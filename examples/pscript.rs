@@ -9,8 +9,8 @@ fn main() {
     let string = native_type::<String>();
 
     // test type printing
-    let st = Type::Struct(vec![
-        ("ty".to_string(), Type::GenericRef(0)),
+    let st = Type::Record(vec![
+        ("ty".to_string(), Type::GenericArg(0)),
         ("name".to_string(), Type::Primitive(string.clone())),
         ("age".to_string(), Type::Primitive(int.clone())),
     ]);

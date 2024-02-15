@@ -122,7 +122,7 @@ impl fmt::Display for TypedValue {
         match &self.ty {
             Type::Primitive(_) => write!(f, "{}: {}", self.value, self.ty),
             Type::Generic(_) => write!(f, "{}: {}", self.value, self.ty), // TODO: validate that all generics are filled
-            Type::GenericRef(_) => panic!("A value cannot have a generic type"),
+            Type::GenericArg(_) => panic!("A value cannot have a generic type"),
             Type::Union(_) => write!(f, "{}: {}", self.value, self.ty),
             Type::Tuple(_) => {
                 let values = match &self.value {
@@ -133,7 +133,7 @@ impl fmt::Display for TypedValue {
                 write_with_separator(values, ", ", f)?;
                 write!(f, "): {}", self.ty)
             }
-            Type::Struct(s) => {
+            Type::Record(s) => {
                 let fields = match &self.value {
                     Value::List(fields) => fields,
                     _ => panic!("A struct must be a list of values"),
