@@ -341,6 +341,10 @@ pub(crate) fn write_with_separator<T: fmt::Display>(
     Ok(())
 }
 
+// Note: if we need to solve type inference, see https://github.com/andrejbauer/plzoo/blob/master/src/poly/type_infer.ml
+// Question: how to lookup local and parent variables in case of recursion with static typing? (static lexical scoping, see de Bruijn indices)
+// See if needed: Explicit substitutions, M. Abadi, L. Cardelli, P.L. Curien, J.J. Lévy, Journal of Functional Programming 6(2), 1996.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,8 +370,10 @@ mod tests {
         let _gen_bound_string = Type::generic("list", vec![_string.clone()]);
         let _gen_2_unbound_a_b = Type::generic("map", vec![_gen_arg0.clone(), _gen_arg1.clone()]);
         let _gen_2_unbound_b_a = Type::generic("map", vec![_gen_arg1.clone(), _gen_arg0.clone()]);
-        let _gen_2_partial_bound_i32_a = Type::generic("map", vec![_i32.clone(), _gen_arg0.clone()]);
-        let _gen_2_partial_bound_a_i32 = Type::generic("map", vec![_gen_arg0.clone(), _i32.clone()]);
+        let _gen_2_partial_bound_i32_a =
+            Type::generic("map", vec![_i32.clone(), _gen_arg0.clone()]);
+        let _gen_2_partial_bound_a_i32 =
+            Type::generic("map", vec![_gen_arg0.clone(), _i32.clone()]);
         let _gen_2_bound_i32_i32 = Type::generic("map", vec![_i32.clone(), _i32.clone()]);
         let _gen_2_bound_i32_f32 = Type::generic("map", vec![_i32.clone(), _f32.clone()]);
         assert!(_gen_unbound.can_be_used_in_place_of(&_gen_unbound));

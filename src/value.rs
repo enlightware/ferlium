@@ -102,6 +102,12 @@ pub enum Value {
     NativeFunction(Box<dyn NativeFunction>), // TODO: present the function type somehow, maybe in a table?
 }
 
+impl Value {
+    pub fn primitive<T: Any + Clone + fmt::Debug + 'static>(value: T) -> Self {
+        Value::Primitive(Box::new(value))
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
