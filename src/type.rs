@@ -9,8 +9,6 @@ use dyn_eq::DynEq;
 
 use crate::assert::assert_unique_strings;
 
-// TODO: non-native function type
-
 pub trait NativeType: DynClone + DynEq {
     fn type_id(&self) -> TypeId;
     fn type_name(&self) -> &'static str;
@@ -88,6 +86,13 @@ fn format_generics(count: usize) -> String {
     }
 }
 
+/// The type of a function
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionType {
+    pub arg_ty: Vec<Type>,
+    pub return_ty: Type,
+}
+
 /// The representation of a type in the system
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -103,8 +108,8 @@ pub enum Type {
     Tuple(Vec<Type>),
     /// Named product type
     Record(Vec<(String, Type)>),
-    /// A function that is implemented in Rust
-    NativeFunction(Vec<Type>, Box<Type>),
+    /// A function type
+    Function(Box<FunctionType>),
 }
 
 impl Type {
@@ -124,6 +129,27 @@ impl Type {
     pub fn record(fields: Vec<(String, Self)>) -> Self {
         assert_unique_strings(&fields);
         Self::Record(fields)
+    }
+
+    pub fn nullary_function(ret: Self) -> Self {
+        Self::Function(Box::new(FunctionType {
+            arg_ty: vec![],
+            return_ty: ret,
+        }))
+    }
+
+    pub fn unary_function(arg: Self, ret: Self) -> Self {
+        Self::Function(Box::new(FunctionType {
+            arg_ty: vec![arg],
+            return_ty: ret,
+        }))
+    }
+
+    pub fn binary_function(arg1: Self, arg2: Self, ret: Self) -> Self {
+        Self::Function(Box::new(FunctionType {
+            arg_ty: vec![arg1, arg2],
+            return_ty: ret,
+        }))
     }
 
     // public methods
@@ -205,20 +231,27 @@ impl Type {
                 _ => false,
             },
             // A function can be used in place of another function if the argument types are contravariant and return type covariant.
-            Type::NativeFunction(this_args, this_ty) => match that {
-                Type::NativeFunction(that_args, that_ty) => {
-                    this_args.len() == that_args.len()
-                        && this_args // contravariant argument types
-                            .iter()
-                            .zip(that_args.iter())
-                            .all(|(this_ty, that_ty)| {
-                                that_ty.can_be_used_in_place_of_with_subst(this_ty, substitutions)
-                            })
-                        && this_ty.can_be_used_in_place_of_with_subst(that_ty, substitutions)
-                    // covariant return type
+            Type::Function(this_fn) => {
+                let this_args = &this_fn.arg_ty;
+                let this_ty = &this_fn.return_ty;
+                match that {
+                    Type::Function(that_fun) => {
+                        let that_args = &that_fun.arg_ty;
+                        let that_ty = &that_fun.return_ty;
+                        this_args.len() == that_args.len()
+                            && this_args // contravariant argument types
+                                .iter()
+                                .zip(that_args.iter())
+                                .all(|(this_ty, that_ty)| {
+                                    that_ty
+                                        .can_be_used_in_place_of_with_subst(this_ty, substitutions)
+                                })
+                            && this_ty.can_be_used_in_place_of_with_subst(that_ty, substitutions)
+                        // covariant return type
+                    }
+                    _ => false,
                 }
-                _ => false,
-            },
+            }
         }
     }
 
@@ -235,7 +268,7 @@ impl Type {
             Type::Union(_) => 3,
             Type::Tuple(_) => 4,
             Type::Record(_) => 5,
-            Type::NativeFunction(_, _) => 6,
+            Type::Function(_) => 6,
         }
     }
 
@@ -251,7 +284,9 @@ impl Type {
                 .map(|(_, t)| t.count_generics())
                 .max()
                 .unwrap_or(0),
-            Type::NativeFunction(args, ret) => count_generics(args).max(ret.count_generics()),
+            Type::Function(function) => {
+                count_generics(&function.arg_ty).max(function.return_ty.count_generics())
+            }
         }
     }
 
@@ -264,7 +299,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Type::Primitive(id) => {
-                let tn = id.type_name();
+                let tn = id.as_ref().type_name();
                 write!(f, "{}", tn.rsplit_once("::").unwrap_or(("", tn)).1)
             }
             Type::Generic(g) => write!(f, "{}{}", g.name, self.format_generics()),
@@ -285,15 +320,17 @@ impl fmt::Display for Type {
                 }
                 write!(f, " }}")
             }
-            Type::NativeFunction(args, ret) => {
+            Type::Function(function) => {
                 write!(
                     f,
                     "({}) -> {}",
-                    args.iter()
+                    function
+                        .arg_ty
+                        .iter()
                         .map(|t| t.to_string())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    ret
+                    function.return_ty
                 )
             }
         }
@@ -309,9 +346,10 @@ impl Ord for Type {
             (Type::Union(a), Type::Union(b)) => a.cmp(b),
             (Type::Tuple(a), Type::Tuple(b)) => a.cmp(b),
             (Type::Record(a), Type::Record(b)) => a.cmp(b),
-            (Type::NativeFunction(args_a, ret_a), Type::NativeFunction(args_b, ret_b)) => {
-                args_a.cmp(args_b).then_with(|| ret_a.cmp(ret_b))
-            }
+            (Type::Function(a), Type::Function(b)) => a
+                .arg_ty
+                .cmp(&b.arg_ty)
+                .then_with(|| a.return_ty.cmp(&b.return_ty)),
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -473,14 +511,12 @@ mod tests {
 
         // Native functions
         // unary functions
-        let _native_fn_i32_i32 = Type::NativeFunction(vec![_i32.clone()], Box::new(_i32.clone()));
-        let _native_fn_i32_f32 = Type::NativeFunction(vec![_i32.clone()], Box::new(_f32.clone()));
-        let _native_fn_f32_i32 = Type::NativeFunction(vec![_f32.clone()], Box::new(_i32.clone()));
-        let _native_fn_f32_f32 = Type::NativeFunction(vec![_f32.clone()], Box::new(_f32.clone()));
-        let _native_fn_any_i32 =
-            Type::NativeFunction(vec![_gen_arg0.clone()], Box::new(_i32.clone()));
-        let _native_fn_i32_any =
-            Type::NativeFunction(vec![_i32.clone()], Box::new(_gen_arg0.clone()));
+        let _native_fn_i32_i32 = Type::unary_function(_i32.clone(), _i32.clone());
+        let _native_fn_i32_f32 = Type::unary_function(_i32.clone(), _f32.clone());
+        let _native_fn_f32_i32 = Type::unary_function(_f32.clone(), _i32.clone());
+        let _native_fn_f32_f32 = Type::unary_function(_f32.clone(), _f32.clone());
+        let _native_fn_any_i32 = Type::unary_function(_gen_arg0.clone(), _i32.clone());
+        let _native_fn_i32_any = Type::unary_function(_i32.clone(), _gen_arg0.clone());
         assert!(_native_fn_i32_i32.can_be_used_in_place_of(&_native_fn_i32_i32));
         assert!(_native_fn_i32_f32.can_be_used_in_place_of(&_native_fn_i32_f32));
         assert!(!_native_fn_i32_i32.can_be_used_in_place_of(&_native_fn_i32_f32));

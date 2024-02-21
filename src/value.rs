@@ -1,26 +1,36 @@
 use dyn_clone::DynClone;
+use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use std::{
     any::{type_name, Any, TypeId},
     fmt,
-    ops::Deref,
 };
 
-use crate::r#type::{write_with_separator, NativeType, Type};
+use crate::{
+    ir::{FunctionKey, Functions},
+    r#type::{write_with_separator, NativeType, Type},
+};
 
 // Support for primitive values
 
-pub trait PrimitiveValue: Any + fmt::Debug + DynClone + 'static {
+pub trait PrimitiveValue: Any + fmt::Debug + DynClone + DynEq + 'static {
     fn as_any(&self) -> &dyn Any;
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
     fn type_id(&self) -> TypeId;
     fn type_name(&self) -> &'static str;
     fn native_type(&self) -> Box<dyn NativeType>;
+    fn ty(&self) -> Type;
 }
 
 dyn_clone::clone_trait_object!(PrimitiveValue);
+dyn_eq::eq_trait_object!(PrimitiveValue);
 
-impl<T: Any + fmt::Debug + Clone> PrimitiveValue for T {
+impl<T: Any + fmt::Debug + std::cmp::Eq + Clone> PrimitiveValue for T {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
         self
     }
 
@@ -35,125 +45,66 @@ impl<T: Any + fmt::Debug + Clone> PrimitiveValue for T {
     fn native_type(&self) -> Box<dyn NativeType> {
         crate::r#type::native_type::<T>()
     }
-}
-
-// Support for function pointers
-
-pub trait NativeFunction: DynClone {
-    fn call(&self, args: Vec<Value>) -> Value;
-    fn ty(&self) -> Type;
-}
-
-dyn_clone::clone_trait_object!(NativeFunction);
-
-pub trait BinaryNativeFunction:
-    Fn(
-    <Self as BinaryNativeFunction>::A,
-    <Self as BinaryNativeFunction>::B,
-) -> <Self as BinaryNativeFunction>::O
-{
-    type A;
-    type B;
-    type O;
-}
-
-impl<
-        A: Clone + 'static,
-        B: Clone + 'static,
-        O: fmt::Debug + Clone + 'static,
-        T: BinaryNativeFunction<A = A, B = B, O = O> + Clone,
-    > NativeFunction for T
-{
-    fn call(&self, args: Vec<Value>) -> Value {
-        let a = args[0]
-            .as_primitive()
-            .unwrap()
-            .deref()
-            .as_any()
-            .downcast_ref::<A>()
-            .unwrap();
-        let b = args[1]
-            .as_primitive()
-            .unwrap()
-            .deref()
-            .as_any()
-            .downcast_ref::<B>()
-            .unwrap();
-
-        Value::Primitive(Box::new(self(a.clone(), b.clone())))
-    }
 
     fn ty(&self) -> Type {
-        Type::primitive::<O>()
+        Type::primitive::<T>()
     }
 }
 
-impl fmt::Debug for dyn NativeFunction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NativeFunction @ {:p}", self)
-    }
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompoundValue {
+    pub values: Vec<Value>,
+    pub ty: Type,
 }
 
-/// A value in the system, must be interpreted with its type
-#[derive(Debug, Clone, EnumAsInner)]
+/// A value in the system
+#[derive(Debug, Clone, PartialEq, EnumAsInner)]
 pub enum Value {
     Primitive(Box<dyn PrimitiveValue>),
-    List(Vec<Value>),
-    NativeFunction(Box<dyn NativeFunction>), // TODO: present the function type somehow, maybe in a table?
+    List(Box<CompoundValue>),
+    Function(FunctionKey),
 }
 
 impl Value {
-    pub fn primitive<T: Any + Clone + fmt::Debug + 'static>(value: T) -> Self {
+    pub fn primitive<T: Any + Clone + fmt::Debug + std::cmp::Eq + 'static>(value: T) -> Self {
         Value::Primitive(Box::new(value))
+    }
+
+    pub fn ty(&self, functions: &Functions) -> Type {
+        match self {
+            Value::Primitive(value) => value.as_ref().ty(),
+            Value::List(value) => value.ty.clone(),
+            Value::Function(key) => Type::Function(Box::new(functions[*key].ty.clone())),
+        }
     }
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Primitive(value) => write!(f, "{:?}", value),
-            Value::List(_) => todo!(),
-            Value::NativeFunction(_) => todo!(),
-        }
-    }
-}
-
-pub struct TypedValue {
-    pub value: Value,
-    pub ty: Type,
-}
-
-impl fmt::Display for TypedValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.ty {
-            Type::Primitive(_) => write!(f, "{}: {}", self.value, self.ty),
-            Type::Generic(_) => write!(f, "{}: {}", self.value, self.ty), // TODO: validate that all generics are filled
-            Type::GenericArg(_) => panic!("A value cannot have a generic type"),
-            Type::Union(_) => write!(f, "{}: {}", self.value, self.ty),
-            Type::Tuple(_) => {
-                let values = match &self.value {
-                    Value::List(values) => values,
-                    _ => panic!("A tuple must be a list of values"),
-                };
-                write!(f, "(")?;
-                write_with_separator(values, ", ", f)?;
-                write!(f, "): {}", self.ty)
-            }
-            Type::Record(s) => {
-                let fields = match &self.value {
-                    Value::List(fields) => fields,
-                    _ => panic!("A struct must be a list of values"),
-                };
-                write!(f, "{{")?;
-                for (i, (name, ty)) in s.iter().enumerate() {
-                    write!(f, "{}: {}: {}", name, fields[i], ty)?;
-                    if i < fields.len() - 1 {
-                        write!(f, ", ")?;
-                    }
+            Value::Primitive(value) => write!(f, "{:?}: {}", value, value.as_ref().type_name()),
+            Value::List(compound) => match &compound.ty {
+                Type::Tuple(_) => {
+                    write!(f, "(")?;
+                    write_with_separator(&compound.values, ", ", f)?;
+                    write!(f, "): {}", compound.ty)
                 }
-                write!(f, "}}: {}", self.ty)
-            }
-            Type::NativeFunction(_, _) => write!(f, "{:?}: {}", self.value, self.ty),
+                Type::Record(s) => {
+                    write!(f, "{{")?;
+                    for (i, (name, ty)) in s.iter().enumerate() {
+                        write!(f, "{}: {}: {}", name, compound.values[i], ty)?;
+                        if i < compound.values.len() - 1 {
+                            write!(f, ", ")?;
+                        }
+                    }
+                    write!(f, "}}: {}", compound.ty)
+                }
+                _ => panic!(
+                    "Cannot display a list of values with type {:?}",
+                    compound.ty
+                ),
+            },
+            Value::Function(_) => todo!(),
         }
     }
 }
