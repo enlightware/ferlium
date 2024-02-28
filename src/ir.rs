@@ -104,25 +104,19 @@ impl Node {
             Node::Match(match_) => {
                 let value = match_.value.eval(ctx);
                 for (pattern, node) in &match_.alternatives {
-                    let mut matches = true;
                     for token in &pattern.0 {
                         match token {
                             Either::Left(ty) => {
-                                if *ty != value.ty(ctx.functions) {
-                                    matches = false;
-                                    break;
+                                if value.ty(ctx.functions).can_be_used_in_place_of(ty) {
+                                    return node.eval(ctx);
                                 }
                             }
                             Either::Right(v) => {
-                                if *v != value {
-                                    matches = false;
-                                    break;
+                                if *v == value {
+                                    return node.eval(ctx);
                                 }
                             }
                         }
-                    }
-                    if matches {
-                        return node.eval(ctx);
                     }
                 }
                 if let Some(default) = &match_.default {

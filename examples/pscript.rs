@@ -14,7 +14,7 @@ fn main() {
 
     // test type printing
     let st = Type::Record(vec![
-        ("ty".to_string(), Type::GenericArg(0)),
+        ("ty".to_string(), Type::GenericVariable(0)),
         ("name".to_string(), Type::Primitive(string.clone())),
         ("age".to_string(), Type::Primitive(int.clone())),
     ]);

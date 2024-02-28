@@ -3,6 +3,8 @@ use std::any::TypeId;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
+use std::rc::Rc;
+use std::rc::Weak;
 
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
@@ -65,9 +67,9 @@ impl Debug for dyn NativeType {
 
 /// A generic type implemented in Rust
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct GenericType {
+pub struct GenericNativeType {
     arguments: Vec<Type>,
-    name: &'static str,
+    native: Box<dyn NativeType>,
 }
 
 fn count_generics(generics: &[Type]) -> usize {
@@ -93,15 +95,30 @@ pub struct FunctionType {
     pub return_ty: Type,
 }
 
+pub type NamedType = (String, Type);
+
+// Using Weak for simplicity now, later can be optimized with an arena and references
+#[derive(Debug, Clone)]
+pub struct NamedTypeRef(pub Weak<NamedType>);
+impl PartialEq for NamedTypeRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+impl Eq for NamedTypeRef {}
+
+pub type NamedTypes = Vec<Rc<NamedType>>;
+
 /// The representation of a type in the system
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     /// A type implemented in Rust without generics
     Primitive(Box<dyn NativeType>),
     /// A type implemented in Rust with generics
-    Generic(Box<GenericType>),
-    /// Generic placeholder
-    GenericArg(usize),
+    GenericNative(Box<GenericNativeType>),
+    /// A type variable, to be used in generics context.
+    /// Its parameter is its indentity in the context considered, as it is bound.
+    GenericVariable(usize),
     /// Anonymous sum type
     Union(Vec<Type>),
     /// Position-based product type
@@ -110,6 +127,8 @@ pub enum Type {
     Record(Vec<(String, Type)>),
     /// A function type
     Function(Box<FunctionType>),
+    /// A type referenced by a key (like a datatype in ML)
+    Named(NamedTypeRef),
 }
 
 impl Type {
@@ -118,8 +137,9 @@ impl Type {
         Self::Primitive(native_type::<T>())
     }
 
-    pub fn generic(name: &'static str, arguments: Vec<Self>) -> Self {
-        Self::Generic(Box::new(GenericType { name, arguments }))
+    pub fn generic_native<T: Clone + 'static>(arguments: Vec<Self>) -> Self {
+        let native = native_type::<T>();
+        Self::GenericNative(Box::new(GenericNativeType { arguments, native }))
     }
 
     pub fn union(types: Vec<Self>) -> Self {
@@ -152,6 +172,10 @@ impl Type {
         }))
     }
 
+    pub fn named(named: &Rc<NamedType>) -> Self {
+        Self::Named(NamedTypeRef(Rc::downgrade(named)))
+    }
+
     // public methods
 
     /// Somewhat a sub-type, but named differently to accommodate generics
@@ -161,18 +185,24 @@ impl Type {
         substitutions: &mut HashMap<usize, Type>,
     ) -> bool {
         // A generic ref can be replaced by anything, but keep in mind the substitutions
-        if let Type::GenericArg(that_index) = that {
+        if let Type::GenericVariable(that_index) = that {
             match substitutions.get(that_index) {
                 Some(subst) => {
                     return self.can_be_used_in_place_of_with_subst(&subst.clone(), substitutions)
                 }
                 None => {
+                    // do not perform substitution if we already have the correct index
+                    if let Type::GenericVariable(this_index) = self {
+                        if this_index == that_index {
+                            return true;
+                        }
+                    }
                     substitutions.insert(*that_index, self.clone());
                     return true;
                 }
             }
         }
-        // We know that that is not a GenericRef
+        // We know that that is not a GenericArg
         match self {
             // A primitive type can be used in place of itself or instantiate a generics
             Type::Primitive(this_ty) => match that {
@@ -180,9 +210,9 @@ impl Type {
                 _ => false,
             },
             // A generic type can be used in place of itself with compatible type arguments, or instantiate a generics
-            Type::Generic(this_gen) => match that {
-                Type::Generic(that_gen) => {
-                    this_gen.name == that_gen.name
+            Type::GenericNative(this_gen) => match that {
+                Type::GenericNative(that_gen) => {
+                    this_gen.native == that_gen.native
                         && this_gen.arguments.len() == that_gen.arguments.len()
                         && this_gen // covariant argument types
                             .arguments
@@ -195,7 +225,7 @@ impl Type {
                 _ => false,
             },
             // We trait generics as invariant
-            Type::GenericArg(_) => false,
+            Type::GenericVariable(_) => false,
             // This union can be used in place of that union if for every type in that union,
             // there is a type in this union that can be used in place of it.
             Type::Union(this_union) => match that {
@@ -252,6 +282,15 @@ impl Type {
                     _ => false,
                 }
             }
+            Type::Named(this_ref) => match that {
+                Type::Named(that_ref) => this_ref == that_ref,
+                _ => this_ref
+                    .0
+                    .upgrade()
+                    .unwrap()
+                    .1
+                    .can_be_used_in_place_of_with_subst(that, substitutions),
+            },
         }
     }
 
@@ -263,20 +302,21 @@ impl Type {
     fn rank(&self) -> usize {
         match self {
             Type::Primitive(_) => 0,
-            Type::Generic(_) => 1,
-            Type::GenericArg(_) => 2,
+            Type::GenericNative(_) => 1,
+            Type::GenericVariable(_) => 2,
             Type::Union(_) => 3,
             Type::Tuple(_) => 4,
             Type::Record(_) => 5,
             Type::Function(_) => 6,
+            Type::Named(_) => 7,
         }
     }
 
-    fn count_generics(&self) -> usize {
+    fn count_generics_rec(&self, counts: &mut HashMap<*const NamedType, usize>) -> usize {
         match self {
             Type::Primitive(_) => 0,
-            Type::Generic(g) => count_generics(&g.arguments),
-            Type::GenericArg(id) => *id + 1, // the max number is this index + 1
+            Type::GenericNative(g) => count_generics(&g.arguments),
+            Type::GenericVariable(id) => *id + 1, // the max number is this index + 1
             Type::Union(types) => types.iter().map(Self::count_generics).max().unwrap_or(0),
             Type::Tuple(types) => types.iter().map(Self::count_generics).max().unwrap_or(0),
             Type::Record(fields) => fields
@@ -287,7 +327,23 @@ impl Type {
             Type::Function(function) => {
                 count_generics(&function.arg_ty).max(function.return_ty.count_generics())
             }
+            Type::Named(named) => {
+                let ptr = named.0.as_ptr();
+                if counts.get(&ptr).is_none() {
+                    counts.insert(ptr, 0);
+                    let named = named.0.upgrade().unwrap();
+                    let count = named.1.count_generics_rec(counts);
+                    counts.insert(ptr, count);
+                }
+                0
+            }
         }
+    }
+
+    fn count_generics(&self) -> usize {
+        let mut counts = HashMap::new();
+        let local_count = self.count_generics_rec(&mut counts);
+        local_count + counts.values().sum::<usize>()
     }
 
     pub fn format_generics(&self) -> String {
@@ -298,12 +354,23 @@ impl Type {
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Type::Named(NamedTypeRef(weak)) => {
+                write!(f, "{}", weak.upgrade().unwrap().0)
+            }
             Type::Primitive(id) => {
                 let tn = id.as_ref().type_name();
                 write!(f, "{}", tn.rsplit_once("::").unwrap_or(("", tn)).1)
             }
-            Type::Generic(g) => write!(f, "{}{}", g.name, self.format_generics()),
-            Type::GenericArg(id) => write!(f, "{}", generic_index_to_char(*id)),
+            Type::GenericNative(g) => {
+                let tn = g.native.as_ref().type_name();
+                write!(
+                    f,
+                    "{}{}",
+                    tn.rsplit_once("::").unwrap_or(("", tn)).1,
+                    self.format_generics()
+                )
+            }
+            Type::GenericVariable(id) => write!(f, "{}", generic_index_to_char(*id)),
             Type::Union(types) => write_with_separator(types, " | ", f),
             Type::Tuple(members) => {
                 write!(f, "(")?;
@@ -340,9 +407,11 @@ impl fmt::Display for Type {
 impl Ord for Type {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
+            // Compare the raw pointers (addresses) of the weak references
+            (Type::Named(a), Type::Named(b)) => a.0.as_ptr().cmp(&b.0.as_ptr()),
             (Type::Primitive(a), Type::Primitive(b)) => a.cmp(b),
-            (Type::Generic(a), Type::Generic(b)) => a.cmp(b),
-            (Type::GenericArg(a), Type::GenericArg(b)) => a.cmp(b),
+            (Type::GenericNative(a), Type::GenericNative(b)) => a.cmp(b),
+            (Type::GenericVariable(a), Type::GenericVariable(b)) => a.cmp(b),
             (Type::Union(a), Type::Union(b)) => a.cmp(b),
             (Type::Tuple(a), Type::Tuple(b)) => a.cmp(b),
             (Type::Record(a), Type::Record(b)) => a.cmp(b),
@@ -393,7 +462,7 @@ mod tests {
         let _i32 = Type::primitive::<i32>();
         let _f32 = Type::primitive::<f32>();
         let _string = Type::primitive::<String>();
-        let _gen_arg0 = Type::GenericArg(0);
+        let _gen_arg0 = Type::GenericVariable(0);
 
         // Primitive types
         assert!(_i32.can_be_used_in_place_of(&_i32));
@@ -402,18 +471,26 @@ mod tests {
         assert!(!_i32.can_be_used_in_place_of(&_string));
 
         // Generics
-        let _gen_arg1 = Type::GenericArg(1);
-        let _gen_unbound = Type::generic("list", vec![_gen_arg0.clone()]);
-        let _gen_bound_i32 = Type::generic("list", vec![_i32.clone()]);
-        let _gen_bound_string = Type::generic("list", vec![_string.clone()]);
-        let _gen_2_unbound_a_b = Type::generic("map", vec![_gen_arg0.clone(), _gen_arg1.clone()]);
-        let _gen_2_unbound_b_a = Type::generic("map", vec![_gen_arg1.clone(), _gen_arg0.clone()]);
+        assert!(_gen_arg0.can_be_used_in_place_of(&_gen_arg0));
+        let _gen_arg1 = Type::GenericVariable(1);
+        assert!(_gen_arg0.can_be_used_in_place_of(&_gen_arg1));
+        #[derive(Debug, Clone)]
+        struct List;
+        let _gen_unbound = Type::generic_native::<List>(vec![_gen_arg0.clone()]);
+        let _gen_bound_i32 = Type::generic_native::<List>(vec![_i32.clone()]);
+        let _gen_bound_string = Type::generic_native::<List>(vec![_string.clone()]);
+        #[derive(Debug, Clone)]
+        struct Map;
+        let _gen_2_unbound_a_b =
+            Type::generic_native::<Map>(vec![_gen_arg0.clone(), _gen_arg1.clone()]);
+        let _gen_2_unbound_b_a =
+            Type::generic_native::<Map>(vec![_gen_arg1.clone(), _gen_arg0.clone()]);
         let _gen_2_partial_bound_i32_a =
-            Type::generic("map", vec![_i32.clone(), _gen_arg0.clone()]);
+            Type::generic_native::<Map>(vec![_i32.clone(), _gen_arg0.clone()]);
         let _gen_2_partial_bound_a_i32 =
-            Type::generic("map", vec![_gen_arg0.clone(), _i32.clone()]);
-        let _gen_2_bound_i32_i32 = Type::generic("map", vec![_i32.clone(), _i32.clone()]);
-        let _gen_2_bound_i32_f32 = Type::generic("map", vec![_i32.clone(), _f32.clone()]);
+            Type::generic_native::<Map>(vec![_gen_arg0.clone(), _i32.clone()]);
+        let _gen_2_bound_i32_i32 = Type::generic_native::<Map>(vec![_i32.clone(), _i32.clone()]);
+        let _gen_2_bound_i32_f32 = Type::generic_native::<Map>(vec![_i32.clone(), _f32.clone()]);
         assert!(_gen_unbound.can_be_used_in_place_of(&_gen_unbound));
         assert!(_gen_bound_i32.can_be_used_in_place_of(&_gen_unbound));
         assert!(_gen_bound_string.can_be_used_in_place_of(&_gen_unbound));
@@ -529,5 +606,20 @@ mod tests {
 
         // binary functions
         // TODO: add more tests
+
+        // named
+        let named_types = vec![
+            Rc::new(("Int".to_string(), _i32.clone())),
+            Rc::new(("OtherInt".to_string(), _i32.clone())),
+        ];
+        let _int = Type::named(&named_types[0]);
+        assert!(_int.can_be_used_in_place_of(&_int));
+        assert!(_int.can_be_used_in_place_of(&_gen_arg0));
+        assert!(_int.can_be_used_in_place_of(&_i32));
+        let _other_int = Type::named(&named_types[1]);
+        assert!(_other_int.can_be_used_in_place_of(&_other_int));
+        assert!(_other_int.can_be_used_in_place_of(&_gen_arg0));
+        assert!(_other_int.can_be_used_in_place_of(&_i32));
+        assert!(!_other_int.can_be_used_in_place_of(&_int));
     }
 }
