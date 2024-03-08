@@ -2,7 +2,7 @@ use painturscript::{
     function::binary_native_function,
     ir::{Application, Context, Functions, Node, StaticApplication},
     r#type::{native_type, Type},
-    value::Value,
+    value::{GenericNativeValue, Value},
 };
 use ustr::ustr;
 use smallvec::smallvec;
@@ -15,6 +15,7 @@ fn main() {
     let string = native_type::<String>();
 
     // test type printing
+    println!("Some types:\n");
     let st = Type::Record(vec![
         (ustr("ty"), Type::GenericVariable(0)),
         (ustr("name"), Type::Primitive(string.clone())),
@@ -25,17 +26,32 @@ fn main() {
     let un = Type::Union(vec![Type::Primitive(int.clone()), Type::Primitive(string)]);
     println!("{}{}", un.format_generics(), un);
     let un = Type::Union(vec![
-        Type::Primitive(int),
+        Type::Primitive(int.clone()),
         Type::Primitive(float),
         Type::Primitive(u32),
     ]);
     println!("{}{}", un.format_generics(), un);
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct List(Vec<Value>);
+
+    let list = Type::generic_native::<List>(smallvec![Type::GenericVariable(0)]);
+    let list_int = Type::generic_native::<List>(smallvec![Type::Primitive(int.clone())]);
+    println!("{}{}", list.format_generics(), list);
+    println!("{}{}", list_int.format_generics(), list_int);
+
     // test printing values
+    println!("\nSome values:\n");
     let v_int = Value::Primitive(Box::new(11_i32));
     println!("{}", v_int);
+    let v_list_int = Value::GenericNative(Box::new(GenericNativeValue {
+        native: Box::new(List(vec![Value::primitive(11_i32), Value::primitive(22_i32)])),
+        arguments: smallvec![Type::Primitive(int.clone())],
+    }));
+    println!("{}", v_list_int);
 
     // test ir execution
+    println!("\nSome IR and its execution:\n");
     // 1. add some native functions
     let mut functions = Functions::default();
     let add_fn = functions.insert(binary_native_function(

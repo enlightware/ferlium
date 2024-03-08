@@ -144,6 +144,10 @@ impl Type {
         Self::GenericNative(Box::new(GenericNativeType { arguments, native }))
     }
 
+    pub fn generic_native_type(native: Box<dyn NativeType>, arguments: SmallVec1<Self>) -> Self {
+        Self::GenericNative(Box::new(GenericNativeType { arguments, native }))
+    }
+
     pub fn union(types: Vec<Self>) -> Self {
         Self::Union(types)
     }
@@ -367,10 +371,15 @@ impl fmt::Display for Type {
                 let tn = g.native.as_ref().type_name();
                 write!(
                     f,
-                    "{}{}",
-                    tn.rsplit_once("::").unwrap_or(("", tn)).1,
-                    self.format_generics()
-                )
+                    "{}",
+                    tn.rsplit_once("::").unwrap_or(("", tn)).1, // FIXME: this formatting is broken for Rust generics
+                )?;
+                if !g.arguments.is_empty() {
+                    write!(f, "<")?;
+                    write_with_separator(&g.arguments, ", ", f)?;
+                    write!(f, ">")?;
+                }
+                Ok(())
             }
             Type::GenericVariable(id) => write!(f, "{}", generic_index_to_char(*id)),
             Type::Union(types) => write_with_separator(types, " | ", f),
