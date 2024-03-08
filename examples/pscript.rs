@@ -4,6 +4,8 @@ use painturscript::{
     r#type::{native_type, Type},
     value::Value,
 };
+use ustr::ustr;
+use smallvec::smallvec;
 
 fn main() {
     // basic types
@@ -14,9 +16,9 @@ fn main() {
 
     // test type printing
     let st = Type::Record(vec![
-        ("ty".to_string(), Type::GenericVariable(0)),
-        ("name".to_string(), Type::Primitive(string.clone())),
-        ("age".to_string(), Type::Primitive(int.clone())),
+        (ustr("ty"), Type::GenericVariable(0)),
+        (ustr("name"), Type::Primitive(string.clone())),
+        (ustr("age"), Type::Primitive(int.clone())),
     ]);
     println!("{}{}", st.format_generics(), st);
 
@@ -44,7 +46,7 @@ fn main() {
     ));
     let mut ctx = Context::new(&functions);
     // 2. define some code
-    let ir = Node::BlockExpr(vec![
+    let ir = Node::BlockExpr(Box::new(smallvec![
         Node::EnvStore(Box::new(Node::Literal(Value::primitive(11_i32)))),
         Node::Apply(Box::new(Application {
             function: Node::Literal(Value::Function(add_fn)),
@@ -56,7 +58,7 @@ fn main() {
                 Node::Literal(Value::primitive(3_i32)),
             ],
         })),
-    ]);
+    ]));
     println!("{:?}", ir);
     // 3. execute this code
     ir.eval_and_print(&mut ctx);

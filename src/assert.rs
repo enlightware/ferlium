@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use ustr::{Ustr, UstrSet};
 
-pub fn assert_unique_strings<T>(vec: &Vec<(String, T)>) {
-    let mut set = HashSet::new();
+pub fn assert_unique_strings<T>(vec: &Vec<(Ustr, T)>) {
+    let mut set = UstrSet::default();
     for (s, _) in vec {
-        assert!(set.insert(s), "Duplicate string found: {}", s);
+        assert!(set.insert(*s), "Duplicate string found: {}", s);
     }
 }

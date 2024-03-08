@@ -7,8 +7,7 @@ use std::{
 };
 
 use crate::{
-    ir::{FunctionKey, Functions},
-    r#type::{write_with_separator, NativeType, Type},
+    containers::SmallVec2, ir::{FunctionKey, Functions}, r#type::{write_with_separator, NativeType, Type}
 };
 
 // Support for primitive values
@@ -53,7 +52,7 @@ impl<T: Any + fmt::Debug + std::cmp::Eq + Clone> PrimitiveValue for T {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompoundValue {
-    pub values: Vec<Value>,
+    pub values: SmallVec2<Value>,
     pub ty: Type,
 }
 

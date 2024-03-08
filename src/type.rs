@@ -8,8 +8,10 @@ use std::rc::Weak;
 
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
+use ustr::Ustr;
 
 use crate::assert::assert_unique_strings;
+use crate::containers::SmallVec1;
 
 pub trait NativeType: DynClone + DynEq {
     fn type_id(&self) -> TypeId;
@@ -68,8 +70,8 @@ impl Debug for dyn NativeType {
 /// A generic type implemented in Rust
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GenericNativeType {
-    arguments: Vec<Type>,
     native: Box<dyn NativeType>,
+    arguments: SmallVec1<Type>,
 }
 
 fn count_generics(generics: &[Type]) -> usize {
@@ -95,7 +97,7 @@ pub struct FunctionType {
     pub return_ty: Type,
 }
 
-pub type NamedType = (String, Type);
+pub type NamedType = (Ustr, Type);
 
 // Using Weak for simplicity now, later can be optimized with an arena and references
 #[derive(Debug, Clone)]
@@ -112,9 +114,9 @@ pub type NamedTypes = Vec<Rc<NamedType>>;
 /// The representation of a type in the system
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
-    /// A type implemented in Rust without generics
+    /// A native type implemented in Rust without generics
     Primitive(Box<dyn NativeType>),
-    /// A type implemented in Rust with generics
+    /// A native type implemented in Rust with generics
     GenericNative(Box<GenericNativeType>),
     /// A type variable, to be used in generics context.
     /// Its parameter is its indentity in the context considered, as it is bound.
@@ -124,10 +126,10 @@ pub enum Type {
     /// Position-based product type
     Tuple(Vec<Type>),
     /// Named product type
-    Record(Vec<(String, Type)>),
+    Record(Vec<(Ustr, Type)>),
     /// A function type
     Function(Box<FunctionType>),
-    /// A type referenced by a key (like a datatype in ML)
+    /// A type referenced by a key (a named constructor, like a datatype in ML)
     Named(NamedTypeRef),
 }
 
@@ -137,7 +139,7 @@ impl Type {
         Self::Primitive(native_type::<T>())
     }
 
-    pub fn generic_native<T: Clone + 'static>(arguments: Vec<Self>) -> Self {
+    pub fn generic_native<T: Clone + 'static>(arguments: SmallVec1<Self>) -> Self {
         let native = native_type::<T>();
         Self::GenericNative(Box::new(GenericNativeType { arguments, native }))
     }
@@ -146,7 +148,7 @@ impl Type {
         Self::Union(types)
     }
 
-    pub fn record(fields: Vec<(String, Self)>) -> Self {
+    pub fn record(fields: Vec<(Ustr, Self)>) -> Self {
         assert_unique_strings(&fields);
         Self::Record(fields)
     }
@@ -455,6 +457,8 @@ pub(crate) fn write_with_separator<T: fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ustr::ustr;
+    use smallvec::smallvec;
 
     #[test]
     fn can_be_used_in_place_of() {
@@ -476,21 +480,21 @@ mod tests {
         assert!(_gen_arg0.can_be_used_in_place_of(&_gen_arg1));
         #[derive(Debug, Clone)]
         struct List;
-        let _gen_unbound = Type::generic_native::<List>(vec![_gen_arg0.clone()]);
-        let _gen_bound_i32 = Type::generic_native::<List>(vec![_i32.clone()]);
-        let _gen_bound_string = Type::generic_native::<List>(vec![_string.clone()]);
+        let _gen_unbound = Type::generic_native::<List>(smallvec![_gen_arg0.clone()]);
+        let _gen_bound_i32 = Type::generic_native::<List>(smallvec![_i32.clone()]);
+        let _gen_bound_string = Type::generic_native::<List>(smallvec![_string.clone()]);
         #[derive(Debug, Clone)]
         struct Map;
         let _gen_2_unbound_a_b =
-            Type::generic_native::<Map>(vec![_gen_arg0.clone(), _gen_arg1.clone()]);
+            Type::generic_native::<Map>(smallvec![_gen_arg0.clone(), _gen_arg1.clone()]);
         let _gen_2_unbound_b_a =
-            Type::generic_native::<Map>(vec![_gen_arg1.clone(), _gen_arg0.clone()]);
+            Type::generic_native::<Map>(smallvec![_gen_arg1.clone(), _gen_arg0.clone()]);
         let _gen_2_partial_bound_i32_a =
-            Type::generic_native::<Map>(vec![_i32.clone(), _gen_arg0.clone()]);
+            Type::generic_native::<Map>(smallvec![_i32.clone(), _gen_arg0.clone()]);
         let _gen_2_partial_bound_a_i32 =
-            Type::generic_native::<Map>(vec![_gen_arg0.clone(), _i32.clone()]);
-        let _gen_2_bound_i32_i32 = Type::generic_native::<Map>(vec![_i32.clone(), _i32.clone()]);
-        let _gen_2_bound_i32_f32 = Type::generic_native::<Map>(vec![_i32.clone(), _f32.clone()]);
+            Type::generic_native::<Map>(smallvec![_gen_arg0.clone(), _i32.clone()]);
+        let _gen_2_bound_i32_i32 = Type::generic_native::<Map>(smallvec![_i32.clone(), _i32.clone()]);
+        let _gen_2_bound_i32_f32 = Type::generic_native::<Map>(smallvec![_i32.clone(), _f32.clone()]);
         assert!(_gen_unbound.can_be_used_in_place_of(&_gen_unbound));
         assert!(_gen_bound_i32.can_be_used_in_place_of(&_gen_unbound));
         assert!(_gen_bound_string.can_be_used_in_place_of(&_gen_unbound));
@@ -545,31 +549,34 @@ mod tests {
         assert!(!_tuple_f32_i32.can_be_used_in_place_of(&_tuple_i32));
 
         // Record
+        let x = ustr("x");
+        let y = ustr("y");
+        let z = ustr("z");
         let _record_vec2_i32 = Type::record(vec![
-            ("x".to_string(), _i32.clone()),
-            ("y".to_string(), _i32.clone()),
+            (x, _i32.clone()),
+            (y, _i32.clone()),
         ]);
         let _record_vec2_f32 = Type::record(vec![
-            ("x".to_string(), _f32.clone()),
-            ("y".to_string(), _f32.clone()),
+            (x, _f32.clone()),
+            (y, _f32.clone()),
         ]);
         let _record_vec3_f32 = Type::record(vec![
-            ("x".to_string(), _f32.clone()),
-            ("y".to_string(), _f32.clone()),
-            ("z".to_string(), _f32.clone()),
+            (x, _f32.clone()),
+            (y, _f32.clone()),
+            (z, _f32.clone()),
         ]);
         let _record_vec3_f32_shuffled = Type::record(vec![
-            ("z".to_string(), _f32.clone()),
-            ("x".to_string(), _f32.clone()),
-            ("y".to_string(), _f32.clone()),
+            (z, _f32.clone()),
+            (x, _f32.clone()),
+            (y, _f32.clone()),
         ]);
         let _record_vec2_gen = Type::record(vec![
-            ("x".to_string(), _gen_arg0.clone()),
-            ("y".to_string(), _gen_arg0.clone()),
+            (x, _gen_arg0.clone()),
+            (y, _gen_arg0.clone()),
         ]);
         let _record_het = Type::record(vec![
-            ("x".to_string(), _i32.clone()),
-            ("y".to_string(), _f32.clone()),
+            (x, _i32.clone()),
+            (y, _f32.clone()),
         ]);
         assert!(_record_vec2_i32.can_be_used_in_place_of(&_record_vec2_i32));
         assert!(_record_vec2_f32.can_be_used_in_place_of(&_record_vec2_f32));
@@ -609,8 +616,8 @@ mod tests {
 
         // named
         let named_types = vec![
-            Rc::new(("Int".to_string(), _i32.clone())),
-            Rc::new(("OtherInt".to_string(), _i32.clone())),
+            Rc::new((ustr("Int"), _i32.clone())),
+            Rc::new((ustr("OtherInt"), _i32.clone())),
         ];
         let _int = Type::named(&named_types[0]);
         assert!(_int.can_be_used_in_place_of(&_int));

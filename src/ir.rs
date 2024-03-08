@@ -1,7 +1,8 @@
 use either::Either;
 use slotmap::{new_key_type, SlotMap};
+use ustr::Ustr;
 
-use crate::{function::FunctionDescription, r#type::Type, value::Value};
+use crate::{containers::{SmallVec1, SmallVec2}, function::FunctionDescription, r#type::Type, value::Value};
 
 new_key_type! {
     /// A key to a function in the context
@@ -41,13 +42,13 @@ pub struct StaticApplication {
 }
 
 #[derive(Debug, Clone)]
-pub struct Pattern(Vec<Either<Type, Value>>);
+pub struct Pattern(SmallVec1<Either<Type, Value>>);
 
 #[derive(Debug, Clone)]
 pub struct Match {
-    pub value: Box<Node>,
-    pub alternatives: Vec<(Pattern, Node)>,
-    pub default: Option<Node>,
+    pub value: Node,
+    pub alternatives: SmallVec1<(Pattern, Node)>,
+    pub default: Option<Box<Node>>,
 }
 
 /// A node of the abstract syntax tree
@@ -58,8 +59,9 @@ pub enum Node {
     StaticApply(Box<StaticApplication>),
     EnvStore(Box<Node>),
     EnvLoad(usize),
-    BlockExpr(Vec<Node>),
-    Project(Box<Node>, usize),
+    BlockExpr(Box<SmallVec2<Node>>),
+    ProjectByPos(Box<(Node, usize)>),
+    ProjectByName(Box<(Node, Ustr)>),
     Match(Box<Match>),
 }
 
@@ -94,11 +96,24 @@ impl Node {
                 ctx.environment.truncate(env_size);
                 return_value
             }
-            Node::Project(node, index) => {
-                let value = node.eval(ctx);
+            Node::ProjectByPos(node_and_index) => {
+                let value = node_and_index.0.eval(ctx);
                 match value {
-                    Value::List(compound) => compound.values[*index].clone(),
+                    Value::List(compound) => compound.values[node_and_index.1].clone(),
                     _ => panic!("Cannot project from a non-compound value"),
+                }
+            }
+            Node::ProjectByName(node_and_name) => {
+                let value = node_and_name.0.eval(ctx);
+                match value.ty(ctx.functions) {
+                    Type::Record(fields) => {
+                        let index = fields.iter().position(|(n, _)| *n == node_and_name.1).unwrap();
+                        match value {
+                            Value::List(compound) => compound.values[index].clone(),
+                            _ => panic!("Cannot project from a non-compound value"),
+                        }
+                    }
+                    _ => panic!("Cannot project from a non-record value"),
                 }
             }
             Node::Match(match_) => {
