@@ -7,7 +7,9 @@ use std::{
 };
 
 use crate::{
-    containers::{SmallVec1, SmallVec2}, ir::{FunctionKey, Functions}, r#type::{write_with_separator, NativeType, Type}
+    containers::{SmallVec1, SmallVec2},
+    ir::{FunctionKey, Functions},
+    r#type::{write_with_separator, NativeType, Type},
 };
 
 // Support for primitive values
@@ -79,10 +81,9 @@ impl Value {
     pub fn ty(&self, functions: &Functions) -> Type {
         match self {
             Value::Primitive(value) => value.as_ref().ty(),
-            Value::GenericNative(value) => Type::generic_native_type(
-                value.native.native_type(),
-                value.arguments.clone(),
-            ),
+            Value::GenericNative(value) => {
+                Type::generic_native_type(value.native.native_type(), value.arguments.clone())
+            }
             Value::List(value) => value.ty.clone(),
             Value::Function(key) => Type::Function(Box::new(functions[*key].ty.clone())),
         }
@@ -95,7 +96,12 @@ impl fmt::Display for Value {
             Value::Primitive(value) => write!(f, "{:?}: {}", value, value.as_ref().type_name()),
             Value::GenericNative(value) => {
                 let tn = value.native.as_ref().type_name();
-                write!(f, "{:?}: {}<", value.native, tn.rsplit_once("::").unwrap_or(("", tn)).1)?;
+                write!(
+                    f,
+                    "{:?}: {}<",
+                    value.native,
+                    tn.rsplit_once("::").unwrap_or(("", tn)).1
+                )?;
                 write_with_separator(&value.arguments, ", ", f)?;
                 write!(f, ">")
             }

@@ -1,11 +1,13 @@
+use std::{cell::RefCell, rc::Rc};
+
 use painturscript::{
     function::binary_native_function,
     ir::{Application, Context, Functions, Node, StaticApplication},
     r#type::{native_type, Type},
     value::{GenericNativeValue, Value},
 };
-use ustr::ustr;
 use smallvec::smallvec;
+use ustr::ustr;
 
 fn main() {
     // basic types
@@ -13,6 +15,7 @@ fn main() {
     let u32 = native_type::<u32>();
     let float = native_type::<f32>();
     let string = native_type::<String>();
+    let empty_tuple = Type::tuple(vec![]);
 
     // test type printing
     println!("Some types:\n");
@@ -32,6 +35,29 @@ fn main() {
     ]);
     println!("{}{}", un.format_generics(), un);
 
+    // ADT recursive list
+    let adt_list = Rc::new((
+        ustr("AdtList"),
+        RefCell::new(Type::union(vec![empty_tuple.clone()])),
+    ));
+    let adt_list_ref = Type::named(&adt_list);
+    adt_list
+        .1
+        .borrow_mut()
+        .as_union_mut()
+        .unwrap()
+        .push(Type::tuple(vec![
+            Type::generic_variable(0),
+            adt_list_ref.clone(),
+        ]));
+    println!(
+        "{}{} = {}",
+        adt_list_ref.format_generics(),
+        adt_list_ref,
+        adt_list.1.borrow()
+    );
+
+    // native list
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct List(Vec<Value>);
 
@@ -45,7 +71,10 @@ fn main() {
     let v_int = Value::Primitive(Box::new(11_i32));
     println!("{}", v_int);
     let v_list_int = Value::GenericNative(Box::new(GenericNativeValue {
-        native: Box::new(List(vec![Value::primitive(11_i32), Value::primitive(22_i32)])),
+        native: Box::new(List(vec![
+            Value::primitive(11_i32),
+            Value::primitive(22_i32),
+        ])),
         arguments: smallvec![Type::Primitive(int.clone())],
     }));
     println!("{}", v_list_int);

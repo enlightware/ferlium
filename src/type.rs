@@ -1,5 +1,6 @@
 use std::any::type_name;
 use std::any::TypeId;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
@@ -8,6 +9,7 @@ use std::rc::Weak;
 
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
+use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
 use crate::assert::assert_unique_strings;
@@ -74,8 +76,12 @@ pub struct GenericNativeType {
     arguments: SmallVec1<Type>,
 }
 
-fn count_generics(generics: &[Type]) -> usize {
-    generics.iter().map(Type::count_generics).max().unwrap_or(0)
+fn count_generics_rec(generics: &[Type], counts: &mut HashMap<*const NamedType, usize>) -> usize {
+    generics
+        .iter()
+        .map(|ty| ty.count_generics_rec(counts))
+        .max()
+        .unwrap_or(0)
 }
 
 fn format_generics(count: usize) -> String {
@@ -97,7 +103,7 @@ pub struct FunctionType {
     pub return_ty: Type,
 }
 
-pub type NamedType = (Ustr, Type);
+pub type NamedType = (Ustr, RefCell<Type>);
 
 // Using Weak for simplicity now, later can be optimized with an arena and references
 #[derive(Debug, Clone)]
@@ -112,7 +118,7 @@ impl Eq for NamedTypeRef {}
 pub type NamedTypes = Vec<Rc<NamedType>>;
 
 /// The representation of a type in the system
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
 pub enum Type {
     /// A native type implemented in Rust without generics
     Primitive(Box<dyn NativeType>),
@@ -148,8 +154,16 @@ impl Type {
         Self::GenericNative(Box::new(GenericNativeType { arguments, native }))
     }
 
+    pub fn generic_variable(id: usize) -> Self {
+        Self::GenericVariable(id)
+    }
+
     pub fn union(types: Vec<Self>) -> Self {
         Self::Union(types)
+    }
+
+    pub fn tuple(types: Vec<Self>) -> Self {
+        Self::Tuple(types)
     }
 
     pub fn record(fields: Vec<(Ustr, Self)>) -> Self {
@@ -295,6 +309,7 @@ impl Type {
                     .upgrade()
                     .unwrap()
                     .1
+                    .borrow()
                     .can_be_used_in_place_of_with_subst(that, substitutions),
             },
         }
@@ -321,24 +336,31 @@ impl Type {
     fn count_generics_rec(&self, counts: &mut HashMap<*const NamedType, usize>) -> usize {
         match self {
             Type::Primitive(_) => 0,
-            Type::GenericNative(g) => count_generics(&g.arguments),
+            Type::GenericNative(g) => count_generics_rec(&g.arguments, counts),
             Type::GenericVariable(id) => *id + 1, // the max number is this index + 1
-            Type::Union(types) => types.iter().map(Self::count_generics).max().unwrap_or(0),
-            Type::Tuple(types) => types.iter().map(Self::count_generics).max().unwrap_or(0),
+            Type::Union(types) => types
+                .iter()
+                .map(|ty| ty.count_generics_rec(counts))
+                .max()
+                .unwrap_or(0),
+            Type::Tuple(types) => types
+                .iter()
+                .map(|ty| ty.count_generics_rec(counts))
+                .max()
+                .unwrap_or(0),
             Type::Record(fields) => fields
                 .iter()
                 .map(|(_, t)| t.count_generics())
                 .max()
                 .unwrap_or(0),
-            Type::Function(function) => {
-                count_generics(&function.arg_ty).max(function.return_ty.count_generics())
-            }
+            Type::Function(function) => count_generics_rec(&function.arg_ty, counts)
+                .max(function.return_ty.count_generics_rec(counts)),
             Type::Named(named) => {
                 let ptr = named.0.as_ptr();
                 if counts.get(&ptr).is_none() {
                     counts.insert(ptr, 0);
                     let named = named.0.upgrade().unwrap();
-                    let count = named.1.count_generics_rec(counts);
+                    let count = named.1.borrow().count_generics_rec(counts);
                     counts.insert(ptr, count);
                 }
                 0
@@ -466,8 +488,8 @@ pub(crate) fn write_with_separator<T: fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ustr::ustr;
     use smallvec::smallvec;
+    use ustr::ustr;
 
     #[test]
     fn can_be_used_in_place_of() {
@@ -502,8 +524,10 @@ mod tests {
             Type::generic_native::<Map>(smallvec![_i32.clone(), _gen_arg0.clone()]);
         let _gen_2_partial_bound_a_i32 =
             Type::generic_native::<Map>(smallvec![_gen_arg0.clone(), _i32.clone()]);
-        let _gen_2_bound_i32_i32 = Type::generic_native::<Map>(smallvec![_i32.clone(), _i32.clone()]);
-        let _gen_2_bound_i32_f32 = Type::generic_native::<Map>(smallvec![_i32.clone(), _f32.clone()]);
+        let _gen_2_bound_i32_i32 =
+            Type::generic_native::<Map>(smallvec![_i32.clone(), _i32.clone()]);
+        let _gen_2_bound_i32_f32 =
+            Type::generic_native::<Map>(smallvec![_i32.clone(), _f32.clone()]);
         assert!(_gen_unbound.can_be_used_in_place_of(&_gen_unbound));
         assert!(_gen_bound_i32.can_be_used_in_place_of(&_gen_unbound));
         assert!(_gen_bound_string.can_be_used_in_place_of(&_gen_unbound));
@@ -561,14 +585,8 @@ mod tests {
         let x = ustr("x");
         let y = ustr("y");
         let z = ustr("z");
-        let _record_vec2_i32 = Type::record(vec![
-            (x, _i32.clone()),
-            (y, _i32.clone()),
-        ]);
-        let _record_vec2_f32 = Type::record(vec![
-            (x, _f32.clone()),
-            (y, _f32.clone()),
-        ]);
+        let _record_vec2_i32 = Type::record(vec![(x, _i32.clone()), (y, _i32.clone())]);
+        let _record_vec2_f32 = Type::record(vec![(x, _f32.clone()), (y, _f32.clone())]);
         let _record_vec3_f32 = Type::record(vec![
             (x, _f32.clone()),
             (y, _f32.clone()),
@@ -579,14 +597,8 @@ mod tests {
             (x, _f32.clone()),
             (y, _f32.clone()),
         ]);
-        let _record_vec2_gen = Type::record(vec![
-            (x, _gen_arg0.clone()),
-            (y, _gen_arg0.clone()),
-        ]);
-        let _record_het = Type::record(vec![
-            (x, _i32.clone()),
-            (y, _f32.clone()),
-        ]);
+        let _record_vec2_gen = Type::record(vec![(x, _gen_arg0.clone()), (y, _gen_arg0.clone())]);
+        let _record_het = Type::record(vec![(x, _i32.clone()), (y, _f32.clone())]);
         assert!(_record_vec2_i32.can_be_used_in_place_of(&_record_vec2_i32));
         assert!(_record_vec2_f32.can_be_used_in_place_of(&_record_vec2_f32));
         assert!(!_record_vec2_i32.can_be_used_in_place_of(&_record_vec2_f32));
@@ -625,8 +637,8 @@ mod tests {
 
         // named
         let named_types = vec![
-            Rc::new((ustr("Int"), _i32.clone())),
-            Rc::new((ustr("OtherInt"), _i32.clone())),
+            Rc::new((ustr("Int"), RefCell::new(_i32.clone()))),
+            Rc::new((ustr("OtherInt"), RefCell::new(_i32.clone()))),
         ];
         let _int = Type::named(&named_types[0]);
         assert!(_int.can_be_used_in_place_of(&_int));

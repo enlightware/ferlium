@@ -2,7 +2,12 @@ use either::Either;
 use slotmap::{new_key_type, SlotMap};
 use ustr::Ustr;
 
-use crate::{containers::{SmallVec1, SmallVec2}, function::FunctionDescription, r#type::Type, value::Value};
+use crate::{
+    containers::{SmallVec1, SmallVec2},
+    function::FunctionDescription,
+    r#type::Type,
+    value::Value,
+};
 
 new_key_type! {
     /// A key to a function in the context
@@ -44,6 +49,7 @@ pub struct StaticApplication {
 #[derive(Debug, Clone)]
 pub struct Pattern(SmallVec1<Either<Type, Value>>);
 
+// TODO: allow to match more than one expression
 #[derive(Debug, Clone)]
 pub struct Match {
     pub value: Node,
@@ -107,7 +113,10 @@ impl Node {
                 let value = node_and_name.0.eval(ctx);
                 match value.ty(ctx.functions) {
                     Type::Record(fields) => {
-                        let index = fields.iter().position(|(n, _)| *n == node_and_name.1).unwrap();
+                        let index = fields
+                            .iter()
+                            .position(|(n, _)| *n == node_and_name.1)
+                            .unwrap();
                         match value {
                             Value::List(compound) => compound.values[index].clone(),
                             _ => panic!("Cannot project from a non-compound value"),
