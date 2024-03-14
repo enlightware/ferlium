@@ -105,6 +105,8 @@ pub struct FunctionType {
 
 pub type NamedType = (Ustr, RefCell<Type>);
 
+type NamedTypeGenericCountMap = HashMap<*const NamedType, usize>;
+
 // Using Weak for simplicity now, later can be optimized with an arena and references
 #[derive(Debug, Clone)]
 pub struct NamedTypeRef(pub Weak<NamedType>);
@@ -333,7 +335,7 @@ impl Type {
         }
     }
 
-    fn count_generics_rec(&self, counts: &mut HashMap<*const NamedType, usize>) -> usize {
+    fn count_generics_rec(&self, counts: &mut NamedTypeGenericCountMap) -> usize {
         match self {
             Type::Primitive(_) => 0,
             Type::GenericNative(g) => count_generics_rec(&g.arguments, counts),
@@ -377,13 +379,28 @@ impl Type {
     pub fn format_generics(&self) -> String {
         format_generics(self.count_generics())
     }
+
+    fn count_generics_with_counts(&self, counts: &mut NamedTypeGenericCountMap) -> usize {
+        let local_count = self.count_generics_rec(counts);
+        local_count + counts.values().sum::<usize>()
+    }
+
+    pub fn format_generics_with_counts(&self, counts: &mut NamedTypeGenericCountMap) -> String {
+        format_generics(self.count_generics_with_counts(counts))
+    }
 }
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Type::Named(NamedTypeRef(weak)) => {
-                write!(f, "{}", weak.upgrade().unwrap().0)
+                let ptr = weak.as_ptr();
+                let inner = weak.upgrade().unwrap();
+                let name = inner.0;
+                let ty = inner.1.borrow();
+                let mut counts = HashMap::new();
+                counts.insert(ptr, 0);
+                write!(f, "{}{}", name, ty.format_generics_with_counts(&mut counts))
             }
             Type::Primitive(id) => {
                 let tn = id.as_ref().type_name();
