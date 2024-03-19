@@ -6,7 +6,7 @@ use crate::{
     containers::{SmallVec1, SmallVec2},
     function::FunctionDescription,
     r#type::Type,
-    value::Value,
+    value::{CompoundValueType, Value},
 };
 
 new_key_type! {
@@ -61,13 +61,15 @@ pub struct Match {
 #[derive(Debug, Clone)]
 pub enum Node {
     Literal(Value),
+    BuildTuple(Box<SmallVec2<Node>>),
+    BuildRecord(Box<SmallVec2<(Ustr, Node)>>),
+    ProjectByPos(Box<(Node, usize)>),
+    ProjectByName(Box<(Node, Ustr)>),
     Apply(Box<Application>),
     StaticApply(Box<StaticApplication>),
     EnvStore(Box<Node>),
     EnvLoad(usize),
     BlockExpr(Box<SmallVec2<Node>>),
-    ProjectByPos(Box<(Node, usize)>),
-    ProjectByName(Box<(Node, Ustr)>),
     Match(Box<Match>),
 }
 
@@ -75,6 +77,40 @@ impl Node {
     pub fn eval(&self, ctx: &mut Context) -> Value {
         match self {
             Node::Literal(value) => value.clone(),
+            Node::BuildTuple(nodes) => {
+                let values = nodes.iter().map(|node| node.eval(ctx)).collect();
+                Value::compound(values, CompoundValueType::Tuple)
+            }
+            Node::BuildRecord(fields) => {
+                let (names, values) = fields
+                    .iter()
+                    .map(|(name, node)| (*name, node.eval(ctx)))
+                    .unzip();
+                Value::compound(values, CompoundValueType::Record(Box::new(names)))
+            }
+            Node::ProjectByPos(node_and_index) => {
+                let value = node_and_index.0.eval(ctx);
+                match value {
+                    Value::Compound(compound) => compound.values[node_and_index.1].clone(),
+                    _ => panic!("Cannot project from a non-compound value"),
+                }
+            }
+            Node::ProjectByName(node_and_name) => {
+                let value = node_and_name.0.eval(ctx);
+                match value.ty(ctx.functions) {
+                    Type::Record(fields) => {
+                        let index = fields
+                            .iter()
+                            .position(|(n, _)| *n == node_and_name.1)
+                            .unwrap();
+                        match value {
+                            Value::Compound(compound) => compound.values[index].clone(),
+                            _ => panic!("Cannot project from a non-compound value"),
+                        }
+                    }
+                    _ => panic!("Cannot project from a non-record value"),
+                }
+            }
             Node::Apply(app) => {
                 let arguments = app.arguments.iter().map(|arg| arg.eval(ctx)).collect();
                 let key = *app.function.eval(ctx).as_function().unwrap();
@@ -101,29 +137,6 @@ impl Node {
                     .unwrap_or(Value::primitive(()));
                 ctx.environment.truncate(env_size);
                 return_value
-            }
-            Node::ProjectByPos(node_and_index) => {
-                let value = node_and_index.0.eval(ctx);
-                match value {
-                    Value::List(compound) => compound.values[node_and_index.1].clone(),
-                    _ => panic!("Cannot project from a non-compound value"),
-                }
-            }
-            Node::ProjectByName(node_and_name) => {
-                let value = node_and_name.0.eval(ctx);
-                match value.ty(ctx.functions) {
-                    Type::Record(fields) => {
-                        let index = fields
-                            .iter()
-                            .position(|(n, _)| *n == node_and_name.1)
-                            .unwrap();
-                        match value {
-                            Value::List(compound) => compound.values[index].clone(),
-                            _ => panic!("Cannot project from a non-compound value"),
-                        }
-                    }
-                    _ => panic!("Cannot project from a non-record value"),
-                }
             }
             Node::Match(match_) => {
                 let value = match_.value.eval(ctx);

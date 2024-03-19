@@ -5,6 +5,7 @@ use std::{
     any::{type_name, Any, TypeId},
     fmt,
 };
+use ustr::Ustr;
 
 use crate::{
     containers::{SmallVec1, SmallVec2},
@@ -59,9 +60,15 @@ pub struct GenericNativeValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompoundValueType {
+    Tuple,
+    Record(Box<SmallVec2<Ustr>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompoundValue {
     pub values: SmallVec2<Value>,
-    pub ty: Type,
+    pub ty: CompoundValueType,
 }
 
 /// A value in the system
@@ -69,7 +76,7 @@ pub struct CompoundValue {
 pub enum Value {
     Primitive(Box<dyn PrimitiveValue>),
     GenericNative(Box<GenericNativeValue>),
-    List(Box<CompoundValue>),
+    Compound(Box<CompoundValue>),
     Function(FunctionKey),
 }
 
@@ -78,13 +85,32 @@ impl Value {
         Value::Primitive(Box::new(value))
     }
 
+    pub fn generic_native(native: Box<dyn PrimitiveValue>, arguments: SmallVec1<Type>) -> Self {
+        Value::GenericNative(Box::new(GenericNativeValue { native, arguments }))
+    }
+
+    pub fn compound(values: SmallVec2<Value>, ty: CompoundValueType) -> Self {
+        Value::Compound(Box::new(CompoundValue { values, ty }))
+    }
+
     pub fn ty(&self, functions: &Functions) -> Type {
         match self {
             Value::Primitive(value) => value.as_ref().ty(),
             Value::GenericNative(value) => {
                 Type::generic_native_type(value.native.native_type(), value.arguments.clone())
             }
-            Value::List(value) => value.ty.clone(),
+            Value::Compound(value) => match &value.ty {
+                CompoundValueType::Tuple => {
+                    Type::Tuple(value.values.iter().map(|v| v.ty(functions)).collect())
+                }
+                CompoundValueType::Record(names) => Type::Record(
+                    names
+                        .iter()
+                        .zip(value.values.iter())
+                        .map(|(name, value)| (*name, value.ty(functions)))
+                        .collect(),
+                ),
+            },
             Value::Function(key) => Type::Function(Box::new(functions[*key].ty.clone())),
         }
     }
@@ -105,26 +131,22 @@ impl fmt::Display for Value {
                 write_with_separator(&value.arguments, ", ", f)?;
                 write!(f, ">")
             }
-            Value::List(compound) => match &compound.ty {
-                Type::Tuple(_) => {
+            Value::Compound(compound) => match &compound.ty {
+                CompoundValueType::Tuple => {
                     write!(f, "(")?;
                     write_with_separator(&compound.values, ", ", f)?;
-                    write!(f, "): {}", compound.ty)
+                    write!(f, "): {}", "TODO tuple type")
                 }
-                Type::Record(s) => {
+                CompoundValueType::Record(s) => {
                     write!(f, "{{")?;
-                    for (i, (name, ty)) in s.iter().enumerate() {
-                        write!(f, "{}: {}: {}", name, compound.values[i], ty)?;
+                    for (i, name) in s.iter().enumerate() {
+                        write!(f, "{}: {}: {}", name, compound.values[i], "TODO value type")?;
                         if i < compound.values.len() - 1 {
                             write!(f, ", ")?;
                         }
                     }
-                    write!(f, "}}: {}", compound.ty)
+                    write!(f, "}}: {}", "TODO record type")
                 }
-                _ => panic!(
-                    "Cannot display a list of values with type {:?}",
-                    compound.ty
-                ),
             },
             Value::Function(_) => todo!(),
         }
