@@ -1,32 +1,23 @@
 use either::Either;
-use slotmap::{new_key_type, SlotMap};
 use ustr::Ustr;
 
 use crate::{
     containers::{SmallVec1, SmallVec2},
-    function::FunctionDescription,
+    function::FunctionKey,
     r#type::Type,
     value::{CompoundValueType, Value},
 };
 
-new_key_type! {
-    /// A key to a function in the context
-    pub struct FunctionKey;
-}
-
-pub type Functions = SlotMap<FunctionKey, FunctionDescription>;
-
 /// Along with the Rust native stack, corresponds to the Zinc Abstract Machine of Caml language family
-pub struct Context<'a> {
-    pub functions: &'a Functions,
+pub struct Context {
     // TODO: revisit pub later on
     // pub stack: Vec<Value>, // Stack is not needed as we are using the Rust native stack
     pub environment: Vec<Value>,
 }
-impl Context<'_> {
-    pub fn new(functions: &Functions) -> Context {
+impl Context {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Context {
         Context {
-            functions,
             environment: Vec::new(),
         }
     }
@@ -57,7 +48,7 @@ pub struct Match {
     pub default: Option<Box<Node>>,
 }
 
-/// A node of the abstract syntax tree
+/// A node of the execution tree
 #[derive(Debug, Clone)]
 pub enum Node {
     Literal(Value),
@@ -97,7 +88,7 @@ impl Node {
             }
             Node::ProjectByName(node_and_name) => {
                 let value = node_and_name.0.eval(ctx);
-                match value.ty(ctx.functions) {
+                match value.ty() {
                     Type::Record(fields) => {
                         let index = fields
                             .iter()
@@ -113,14 +104,14 @@ impl Node {
             }
             Node::Apply(app) => {
                 let arguments = app.arguments.iter().map(|arg| arg.eval(ctx)).collect();
-                let key = *app.function.eval(ctx).as_function().unwrap();
-                let function = &ctx.functions[key];
-                function.code.call(arguments, ctx.functions)
+                let function_value = app.function.eval(ctx);
+                let function = function_value.as_function().unwrap().get();
+                function.code.call(arguments, &())
             }
             Node::StaticApply(app) => {
                 let arguments = app.arguments.iter().map(|arg| arg.eval(ctx)).collect();
-                let function = &ctx.functions[app.function];
-                function.code.call(arguments, ctx.functions)
+                let function = app.function.get();
+                function.code.call(arguments, &())
             }
             Node::EnvStore(node) => {
                 let value = node.eval(ctx);
@@ -144,7 +135,7 @@ impl Node {
                     for token in &pattern.0 {
                         match token {
                             Either::Left(ty) => {
-                                if value.ty(ctx.functions).can_be_used_in_place_of(ty) {
+                                if value.ty().can_be_used_in_place_of(ty) {
                                     return node.eval(ctx);
                                 }
                             }

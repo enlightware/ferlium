@@ -109,7 +109,7 @@ type NamedTypeGenericCountMap = HashMap<*const NamedType, usize>;
 
 // Using Weak for simplicity now, later can be optimized with an arena and references
 #[derive(Debug, Clone)]
-pub struct NamedTypeRef(pub Weak<NamedType>);
+pub struct NamedTypeRef(Weak<NamedType>);
 impl PartialEq for NamedTypeRef {
     fn eq(&self, other: &Self) -> bool {
         self.0.ptr_eq(&other.0)

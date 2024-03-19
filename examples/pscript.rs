@@ -1,8 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use painturscript::{
-    function::binary_native_function,
-    ir::{Application, Context, Functions, Node, StaticApplication},
+    function::{binary_native_function, FunctionKey},
+    ir::{Application, Context, Node, StaticApplication},
     r#type::{native_type, Type},
     value::{GenericNativeValue, Value},
 };
@@ -66,6 +66,19 @@ fn main() {
     println!("{}{}", list.format_generics(), list);
     println!("{}{}", list_int.format_generics(), list_int);
 
+    // functions
+    let functions = vec![
+        Rc::new(binary_native_function(
+            std::ops::Add::add as fn(i32, i32) -> i32,
+        )),
+        Rc::new(binary_native_function(
+            std::ops::Sub::sub as fn(i32, i32) -> i32,
+        ))
+    ];
+    let add_fn = FunctionKey::new(&functions[0]);
+    let sub_fn = FunctionKey::new(&functions[1]);
+    let add_value = Value::Function(add_fn.clone());
+
     // test printing values
     println!("\nSome values:\n");
     let v_int = Value::Primitive(Box::new(11_i32));
@@ -78,19 +91,10 @@ fn main() {
         arguments: smallvec![Type::Primitive(int.clone())],
     }));
     println!("{}", v_list_int);
+    println!("{}", add_value);
 
     // test ir execution
     println!("\nSome IR and its execution:\n");
-    // 1. add some native functions
-    let mut functions = Functions::default();
-    let add_fn = functions.insert(binary_native_function(
-        std::ops::Add::add as fn(i32, i32) -> i32,
-    ));
-    let sub_fn = functions.insert(binary_native_function(
-        std::ops::Sub::sub as fn(i32, i32) -> i32,
-    ));
-    let mut ctx = Context::new(&functions);
-    // 2. define some code
     let ir = Node::BlockExpr(Box::new(smallvec![
         Node::EnvStore(Box::new(Node::Literal(Value::primitive(11_i32)))),
         Node::Apply(Box::new(Application {
@@ -105,6 +109,5 @@ fn main() {
         })),
     ]));
     println!("{:?}", ir);
-    // 3. execute this code
-    ir.eval_and_print(&mut ctx);
+    ir.eval_and_print(&mut Context::new());
 }

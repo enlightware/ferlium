@@ -1,12 +1,12 @@
-use std::fmt;
+use std::{fmt, rc::{Rc, Weak}};
 
 use crate::{
-    ir::{self, Functions},
+    ir::{self},
     r#type::{FunctionType, Type},
     value::Value,
 };
 
-type CallCtx = Functions;
+type CallCtx = ();
 
 /// A function that can be called
 pub trait FunctionCall {
@@ -15,7 +15,7 @@ pub trait FunctionCall {
 
 impl fmt::Debug for dyn FunctionCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FunctionCall @ {:p}", self)
+        write!(f, "fn @ {:p}", self)
     }
 }
 
@@ -27,6 +27,37 @@ pub struct FunctionDescription {
     pub code: Box<dyn FunctionCall>,
 }
 
+impl FunctionDescription {
+    pub fn ty(&self) -> Type {
+        Type::Function(Box::new(self.ty.clone()))
+    }
+}
+
+#[derive(Clone)]
+pub struct FunctionKey(Weak<FunctionDescription>);
+
+impl FunctionKey {
+    pub fn new(function: &Rc<FunctionDescription>) -> Self {
+        FunctionKey(Rc::downgrade(function))
+    }
+    pub fn get(&self) -> Rc<FunctionDescription> {
+        self.0.upgrade().unwrap()
+    }
+}
+
+impl std::fmt::Debug for FunctionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.get().code)
+    }
+}
+
+impl PartialEq for FunctionKey {
+    fn eq(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for FunctionKey {}
+
 /// A function holding user-defined code
 #[derive(Debug, Clone)]
 pub struct ScriptFunction {
@@ -34,8 +65,8 @@ pub struct ScriptFunction {
 }
 
 impl FunctionCall for ScriptFunction {
-    fn call(&self, args: Vec<Value>, ctx: &CallCtx) -> Value {
-        let mut ctx = ir::Context::new(ctx);
+    fn call(&self, args: Vec<Value>, _ctx: &CallCtx) -> Value {
+        let mut ctx = ir::Context::new();
         ctx.environment.extend(args);
         self.code.eval(&mut ctx)
     }

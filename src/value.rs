@@ -8,9 +8,7 @@ use std::{
 use ustr::Ustr;
 
 use crate::{
-    containers::{SmallVec1, SmallVec2},
-    ir::{FunctionKey, Functions},
-    r#type::{write_with_separator, NativeType, Type},
+    containers::{SmallVec1, SmallVec2}, function::FunctionKey, r#type::{write_with_separator, NativeType, Type}
 };
 
 // Support for primitive values
@@ -70,6 +68,20 @@ pub struct CompoundValue {
     pub values: SmallVec2<Value>,
     pub ty: CompoundValueType,
 }
+impl CompoundValue {
+    pub fn ty(&self) -> Type {
+        match &self.ty {
+            CompoundValueType::Tuple => Type::Tuple(self.values.iter().map(|v| v.ty()).collect()),
+            CompoundValueType::Record(names) => Type::Record(
+                names
+                    .iter()
+                    .zip(self.values.iter())
+                    .map(|(name, value)| (*name, value.ty()))
+                    .collect(),
+            ),
+        }
+    }
+}
 
 /// A value in the system
 #[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
@@ -93,7 +105,7 @@ impl Value {
         Value::Compound(Box::new(CompoundValue { values, ty }))
     }
 
-    pub fn ty(&self, functions: &Functions) -> Type {
+    pub fn ty(&self) -> Type {
         match self {
             Value::Primitive(value) => value.as_ref().ty(),
             Value::GenericNative(value) => {
@@ -101,17 +113,19 @@ impl Value {
             }
             Value::Compound(value) => match &value.ty {
                 CompoundValueType::Tuple => {
-                    Type::Tuple(value.values.iter().map(|v| v.ty(functions)).collect())
+                    Type::Tuple(value.values.iter().map(|v| v.ty()).collect())
                 }
                 CompoundValueType::Record(names) => Type::Record(
                     names
                         .iter()
                         .zip(value.values.iter())
-                        .map(|(name, value)| (*name, value.ty(functions)))
+                        .map(|(name, value)| (*name, value.ty()))
                         .collect(),
                 ),
             },
-            Value::Function(key) => Type::Function(Box::new(functions[*key].ty.clone())),
+            Value::Function(function) => {
+                Type::Function(Box::new(function.get().ty.clone()))
+            }
         }
     }
 }
@@ -135,20 +149,24 @@ impl fmt::Display for Value {
                 CompoundValueType::Tuple => {
                     write!(f, "(")?;
                     write_with_separator(&compound.values, ", ", f)?;
-                    write!(f, "): {}", "TODO tuple type")
+                    write!(f, "): {}", compound.ty())
                 }
                 CompoundValueType::Record(s) => {
                     write!(f, "{{")?;
                     for (i, name) in s.iter().enumerate() {
-                        write!(f, "{}: {}: {}", name, compound.values[i], "TODO value type")?;
+                        let value = &compound.values[i];
+                        write!(f, "{}: {}: {}", name, value, value.ty())?;
                         if i < compound.values.len() - 1 {
                             write!(f, ", ")?;
                         }
                     }
-                    write!(f, "}}: {}", "TODO record type")
+                    write!(f, "}}: {}", compound.ty())
                 }
             },
-            Value::Function(_) => todo!(),
+            Value::Function(function) => {
+                let function = function.get();
+                write!(f, "{:?}: {}", function.code, function.ty())
+            },
         }
     }
 }
