@@ -67,7 +67,7 @@ fn main() {
     println!("{}{}", list_int.format_generics(), list_int);
 
     // functions
-    let functions = vec![
+    let functions = [
         Rc::new(binary_native_function(
             std::ops::Add::add as fn(i32, i32) -> i32,
         )),

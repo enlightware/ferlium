@@ -653,9 +653,9 @@ mod tests {
         // TODO: add more tests
 
         // named
-        let named_types = vec![
+        let named_types = [
             Rc::new((ustr("Int"), RefCell::new(_i32.clone()))),
-            Rc::new((ustr("OtherInt"), RefCell::new(_i32.clone()))),
+            Rc::new((ustr("OtherInt"), RefCell::new(_i32.clone())))
         ];
         let _int = Type::named(&named_types[0]);
         assert!(_int.can_be_used_in_place_of(&_int));

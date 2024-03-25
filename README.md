@@ -15,9 +15,9 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 
 * ML: basic functional concepts (especially [this course](https://pauillac.inria.fr/~remy/mpri/))
 * Rust: syntax
-* Typescript: anonymous union types
+* Typescript: anonymous union types, bounded parametric polymorphism (with union type bounds)
 
-## Why painturscript?
+## Why the name painturscript?
 
 Why this name? Several reasons:
 
