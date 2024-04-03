@@ -6,16 +6,29 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 
 ## Key features
 
+### For users
+
+* Functional statically-typed scripting language
+* Bounded parametric polymorphism
+* Trait for type classes (not-user definable)
+* Subtype polymorphism
+* Algebraic data types
+* Enum union types
+* Pattern matching
+* Type inference
+
+### For developers and integrators
+
 * Intermediate representation (IR) as close as possible to a textbook functional language (for readability and correctness)
 * But access necessary extensions for performance reasons (e.g., special case for functions not as values)
 * Avoid native code in the IR when not necessary (i.e., no int, bool, etc. explicit there)
 * Smooth binding with native code (to bring int, bool, etc. on demand)
+* Rich integration possibilities with the native platform (e.g. for platform-managed values)
 
 ## Inspirations
 
 * ML: basic functional concepts (especially [this course](https://pauillac.inria.fr/~remy/mpri/))
-* Rust: syntax
-* Typescript: anonymous union types, bounded parametric polymorphism (with union type bounds)
+* Rust: syntax and type system
 
 ## Why the name painturscript?
 

@@ -1,7 +1,10 @@
-use std::{fmt, rc::{Rc, Weak}};
+use std::{
+    fmt,
+    rc::{Rc, Weak},
+};
 
 use crate::{
-    ir::{self},
+    ir,
     r#type::{FunctionType, Type},
     value::Value,
 };
@@ -29,7 +32,7 @@ pub struct FunctionDescription {
 
 impl FunctionDescription {
     pub fn ty(&self) -> Type {
-        Type::Function(Box::new(self.ty.clone()))
+        Type::function(self.ty.clone())
     }
 }
 
@@ -85,9 +88,12 @@ pub trait BinaryNativeFunction:
     type O: Clone + 'static;
 
     fn ty() -> FunctionType {
+        let a_ty = Type::primitive::<Self::A>();
+        let b_ty = Type::primitive::<Self::B>();
+        let o_ty = Type::primitive::<Self::O>();
         FunctionType {
-            arg_ty: vec![Type::primitive::<Self::A>(), Type::primitive::<Self::B>()],
-            return_ty: Type::primitive::<Self::O>(),
+            arg_ty: vec![a_ty, b_ty],
+            return_ty: o_ty,
         }
     }
 }

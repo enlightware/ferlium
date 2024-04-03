@@ -4,5 +4,8 @@
 		"painturscript",
 		"rsplit",
 		"slotmap"
+	],
+	"rust-analyzer.linkedProjects": [
+		"./Cargo.toml"
 	]
 }

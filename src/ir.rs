@@ -4,8 +4,7 @@ use ustr::Ustr;
 use crate::{
     containers::{SmallVec1, SmallVec2},
     function::FunctionKey,
-    r#type::Type,
-    value::{CompoundValueType, Value},
+    value::Value,
 };
 
 /// Along with the Rust native stack, corresponds to the Zinc Abstract Machine of Caml language family
@@ -38,9 +37,10 @@ pub struct StaticApplication {
 }
 
 #[derive(Debug, Clone)]
-pub struct Pattern(SmallVec1<Either<Type, Value>>);
+pub struct Pattern(SmallVec1<Either<Ustr, Value>>);
 
 // TODO: allow to match more than one expression
+// TODO: allow to deconstruct variant, record, tuple
 #[derive(Debug, Clone)]
 pub struct Match {
     pub value: Node,
@@ -70,34 +70,33 @@ impl Node {
             Node::Literal(value) => value.clone(),
             Node::BuildTuple(nodes) => {
                 let values = nodes.iter().map(|node| node.eval(ctx)).collect();
-                Value::compound(values, CompoundValueType::Tuple)
+                Value::Tuple(Box::new(values))
             }
             Node::BuildRecord(fields) => {
-                let (names, values) = fields
+                let fields = fields
                     .iter()
                     .map(|(name, node)| (*name, node.eval(ctx)))
-                    .unzip();
-                Value::compound(values, CompoundValueType::Record(Box::new(names)))
+                    .collect();
+                Value::Record(Box::new(fields))
             }
             Node::ProjectByPos(node_and_index) => {
                 let value = node_and_index.0.eval(ctx);
                 match value {
-                    Value::Compound(compound) => compound.values[node_and_index.1].clone(),
+                    Value::Tuple(tuple) => tuple[node_and_index.1].clone(),
+                    Value::Record(record) => record[node_and_index.1].1.clone(),
+                    Value::Variant(variant) => variant.value.clone(),
                     _ => panic!("Cannot project from a non-compound value"),
                 }
             }
             Node::ProjectByName(node_and_name) => {
                 let value = node_and_name.0.eval(ctx);
-                match value.ty() {
-                    Type::Record(fields) => {
-                        let index = fields
+                match value {
+                    Value::Record(record) => {
+                        let index = record
                             .iter()
                             .position(|(n, _)| *n == node_and_name.1)
                             .unwrap();
-                        match value {
-                            Value::Compound(compound) => compound.values[index].clone(),
-                            _ => panic!("Cannot project from a non-compound value"),
-                        }
+                        record[index].1.clone()
                     }
                     _ => panic!("Cannot project from a non-record value"),
                 }
@@ -134,9 +133,11 @@ impl Node {
                 for (pattern, node) in &match_.alternatives {
                     for token in &pattern.0 {
                         match token {
-                            Either::Left(ty) => {
-                                if value.ty().can_be_used_in_place_of(ty) {
-                                    return node.eval(ctx);
+                            Either::Left(tag) => {
+                                if let Value::Variant(variant) = &value {
+                                    if variant.tag == *tag {
+                                        return node.eval(ctx);
+                                    }
                                 }
                             }
                             Either::Right(v) => {
@@ -160,27 +161,4 @@ impl Node {
         let value = self.eval(ctx);
         println!("{}", value);
     }
-
-    // Note: unclear whether we really need this method
-    // pub fn ty(&self, ctx: &Context) -> Type {
-    //     match self {
-    //         Node::Literal(value) => value.ty(),
-    //         Node::Apply(node) => node.function.ty(),
-    //         Node::EnvStore(node) => node.ty(ctx),
-    //         Node::EnvLoad(index) => ctx.environment[*index].ty(),
-    //         Node::BlockExpr(nodes) => nodes
-    //             .last()
-    //             .map(|node| node.ty(ctx))
-    //             .unwrap_or(Type::primitive::<()>()),
-    //         Node::Project(node, index) => {
-    //             let ty = node.ty(ctx);
-    //             match ty {
-    //                 Type::Tuple(types) => types[*index].clone(),
-    //                 Type::Record(fields) => fields[*index].1.clone(),
-    //                 _ => panic!("Cannot project from a non product-type"),
-    //             }
-    //         }
-    //         Node::Match(_) => todo!(),
-    //     }
-    // }
 }
