@@ -79,7 +79,7 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // FIXME: primitive alwasy show the primitive naming
+            // FIXME: primitive always show the primitive naming
             Value::Primitive(value) => write!(f, "{:?}: {}", value, value.as_ref().type_name()),
             // Value::GenericNative(value) => {
             //     let tn = value.native.as_ref().type_name();

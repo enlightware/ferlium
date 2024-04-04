@@ -1,9 +1,14 @@
 {
 	"cSpell.words": [
+		"Caml",
+		"indexmap",
+		"nonmax",
 		"nullary",
 		"painturscript",
 		"rsplit",
-		"slotmap"
+		"slotmap",
+		"smallvec",
+		"subtyping"
 	],
 	"rust-analyzer.linkedProjects": [
 		"./Cargo.toml"
