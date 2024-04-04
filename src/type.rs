@@ -221,14 +221,14 @@ impl Type {
             return true;
         }
         // A generic ref can be replaced by anything, but keep in mind the substitutions
-        if let TypeData::GenericVariable(that_index) = get_type(that) {
+        if let TypeData::GenericVariable(that_index) = *get_type(that) {
             match substitutions.get(&that_index) {
                 Some(subst) => {
                     return self.can_be_used_in_place_of_with_subst(*subst, substitutions)
                 }
                 None => {
                     // do not perform substitution if we already have the correct index
-                    if let TypeData::GenericVariable(this_index) = get_type(self) {
+                    if let TypeData::GenericVariable(this_index) = *get_type(self) {
                         if this_index == that_index {
                             return true;
                         }
@@ -304,7 +304,7 @@ impl fmt::Display for Type {
         }
 
         // Recurse
-        let result = write!(f, "{}", get_type(*self));
+        let result = write!(f, "{}", *get_type(*self));
 
         // Remove the value on back-tracking
         TYPE_DISPLAY_VISITED.with(|visited| {
@@ -327,7 +327,7 @@ pub enum TypeData {
     /// A native type implemented in Rust with generics
     GenericNative(Box<GenericNativeType>),
     /// A type variable, to be used in generics context.
-    /// Its parameter is its indentity in the context considered, as it is bound.
+    /// Its parameter is its identity in the context considered, as it is bound.
     GenericVariable(usize), // TODO: add bounds
     /// Tagged union sum type
     Variant(Vec<(Ustr, Type)>),
@@ -352,12 +352,12 @@ impl TypeData {
         // We know that that is not a GenericArg
         match self {
             // A primitive type can be used in place of itself or instantiate a generics
-            TypeData::Primitive(this_ty) => match get_type(that) {
-                TypeData::Primitive(that_ty) => this_ty == &that_ty,
+            TypeData::Primitive(this_ty) => match &*get_type(that) {
+                TypeData::Primitive(that_ty) => this_ty == that_ty,
                 _ => false,
             },
             // A generic type can be used in place of itself with compatible type arguments, or instantiate a generics
-            TypeData::GenericNative(this_gen) => match get_type(that) {
+            TypeData::GenericNative(this_gen) => match &*get_type(that) {
                 TypeData::GenericNative(that_gen) => {
                     this_gen.native == that_gen.native
                         && this_gen.arguments.len() == that_gen.arguments.len()
@@ -375,7 +375,7 @@ impl TypeData {
             TypeData::GenericVariable(_) => false,
             // This variant can be used in place of that variant if for every constructor and argument in that variant,
             // there is a constructor and argument in this union that can be used in place of it.
-            TypeData::Variant(this_variant) => match get_type(that) {
+            TypeData::Variant(this_variant) => match &*get_type(that) {
                 TypeData::Variant(that_variant) => that_variant.iter().all(|that_ctor| {
                     this_variant.iter().any(|this_ctor| {
                         this_ctor.0 == that_ctor.0
@@ -387,7 +387,7 @@ impl TypeData {
                 _ => false,
             },
             // Larger tuples can be used in place of smaller tuples
-            TypeData::Tuple(this_tuple) => match get_type(that) {
+            TypeData::Tuple(this_tuple) => match &*get_type(that) {
                 TypeData::Tuple(that_tuple) => {
                     this_tuple.len() >= that_tuple.len()
                         && this_tuple // covariant element types
@@ -401,7 +401,7 @@ impl TypeData {
             },
             // This record can be used in place of that record if for every field in that record,
             // there is a field in this record that can be used in place of it.
-            TypeData::Record(this_record) => match get_type(that) {
+            TypeData::Record(this_record) => match &*get_type(that) {
                 TypeData::Record(that_record) => that_record.iter().all(|(that_name, that_ty)| {
                     this_record.iter().any(|(this_name, this_ty)| {
                         this_name == that_name
@@ -414,7 +414,7 @@ impl TypeData {
             TypeData::Function(this_fn) => {
                 let this_args = &this_fn.arg_ty;
                 let this_ty = &this_fn.return_ty;
-                match get_type(that) {
+                match &*get_type(that) {
                     TypeData::Function(that_fun) => {
                         let that_args = &that_fun.arg_ty;
                         let that_ty = &that_fun.return_ty;
@@ -667,30 +667,21 @@ where
     types().write().unwrap().insert_types(tys)
 }
 
-pub fn get_type(r: Type) -> TypeData {
-    types().read().unwrap().get_type(r).clone()
+pub struct TypeRef<'a> {
+    ty: Type,
+    guard: std::sync::RwLockReadGuard<'a, TypeUniverse>,
 }
-// FIXME: is there a way to return a reference to the type data?
-// Something like this:
-/*
-struct DataRef<'a, T> {
-    // The lock guard is stored here to keep the lock alive.
-    _guard: std::sync::RwLockReadGuard<'a, MyGlobalStruct>,
-    // Reference to the data inside the global structure.
-    pub data: &'a T,
-}
-
-and
-
-impl<'a, T> Deref for DataRef<'a, T> {
-    type Target = T;
-
+impl<'a> std::ops::Deref for TypeRef<'a> {
+    type Target = TypeData;
     fn deref(&self) -> &Self::Target {
-        self.data
+        self.guard.get_type(self.ty)
     }
 }
 
-*/
+pub fn get_type<'t>(ty: Type) -> TypeRef<'t> {
+    let guard = types().read().unwrap();
+    TypeRef { ty, guard }
+}
 
 pub struct TypeNames {
     pub names_to_types: HashMap<Ustr, Type>,
