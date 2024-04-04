@@ -19,6 +19,7 @@ use ustr::Ustr;
 use crate::assert::assert_unique_strings;
 use crate::containers::First;
 use crate::containers::SmallVec1;
+use crate::sync::SyncPhantomData;
 
 pub trait NativeType: DynClone + DynEq + Send + Sync {
     fn type_id(&self) -> TypeId;
@@ -50,19 +51,9 @@ impl Hash for dyn NativeType {
     }
 }
 
-// Helper phantom data to make NativeType Sync
-#[derive(Clone, Copy)]
-struct SyncPhantomData<T: ?Sized> {
-    phantom: std::marker::PhantomData<std::sync::atomic::AtomicPtr<Box<T>>>,
-}
-impl<T: ?Sized> SyncPhantomData<T> {
-    fn new() -> Self {
-        Self {
-            phantom: std::marker::PhantomData,
-        }
-    }
-}
 
+
+#[derive(Default)]
 pub struct NativeTypeImpl<T> {
     _marker: SyncPhantomData<T>,
 }
@@ -74,7 +65,7 @@ impl<T> Clone for NativeTypeImpl<T> {
 impl<T> NativeTypeImpl<T> {
     pub fn new() -> Self {
         Self {
-            _marker: SyncPhantomData::new(),
+            _marker: SyncPhantomData::default(),
         }
     }
 }
