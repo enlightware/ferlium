@@ -833,19 +833,15 @@ mod tests {
         // binary functions
         // TODO: add more tests
 
-        // // named
-        // let named_types = [
-        //     Rc::new((ustr("Int"), RefCell::new(_i32.clone()))),
-        //     Rc::new((ustr("OtherInt"), RefCell::new(_i32.clone())))
-        // ];
-        // let _int = TypeData::named(&named_types[0]);
-        // assert!(_int.can_be_used_in_place_of(&_int));
-        // assert!(_int.can_be_used_in_place_of(&_gen_arg0));
-        // assert!(_int.can_be_used_in_place_of(&_i32));
-        // let _other_int = TypeData::named(&named_types[1]);
-        // assert!(_other_int.can_be_used_in_place_of(&_other_int));
-        // assert!(_other_int.can_be_used_in_place_of(&_gen_arg0));
-        // assert!(_other_int.can_be_used_in_place_of(&_i32));
-        // assert!(!_other_int.can_be_used_in_place_of(&_int));
+        // new types
+        let _int = Type::new_type(ustr("Int"), _i32);
+        assert!(_int.can_be_used_in_place_of(_int));
+        assert!(_int.can_be_used_in_place_of(_gen_arg0));
+        assert!(_int.can_be_used_in_place_of(_i32));
+        let _other_int = Type::new_type(ustr("OtherInt"), _i32);
+        assert!(_other_int.can_be_used_in_place_of(_other_int));
+        assert!(_other_int.can_be_used_in_place_of(_gen_arg0));
+        assert!(_other_int.can_be_used_in_place_of(_i32));
+        assert!(!_other_int.can_be_used_in_place_of(_int));
     }
 }
