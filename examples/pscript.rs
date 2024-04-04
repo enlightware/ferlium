@@ -47,7 +47,7 @@ fn main() {
     //     (ustr("Cons"), Type::new_local_ref(0)),
     // ]);
     // // add them to the universe as a batch
-    // let adt_list = add_types::<_, Vec<_>>([adt_list_element, adt_list])[0];
+    // let adt_list = store_types::<_, Vec<_>>([adt_list_element, adt_list])[0];
     // println!(
     //     "{}{}",
     //     adt_list.format_generics(),

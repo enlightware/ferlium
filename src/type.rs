@@ -138,44 +138,44 @@ pub struct Type {
 impl Type {
     // helper constructors
     pub fn primitive<T: Clone + 'static>() -> Self {
-        add_type(TypeData::Primitive(native_type::<T>()))
+        TypeData::Primitive(native_type::<T>()).store()
     }
 
     pub fn generic_native<T: Clone + 'static>(arguments: SmallVec1<Self>) -> Self {
         let native = native_type::<T>();
-        add_type(TypeData::GenericNative(Box::new(GenericNativeType {
+        TypeData::GenericNative(Box::new(GenericNativeType {
             arguments,
             native,
-        })))
+        })).store()
     }
 
     pub fn generic_native_type(native: Box<dyn NativeType>, arguments: SmallVec1<Self>) -> Self {
-        add_type(TypeData::GenericNative(Box::new(GenericNativeType {
+        TypeData::GenericNative(Box::new(GenericNativeType {
             arguments,
             native,
-        })))
+        })).store()
     }
 
     pub fn generic_variable(id: usize) -> Self {
-        add_type(TypeData::GenericVariable(id))
+        TypeData::GenericVariable(id).store()
     }
 
     pub fn variant(mut types: Vec<(Ustr, Self)>) -> Self {
         types.sort_by(|(a, _), (b, _)| a.cmp(b));
-        add_type(TypeData::Variant(types))
+        TypeData::Variant(types).store()
     }
 
     pub fn tuple(elements: Vec<Self>) -> Self {
-        add_type(TypeData::Tuple(elements))
+        TypeData::Tuple(elements).store()
     }
 
     pub fn record(fields: Vec<(Ustr, Self)>) -> Self {
         assert_unique_strings(&fields);
-        add_type(TypeData::Record(fields))
+        TypeData::Record(fields).store()
     }
 
     pub fn function(ft: FunctionType) -> Self {
-        add_type(TypeData::Function(Box::new(ft)))
+        TypeData::Function(Box::new(ft)).store()
     }
 
     pub fn nullary_function(ret: Self) -> Self {
@@ -200,7 +200,7 @@ impl Type {
     }
 
     pub fn new_type(name: Ustr, ty: Self) -> Self {
-        add_type(TypeData::NewType(name, ty))
+        TypeData::NewType(name, ty).store()
     }
 
     pub fn new_local_ref(index: u32) -> Self {
@@ -208,6 +208,12 @@ impl Type {
             world: None,
             index,
         }
+    }
+
+    // getter
+    pub fn data<'t>(&self) -> TypeDataRef<'t> {
+        let guard = types().read().unwrap();
+        TypeDataRef { ty: *self, guard }
     }
 
     // subtyping
@@ -221,14 +227,14 @@ impl Type {
             return true;
         }
         // A generic ref can be replaced by anything, but keep in mind the substitutions
-        if let TypeData::GenericVariable(that_index) = *get_type(that) {
+        if let TypeData::GenericVariable(that_index) = *that.data() {
             match substitutions.get(&that_index) {
                 Some(subst) => {
                     return self.can_be_used_in_place_of_with_subst(*subst, substitutions)
                 }
                 None => {
                     // do not perform substitution if we already have the correct index
-                    if let TypeData::GenericVariable(this_index) = *get_type(self) {
+                    if let TypeData::GenericVariable(this_index) = *self.data() {
                         if this_index == that_index {
                             return true;
                         }
@@ -239,7 +245,7 @@ impl Type {
             }
         }
         // Otherwise, we need to do a structural comparison
-        get_type(self).can_be_used_in_place_of_with_subst(that, substitutions)
+        self.data().can_be_used_in_place_of_with_subst(that, substitutions)
     }
 
     pub fn can_be_used_in_place_of(self, that: Self) -> bool {
@@ -250,7 +256,7 @@ impl Type {
     fn count_generics_rec(&self, counts: &mut TypeGenericCountMap) -> usize {
         if counts.get(self).is_none() {
             counts.insert(*self, 0);
-            let count = get_type(*self).count_generics_rec(counts);
+            let count = self.data().count_generics_rec(counts);
             counts.insert(*self, count);
         }
         0
@@ -279,12 +285,7 @@ impl PartialOrd for Type {
         Some(self.cmp(other))
     }
 }
-// impl Deref for Type {
-//     type Target = TypeData;
-//     fn deref(&self) -> &Self::Target {
-//         get_type(*self)
-//     }
-// }
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Check for cycle and insert the type into the HashSet
@@ -304,7 +305,7 @@ impl fmt::Display for Type {
         }
 
         // Recurse
-        let result = write!(f, "{}", *get_type(*self));
+        let result = write!(f, "{}", *self.data());
 
         // Remove the value on back-tracking
         TYPE_DISPLAY_VISITED.with(|visited| {
@@ -343,6 +344,11 @@ pub enum TypeData {
 // TODO: traits as bounds of generics
 
 impl TypeData {
+    /// Store in the type system and return a type identifier
+    pub fn store(self) -> Type {
+        store_type(self)
+    }
+    
     /// Somewhat a sub-type, but named differently to accommodate generics
     fn can_be_used_in_place_of_with_subst(
         &self,
@@ -352,12 +358,12 @@ impl TypeData {
         // We know that that is not a GenericArg
         match self {
             // A primitive type can be used in place of itself or instantiate a generics
-            TypeData::Primitive(this_ty) => match &*get_type(that) {
+            TypeData::Primitive(this_ty) => match &*that.data() {
                 TypeData::Primitive(that_ty) => this_ty == that_ty,
                 _ => false,
             },
             // A generic type can be used in place of itself with compatible type arguments, or instantiate a generics
-            TypeData::GenericNative(this_gen) => match &*get_type(that) {
+            TypeData::GenericNative(this_gen) => match &*that.data() {
                 TypeData::GenericNative(that_gen) => {
                     this_gen.native == that_gen.native
                         && this_gen.arguments.len() == that_gen.arguments.len()
@@ -375,7 +381,7 @@ impl TypeData {
             TypeData::GenericVariable(_) => false,
             // This variant can be used in place of that variant if for every constructor and argument in that variant,
             // there is a constructor and argument in this union that can be used in place of it.
-            TypeData::Variant(this_variant) => match &*get_type(that) {
+            TypeData::Variant(this_variant) => match &*that.data() {
                 TypeData::Variant(that_variant) => that_variant.iter().all(|that_ctor| {
                     this_variant.iter().any(|this_ctor| {
                         this_ctor.0 == that_ctor.0
@@ -387,7 +393,7 @@ impl TypeData {
                 _ => false,
             },
             // Larger tuples can be used in place of smaller tuples
-            TypeData::Tuple(this_tuple) => match &*get_type(that) {
+            TypeData::Tuple(this_tuple) => match &*that.data() {
                 TypeData::Tuple(that_tuple) => {
                     this_tuple.len() >= that_tuple.len()
                         && this_tuple // covariant element types
@@ -401,7 +407,7 @@ impl TypeData {
             },
             // This record can be used in place of that record if for every field in that record,
             // there is a field in this record that can be used in place of it.
-            TypeData::Record(this_record) => match &*get_type(that) {
+            TypeData::Record(this_record) => match &*that.data() {
                 TypeData::Record(that_record) => that_record.iter().all(|(that_name, that_ty)| {
                     this_record.iter().any(|(this_name, this_ty)| {
                         this_name == that_name
@@ -414,7 +420,7 @@ impl TypeData {
             TypeData::Function(this_fn) => {
                 let this_args = &this_fn.arg_ty;
                 let this_ty = &this_fn.return_ty;
-                match &*get_type(that) {
+                match &*that.data() {
                     TypeData::Function(that_fun) => {
                         let that_args = &that_fun.arg_ty;
                         let that_ty = &that_fun.return_ty;
@@ -655,11 +661,13 @@ fn types() -> &'static RwLock<TypeUniverse> {
     TYPES.get_or_init(|| RwLock::new(TypeUniverse::new()))
 }
 
-pub fn add_type(ty: TypeData) -> Type {
+/// Store a type in the type system and return a type identifier
+pub fn store_type(ty: TypeData) -> Type {
     types().write().unwrap().insert_type(ty)
 }
 
-pub fn add_types<I, O>(tys: I) -> O
+/// Store a list of types in the type system and return a list of type identifiers
+pub fn store_types<I, O>(tys: I) -> O
 where
     I: IntoIterator<Item = TypeData>,
     O: FromIterator<Type>,
@@ -667,20 +675,15 @@ where
     types().write().unwrap().insert_types(tys)
 }
 
-pub struct TypeRef<'a> {
+pub struct TypeDataRef<'a> {
     ty: Type,
     guard: std::sync::RwLockReadGuard<'a, TypeUniverse>,
 }
-impl<'a> std::ops::Deref for TypeRef<'a> {
+impl<'a> std::ops::Deref for TypeDataRef<'a> {
     type Target = TypeData;
     fn deref(&self) -> &Self::Target {
         self.guard.get_type(self.ty)
     }
-}
-
-pub fn get_type<'t>(ty: Type) -> TypeRef<'t> {
-    let guard = types().read().unwrap();
-    TypeRef { ty, guard }
 }
 
 pub struct TypeNames {
@@ -756,7 +759,7 @@ mod tests {
         assert!(!_gen_2_bound_i32_f32.can_be_used_in_place_of(_gen_2_bound_i32_i32));
         assert!(_gen_2_bound_i32_f32.can_be_used_in_place_of(_gen_2_bound_i32_f32));
 
-        // Union
+        // Variants
         let _i_s = ustr("i");
         let _f_s = ustr("f");
         let _s_s = ustr("s");
