@@ -1,12 +1,11 @@
 pub(crate) trait Node {
-    type Index: TryInto<usize> + TryFrom<usize> + Copy;
+    type Index: TryInto<usize> + Copy;
     fn neighbors(&self) -> impl Iterator<Item = Self::Index>;
 }
 
-pub(crate) fn find_disjoint_subgraphs<N: Node>(graph: &[N]) -> Vec<Vec<N::Index>>
-    where
-        <<N as Node>::Index as TryFrom<usize>>::Error: std::fmt::Debug,
-        <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug
+pub(crate) fn find_disjoint_subgraphs<N: Node>(graph: &[N]) -> Vec<Vec<usize>>
+where
+    <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,
 {
     let mut visited = vec![false; graph.len()]; // Track visited nodes
     let mut disjoint_subgraphs = Vec::new(); // Store the result
@@ -23,7 +22,7 @@ pub(crate) fn find_disjoint_subgraphs<N: Node>(graph: &[N]) -> Vec<Vec<N::Index>
                 continue; // Skip if already visited
             }
             visited[node_idx] = true; // Mark as visited
-            current_subgraph.push(N::Index::try_from(node_idx).unwrap()); // Add to current subgraph
+            current_subgraph.push(node_idx); // Add to current subgraph
 
             // Add all unvisited connected nodes to the queue
             for neighbor_idx in graph[node_idx].neighbors() {
@@ -53,24 +52,26 @@ mod tests {
 
     #[test]
     fn single_disjoint_graph() {
-        let graph = vec![
-            Node(vec![]),
-            Node(vec![]),
-            Node(vec![]),
-        ];
+        let graph = vec![Node(vec![]), Node(vec![]), Node(vec![])];
         let subgraphs = find_disjoint_subgraphs(&graph);
         assert_eq!(subgraphs.len(), 3);
+        assert_eq!(subgraphs[0].len(), 1);
+        assert_eq!(subgraphs[0][0], 0);
+        assert_eq!(subgraphs[1].len(), 1);
+        assert_eq!(subgraphs[1][0], 1);
+        assert_eq!(subgraphs[2].len(), 1);
+        assert_eq!(subgraphs[2][0], 2);
     }
 
     #[test]
     fn single_joint_graph() {
-        let graph = vec![
-            Node(vec![1, 2]),
-            Node(vec![0]),
-            Node(vec![0]),
-        ];
+        let graph = vec![Node(vec![1, 2]), Node(vec![0]), Node(vec![0])];
         let subgraphs = find_disjoint_subgraphs(&graph);
         assert_eq!(subgraphs.len(), 1);
+        assert_eq!(subgraphs[0].len(), 3);
+        assert_eq!(subgraphs[0][0], 0);
+        assert_eq!(subgraphs[0][1], 2);
+        assert_eq!(subgraphs[0][2], 1);
     }
 
     #[test]
@@ -85,5 +86,14 @@ mod tests {
         ];
         let subgraphs = find_disjoint_subgraphs(&graph);
         assert_eq!(subgraphs.len(), 3);
+        assert_eq!(subgraphs[0].len(), 2);
+        assert_eq!(subgraphs[0][0], 0);
+        assert_eq!(subgraphs[0][1], 1);
+        assert_eq!(subgraphs[1].len(), 3);
+        assert_eq!(subgraphs[1][0], 2);
+        assert_eq!(subgraphs[1][1], 5);
+        assert_eq!(subgraphs[1][2], 4);
+        assert_eq!(subgraphs[2].len(), 1);
+        assert_eq!(subgraphs[2][0], 3);
     }
 }

@@ -15,6 +15,24 @@ use crate::{
 
 // Support for primitive values
 
+// pub trait PrimitiveDisplay {
+//     fn pfmt(&self, f: &mut fmt::Formatter) -> fmt::Result;
+// }
+
+// impl<T: fmt::Display> PrimitiveDisplay for T {
+//     fn pfmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//         self.fmt(f)
+//     }
+// }
+
+// impl PrimitiveDisplay for () {
+//     fn pfmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//         write!(f, "()")
+//     }
+// }
+
+// TODO: investigate: https://docs.rs/manyfmt/latest/manyfmt/
+
 pub trait PrimitiveValue: Any + fmt::Debug + DynClone + DynEq + 'static {
     fn as_any(&self) -> &dyn Any;
     fn into_any(self: Box<Self>) -> Box<dyn Any>;

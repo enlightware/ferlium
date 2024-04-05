@@ -1,13 +1,14 @@
 use std::any::type_name;
 use std::any::TypeId;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::{self, Debug};
 use std::hash::Hash;
+use std::iter;
 use std::sync::OnceLock;
 use std::sync::RwLock;
-use std::cell::RefCell;
-use std::collections::HashSet;
 
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
@@ -17,8 +18,10 @@ use nonmax::NonMaxU32;
 use ustr::Ustr;
 
 use crate::assert::assert_unique_strings;
-use crate::containers::First;
+use crate::containers::compare_by;
 use crate::containers::SmallVec1;
+use crate::graph;
+use crate::graph::find_disjoint_subgraphs;
 use crate::sync::SyncPhantomData;
 
 pub trait NativeType: DynClone + DynEq + Send + Sync {
@@ -50,8 +53,6 @@ impl Hash for dyn NativeType {
         NativeType::type_id(self).hash(state)
     }
 }
-
-
 
 #[derive(Default)]
 pub struct NativeTypeImpl<T> {
@@ -100,6 +101,16 @@ pub struct GenericNativeType {
     arguments: SmallVec1<Type>,
 }
 
+impl GenericNativeType {
+    fn local_cmp(&self, other: &Self) -> Ordering {
+        (*self.native).cmp(&*other.native).then(compare_by(
+            &self.arguments,
+            &other.arguments,
+            Type::local_cmp,
+        ))
+    }
+}
+
 fn count_generics_rec(generics: &[Type], counts: &mut TypeGenericCountMap) -> usize {
     generics
         .iter()
@@ -127,6 +138,13 @@ pub struct FunctionType {
     pub return_ty: Type,
 }
 
+impl FunctionType {
+    fn local_cmp(&self, other: &Self) -> Ordering {
+        compare_by(&self.arg_ty, &other.arg_ty, Type::local_cmp)
+            .then(self.return_ty.local_cmp(&other.return_ty))
+    }
+}
+
 type TypeGenericCountMap = HashMap<Type, usize>;
 
 /// A type identifier, unique for a given type of a given mathematical structure
@@ -144,17 +162,11 @@ impl Type {
 
     pub fn generic_native<T: Clone + 'static>(arguments: SmallVec1<Self>) -> Self {
         let native = native_type::<T>();
-        TypeData::GenericNative(Box::new(GenericNativeType {
-            arguments,
-            native,
-        })).store()
+        TypeData::GenericNative(Box::new(GenericNativeType { arguments, native })).store()
     }
 
     pub fn generic_native_type(native: Box<dyn NativeType>, arguments: SmallVec1<Self>) -> Self {
-        TypeData::GenericNative(Box::new(GenericNativeType {
-            arguments,
-            native,
-        })).store()
+        TypeData::GenericNative(Box::new(GenericNativeType { arguments, native })).store()
     }
 
     pub fn generic_variable(id: usize) -> Self {
@@ -204,17 +216,34 @@ impl Type {
         TypeData::NewType(name, ty).store()
     }
 
-    pub fn new_local_ref(index: u32) -> Self {
+    pub fn new_local(index: u32) -> Self {
+        Self { world: None, index }
+    }
+
+    pub fn new_global(world: u32, index: u32) -> Self {
         Self {
-            world: None,
+            world: Some(NonMaxU32::new(world).unwrap()),
             index,
         }
     }
 
     // getter
-    pub fn data<'t>(&self) -> TypeDataRef<'t> {
+    pub fn world(self) -> Option<NonMaxU32> {
+        self.world
+    }
+
+    pub fn index(self) -> u32 {
+        self.index
+    }
+
+    pub fn data<'t>(self) -> TypeDataRef<'t> {
         let guard = types().read().unwrap();
-        TypeDataRef { ty: *self, guard }
+        TypeDataRef { ty: self, guard }
+    }
+
+    // filter
+    pub fn is_local(self) -> bool {
+        self.world.is_none()
     }
 
     // subtyping
@@ -246,7 +275,8 @@ impl Type {
             }
         }
         // Otherwise, we need to do a structural comparison
-        self.data().can_be_used_in_place_of_with_subst(that, substitutions)
+        self.data()
+            .can_be_used_in_place_of_with_subst(that, substitutions)
     }
 
     pub fn can_be_used_in_place_of(self, that: Self) -> bool {
@@ -254,23 +284,32 @@ impl Type {
     }
 
     // generic counting
-    fn count_generics_rec(&self, counts: &mut TypeGenericCountMap) -> usize {
-        if counts.get(self).is_none() {
-            counts.insert(*self, 0);
+    fn count_generics_rec(self, counts: &mut TypeGenericCountMap) -> usize {
+        if counts.get(&self).is_none() {
+            counts.insert(self, 0);
             let count = self.data().count_generics_rec(counts);
-            counts.insert(*self, count);
+            counts.insert(self, count);
         }
         0
     }
 
-    fn count_generics(&self) -> usize {
+    fn count_generics(self) -> usize {
         let mut counts = HashMap::new();
         let local_count = self.count_generics_rec(&mut counts);
         local_count + counts.values().sum::<usize>()
     }
 
-    pub fn format_generics(&self) -> String {
+    pub fn format_generics(self) -> String {
         format_generics(self.count_generics())
+    }
+
+    // other
+    fn local_cmp(&self, other: &Self) -> Ordering {
+        if (self.world, other.world) == (None, None) {
+            Ordering::Equal
+        } else {
+            self.cmp(other)
+        }
     }
 }
 
@@ -349,7 +388,7 @@ impl TypeData {
     pub fn store(self) -> Type {
         store_type(self)
     }
-    
+
     /// Somewhat a sub-type, but named differently to accommodate generics
     fn can_be_used_in_place_of_with_subst(
         &self,
@@ -448,6 +487,74 @@ impl TypeData {
 
     pub fn can_be_used_in_place_of(&self, that: Type) -> bool {
         self.can_be_used_in_place_of_with_subst(that, &mut HashMap::new())
+    }
+
+    pub fn inner_types(&self) -> Box<dyn Iterator<Item = Type> + '_> {
+        match self {
+            TypeData::Primitive(_) => Box::new(iter::empty()),
+            TypeData::GenericNative(g) => Box::new(g.arguments.iter().copied()),
+            TypeData::GenericVariable(_) => Box::new(iter::empty()),
+            TypeData::Variant(types) => Box::new(types.iter().map(|(_, ty)| *ty)),
+            TypeData::Tuple(types) => Box::new(types.iter().copied()),
+            TypeData::Record(fields) => Box::new(fields.iter().map(|(_, ty)| *ty)),
+            TypeData::Function(function) => Box::new(
+                function
+                    .arg_ty
+                    .iter()
+                    .copied()
+                    .chain(iter::once(function.return_ty)),
+            ),
+            TypeData::NewType(_, ty) => Box::new(iter::once(*ty)),
+        }
+    }
+
+    pub fn inner_types_mut(&mut self) -> Box<dyn Iterator<Item = &mut Type> + '_> {
+        match self {
+            TypeData::Primitive(_) => Box::new(iter::empty()),
+            TypeData::GenericNative(g) => Box::new(g.arguments.iter_mut()),
+            TypeData::GenericVariable(_) => Box::new(iter::empty()),
+            TypeData::Variant(types) => Box::new(types.iter_mut().map(|(_, ty)| ty)),
+            TypeData::Tuple(types) => Box::new(types.iter_mut()),
+            TypeData::Record(fields) => Box::new(fields.iter_mut().map(|(_, ty)| ty)),
+            TypeData::Function(function) => Box::new(
+                function
+                    .arg_ty
+                    .iter_mut()
+                    .chain(iter::once(&mut function.return_ty)),
+            ),
+            TypeData::NewType(_, ty) => Box::new(iter::once(ty)),
+        }
+    }
+
+    fn local_cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            // Compare the raw pointers (addresses) of the weak references
+            (TypeData::Primitive(a), TypeData::Primitive(b)) => a.cmp(b),
+            (TypeData::GenericNative(a), TypeData::GenericNative(b)) => a.local_cmp(b),
+            (TypeData::GenericVariable(a), TypeData::GenericVariable(b)) => a.cmp(b),
+            (TypeData::Variant(a), TypeData::Variant(b)) => {
+                compare_by(a, b, |(a_s, a_t), (b_s, b_t)| {
+                    a_s.cmp(b_s).then(a_t.local_cmp(b_t))
+                })
+            }
+            (TypeData::Tuple(a), TypeData::Tuple(b)) => compare_by(a, b, Type::local_cmp),
+            (TypeData::Record(a), TypeData::Record(b)) => {
+                compare_by(a, b, |(a_s, a_t), (b_s, b_t)| {
+                    a_s.cmp(b_s).then(a_t.local_cmp(b_t))
+                })
+            }
+            (TypeData::Function(a), TypeData::Function(b)) => a.local_cmp(b),
+            _ => self.rank().cmp(&other.rank()),
+        }
+    }
+
+    /// Substitute the indices of local types using subst
+    fn substitute_locals(&mut self, subst: &HashMap<u32, u32>) {
+        self.inner_types_mut().for_each(|ty| {
+            if ty.world().is_none() {
+                ty.index = *subst.get(&ty.index).unwrap();
+            }
+        });
     }
 
     // helper functions
@@ -589,6 +696,18 @@ impl PartialOrd for TypeData {
     }
 }
 
+impl graph::Node for TypeData {
+    type Index = u32;
+
+    fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
+        self.inner_types()
+            .filter(|t| t.is_local())
+            .map(Type::index)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
 fn generic_index_to_char(index: usize) -> char {
     char::from_digit(index as u32 + 10, 36).unwrap_or('_')
 }
@@ -611,46 +730,110 @@ type TypeWorld = IndexSet<TypeData>;
 
 struct TypeUniverse {
     worlds: Vec<TypeWorld>,
+    local_to_world: HashMap<Vec<TypeData>, usize>,
 }
 
 impl TypeUniverse {
     fn new() -> Self {
         Self {
             worlds: vec![IndexSet::new()],
+            local_to_world: HashMap::new(),
         }
     }
 
-    fn insert_type(&mut self, ty: TypeData) -> Type {
-        self.insert_types::<_, First<_>>([ty]).0.unwrap()
+    fn insert_type(&mut self, td: TypeData) -> Type {
+        self.insert_types(&[td])[0]
     }
 
-    fn insert_types<I, O>(&mut self, tys: I) -> O
-    where
-        I: IntoIterator<Item = TypeData>,
-        O: FromIterator<Type>,
-    {
-        // 1. partition tys into cliques of recursive types
-        // 2. sort each clique
-        // 3. put each clique in a hash map
-        // 4. normalize indices of each clique to the universe set
-        // 5. link the hash map to these
-        // 6. return references to the normalized cliques
+    fn insert_types(&mut self, tds: &[TypeData]) -> Vec<Type> {
+        // 1. partition tds into sub-graphs of connected recursive types
+        let partitioned_indices = find_disjoint_subgraphs(tds);
 
-        // current el cheapos implementation not handling recursive types
-        let world = &mut self.worlds[0];
-        tys.into_iter()
-            .enumerate()
-            .map(|(_i, ty)| {
-                let (index, _new) = world.insert_full(ty);
-                Type {
-                    world: Some(NonMaxU32::new(0).unwrap()),
-                    index: index as u32,
+        // for each sub-graph
+        let mut types = vec![Type::new_local(0); tds.len()];
+        partitioned_indices
+            .into_iter()
+            .flat_map(|mut input_indices| {
+                // 2. detect singletons and put them in the main world if they have no cycle
+                if input_indices.len() == 1 {
+                    let input_index = input_indices[0];
+                    let td = &tds[input_index];
+                    if td.inner_types().all(|ty| !ty.is_local()) {
+                        let first_world = &mut self.worlds[0];
+                        // is it already present?
+                        let index = if let Some((index, _)) = first_world.get_full(td) {
+                            index
+                        } else {
+                            first_world.insert_full(td.clone()).0
+                        };
+                        let ty = Type::new_global(0, index as u32);
+                        return Box::new(iter::once((input_index, ty))) as Box<dyn Iterator<Item = _>>;
+                    }
                 }
+
+                // 3. sort each sub-graph
+                input_indices.sort_by(|&a, &b| {
+                    // ignore local types while sorting
+                    tds[a].local_cmp(&tds[b])
+                    // TODO: look at permutations for the secondary sorting
+                });
+
+                // 4. renormalize local indices and store into local world
+                let subst_to_local: HashMap<_, _> = input_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(local_index, &input_index)| (input_index as u32, local_index as u32))
+                    .collect();
+                let local_world: Vec<_> = input_indices
+                    .iter()
+                    .map(|&index| {
+                        let mut td = tds[index].clone();
+                        td.substitute_locals(&subst_to_local);
+                        td
+                    })
+                    .collect();
+                assert!(local_world.iter().all(|td| td
+                    .inner_types()
+                    .filter(|ty| ty.is_local())
+                    .all(|ty| (ty.index as usize) < local_world.len())));
+
+                // 5. local world is now a key
+                let global_world_indices = |worlds: &Vec<TypeWorld>, world_index| {
+                    let global_world: &TypeWorld = &worlds[world_index];
+                    let global_world_size = global_world.len() as u32;
+                    Box::new((0..global_world_size)
+                        .zip(input_indices)
+                        .map(move |(index, ty_index)| (ty_index, Type::new_global(world_index as u32, index))))
+                };
+                if let Some(&index) = self.local_to_world.get(&local_world) {
+                    return global_world_indices(&self.worlds, index);
+                }
+                let global_world_index = self.worlds.len() as u32;
+                self.local_to_world
+                    .insert(local_world.clone(), global_world_index as usize);
+
+                // 6. renormalize local indices to global indices and store into global world
+                let global_world: IndexSet<_> = local_world
+                    .into_iter()
+                    .map(|mut td| {
+                        td.inner_types_mut().for_each(|ty| {
+                            if ty.is_local() {
+                                ty.world = Some(NonMaxU32::new(global_world_index).unwrap());
+                            }
+                        });
+                        td
+                    })
+                    .collect();
+                self.worlds.push(global_world);
+
+                // 7. collect indices
+                global_world_indices(&self.worlds, global_world_index as usize)
             })
-            .collect()
+            .for_each(|(ty_index, ty)| types[ty_index] = ty);
+        types
     }
 
-    fn get_type(&self, r: Type) -> &TypeData {
+    fn get_type_data(&self, r: Type) -> &TypeData {
         self.worlds[r.world.unwrap().get() as usize]
             .get_index(r.index as usize)
             .unwrap()
@@ -663,17 +846,20 @@ fn types() -> &'static RwLock<TypeUniverse> {
 }
 
 /// Store a type in the type system and return a type identifier
-pub fn store_type(ty: TypeData) -> Type {
-    types().write().unwrap().insert_type(ty)
+pub fn store_type(type_data: TypeData) -> Type {
+    types().write().unwrap().insert_type(type_data)
 }
 
 /// Store a list of types in the type system and return a list of type identifiers
-pub fn store_types<I, O>(tys: I) -> O
-where
-    I: IntoIterator<Item = TypeData>,
-    O: FromIterator<Type>,
-{
-    types().write().unwrap().insert_types(tys)
+pub fn store_types(types_data: &[TypeData]) -> Vec<Type> {
+    types().write().unwrap().insert_types(types_data)
+}
+
+pub fn dump_type_world(index: usize) {
+    let world = &types().read().unwrap().worlds[index];
+    for (i, ty) in world.iter().enumerate() {
+        println!("{}: {}", i, ty);
+    }
 }
 
 pub struct TypeDataRef<'a> {
@@ -683,7 +869,7 @@ pub struct TypeDataRef<'a> {
 impl<'a> std::ops::Deref for TypeDataRef<'a> {
     type Target = TypeData;
     fn deref(&self) -> &Self::Target {
-        self.guard.get_type(self.ty)
+        self.guard.get_type_data(self.ty)
     }
 }
 

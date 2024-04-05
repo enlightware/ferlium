@@ -1,9 +1,9 @@
 mod assert;
 mod containers;
-mod sync;
-mod graph;
 pub mod function;
+mod graph;
 pub mod ir;
 pub mod std;
+mod sync;
 pub mod r#type;
 pub mod value;

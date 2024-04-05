@@ -3,7 +3,7 @@ use std::rc::Rc;
 use painturscript::{
     function::{binary_native_function, FunctionKey},
     ir::{Application, Context, Node, StaticApplication},
-    r#type::Type,
+    r#type::{dump_type_world, store_types, Type, TypeData},
     value::Value,
 };
 use smallvec::smallvec;
@@ -36,23 +36,21 @@ fn main() {
     println!("{}{}", variant.format_generics(), variant);
 
     // ADT recursive list
-    // TODO: implement recursive type integration logic
-    // manually create the type outside of the universe
-    // let adt_list_element = TypeData::Tuple(vec![
-    //     Type::generic_variable(0),
-    //     Type::new_local_ref(1),
-    // ]);
-    // let adt_list = TypeData::Variant(vec![
-    //     (ustr("Nil"), empty_tuple),
-    //     (ustr("Cons"), Type::new_local_ref(0)),
-    // ]);
-    // // add them to the universe as a batch
-    // let adt_list = store_types::<_, Vec<_>>([adt_list_element, adt_list])[0];
-    // println!(
-    //     "{}{}",
-    //     adt_list.format_generics(),
-    //     adt_list
-    // );
+    let adt_list_element = TypeData::Tuple(vec![
+        Type::generic_variable(0),
+        Type::new_local(1),
+    ]);
+    let adt_list = TypeData::Variant(vec![
+        (ustr("Nil"), empty_tuple),
+        (ustr("Cons"), Type::new_local(0)),
+    ]);
+    // add them to the universe as a batch
+    let adt_list = store_types(&[adt_list_element, adt_list])[1];
+    println!(
+        "{}{}",
+        adt_list.format_generics(),
+        adt_list
+    );
 
     // native list
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,12 +80,10 @@ fn main() {
     println!("\nSome values:\n");
     let v_int = Value::Primitive(Box::new(11_i32));
     println!("{}", v_int);
-    let v_list_int = Value::Primitive(
-        Box::new(List(vec![
-            Value::primitive(11_i32),
-            Value::primitive(22_i32),
-        ]))
-    );
+    let v_list_int = Value::Primitive(Box::new(List(vec![
+        Value::primitive(11_i32),
+        Value::primitive(22_i32),
+    ])));
     println!("{}", v_list_int);
     println!("{}", add_value);
 
