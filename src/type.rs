@@ -129,6 +129,7 @@ pub struct FunctionType {
 
 type TypeGenericCountMap = HashMap<Type, usize>;
 
+/// A type identifier, unique for a given type of a given mathematical structure
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Type {
     world: Option<NonMaxU32>, // If None, current local world
