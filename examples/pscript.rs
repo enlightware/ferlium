@@ -3,7 +3,7 @@ use std::rc::Rc;
 use painturscript::{
     function::{binary_native_function, FunctionKey},
     ir::{Application, Context, Node, StaticApplication},
-    r#type::{dump_type_world, store_types, Type, TypeData},
+    r#type::{store_types, Type, TypeData},
     value::Value,
 };
 use smallvec::smallvec;
@@ -36,21 +36,14 @@ fn main() {
     println!("{}{}", variant.format_generics(), variant);
 
     // ADT recursive list
-    let adt_list_element = TypeData::Tuple(vec![
-        Type::generic_variable(0),
-        Type::new_local(1),
-    ]);
+    let adt_list_element = TypeData::Tuple(vec![Type::generic_variable(0), Type::new_local(1)]);
     let adt_list = TypeData::Variant(vec![
         (ustr("Nil"), empty_tuple),
         (ustr("Cons"), Type::new_local(0)),
     ]);
     // add them to the universe as a batch
     let adt_list = store_types(&[adt_list_element, adt_list])[1];
-    println!(
-        "{}{}",
-        adt_list.format_generics(),
-        adt_list
-    );
+    println!("{}{}", adt_list.format_generics(), adt_list);
 
     // native list
     #[derive(Debug, Clone, PartialEq, Eq)]

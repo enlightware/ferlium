@@ -251,16 +251,23 @@ impl Type {
         self,
         that: Self,
         substitutions: &mut HashMap<usize, Type>,
+        seen: &mut HashSet<(Type, Type)>,
     ) -> bool {
         // If the types are the same, they can be used in place of each other
         if self == that {
             return true;
         }
+        // If we are recursing, prevent subtyping cycles
+        // TODO: do smarter matching to support recursive types
+        if seen.contains(&(self, that)) {
+            return false;
+        }
         // A generic ref can be replaced by anything, but keep in mind the substitutions
         if let TypeData::GenericVariable(that_index) = *that.data() {
             match substitutions.get(&that_index) {
                 Some(subst) => {
-                    return self.can_be_used_in_place_of_with_subst(*subst, substitutions)
+                    seen.insert((self, that));
+                    return self.can_be_used_in_place_of_with_subst(*subst, substitutions, seen);
                 }
                 None => {
                     // do not perform substitution if we already have the correct index
@@ -275,12 +282,13 @@ impl Type {
             }
         }
         // Otherwise, we need to do a structural comparison
+        seen.insert((self, that));
         self.data()
-            .can_be_used_in_place_of_with_subst(that, substitutions)
+            .can_be_used_in_place_of_with_subst(that, substitutions, seen)
     }
 
     pub fn can_be_used_in_place_of(self, that: Self) -> bool {
-        self.can_be_used_in_place_of_with_subst(that, &mut HashMap::new())
+        self.can_be_used_in_place_of_with_subst(that, &mut HashMap::new(), &mut HashSet::new())
     }
 
     // generic counting
@@ -394,6 +402,7 @@ impl TypeData {
         &self,
         that: Type,
         substitutions: &mut HashMap<usize, Type>,
+        seen: &mut HashSet<(Type, Type)>,
     ) -> bool {
         // We know that that is not a GenericArg
         match self {
@@ -412,7 +421,11 @@ impl TypeData {
                             .iter()
                             .zip(that_gen.arguments.iter())
                             .all(|(this_ty, that_ty)| {
-                                this_ty.can_be_used_in_place_of_with_subst(*that_ty, substitutions)
+                                this_ty.can_be_used_in_place_of_with_subst(
+                                    *that_ty,
+                                    substitutions,
+                                    seen,
+                                )
                             })
                 }
                 _ => false,
@@ -425,9 +438,11 @@ impl TypeData {
                 TypeData::Variant(that_variant) => that_variant.iter().all(|that_ctor| {
                     this_variant.iter().any(|this_ctor| {
                         this_ctor.0 == that_ctor.0
-                            && this_ctor
-                                .1
-                                .can_be_used_in_place_of_with_subst(that_ctor.1, substitutions)
+                            && this_ctor.1.can_be_used_in_place_of_with_subst(
+                                that_ctor.1,
+                                substitutions,
+                                seen,
+                            )
                     })
                 }),
                 _ => false,
@@ -440,7 +455,11 @@ impl TypeData {
                             .iter()
                             .zip(that_tuple.iter())
                             .all(|(this_ty, that_ty)| {
-                                this_ty.can_be_used_in_place_of_with_subst(*that_ty, substitutions)
+                                this_ty.can_be_used_in_place_of_with_subst(
+                                    *that_ty,
+                                    substitutions,
+                                    seen,
+                                )
                             })
                 }
                 _ => false,
@@ -451,7 +470,11 @@ impl TypeData {
                 TypeData::Record(that_record) => that_record.iter().all(|(that_name, that_ty)| {
                     this_record.iter().any(|(this_name, this_ty)| {
                         this_name == that_name
-                            && this_ty.can_be_used_in_place_of_with_subst(*that_ty, substitutions)
+                            && this_ty.can_be_used_in_place_of_with_subst(
+                                *that_ty,
+                                substitutions,
+                                seen,
+                            )
                     })
                 }),
                 _ => false,
@@ -469,10 +492,17 @@ impl TypeData {
                                 .iter()
                                 .zip(that_args.iter())
                                 .all(|(this_ty, that_ty)| {
-                                    that_ty
-                                        .can_be_used_in_place_of_with_subst(*this_ty, substitutions)
+                                    that_ty.can_be_used_in_place_of_with_subst(
+                                        *this_ty,
+                                        substitutions,
+                                        seen,
+                                    )
                                 })
-                            && this_ty.can_be_used_in_place_of_with_subst(*that_ty, substitutions)
+                            && this_ty.can_be_used_in_place_of_with_subst(
+                                *that_ty,
+                                substitutions,
+                                seen,
+                            )
                         // covariant return type
                     }
                     _ => false,
@@ -480,13 +510,13 @@ impl TypeData {
             }
             // A new type can be used in place of the type it wraps
             TypeData::NewType(_, this_ty) => {
-                this_ty.can_be_used_in_place_of_with_subst(that, substitutions)
+                this_ty.can_be_used_in_place_of_with_subst(that, substitutions, seen)
             }
         }
     }
 
     pub fn can_be_used_in_place_of(&self, that: Type) -> bool {
-        self.can_be_used_in_place_of_with_subst(that, &mut HashMap::new())
+        self.can_be_used_in_place_of_with_subst(that, &mut HashMap::new(), &mut HashSet::new())
     }
 
     pub fn inner_types(&self) -> Box<dyn Iterator<Item = Type> + '_> {
@@ -745,12 +775,12 @@ impl TypeUniverse {
         self.insert_types(&[td])[0]
     }
 
-    fn insert_types(&mut self, tds: &[TypeData]) -> Vec<Type> {
+    fn insert_types<const N: usize>(&mut self, tds: &[TypeData; N]) -> [Type; N] {
         // 1. partition tds into sub-graphs of connected recursive types
         let partitioned_indices = find_disjoint_subgraphs(tds);
 
         // for each sub-graph
-        let mut types = vec![Type::new_local(0); tds.len()];
+        let mut types = [Type::new_local(0); N];
         partitioned_indices
             .into_iter()
             .flat_map(|mut input_indices| {
@@ -767,7 +797,8 @@ impl TypeUniverse {
                             first_world.insert_full(td.clone()).0
                         };
                         let ty = Type::new_global(0, index as u32);
-                        return Box::new(iter::once((input_index, ty))) as Box<dyn Iterator<Item = _>>;
+                        return Box::new(iter::once((input_index, ty)))
+                            as Box<dyn Iterator<Item = _>>;
                     }
                 }
 
@@ -801,9 +832,11 @@ impl TypeUniverse {
                 let global_world_indices = |worlds: &Vec<TypeWorld>, world_index| {
                     let global_world: &TypeWorld = &worlds[world_index];
                     let global_world_size = global_world.len() as u32;
-                    Box::new((0..global_world_size)
-                        .zip(input_indices)
-                        .map(move |(index, ty_index)| (ty_index, Type::new_global(world_index as u32, index))))
+                    Box::new((0..global_world_size).zip(input_indices).map(
+                        move |(index, ty_index)| {
+                            (ty_index, Type::new_global(world_index as u32, index))
+                        },
+                    ))
                 };
                 if let Some(&index) = self.local_to_world.get(&local_world) {
                     return global_world_indices(&self.worlds, index);
@@ -851,7 +884,7 @@ pub fn store_type(type_data: TypeData) -> Type {
 }
 
 /// Store a list of types in the type system and return a list of type identifiers
-pub fn store_types(types_data: &[TypeData]) -> Vec<Type> {
+pub fn store_types<const N: usize>(types_data: &[TypeData; N]) -> [Type; N] {
     types().write().unwrap().insert_types(types_data)
 }
 
@@ -965,6 +998,27 @@ mod tests {
         assert!(_union_string_i32_f32.can_be_used_in_place_of(_variant_i32_f32));
         assert!(_union_string_i32_f32.can_be_used_in_place_of(_variant_f32_i32));
 
+        // Recursive variants
+        let empty_tuple = Type::tuple(vec![]);
+        let adt_gen_list_element_td = TypeData::Tuple(vec![_gen_arg0, Type::new_local(1)]);
+        let adt_list_td = TypeData::Variant(vec![
+            (ustr("Nil"), empty_tuple),
+            (ustr("Cons"), Type::new_local(0)),
+        ]);
+        let [adt_gen_list_element, adt_gen_list] =
+            store_types(&[adt_gen_list_element_td, adt_list_td.clone()]);
+        assert!(adt_gen_list.can_be_used_in_place_of(adt_gen_list));
+        assert!(adt_gen_list_element.can_be_used_in_place_of(adt_gen_list_element));
+        assert!(!adt_gen_list.can_be_used_in_place_of(adt_gen_list_element));
+        assert!(!adt_gen_list_element.can_be_used_in_place_of(adt_gen_list));
+        assert!(adt_gen_list.can_be_used_in_place_of(_gen_arg1));
+        // FIXME: support recursive types
+        // TODO: read Subtyping Recursive Types, Luca Cardelli, 1993
+        // let adt_int_list_element_td = TypeData::Tuple(vec![_i32, Type::new_local(1)]);
+        // let [adt_int_list_element, adt_int_list] = store_types(&[adt_int_list_element_td, adt_list_td]);
+        // assert!(adt_int_list.can_be_used_in_place_of(adt_gen_list));
+        // assert!(adt_int_list_element.can_be_used_in_place_of(adt_gen_list_element));
+
         // Tuples
         let _tuple_i32 = Type::tuple(vec![_i32]);
         let _tuple_f32 = Type::tuple(vec![_f32]);
@@ -976,6 +1030,13 @@ mod tests {
         assert!(_tuple_i32_i32.can_be_used_in_place_of(_tuple_i32));
         assert!(_tuple_i32_f32.can_be_used_in_place_of(_tuple_i32));
         assert!(!_tuple_f32_i32.can_be_used_in_place_of(_tuple_i32));
+        let _tuple_gen0_gen1 = Type::tuple(vec![_gen_arg0, _gen_arg1]);
+        assert!(_tuple_i32_i32.can_be_used_in_place_of(_tuple_gen0_gen1));
+        let _tuple_i32_tuple_f32_i32 = Type::tuple(vec![_i32, _tuple_f32_i32]);
+        assert!(_tuple_i32_tuple_f32_i32.can_be_used_in_place_of(_tuple_gen0_gen1));
+        let _gen_arg2 = Type::generic_variable(2);
+        let _tuple_i32_tuple_f32_gen2 = Type::tuple(vec![_i32, Type::tuple(vec![_f32, _gen_arg2])]);
+        assert!(_tuple_i32_tuple_f32_i32.can_be_used_in_place_of(_tuple_i32_tuple_f32_gen2));
 
         // Record
         let x = ustr("x");
