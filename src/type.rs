@@ -221,7 +221,7 @@ impl Type {
     }
 
     pub fn new_type(name: Ustr, ty: Self) -> Self {
-        TypeData::NewType(name, ty).store()
+        TypeData::Newtype(name, ty).store()
     }
 
     pub fn new_local(index: u32) -> Self {
@@ -394,8 +394,8 @@ pub enum TypeData {
     Record(Vec<(Ustr, Type)>),
     /// A function type
     Function(Box<FunctionType>),
-    /// A named new type
-    NewType(Ustr, Type),
+    /// A named newtype
+    Newtype(Ustr, Type),
 }
 // TODO: traits as bounds of generics
 
@@ -517,7 +517,7 @@ impl TypeData {
                 }
             }
             // A new type can be used in place of the type it wraps
-            TypeData::NewType(_, this_ty) => {
+            TypeData::Newtype(_, this_ty) => {
                 this_ty.can_be_used_in_place_of_with_subst(that, substitutions, seen)
             }
         }
@@ -542,7 +542,7 @@ impl TypeData {
                     .copied()
                     .chain(iter::once(function.ret)),
             ),
-            TypeData::NewType(_, ty) => Box::new(iter::once(*ty)),
+            TypeData::Newtype(_, ty) => Box::new(iter::once(*ty)),
         }
     }
 
@@ -560,7 +560,7 @@ impl TypeData {
                     .iter_mut()
                     .chain(iter::once(&mut function.ret)),
             ),
-            TypeData::NewType(_, ty) => Box::new(iter::once(ty)),
+            TypeData::Newtype(_, ty) => Box::new(iter::once(ty)),
         }
     }
 
@@ -605,7 +605,7 @@ impl TypeData {
             TypeData::Tuple(_) => 4,
             TypeData::Record(_) => 5,
             TypeData::Function(_) => 6,
-            TypeData::NewType(_, _) => 7,
+            TypeData::Newtype(_, _) => 7,
         }
     }
 
@@ -631,7 +631,7 @@ impl TypeData {
                 .unwrap_or(0),
             TypeData::Function(function) => count_generics_rec(&function.args, counts)
                 .max(function.ret.count_generics_rec(counts)),
-            TypeData::NewType(_, ty) => ty.count_generics_rec(counts),
+            TypeData::Newtype(_, ty) => ty.count_generics_rec(counts),
         }
     }
 
@@ -704,7 +704,7 @@ impl fmt::Display for TypeData {
                     function.ret
                 )
             }
-            TypeData::NewType(name, ty) => write!(f, "{name}({ty})"),
+            TypeData::Newtype(name, ty) => write!(f, "{name}({ty})"),
         }
     }
 }
