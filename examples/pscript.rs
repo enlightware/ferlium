@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use painturscript::{
-    function::{binary_native_function, FunctionKey},
+    function::{BinaryNativeFn, FunctionKey},
     ir::{Application, Context, Node, StaticApplication},
     r#type::{store_types, Type, TypeData},
     value::Value,
@@ -48,7 +48,6 @@ fn main() {
     // native list
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct List(Vec<Value>);
-
     let list = Type::generic_native::<List>(smallvec![Type::generic_variable(0)]);
     let list_int = Type::generic_native::<List>(smallvec![int]);
     println!("{}{}", list.format_generics(), list);
@@ -56,10 +55,10 @@ fn main() {
 
     // functions
     let functions = [
-        Rc::new(binary_native_function(
+        Rc::new(BinaryNativeFn::description(
             std::ops::Add::add as fn(i32, i32) -> i32,
         )),
-        Rc::new(binary_native_function(
+        Rc::new(BinaryNativeFn::description(
             std::ops::Sub::sub as fn(i32, i32) -> i32,
         )),
     ];

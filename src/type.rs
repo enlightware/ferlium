@@ -134,14 +134,20 @@ fn format_generics(count: usize) -> String {
 /// The type of a function
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionType {
-    pub arg_ty: Vec<Type>,
-    pub return_ty: Type,
+    pub args: Vec<Type>,
+    pub ret: Type,
 }
 
 impl FunctionType {
+    pub fn new(args: &[Type], ret: Type) -> Self {
+        Self {
+            args: args.to_vec(),
+            ret,
+        }
+    }
     fn local_cmp(&self, other: &Self) -> Ordering {
-        compare_by(&self.arg_ty, &other.arg_ty, Type::local_cmp)
-            .then(self.return_ty.local_cmp(&other.return_ty))
+        compare_by(&self.args, &other.args, Type::local_cmp)
+            .then(self.ret.local_cmp(&other.ret))
     }
 }
 
@@ -156,6 +162,10 @@ pub struct Type {
 
 impl Type {
     // helper constructors
+    pub fn unit() -> Self {
+        Type::tuple(vec![])
+    }
+
     pub fn primitive<T: Clone + 'static>() -> Self {
         TypeData::Primitive(native_type::<T>()).store()
     }
@@ -187,29 +197,27 @@ impl Type {
         TypeData::Record(fields).store()
     }
 
-    pub fn function(ft: FunctionType) -> Self {
-        TypeData::Function(Box::new(ft)).store()
+    pub fn function_type(ty: FunctionType) -> Self {
+        TypeData::Function(Box::new(ty)).store()
+    }
+
+    pub fn function(args: &[Self], ret: Self) -> Self {
+        Self::function_type(FunctionType {
+            args: args.to_vec(),
+            ret,
+        })
     }
 
     pub fn nullary_function(ret: Self) -> Self {
-        Self::function(FunctionType {
-            arg_ty: vec![],
-            return_ty: ret,
-        })
+        Self::function(&[], ret)
     }
 
     pub fn unary_function(arg: Self, ret: Self) -> Self {
-        Self::function(FunctionType {
-            arg_ty: vec![arg],
-            return_ty: ret,
-        })
+        Self::function(&[arg], ret)
     }
 
     pub fn binary_function(arg1: Self, arg2: Self, ret: Self) -> Self {
-        Self::function(FunctionType {
-            arg_ty: vec![arg1, arg2],
-            return_ty: ret,
-        })
+        Self::function(&[arg1, arg2], ret)
     }
 
     pub fn new_type(name: Ustr, ty: Self) -> Self {
@@ -481,12 +489,12 @@ impl TypeData {
             },
             // A function can be used in place of another function if the argument types are contravariant and return type covariant.
             TypeData::Function(this_fn) => {
-                let this_args = &this_fn.arg_ty;
-                let this_ty = &this_fn.return_ty;
+                let this_args = &this_fn.args;
+                let this_ty = &this_fn.ret;
                 match &*that.data() {
                     TypeData::Function(that_fun) => {
-                        let that_args = &that_fun.arg_ty;
-                        let that_ty = &that_fun.return_ty;
+                        let that_args = &that_fun.args;
+                        let that_ty = &that_fun.ret;
                         this_args.len() == that_args.len()
                             && this_args // contravariant argument types
                                 .iter()
@@ -529,10 +537,10 @@ impl TypeData {
             TypeData::Record(fields) => Box::new(fields.iter().map(|(_, ty)| *ty)),
             TypeData::Function(function) => Box::new(
                 function
-                    .arg_ty
+                    .args
                     .iter()
                     .copied()
-                    .chain(iter::once(function.return_ty)),
+                    .chain(iter::once(function.ret)),
             ),
             TypeData::NewType(_, ty) => Box::new(iter::once(*ty)),
         }
@@ -548,9 +556,9 @@ impl TypeData {
             TypeData::Record(fields) => Box::new(fields.iter_mut().map(|(_, ty)| ty)),
             TypeData::Function(function) => Box::new(
                 function
-                    .arg_ty
+                    .args
                     .iter_mut()
-                    .chain(iter::once(&mut function.return_ty)),
+                    .chain(iter::once(&mut function.ret)),
             ),
             TypeData::NewType(_, ty) => Box::new(iter::once(ty)),
         }
@@ -621,8 +629,8 @@ impl TypeData {
                 .map(|(_, ty)| ty.count_generics_rec(counts))
                 .max()
                 .unwrap_or(0),
-            TypeData::Function(function) => count_generics_rec(&function.arg_ty, counts)
-                .max(function.return_ty.count_generics_rec(counts)),
+            TypeData::Function(function) => count_generics_rec(&function.args, counts)
+                .max(function.ret.count_generics_rec(counts)),
             TypeData::NewType(_, ty) => ty.count_generics_rec(counts),
         }
     }
@@ -688,12 +696,12 @@ impl fmt::Display for TypeData {
                     f,
                     "({}) -> {}",
                     function
-                        .arg_ty
+                        .args
                         .iter()
                         .map(|t| t.to_string())
                         .collect::<Vec<_>>()
                         .join(", "),
-                    function.return_ty
+                    function.ret
                 )
             }
             TypeData::NewType(name, ty) => write!(f, "{name}({ty})"),
@@ -712,9 +720,9 @@ impl Ord for TypeData {
             (TypeData::Tuple(a), TypeData::Tuple(b)) => a.cmp(b),
             (TypeData::Record(a), TypeData::Record(b)) => a.cmp(b),
             (TypeData::Function(a), TypeData::Function(b)) => a
-                .arg_ty
-                .cmp(&b.arg_ty)
-                .then_with(|| a.return_ty.cmp(&b.return_ty)),
+                .args
+                .cmp(&b.args)
+                .then_with(|| a.ret.cmp(&b.ret)),
             _ => self.rank().cmp(&other.rank()),
         }
     }

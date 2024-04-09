@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    marker::PhantomData,
     rc::{Rc, Weak},
 };
 
@@ -32,7 +33,7 @@ pub struct FunctionDescription {
 
 impl FunctionDescription {
     pub fn ty(&self) -> Type {
-        Type::function(self.ty.clone())
+        Type::function_type(self.ty.clone())
     }
 }
 
@@ -77,33 +78,110 @@ impl FunctionCall for ScriptFunction {
 
 // native functions
 
-pub trait BinaryNativeFunction:
-    Fn(
-    <Self as BinaryNativeFunction>::A,
-    <Self as BinaryNativeFunction>::B,
-) -> <Self as BinaryNativeFunction>::O
-{
-    type A: Clone + 'static;
-    type B: Clone + 'static;
-    type O: Clone + 'static;
+pub struct NullaryNativeFn<O: fmt::Debug + Clone + std::cmp::Eq + 'static, F: Fn() -> O + 'static>(
+    F,
+    PhantomData<O>,
+);
 
-    fn ty() -> FunctionType {
-        let a_ty = Type::primitive::<Self::A>();
-        let b_ty = Type::primitive::<Self::B>();
-        let o_ty = Type::primitive::<Self::O>();
-        FunctionType {
-            arg_ty: vec![a_ty, b_ty],
-            return_ty: o_ty,
+impl<O: fmt::Debug + Clone + std::cmp::Eq + 'static, F: Fn() -> O + 'static> NullaryNativeFn<O, F> {
+    pub fn new(f: F) -> Self {
+        NullaryNativeFn(f, PhantomData)
+    }
+
+    pub fn description(f: F) -> FunctionDescription {
+        let o_ty = Type::primitive::<O>();
+        FunctionDescription {
+            ty: FunctionType::new(&[], o_ty),
+            code: Box::new(NullaryNativeFn(f, PhantomData)),
         }
     }
 }
+
+impl<O, F> FunctionCall for NullaryNativeFn<O, F>
+where
+    O: fmt::Debug + Clone + std::cmp::Eq + 'static,
+    F: Fn() -> O,
+{
+    fn call(&self, _: Vec<Value>, _: &CallCtx) -> Value {
+        Value::Primitive(Box::new((self.0)()))
+    }
+}
+
+pub struct UnaryNativeFn<
+    A: Clone + 'static,
+    O: fmt::Debug + Clone + std::cmp::Eq + 'static,
+    F: Fn(A) -> O + 'static,
+>(F, PhantomData<(A, O)>);
+
+impl<
+        A: Clone + 'static,
+        O: fmt::Debug + Clone + std::cmp::Eq + 'static,
+        F: Fn(A) -> O + 'static,
+    > UnaryNativeFn<A, O, F>
+{
+    pub fn new(f: F) -> Self {
+        UnaryNativeFn(f, PhantomData)
+    }
+
+    pub fn description(f: F) -> FunctionDescription {
+        let a_ty = Type::primitive::<A>();
+        let o_ty = Type::primitive::<O>();
+        FunctionDescription {
+            ty: FunctionType::new(&[a_ty], o_ty),
+            code: Box::new(UnaryNativeFn(f, PhantomData)),
+        }
+    }
+}
+
+impl<A, O, F> FunctionCall for UnaryNativeFn<A, O, F>
+where
+    A: Clone + 'static,
+    O: fmt::Debug + Clone + std::cmp::Eq + 'static,
+    F: Fn(A) -> O,
+{
+    fn call(&self, args: Vec<Value>, _: &CallCtx) -> Value {
+        let a_primitive = args.into_iter().next().unwrap().into_primitive().unwrap();
+        let a = a_primitive.into_any().downcast::<A>().unwrap();
+
+        Value::Primitive(Box::new((self.0)(*a)))
+    }
+}
+
+pub struct BinaryNativeFn<
+    A: Clone + 'static,
+    B: Clone + 'static,
+    O: fmt::Debug + Clone + std::cmp::Eq + 'static,
+    F: Fn(A, B) -> O + 'static,
+>(F, PhantomData<(A, B, O)>);
 
 impl<
         A: Clone + 'static,
         B: Clone + 'static,
         O: fmt::Debug + Clone + std::cmp::Eq + 'static,
-        F: BinaryNativeFunction<A = A, B = B, O = O> + Clone + 'static,
-    > FunctionCall for F
+        F: Fn(A, B) -> O + 'static,
+    > BinaryNativeFn<A, B, O, F>
+{
+    pub fn new(f: F) -> Self {
+        BinaryNativeFn(f, PhantomData)
+    }
+
+    pub fn description(f: F) -> FunctionDescription {
+        let a_ty = Type::primitive::<A>();
+        let b_ty = Type::primitive::<B>();
+        let o_ty = Type::primitive::<O>();
+        FunctionDescription {
+            ty: FunctionType::new(&[a_ty, b_ty], o_ty),
+            code: Box::new(BinaryNativeFn(f, PhantomData)),
+        }
+    }
+}
+
+impl<A, B, O, F> FunctionCall for BinaryNativeFn<A, B, O, F>
+where
+    A: Clone + 'static,
+    B: Clone + 'static,
+    O: fmt::Debug + Clone + std::cmp::Eq + 'static,
+    F: Fn(A, B) -> O,
 {
     fn call(&self, args: Vec<Value>, _: &CallCtx) -> Value {
         let mut args = args.into_iter();
@@ -112,26 +190,35 @@ impl<
         let b_primitive = args.next().unwrap().into_primitive().unwrap();
         let b = b_primitive.into_any().downcast::<B>().unwrap();
 
-        Value::Primitive(Box::new(self(*a, *b)))
+        Value::Primitive(Box::new((self.0)(*a, *b)))
     }
 }
 
-impl BinaryNativeFunction for fn(i32, i32) -> i32 {
-    type A = i32;
-    type B = i32;
-    type O = i32;
+pub struct BinaryPartialNativeFn<A, O, F>(F, PhantomData<(A, O)>);
+
+impl<
+        A: Clone + 'static,
+        O: fmt::Debug + Clone + std::cmp::Eq + 'static,
+        F: Fn(A, Value) -> O + 'static,
+    > BinaryPartialNativeFn<A, O, F>
+{
+    pub fn new(f: F) -> Self {
+        BinaryPartialNativeFn(f, PhantomData)
+    }
 }
 
-pub fn binary_native_function<
+impl<A, O, F> FunctionCall for BinaryPartialNativeFn<A, O, F>
+where
     A: Clone + 'static,
-    B: Clone + 'static,
     O: fmt::Debug + Clone + std::cmp::Eq + 'static,
-    F: Fn(A, B) -> O + Clone + BinaryNativeFunction<A = A, B = B, O = O> + 'static,
->(
-    f: F,
-) -> FunctionDescription {
-    FunctionDescription {
-        ty: F::ty(),
-        code: Box::new(f),
+    F: Fn(A, Value) -> O,
+{
+    fn call(&self, args: Vec<Value>, _: &CallCtx) -> Value {
+        let mut args = args.into_iter();
+        let a_primitive = args.next().unwrap().into_primitive().unwrap();
+        let a = a_primitive.into_any().downcast::<A>().unwrap();
+        let b = args.next().unwrap();
+
+        Value::Primitive(Box::new((self.0)(*a, b)))
     }
 }
