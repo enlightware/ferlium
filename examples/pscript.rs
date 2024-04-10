@@ -16,42 +16,43 @@ fn main() {
     let float = Type::primitive::<f32>();
     let string = Type::primitive::<String>();
     let empty_tuple = Type::tuple(vec![]);
+    let gen0 = Type::generic_variable(0);
 
     // test type printing
     println!("Some types:\n");
     let st = Type::record(vec![
-        (ustr("ty"), Type::generic_variable(0)),
+        (ustr("ty"), gen0),
         (ustr("name"), string),
         (ustr("age"), int),
     ]);
-    println!("{}{}", st.format_generics(), st);
+    println!("{}", st);
 
     let variant = Type::variant(vec![(ustr("i"), int), (ustr("s"), string)]);
-    println!("{}{}", variant.format_generics(), variant);
+    println!("{}", variant);
     let variant = Type::variant(vec![
         (ustr("i"), int),
         (ustr("f"), float),
         (ustr("u32"), u32),
     ]);
-    println!("{}{}", variant.format_generics(), variant);
+    println!("{}", variant);
 
     // ADT recursive list
-    let adt_list_element = TypeData::Tuple(vec![Type::generic_variable(0), Type::new_local(1)]);
+    let adt_list_element = TypeData::Tuple(vec![gen0, Type::new_local(1)]);
     let adt_list = TypeData::Variant(vec![
         (ustr("Nil"), empty_tuple),
         (ustr("Cons"), Type::new_local(0)),
     ]);
     // add them to the universe as a batch
     let adt_list = store_types(&[adt_list_element, adt_list])[1];
-    println!("{}{}", adt_list.format_generics(), adt_list);
+    println!("{}", adt_list);
 
     // native list
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct List(Vec<Value>);
-    let list = Type::generic_native::<List>(smallvec![Type::generic_variable(0)]);
+    let list = Type::generic_native::<List>(smallvec![gen0]);
     let list_int = Type::generic_native::<List>(smallvec![int]);
-    println!("{}{}", list.format_generics(), list);
-    println!("{}{}", list_int.format_generics(), list_int);
+    println!("{}", list);
+    println!("{}", list_int);
 
     // functions
     let functions = [
@@ -67,6 +68,12 @@ fn main() {
     let add_fn = FunctionKey::new(&functions[0]);
     let sub_fn = FunctionKey::new(&functions[1]);
     let add_value = Value::Function(add_fn.clone());
+
+    // some interesting functions and types
+    let option = Type::variant(vec![(ustr("None"), empty_tuple), (ustr("Some"), gen0)]);
+    println!("Option: {}", option);
+    let iterator_gen0 = Type::function(&[], Type::tuple(vec![option, Type::new_local(0)]));
+    println!("Iterator: {}", iterator_gen0);
 
     // test printing values
     println!("\nSome values:\n");

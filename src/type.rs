@@ -672,7 +672,7 @@ impl fmt::Display for TypeData {
                     if i > 0 {
                         write!(f, " | ")?;
                     }
-                    write!(f, "{name}: {ty}")?;
+                    write!(f, "{name} of {ty}")?;
                 }
                 Ok(())
             }
@@ -747,7 +747,8 @@ impl graph::Node for TypeData {
 }
 
 fn generic_index_to_char(index: usize) -> char {
-    char::from_digit(index as u32 + 10, 36).unwrap_or('_')
+    // char::from_digit(index as u32 + 10, 36).unwrap_or('_')
+    char::from_u32(index as u32 + 0x3B1).unwrap_or('_')
 }
 
 pub(crate) fn write_with_separator<T: fmt::Display>(
