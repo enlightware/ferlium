@@ -9,13 +9,12 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 ### For users
 
 * Functional statically-typed scripting language
-* Bounded parametric polymorphism
-* Trait for type classes (not-user definable)
-* Subtype polymorphism
-* Algebraic data types
-* Enum union types
+* Parametric polymorphism (generics)
+* Ad hoc polymorphism through type classes (traits)
+* Row polymorphism (subtyping for records and tuples)
+* Algebraic data types (including tagged unions)
 * Pattern matching
-* Type inference
+* Type inference (Hindley-Milner style)
 
 ### For developers and integrators
 

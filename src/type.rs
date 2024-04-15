@@ -788,6 +788,8 @@ impl TypeUniverse {
         // 1. partition tds into sub-graphs of connected recursive types
         let partitioned_indices = find_disjoint_subgraphs(tds);
 
+        // TODO: somewhere, renormalize generics to be in the same order
+
         // for each sub-graph
         let mut types = [Type::new_local(0); N];
         partitioned_indices
