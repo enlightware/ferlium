@@ -146,8 +146,7 @@ impl FunctionType {
         }
     }
     fn local_cmp(&self, other: &Self) -> Ordering {
-        compare_by(&self.args, &other.args, Type::local_cmp)
-            .then(self.ret.local_cmp(&other.ret))
+        compare_by(&self.args, &other.args, Type::local_cmp).then(self.ret.local_cmp(&other.ret))
     }
 }
 
@@ -719,10 +718,9 @@ impl Ord for TypeData {
             (TypeData::Variant(a), TypeData::Variant(b)) => a.cmp(b),
             (TypeData::Tuple(a), TypeData::Tuple(b)) => a.cmp(b),
             (TypeData::Record(a), TypeData::Record(b)) => a.cmp(b),
-            (TypeData::Function(a), TypeData::Function(b)) => a
-                .args
-                .cmp(&b.args)
-                .then_with(|| a.ret.cmp(&b.ret)),
+            (TypeData::Function(a), TypeData::Function(b)) => {
+                a.args.cmp(&b.args).then_with(|| a.ret.cmp(&b.ret))
+            }
             _ => self.rank().cmp(&other.rank()),
         }
     }

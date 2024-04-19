@@ -1,7 +1,7 @@
 use itertools::Itertools;
 use smallvec::smallvec;
-use ustr::ustr;
 use std::{collections::VecDeque, rc::Rc};
+use ustr::ustr;
 
 use crate::{
     function::{BinaryPartialNativeFn, FunctionDescription, NullaryNativeFn, UnaryNativeFn},
@@ -58,9 +58,12 @@ impl List {
 
     fn map(self, f: Value) -> Self {
         let function = f.as_function().unwrap().get();
-        Self(Rc::new(self.0.iter().map(|v| {
-            function.code.call(vec![v.clone()], &())
-        }).collect()))
+        Self(Rc::new(
+            self.0
+                .iter()
+                .map(|v| function.code.call(vec![v.clone()], &()))
+                .collect(),
+        ))
     }
 }
 
@@ -117,6 +120,13 @@ impl ListModule {
             ty: FunctionType::new(&[list, map_fn], list1),
             code: Box::new(BinaryPartialNativeFn::new(List::map)),
         });
-        ListModule { new, from_iterator, append, prepend, len, map }
+        ListModule {
+            new,
+            from_iterator,
+            append,
+            prepend,
+            len,
+            map,
+        }
     }
 }

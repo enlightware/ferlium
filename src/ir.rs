@@ -1,4 +1,4 @@
-use either::Either;
+use chumsky::chain::Chain;
 use ustr::Ustr;
 
 use crate::{
@@ -37,14 +37,37 @@ pub struct StaticApplication {
 }
 
 #[derive(Debug, Clone)]
-pub struct Pattern(SmallVec1<Either<Ustr, Value>>);
+pub enum MatchTarget {
+    Any,
+    Value(Value),
+    Tag(Ustr),
+}
+impl MatchTarget {
+    pub fn is_match(&self, value: &Value) -> bool {
+        match self {
+            MatchTarget::Any => true,
+            MatchTarget::Value(v) => v == value,
+            MatchTarget::Tag(tag) => {
+                if let Value::Variant(variant) = value {
+                    variant.tag == *tag
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
 
-// TODO: allow to match more than one expression
-// TODO: allow to deconstruct variant, record, tuple
+#[derive(Debug, Clone)]
+pub struct PatternTuple(SmallVec1<MatchTarget>);
+
+#[derive(Debug, Clone)]
+pub struct PatterDisjunction(SmallVec1<PatternTuple>);
+
 #[derive(Debug, Clone)]
 pub struct Match {
     pub value: Node,
-    pub alternatives: SmallVec1<(Pattern, Node)>,
+    pub alternatives: SmallVec1<(PatterDisjunction, Node)>,
     pub default: Option<Box<Node>>,
 }
 
@@ -107,21 +130,19 @@ impl Node {
             }
             Node::Match(match_) => {
                 let value = match_.value.eval(ctx);
-                for (pattern, node) in &match_.alternatives {
-                    for token in &pattern.0 {
-                        match token {
-                            Either::Left(tag) => {
-                                if let Value::Variant(variant) = &value {
-                                    if variant.tag == *tag {
-                                        return node.eval(ctx);
-                                    }
-                                }
-                            }
-                            Either::Right(v) => {
-                                if *v == value {
-                                    return node.eval(ctx);
-                                }
-                            }
+                for (alternative, node) in &match_.alternatives {
+                    for tuple in &alternative.0 {
+                        let is_match = if tuple.len() == 1 {
+                            tuple.0[0].is_match(&value)
+                        } else {
+                            tuple
+                                .0
+                                .iter()
+                                .zip(value.as_tuple().unwrap().iter())
+                                .all(|(target, value)| target.is_match(value))
+                        };
+                        if is_match {
+                            return node.eval(ctx);
                         }
                     }
                 }
