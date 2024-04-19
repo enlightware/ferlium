@@ -15,6 +15,7 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 * Algebraic data types (including tagged unions)
 * Pattern matching
 * Type inference (Hindley-Milner style)
+* Compile-time code validation (somehow similar to Rust's procedural macro system)
 
 ### For developers and integrators
 

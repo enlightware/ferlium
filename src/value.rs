@@ -84,7 +84,6 @@ pub enum Value {
     Primitive(Box<dyn PrimitiveValue>),
     Variant(Box<VariantValue>),
     Tuple(Box<SmallVec2<Value>>),
-    Record(Box<SmallVec2<(Ustr, Value)>>),
     Function(FunctionKey),
 }
 
@@ -115,16 +114,6 @@ impl fmt::Display for Value {
                 write!(f, "(")?;
                 write_with_separator(tuple, ", ", f)?;
                 write!(f, ")")
-            }
-            Value::Record(fields) => {
-                write!(f, "{{")?;
-                for (i, (name, value)) in fields.iter().enumerate() {
-                    write!(f, "{}: {}", name, value)?;
-                    if i < fields.len() - 1 {
-                        write!(f, ", ")?;
-                    }
-                }
-                write!(f, "}}")
             }
             Value::Function(function) => {
                 let function = function.get();

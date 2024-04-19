@@ -53,9 +53,7 @@ pub struct Match {
 pub enum Node {
     Literal(Value),
     BuildTuple(Box<SmallVec2<Node>>),
-    BuildRecord(Box<SmallVec2<(Ustr, Node)>>),
-    ProjectByPos(Box<(Node, usize)>),
-    ProjectByName(Box<(Node, Ustr)>),
+    Project(Box<(Node, usize)>),
     Apply(Box<Application>),
     StaticApply(Box<StaticApplication>),
     EnvStore(Box<Node>),
@@ -72,33 +70,12 @@ impl Node {
                 let values = nodes.iter().map(|node| node.eval(ctx)).collect();
                 Value::Tuple(Box::new(values))
             }
-            Node::BuildRecord(fields) => {
-                let fields = fields
-                    .iter()
-                    .map(|(name, node)| (*name, node.eval(ctx)))
-                    .collect();
-                Value::Record(Box::new(fields))
-            }
-            Node::ProjectByPos(node_and_index) => {
+            Node::Project(node_and_index) => {
                 let value = node_and_index.0.eval(ctx);
                 match value {
                     Value::Tuple(tuple) => tuple[node_and_index.1].clone(),
-                    Value::Record(record) => record[node_and_index.1].1.clone(),
                     Value::Variant(variant) => variant.value.clone(),
                     _ => panic!("Cannot project from a non-compound value"),
-                }
-            }
-            Node::ProjectByName(node_and_name) => {
-                let value = node_and_name.0.eval(ctx);
-                match value {
-                    Value::Record(record) => {
-                        let index = record
-                            .iter()
-                            .position(|(n, _)| *n == node_and_name.1)
-                            .unwrap();
-                        record[index].1.clone()
-                    }
-                    _ => panic!("Cannot project from a non-record value"),
                 }
             }
             Node::Apply(app) => {
