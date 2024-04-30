@@ -71,8 +71,11 @@ pub struct ScriptFunction {
 impl FunctionCall for ScriptFunction {
     fn call(&self, args: Vec<Value>, _ctx: &CallCtx) -> Value {
         let mut ctx = ir::Context::new();
+        let env_size = ctx.environment.len();
         ctx.environment.extend(args);
-        self.code.eval(&mut ctx)
+        let ret = self.code.eval(&mut ctx);
+        ctx.environment.truncate(env_size);
+        ret
     }
 }
 
