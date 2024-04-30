@@ -1,6 +1,3 @@
-use chumsky::chain::Chain;
-use ustr::Ustr;
-
 use crate::{
     containers::{SmallVec1, SmallVec2},
     function::FunctionKey,
@@ -37,37 +34,9 @@ pub struct StaticApplication {
 }
 
 #[derive(Debug, Clone)]
-pub enum MatchTarget {
-    Any,
-    Value(Value),
-    Tag(Ustr),
-}
-impl MatchTarget {
-    pub fn is_match(&self, value: &Value) -> bool {
-        match self {
-            MatchTarget::Any => true,
-            MatchTarget::Value(v) => v == value,
-            MatchTarget::Tag(tag) => {
-                if let Value::Variant(variant) = value {
-                    variant.tag == *tag
-                } else {
-                    false
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PatternTuple(SmallVec1<MatchTarget>);
-
-#[derive(Debug, Clone)]
-pub struct PatterDisjunction(SmallVec1<PatternTuple>);
-
-#[derive(Debug, Clone)]
-pub struct Match {
+pub struct Case {
     pub value: Node,
-    pub alternatives: SmallVec1<(PatterDisjunction, Node)>,
+    pub alternatives: SmallVec1<(Value, Node)>,
     pub default: Option<Box<Node>>,
 }
 
@@ -82,7 +51,7 @@ pub enum Node {
     EnvStore(Box<Node>),
     EnvLoad(usize),
     BlockExpr(Box<SmallVec2<Node>>),
-    Match(Box<Match>),
+    Case(Box<Case>),
 }
 
 impl Node {
@@ -128,25 +97,14 @@ impl Node {
                 ctx.environment.truncate(env_size);
                 return_value
             }
-            Node::Match(match_) => {
-                let value = match_.value.eval(ctx);
-                for (alternative, node) in &match_.alternatives {
-                    for tuple in &alternative.0 {
-                        let is_match = if tuple.len() == 1 {
-                            tuple.0[0].is_match(&value)
-                        } else {
-                            tuple
-                                .0
-                                .iter()
-                                .zip(value.as_tuple().unwrap().iter())
-                                .all(|(target, value)| target.is_match(value))
-                        };
-                        if is_match {
-                            return node.eval(ctx);
-                        }
+            Node::Case(case) => {
+                let value = case.value.eval(ctx);
+                for (alternative, node) in &case.alternatives {
+                    if value == *alternative {
+                        return node.eval(ctx);
                     }
                 }
-                if let Some(default) = &match_.default {
+                if let Some(default) = &case.default {
                     default.eval(ctx)
                 } else {
                     panic!("No match found for value {:?}", value);
