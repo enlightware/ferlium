@@ -65,8 +65,8 @@ impl Node {
             Node::Project(node_and_index) => {
                 let value = node_and_index.0.eval(ctx);
                 match value {
-                    Value::Tuple(tuple) => tuple[node_and_index.1].clone(),
-                    Value::Variant(variant) => variant.value.clone(),
+                    Value::Tuple(tuple) => tuple.into_iter().nth(node_and_index.1).unwrap(),
+                    Value::Variant(variant) => variant.value,
                     _ => panic!("Cannot project from a non-compound value"),
                 }
             }
