@@ -1,0 +1,354 @@
+mod common;
+
+use common::{fail_run, run, unit};
+use painturscript::{error::RuntimeError, std::array::Array, value::Value};
+
+#[test]
+fn literals() {
+    assert_eq!(run("42"), int!(42));
+    assert_eq!(run("true"), bool!(true));
+    assert_eq!(run("false"), bool!(false));
+}
+
+#[test]
+fn equalities() {
+    assert_eq!(run("42 == 42"), bool!(true));
+    assert_eq!(run("41 == 42"), bool!(false));
+    assert_eq!(run("42 != 42"), bool!(false));
+    assert_eq!(run("41 != 42"), bool!(true));
+    assert_eq!(run("true == true"), bool!(true));
+    assert_eq!(run("true == false"), bool!(false));
+    assert_eq!(run("true != true"), bool!(false));
+    assert_eq!(run("true != false"), bool!(true));
+    assert_eq!(run("() == ()"), bool!(true));
+    assert_eq!(run("() != ()"), bool!(false));
+    assert_eq!(run("() == (1,)"), bool!(false));
+    assert_eq!(run("() != (1,)"), bool!(true));
+    assert_eq!(run("(1,) == (1,)"), bool!(true));
+    assert_eq!(run("(1,) != (1,)"), bool!(false));
+    assert_eq!(run("(1,) == (2,)"), bool!(false));
+    assert_eq!(run("(1,) != (2,)"), bool!(true));
+    assert_eq!(run("(1,true) == (1,true)"), bool!(true));
+    assert_eq!(run("(1,true) != (1,true)"), bool!(false));
+    assert_eq!(run("(1,true) == (2,true)"), bool!(false));
+    assert_eq!(run("(1,true) != (2,true)"), bool!(true));
+    assert_eq!(run("(1,true) == (1,false)"), bool!(false));
+    assert_eq!(run("(1,true) != (1,false)"), bool!(true));
+    assert_eq!(run("[] == []"), bool!(true));
+    assert_eq!(run("[] != []"), bool!(false));
+    assert_eq!(run("[] == [1]"), bool!(false));
+    assert_eq!(run("[] != [1]"), bool!(true));
+    assert_eq!(run("[1] == [1]"), bool!(true));
+    assert_eq!(run("[1] != [1]"), bool!(false));
+    assert_eq!(run("[1] == [2]"), bool!(false));
+    assert_eq!(run("[1] != [2]"), bool!(true));
+    assert_eq!(run("let a = [1, 1]; a[0] == a[1]"), bool!(true));
+    assert_eq!(run("let a = [1, 1]; a[0] != a[1]"), bool!(false));
+}
+
+#[test]
+fn local_variables() {
+    assert_eq!(run("let a = 1 ; a"), int!(1));
+    assert_eq!(run("var a = 1 ; a"), int!(1));
+    assert_eq!(run("var a = 1 ; a = 2; a"), int!(2));
+    assert_eq!(run("let a = true ; a"), bool!(true));
+    assert_eq!(run("var a = true ; a"), bool!(true));
+    assert_eq!(run("var a = true ; a = false; a"), bool!(false));
+    assert_eq!(run("var a = [1, 2]; a = [3, 4, 5]; a"), int_a![3, 4, 5]);
+    assert_eq!(run("var a = [1, 2]; a = [3]; a == [3]"), bool!(true));
+    assert_eq!(
+        run("var a = (1, true); a = (2, false); a == (2, false)"),
+        bool!(true)
+    );
+}
+
+#[test]
+fn logic_operators() {
+    assert_eq!(run("not true"), bool!(false));
+    assert_eq!(run("not false"), bool!(true));
+    assert_eq!(run("not not true"), bool!(true));
+    assert_eq!(run("not not false"), bool!(false));
+    assert_eq!(run("not not not true"), bool!(false));
+    assert_eq!(run("not not not false"), bool!(true));
+    assert_eq!(run("true or false"), bool!(true));
+    assert_eq!(run("true and false"), bool!(false));
+    assert_eq!(run("true or true and false"), bool!(true));
+    assert_eq!(run("(true or true) and false"), bool!(false));
+}
+
+#[test]
+fn arithmetic_operators() {
+    assert_eq!(run("1+2"), int!(3));
+    assert_eq!(run("  1  + 2 "), int!(3));
+    assert_eq!(run("3*2"), int!(6));
+    assert_eq!(run("7/2"), int!(3));
+    assert_eq!(run("1-4"), int!(-3));
+    assert_eq!(run("-1"), int!(-1));
+    assert_eq!(run("--1"), int!(1));
+    assert_eq!(run("---1"), int!(-1));
+    assert_eq!(run("1---5"), int!(-4));
+    assert_eq!(run("1+--5"), int!(6));
+    assert_eq!(run("0-2-2"), int!(-4));
+    assert_eq!(run("0-(2-2)"), int!(0));
+    assert_eq!(run("1+2*3"), int!(7));
+    assert_eq!(run("12/3/2"), int!(2));
+    assert_eq!(run("12/(3/2)"), int!(12));
+}
+
+#[test]
+fn comparison_operators() {
+    assert_eq!(run("1 < 2"), bool!(true));
+    assert_eq!(run("1 <= 2"), bool!(true));
+    assert_eq!(run("1 > 2"), bool!(false));
+    assert_eq!(run("1 >= 2"), bool!(false));
+    assert_eq!(run("1 != 2"), bool!(true));
+    assert_eq!(run("1 == 2"), bool!(false));
+    assert_eq!(run("2 < 2"), bool!(false));
+    assert_eq!(run("2 <= 2"), bool!(true));
+    assert_eq!(run("2 > 2"), bool!(false));
+    assert_eq!(run("2 >= 2"), bool!(true));
+    assert_eq!(run("2 != 2"), bool!(false));
+    assert_eq!(run("2 == 2"), bool!(true));
+}
+
+#[test]
+fn expression_grouping() {
+    assert_eq!(run("(1)"), int!(1));
+    assert_eq!(run("((1))"), int!(1));
+    assert_eq!(run("(((1)))"), int!(1));
+    assert_eq!(run("(((1)))+((2))"), int!(3));
+    assert_eq!(run("1 + (2 * 3)"), int!(7));
+    assert_eq!(run("(1 + 2) * 3"), int!(9));
+    assert_eq!(run("1 + 2 * 3"), int!(7));
+    assert_eq!(run("1 * 2 + 3"), int!(5));
+    assert_eq!(run("1 * (2 + 3)"), int!(5));
+}
+
+#[test]
+fn if_expr() {
+    assert_eq!(run("if 1 < 2 { 1 } else { 2 }"), int!(1));
+    assert_eq!(run("if 1 <= 2 { 1 } else { 2 }"), int!(1));
+    assert_eq!(run("if 1 > 2 { 1 } else { 2 }"), int!(2));
+    assert_eq!(run("if 1 >= 2 { 1 } else { 2 }"), int!(2));
+    assert_eq!(run("if 1 != 2 { 1 } else { 2 }"), int!(1));
+    assert_eq!(run("if 1 == 2 { 1 } else { 2 }"), int!(2));
+    assert_eq!(run("if 2 < 2 { 1 } else { 2 }"), int!(2));
+    assert_eq!(run("if 2 <= 2 { 1 } else { 2 }"), int!(1));
+    assert_eq!(run("if 2 > 2 { 1 } else { 2 }"), int!(2));
+    assert_eq!(run("if 2 >= 2 { 1 } else { 2 }"), int!(1));
+    assert_eq!(run("if 2 != 2 { 1 } else { 2 }"), int!(2));
+    assert_eq!(run("if 2 == 2 { 1 } else { 2 }"), int!(1));
+}
+
+#[test]
+fn match_expr() {
+    assert_eq!(run("match true { true => 0, _ => 1 }"), int!(0));
+    assert_eq!(run("match false { true => 0, _ => 1 }"), int!(1));
+    assert_eq!(run("match true { true => 0, _ => 1, }"), int!(0));
+    assert_eq!(run("match true { false => 1, true => 0 }"), int!(0));
+    assert_eq!(run("match true { false => 1, true => 0, }"), int!(0));
+    assert_eq!(run("let a = 0; match a { 0 => 1, _ => 3 }"), int!(1));
+    assert_eq!(run("let a = 1; match a { 0 => 1, _ => 3 }"), int!(3));
+    assert_eq!(
+        run("let a = 0; match a { 0 => 1, 1 => 2, _ => 3 }"),
+        int!(1)
+    );
+    assert_eq!(
+        run("let a = 1; match a { 0 => 1, 1 => 2, _ => 3 }"),
+        int!(2)
+    );
+    assert_eq!(
+        run("let a = 5; match a { 0 => 1, 1 => 2, _ => 3 }"),
+        int!(3)
+    );
+    // TODO: add more complex literals (tuples, array) once optimisation is in place
+}
+
+#[test]
+fn tuple_creation() {
+    assert_eq!(run("()"), unit());
+    assert_eq!(run("(1,)"), int_tuple!(1));
+    assert_eq!(run("(1, 2)"), int_tuple!(1, 2));
+    assert_eq!(run("(1, 2, )"), int_tuple!(1, 2));
+    assert_eq!(run("(1, 1)"), int_tuple!(1, 1));
+    assert_eq!(run("(3, 1, 7)"), int_tuple!(3, 1, 7));
+}
+
+#[test]
+fn tuple_projection() {
+    assert_eq!(run("(1,).0"), int!(1));
+    assert_eq!(run("(1,2).1"), int!(2));
+    assert_eq!(run("(1,(3, (2, 4, 5))).1.1.2"), int!(5));
+    assert_eq!(run("let a = (1,2); a.1"), int!(2));
+    assert_eq!(run("let f = || (1,2); f().1"), int!(2));
+}
+
+#[test]
+fn lambda() {
+    assert_eq!(run("let f = || 1; f()"), int!(1));
+    assert_eq!(run("let f = |x| x; f(1)"), int!(1));
+    assert_eq!(run("let f = |x,| x; f(1)"), int!(1));
+    assert_eq!(run("let f = |x, y| x + y; f(1, 2)"), int!(3));
+    assert_eq!(run("let f = |x, y,| x + y; f(1, 2)"), int!(3));
+    assert_eq!(run("let f = |x, y| x + y; f(1, f(2, 3))"), int!(6));
+    assert_eq!(run("let f = |x, y| x + y; f(f(1, 2), 3)"), int!(6));
+    assert_eq!(run("let f = |x, y| x + y; f(f(1, 2), f(3, 4))"), int!(10));
+    assert_eq!(
+        run("let sq = |x| x * x; let inc = |x| x + 1; sq(inc(inc(2)))"),
+        int!(16)
+    );
+}
+
+#[test]
+fn assignment() {
+    assert_eq!(run("let a = 1; a"), int!(1));
+    assert_eq!(run("var a = 1; a = 2; a"), int!(2));
+    assert_eq!(run("var a = 1; let b = 2; a = b; a"), int!(2));
+    assert_eq!(run("var a = 1; let b = 2; a = b; b"), int!(2));
+    assert_eq!(run("var a = 1; var b = 2; a = b; b = a; b"), int!(2));
+    assert_eq!(run("var a = (1, 2); a.0 = 3; a"), int_tuple!(3, 2));
+    assert_eq!(run("var a = ((1, 2), 3); a.0.1 = 5; a.0"), int_tuple!(1, 5));
+    assert_eq!(run("var a = [1, 2]; a[0] = 3; a"), int_a![3, 2]);
+    assert_eq!(
+        run("var a = [[1, 2], [3, 4]]; a[0][1] = 5; a[0]"),
+        int_a![1, 5]
+    );
+}
+
+#[test]
+fn execution_errors() {
+    use RuntimeError::*;
+    assert_eq!(fail_run("1 / 0"), DivisionByZero);
+    assert_eq!(fail_run("let v = || 0; 1 / v()"), DivisionByZero);
+    assert_eq!(fail_run("1 % 0"), RemainderByZero);
+    assert_eq!(fail_run("let v = || 0; 1 % v()"), RemainderByZero);
+    assert_eq!(
+        fail_run("[1][1]"),
+        ArrayAccessOutOfBounds { index: 1, len: 1 }
+    );
+    assert_eq!(
+        fail_run("let a = [1, 2]; a[3]"),
+        ArrayAccessOutOfBounds { index: 3, len: 2 }
+    );
+    assert_eq!(
+        fail_run("let a = [1, 2]; a[-3]"),
+        ArrayAccessOutOfBounds { index: -3, len: 2 }
+    );
+    assert_eq!(
+        fail_run("let a = [1, 2]; a[3] = 0"),
+        ArrayAccessOutOfBounds { index: 3, len: 2 }
+    );
+    assert_eq!(
+        fail_run("let a = [1, 2]; a[-3] = 0"),
+        ArrayAccessOutOfBounds { index: -3, len: 2 }
+    );
+    assert_eq!(
+        fail_run("let i = || 3; let a = [1, 2]; a[i()]"),
+        ArrayAccessOutOfBounds { index: 3, len: 2 }
+    );
+    assert_eq!(
+        fail_run("let i = || -3; let a = [1, 2]; a[i()]"),
+        ArrayAccessOutOfBounds { index: -3, len: 2 }
+    );
+    assert_eq!(
+        fail_run("let i = || 3; let a = [1, 2]; a[i()] = 0"),
+        ArrayAccessOutOfBounds { index: 3, len: 2 }
+    );
+    assert_eq!(
+        fail_run("let i = || -3; let a = [1, 2]; a[i()] = 0"),
+        ArrayAccessOutOfBounds { index: -3, len: 2 }
+    );
+}
+
+#[test]
+fn array_creation() {
+    assert_eq!(run("[]"), int_a![]);
+    assert_eq!(run("[1]"), int_a![1]);
+    assert_eq!(run("[1,]"), int_a![1]);
+    assert_eq!(run("[1, 2]"), int_a![1, 2]);
+    assert_eq!(run("[1, 2,]"), int_a![1, 2]);
+    assert_eq!(run("[1, 1]"), int_a![1, 1]);
+    assert_eq!(run("[3, 1, 7]"), int_a![3, 1, 7]);
+}
+
+#[test]
+fn array_index() {
+    assert_eq!(run("[1][0]"), int!(1));
+    assert_eq!(run("[1][-1]"), int!(1));
+    assert_eq!(run("[1, 3][0]"), int!(1));
+    assert_eq!(run("[1, 3][1]"), int!(3));
+    assert_eq!(run("[1, 3][-1]"), int!(3));
+    assert_eq!(run("[1, 3][-2]"), int!(1));
+    assert_eq!(run("[[1, 2], [3, 4]][1][0]"), int!(3));
+    assert_eq!(run("let a = [1, 3]; a[0]"), int!(1));
+    assert_eq!(run("let a = [1, 3]; a[1]"), int!(3));
+    assert_eq!(run("let i = 0; [1, 3][i]"), int!(1));
+    assert_eq!(run("let i = 1; [1, 3][i]"), int!(3));
+    assert_eq!(run("let i = -1; [1, 3][i]"), int!(3));
+    assert_eq!(run("let i = -2; [1, 3][i]"), int!(1));
+    assert_eq!(run("let i = 0; let j = 1; [[1, 2], [3, 4]][i][j]"), int!(2));
+}
+
+// TODO: add array from iterator
+
+#[test]
+fn array_append() {
+    assert_eq!(run("var a = []; array_append(a, 1); a"), int_a![1]);
+    assert_eq!(run("var a = [1]; array_append(a, 1); a"), int_a![1, 1]);
+    assert_eq!(run("var a = [2]; array_append(a, 1); a"), int_a![2, 1]);
+}
+
+#[test]
+fn array_prepend() {
+    assert_eq!(run("var a = []; array_prepend(a, 1); a"), int_a![1]);
+    assert_eq!(run("var a = [1]; array_prepend(a, 1); a"), int_a![1, 1]);
+    assert_eq!(run("var a = [2]; array_prepend(a, 1); a"), int_a![1, 2]);
+}
+
+#[test]
+fn array_len() {
+    assert_eq!(run("let a = []; array_len(a)"), int!(0));
+    assert_eq!(run("let a = [1]; array_len(a)"), int!(1));
+    assert_eq!(run("let a = [1, 2]; array_len(a)"), int!(2));
+    assert_eq!(run("let a = [[1], [1, 1]]; array_len(a)"), int!(2));
+    assert_eq!(run("let a = [1, 1, 1]; array_len(a)"), int!(3));
+}
+
+#[test]
+fn modules() {
+    assert_eq!(run("fn a(x) { x }"), unit());
+    assert_eq!(run("fn a(x) { x } a(1)"), int!(1));
+    assert_eq!(run("fn a(x) { x + 1 } a(1)"), int!(2));
+    assert_eq!(
+        run("fn d(x) { 2 * x } fn s(x) { x + 1 } d(s(s(1)))"),
+        int!(6)
+    );
+}
+
+#[test]
+fn recursive_functions() {
+    assert_eq!(
+        run("fn fact(x) { if x > 1 { x * fact(x-1) } else { 1 } } fact(5)"),
+        int!(120)
+    );
+    assert_eq!(
+        run(r#"fn is_even(n) {
+                if n == 0 {
+                    true
+                } else {
+                    is_odd(n - 1)
+                }
+            }
+
+            fn is_odd(n) {
+                if n == 0 {
+                    false
+                } else {
+                    is_even(n - 1)
+                }
+            }
+
+            is_even(10)"#),
+        bool!(true)
+    )
+}

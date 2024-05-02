@@ -1,106 +1,105 @@
-use std::rc::Rc;
+use painturscript::emit_ir::ModuleEnv;
+use painturscript::std::{new_module_with_prelude, new_std_module_env};
+use rustyline::DefaultEditor;
+use rustyline::{config::Configurer, error::ReadlineError};
 
-use painturscript::{
-    function::{BinaryNativeFn, FunctionKey},
-    ir::{Application, Context, Node, StaticApplication},
-    r#type::{store_types, Type, TypeData},
-    value::Value,
-};
-use smallvec::smallvec;
-use ustr::ustr;
+use painturscript::{emit_ir::EmitIrEnv, ir::EvalCtx};
 
 fn main() {
-    // basic types
-    let int = Type::primitive::<i32>();
-    let u32 = Type::primitive::<u32>();
-    let float = Type::primitive::<f32>();
-    let string = Type::primitive::<String>();
-    let empty_tuple = Type::tuple(vec![]);
-    let gen0 = Type::generic_variable(0);
+    // Painturscript emission and evaluation contexts
+    let other_modules = new_std_module_env();
+    let mut module = new_module_with_prelude();
+    let mut locals = vec![];
+    let mut eval_ctx = EvalCtx::new();
 
-    // test type printing
-    println!("Some types:\n");
-    let st = Type::record(vec![
-        (ustr("ty"), gen0),
-        (ustr("name"), string),
-        (ustr("age"), int),
-    ]);
-    println!("{}", st);
+    // REPL loop
+    let mut rl = DefaultEditor::new().unwrap();
+    rl.set_max_history_size(256).unwrap();
+    let history_filename = "pscript_history.txt";
+    if rl.load_history(history_filename).is_err() {
+        println!("No previous history.");
+    }
+    loop {
+        // Read input
+        let readline = rl.readline(">> ");
+        let src = match readline {
+            Ok(line) => {
+                rl.add_history_entry(line.as_str()).unwrap();
+                line
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("CTRL-C");
+                return;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("CTRL-D");
+                return;
+            }
+            Err(err) => {
+                println!("Readline Error: {:?}", err);
+                return;
+            }
+        };
 
-    let variant = Type::variant(vec![(ustr("i"), int), (ustr("s"), string)]);
-    println!("{}", variant);
-    let variant = Type::variant(vec![
-        (ustr("i"), int),
-        (ustr("f"), float),
-        (ustr("u32"), u32),
-    ]);
-    println!("{}", variant);
+        // Parse input
+        let (module_ast, expr_ast) = painturscript::parser::parse(&src);
+        if !module_ast.is_empty() {
+            println!("Module AST:\n{module_ast}");
+        }
+        if let Some(expr_ast) = expr_ast.as_ref() {
+            println!("Expr AST:\n{expr_ast}");
+        }
+        let parse_errors = module_ast.errors();
+        if !parse_errors.is_empty() {
+            println!("Parse errors:");
+            for e in parse_errors {
+                println!("{}", e.0);
+            }
+            continue;
+        }
 
-    // ADT recursive list
-    let adt_list_element = TypeData::Tuple(vec![gen0, Type::new_local(1)]);
-    let adt_list = TypeData::Variant(vec![
-        (ustr("Nil"), empty_tuple),
-        (ustr("Cons"), Type::new_local(0)),
-    ]);
-    // add them to the universe as a batch
-    let adt_list = store_types(&[adt_list_element, adt_list])[1];
-    println!("{}", adt_list);
+        // Compile module
+        if !module_ast.is_empty() {
+            module = match EmitIrEnv::emit_module(&module_ast, &other_modules, Some(module.clone()))
+            {
+                Ok(module) => module,
+                Err(e) => {
+                    println!("Module emission error: {:?}", e);
+                    continue;
+                }
+            };
+            println!("Module IR:\n{module}");
+        }
 
-    // native list
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct List(Vec<Value>);
-    let list = Type::generic_native::<List>(smallvec![gen0]);
-    let list_int = Type::generic_native::<List>(smallvec![int]);
-    println!("{}", list);
-    println!("{}", list_int);
+        // Compile and evaluate expression
+        let expr = match expr_ast {
+            Some(expr) => expr,
+            None => {
+                println!("No expression to evaluate.");
+                continue;
+            }
+        };
+        let mut emit_env = EmitIrEnv::new(locals, ModuleEnv::new(&module, &other_modules));
+        let expr_ir = emit_env.emit_expr(&expr);
+        locals = emit_env.get_locals_and_drop();
+        let ir = match expr_ir {
+            Ok(ir) => ir,
+            Err(e) => {
+                println!("Emission error: {:?}", e);
+                continue;
+            }
+        };
+        println!("Expr IR:\n{ir}");
 
-    // functions
-    let functions = [
-        Rc::new(BinaryNativeFn::description(
-            std::ops::Add::add as fn(i32, i32) -> i32,
-        )),
-        Rc::new(BinaryNativeFn::description(
-            std::ops::Sub::sub as fn(i32, i32) -> i32,
-        )),
-    ];
-    let add_fn_ty = functions[0].ty();
-    println!("{}", add_fn_ty);
-    let add_fn = FunctionKey::new(&functions[0]);
-    let sub_fn = FunctionKey::new(&functions[1]);
-    let add_value = Value::Function(add_fn.clone());
+        // Evaluate and print result
+        let result = ir.eval(&mut eval_ctx);
+        match result {
+            Ok(value) => println!("{value}"),
+            Err(error) => println!("Runtime error: {error:?}"),
+        }
 
-    // some interesting functions and types
-    let option = Type::variant(vec![(ustr("None"), empty_tuple), (ustr("Some"), gen0)]);
-    println!("Option: {}", option);
-    let iterator_gen0 = Type::function(&[], Type::tuple(vec![option, Type::new_local(0)]));
-    println!("Iterator: {}", iterator_gen0);
-
-    // test printing values
-    println!("\nSome values:\n");
-    let v_int = Value::Primitive(Box::new(11_i32));
-    println!("{}", v_int);
-    let v_list_int = Value::Primitive(Box::new(List(vec![
-        Value::primitive(11_i32),
-        Value::primitive(22_i32),
-    ])));
-    println!("{}", v_list_int);
-    println!("{}", add_value);
-
-    // test ir execution
-    println!("\nSome IR and its execution:\n");
-    let ir = Node::BlockExpr(Box::new(smallvec![
-        Node::EnvStore(Box::new(Node::Literal(Value::primitive(11_i32)))),
-        Node::Apply(Box::new(Application {
-            function: Node::Literal(Value::Function(add_fn)),
-            arguments: vec![
-                Node::StaticApply(Box::new(StaticApplication {
-                    function: sub_fn,
-                    arguments: vec![Node::EnvLoad(0), Node::Literal(Value::primitive(5_i32))],
-                })),
-                Node::Literal(Value::primitive(3_i32)),
-            ],
-        })),
-    ]));
-    println!("{:?}", ir);
-    ir.eval_and_print(&mut Context::new());
+        if let Err(e) = rl.save_history(history_filename) {
+            println!("Failed to save history: {:?}", e);
+        }
+    }
 }

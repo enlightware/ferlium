@@ -5,6 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[build-dependencies]
+cfgrammar = "0.13"
+lrlex = "0.13"
+lrpar = "0.13"
+
+[dev-dependencies]
+rustyline = "14.0.0"
+
 [dependencies]
 dyn-clone = "1.0.16"
 dyn-eq = "0.1.3"
@@ -13,5 +21,10 @@ itertools = "0.12.1"
 ustr = "1.0.0"
 smallvec = "1.13.1"
 nonmax = "=0.5.5"
+ordered-float = "4.2.0"
 indexmap = "2.2.6"
-chumsky = "0.9.3"
+cfgrammar = "0.13"
+lrlex = "0.13"
+lrpar = "0.13"
+num-traits = "0.2.19"
+ena = "0.14.3"

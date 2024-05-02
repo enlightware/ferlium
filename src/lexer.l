@@ -1,0 +1,57 @@
+%%
+[1-9][0-9]*|0           "INT"
+
+true                    "true"
+false                   "false"
+
+if                      "if"
+else                    "else"
+match                   "match"
+
+return                  "return"
+
+let                     "let"
+var						"var"
+
+fn                      "fn"
+
+and						"and"
+or						"or"
+not						"not"
+
+==                      "=="
+!=                      "!="
+>=                      ">="
+\<=                     "<="
+>                       ">"
+\<                      "<"
+=                       "="
+
+\+                      "+"
+-                       "-"
+\*                      "*"
+/                       "/"
+%                       "%"
+
+\(                      "("
+\)                      ")"
+\[                      "["
+\]                      "]"
+\{                      "{"
+\}                      "}"
+\|                      "|"
+=>                      "=>"
+:                       ":"
+;                       ";"
+,                       ","
+\.                      "."
+_                       "_"
+
+[\p{L}_][\p{L}\p{N}_]*  "IDENT"
+
+[ \t\r\n]+              ;
+
+.                       "UNMATCHED"
+
+-                       "U_MINUS"
+else                    "NO_ELSE"

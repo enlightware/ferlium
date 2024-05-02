@@ -14,6 +14,7 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 * Row polymorphism (subtyping for records and tuples)
 * Algebraic data types (including tagged unions)
 * Pattern matching
+* Mutable value semantics
 * Type inference (Hindley-Milner style)
 * Compile-time code validation (somehow similar to Rust's procedural macro system)
 
@@ -29,6 +30,7 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 
 * ML: basic functional concepts (especially [this course](https://pauillac.inria.fr/~remy/mpri/))
 * Rust: syntax and type system
+* Swift(let) (especially [this paper](https://www.jot.fm/issues/issue_2022_02/article2.pdf))
 
 ## Why the name painturscript?
 
