@@ -1,16 +1,16 @@
-use std::{cell::RefCell, collections::VecDeque, fmt, rc::Rc};
+use std::{collections::VecDeque, fmt, rc::Rc};
 
 use itertools::Itertools;
 use ustr::ustr;
 
 use crate::{
-    function::{
-        BinaryPartialMutNativeFn, BinaryPartialNativeFn, FunctionDescription, UnaryNativeFn,
-    },
+    format::write_with_separator,
+    function::{BinaryNativeFn, BinaryPartialMutNativeFn, BinaryPartialNativeFn, UnaryNativeFn},
     ir::EvalCtx,
-    module::Module,
-    r#type::{bare_native_type, write_with_separator, FnType, NativeType, Type, TypeOfNativeValue},
-    value::{ValOrMut, Value},
+    module::{Module, ModuleFunction},
+    r#type::{bare_native_type, FnType, Type},
+    type_scheme::TypeScheme,
+    value::{NativeDisplay, ValOrMut, Value},
 };
 
 use super::{iterator::iterator_type, math::int_type};
@@ -20,11 +20,15 @@ pub struct Array(Rc<VecDeque<Value>>);
 
 impl Array {
     pub fn new() -> Self {
-        Array(Rc::new(VecDeque::new()))
+        Self(Rc::new(VecDeque::new()))
     }
 
     pub fn from_vec(values: Vec<Value>) -> Self {
-        Array(Rc::new(VecDeque::from(values)))
+        Self::from_deque(VecDeque::from(values))
+    }
+
+    pub fn from_deque(values: VecDeque<Value>) -> Self {
+        Self(Rc::new(values))
     }
 
     // Manual implementation of a conversion from an iterator function to a new list
@@ -35,7 +39,7 @@ impl Array {
             let iter_fn = iter_fn_key.get();
             let mut ctx = EvalCtx::new();
             // FIXME: address runtime error by returning a Result
-            let ret = iter_fn.borrow().code.call(vec![], &mut ctx).unwrap();
+            let ret = iter_fn.borrow().call(vec![], &mut ctx).unwrap();
             let ret_tuple = *ret.into_tuple().unwrap();
             let (in_value, next_iter) = ret_tuple.into_iter().collect_tuple().unwrap();
             let option = *in_value.into_variant().unwrap();
@@ -48,11 +52,12 @@ impl Array {
         Array(Rc::new(vec))
     }
 
-    fn from_iterator_descr() -> FunctionDescription {
-        FunctionDescription {
-            ty: FnType::new_by_val(&[iterator_type()], array_type()),
-            code: Box::new(UnaryNativeFn::new(Array::from_iterator)),
-        }
+    fn from_iterator_descr() -> ModuleFunction {
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            &[iterator_type()],
+            array_type_generic(),
+        ));
+        UnaryNativeFn::description_with_ty_scheme(Array::from_iterator, ty_scheme)
     }
 
     pub fn get(&self, index: usize) -> Option<&Value> {
@@ -76,28 +81,26 @@ impl Array {
         Rc::make_mut(&mut self.0).push_back(value);
     }
 
-    fn append_descr() -> FunctionDescription {
+    fn append_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
         let unit = Type::unit();
-        let array = array_type();
-        FunctionDescription {
-            ty: FnType::new(&[(array, true), (gen0, false)], unit),
-            code: Box::new(BinaryPartialMutNativeFn::new(Array::append)),
-        }
+        let array = array_type_generic();
+        let ty_scheme =
+            TypeScheme::new_infer_quantifiers(FnType::new(&[(array, true), (gen0, false)], unit));
+        BinaryPartialMutNativeFn::description_with_ty_scheme(Array::append, ty_scheme)
     }
 
     pub fn prepend(&mut self, value: Value) {
         Rc::make_mut(&mut self.0).push_front(value);
     }
 
-    fn prepend_descr() -> FunctionDescription {
+    fn prepend_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
         let unit = Type::unit();
-        let array = array_type();
-        FunctionDescription {
-            ty: FnType::new(&[(array, true), (gen0, false)], unit),
-            code: Box::new(BinaryPartialMutNativeFn::new(Array::prepend)),
-        }
+        let array = array_type_generic();
+        let ty_scheme =
+            TypeScheme::new_infer_quantifiers(FnType::new(&[(array, true), (gen0, false)], unit));
+        BinaryPartialMutNativeFn::description_with_ty_scheme(Array::prepend, ty_scheme)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -108,12 +111,29 @@ impl Array {
         self.0.len()
     }
 
-    fn len_descr() -> FunctionDescription {
-        let array = array_type();
-        FunctionDescription {
-            ty: FnType::new(&[(array, false)], int_type()),
-            code: Box::new(UnaryNativeFn::new(|a: Self| a.len() as isize)),
-        }
+    fn len_descr() -> ModuleFunction {
+        let array = array_type_generic();
+        let ty_scheme =
+            TypeScheme::new_infer_quantifiers(FnType::new(&[(array, false)], int_type()));
+        UnaryNativeFn::description_with_ty_scheme(|a: Self| a.len() as isize, ty_scheme)
+    }
+
+    fn concat(a: &Self, b: &Self) -> Self {
+        let mut new = (*a.0).clone();
+        new.extend(b.0.iter().cloned());
+        Self::from_deque(new)
+    }
+
+    fn concat_descr() -> ModuleFunction {
+        let array_ty = array_type_generic();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new(
+            &[(array_ty, false), (array_ty, false)],
+            array_ty,
+        ));
+        BinaryNativeFn::description_with_ty_scheme(
+            |a: Self, b: Self| Self::concat(&a, &b),
+            ty_scheme,
+        )
     }
 
     // TODO: how to make this into an iterator
@@ -128,7 +148,6 @@ impl Array {
                 .map(|v| {
                     function
                         .borrow()
-                        .code
                         .call(vec![ValOrMut::Val(v.clone())], &mut ctx)
                         .unwrap()
                 })
@@ -136,16 +155,15 @@ impl Array {
         ))
     }
 
-    fn map_descr() -> FunctionDescription {
+    fn map_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
         let gen1 = Type::variable_id(1);
         let map_fn = Type::function(&[gen0], gen1);
         let array0 = Type::native::<Array>(vec![gen0]);
         let array1 = Type::native::<Array>(vec![gen1]);
-        FunctionDescription {
-            ty: FnType::new_by_val(&[array0, map_fn], array1),
-            code: Box::new(BinaryPartialNativeFn::new(Array::map)),
-        }
+        let ty_scheme =
+            TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[array0, map_fn], array1));
+        BinaryPartialNativeFn::description_with_ty_scheme(Array::map, ty_scheme)
     }
 }
 
@@ -155,58 +173,36 @@ impl Default for Array {
     }
 }
 
-impl fmt::Display for Array {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl NativeDisplay for Array {
+    fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[")?;
-        let (lhs, rhs) = self.0.as_slices();
-        if !lhs.is_empty() {
-            write_with_separator(lhs, ", ", f)?;
-        }
-        if !lhs.is_empty() && !rhs.is_empty() {
-            write!(f, ", ")?;
-        }
-        if !rhs.is_empty() {
-            write_with_separator(rhs, ", ", f)?;
-        }
+        write_with_separator(self.0.iter(), ", ", f)?;
         write!(f, "]")
     }
 }
 
-impl TypeOfNativeValue for Array {
-    fn type_of_value(&self) -> NativeType {
-        NativeType::new(
-            bare_native_type::<Self>(),
-            match self.get(0) {
-                Some(value) => vec![value.ty()],
-                None => vec![Type::variable_id(0)],
-            }
-        )
-    }
+pub fn array_type(element_ty: Type) -> Type {
+    Type::native::<Array>(vec![element_ty])
 }
 
-pub fn array_type() -> Type {
-    Type::native::<Array>(vec![Type::variable_id(0)])
+fn array_type_generic() -> Type {
+    array_type(Type::variable_id(0))
 }
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.types.set(ustr("array"), array_type());
+    to.types
+        .set_bare_native(ustr("array"), bare_native_type::<Array>());
 
     // TODO: use type classes to get rid of the array prefix
-    to.functions.insert(
-        ustr("array_from_iterator"),
-        Rc::new(RefCell::new(Array::from_iterator_descr())),
-    );
-    to.functions.insert(
-        ustr("array_append"),
-        Rc::new(RefCell::new(Array::append_descr())),
-    );
-    to.functions.insert(
-        ustr("array_prepend"),
-        Rc::new(RefCell::new(Array::prepend_descr())),
-    );
     to.functions
-        .insert(ustr("array_len"), Rc::new(RefCell::new(Array::len_descr())));
+        .insert(ustr("array_from_iterator"), Array::from_iterator_descr());
     to.functions
-        .insert(ustr("array_map"), Rc::new(RefCell::new(Array::map_descr())));
+        .insert(ustr("array_append"), Array::append_descr());
+    to.functions
+        .insert(ustr("array_prepend"), Array::prepend_descr());
+    to.functions.insert(ustr("array_len"), Array::len_descr());
+    to.functions
+        .insert(ustr("array_concat"), Array::concat_descr());
+    to.functions.insert(ustr("array_map"), Array::map_descr());
 }

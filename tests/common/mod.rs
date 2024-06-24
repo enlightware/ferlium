@@ -1,52 +1,49 @@
 use painturscript::{
-    emit_ir::{EmitIrEnv, ModuleEnv},
-    error::RuntimeError,
+    compile,
+    error::{CompilationError, RuntimeError},
     ir::{EvalCtx, EvalResult},
-    parser::parse,
-    std::{new_module_with_prelude, new_std_module_env},
+    std::new_std_module_env,
     value::Value,
+    ModuleAndExpr,
 };
 
+#[derive(Debug)]
+pub enum Error {
+    Compilation(CompilationError),
+    Runtime(RuntimeError),
+}
+
+pub type CompileRunResult = Result<Value, Error>;
+
 /// Compile and run the src and return its execution result (either a value or an error)
-pub fn try_run(src: &str) -> EvalResult {
-    // parse the source code
-    println!("Input: {src}");
-    let (module_ast, expr_ast) = parse(src);
-    println!("Module AST\n{module_ast}");
-    assert_eq!(module_ast.errors(), &[]);
-    if let Some(expr) = expr_ast.as_ref() {
-        println!("Expr AST\n{expr}");
-        assert_eq!(expr.errors(), &[]);
-    }
-
-    // setup a module with the prelude
+pub fn try_compile_and_run(src: &str) -> CompileRunResult {
+    // Compile the source.
     let other_modules = new_std_module_env();
+    let ModuleAndExpr { module, expr } =
+        compile(src, &other_modules).map_err(Error::Compilation)?;
 
-    // emit IR for the module
-    let current_module = new_module_with_prelude();
-    let current_module = EmitIrEnv::emit_module(&module_ast, &other_modules, Some(current_module))
-        .expect("Error during module IR emission");
-    if !current_module.is_empty() {
-        println!("Module IR\n{current_module}");
-    }
-
-    // emit IR for the expression, and execute it
-    let mut emit_env = EmitIrEnv::with_module_env(ModuleEnv::new(&current_module, &other_modules));
-    if let Some(expr) = expr_ast {
-        let expr_ir = emit_env
-            .emit_expr(&expr)
-            .expect("Error during expr IR emission");
-        println!("Expr IR\n{expr_ir}");
+    // Run the expression if any.
+    if let Some(expr) = expr {
         let mut eval_ctx = EvalCtx::new();
-        expr_ir.eval(&mut eval_ctx)
+        let result = expr.expr.eval(&mut eval_ctx).map_err(Error::Runtime)?;
+        drop(module); // ensure that the module will live during eval, as it holds the strong references to the functions refered in the expression
+        Ok(result)
     } else {
         Ok(Value::unit())
     }
 }
 
+/// Compile and run the src and return its execution result (either a value or an error)
+pub fn try_run(src: &str) -> EvalResult {
+    try_compile_and_run(src).map_err(|error| match error {
+        Error::Compilation(error) => panic!("Compilation error: {error:?}"),
+        Error::Runtime(error) => error,
+    })
+}
+
 /// Compile and run the src and return its value
 pub fn run(src: &str) -> Value {
-    try_run(src).unwrap_or_else(|e| panic!("Runtime error: {e:?}"))
+    try_run(src).unwrap_or_else(|error| panic!("Runtime error: {error:?}"))
 }
 
 /// Compile and run the src and expect a runtime error
@@ -57,6 +54,18 @@ pub fn fail_run(src: &str) -> RuntimeError {
     }
 }
 
+/// Compile and expect a check error
+pub fn fail_compilation(src: &str) -> CompilationError {
+    match try_compile_and_run(src) {
+        Ok(value) => panic!("Expected compilation error, got value: {value}"),
+        Err(error) => match error {
+            Error::Compilation(error) => error,
+            _ => panic!("Expected compilation error, got {error:?}"),
+        },
+    }
+}
+
+/// The value of type unit
 pub fn unit() -> Value {
     Value::unit()
 }

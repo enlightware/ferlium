@@ -1,55 +1,36 @@
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
-use std::{
-    any::{type_name, Any, TypeId},
-    cell::RefCell,
-    fmt,
-    rc::Rc,
-};
+use std::{any::Any, cell::RefCell, fmt, rc::Rc};
 use ustr::Ustr;
 
 use crate::{
     containers::{SVec2, B},
     error::RuntimeError,
-    function::{FunctionDescription, FunctionRef},
+    format::write_with_separator,
+    function::{Function, FunctionRef},
     ir::{EvalCtx, Place},
-    r#type::{write_with_separator, NativeType, Type, TypeOfNativeValue},
+    module::ModuleEnv,
+    r#type::TypeVarSubstitution,
 };
 
 // Support for primitive values
 
-// pub trait PrimitiveDisplay {
-//     fn pfmt(&self, f: &mut fmt::Formatter) -> fmt::Result;
-// }
+/// Native types must implement this so that they can be displayed.
+pub trait NativeDisplay {
+    fn native_fmt(&self, f: &mut fmt::Formatter) -> fmt::Result;
+}
 
-// impl<T: fmt::Display> PrimitiveDisplay for T {
-//     fn pfmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-//         self.fmt(f)
-//     }
-// }
-
-// impl PrimitiveDisplay for () {
-//     fn pfmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-//         write!(f, "()")
-//     }
-// }
-
-// TODO: investigate: https://docs.rs/manyfmt/latest/manyfmt/
-
-pub trait NativeValue: Any + fmt::Debug + DynClone + DynEq + 'static {
+pub trait NativeValue: Any + fmt::Debug + DynClone + DynEq + NativeDisplay + 'static {
     fn as_any(&self) -> &dyn Any;
     fn as_mut_any(&mut self) -> &mut dyn Any;
     fn into_any(self: B<Self>) -> B<dyn Any>;
-    fn type_id(&self) -> TypeId;
-    fn type_name(&self) -> &'static str;
-    fn native_type(&self) -> NativeType;
 }
 
 dyn_clone::clone_trait_object!(NativeValue);
 dyn_eq::eq_trait_object!(NativeValue);
 
-impl<T: Any + fmt::Debug + std::cmp::Eq + Clone + TypeOfNativeValue> NativeValue for T {
+impl<T: Any + fmt::Debug + std::cmp::Eq + Clone + NativeDisplay> NativeValue for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -60,18 +41,6 @@ impl<T: Any + fmt::Debug + std::cmp::Eq + Clone + TypeOfNativeValue> NativeValue
 
     fn into_any(self: B<Self>) -> B<dyn Any> {
         self
-    }
-
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<T>()
-    }
-
-    fn type_name(&self) -> &'static str {
-        type_name::<T>()
-    }
-
-    fn native_type(&self) -> NativeType {
-        self.type_of_value()
     }
 }
 
@@ -101,7 +70,7 @@ impl Value {
         Self::native::<()>(())
     }
 
-    pub fn native<T: Any + Clone + fmt::Debug + std::cmp::Eq + TypeOfNativeValue + 'static>(value: T) -> Self {
+    pub fn native<T: NativeValue + 'static>(value: T) -> Self {
         Value::Native(B::new(value))
     }
 
@@ -109,13 +78,14 @@ impl Value {
         Value::Tuple(B::new(values.into()))
     }
 
-    pub fn function(description: FunctionDescription) -> Self {
-        Value::Function(FunctionRef::new_strong(&Rc::new(RefCell::new(description))))
+    pub fn function(function: Function) -> Self {
+        Value::Function(FunctionRef::new_strong(&Rc::new(RefCell::new(function))))
     }
 
     pub fn into_primitive_ty<T: 'static>(self) -> Option<T> {
+        use Value::*;
         match self {
-            Value::Native(value) => Some(*value.into_any().downcast::<T>().ok()?),
+            Native(value) => Some(*value.into_any().downcast::<T>().ok()?),
             _ => None,
         }
     }
@@ -127,15 +97,57 @@ impl Value {
         }
     }
 
-    pub fn ty(&self) -> Type {
+    pub fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &ModuleEnv<'_>,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = "⎸ ".repeat(indent);
+        use Value::*;
         match self {
-            Value::Native(value) => Type::native_type(value.native_type()),
-            Value::Variant(_) => todo!("implement variants"),
-            Value::Tuple(tuple) => {
-                let types = tuple.iter().map(Value::ty).collect();
-                Type::tuple(types)
+            Native(value) => {
+                // TODO: later, optionally have pretty print for native values
+                writeln!(f, "{indent_str}{:?}", value)
             }
-            Value::Function(function) => function.get().borrow().ty(),
+            Variant(variant) => {
+                writeln!(f, "{indent_str}{}(", variant.tag)?;
+                variant.value.format_ind(f, env, indent + 1)?;
+                writeln!(f, "{indent_str})")
+            }
+            Tuple(tuple) => {
+                writeln!(f, "(")?;
+                for element in tuple.iter() {
+                    element.format_ind(f, env, indent + 1)?;
+                }
+                writeln!(f, ")")
+            }
+            Function(function) => {
+                let function = function.get();
+                let function = function.borrow();
+                writeln!(f, "{indent_str}lambda @ {:p}", *function,)?;
+                function.format_ind(f, env, indent + 1)
+            }
+        }
+    }
+
+    pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
+        use Value::*;
+        match self {
+            Native(_) => {}
+            Variant(variant) => {
+                variant.value.substitute(subst);
+            }
+            Tuple(tuple) => {
+                for element in tuple.iter_mut() {
+                    element.substitute(subst);
+                }
+            }
+            Function(function) => {
+                let function = function.get();
+                let mut function = function.borrow_mut();
+                function.apply_if_script(&mut |node| node.substitute(subst));
+            }
         }
     }
 }
@@ -143,28 +155,19 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Native(value) => write!(f, "{:?}: {}", value, value.as_ref().type_name()),
-            // Value::GenericNative(value) => {
-            //     let tn = value.native.as_ref().type_name();
-            //     write!(
-            //         f,
-            //         "{:?}: {}<",
-            //         value.native,
-            //         tn.rsplit_once("::").unwrap_or(("", tn)).1
-            //     )?;
-            //     write_with_separator(&value.arguments, ", ", f)?;
-            //     write!(f, ">")
-            // }
-            Value::Variant(variant) => write!(f, "{}({})", variant.tag, variant.value),
+            Value::Native(value) => value.native_fmt(f),
+            Value::Variant(variant) => {
+                write!(f, "{}({})", variant.tag, variant.value)
+            }
             Value::Tuple(tuple) => {
                 write!(f, "(")?;
-                write_with_separator(tuple, ", ", f)?;
+                write_with_separator(tuple.iter(), ", ", f)?;
                 write!(f, ")")
             }
             Value::Function(function) => {
                 let function = function.get();
                 let function = function.borrow();
-                write!(f, "{:?}: {}", function.code, function.ty())
+                write!(f, "{:?}", function)
             }
         }
     }
@@ -203,8 +206,9 @@ mod tests {
 
     #[test]
     fn value_as_primitive_ty_mut() {
-        let mut a = Value::native(42);
-        let mut b = 42;
+        let v = 42isize;
+        let mut a = Value::native(v);
+        let mut b = v;
         assert_eq!(a.as_primitive_ty_mut::<isize>(), Some(&mut b));
     }
 }

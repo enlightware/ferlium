@@ -1,6 +1,8 @@
 mod common;
 
-use common::run;
+use test_log::test;
+
+use common::{run, unit};
 use painturscript::value::Value;
 
 #[test]
@@ -80,4 +82,21 @@ fn stuff_in_single_if() {
         run("var a = [1]; if true { a[-1] = a[0] + 1 }; a"),
         int_a![2]
     );
+}
+
+#[test]
+fn array_and_let_polymorphism() {
+    assert_eq!(
+        run("let f = || []; var a = f(); array_append(a, 1); a[0]"),
+        int!(1)
+    );
+    // FIXME: this should fail with access error
+    // assert_eq!(run("let f = || []; let a = f(); array_append(a, 1); a[0]"), int!(1));
+}
+
+#[test]
+fn array_access_in_module_functions() {
+    assert_eq!(run("fn p(a) { let x = a[0] }"), unit());
+    assert_eq!(run("fn p(a) { let x = a[0]; x }"), unit());
+    assert_eq!(run("fn p(a, i) { let x = a[i]; 0 }"), unit());
 }

@@ -1,259 +1,320 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
+
+use itertools::Itertools;
 
 use crate::{
     ast::{self, *},
-    containers::{SVec2, B},
-    function::{FunctionDescription, FunctionDescriptionRc, FunctionRef, ScriptFunction},
+    containers::B,
+    error::InternalCompilationError,
+    function::ScriptFunction,
     ir,
-    module::{Module, Modules},
-    r#type::{FnType, Type},
-    type_inference::TypingEnv,
+    module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
+    r#type::{FnType, Type, TypeLike, TypeVar},
+    std::logic::unit_type,
+    type_inference::{Constraint, FreshTyVarGen, TypeInference, TypingEnv},
+    type_scheme::{PubConstraint, TypeScheme},
     value::Value,
 };
-use ustr::Ustr;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Local {
-    name: Ustr,
-    mutable: bool,
-}
-impl Local {
-    fn new(name: Ustr, mutable: bool) -> Self {
-        Self { name, mutable }
+pub use crate::type_inference::Local;
+
+/// Emit IR for the given module
+pub fn emit_module(
+    source: &ast::Module,
+    others: &Modules,
+    merge_with: Option<&Module>,
+) -> Result<Module, InternalCompilationError> {
+    use ir::Node as N;
+    use ir::NodeKind as K;
+
+    // First pass, populate the function table and allocate fresh mono type variables.
+    let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
+    let mut ty_inf = TypeInference::default();
+    for ModuleFunction {
+        name,
+        args,
+        args_span,
+        span,
+        ..
+    } in &source.functions
+    {
+        let args_ty = ty_inf.fresh_type_var_tys(args.len());
+        let dummy_code = B::new(ScriptFunction::new(N::new(
+            K::Literal(Value::unit()),
+            unit_type(),
+            *span,
+        )));
+        // Note: the type is filled with type variables, and the quantifiers and constraints
+        // are left empty. They will be filled in the second pass.
+        let descr = module::ModuleFunction {
+            ty_scheme: TypeScheme::new_just_type(FnType::new_by_val(
+                &args_ty,
+                Type::variable(ty_inf.fresh_type_var()),
+            )),
+            code: Rc::new(RefCell::new(dummy_code)),
+            spans: Some(module::ModuleFunctionSpans {
+                name: name.1,
+                args: args.iter().map(|(_, s)| *s).collect(),
+                args_span: *args_span,
+                span: *span,
+            }),
+        };
+        output.functions.insert(name.0, descr);
     }
-}
 
-pub type EmissionError = String;
-
-#[derive(Clone, Copy)]
-pub struct ModuleEnv<'m> {
-    current: &'m Module,
-    others: &'m Modules,
-}
-impl<'m> ModuleEnv<'m> {
-    pub fn new(current: &'m Module, others: &'m Modules) -> Self {
-        Self { current, others }
+    // Second pass, infer types and emit function bodies.
+    for function in &source.functions {
+        let name = function.name.0;
+        let descr = output.functions.get(&name).unwrap();
+        let module_env = ModuleEnv::new(&output, others);
+        let mut ty_env = TypingEnv::new(
+            descr.ty_scheme.ty.as_locals_no_bound(&function.args),
+            module_env,
+        );
+        let fn_node = ty_inf.check_expr(&mut ty_env, &function.body, descr.ty_scheme.ty.ret)?;
+        let descr = output.functions.get_mut(&name).unwrap();
+        *descr.code.borrow_mut() = B::new(ScriptFunction::new(fn_node));
     }
+    let module_env = ModuleEnv::new(&output, others);
+    ty_inf.log_debug_constraints(module_env);
+
+    // Third pass, perform the unification.
+    let mut ty_inf = ty_inf.unify(&mut invalid_outer_fresh_ty_var_gen)?;
+    ty_inf.log_debug_substitution_table(module_env);
+    ty_inf.log_debug_constraints(module_env);
+
+    // Fourth pass, substitute the mono type variables with the inferred types.
+    for ModuleFunction { name, .. } in &source.functions {
+        let descr = output.functions.get_mut(&name.0).unwrap();
+        ty_inf.substitute_module_function(descr);
+    }
+
+    // Fifth pass, get the remaining constraints and collect the free type variables.
+    let (all_constraints, external_constraints) = ty_inf.constraints();
+    assert!(
+        external_constraints.is_empty(),
+        "No external constraints shall remain at top level"
+    );
+    for ModuleFunction { name, .. } in &source.functions {
+        // Compute the quantifiers based on the type variables in the function type and
+        // the constraints referring to them.
+        let descr = output.functions.get_mut(&name.0).unwrap();
+        let mut quantifiers = descr.ty_scheme.ty.inner_ty_vars();
+        let mut constraints;
+        loop {
+            // Loop because new constraints may introduce new type variables.
+            let initial_count = quantifiers.len();
+            constraints = filter_constraints(&all_constraints, &quantifiers);
+            quantifiers = extend_with_contraint_ty_vars(&quantifiers, &constraints);
+            if quantifiers.len() == initial_count {
+                break;
+            }
+        }
+
+        // Detect unbound type variables in the code and return error if any.
+        let mut unbound = HashSet::new();
+        descr.code.borrow_mut().apply_if_script(&mut |node| {
+            node.unbound_ty_vars(&mut unbound, &quantifiers, 0);
+        });
+        if let Some((ty_var, span)) = unbound.into_iter().next() {
+            let pos = span.start();
+            let mut ty = None;
+            descr
+                .code
+                .borrow_mut()
+                .apply_if_script(&mut |node| ty = node.type_at(pos));
+            let ty = ty.ok_or_else(|| {
+                InternalCompilationError::Internal(format!(
+                    "Type not found at pos {pos} while looking for unbound type variable {ty_var}"
+                ))
+            })?;
+            return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
+        }
+
+        // Write the final type scheme.
+        descr.ty_scheme.quantifiers = quantifiers;
+        descr.ty_scheme.constraints = constraints;
+    }
+
+    // Safety check: make sure that there are no unused constraints.
+    let used_constraints: HashSet<_> = source
+        .functions
+        .iter()
+        .flat_map(|f| output.functions[&f.name.0].ty_scheme.constraints.clone())
+        .collect();
+    let unused_constraints = all_constraints
+        .iter()
+        .filter(|c| !used_constraints.contains(c))
+        .collect::<Vec<_>>();
+    if !unused_constraints.is_empty() {
+        let module_env = ModuleEnv::new(&output, others);
+        let constraints = unused_constraints
+            .iter()
+            .map(|c| c.format_with(&module_env))
+            .join(" ∧ ");
+        return Err(InternalCompilationError::Internal(format!(
+            "Unused constraints in module compilation: {}",
+            constraints
+        )));
+    }
+
+    // Sixth pass, normalize the type schemes and substitute the types in the functions.
+    for ModuleFunction { name, .. } in &source.functions {
+        let descr = output.functions.get_mut(&name.0).unwrap();
+        let subst = descr.ty_scheme.normalize();
+        descr.code.borrow_mut().apply_if_script(&mut |node| {
+            node.substitute(&subst);
+        });
+    }
+
+    Ok(output)
 }
 
-pub struct EmitIrEnv<'m> {
+/// A compiled expression
+#[derive(Debug)]
+pub struct CompiledExpr {
+    pub expr: ir::Node,
+    pub ty: TypeScheme<Type>,
+    pub locals: Vec<Local>,
+}
+
+/// Emit IR for an expression
+/// Retrun the compiled expression and any remaining external constraints
+/// referring to lower-generation type variables.
+pub fn emit_expr(
+    source: &ast::Expr,
+    module_env: ModuleEnv,
     locals: Vec<Local>,
-    modules: ModuleEnv<'m>,
+    generation: u32,
+    outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
+) -> Result<(CompiledExpr, Vec<Constraint>), InternalCompilationError> {
+    // Infer the expression with the existing locals.
+    let initial_local_count = locals.len();
+    let mut ty_env = TypingEnv::new(locals, module_env);
+    let mut ty_inf = TypeInference::new_with_generation(generation);
+    let (mut node, mut ty) = ty_inf.infer_expr(&mut ty_env, source)?;
+    let mut locals = ty_env.get_locals_and_drop();
+    // FIXME: we need to emit fresh variables not in the locals before us!
+    // So we need some notion of generations so that fresh ones do not clash with older ones.
+    ty_inf.log_debug_constraints(module_env);
+
+    // Perform the unification.
+    let mut ty_inf = ty_inf.unify(outer_fresh_ty_var_gen)?;
+    ty_inf.log_debug_substitution_table(module_env);
+
+    // Substitute the result of the unification.
+    ty_inf.substitute_node(&mut node, &[]);
+    ty = ty_inf.substitute_type(ty, &[]);
+    for local in locals.iter_mut().skip(initial_local_count) {
+        ty_inf.substitute_in_type_scheme(&mut local.ty);
+    }
+    ty_inf.substitute_in_external_constraints();
+
+    // Get the remaining constraints and collect the free variables.
+    ty_inf.log_debug_constraints(module_env);
+    let (constraints, external_constraints) = ty_inf.constraints();
+    let quantifiers = TypeScheme::<Type>::list_ty_vars(&ty, &constraints, generation);
+
+    // Detect unbound type variables in the code and return error if any.
+    let mut unbound = HashSet::new();
+    node.unbound_ty_vars(&mut unbound, &quantifiers, generation);
+    if let Some((ty_var, span)) = unbound.into_iter().next() {
+        let pos = span.start();
+        let ty = node.type_at(pos).ok_or_else(|| {
+            InternalCompilationError::Internal(format!(
+                "Type not found at pos {pos} while looking for unbound type variable {ty_var}"
+            ))
+        })?;
+        return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
+    }
+
+    // Detect unbound inner type variables in locals and return internal error if any.
+    for local in locals.iter().skip(initial_local_count) {
+        let unbounds = local.ty.unbound_ty_vars(generation);
+        if let Some(&ty_var) = unbounds.first() {
+            return Err(InternalCompilationError::Internal(format!(
+                "Unbound type variable {ty_var} in local {} with type {}",
+                local.name,
+                local.ty.display_rust_style(&module_env)
+            )));
+        }
+    }
+
+    // Detect external constraints that contain type variables listed in the quantifiers
+    for constraint in &external_constraints {
+        if constraint.contains_ty_vars(&quantifiers) {
+            return Err(InternalCompilationError::Internal(format!(
+                "External constraint {} contains one of the internal type variables {}",
+                constraint.format_with(&module_env),
+                quantifiers.iter().map(|var| format!("{var}")).join(", ")
+            )));
+        }
+    }
+
+    // Normalize the type scheme
+    let mut ty_scheme = TypeScheme {
+        ty,
+        quantifiers,
+        constraints,
+    };
+    let subst = ty_scheme.normalize();
+    node.substitute(&subst);
+
+    Ok((
+        CompiledExpr {
+            expr: node,
+            ty: ty_scheme,
+            locals,
+        },
+        external_constraints,
+    ))
 }
 
-impl<'m> EmitIrEnv<'m> {
-    pub fn with_module_env(modules: ModuleEnv<'m>) -> Self {
-        Self {
-            locals: vec![],
-            modules,
-        }
-    }
+/// Emit IR for an expression
+/// Retrun the compiled expression and any remaining external constraints
+/// referring to lower-generation type variables.
+pub fn emit_expr_top_level(
+    source: &ast::Expr,
+    module_env: ModuleEnv,
+    locals: Vec<Local>,
+) -> Result<(CompiledExpr, Vec<Constraint>), InternalCompilationError> {
+    emit_expr(
+        source,
+        module_env,
+        locals,
+        0,
+        &mut invalid_outer_fresh_ty_var_gen,
+    )
+}
 
-    pub fn new(locals: Vec<Local>, modules: ModuleEnv<'m>) -> Self {
-        Self { locals, modules }
-    }
-
-    pub fn get_locals_and_drop(self) -> Vec<Local> {
-        self.locals
-    }
-
-    fn new_function(args: &[Ustr], modules: ModuleEnv<'m>) -> Self {
-        let locals = args.iter().map(|name| Local::new(*name, false)).collect();
-        EmitIrEnv { locals, modules }
-    }
-
-    /// Emit IR for the given module
-    pub fn emit_module(
-        source: &ast::Module,
-        others: &Modules,
-        merge_with: Option<Module>,
-    ) -> Result<Module, EmissionError> {
-        let mut output = merge_with.unwrap_or_default();
-        let mut ty_inf = TypingEnv::default();
-        // first pass, populate the function table and allocate fresh mono type variables
-        for (name, args, _body) in &source.functions {
-            let args_ty: Vec<_> = args
-                .iter()
-                .map(|_| Type::variable(ty_inf.fresh_type_var()))
-                .collect();
-            let f_descr = FunctionDescription {
-                ty: FnType::new_by_val(&args_ty, Type::variable(ty_inf.fresh_type_var())),
-                code: B::new(ScriptFunction::new(ir::Node::Literal(Value::unit()))), // fake code
-            };
-            output
-                .functions
-                .insert(*name, Rc::new(RefCell::new(f_descr)));
-        }
-
-        // second pass, infer types
-        // TODO: add type inference
-
-        // third pass, generate the functions bodies
-        for (name, args, body) in &source.functions {
-            let mut env = EmitIrEnv::new_function(args, ModuleEnv::new(&output, others));
-            let code = env.emit_expr(body)?;
-            let descr = output.functions.get_mut(name).unwrap();
-            descr.borrow_mut().code = B::new(ScriptFunction::new(code));
-        }
-
-        // substitute the remaining mono type variables as poly type variales in function definitions
-        Ok(output)
-    }
-
-    /// Emit IR for an expression
-    pub fn emit_expr(&mut self, expr: &Expr) -> Result<ir::Node, EmissionError> {
-        use ir::Node as N;
-        use ExprKind::*;
-        match &expr.kind {
-            Literal(value) => Ok(N::Literal(value.clone())),
-            Variable(name) => Ok(N::EnvLoad(self.get_variable_index(*name)?)),
-            LetVar(name, mutable, expr) => {
-                let store_node = N::EnvStore(B::new(self.emit_expr(expr)?));
-                // Note: to allow recursion, we would env.insert before the store_node
-                self.locals.push(Local::new(*name, *mutable));
-                Ok(store_node)
+/// Filter constraints that contain type variables listed in the quantifiers
+fn filter_constraints(constraints: &[PubConstraint], ty_vars: &[TypeVar]) -> Vec<PubConstraint> {
+    constraints
+        .iter()
+        .filter(|constraint| {
+            let ret = constraint.contains_ty_vars(ty_vars);
+            if ret {
+                log::debug!("Constraint {constraint:?} contains: {ret}");
             }
-            Abstract(args, body) => {
-                // Setup a new environment for the function
-                // TODO: capture the outer environment
-                let mut f_env = EmitIrEnv::new_function(args, self.modules);
-                let f_body = f_env.emit_expr(body)?;
-                // FIXME: this is a hack as we need to provide types but we do not do typing yet
-                let args_ty: Vec<_> = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| Type::variable_id(i as u32))
-                    .collect();
-                let f_descr = FunctionDescription {
-                    ty: FnType::new_by_val(&args_ty, Type::variable_id(args_ty.len() as u32)),
-                    code: B::new(ScriptFunction::new(f_body)),
-                };
-                Ok(N::Literal(Value::function(f_descr)))
-            }
-            Apply(function, args) => {
-                // do we have a global function?
-                if let Variable(name) = function.kind {
-                    if !self.has_variable_name(name) {
-                        return self.emit_static_apply(name, args);
-                    }
-                }
-                // no, we emit code to evaluate function
-                let function = self.emit_expr(function)?;
-                let arguments = self.emit_irs(args)?;
-                Ok(N::Apply(B::new(ir::Application {
-                    function,
-                    arguments,
-                })))
-            }
-            StaticApply(name, args) => self.emit_static_apply(*name, args),
-            Block(exprs) => {
-                let env_size = self.locals.len();
-                let nodes = exprs
-                    .iter()
-                    .map(|expr| self.emit_expr(expr))
-                    .collect::<Result<_, _>>()?;
-                self.locals.truncate(env_size);
-                Ok(N::BlockExpr(B::new(nodes)))
-            }
-            Assign(place, expr) => {
-                let value = self.emit_expr(expr)?;
-                let place = self.emit_expr(place)?;
-                Ok(N::Assign(B::new(ir::Assignment { place, value })))
-            }
-            Tuple(exprs) => {
-                let exprs = self.emit_irs(exprs)?;
-                Ok(N::Tuple(B::new(SVec2::from_vec(exprs))))
-            }
-            Project(expr, index) => {
-                let expr = self.emit_expr(expr)?;
-                Ok(N::Project(B::new((expr, *index))))
-            }
-            Array(exprs) => {
-                let exprs = self.emit_irs(exprs)?;
-                Ok(N::Array(B::new(SVec2::from_vec(exprs))))
-            }
-            Index(array, index) => {
-                let array = self.emit_expr(array)?;
-                let index = self.emit_expr(index)?;
-                Ok(N::Index(B::new(array), B::new(index)))
-            }
-            Match(expr, alternatives, default) => {
-                let value = self.emit_expr(expr)?;
-                // convert optional default to mandatory one
-                if let Some(default) = default {
-                    let default = self.emit_expr(default)?;
-                    let alternatives = self.emit_patterns(alternatives)?;
-                    Ok(N::Case(B::new(ir::Case {
-                        value,
-                        alternatives,
-                        default,
-                    })))
-                } else if alternatives.is_empty() {
-                    panic!("empty match without default");
-                } else {
-                    let default = self.emit_expr(&alternatives.last().unwrap().1)?;
-                    let alternatives =
-                        self.emit_patterns(&alternatives[0..alternatives.len() - 1])?;
-                    Ok(N::Case(B::new(ir::Case {
-                        value,
-                        alternatives,
-                        default,
-                    })))
-                }
-            }
-            Error(msg) => {
-                panic!("attempted to emit IR for error node: {msg}");
-            }
-        }
-    }
+            ret
+        })
+        .cloned()
+        .collect()
+}
 
-    fn emit_static_apply(&mut self, name: Ustr, args: &[Expr]) -> Result<ir::Node, EmissionError> {
-        let function = FunctionRef::new_weak(&self.get_function(name)?);
-        let arguments = self.emit_irs(args)?;
-        Ok(ir::Node::StaticApply(B::new(ir::StaticApplication {
-            function,
-            arguments,
-        })))
-    }
+/// Extend a list of type variables with the type variables in the constraints
+fn extend_with_contraint_ty_vars(
+    ty_vars: &[TypeVar],
+    constraints: &[PubConstraint],
+) -> Vec<TypeVar> {
+    ty_vars
+        .iter()
+        .cloned()
+        .chain(constraints.iter().flat_map(|c| c.inner_ty_vars()))
+        .unique()
+        .collect()
+}
 
-    fn emit_irs(&mut self, exprs: &[Expr]) -> Result<Vec<ir::Node>, EmissionError> {
-        exprs.iter().map(|expr| self.emit_expr(expr)).collect()
-    }
-
-    fn emit_patterns<U: std::iter::FromIterator<(Value, ir::Node)>>(
-        &mut self,
-        pairs: &[(Expr, Expr)],
-    ) -> Result<U, EmissionError> {
-        pairs
-            .iter()
-            .map(|(pattern, expr)| {
-                if let ExprKind::Literal(literal) = &pattern.kind {
-                    Ok((literal.clone(), self.emit_expr(expr)?))
-                } else {
-                    Err("Expect literal, found another expr kind".to_string())
-                }
-            })
-            .collect::<Result<U, EmissionError>>()
-    }
-
-    fn has_variable_name(&self, name: Ustr) -> bool {
-        self.locals.iter().any(|local| local.name == name)
-    }
-
-    fn get_variable_index(&self, name: Ustr) -> Result<usize, EmissionError> {
-        self.locals
-            .iter()
-            .rev()
-            .position(|local| local.name == name)
-            .map(|index| self.locals.len() - 1 - index)
-            .ok_or_else(|| format!("variable {name} not found"))
-    }
-
-    fn get_function(&self, name: Ustr) -> Result<FunctionDescriptionRc, EmissionError> {
-        // TODO: add support for looking up in other modules with qualified path
-        self.modules
-            .current
-            .get_function(name, self.modules.others)
-            .ok_or_else(|| format!("function {name} not found"))
-    }
+fn invalid_outer_fresh_ty_var_gen() -> TypeVar {
+    panic!("Already at outer-most level, cannot have an even outer fresh type variable generator.")
 }

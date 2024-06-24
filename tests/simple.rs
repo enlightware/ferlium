@@ -1,7 +1,19 @@
 mod common;
 
-use common::{fail_run, run, unit};
+use test_log::test;
+
+use common::{fail_compilation, fail_run, run, unit};
 use painturscript::{error::RuntimeError, std::array::Array, value::Value};
+
+#[test]
+fn whitespaces() {
+    assert_eq!(run(""), unit());
+    assert_eq!(run(" "), unit());
+    assert_eq!(run("\t"), unit());
+    assert_eq!(run(" \t"), unit());
+    assert_eq!(run("\t "), unit());
+    assert_eq!(run("\t \t  \t\t\t"), unit());
+}
 
 #[test]
 fn literals() {
@@ -16,14 +28,14 @@ fn equalities() {
     assert_eq!(run("41 == 42"), bool!(false));
     assert_eq!(run("42 != 42"), bool!(false));
     assert_eq!(run("41 != 42"), bool!(true));
+    fail_compilation("1 == true").expect_type_mismatch("int", "bool");
     assert_eq!(run("true == true"), bool!(true));
     assert_eq!(run("true == false"), bool!(false));
     assert_eq!(run("true != true"), bool!(false));
     assert_eq!(run("true != false"), bool!(true));
     assert_eq!(run("() == ()"), bool!(true));
     assert_eq!(run("() != ()"), bool!(false));
-    assert_eq!(run("() == (1,)"), bool!(false));
-    assert_eq!(run("() != (1,)"), bool!(true));
+    fail_compilation("() == (1,)").expect_type_mismatch("()", "(int)");
     assert_eq!(run("(1,) == (1,)"), bool!(true));
     assert_eq!(run("(1,) != (1,)"), bool!(false));
     assert_eq!(run("(1,) == (2,)"), bool!(false));
@@ -34,8 +46,8 @@ fn equalities() {
     assert_eq!(run("(1,true) != (2,true)"), bool!(true));
     assert_eq!(run("(1,true) == (1,false)"), bool!(false));
     assert_eq!(run("(1,true) != (1,false)"), bool!(true));
-    assert_eq!(run("[] == []"), bool!(true));
-    assert_eq!(run("[] != []"), bool!(false));
+    fail_compilation("[] == []").expect_unbound_ty_var();
+    fail_compilation("[] != []").expect_unbound_ty_var();
     assert_eq!(run("[] == [1]"), bool!(false));
     assert_eq!(run("[] != [1]"), bool!(true));
     assert_eq!(run("[1] == [1]"), bool!(true));
@@ -60,6 +72,7 @@ fn local_variables() {
         run("var a = (1, true); a = (2, false); a == (2, false)"),
         bool!(true)
     );
+    assert_eq!(run("let f = || 1; let a = f(); a"), int!(1));
 }
 
 #[test]
@@ -179,8 +192,18 @@ fn tuple_projection() {
     assert_eq!(run("(1,).0"), int!(1));
     assert_eq!(run("(1,2).1"), int!(2));
     assert_eq!(run("(1,(3, (2, 4, 5))).1.1.2"), int!(5));
+    assert_eq!(run("let a = (1,2); a.0"), int!(1));
     assert_eq!(run("let a = (1,2); a.1"), int!(2));
     assert_eq!(run("let f = || (1,2); f().1"), int!(2));
+    assert_eq!(
+        run("let f = |x, y| (y == x.1.0); f((1,(2,1)), 2)"),
+        bool!(true)
+    );
+    assert_eq!(
+        run("let f = |x, y| (x.1, x.1.0, y == x.1); f((1,(2,1)), (2,1)); ()"),
+        unit()
+    );
+    assert_eq!(run("fn f(v) { v.1.2.3 } ()"), unit());
 }
 
 #[test]
@@ -197,11 +220,17 @@ fn lambda() {
         run("let sq = |x| x * x; let inc = |x| x + 1; sq(inc(inc(2)))"),
         int!(16)
     );
+    assert_eq!(run("let id = |x| x; id(1); id(true)"), bool!(true));
+    assert_eq!(
+        run("let d = |x, y| (x, y + 1); d(true, 1); d(1, 2)"),
+        int_tuple!(1, 3)
+    );
 }
 
 #[test]
 fn assignment() {
     assert_eq!(run("let a = 1; a"), int!(1));
+    assert_eq!(run("var a = 1; a = 2"), unit());
     assert_eq!(run("var a = 1; a = 2; a"), int!(2));
     assert_eq!(run("var a = 1; let b = 2; a = b; a"), int!(2));
     assert_eq!(run("var a = 1; let b = 2; a = b; b"), int!(2));
@@ -307,11 +336,26 @@ fn array_prepend() {
 
 #[test]
 fn array_len() {
-    assert_eq!(run("let a = []; array_len(a)"), int!(0));
+    fail_compilation("let a = []; array_len(a)").expect_unbound_ty_var();
     assert_eq!(run("let a = [1]; array_len(a)"), int!(1));
     assert_eq!(run("let a = [1, 2]; array_len(a)"), int!(2));
     assert_eq!(run("let a = [[1], [1, 1]]; array_len(a)"), int!(2));
     assert_eq!(run("let a = [1, 1, 1]; array_len(a)"), int!(3));
+}
+
+#[test]
+fn array_concat() {
+    assert_eq!(run("array_concat([], [])"), int_a![]);
+    assert_eq!(run("array_concat([1], [])"), int_a![1]);
+    assert_eq!(run("array_concat([], [1])"), int_a![1]);
+    assert_eq!(run("array_concat([1], [2])"), int_a![1, 2]);
+    assert_eq!(run("array_concat([1, 2], [3])"), int_a![1, 2, 3]);
+    assert_eq!(run("array_concat([1], [2, 3])"), int_a![1, 2, 3]);
+    assert_eq!(run("array_concat([1, 2], [3, 4])"), int_a![1, 2, 3, 4]);
+    assert_eq!(
+        run("array_concat([1, 2], [3, 4, 5])"),
+        int_a![1, 2, 3, 4, 5]
+    );
 }
 
 #[test]

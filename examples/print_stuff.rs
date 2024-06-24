@@ -1,22 +1,56 @@
-use std::{cell::RefCell, rc::Rc};
+use std::fmt;
 
 use painturscript::{
     function::{BinaryNativeFn, FunctionRef},
-    ir::{Application, EvalCtx, Node, StaticApplication},
-    r#type::{bare_native_type, store_types, NativeType, Type, TypeKind, TypeOfNativeValue},
-    value::Value,
+    module::{FmtWithModuleEnv, ModuleEnv, Modules},
+    r#type::{bare_native_type, store_types, Type, TypeKind},
+    std::{
+        logic::unit_type,
+        math::{float_type, int_type},
+        std_module,
+    },
+    value::{NativeDisplay, Value},
 };
-use smallvec::smallvec;
 use ustr::ustr;
+
+fn println(value: &impl FmtWithModuleEnv, data: &ModuleEnv) {
+    println!("{}", value.format_with(data));
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct List(Vec<Value>);
+
+impl NativeDisplay for List {
+    fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[")?;
+        for (i, v) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", v)?;
+        }
+        write!(f, "]")
+    }
+}
 
 fn main() {
     // basic types
-    let int = Type::primitive::<isize>();
+    let int = int_type();
     let u32 = Type::primitive::<u32>();
-    let float = Type::primitive::<f32>();
+    let float = float_type();
     let string = Type::primitive::<String>();
-    let empty_tuple = Type::tuple(vec![]);
+    let empty_tuple = unit_type();
     let gen0 = Type::variable_id(0);
+
+    // environment
+    let other_modules = Modules::new();
+    let mut current_module = std_module();
+    current_module.types.set(ustr("u32"), u32);
+    current_module.types.set(ustr("string"), string);
+    current_module
+        .types
+        .set_bare_native(ustr("list"), bare_native_type::<List>());
+    let module_env = ModuleEnv::new(&current_module, &other_modules);
 
     // test type printing
     println!("Some types:\n");
@@ -25,16 +59,16 @@ fn main() {
         (ustr("name"), string),
         (ustr("age"), int),
     ]);
-    println!("{}", st);
+    println(&st, &module_env);
 
     let variant = Type::variant(vec![(ustr("i"), int), (ustr("s"), string)]);
-    println!("{}", variant);
+    println(&variant, &module_env);
     let variant = Type::variant(vec![
         (ustr("i"), int),
         (ustr("f"), float),
         (ustr("u32"), u32),
     ]);
-    println!("{}", variant);
+    println(&variant, &module_env);
 
     // ADT recursive list
     let adt_list_element = TypeKind::Tuple(vec![gen0, Type::new_local(1)]);
@@ -44,47 +78,32 @@ fn main() {
     ]);
     // add them to the universe as a batch
     let adt_list = store_types(&[adt_list_element, adt_list])[1];
-    println!("{}", adt_list);
+    println(&adt_list, &module_env);
 
     // native list
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct List(Vec<Value>);
-    impl TypeOfNativeValue for List {
-        fn type_of_value(&self) -> NativeType {
-            NativeType::new(
-                bare_native_type::<Self>(),
-                match self.0.first() {
-                    Some(value) => vec![value.ty()],
-                    None => vec![Type::variable_id(0)],
-                }
-            )
-        }
-    }
     let list = Type::native::<List>(vec![gen0]);
     let list_int = Type::native::<List>(vec![int]);
-    println!("{}", list);
-    println!("{}", list_int);
+    println(&list, &module_env);
+    println(&list_int, &module_env);
 
     // functions
     let functions = [
-        Rc::new(RefCell::new(BinaryNativeFn::description(
-            std::ops::Add::add as fn(isize, isize) -> isize,
-        ))),
-        Rc::new(RefCell::new(BinaryNativeFn::description(
-            std::ops::Sub::sub as fn(isize, isize) -> isize,
-        ))),
+        BinaryNativeFn::description(std::ops::Add::add as fn(isize, isize) -> isize),
+        BinaryNativeFn::description(std::ops::Sub::sub as fn(isize, isize) -> isize),
     ];
-    let add_fn_ty = functions[0].borrow().ty();
-    println!("{}", add_fn_ty);
-    let add_fn = FunctionRef::new_strong(&functions[0]);
-    let sub_fn = FunctionRef::new_strong(&functions[1]);
+    let add_fn_ty = functions[0].ty_scheme.clone();
+    println!("{}", add_fn_ty.display_rust_style(&module_env));
+    let add_fn = FunctionRef::new_strong(&functions[0].code);
+    let _sub_fn = FunctionRef::new_strong(&functions[1].code);
     let add_value = Value::Function(add_fn.clone());
 
     // some interesting functions and types
     let option = Type::variant(vec![(ustr("None"), empty_tuple), (ustr("Some"), gen0)]);
-    println!("Option: {}", option);
+    print!("Option: ");
+    println(&option, &module_env);
     let iterator_gen0 = Type::function(&[], Type::tuple(vec![option, Type::new_local(0)]));
-    println!("Iterator: {}", iterator_gen0);
+    println!("Iterator: ");
+    println(&iterator_gen0, &module_env);
 
     // test printing values
     println!("\nSome values:\n");
@@ -96,22 +115,4 @@ fn main() {
     ])));
     println!("{}", v_list_int);
     println!("{}", add_value);
-
-    // test ir execution
-    println!("\nSome IR and its execution:\n");
-    let ir = Node::BlockExpr(Box::new(smallvec![
-        Node::EnvStore(Box::new(Node::Literal(Value::native(11_isize)))),
-        Node::Apply(Box::new(Application {
-            function: Node::Literal(Value::Function(add_fn)),
-            arguments: vec![
-                Node::StaticApply(Box::new(StaticApplication {
-                    function: sub_fn,
-                    arguments: vec![Node::EnvLoad(0), Node::Literal(Value::native(5_isize))],
-                })),
-                Node::Literal(Value::native(3_isize)),
-            ],
-        })),
-    ]));
-    println!("{:?}", ir);
-    ir.eval_and_print(&mut EvalCtx::new());
 }

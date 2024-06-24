@@ -4,18 +4,58 @@ use std::fmt::Debug;
 
 use ustr::Ustr;
 
-use crate::{containers::B, error::LocatedError, r#type::Type, value::Value};
+use crate::{
+    containers::B, error::LocatedError, module::FmtWithModuleEnv, r#type::Type, value::Value,
+};
+
+#[derive(Debug, Clone)]
+pub struct ModuleFunction {
+    pub name: (Ustr, Span),
+    pub args: Vec<(Ustr, Span)>,
+    pub args_span: Span,
+    pub body: B<Expr>,
+    pub span: Span,
+}
+impl ModuleFunction {
+    pub fn new(
+        name: (Ustr, Span),
+        args: Vec<(Ustr, Span)>,
+        args_span: Span,
+        body: B<Expr>,
+        span: Span,
+    ) -> Self {
+        Self {
+            name,
+            args,
+            args_span,
+            body,
+            span,
+        }
+    }
+}
 
 // A module is a collection of functions and types, and is the top-level structure of the AST
 #[derive(Debug, Clone, Default)]
 pub struct Module {
-    pub functions: Vec<(Ustr, Vec<Ustr>, B<Expr>)>,
+    pub functions: Vec<ModuleFunction>,
     pub types: Vec<(Ustr, Type)>,
 }
 impl Module {
-    pub fn new_with_function(name: Ustr, args: Vec<Ustr>, body: Expr) -> Self {
+    pub fn new_with_function(
+        name: (Ustr, Span),
+        args: Vec<(Ustr, Span)>,
+        args_span: Span,
+        body: Expr,
+        span: Span,
+    ) -> Self {
         Self {
-            functions: vec![(name, args, B::new(body))],
+            functions: vec![ModuleFunction::new(
+                name,
+                args,
+                args_span,
+                B::new(body),
+                span,
+            )],
             ..Default::default()
         }
     }
@@ -27,7 +67,7 @@ impl Module {
 
     pub fn errors(&self) -> Vec<LocatedError> {
         let mut errors = vec![];
-        for (_, _, body) in self.functions.iter() {
+        for ModuleFunction { body, .. } in self.functions.iter() {
             body.acc_errors_rec(&mut errors);
         }
         errors
@@ -38,22 +78,29 @@ impl Module {
     }
 }
 
-impl std::fmt::Display for Module {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl FmtWithModuleEnv for Module {
+    fn fmt_with_module_env(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &crate::module::ModuleEnv<'_>,
+    ) -> std::fmt::Result {
         if !self.types.is_empty() {
             writeln!(f, "Types:")?;
             for (name, ty) in self.types.iter() {
-                writeln!(f, "  {}: {}", name, ty)?;
+                writeln!(f, "  {}: {}", name, ty.format_with(env))?;
             }
         }
         if !self.functions.is_empty() {
             writeln!(f, "Functions:")?;
-            for (name, args, body) in self.functions.iter() {
+            for ModuleFunction {
+                name, args, body, ..
+            } in self.functions.iter()
+            {
                 writeln!(
                     f,
                     "  fn {}({}):",
-                    name,
-                    args.iter().map(ToString::to_string).join(", ")
+                    name.0,
+                    args.iter().map(|(name, _)| name.to_string()).join(", ")
                 )?;
                 body.format_ind(f, 2)?;
             }
@@ -62,21 +109,19 @@ impl std::fmt::Display for Module {
     }
 }
 
-pub type NodeId = u32;
-
-/// An kind-specific part of an expression as an Abstract Syntax Tree
+/// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone)]
 pub enum ExprKind {
-    Literal(Value),
+    Literal(Value, Type),
     Variable(Ustr),
-    LetVar(Ustr, bool, B<Expr>),
-    Abstract(Vec<Ustr>, B<Expr>),
+    LetVar((Ustr, Span), bool, B<Expr>),
+    Abstract(Vec<(Ustr, Span)>, B<Expr>),
     Apply(B<Expr>, Vec<Expr>),
     StaticApply(Ustr, Vec<Expr>),
     Block(Vec<Expr>),
     Assign(B<Expr>, B<Expr>),
     Tuple(Vec<Expr>),
-    Project(B<Expr>, usize),
+    Project(B<Expr>, usize, Span),
     Array(Vec<Expr>),
     Index(B<Expr>, B<Expr>),
     Match(B<Expr>, Vec<(Expr, Expr)>, Option<B<Expr>>),
@@ -98,16 +143,16 @@ impl Expr {
         let indent_str = "  ".repeat(indent);
         use ExprKind::*;
         match &self.kind {
-            Literal(value) => writeln!(f, "{indent_str}{value}"),
+            Literal(value, _) => writeln!(f, "{indent_str}{value}"),
             Variable(name) => writeln!(f, "{indent_str}{name} (local)"),
-            LetVar(name, mutable, expr) => {
-                let kw = if *mutable { "mut" } else { "let" };
+            LetVar((name, _), mutable, expr) => {
+                let kw = if *mutable { "var" } else { "let" };
                 writeln!(f, "{indent_str}{kw} {name} =")?;
                 expr.format_ind(f, indent + 1)
             }
             Abstract(args, body) => {
                 write!(f, "{indent_str}|")?;
-                for arg in args {
+                for (arg, _) in args {
                     write!(f, "{arg}, ")?;
                 }
                 writeln!(f, "|")?;
@@ -116,11 +161,15 @@ impl Expr {
             Apply(func, args) => {
                 writeln!(f, "{indent_str}eval")?;
                 func.format_ind(f, indent + 1)?;
-                writeln!(f, "{indent_str}and apply to (")?;
-                for arg in args {
-                    arg.format_ind(f, indent + 1)?;
+                if args.is_empty() {
+                    writeln!(f, "{indent_str}and apply to ()")
+                } else {
+                    writeln!(f, "{indent_str}and apply to (")?;
+                    for arg in args {
+                        arg.format_ind(f, indent + 1)?;
+                    }
+                    writeln!(f, "{indent_str})")
                 }
-                writeln!(f, "{indent_str})")
             }
             StaticApply(func, args) => {
                 writeln!(f, "{indent_str}apply {func} to (")?;
@@ -136,7 +185,7 @@ impl Expr {
                 Ok(())
             }
             Assign(place, value) => {
-                writeln!(f, "{indent_str}=")?;
+                writeln!(f, "{indent_str}assign")?;
                 place.format_ind(f, indent + 1)?;
                 value.format_ind(f, indent + 1)
             }
@@ -147,16 +196,20 @@ impl Expr {
                 }
                 writeln!(f, "{indent_str})")
             }
-            Project(expr, index) => {
+            Project(expr, index, _) => {
                 expr.format_ind(f, indent)?;
-                writeln!(f, "{indent_str}.{index}")
+                writeln!(f, "{indent_str}  .{index}")
             }
             Array(args) => {
-                writeln!(f, "{indent_str}[")?;
-                for arg in args.iter() {
-                    arg.format_ind(f, indent + 1)?;
+                if args.is_empty() {
+                    writeln!(f, "{indent_str}[]")
+                } else {
+                    writeln!(f, "{indent_str}[")?;
+                    for arg in args.iter() {
+                        arg.format_ind(f, indent + 1)?;
+                    }
+                    writeln!(f, "{indent_str}]")
                 }
-                writeln!(f, "{indent_str}]")
             }
             Index(expr, index) => {
                 expr.format_ind(f, indent)?;
@@ -214,7 +267,7 @@ impl Expr {
                 value.acc_errors_rec(errors);
             }
             ExprKind::Tuple(args) => acc_errors(errors, args.iter()),
-            ExprKind::Project(expr, _) => expr.acc_errors_rec(errors),
+            ExprKind::Project(expr, _, _) => expr.acc_errors_rec(errors),
             ExprKind::Array(args) => acc_errors(errors, args.iter()),
             ExprKind::Index(expr, index) => {
                 expr.acc_errors_rec(errors);

@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::iter;
@@ -14,25 +15,108 @@ use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
+use itertools::Itertools;
+use lrpar::Span;
 use nonmax::NonMaxU32;
 use ustr::Ustr;
 
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::B;
+use crate::emit_ir::Local;
 use crate::graph;
 use crate::graph::find_disjoint_subgraphs;
+use crate::module::FmtWithModuleEnv;
+use crate::module::ModuleEnv;
 use crate::sync::SyncPhantomData;
+use crate::type_scheme::TypeScheme;
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-pub struct TypeVar(pub(crate) u32);
+/// Something that is a type or part of it, and that can
+/// be instantiated and queried for its free type variables.
+pub trait TypeLike {
+    /// Instantiate the type variables within this type with the given substitutions
+    fn instantiate(&self, subst: &TypeSubstitution) -> Self;
+    /// Substitute the type variables within this type wih the given substitutions
+    fn substitute(&self, subst: &TypeVarSubstitution) -> Self;
+    /// Return all type variables contained in this type
+    fn inner_ty_vars(&self) -> Vec<TypeVar>;
+}
 
+/// A key for the type variable in the unification table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TyVarKey(pub(crate) u32);
+impl TyVarKey {
+    pub fn to_var(&self, generation: u32) -> TypeVar {
+        TypeVar::new(self.0, generation)
+    }
+}
+
+impl Display for TyVarKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", type_variable_index_to_string(self.0))
+    }
+}
+
+/// A generic variable for a type
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeVar {
+    /// The generation of this type variable, to avoid name clashing in let polymorphism
+    generation: u32,
+    /// The name of this type variable, its identity in the context considered
+    name: u32,
+}
+
+impl TypeVar {
+    pub fn new(name: u32, generation: u32) -> Self {
+        Self { generation, name }
+    }
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+    pub fn name(&self) -> u32 {
+        self.name
+    }
+    pub fn as_key(&self) -> TyVarKey {
+        TyVarKey(self.name)
+    }
+
+    pub(crate) fn new_fresh(name: u32, generation: u32) -> Self {
+        Self { generation, name }
+    }
+
+    pub(crate) fn substitute(self, subst: &TypeVarSubstitution) -> Self {
+        subst.get(&self).copied().unwrap_or(self)
+    }
+}
+
+impl Display for TypeVar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.generation > 0 {
+            write!(
+                f,
+                "{}",
+                type_variable_gen_index_to_string(self.name, self.generation)
+            )
+        } else {
+            write!(f, "{}", type_variable_index_to_string(self.name))
+        }
+    }
+}
 pub trait BareNativeType: DynClone + DynEq + Send + Sync {
     fn type_id(&self) -> TypeId {
         TypeId::of::<Self>()
     }
     fn type_name(&self) -> &'static str {
         type_name::<Self>()
+    }
+}
+
+impl FmtWithModuleEnv for B<dyn BareNativeType> {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        match env.bare_native_name(self) {
+            Some(name) => write!(f, "{name}"),
+            None => write!(f, "{}", self.as_ref().type_name()),
+        }
     }
 }
 
@@ -101,28 +185,12 @@ impl Debug for dyn BareNativeType {
     }
 }
 
-/// For a native value, return its type
-pub trait TypeOfNativeValue {
-    fn type_of_value(&self) -> NativeType;
-}
-
-#[macro_export]
-macro_rules! impl_bare_native_type {
-    ($t:ty) => {
-        impl $crate::r#type::TypeOfNativeValue for $t {
-            fn type_of_value(&self) -> $crate::r#type::NativeType {
-                $crate::r#type::NativeType::new_primitive::<Self>()
-            }
-        }
-    };
-}
-
 /// A generic type implemented in Rust.
 /// If arguments is empty, we call it a primitive type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NativeType {
-    bare_ty: B<dyn BareNativeType>,
-    arguments: Vec<Type>,
+    pub bare_ty: B<dyn BareNativeType>,
+    pub arguments: Vec<Type>,
 }
 
 impl NativeType {
@@ -144,29 +212,20 @@ impl NativeType {
     }
 }
 
-fn count_generics_rec(args: &[Type], counts: &mut TypeGenericCountMap) -> u32 {
-    args.iter()
-        .map(|ty| ty.count_generics_rec(counts))
-        .max()
-        .unwrap_or(0)
-}
-
-fn count_arg_generics_rec(args: &[FnArgType], counts: &mut TypeGenericCountMap) -> u32 {
-    args.iter()
-        .map(|arg| arg.ty.count_generics_rec(counts))
-        .max()
-        .unwrap_or(0)
-}
-
-fn format_generics(count: u32) -> String {
-    if count > 0 {
-        let generics = (0..count)
-            .map(generic_index_to_char)
-            .map(String::from)
-            .collect::<Vec<_>>();
-        format!("<{}>", generics.join(", "))
-    } else {
-        String::new()
+impl FmtWithModuleEnv for NativeType {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        self.bare_ty.fmt_with_module_env(f, env)?;
+        if !self.arguments.is_empty() {
+            write!(f, "<")?;
+            for (i, ty) in self.arguments.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                ty.fmt_with_module_env(f, env)?;
+            }
+            write!(f, ">")?;
+        }
+        Ok(())
     }
 }
 
@@ -187,7 +246,7 @@ impl FnArgType {
     fn can_be_used_in_place_of_with_subst(
         self,
         other: Self,
-        substitutions: &mut Substitutions,
+        substitutions: &mut TypeSubstitution,
         seen: &mut HashSet<(Type, Type)>,
     ) -> bool {
         self.ty
@@ -195,14 +254,12 @@ impl FnArgType {
             && (self.inout || !other.inout)
     }
 }
-impl fmt::Display for FnArgType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl FmtWithModuleEnv for FnArgType {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         if self.inout {
-            write!(f, "inout ")
-        } else {
-            Ok(())
-        }?;
-        write!(f, "{}", self.ty)
+            write!(f, "inout ")?;
+        }
+        self.ty.fmt_with_module_env(f, env)
     }
 }
 
@@ -223,6 +280,7 @@ impl FnType {
             ret,
         }
     }
+
     pub fn new_by_val(args: &[Type], ret: Type) -> Self {
         Self {
             args: args
@@ -232,13 +290,79 @@ impl FnType {
             ret,
         }
     }
+
+    pub fn as_locals_no_bound(&self, arg_names: &[(Ustr, Span)]) -> Vec<Local> {
+        arg_names
+            .iter()
+            .zip(self.args.iter())
+            .map(|((name, span), arg)| {
+                Local::new(*name, arg.inout, TypeScheme::new_just_type(arg.ty), *span)
+            })
+            .collect()
+    }
+
+    pub fn args_ty(&self) -> impl Iterator<Item = Type> + '_ {
+        self.args.iter().map(|arg| arg.ty)
+    }
+
     fn local_cmp(&self, other: &Self) -> Ordering {
         compare_by(&self.args, &other.args, FnArgType::local_cmp)
             .then(self.ret.local_cmp(&other.ret))
     }
 }
 
-type TypeGenericCountMap = HashMap<Type, u32>;
+impl TypeLike for FnType {
+    fn instantiate(&self, subst: &TypeSubstitution) -> Self {
+        Self {
+            args: self
+                .args
+                .iter()
+                .map(|arg| FnArgType {
+                    ty: arg.ty.instantiate(subst),
+                    inout: arg.inout,
+                })
+                .collect(),
+            ret: self.ret.instantiate(subst),
+        }
+    }
+
+    fn substitute(&self, subst: &TypeVarSubstitution) -> Self {
+        Self {
+            args: self
+                .args
+                .iter()
+                .map(|arg| FnArgType {
+                    ty: arg.ty.substitute(subst),
+                    inout: arg.inout,
+                })
+                .collect(),
+            ret: self.ret.substitute(subst),
+        }
+    }
+
+    fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        self.args
+            .iter()
+            .flat_map(|arg| arg.ty.inner_ty_vars())
+            .chain(self.ret.inner_ty_vars())
+            .unique()
+            .collect()
+    }
+}
+
+impl FmtWithModuleEnv for FnType {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        write!(f, "(")?;
+        for (i, arg) in self.args.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            arg.fmt_with_module_env(f, env)?;
+        }
+        write!(f, ") → ")?;
+        self.ret.fmt_with_module_env(f, env)
+    }
+}
 
 /// A type identifier, unique for a given type of a given mathematical structure
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -267,7 +391,7 @@ impl Type {
     }
 
     pub fn variable_id(id: u32) -> Self {
-        Self::variable(TypeVar(id))
+        Self::variable(TypeVar::new(id, 0))
     }
 
     pub fn variable(var: TypeVar) -> Self {
@@ -347,7 +471,7 @@ impl Type {
     pub fn can_be_used_in_place_of_with_subst(
         self,
         other: Self,
-        substitutions: &mut Substitutions,
+        substitutions: &mut TypeSubstitution,
         seen: &mut HashSet<(Type, Type)>,
     ) -> bool {
         // If the types are the same, they can be used in place of each other
@@ -388,26 +512,6 @@ impl Type {
         self.can_be_used_in_place_of_with_subst(that, &mut HashMap::new(), &mut HashSet::new())
     }
 
-    // generic counting
-    fn count_generics_rec(self, counts: &mut TypeGenericCountMap) -> u32 {
-        if counts.get(&self).is_none() {
-            counts.insert(self, 0);
-            let count = self.data().count_generics_rec(counts);
-            counts.insert(self, count);
-        }
-        0
-    }
-
-    fn count_generics(self) -> u32 {
-        let mut counts = HashMap::new();
-        let local_count = self.count_generics_rec(&mut counts);
-        local_count + counts.values().sum::<u32>()
-    }
-
-    pub fn format_generics(self) -> String {
-        format_generics(self.count_generics())
-    }
-
     // other
     fn local_cmp(&self, other: &Self) -> Ordering {
         if (self.world, other.world) == (None, None) {
@@ -415,6 +519,88 @@ impl Type {
         } else {
             self.cmp(other)
         }
+    }
+
+    /// Apply f to self if we are not in a self-calling cycle.
+    /// Takes two function for normal and cyclic cases, and a context
+    fn with_cycle_detection<F, D, C, R>(&self, normal: F, cycle: D, ctx: C) -> R
+    where
+        F: FnOnce(&Self, C) -> R,
+        D: FnOnce(&Self, C) -> R,
+    {
+        // Thread-local hash-map for cycle detection
+        thread_local! {
+            static TYPE_VISITED: RefCell<HashSet<Type>> = RefCell::new(HashSet::new());
+        }
+
+        // Check for cycle and insert the type into the HashSet
+        let cycle_detected = TYPE_VISITED.with(|visited| {
+            let mut visited = visited.borrow_mut();
+            if visited.contains(self) {
+                true // Cycle detected
+            } else {
+                visited.insert(*self);
+                false
+            }
+        });
+
+        // Return special case if cycle detected
+        if cycle_detected {
+            return cycle(self, ctx);
+        }
+
+        // Normal case, can possibly recurse
+        let result = normal(self, ctx);
+
+        // Remove the type on back-tracking
+        TYPE_VISITED.with(|visited| {
+            visited.borrow_mut().remove(self);
+        });
+
+        result
+    }
+}
+
+impl TypeLike for Type {
+    fn instantiate(&self, subst: &TypeSubstitution) -> Self {
+        self.with_cycle_detection(
+            |ty, _| {
+                let kind = ty.data().clone();
+                kind.instantiate(subst)
+            },
+            |ty, _| *ty,
+            (),
+        )
+    }
+
+    fn substitute(&self, subst: &TypeVarSubstitution) -> Self {
+        self.with_cycle_detection(
+            |ty, _| {
+                let kind = ty.data().clone();
+                kind.substitute(subst)
+            },
+            |ty, _| *ty,
+            (),
+        )
+    }
+
+    fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        self.with_cycle_detection(|ty, _| ty.data().inner_ty_vars(), |_, _| vec![], ())
+    }
+}
+
+impl FmtWithModuleEnv for Type {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        // If we have a name for this type, use it
+        if let Some(name) = env.type_name(*self) {
+            return write!(f, "{}", name);
+        }
+
+        self.with_cycle_detection(
+            |ty, (f, env)| ty.data().fmt_with_module_env(f, env),
+            |_, (f, _)| write!(f, "Self"),
+            (f, env),
+        )
     }
 }
 
@@ -425,49 +611,23 @@ impl Ord for Type {
             .then(self.index.cmp(&other.index))
     }
 }
+
 impl PartialOrd for Type {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl fmt::Display for Type {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // Check for cycle and insert the type into the HashSet
-        let cycle_detected = TYPE_DISPLAY_VISITED.with(|visited| {
-            let mut visited = visited.borrow_mut();
-            if visited.contains(self) {
-                true // Cycle detected
-            } else {
-                visited.insert(*self);
-                false
-            }
-        });
+pub type TypeSubstitution = HashMap<TypeVar, Type>;
 
-        // Print self type if cycle detected
-        if cycle_detected {
-            return write!(f, "Self");
-        }
-
-        // Recurse
-        let result = write!(f, "{}", *self.data());
-
-        // Remove the value on back-tracking
-        TYPE_DISPLAY_VISITED.with(|visited| {
-            visited.borrow_mut().remove(self);
-        });
-
-        result
-    }
-}
-
-type Substitutions = HashMap<TypeVar, Type>;
+pub type TypeVarSubstitution = HashMap<TypeVar, TypeVar>;
 
 /// Named types
 #[derive(Debug, Clone, Default)]
 pub struct TypeAliases {
     name_to_type: HashMap<Ustr, Type>,
     type_to_name: HashMap<Type, Ustr>,
+    bare_native_to_name: HashMap<B<dyn BareNativeType>, Ustr>,
 }
 impl TypeAliases {
     // TODO: handle errors
@@ -483,6 +643,14 @@ impl TypeAliases {
         self.name_to_type.get(&name).copied()
     }
 
+    pub fn set_bare_native(&mut self, alias: Ustr, bare: B<dyn BareNativeType>) {
+        self.bare_native_to_name.insert(bare, alias);
+    }
+
+    pub fn get_bare_native_name(&self, bare: &B<dyn BareNativeType>) -> Option<Ustr> {
+        self.bare_native_to_name.get(bare).copied()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&Ustr, &Type)> {
         self.name_to_type.iter()
     }
@@ -490,14 +658,13 @@ impl TypeAliases {
     pub fn extend(&mut self, other: Self) {
         self.name_to_type.extend(other.name_to_type);
         self.type_to_name.extend(other.type_to_name);
+        self.bare_native_to_name.extend(other.bare_native_to_name);
     }
     pub fn is_empty(&self) -> bool {
-        self.name_to_type.is_empty() && self.type_to_name.is_empty()
+        self.name_to_type.is_empty()
+            && self.type_to_name.is_empty()
+            && self.bare_native_to_name.is_empty()
     }
-}
-
-thread_local! {
-    static TYPE_DISPLAY_VISITED: RefCell<HashSet<Type>> = RefCell::new(HashSet::new());
 }
 
 /// The representation of a type in the system
@@ -527,11 +694,110 @@ impl TypeKind {
         store_type(self)
     }
 
+    /// Instantiate the type variables within this type with the given substitutions, recursively
+    fn instantiate(&self, subst: &TypeSubstitution) -> Type {
+        use TypeKind::*;
+        match self {
+            Variable(var) => match subst.get(var) {
+                Some(ty) => *ty,
+                None => Type::variable(*var),
+            },
+            Native(native_ty) => Type::native_type(NativeType::new(
+                native_ty.bare_ty.clone(),
+                native_ty
+                    .arguments
+                    .iter()
+                    .map(|ty| ty.instantiate(subst))
+                    .collect(),
+            )),
+            Variant(types) => Type::variant(
+                types
+                    .iter()
+                    .map(|(name, ty)| (*name, ty.instantiate(subst)))
+                    .collect(),
+            ),
+            Tuple(tuple) => Type::tuple(tuple.iter().map(|ty| ty.instantiate(subst)).collect()),
+            Record(fields) => Type::record(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (*name, ty.instantiate(subst)))
+                    .collect(),
+            ),
+            Function(fn_type) => Type::function_type(fn_type.instantiate(subst)),
+            Newtype(name, ty) => Type::new_type(*name, ty.instantiate(subst)),
+        }
+    }
+
+    /// Substitute the type variables within this type wih the given substitutions, recursively
+    fn substitute(&self, subst: &TypeVarSubstitution) -> Type {
+        use TypeKind::*;
+        match self {
+            Variable(var) => match subst.get(var) {
+                Some(ty_var) => Type::variable(*ty_var),
+                None => Type::variable(*var),
+            },
+            Native(native_ty) => Type::native_type(NativeType::new(
+                native_ty.bare_ty.clone(),
+                native_ty
+                    .arguments
+                    .iter()
+                    .map(|ty| ty.substitute(subst))
+                    .collect(),
+            )),
+            Variant(types) => Type::variant(
+                types
+                    .iter()
+                    .map(|(name, ty)| (*name, ty.substitute(subst)))
+                    .collect(),
+            ),
+            Tuple(tuple) => Type::tuple(tuple.iter().map(|ty| ty.substitute(subst)).collect()),
+            Record(fields) => Type::record(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (*name, ty.substitute(subst)))
+                    .collect(),
+            ),
+            Function(fn_type) => Type::function_type(fn_type.substitute(subst)),
+            Newtype(name, ty) => Type::new_type(*name, ty.substitute(subst)),
+        }
+    }
+
+    /// Return all type variables contained in this type, recursively
+    fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        use TypeKind::*;
+        match self {
+            Variable(v) => vec![*v],
+            Native(native) => native
+                .arguments
+                .iter()
+                .flat_map(Type::inner_ty_vars)
+                .unique()
+                .collect(),
+            Variant(types) => types
+                .iter()
+                .flat_map(|(_, ty)| ty.inner_ty_vars())
+                .unique()
+                .collect(),
+            Tuple(types) => types
+                .iter()
+                .flat_map(Type::inner_ty_vars)
+                .unique()
+                .collect(),
+            Record(fields) => fields
+                .iter()
+                .flat_map(|(_, ty)| ty.inner_ty_vars())
+                .unique()
+                .collect(),
+            Function(fn_type) => fn_type.inner_ty_vars(),
+            Newtype(_, ty) => ty.inner_ty_vars(),
+        }
+    }
+
     /// Somewhat a sub-type, but named differently to accommodate generics
     fn can_be_used_in_place_of_with_subst(
         &self,
         other: Type,
-        substitutions: &mut Substitutions,
+        substitutions: &mut TypeSubstitution,
         seen: &mut HashSet<(Type, Type)>,
     ) -> bool {
         // We know that that is not a GenericArg
@@ -645,6 +911,37 @@ impl TypeKind {
         self.can_be_used_in_place_of_with_subst(that, &mut HashMap::new(), &mut HashSet::new())
     }
 
+    // recursive checking
+    pub fn contains_type_var(&self, var: TypeVar) -> bool {
+        self.contains_ty_vars(&[var])
+    }
+
+    // recursive checking
+    pub fn contains_ty_vars(&self, vars: &[TypeVar]) -> bool {
+        // FIXME: support recursive types
+        match self {
+            TypeKind::Variable(v) => vars.contains(v),
+            TypeKind::Native(native) => native
+                .arguments
+                .iter()
+                .any(|ty| ty.data().contains_ty_vars(vars)),
+            TypeKind::Variant(types) => {
+                types.iter().any(|(_, ty)| ty.data().contains_ty_vars(vars))
+            }
+            TypeKind::Tuple(types) => types.iter().any(|ty| ty.data().contains_ty_vars(vars)),
+            TypeKind::Record(fields) => fields
+                .iter()
+                .any(|(_, ty)| ty.data().contains_ty_vars(vars)),
+            TypeKind::Function(ty) => {
+                ty.args
+                    .iter()
+                    .any(|arg| arg.ty.data().contains_ty_vars(vars))
+                    || ty.ret.data().contains_ty_vars(vars)
+            }
+            TypeKind::Newtype(_, ty) => ty.data().contains_ty_vars(vars),
+        }
+    }
+
     pub fn inner_types(&self) -> B<dyn Iterator<Item = Type> + '_> {
         match self {
             TypeKind::Native(g) => B::new(g.arguments.iter().copied()),
@@ -713,82 +1010,42 @@ impl TypeKind {
 
     // helper functions
     fn rank(&self) -> usize {
+        use TypeKind::*;
         match self {
-            TypeKind::Native(_) => 1,
-            TypeKind::Variable(_) => 2,
-            TypeKind::Variant(_) => 3,
-            TypeKind::Tuple(_) => 4,
-            TypeKind::Record(_) => 5,
-            TypeKind::Function(_) => 6,
-            TypeKind::Newtype(_, _) => 7,
+            Native(_) => 1,
+            Variable(_) => 2,
+            Variant(_) => 3,
+            Tuple(_) => 4,
+            Record(_) => 5,
+            Function(_) => 6,
+            Newtype(_, _) => 7,
         }
     }
-
-    fn count_generics_rec(&self, counts: &mut TypeGenericCountMap) -> u32 {
-        match self {
-            TypeKind::Native(g) => count_generics_rec(&g.arguments, counts),
-            TypeKind::Variable(id) => id.0 + 1, // the max number is this index + 1
-            TypeKind::Variant(types) => types
-                .iter()
-                .map(|(_, ty)| ty.count_generics_rec(counts))
-                .max()
-                .unwrap_or(0),
-            TypeKind::Tuple(types) => types
-                .iter()
-                .map(|ty| ty.count_generics_rec(counts))
-                .max()
-                .unwrap_or(0),
-            TypeKind::Record(fields) => fields
-                .iter()
-                .map(|(_, ty)| ty.count_generics_rec(counts))
-                .max()
-                .unwrap_or(0),
-            TypeKind::Function(function) => count_arg_generics_rec(&function.args, counts)
-                .max(function.ret.count_generics_rec(counts)),
-            TypeKind::Newtype(_, ty) => ty.count_generics_rec(counts),
-        }
-    }
-
-    // fn count_generics_with_counts(&self, counts: &mut NamedTypeGenericCountMap) -> usize {
-    //     let local_count = self.count_generics_rec(counts);
-    //     local_count + counts.values().sum::<usize>()
-    // }
-
-    // pub fn format_generics_with_counts(&self, counts: &mut NamedTypeGenericCountMap) -> String {
-    //     format_generics(self.count_generics_with_counts(counts))
-    // }
 }
 
-impl fmt::Display for TypeKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl FmtWithModuleEnv for TypeKind {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         match self {
-            TypeKind::Native(g) => {
-                let tn = g.bare_ty.as_ref().type_name();
-                write!(
-                    f,
-                    "{}",
-                    tn.rsplit_once("::").unwrap_or(("", tn)).1, // FIXME: this formatting is broken for Rust generics
-                )?;
-                if !g.arguments.is_empty() {
-                    write!(f, "<")?;
-                    write_with_separator(&g.arguments, ", ", f)?;
-                    write!(f, ">")?;
-                }
-                Ok(())
-            }
-            TypeKind::Variable(id) => write!(f, "{}", generic_index_to_char(id.0)),
+            TypeKind::Variable(var) => write!(f, "{var}"),
+            TypeKind::Native(native) => native.fmt_with_module_env(f, env),
             TypeKind::Variant(types) => {
                 for (i, (name, ty)) in types.iter().enumerate() {
                     if i > 0 {
                         write!(f, " | ")?;
                     }
-                    write!(f, "{name} of {ty}")?;
+                    write!(f, "{name} of ")?;
+                    ty.fmt_with_module_env(f, env)?;
                 }
                 Ok(())
             }
-            TypeKind::Tuple(members) => {
+            TypeKind::Tuple(elements) => {
                 write!(f, "(")?;
-                write_with_separator(members, ", ", f)?;
+                for (i, ty) in elements.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    ty.fmt_with_module_env(f, env)?;
+                }
                 write!(f, ")")
             }
             TypeKind::Record(fields) => {
@@ -797,24 +1054,17 @@ impl fmt::Display for TypeKind {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{name}: {ty}")?;
+                    write!(f, "{name}: ")?;
+                    ty.fmt_with_module_env(f, env)?;
                 }
                 write!(f, " }}")
             }
-            TypeKind::Function(function) => {
-                write!(
-                    f,
-                    "({}) -> {}",
-                    function
-                        .args
-                        .iter()
-                        .map(|t| t.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    function.ret
-                )
+            TypeKind::Function(function) => function.fmt_with_module_env(f, env),
+            TypeKind::Newtype(name, ty) => {
+                write!(f, "{name}(")?;
+                ty.fmt_with_module_env(f, env)?;
+                write!(f, ")")
             }
-            TypeKind::Newtype(name, ty) => write!(f, "{name}({ty})"),
         }
     }
 }
@@ -854,23 +1104,30 @@ impl graph::Node for TypeKind {
     }
 }
 
-fn generic_index_to_char(index: u32) -> char {
-    // char::from_digit(index as u32 + 10, 36).unwrap_or('_')
-    char::from_u32(index as u32 + 0x3B1).unwrap_or('_')
+fn type_variable_index_to_string(index: u32) -> String {
+    let first = 0x3B1;
+    let last = 0x3C9;
+    let unicode_char = first + index;
+    if unicode_char <= last {
+        char::from_u32(unicode_char).unwrap_or('_').to_string()
+    } else {
+        format!("T{}", unicode_char - last)
+    }
 }
 
-pub(crate) fn write_with_separator<T: fmt::Display>(
-    vec: &[T],
-    separator: &str,
-    f: &mut fmt::Formatter,
-) -> fmt::Result {
-    for e in vec.iter().take(1) {
-        write!(f, "{e}")?;
+fn type_variable_gen_index_to_string(index: u32, generation: u32) -> String {
+    let first = 0x2080;
+    let last = 0x2089;
+    let unicode_char = first + generation;
+    if unicode_char <= last {
+        format!(
+            "{}{}",
+            type_variable_index_to_string(index),
+            char::from_u32(unicode_char).unwrap_or('_')
+        )
+    } else {
+        format!("{}₋", type_variable_index_to_string(index))
     }
-    for e in vec.iter().skip(1) {
-        write!(f, "{separator}{e}")?;
-    }
-    Ok(())
 }
 
 type TypeWorld = IndexSet<TypeKind>;
@@ -985,9 +1242,12 @@ impl TypeUniverse {
     }
 
     fn get_type_data(&self, r: Type) -> &TypeKind {
-        self.worlds[r.world.unwrap().get() as usize]
+        self.worlds[r
+            .world
+            .expect("Attempted to get type data for local world")
+            .get() as usize]
             .get_index(r.index as usize)
-            .unwrap()
+            .expect("Attempted to get type data for non-existent type")
     }
 }
 
@@ -998,18 +1258,24 @@ fn types() -> &'static RwLock<TypeUniverse> {
 
 /// Store a type in the type system and return a type identifier
 pub fn store_type(type_data: TypeKind) -> Type {
-    types().write().unwrap().insert_type(type_data)
+    types()
+        .try_write()
+        .expect("Cannot get a write lock to type universes")
+        .insert_type(type_data)
 }
 
 /// Store a list of types in the type system and return a list of type identifiers
 pub fn store_types<const N: usize>(types_data: &[TypeKind; N]) -> [Type; N] {
-    types().write().unwrap().insert_types(types_data)
+    types()
+        .try_write()
+        .expect("Cannot get a write lock to type universes")
+        .insert_types(types_data)
 }
 
-pub fn dump_type_world(index: usize) {
+pub fn dump_type_world(index: usize, env: &ModuleEnv<'_>) {
     let world = &types().read().unwrap().worlds[index];
     for (i, ty) in world.iter().enumerate() {
-        println!("{}: {}", i, ty);
+        println!("{}: {}", i, ty.format_with(env));
     }
 }
 

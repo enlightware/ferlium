@@ -1,12 +1,34 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt, rc::Rc};
 
+use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
-    containers::iterable_to_string,
-    function::{FunctionDescriptionRc, FunctionsMap},
-    r#type::TypeAliases,
+    containers::{find_key_for_value_property, B},
+    format::FormatWith,
+    function::FunctionRc,
+    r#type::{BareNativeType, FnType, Type, TypeAliases},
+    type_scheme::TypeScheme,
 };
+
+/// If the module function is from code, this struct contains the spans of the function.
+#[derive(Debug, Clone)]
+pub struct ModuleFunctionSpans {
+    pub name: Span,
+    pub args: Vec<Span>,
+    pub args_span: Span,
+    pub span: Span,
+}
+
+/// A function inside a module.
+#[derive(Debug, Clone)]
+pub struct ModuleFunction {
+    pub code: FunctionRc,
+    pub ty_scheme: TypeScheme<FnType>,
+    pub spans: Option<ModuleFunctionSpans>,
+}
+
+pub type FunctionsMap = HashMap<Ustr, ModuleFunction>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct UseSome {
@@ -28,12 +50,13 @@ pub(crate) type Uses = Vec<Use>;
 /// A module is a collection of functions, type aliases and use statements.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
-    pub(crate) functions: FunctionsMap,
-    pub(crate) types: TypeAliases,
+    pub functions: FunctionsMap,
+    pub types: TypeAliases,
     pub(crate) uses: Uses,
 }
 
 impl Module {
+    /// Extend this module with other, consuming it
     pub fn extend(&mut self, other: Self) {
         self.functions.extend(other.functions);
         self.types.extend(other.types);
@@ -44,14 +67,41 @@ impl Module {
         self.functions.is_empty() && self.types.is_empty() && self.uses.is_empty()
     }
 
+    /// Return the type for the source pos, if any.
+    pub fn type_at(&self, pos: usize) -> Option<Type> {
+        for (_, function) in self.functions.iter() {
+            let mut ty = None;
+            function
+                .code
+                .borrow_mut()
+                .apply_if_script(&mut |node| ty = node.type_at(pos));
+            if ty.is_some() {
+                return ty;
+            }
+        }
+        None
+    }
+
+    /// Return whether this module uses sym_name from mod_name
+    pub fn uses(&self, mod_name: Ustr, sym_name: Ustr) -> bool {
+        self.uses.iter().any(|u| match u {
+            Use::All(module) => *module == mod_name,
+            Use::Some(some) => some.module == mod_name && some.symbols.contains(&sym_name),
+        })
+    }
+
     /// Look-up a function by name in this module or in any of the modules this module uses.
-    pub fn get_function(&self, name: Ustr, others: &Modules) -> Option<FunctionDescriptionRc> {
-        self.functions.get(&name).cloned().or_else(|| {
+    pub fn get_function<'a>(
+        &'a self,
+        name: Ustr,
+        others: &'a Modules,
+    ) -> Option<&'a ModuleFunction> {
+        self.functions.get(&name).or_else(|| {
             self.uses.iter().find_map(|use_module| match use_module {
-                Use::All(module) => others.get(module)?.functions.get(&name).cloned(),
+                Use::All(module) => others.get(module)?.functions.get(&name),
                 Use::Some(use_some) => {
                     if use_some.symbols.contains(&name) {
-                        others.get(&use_some.module)?.functions.get(&name).cloned()
+                        others.get(&use_some.module)?.functions.get(&name)
                     } else {
                         None
                     }
@@ -59,28 +109,32 @@ impl Module {
             })
         })
     }
-}
 
-impl std::fmt::Display for Module {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn format_with_modules(&self, f: &mut fmt::Formatter, modules: &Modules) -> fmt::Result {
+        let env = ModuleEnv::new(self, modules);
         if !self.types.is_empty() {
             writeln!(f, "Types:")?;
             for (name, ty) in self.types.iter() {
-                writeln!(f, "  {}: {}", name, ty)?;
+                writeln!(f, "  {}: {}", name, ty.format_with(&env))?;
             }
+            writeln!(f)?;
         }
         if !self.functions.is_empty() {
             writeln!(f, "Functions:")?;
-            for (name, f_descr) in self.functions.iter() {
-                let f_descr = f_descr.borrow();
-                writeln!(
-                    f,
-                    "  fn {name}({}) -> {}",
-                    iterable_to_string(f_descr.ty.args.iter(), ", "),
-                    f_descr.ty.ret
-                )?;
-                f_descr.code.format_ind(f, 2)?;
+            for (name, function) in self.functions.iter() {
+                if function.ty_scheme.is_just_type() {
+                    writeln!(f, "fn {name} {}", function.ty_scheme.ty.format_with(&env))?;
+                } else {
+                    writeln!(
+                        f,
+                        "fn {name} {} {}",
+                        function.ty_scheme.ty.format_with(&env),
+                        function.ty_scheme.display_constraints_rust_style(&env),
+                    )?;
+                }
+                function.code.borrow().format_ind(f, &env, 1)?;
             }
+            writeln!(f)?;
         }
         if !self.uses.is_empty() {
             writeln!(f, "Uses:")?;
@@ -101,4 +155,97 @@ impl std::fmt::Display for Module {
     }
 }
 
+impl fmt::Display for FormatWith<'_, Module, Modules> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.format_with_modules(f, self.data)
+    }
+}
+
 pub type Modules = HashMap<Ustr, Module>;
+
+#[derive(Clone, Copy)]
+pub struct ModuleEnv<'m> {
+    pub(crate) current: &'m Module,
+    pub(crate) others: &'m Modules,
+}
+
+impl<'m> ModuleEnv<'m> {
+    pub fn new(current: &'m Module, others: &'m Modules) -> Self {
+        Self { current, others }
+    }
+
+    pub fn type_name(&self, ty: Type) -> Option<String> {
+        self.current.types.get_name(ty).map_or_else(
+            || {
+                self.others.iter().find_map(|(mod_name, module)| {
+                    module.types.get_name(ty).map(|ty_name| {
+                        if self.current.uses(*mod_name, ty_name) {
+                            ty_name.to_string()
+                        } else {
+                            format!("{mod_name}::{ty_name}")
+                        }
+                    })
+                })
+            },
+            |name| Some(name.to_string()),
+        )
+    }
+
+    pub fn bare_native_name(&self, native: &B<dyn BareNativeType>) -> Option<String> {
+        self.current.types.get_bare_native_name(native).map_or_else(
+            || {
+                self.others.iter().find_map(|(mod_name, module)| {
+                    module.types.get_bare_native_name(native).map(|ty_name| {
+                        if self.current.uses(*mod_name, ty_name) {
+                            ty_name.to_string()
+                        } else {
+                            format!("{mod_name}::{ty_name}")
+                        }
+                    })
+                })
+            },
+            |name| Some(name.to_string()),
+        )
+    }
+
+    pub fn function_name(&self, func: &FunctionRc) -> Option<String> {
+        fn compare(module: &ModuleFunction, function: &FunctionRc) -> bool {
+            Rc::ptr_eq(&module.code, function)
+        }
+        // FIXME: this needs update
+        find_key_for_value_property(&self.current.functions, func, compare).map_or_else(
+            || {
+                self.others.iter().find_map(|(mod_name, module)| {
+                    find_key_for_value_property(&module.functions, func, compare).map(|func_name| {
+                        if self.current.uses(*mod_name, *func_name) {
+                            func_name.to_string()
+                        } else {
+                            format!("{mod_name}::{func_name}")
+                        }
+                    })
+                })
+            },
+            |name| Some(name.to_string()),
+        )
+    }
+}
+
+/// Format a type with a module environment
+pub trait FmtWithModuleEnv {
+    fn format_with<'a>(&'a self, env: &'a ModuleEnv<'a>) -> FormatWithModuleEnv<'_, Self> {
+        FormatWithModuleEnv {
+            value: self,
+            data: env,
+        }
+    }
+
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result;
+}
+
+pub type FormatWithModuleEnv<'a, T> = FormatWith<'a, T, ModuleEnv<'a>>;
+
+impl<T: FmtWithModuleEnv> fmt::Display for FormatWithModuleEnv<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.value.fmt_with_module_env(f, self.data)
+    }
+}

@@ -1,7 +1,7 @@
 %start Module
 
 // we do not need this atm as we are not using the parser's built in error recovery
-%avoid_insert 'INT' 'IDENT'
+%avoid_insert 'UNMATCHED' 'INT' 'IDENT' 'true' 'false'
 
 // least precedence to highest precedence
 // inspired by Rust: https://doc.rust-lang.org/reference/expressions.html#expression-precedence
@@ -48,7 +48,10 @@ FunctionOrType -> Module
 
 Function -> Module
     : 'fn' 'IDENT' '(' StringArgsOptComma ')' '{' Expr '}'
-        { Module::new_with_function(s($2, $lexer), $4, $7) }
+        {
+            let args_span = Span::new(lex_span($3).start(), lex_span($5).end());
+            Module::new_with_function((s($2, $lexer), lex_span($2)), $4, args_span, $7, $span)
+        }
     ;
 
 //Type -> Module
@@ -106,13 +109,13 @@ Expr -> Expr
     | Literal
         { $1 }
     | 'let' 'IDENT' '=' Expr
-        { Expr::new(LetVar(s($2, $lexer), false, B::new($4)), $span) }
+        { Expr::new(LetVar((s($2, $lexer), lex_span($2)), false, B::new($4)), $span) }
     | 'var' 'IDENT' '=' Expr
-        { Expr::new(LetVar(s($2, $lexer), true, B::new($4)), $span) }
+        { Expr::new(LetVar((s($2, $lexer), lex_span($2)), true, B::new($4)), $span) }
     | '|' StringArgsOptComma '|' Expr
         { Expr::new(Abstract($2, B::new($4)), $span) }
     | '(' ')'
-        { Expr::new(Literal(Value::unit()), $span) }
+        { Expr::new(Literal(Value::unit(), Type::unit()), $span) }
     | '(' TupleArgs ')'
         { make_tuple($2, $span) }
     | Expr '.' 'INT'
@@ -120,7 +123,7 @@ Expr -> Expr
     | Expr '.' 'IDENT'
         { error("Named field projection and record are not yet supported", $span) }
     | '[' ']'
-        { Expr::new(Literal(Value::native(Array::new())), $span) }
+        { Expr::new(Array(vec![]), $span) }
     | '[' ExprArgsOptComma ']'
         { Expr::new(Array($2), $span) }
     | Expr '(' ')'
@@ -144,18 +147,18 @@ ExprOptComma -> Expr
         { $1 }
     ;
 
-StringArgsOptComma -> Vec<Ustr>
+StringArgsOptComma -> Vec<(Ustr, Span)>
     : StringArgs ','
         { $1 }
     | StringArgs
         { $1 }
     ;
 
-StringArgs -> Vec<Ustr>
+StringArgs -> Vec<(Ustr, Span)>
     : StringArgs ',' 'IDENT'
-        { let mut args = $1; args.push(s($3, $lexer)); args }
+        { let mut args = $1; args.push((s($3, $lexer), lex_span($3))); args }
     | 'IDENT'
-        { vec![s($1, $lexer)] }
+        { vec![(s($1, $lexer), lex_span($1))] }
     | %empty
         { vec![] }
     ;
@@ -225,7 +228,7 @@ Literal -> Expr
     : INT
         { parse_num::<isize>(&s($1, $lexer), lex_span($1)) }
     | BoolLiteral
-        { Expr::new(Literal($1), $span) }
+        { Expr::new(Literal($1, Type::primitive::<bool>()), $span) }
     ;
 
 BoolLiteral -> Value
@@ -244,9 +247,10 @@ Unmatched -> ()
 use crate::ast::{Expr, Module};
 use crate::ast::ExprKind::*;
 use crate::value::Value;
+use crate::r#type::Type;
 use crate::containers::B;
-use crate::std::array::Array;
 use ustr::{Ustr, ustr};
+use lrpar::Span;
 
 // Parser support code is in this module
 use crate::parser_helpers::*;

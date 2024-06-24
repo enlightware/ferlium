@@ -17,11 +17,13 @@
 		"prec",
 		"pscript",
 		"readline",
+		"rfind",
 		"rsplit",
 		"rustyline",
 		"slotmap",
 		"smallvec",
-		"subtyping"
+		"subtyping",
+		"unbounds"
 	],
 	"rust-analyzer.linkedProjects": [
 		"./Cargo.toml"

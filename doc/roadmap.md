@@ -2,10 +2,12 @@
 
 ### Language features
 
+- Record types
+- Effects
+- Type classes
+- Co-routine/async
 - Algebraic data types
 - Generalised match
-- Type classes
-- Effects
 - Object-oriented style function calls
 - Early return
 
@@ -16,11 +18,13 @@
 
 ### Compiler features
 
-- Type checking and inference
+- Type checking inout polymorphism
+- Execution
 - Effect checking and inference
 - Optimisations
 - Just in time compilation
 
-### Open questions
+### Next tasks
 
-- Should we have recursive lambas?
+- Type check var/let and equalities
+- Add record type

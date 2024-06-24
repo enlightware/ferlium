@@ -8,9 +8,21 @@ Currently, Painturscript transforms the source code into an abstract syntax tree
 
 The following phases (will 🚧) happen in the compiler:
 
-- Lexing and parsing, the result is the AST.
-- Type checking and inference 🚧
-- ADT desugaring 🚧
-- Optimisation 🚧
-- Code generation, the result is IR.
+- Source code parsing
+  - Lexing
+  - Parsing and AST generation
+- Analysis of the AST
+  - Symbol resolution
+  - Type checking and inference
+  - ADT desugaring 🚧
+  - IR generation
+- IR optimisation 🚧
 - IR execution.
+
+In the future, to support async methods, we will do:
+- Bytecode generation 🚧
+- Code execution in VM 🚧
+
+or:
+- JIT native code generation
+- Native code execution

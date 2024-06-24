@@ -1,4 +1,5 @@
-use std::cmp;
+use std::hash::Hash;
+use std::{cmp, collections::HashMap};
 
 /// Alias to keep code shorter
 pub(crate) type B<T> = Box<T>;
@@ -42,10 +43,37 @@ where
 /// Concatenate a collection of items into a string, separating them with a separator.
 pub fn iterable_to_string(
     iter: impl IntoIterator<Item = impl std::fmt::Display>,
-    sep: &str,
+    separator: &str,
 ) -> String {
     iter.into_iter()
         .map(|x| x.to_string())
         .collect::<Vec<_>>()
-        .join(sep)
+        .join(separator)
+}
+
+/// In a Hashmap, find a key that has a value equal to the given value.
+pub fn find_key_for_value_property<'a, K, V, P, F>(
+    map: &'a HashMap<K, V>,
+    value: &P,
+    compare: F,
+) -> Option<&'a K>
+where
+    K: Eq + Hash,
+    F: Fn(&V, &P) -> bool,
+{
+    for (key, val) in map {
+        if compare(val, value) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+/// Returns a vector containing the elements of this that are not in that
+/// O(this.len() * that.len())
+pub fn vec_difference<T: Clone + PartialEq>(this: &[T], that: &[T]) -> Vec<T> {
+    this.iter()
+        .filter(|&x| !that.contains(x))
+        .cloned()
+        .collect()
 }

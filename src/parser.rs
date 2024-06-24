@@ -7,20 +7,18 @@ lrlex_mod!("lexer.l");
 lrpar_mod!("parser.y");
 
 pub fn parse(src: &str) -> (Module, Option<Expr>) {
+    if src.trim().is_empty() {
+        return (Module::default(), None);
+    }
     let lexerdef = lexer_l::lexerdef();
     let lexer = lexerdef.lexer(src);
-    let (res, _errs) = parser_y::parse(&lexer);
-    // for e in errs {
-    //     println!("{}", e.pp(&lexer, &parser_y::token_epp));
-    // }
-    match res {
-        Some(ast) => ast,
-        None => (
-            Module::default(),
-            Some(Expr::new(
-                ExprKind::Error("Parse error".into()),
-                Span::new(0, src.len()),
-            )),
-        ),
+    let (res, errs) = parser_y::parse(&lexer);
+    if let Some(_err) = errs.first() {
+        let expr = Expr::new(
+            ExprKind::Error("General parse error".into()),
+            Span::new(0, src.len()),
+        );
+        return (Module::default(), Some(expr));
     }
+    res.unwrap_or_default()
 }

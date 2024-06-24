@@ -12,13 +12,16 @@ lrpar = "0.13"
 
 [dev-dependencies]
 rustyline = "14.0.0"
+ariadne = "0.4.1"
+env_logger ="0.11.3"
+test-log = "0.2.16"
 
 [dependencies]
 dyn-clone = "1.0.16"
 dyn-eq = "0.1.3"
 enum-as-inner = "0.6.0"
 itertools = "0.12.1"
-ustr = "1.0.0"
+ustr = { git = "https://github.com/enlightware/ustr.git", branch = "script" }
 smallvec = "1.13.1"
 nonmax = "=0.5.5"
 ordered-float = "4.2.0"
@@ -28,3 +31,4 @@ lrlex = "0.13"
 lrpar = "0.13"
 num-traits = "0.2.19"
 ena = "0.14.3"
+log = "0.4.22"
