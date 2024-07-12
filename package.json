@@ -10,6 +10,10 @@
   },
   "dependencies": {
     "@babel/types": "^7.24.0",
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/state": "^6.4.1",
+    "@codemirror/view": "^6.28.4",
+    "codemirror": "^6.0.1",
     "vite-plugin-wasm-pack": "github:enlightware/vite-plugin-wasm-pack#60995dd",
     "vue": "^3.4.31"
   },

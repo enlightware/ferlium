@@ -1,25 +1,47 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+
+import { ref, onMounted, type Ref } from 'vue';
 import { replace_text } from 'script-api';
 
-const inputText = ref('');
+import { javascript } from '@codemirror/lang-javascript';
+import { EditorView } from '@codemirror/view';
+import { basicSetup } from 'codemirror';
+import { nonnull } from '../types';
 
-function processText() {
+const editor: Ref<null | HTMLElement> = ref(null);
+
+onMounted(() => {
+	const viewPtr: unknown[] = [null];
+	viewPtr[0] = new EditorView({
+		doc: "",
+		extensions: [
+			basicSetup,
+			javascript(),
+			EditorView.updateListener.of(({ state }) => {
+				const text = state.doc.toString();
+				const newText = processText(text);
+				const view = (viewPtr[0] as EditorView);
+				if (newText !== text) {
+					view.dispatch({changes: {from: 0, to: newText.length, insert: newText}});
+				}
+			})
+		],
+		parent: nonnull(editor.value),
+	});
+});
+
+function processText(text: string) {
 	// Function is called on every keystroke to process the text.
-	inputText.value = replace_text(inputText.value, 'foo', 'bar');
+	return replace_text(text, 'foo', 'bar');
 }
 </script>
 
 <template>
-	<textarea
-		v-model="inputText"
-		placeholder="Type here..."
-		@input="processText"
-	/>
+	<div ref="editor" />
 </template>
 
 <style scoped>
-textarea {
+div {
 	font-family: monospace;
 }
 </style>
