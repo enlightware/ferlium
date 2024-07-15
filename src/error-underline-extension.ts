@@ -1,35 +1,59 @@
-import { EditorView, Decoration, type DecorationSet } from "@codemirror/view";
+import { EditorView, Decoration, type DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { StateField, StateEffect } from "@codemirror/state";
 
-const clearErrorUnderlines = StateEffect.define({});
-const addErrorUnderline = StateEffect.define<{ from: number, to: number }>({
-	map: ({ from, to }, change) => ({ from: change.mapPos(from), to: change.mapPos(to) })
+export interface ErrorData {
+	from: number;
+	to: number;
+	text: string;
+}
+
+const replaceErrorData = StateEffect.define<ErrorData[]>({
+	map: (data, change) =>
+		data.map(({ from, to, text }) => ({ from: change.mapPos(from), to: change.mapPos(to), text }))
 });
 
-const errorUnderlineField = StateField.define<DecorationSet>({
+const errorUnderlineField = StateField.define<ErrorData[]>({
 	create() {
-		return Decoration.none
+		return [];
 	},
-	update(underlines, tr) {
-		underlines = underlines.map(tr.changes);
+	update(errorData, tr) {
+		// errorData = errorData.map(tr.changes);
 		for (const e of tr.effects) {
-			if (e.is(clearErrorUnderlines)) {
-				underlines = underlines.update({
-					filter: () => false
-				});
-			}
-			if (e.is(addErrorUnderline)) {
-				underlines = underlines.update({
-					add: [errorUnderlineMark.range(e.value.from, e.value.to)]
-				});
+			if (e.is(replaceErrorData)) {
+				errorData = e.value;
 			}
 		}
-		return underlines;
-	},
-	provide: f => EditorView.decorations.from(f)
+		return errorData;
+	}
 });
 
-const errorUnderlineMark = Decoration.mark({ class: "cm-error-underline" })
+const errorUnderlineMark = Decoration.mark({ class: "cm-error-underline" });
+
+function renderErrorData(data: ErrorData[]) {
+	const decorations = data.map(data =>
+		errorUnderlineMark.range(data.from, data.to)
+	);
+	return Decoration.set(decorations);
+}
+
+export const renderErrorDataPlugin = ViewPlugin.fromClass(
+	class Plugin {
+		decorations: DecorationSet;
+		constructor() {
+			this.decorations = Decoration.none;
+		}
+		update(update: ViewUpdate) {
+			const erroData = update.state.field(errorUnderlineField, false);
+			if (erroData !== undefined) {
+				this.decorations = renderErrorData(erroData);
+			}
+		}
+	},
+	{
+		decorations: (v) => v.decorations
+	}
+);
+
 
 const errorUnderlineTheme = EditorView.baseTheme({
 	".cm-error-underline": {
@@ -37,11 +61,9 @@ const errorUnderlineTheme = EditorView.baseTheme({
 	}
 });
 
-export function setErrorUnderlines(view: EditorView, ranges: [number, number][]) {
-	const effects: StateEffect<unknown>[] = [clearErrorUnderlines.of(null)];
-	for (const [from, to] of ranges) {
-		effects.push(addErrorUnderline.of({ from, to }));
-	}
+export function setErrorUnderlines(view: EditorView, errorData: ErrorData[]) {
+	const effects: StateEffect<unknown>[] = [];
+	effects.push(replaceErrorData.of(errorData));
 	if (!view.state.field(errorUnderlineField, false)) {
 		effects.push(StateEffect.appendConfig.of([errorUnderlineField, errorUnderlineTheme]));
 	}

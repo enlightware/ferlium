@@ -7,7 +7,7 @@ import { javascript } from '@codemirror/lang-javascript';
 import { EditorView } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
 import { nonnull } from '../types';
-import { setErrorUnderlines } from '../error-underline-extension';
+import { renderErrorDataPlugin, setErrorUnderlines } from '../error-underline-extension';
 import { renderTypeHintPlugin, setTypeHints } from '../type-hint-extension';
 
 const editor: Ref<null | HTMLElement> = ref(null);
@@ -19,6 +19,7 @@ onMounted(() => {
 		extensions: [
 			basicSetup,
 			javascript(),
+			renderErrorDataPlugin,
 			renderTypeHintPlugin,
 			EditorView.updateListener.of((update) => {
 				const text = update.state.doc.toString();
@@ -49,11 +50,11 @@ function processText(text: string) {
 
 function findErrors(text: string) {
 	const target = "bar";
-	const result: [number, number][] = [];
+	const result = [];
 	let index = text.indexOf(target);
 
 	while (index !== -1) {
-		result.push([index, index + target.length]);
+		result.push({ from: index, to: index + target.length, text: "dummy"});
 		index = text.indexOf(target, index + 1);
 	}
 
