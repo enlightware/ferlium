@@ -1,16 +1,17 @@
 <script setup lang="ts">
 
 import { ref, onMounted, type Ref } from 'vue';
-import { replace_text } from 'script-api';
+import { Compiler } from 'script-api';
 
-import { javascript } from '@codemirror/lang-javascript';
+// import { javascript } from '@codemirror/lang-javascript';
 import { EditorView } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
 import { nonnull } from '../types';
 import { renderErrorDataPlugin, setErrorUnderlines } from '../error-underline-extension';
-import { renderTypeHintPlugin, setTypeHints } from '../type-hint-extension';
+import { renderAnnotationsPlugin, setAnnotations } from '../annotation-extension';
 
 const editor: Ref<null | HTMLElement> = ref(null);
+const compiler = new Compiler();
 
 onMounted(() => {
 	const viewPtr: unknown[] = [null];
@@ -18,23 +19,24 @@ onMounted(() => {
 		doc: "",
 		extensions: [
 			basicSetup,
-			javascript(),
+			// javascript(),
 			renderErrorDataPlugin,
-			renderTypeHintPlugin,
+			renderAnnotationsPlugin,
 			EditorView.updateListener.of((update) => {
 				const text = update.state.doc.toString();
 				const view = (viewPtr[0] as EditorView);
-				const newText = processText(text);
-				if (newText !== text) {
-					view.dispatch({changes: {from: 0, to: newText.length, insert: newText}});
-				}
+				// const newText = processText(text);
+				// if (newText !== text) {
+				// 	view.dispatch({changes: {from: 0, to: newText.length, insert: newText}});
+				// }
 				if (update.docChanged) {
-					const errors = findErrors(text);
-					setErrorUnderlines(view, errors);
-					if (text.length > 5) {
-						setTypeHints(view, [{ pos: 5, hint: "tada"}]);
+					const errorData = compiler.compile(text);
+					if (errorData !== undefined) {
+						setErrorUnderlines(view, errorData);
+						setAnnotations(view, []);
 					} else {
-						setTypeHints(view, []);
+						setErrorUnderlines(view, []);
+						setAnnotations(view, compiler.get_annotations());
 					}
 				}
 			})
@@ -42,24 +44,6 @@ onMounted(() => {
 		parent: nonnull(editor.value),
 	});
 });
-
-function processText(text: string) {
-	// Function is called on every keystroke to process the text.
-	return replace_text(text, 'foo', 'bar');
-}
-
-function findErrors(text: string) {
-	const target = "bar";
-	const result = [];
-	let index = text.indexOf(target);
-
-	while (index !== -1) {
-		result.push({ from: index, to: index + target.length, text: "dummy"});
-		index = text.indexOf(target, index + 1);
-	}
-
-	return result;
-}
 
 </script>
 

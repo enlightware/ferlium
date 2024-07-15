@@ -1,15 +1,10 @@
 import { EditorView, Decoration, type DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { StateField, StateEffect } from "@codemirror/state";
-
-export interface ErrorData {
-	from: number;
-	to: number;
-	text: string;
-}
+import { ErrorData } from 'script-api';
 
 const replaceErrorData = StateEffect.define<ErrorData[]>({
 	map: (data, change) =>
-		data.map(({ from, to, text }) => ({ from: change.mapPos(from), to: change.mapPos(to), text }))
+		data.map(data => new ErrorData(change.mapPos(data.from), change.mapPos(data.to), data.text))
 });
 
 const errorUnderlineField = StateField.define<ErrorData[]>({

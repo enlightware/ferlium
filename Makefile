@@ -7,5 +7,8 @@ build-rust-code:
 install-dev-deps:
 	cargo install wasm-pack
 
+update-cargo-dev:
+	cd script-api && CARGO_NET_GIT_FETCH_WITH_CLI=true cargo update
+
 lint:
 	./node_modules/.bin/eslint
