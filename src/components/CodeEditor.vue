@@ -7,6 +7,8 @@ import { javascript } from '@codemirror/lang-javascript';
 import { EditorView } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
 import { nonnull } from '../types';
+import { setErrorUnderlines } from '../error-underline-extension';
+import { renderTypeHintPlugin, setTypeHints } from '../type-hint-extension';
 
 const editor: Ref<null | HTMLElement> = ref(null);
 
@@ -17,12 +19,22 @@ onMounted(() => {
 		extensions: [
 			basicSetup,
 			javascript(),
-			EditorView.updateListener.of(({ state }) => {
-				const text = state.doc.toString();
-				const newText = processText(text);
+			renderTypeHintPlugin,
+			EditorView.updateListener.of((update) => {
+				const text = update.state.doc.toString();
 				const view = (viewPtr[0] as EditorView);
+				const newText = processText(text);
 				if (newText !== text) {
 					view.dispatch({changes: {from: 0, to: newText.length, insert: newText}});
+				}
+				if (update.docChanged) {
+					const errors = findErrors(text);
+					setErrorUnderlines(view, errors);
+					if (text.length > 5) {
+						setTypeHints(view, [{ pos: 5, hint: "tada"}]);
+					} else {
+						setTypeHints(view, []);
+					}
 				}
 			})
 		],
@@ -34,6 +46,20 @@ function processText(text: string) {
 	// Function is called on every keystroke to process the text.
 	return replace_text(text, 'foo', 'bar');
 }
+
+function findErrors(text: string) {
+	const target = "bar";
+	const result: [number, number][] = [];
+	let index = text.indexOf(target);
+
+	while (index !== -1) {
+		result.push([index, index + target.length]);
+		index = text.indexOf(target, index + 1);
+	}
+
+	return result;
+}
+
 </script>
 
 <template>
@@ -41,7 +67,4 @@ function processText(text: string) {
 </template>
 
 <style scoped>
-div {
-	font-family: monospace;
-}
 </style>
