@@ -9,8 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@babel/types": "^7.24.0",
+    "@babel/types": "^7.24.9",
+    "@codemirror/commands": "^6.6.0",
     "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/language": "^6.10.2",
     "@codemirror/state": "^6.4.1",
     "@codemirror/view": "^6.28.4",
     "codemirror": "^6.0.1",
@@ -18,15 +20,15 @@
     "vue": "^3.4.31"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
+    "@eslint/js": "^9.7.0",
     "@nabla/vite-plugin-eslint": "^2.0.4",
-    "@types/node": "^20.12.7",
-    "@vitejs/plugin-vue": "^5.0.4",
-    "eslint": "^8.56.0",
-    "eslint-plugin-vue": "^9.25.0",
+    "@types/node": "^20.14.10",
+    "@vitejs/plugin-vue": "^5.0.5",
+    "eslint": "^8.57.0",
+    "eslint-plugin-vue": "^9.27.0",
     "typescript": "^5.5.3",
-    "typescript-eslint": "^7.15.0",
-    "vite": "^5.3.3",
+    "typescript-eslint": "^7.16.1",
+    "vite": "^5.3.4",
     "vite-plugin-mkcert": "^1.17.5",
     "vue-tsc": "^2.0.26"
   }
