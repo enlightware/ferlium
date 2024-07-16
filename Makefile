@@ -1,6 +1,9 @@
 dev: install-dev-deps build-rust-code
 	npx vite
 
+build: build-rust-code
+	npx vite build --base='./'
+
 build-rust-code:
 	wasm-pack build script-api/ --target web
 
