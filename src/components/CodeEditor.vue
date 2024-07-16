@@ -3,11 +3,13 @@
 import { ref, onMounted, type Ref } from 'vue';
 import { Compiler } from 'script-api';
 
-import { EditorView, ViewUpdate } from '@codemirror/view';
+import { EditorView,keymap, ViewUpdate } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
 import { nonnull } from '../types';
 import { renderErrorDataPlugin, setErrorUnderlines } from '../error-underline-extension';
 import { renderAnnotationsPlugin, setAnnotations } from '../annotation-extension';
+import {indentWithTab} from "@codemirror/commands"
+import {indentUnit} from "@codemirror/language"
 
 const editor: Ref<null | HTMLElement> = ref(null);
 const compiler = new Compiler();
@@ -36,6 +38,8 @@ onMounted(() => {
 		doc: "",
 		extensions: [
 			basicSetup,
+			keymap.of([indentWithTab]),
+			indentUnit.of("\t"),
 			renderErrorDataPlugin,
 			renderAnnotationsPlugin,
 			EditorView.updateListener.of(processUpdate)
