@@ -1,21 +1,33 @@
 <script setup lang="ts">
 
 import { ref, onMounted, type Ref } from 'vue';
-import { Compiler } from 'script-api';
+import { Compiler, ErrorData } from 'script-api';
 
 import { EditorView,keymap, ViewUpdate, scrollPastEnd } from '@codemirror/view';
 import { indentWithTab } from "@codemirror/commands";
 import { indentUnit } from "@codemirror/language";
-//import { lintGutter } from "@codemirror/lint";
+import { linter, type Diagnostic } from "@codemirror/lint";
 import { basicSetup } from 'codemirror';
 import { nonnull } from '../types';
-import { renderErrorDataPlugin, setErrorUnderlines } from '../error-underline-extension';
 import { renderAnnotationsPlugin, setAnnotations } from '../annotation-extension';
 
 const editor: Ref<null | HTMLElement> = ref(null);
 const compiler = new Compiler();
+const diagnostics: Diagnostic[] = [];
 
-function processUpdate(update: ViewUpdate){
+function fillDiagnostics(errorData: ErrorData[]){
+	diagnostics.length = 0;
+	for (const data of errorData){
+		diagnostics.push({
+			from: data.from,
+			to: data.to,
+			severity: "error",
+			message: data.text,
+		});
+	}
+}
+
+function processUpdate(update: ViewUpdate) {
 	const text = update.state.doc.toString();
 	const view = update.view;
 	// const newText = processText(text);
@@ -25,10 +37,10 @@ function processUpdate(update: ViewUpdate){
 	if (update.docChanged) {
 		const errorData = compiler.compile(text);
 		if (errorData !== undefined) {
-			setErrorUnderlines(view, errorData);
+			fillDiagnostics(errorData);
 			setAnnotations(view, []);
 		} else {
-			setErrorUnderlines(view, []);
+			diagnostics.length = 0;
 			setAnnotations(view, compiler.get_annotations());
 		}
 	}
@@ -42,10 +54,9 @@ onMounted(() => {
 			keymap.of([indentWithTab]),
 			indentUnit.of("\t"),
 			scrollPastEnd(),
-			//lintGutter(),
-			renderErrorDataPlugin,
 			renderAnnotationsPlugin,
 			EditorView.updateListener.of(processUpdate),
+			linter(() => diagnostics),
 			EditorView.theme({
 				"&.cm-editor": {height: "100%"},
 				".cm-scroller": {overflow: "auto"}
@@ -54,7 +65,6 @@ onMounted(() => {
 		parent: nonnull(editor.value),
 	});
 });
-
 </script>
 
 <template>

@@ -11,8 +11,8 @@
   "dependencies": {
     "@babel/types": "^7.24.9",
     "@codemirror/commands": "^6.6.0",
-    "@codemirror/lang-javascript": "^6.2.2",
     "@codemirror/language": "^6.10.2",
+    "@codemirror/lint": "^6.8.1",
     "@codemirror/state": "^6.4.1",
     "@codemirror/view": "^6.28.4",
     "codemirror": "^6.0.1",
