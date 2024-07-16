@@ -4,6 +4,11 @@
 	font-weight: 400;
 	src: local('Roboto'), local('Roboto-Regular'), url('assets/roboto-regular.woff2') format('woff2');
 }
+@font-face {
+	font-family: JuliaMono;
+	src: url("assets/JuliaMono-Regular.woff2") format("woff2");
+	text-rendering: optimizeLegibility;
+}
 
 :root {
 	font-family: Roboto;
