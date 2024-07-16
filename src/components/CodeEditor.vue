@@ -59,7 +59,7 @@ onMounted(() => {
 			linter(() => diagnostics),
 			EditorView.theme({
 				"&.cm-editor": {height: "100%"},
-				".cm-scroller": {overflow: "auto"}
+				".cm-scroller": {overflow: "auto", fontFamily: "'Fira Code', monospace"}
 			}),
 		],
 		parent: nonnull(editor.value),
