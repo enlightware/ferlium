@@ -15,6 +15,8 @@
     "@codemirror/lint": "^6.8.1",
     "@codemirror/state": "^6.4.1",
     "@codemirror/view": "^6.28.4",
+    "@lezer/highlight": "^1.2.0",
+    "@lezer/lr": "^1.4.1",
     "codemirror": "^6.0.1",
     "unplugin-lezer": "^1.0.0",
     "vite-plugin-wasm-pack": "github:enlightware/vite-plugin-wasm-pack#60995dd",

@@ -4,7 +4,7 @@ import vue from '@vitejs/plugin-vue';
 import eslintPlugin from "@nabla/vite-plugin-eslint";
 import wasmPack from 'vite-plugin-wasm-pack';
 import mkcert from'vite-plugin-mkcert';
-import lezer from 'unplugin-lezer/vite'
+import lezer from 'unplugin-lezer/vite';
 
 const gitCommitHash = execSync('git rev-parse HEAD').toString().trimEnd();
 
