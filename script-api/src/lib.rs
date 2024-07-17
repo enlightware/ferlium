@@ -3,7 +3,7 @@ mod utils;
 use painturscript::{
     compile, error::CompilationError, module::Modules, std::new_std_module_env, ModuleAndExpr, Span,
 };
-use utils::set_panic_hook;
+use utils::{set_panic_hook, CharIndexLookup};
 use wasm_bindgen::prelude::*;
 
 /// An error-data structure to be used in IDEs
@@ -25,6 +25,13 @@ impl ErrorData {
             from: span.start(),
             to: span.end(),
             text,
+        }
+    }
+    pub(crate) fn map(self, f: impl Fn(usize) -> usize) -> Self {
+        Self {
+            from: f(self.from),
+            to: f(self.to),
+            text: self.text,
         }
     }
 }
@@ -118,18 +125,27 @@ impl Compiler {
     }
 
     pub fn compile(&mut self, src: &str) -> Option<Vec<ErrorData>> {
+        let char_indices = CharIndexLookup::new(src);
         match self.compile_internal(src) {
             Ok(()) => None,
-            Err(err) => Some(compilation_error_to_data(&err)),
+            Err(err) => Some(
+                compilation_error_to_data(&err)
+                    .into_iter()
+                    .map(|data| data.map(|pos| char_indices.byte_to_char_position(pos)))
+                    .collect(),
+            ),
         }
     }
 
     pub fn get_annotations(&self) -> Vec<AnnotationData> {
+        let char_indices = CharIndexLookup::new(&self.user_src);
         let mut annotations = self
             .user_module
             .display_annotations(self.user_src.as_str(), &self.modules)
             .iter()
-            .map(|(pos, hint)| AnnotationData::new(*pos, hint.clone()))
+            .map(|(pos, hint)| {
+                AnnotationData::new(char_indices.byte_to_char_position(*pos), hint.clone())
+            })
             .collect::<Vec<_>>();
         annotations.sort_by_key(|a| a.pos);
         annotations
