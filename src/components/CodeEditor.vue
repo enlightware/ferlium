@@ -1,6 +1,6 @@
 <script setup lang="ts">
 
-import { ref, onMounted, type Ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import { Compiler, ErrorData } from 'script-api';
 
 import { EditorView,keymap, ViewUpdate, scrollPastEnd } from '@codemirror/view';
@@ -8,13 +8,14 @@ import { indentWithTab } from "@codemirror/commands";
 import { indentUnit } from "@codemirror/language";
 import { linter, type Diagnostic } from "@codemirror/lint";
 import { basicSetup } from 'codemirror';
-import { nonnull } from '../types';
 import { renderAnnotationsPlugin, setAnnotations } from '../annotation-extension';
 import { languageExtension } from "../language/language-extension";
 
-const editor: Ref<null | HTMLElement> = ref(null);
-const compiler = new Compiler();
+const editor = ref<HTMLElement>();
+const view = ref<EditorView>();
 const diagnostics: Diagnostic[] = [];
+
+const compiler = new Compiler();
 
 function fillDiagnostics(errorData: ErrorData[]){
 	diagnostics.length = 0;
@@ -31,10 +32,6 @@ function fillDiagnostics(errorData: ErrorData[]){
 function processUpdate(update: ViewUpdate) {
 	const text = update.state.doc.toString();
 	const view = update.view;
-	// const newText = processText(text);
-	// if (newText !== text) {
-	// 	view.dispatch({changes: {from: 0, to: newText.length, insert: newText}});
-	// }
 	if (update.docChanged) {
 		const errorData = compiler.compile(text);
 		if (errorData !== undefined) {
@@ -47,8 +44,19 @@ function processUpdate(update: ViewUpdate) {
 	}
 }
 
+const setText = (newText: string) => {
+	if (view.value) {
+		const text = view.value.state.doc.toString();
+		view.value.dispatch({changes: {from: 0, to: text.length, insert: newText}});
+	}
+};
+
+defineExpose({
+	setText
+});
+
 onMounted(() => {
-	new EditorView({
+	view.value = new EditorView({
 		doc: "",
 		extensions: [
 			basicSetup,
@@ -64,7 +72,7 @@ onMounted(() => {
 				".cm-scroller": {overflow: "auto", fontFamily: "'JuliaMono', monospace"}
 			}),
 		],
-		parent: nonnull(editor.value),
+		parent: editor.value,
 	});
 });
 </script>
@@ -75,8 +83,7 @@ onMounted(() => {
 
 <style scoped>
 div {
-	height: 100%;
-	width: 100%;
-	border: 1px solid black;
+	flex-grow: 1;
+	overflow-y: auto;
 }
 </style>
