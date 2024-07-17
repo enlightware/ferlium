@@ -1,0 +1,151 @@
+
+@tokens {
+  Identifier { $[a-zA-Z_]$[a-zA-Z0-9_]* }
+  Integer { $[0-9]$[0-9]* }
+  String { '"' (!["\\] | "\\" _)* '"' }
+  BoolLiteral { "true" | "false" }
+  LineComment { "//" ![\n]* }
+  space { @whitespace+ }
+  @precedence { LineComment, "/", BoolLiteral, Identifier }
+}
+
+kw<term> { @specialize[@name={term}]<Identifier, term> }
+
+
+@skip {space | LineComment}
+
+@top module {
+  FunctionsOrTypesWExpr {FunctionsOrTypes Expr} |
+  FunctionsOrTypes  |
+  Expr
+}
+
+FunctionsOrTypes {
+    FunctionOrTypes{FunctionOrType+}
+}
+
+FunctionOrType {
+  Function
+}
+
+Function {
+  kw<'fn'> Identifier '(' StringArgsOptComma ')' '{' Expr '}'
+}
+
+Expr {
+  plus { Expr !additive '+' Expr}
+    | minus { Expr !additive '-' Expr}
+    | multiplication {Expr !multiplicative '*' Expr}
+    | division { Expr !multiplicative '/' Expr}
+    | modulo { Expr !multiplicative '%' Expr}
+    | or {Expr !logic kw<'or'> Expr}
+    | and {Expr !logic kw<'and'> Expr}
+    | minusPrefix{!reverse '-' Expr}
+    | not {!reverse kw<'not'> Expr}
+    | Identifierical {Expr !compare '==' Expr}
+    | notEqual {Expr !compare '!=' Expr}
+    | smaller {Expr !compare '<' Expr}
+    | smallerEqual {Expr !compare '<=' Expr}
+    | bigger {Expr !compare '>' Expr}
+    | biggerEqual {Expr !compare '>=' Expr}
+    | equal {Expr !equal '=' Expr}
+    | if {!command kw<'if'> Expr '{' Expr '}' !command kw<'else'> '{' Expr '}' | !command kw<'if'> Expr '{' Expr '}'}
+    | match {!command kw<'match'> Expr '{' MatchArgsOptComma '}' | !command kw<'match'> Expr '{' MatchArgs ',' kw<'_'> '=>' ExprOptComma '}'}
+    | return {!return kw<'return'> Expr }
+    | parentheses {!parentheses '(' Expr ')' | !parentheses'(' ')' | !parentheses'(' TupleArgs ')' | Expr !parentheses'(' ')' | Expr '(' ExprArgsOptComma ')'}
+    | Literal
+    | let {!command kw<'let'> Identifier '=' Expr}
+    | var {!command kw<'var'> Identifier '=' Expr}
+    | verticals {!vertical '|' StringArgsOptComma !vertical '|' Expr}
+    | int {Expr !dot '.' Integer}
+    | Identifier {Expr !dot '.' Identifier}
+    | Identifier
+    | brackets {!bracket '[' ']' | !bracket '[' ExprArgsOptComma ']' | Expr !bracket '[' Expr ']'}
+    | braces {!braces '{' RecordFieldsOptComma '}'}
+    | semicolon {Expr !semicolon ';' Expr}
+}
+
+
+ExprOptComma {
+    Expr ','
+    | Expr
+}
+
+StringArgsOptComma {
+    StringArgs ','
+    | StringArgs
+}
+
+StringArgs {
+    StringArgs ',' Identifier
+    | Identifier
+    | ""
+}
+ExprArgsOptComma {
+    ExprArgs ','
+    | ExprArgs
+}
+
+ExprArgs{
+    ExprArgs ',' Expr
+    | Expr
+}
+
+TupleArgs {
+    Expr ',' ExprArgs
+    | Expr ',' ExprArgs ','
+    | Expr ','
+}
+
+RecordFieldsOptComma {
+    RecordFields ','
+    | RecordFields
+}
+
+RecordFields {
+    RecordFields ',' 'Identifier' ':' Expr
+    | Identifier ':' Expr
+}
+
+MatchArgsOptComma {
+    MatchArgs ','
+    | MatchArgs
+}
+
+MatchArgs {
+    MatchArgs ',' MatchArg
+    | MatchArg
+}
+
+MatchArg {
+    Pattern '=>' Expr
+}
+
+Pattern {
+    Expr
+}
+
+Literal {
+    Integer
+    | BoolLiteral
+}
+
+
+@precedence {
+parentheses,
+dot @right,
+reverse @right,
+multiplicative @left,
+additive @left,
+bracket,
+compare @left,
+and @left,
+or @left,
+vertical,
+equal @left,
+braces,
+logic @left,
+command,
+return,
+semicolon @left
+}

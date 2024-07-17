@@ -4,12 +4,18 @@ import vue from '@vitejs/plugin-vue';
 import eslintPlugin from "@nabla/vite-plugin-eslint";
 import wasmPack from 'vite-plugin-wasm-pack';
 import mkcert from'vite-plugin-mkcert';
+import lezer from 'unplugin-lezer/vite'
 
 const gitCommitHash = execSync('git rev-parse HEAD').toString().trimEnd();
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [vue(), eslintPlugin(), wasmPack(['./script-api']), mkcert({mkcertPath: '/usr/bin/mkcert'})],
+  plugins: [vue(),
+    eslintPlugin(),
+    wasmPack(['./script-api']),
+    mkcert({mkcertPath: '/usr/bin/mkcert'}),
+    lezer(),
+  ],
   define: {
     // Define a global constant for the git revision
     '__GIT_REVISION__': JSON.stringify(gitCommitHash)

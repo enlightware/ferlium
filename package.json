@@ -16,6 +16,7 @@
     "@codemirror/state": "^6.4.1",
     "@codemirror/view": "^6.28.4",
     "codemirror": "^6.0.1",
+    "unplugin-lezer": "^1.0.0",
     "vite-plugin-wasm-pack": "github:enlightware/vite-plugin-wasm-pack#60995dd",
     "vue": "^3.4.31"
   },

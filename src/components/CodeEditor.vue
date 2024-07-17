@@ -10,6 +10,7 @@ import { linter, type Diagnostic } from "@codemirror/lint";
 import { basicSetup } from 'codemirror';
 import { nonnull } from '../types';
 import { renderAnnotationsPlugin, setAnnotations } from '../annotation-extension';
+import { languageExtension } from "../language/language-extension";
 
 const editor: Ref<null | HTMLElement> = ref(null);
 const compiler = new Compiler();
@@ -51,12 +52,13 @@ onMounted(() => {
 		doc: "",
 		extensions: [
 			basicSetup,
+			languageExtension(),
 			keymap.of([indentWithTab]),
 			indentUnit.of("\t"),
 			scrollPastEnd(),
 			renderAnnotationsPlugin,
 			EditorView.updateListener.of(processUpdate),
-			linter(() => diagnostics),
+			linter(() => diagnostics, { delay: 0 }),
 			EditorView.theme({
 				"&.cm-editor": {height: "100%"},
 				".cm-scroller": {overflow: "auto", fontFamily: "'JuliaMono', monospace"}
