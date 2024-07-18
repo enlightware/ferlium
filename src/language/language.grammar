@@ -1,70 +1,81 @@
 
 @tokens {
-  Identifier { $[a-zA-Z_]$[a-zA-Z0-9_]* }
-  Integer { $[0-9]$[0-9]* }
-  String { '"' (!["\\] | "\\" _)* '"' }
-  BoolLiteral { "true" | "false" }
-  LineComment { "//" ![\n]* }
-  space { @whitespace+ }
-  @precedence { LineComment, "/", BoolLiteral, Identifier }
+    Identifier { $[a-zA-Z_]$[a-zA-Z0-9_]* }
+    Integer { $[0-9]$[0-9]* }
+    String { '"' (!["\\] | "\\" _)* '"' }
+    BoolLiteral { "true" | "false" }
+    LineComment { "//" ![\n]* }
+    whitespace { @whitespace+ }
+    CompareOp { "==" | "!="| ">"| ">="| "<" | "<=" }
+
+    "[" "]" "{" "}" "(" ")"
+    ";" ":" "::" ","
+    "=" "=>"
+
+    @precedence { LineComment, "/", BoolLiteral, Identifier }
 }
 
 kw<term> { @specialize[@name={term}]<Identifier, term> }
 
-
-@skip {space | LineComment}
+@skip { whitespace | LineComment }
 
 @top module {
-  FunctionsOrTypesWExpr {FunctionsOrTypes Expr} |
-  FunctionsOrTypes  |
-  Expr
+    FunctionsOrTypes Expr
+    | FunctionsOrTypes
+    | Expr
 }
 
 FunctionsOrTypes {
-    FunctionOrTypes{FunctionOrType+}
+    FunctionOrTypes { FunctionOrType+ }
 }
 
 FunctionOrType {
-  Function
+    Function
 }
 
 Function {
-  kw<'fn'> Identifier '(' StringArgsOptComma ')' '{' Expr '}'
+    kw<'fn'> Identifier '(' StringArgsOptComma ')' '{' Expr '}'
 }
 
 Expr {
-  plus { Expr !additive '+' Expr}
-    | minus { Expr !additive '-' Expr}
-    | multiplication {Expr !multiplicative '*' Expr}
-    | division { Expr !multiplicative '/' Expr}
-    | modulo { Expr !multiplicative '%' Expr}
-    | or {Expr !logic kw<'or'> Expr}
-    | and {Expr !logic kw<'and'> Expr}
-    | minusPrefix{!reverse '-' Expr}
-    | not {!reverse kw<'not'> Expr}
-    | Identifierical {Expr !compare '==' Expr}
-    | notEqual {Expr !compare '!=' Expr}
-    | smaller {Expr !compare '<' Expr}
-    | smallerEqual {Expr !compare '<=' Expr}
-    | bigger {Expr !compare '>' Expr}
-    | biggerEqual {Expr !compare '>=' Expr}
+    Expr !additive ArithOp { '+' | '-' } Expr
+    | Expr !multiplicative ArithOp { '*' | '/' | '%'} Expr
+    | !unaryMinus ArithOp { '-' } Expr
+    | Expr !or LogicOp { kw<'or'> } Expr
+    | Expr !and LogicOp { kw<'and'>} Expr
+    | !not kw<'not'> Expr
+    | Expr !compare CompareOp Expr
     | equal {Expr !equal '=' Expr}
-    | if {!command kw<'if'> Expr '{' Expr '}' !command kw<'else'> '{' Expr '}' | !command kw<'if'> Expr '{' Expr '}'}
-    | match {!command kw<'match'> Expr '{' MatchArgsOptComma '}' | !command kw<'match'> Expr '{' MatchArgs ',' kw<'_'> '=>' ExprOptComma '}'}
-    | return {!return kw<'return'> Expr }
-    | parentheses {!parentheses '(' Expr ')' | !parentheses'(' ')' | !parentheses'(' TupleArgs ')' | Expr !parentheses'(' ')' | Expr '(' ExprArgsOptComma ')'}
-    | Literal
-    | let {!command kw<'let'> Identifier '=' Expr}
-    | var {!command kw<'var'> Identifier '=' Expr}
-    | verticals {!vertical '|' StringArgsOptComma !vertical '|' Expr}
-    | int {Expr !dot '.' Integer}
-    | Identifier {Expr !dot '.' Identifier}
+    | IfExpression
+    | MatchExpression
+    | !return kw<'return'> Expr
+    | !parentheses '(' Expr ')'
     | Identifier
-    | brackets {!bracket '[' ']' | !bracket '[' ExprArgsOptComma ']' | Expr !bracket '[' Expr ']'}
-    | braces {!braces '{' RecordFieldsOptComma '}'}
-    | semicolon {Expr !semicolon ';' Expr}
+    | Literal
+    | !command kw<'let'> Identifier '=' Expr
+    | !command kw<'var'> Identifier '=' Expr
+    | !vertical '|' StringArgsOptComma !vertical '|' Expr
+    | !parentheses '(' ')'
+    | !parentheses '(' TupleArgs ')'
+    | Expr !dot '.' Integer
+    | Expr !dot '.' Identifier
+    | !bracket '[' ']'
+    | !bracket '[' ExprArgsOptComma ']'
+    | Expr !parentheses '(' ')'
+    | Expr '(' ExprArgsOptComma ')'
+    | Expr !bracket '[' Expr ']'
+    | !braces '{' RecordFieldsOptComma '}'
+    | Expr !semicolon ';' Expr
 }
 
+IfExpression {
+    !command kw<'if'> Expr '{' Expr '}' (!command kw<'else'> '{' Expr '}')?
+}
+
+MatchExpression {
+    !command kw<'match'> Expr '{' MatchArgsOptComma '}'
+    | !command kw<'match'> Expr '{' MatchArgs ',' kw<'_'> '=>' ExprOptComma '}'
+}
 
 ExprOptComma {
     Expr ','
@@ -132,20 +143,21 @@ Literal {
 
 
 @precedence {
-parentheses,
-dot @right,
-reverse @right,
-multiplicative @left,
-additive @left,
-bracket,
-compare @left,
-and @left,
-or @left,
-vertical,
-equal @left,
-braces,
-logic @left,
-command,
-return,
-semicolon @left
+    parentheses,
+    dot @right,
+    unaryMinus @right,
+    multiplicative @left,
+    additive @left,
+    bracket,
+    compare @left,
+    not @right,
+    and @left,
+    or @left,
+    vertical,
+    equal @left,
+    braces,
+    logic @left,
+    command,
+    return,
+    semicolon @left
 }
