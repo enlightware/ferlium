@@ -45,15 +45,14 @@ Expr {
     | Expr !and LogicOp { kw<'and'>} Expr
     | !not kw<'not'> Expr
     | Expr !compare CompareOp Expr
-    | equal {Expr !equal '=' Expr}
+    | Expr !equal '=' Expr
     | IfExpression
     | MatchExpression
     | !return kw<'return'> Expr
     | !parentheses '(' Expr ')'
     | Identifier
     | Literal
-    | !command kw<'let'> Identifier '=' Expr
-    | !command kw<'var'> Identifier '=' Expr
+    | VarDefExpression
     | !vertical '|' StringArgsOptComma !vertical '|' Expr
     | !parentheses '(' ')'
     | !parentheses '(' TupleArgs ')'
@@ -75,6 +74,11 @@ IfExpression {
 MatchExpression {
     !command kw<'match'> Expr '{' MatchArgsOptComma '}'
     | !command kw<'match'> Expr '{' MatchArgs ',' kw<'_'> '=>' ExprOptComma '}'
+}
+
+VarDefExpression {
+    !command kw<'let'> Identifier '=' Expr
+    | !command kw<'var'> Identifier '=' Expr
 }
 
 ExprOptComma {

@@ -1,5 +1,5 @@
 import { parser } from "./language.grammar";
-import { LRLanguage, LanguageSupport, continuedIndent, indentNodeProp } from "@codemirror/language";
+import { LRLanguage, LanguageSupport, continuedIndent, flatIndent, indentNodeProp } from "@codemirror/language";
 import { styleTags, tags as t } from "@lezer/highlight";
 
 // list if tags: https://lezer.codemirror.net/docs/ref/#highlight.tags
@@ -29,7 +29,8 @@ export function languageExtension() {
 			props: [
 				highlight,
 				indentNodeProp.add({
-					"Expr Function": continuedIndent(),
+					Expr: flatIndent,
+					"Function IfExpression": continuedIndent()
 				}),
 			]
 		}),
