@@ -1,14 +1,14 @@
 <script setup lang="ts">
 
-import { ref, onMounted } from 'vue';
-import { Compiler, ErrorData } from 'script-api';
+import { ref, onMounted } from "vue";
+import { Compiler, ErrorData } from "script-api";
 
-import { EditorView,keymap, ViewUpdate, scrollPastEnd } from '@codemirror/view';
+import { EditorView, keymap, ViewUpdate, scrollPastEnd } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
 import { indentUnit } from "@codemirror/language";
 import { linter, type Diagnostic } from "@codemirror/lint";
-import { basicSetup } from 'codemirror';
-import { renderAnnotationsPlugin, setAnnotations } from '../annotation-extension';
+import { basicSetup } from "codemirror";
+import { renderAnnotationsPlugin, setAnnotations } from "../annotation-extension";
 import { languageExtension } from "../language/language-extension";
 
 const editor = ref<HTMLElement>();
@@ -16,6 +16,21 @@ const view = ref<EditorView>();
 const diagnostics: Diagnostic[] = [];
 
 const compiler = new Compiler();
+
+const extensions = [
+	basicSetup,
+	languageExtension(),
+	keymap.of([indentWithTab]),
+	indentUnit.of("\t"),
+	scrollPastEnd(),
+	renderAnnotationsPlugin,
+	EditorView.updateListener.of(processUpdate),
+	linter(() => diagnostics, { delay: 0 }),
+	EditorView.theme({
+		"&.cm-editor": {height: "100%"},
+		".cm-scroller": {overflow: "auto", fontFamily: "'JuliaMono', monospace"}
+	}),
+];
 
 function fillDiagnostics(errorData: ErrorData[]){
 	diagnostics.length = 0;
@@ -58,20 +73,7 @@ defineExpose({
 onMounted(() => {
 	view.value = new EditorView({
 		doc: "",
-		extensions: [
-			basicSetup,
-			languageExtension(),
-			keymap.of([indentWithTab]),
-			indentUnit.of("\t"),
-			scrollPastEnd(),
-			renderAnnotationsPlugin,
-			EditorView.updateListener.of(processUpdate),
-			linter(() => diagnostics, { delay: 0 }),
-			EditorView.theme({
-				"&.cm-editor": {height: "100%"},
-				".cm-scroller": {overflow: "auto", fontFamily: "'JuliaMono', monospace"}
-			}),
-		],
+		extensions,
 		parent: editor.value,
 	});
 });
