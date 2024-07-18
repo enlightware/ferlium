@@ -10,6 +10,7 @@ import { linter, type Diagnostic } from "@codemirror/lint";
 import { basicSetup } from "codemirror";
 import { renderAnnotationsPlugin, setAnnotations } from "../annotation-extension";
 import { languageExtension } from "../language/language-extension";
+import { positionPanel } from "../position-panel-extension";
 
 const editor = ref<HTMLElement>();
 const view = ref<EditorView>();
@@ -20,6 +21,7 @@ const compiler = new Compiler();
 const extensions = [
 	basicSetup,
 	languageExtension(),
+	positionPanel(),
 	keymap.of([indentWithTab]),
 	indentUnit.of("\t"),
 	scrollPastEnd(),
@@ -28,7 +30,8 @@ const extensions = [
 	linter(() => diagnostics, { delay: 0 }),
 	EditorView.theme({
 		"&.cm-editor": {height: "100%"},
-		".cm-scroller": {overflow: "auto", fontFamily: "'JuliaMono', monospace"}
+		".cm-scroller": {overflow: "auto", fontFamily: "'JuliaMono', monospace"},
+		".cursor-panel": {textAlign: "right", paddingRight: "4px"}
 	}),
 ];
 
