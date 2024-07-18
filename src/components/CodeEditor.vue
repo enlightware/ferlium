@@ -25,6 +25,7 @@ const extensions = [
 	keymap.of([indentWithTab]),
 	indentUnit.of("\t"),
 	scrollPastEnd(),
+	EditorView.lineWrapping,
 	renderAnnotationsPlugin,
 	EditorView.updateListener.of(processUpdate),
 	linter(() => diagnostics, { delay: 0 }),
