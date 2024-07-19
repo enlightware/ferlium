@@ -15,7 +15,7 @@ function updateEditor(data: { value: string, index: number }) {
 
 <template>
 	<DropdownSelect
-		:items="['Empty', 'Factorial', 'Is even', 'Polymorphic let']"
+		:items="['Empty', 'Factorial', 'Is even', 'Polymorphic let (function)', 'Polymorphic let (value)']"
 		@selection-changed="updateEditor"
 	/>
 	<CodeEditor ref="editor" />

@@ -30,6 +30,9 @@ is_even(10)
 `,
 	`let f = |x, y| (x.1, x.1.0, y == x.1);
 let id = |x| x;
-id(1)
+(id(1), id(true), id(|x, y| (y, x)))
+`,
+	`let a = [];
+(array_concat(a, [1]), array_concat(a, [true]))
 `
 ];
