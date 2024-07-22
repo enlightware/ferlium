@@ -1,7 +1,7 @@
 mod utils;
 
 use painturscript::{
-    compile, error::CompilationError, module::Modules, std::new_std_module_env, ModuleAndExpr, Span,
+    compile, error::CompilationError, module::Modules, std::new_std_module_env, type_scheme::DisplayStyle, ModuleAndExpr, Span
 };
 use utils::{set_panic_hook, CharIndexLookup};
 use wasm_bindgen::prelude::*;
@@ -141,7 +141,7 @@ impl Compiler {
         let char_indices = CharIndexLookup::new(&self.user_src);
         let mut annotations = self
             .user_module
-            .display_annotations(self.user_src.as_str(), &self.modules)
+            .display_annotations(self.user_src.as_str(), &self.modules, DisplayStyle::Rust)
             .iter()
             .map(|(pos, hint)| {
                 AnnotationData::new(char_indices.byte_to_char_position(*pos), hint.clone())
