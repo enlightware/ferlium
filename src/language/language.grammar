@@ -38,14 +38,10 @@ Function {
 }
 
 Expr {
-    Expr !additive ArithOp { '+' | '-' } Expr
-    | Expr !multiplicative ArithOp { '*' | '/' | '%'} Expr
-    | !unaryMinus ArithOp { '-' } Expr
-    | Expr !or LogicOp { kw<'or'> } Expr
-    | Expr !and LogicOp { kw<'and'>} Expr
-    | !not kw<'not'> Expr
-    | Expr !compare CompareOp Expr
-    | Expr !equal '=' Expr
+    ArithExpression
+    | LogicExpression
+    | CompareExpression
+    | Assignment
     | IfExpression
     | MatchExpression
     | !return kw<'return'> Expr
@@ -53,18 +49,34 @@ Expr {
     | Identifier
     | Literal
     | VarDefExpression
-    | !vertical '|' StringArgsOptComma !vertical '|' Expr
-    | !parentheses '(' ')'
-    | !parentheses '(' TupleArgs ')'
-    | Expr !dot '.' Integer
-    | Expr !dot '.' Identifier
-    | !bracket '[' ']'
-    | !bracket '[' ExprArgsOptComma ']'
-    | Expr !parentheses '(' ')'
-    | Expr '(' ExprArgsOptComma ')'
-    | Expr !bracket '[' Expr ']'
-    | !braces '{' RecordFieldsOptComma '}'
+    | AbstractExpression
+    | TupleExpression
+    | RecordExpression
+    | ProjectExpression
+    | ArrayExpression
+    | ApplyExpression
+    | IndexExpression
     | Expr !semicolon ';' Expr
+}
+
+ArithExpression {
+    Expr !additive ArithOp { '+' | '-' } Expr
+    | Expr !multiplicative ArithOp { '*' | '/' | '%'} Expr
+    | !unaryMinus ArithOp { '-' } Expr
+}
+
+LogicExpression {
+    Expr !or LogicOp { kw<'or'> } Expr
+    | Expr !and LogicOp { kw<'and'>} Expr
+    | !not kw<'not'> Expr
+}
+
+CompareExpression {
+    Expr !compare CompareOp Expr
+}
+
+Assignment {
+    Expr !equal '=' Expr
 }
 
 IfExpression {
@@ -79,6 +91,38 @@ MatchExpression {
 VarDefExpression {
     !command kw<'let'> Identifier '=' Expr
     | !command kw<'var'> Identifier '=' Expr
+}
+
+AbstractExpression {
+    !vertical '|' StringArgsOptComma !vertical '|' Expr
+}
+
+TupleExpression {
+    !parentheses '(' ')'
+    | !parentheses '(' TupleArgs ')'
+}
+
+RecordExpression {
+    !braces '{' RecordFieldsOptComma '}'
+}
+
+ProjectExpression {
+    Expr !dot '.' Integer
+    | Expr !dot '.' Identifier
+}
+
+ArrayExpression {
+    !bracket '[' ']'
+    | !bracket '[' ExprArgsOptComma ']'
+}
+
+ApplyExpression {
+    Expr !parentheses '(' ')'
+    | Expr '(' ExprArgsOptComma ')'
+}
+
+IndexExpression {
+    Expr !bracket '[' Expr ']'
 }
 
 ExprOptComma {
