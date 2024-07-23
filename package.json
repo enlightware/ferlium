@@ -14,25 +14,25 @@
     "@codemirror/language": "^6.10.2",
     "@codemirror/lint": "^6.8.1",
     "@codemirror/state": "^6.4.1",
-    "@codemirror/view": "^6.28.4",
+    "@codemirror/view": "^6.28.6",
     "@lezer/highlight": "^1.2.0",
     "@lezer/lr": "^1.4.1",
     "codemirror": "^6.0.1",
-    "unplugin-lezer": "^1.0.0",
+    "unplugin-lezer": "^1.0.1",
     "vite-plugin-wasm-pack": "github:enlightware/vite-plugin-wasm-pack#60995dd",
-    "vue": "^3.4.31"
+    "vue": "^3.4.33"
   },
   "devDependencies": {
     "@eslint/js": "^9.7.0",
     "@nabla/vite-plugin-eslint": "^2.0.4",
-    "@types/node": "^20.14.10",
+    "@types/node": "^20.14.11",
     "@vitejs/plugin-vue": "^5.0.5",
     "eslint": "^8.57.0",
     "eslint-plugin-vue": "^9.27.0",
-    "typescript": "^5.5.3",
-    "typescript-eslint": "^7.16.1",
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^7.17.0",
     "vite": "^5.3.4",
     "vite-plugin-mkcert": "^1.17.5",
-    "vue-tsc": "^2.0.26"
+    "vue-tsc": "^2.0.28"
   }
 }
