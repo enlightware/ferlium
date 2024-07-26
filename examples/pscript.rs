@@ -1,10 +1,11 @@
 use ariadne::Label;
 use lrpar::Span;
-use painturscript::emit_ir::{emit_expr_top_level, emit_module, Local};
+use painturscript::emit_ir::{emit_expr_top_level, emit_module};
 use painturscript::error::InternalCompilationError;
 use painturscript::format::FormatWith;
 use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
 use painturscript::std::{new_module_with_prelude, new_std_module_env};
+use painturscript::typing_env::Local;
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 
@@ -163,7 +164,7 @@ fn main() {
             for (i, local) in locals.iter().enumerate() {
                 println!(
                     "{} {}: {} = {}",
-                    if local.mutable { "var" } else { "let" },
+                    local.mutable.var_def_string(),
                     local.name,
                     local
                         .ty

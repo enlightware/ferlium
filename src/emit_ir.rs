@@ -11,12 +11,11 @@ use crate::{
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
     r#type::{FnType, Type, TypeLike, TypeVar},
     std::logic::unit_type,
-    type_inference::{Constraint, FreshTyVarGen, TypeInference, TypingEnv},
+    type_inference::{Constraint, FreshTyVarGen, TypeInference},
     type_scheme::{PubConstraint, TypeScheme},
+    typing_env::{Local, TypingEnv},
     value::Value,
 };
-
-pub use crate::type_inference::Local;
 
 /// Emit IR for the given module
 pub fn emit_module(
@@ -105,7 +104,7 @@ pub fn emit_module(
             // Loop because new constraints may introduce new type variables.
             let initial_count = quantifiers.len();
             constraints = filter_constraints(&all_constraints, &quantifiers);
-            quantifiers = extend_with_contraint_ty_vars(&quantifiers, &constraints);
+            quantifiers = extend_with_constraint_ty_vars(&quantifiers, &constraints);
             if quantifiers.len() == initial_count {
                 break;
             }
@@ -179,7 +178,7 @@ pub struct CompiledExpr {
 }
 
 /// Emit IR for an expression
-/// Retrun the compiled expression and any remaining external constraints
+/// Return the compiled expression and any remaining external constraints
 /// referring to lower-generation type variables.
 pub fn emit_expr(
     source: &ast::Expr,
@@ -271,7 +270,7 @@ pub fn emit_expr(
 }
 
 /// Emit IR for an expression
-/// Retrun the compiled expression and any remaining external constraints
+/// Return the compiled expression and any remaining external constraints
 /// referring to lower-generation type variables.
 pub fn emit_expr_top_level(
     source: &ast::Expr,
@@ -303,7 +302,7 @@ fn filter_constraints(constraints: &[PubConstraint], ty_vars: &[TypeVar]) -> Vec
 }
 
 /// Extend a list of type variables with the type variables in the constraints
-fn extend_with_contraint_ty_vars(
+fn extend_with_constraint_ty_vars(
     ty_vars: &[TypeVar],
     constraints: &[PubConstraint],
 ) -> Vec<TypeVar> {

@@ -30,7 +30,8 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 
 * ML: basic functional concepts (especially [this course](https://pauillac.inria.fr/~remy/mpri/) and [this one](https://cs3110.github.io/textbook/chapters/interp/inference.html))
 * Rust: syntax and type system
-* Swift(let) (especially [this paper](https://www.jot.fm/issues/issue_2022_02/article2.pdf))
+* HM(X) approach to type inference ([this paper](https://www.researchgate.net/profile/Martin-Sulzmann/publication/220346751_Type_Inference_with_Constrained_Types/links/5ab00c0b0f7e9b4897c1d25b/Type-Inference-with-Constrained-Types.pdf))
+* Mutable Value Semantics (especially [this paper](https://www.jot.fm/issues/issue_2022_02/article2.pdf))
 * This [series of blog posts](https://thunderseethe.dev/posts/type-inference/)
 
 ## Why the name painturscript?

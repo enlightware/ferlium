@@ -16,6 +16,7 @@ pub mod function;
 mod graph;
 pub mod ir;
 pub mod module;
+pub mod mutability;
 pub mod parser;
 mod parser_helpers;
 pub mod std;
@@ -23,6 +24,7 @@ mod sync;
 pub mod r#type;
 mod type_inference;
 pub mod type_scheme;
+pub mod typing_env;
 pub mod value;
 
 pub use lrpar::Span;

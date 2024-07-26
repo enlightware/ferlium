@@ -5,7 +5,8 @@ use std::fmt::Debug;
 use ustr::Ustr;
 
 use crate::{
-    containers::B, error::LocatedError, module::FmtWithModuleEnv, r#type::Type, value::Value,
+    containers::B, error::LocatedError, module::FmtWithModuleEnv, mutability::MutVal, r#type::Type,
+    value::Value,
 };
 
 #[derive(Debug, Clone)]
@@ -114,7 +115,7 @@ impl FmtWithModuleEnv for Module {
 pub enum ExprKind {
     Literal(Value, Type),
     Variable(Ustr),
-    LetVar((Ustr, Span), bool, B<Expr>),
+    LetVar((Ustr, Span), MutVal, B<Expr>),
     Abstract(Vec<(Ustr, Span)>, B<Expr>),
     Apply(B<Expr>, Vec<Expr>),
     StaticApply(Ustr, Vec<Expr>),
@@ -146,7 +147,7 @@ impl Expr {
             Literal(value, _) => writeln!(f, "{indent_str}{value}"),
             Variable(name) => writeln!(f, "{indent_str}{name} (local)"),
             LetVar((name, _), mutable, expr) => {
-                let kw = if *mutable { "var" } else { "let" };
+                let kw = mutable.var_def_string();
                 writeln!(f, "{indent_str}{kw} {name} =")?;
                 expr.format_ind(f, indent + 1)
             }

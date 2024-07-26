@@ -19,6 +19,7 @@ use crate::{
     r#type::{FnType, NativeType, TyVarKey, Type, TypeKind, TypeLike, TypeSubstitution, TypeVar},
     std::{array::array_type, math::int_type},
     type_scheme::{PubConstraint, TypeScheme},
+    typing_env::{Local, TypingEnv},
     value::Value,
 };
 
@@ -72,85 +73,6 @@ impl FmtWithModuleEnv for Constraint {
             }
             Constraint::Pub(pub_constraint) => pub_constraint.fmt_with_module_env(f, env),
         }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Local {
-    pub name: Ustr,
-    pub mutable: bool,
-    pub ty: TypeScheme<Type>,
-    pub span: Span,
-}
-impl Local {
-    pub fn new(name: Ustr, mutable: bool, ty: TypeScheme<Type>, span: Span) -> Self {
-        Self {
-            name,
-            mutable,
-            ty,
-            span,
-        }
-    }
-    fn new_var(name: Ustr, ty: Type, span: Span) -> Self {
-        Self {
-            name,
-            mutable: true,
-            ty: TypeScheme::new_just_type(ty),
-            span,
-        }
-    }
-    fn new_let(name: Ustr, ty: Type, span: Span) -> Self {
-        Self {
-            name,
-            mutable: false,
-            ty: TypeScheme::new_just_type(ty),
-            span,
-        }
-    }
-}
-
-/// A typing environment, mapping local variable names to types.
-pub struct TypingEnv<'m> {
-    locals: Vec<Local>,
-    module_env: ModuleEnv<'m>,
-}
-impl<'m> TypingEnv<'m> {
-    pub fn new(locals: Vec<Local>, module_env: ModuleEnv<'m>) -> Self {
-        Self { locals, module_env }
-    }
-
-    pub fn get_locals_and_drop(self) -> Vec<Local> {
-        self.locals
-    }
-
-    fn has_variable_name(&self, name: Ustr) -> bool {
-        self.locals.iter().any(|local| local.name == name)
-    }
-
-    fn get_variable_index_and_type_scheme(
-        &self,
-        name: Ustr,
-        span: Span,
-    ) -> Result<(usize, &TypeScheme<Type>), InternalCompilationError> {
-        self.locals
-            .iter()
-            .rev()
-            .position(|local| local.name == name)
-            .map(|rev_index| self.locals.len() - 1 - rev_index)
-            .map(|index| (index, &self.locals[index].ty))
-            .ok_or(InternalCompilationError::VariableNotFound(span))
-    }
-
-    fn get_function(
-        &'m self,
-        name: Ustr,
-        span: Span,
-    ) -> Result<&'m ModuleFunction, InternalCompilationError> {
-        // TODO: add support for looking up in other modules with qualified path
-        self.module_env
-            .current
-            .get_function(name, self.module_env.others)
-            .ok_or(InternalCompilationError::FunctionNotFound(span))
     }
 }
 
@@ -213,7 +135,7 @@ impl TypeInference {
                 (node, var_ty)
             }
             LetVar((name, name_span), mutable, let_expr) => {
-                let (node, ty_scheme) = if *mutable {
+                let (node, ty_scheme) = if mutable.into() {
                     // Mutable variable, do not do generalization.
                     let (node, ty) = self.infer_expr(env, let_expr)?;
                     (node, TypeScheme::new_just_type(ty))

@@ -109,9 +109,9 @@ Expr -> Expr
     | Literal
         { $1 }
     | 'let' 'IDENT' '=' Expr
-        { Expr::new(LetVar((s($2, $lexer), lex_span($2)), false, B::new($4)), $span) }
+        { Expr::new(LetVar((s($2, $lexer), lex_span($2)), MutVal::constant(), B::new($4)), $span) }
     | 'var' 'IDENT' '=' Expr
-        { Expr::new(LetVar((s($2, $lexer), lex_span($2)), true, B::new($4)), $span) }
+        { Expr::new(LetVar((s($2, $lexer), lex_span($2)), MutVal::mutable(), B::new($4)), $span) }
     | '|' StringArgsOptComma '|' Expr
         { Expr::new(Abstract($2, B::new($4)), $span) }
     | '(' ')'
@@ -249,6 +249,7 @@ use crate::ast::ExprKind::*;
 use crate::value::Value;
 use crate::r#type::Type;
 use crate::containers::B;
+use crate::mutability::MutVal;
 use ustr::{Ustr, ustr};
 use lrpar::Span;
 

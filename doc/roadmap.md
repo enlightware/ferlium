@@ -27,4 +27,6 @@
 ### Next tasks
 
 - Type check var/let and equalities
+- Do not add trivial constraints to type inference
+- Add {} block expression
 - Add record type

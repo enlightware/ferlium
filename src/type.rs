@@ -23,13 +23,13 @@ use ustr::Ustr;
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::B;
-use crate::emit_ir::Local;
 use crate::graph;
 use crate::graph::find_disjoint_subgraphs;
 use crate::module::FmtWithModuleEnv;
 use crate::module::ModuleEnv;
 use crate::sync::SyncPhantomData;
 use crate::type_scheme::TypeScheme;
+use crate::typing_env::Local;
 
 /// Something that is a type or part of it, and that can
 /// be instantiated and queried for its free type variables.
@@ -296,7 +296,12 @@ impl FnType {
             .iter()
             .zip(self.args.iter())
             .map(|((name, span), arg)| {
-                Local::new(*name, arg.inout, TypeScheme::new_just_type(arg.ty), *span)
+                Local::new(
+                    *name,
+                    arg.inout.into(),
+                    TypeScheme::new_just_type(arg.ty),
+                    *span,
+                )
             })
             .collect()
     }

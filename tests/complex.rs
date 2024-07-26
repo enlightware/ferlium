@@ -99,7 +99,10 @@ fn array_and_let_polymorphism() {
 
 #[test]
 fn array_and_lambda() {
-    assert_eq!(run("var a = [1,2]; (|x| array_append(x, 3))(a)"), int_a![1, 2, 3]);
+    assert_eq!(
+        run("var a = [1,2]; (|x| array_append(x, 3))(a)"),
+        int_a![1, 2, 3]
+    );
 }
 
 #[test]
