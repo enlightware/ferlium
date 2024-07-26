@@ -2,7 +2,7 @@ mod common;
 
 use test_log::test;
 
-use common::{run, unit};
+use common::{fail_compilation, run, unit};
 use painturscript::value::Value;
 
 #[test]
@@ -90,8 +90,16 @@ fn array_and_let_polymorphism() {
         run("let f = || []; var a = f(); array_append(a, 1); a[0]"),
         int!(1)
     );
+    // TODO: check return type here
+    assert_eq!(run("let f = || []; let a = f(); ()"), unit());
+    fail_compilation("let f = || []; var a = f(); ()").expect_unbound_ty_var();
     // FIXME: this should fail with access error
     // assert_eq!(run("let f = || []; let a = f(); array_append(a, 1); a[0]"), int!(1));
+}
+
+#[test]
+fn array_and_lambda() {
+    assert_eq!(run("var a = [1,2]; (|x| array_append(x, 3))(a)"), int_a![1, 2, 3]);
 }
 
 #[test]

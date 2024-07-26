@@ -507,7 +507,7 @@ impl TypeInference {
 
         // Functions call
         if let Abstract(args, body) = &expr.kind {
-            let ty_data = &*expected_ty.data();
+            let ty_data = { expected_ty.data().clone() };
             if let TypeKind::Function(fn_ty) = ty_data {
                 // Build environment for typing the function's body
                 let locals = args
