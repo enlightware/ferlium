@@ -1,15 +1,18 @@
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
-use std::{any::Any, cell::RefCell, fmt, rc::Rc};
+use std::{
+    any::Any,
+    cell::RefCell,
+    fmt::{self, Display},
+    rc::Rc,
+};
 use ustr::Ustr;
 
 use crate::{
     containers::{SVec2, B},
-    error::RuntimeError,
     format::write_with_separator,
     function::{Function, FunctionRef},
-    ir::{EvalCtx, Place},
     module::ModuleEnv,
     r#type::TypeVarSubstitution,
 };
@@ -152,7 +155,7 @@ impl Value {
     }
 }
 
-impl fmt::Display for Value {
+impl Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Native(value) => value.native_fmt(f),
@@ -170,33 +173,6 @@ impl fmt::Display for Value {
                 write!(f, "{:?}", function)
             }
         }
-    }
-}
-
-/// Either a value or a unique mutable reference to a value.
-/// This allows to implement the mutable value semantics.
-#[derive(Debug, PartialEq, Eq, EnumAsInner)]
-pub enum ValOrMut {
-    /// A value, itself
-    Val(Value),
-    /// A mutable reference, index in the environment plus path within the value
-    Mut(Place),
-}
-impl ValOrMut {
-    pub fn into_primitive<T: 'static>(self) -> Option<T> {
-        match self {
-            ValOrMut::Val(val) => val.into_primitive_ty::<T>(),
-            ValOrMut::Mut(_) => None,
-        }
-    }
-    pub fn as_mut_primitive<T: 'static>(
-        self,
-        ctx: &mut EvalCtx,
-    ) -> Result<Option<&mut T>, RuntimeError> {
-        Ok(match self {
-            ValOrMut::Val(_) => None,
-            ValOrMut::Mut(place) => place.target_ref(ctx)?.as_primitive_ty_mut::<T>(),
-        })
     }
 }
 

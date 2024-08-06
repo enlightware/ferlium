@@ -22,7 +22,7 @@ pub enum DisplayStyle {
 /// A constraint that can be part of a type scheme.
 /// This corresponds to a solved constraint in HM(X).
 #[derive(Debug, Clone, Eq)]
-pub enum PubConstraint {
+pub enum PubTypeConstraint {
     /// Tuple projection constraint: tuple_ty.index = element_ty
     TupleAtIndexIs {
         tuple_ty: Type,
@@ -33,7 +33,7 @@ pub enum PubConstraint {
     },
 }
 
-impl PubConstraint {
+impl PubTypeConstraint {
     pub fn new_tuple_at_index_is(
         tuple_ty: Type,
         tuple_span: Span,
@@ -52,7 +52,7 @@ impl PubConstraint {
 
     pub fn contains_ty_vars(&self, vars: &[TypeVar]) -> bool {
         match self {
-            PubConstraint::TupleAtIndexIs {
+            PubTypeConstraint::TupleAtIndexIs {
                 tuple_ty,
                 element_ty,
                 ..
@@ -61,7 +61,7 @@ impl PubConstraint {
     }
 }
 
-impl TypeLike for PubConstraint {
+impl TypeLike for PubTypeConstraint {
     fn instantiate(&self, subst: &TypeSubstitution) -> Self {
         match self {
             Self::TupleAtIndexIs {
@@ -100,7 +100,7 @@ impl TypeLike for PubConstraint {
 
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
         match self {
-            PubConstraint::TupleAtIndexIs {
+            PubTypeConstraint::TupleAtIndexIs {
                 tuple_ty,
                 element_ty,
                 ..
@@ -114,17 +114,17 @@ impl TypeLike for PubConstraint {
     }
 }
 
-impl PartialEq for PubConstraint {
+impl PartialEq for PubTypeConstraint {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (
-                PubConstraint::TupleAtIndexIs {
+                PubTypeConstraint::TupleAtIndexIs {
                     tuple_ty: t_ty1,
                     index: idx1,
                     element_ty: e_ty1,
                     ..
                 },
-                PubConstraint::TupleAtIndexIs {
+                PubTypeConstraint::TupleAtIndexIs {
                     tuple_ty: t_ty2,
                     index: idx2,
                     element_ty: e_ty2,
@@ -135,10 +135,10 @@ impl PartialEq for PubConstraint {
     }
 }
 
-impl Hash for PubConstraint {
+impl Hash for PubTypeConstraint {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
-            PubConstraint::TupleAtIndexIs {
+            PubTypeConstraint::TupleAtIndexIs {
                 tuple_ty,
                 index,
                 element_ty,
@@ -152,14 +152,14 @@ impl Hash for PubConstraint {
     }
 }
 
-impl FmtWithModuleEnv for PubConstraint {
+impl FmtWithModuleEnv for PubTypeConstraint {
     fn fmt_with_module_env(
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
         match self {
-            PubConstraint::TupleAtIndexIs {
+            PubTypeConstraint::TupleAtIndexIs {
                 tuple_ty,
                 index,
                 element_ty,
@@ -181,7 +181,7 @@ impl FmtWithModuleEnv for PubConstraint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeScheme<Ty: TypeLike> {
     pub(crate) quantifiers: Vec<TypeVar>,
-    pub(crate) constraints: Vec<PubConstraint>,
+    pub(crate) constraints: Vec<PubTypeConstraint>,
     pub(crate) ty: Ty,
 }
 
@@ -195,7 +195,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         }
     }
 
-    /// Create a new type scheme by infering quantifiers from the type, and no constraints.
+    /// Create a new type scheme by inferring quantifiers from the type, and no constraints.
     pub(crate) fn new_infer_quantifiers(ty: Ty) -> Self {
         let quantifiers = ty.inner_ty_vars();
         Self {
@@ -241,12 +241,16 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     /// Helper function to list free type variables in a type and its constraints.
     pub(crate) fn list_ty_vars(
         ty: &Ty,
-        constraints: &[PubConstraint],
+        constraints: &[PubTypeConstraint],
         generation: u32,
     ) -> Vec<TypeVar> {
         ty.inner_ty_vars()
             .into_iter()
-            .chain(constraints.iter().flat_map(PubConstraint::inner_ty_vars))
+            .chain(
+                constraints
+                    .iter()
+                    .flat_map(PubTypeConstraint::inner_ty_vars),
+            )
             .unique()
             .filter(|var| var.generation() == generation)
             .collect()

@@ -49,15 +49,17 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
-        TypeMismatch(a, b, span) => {
-            let offset = start_of_line_of(src, span.start());
+        IsNotSubtype(cur, cur_span, exp, exp_span) => {
+            let min_pos = cur_span.start().min(exp_span.start());
+            let offset = start_of_line_of(src, min_pos);
             Report::build(ReportKind::Error, "input", offset)
                 .with_message(format!(
-                    "Type {} is incompatible with type {}",
-                    a.format_with(env).fg(Color::Blue),
-                    b.format_with(env).fg(Color::Blue)
+                    "Type {} is not a sub-type of type {}",
+                    cur.format_with(env).fg(Color::Blue),
+                    exp.format_with(env).fg(Color::Blue)
                 ))
-                .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
+                .with_label(Label::new(("input", span_range(*cur_span))).with_color(Color::Blue))
+                .with_label(Label::new(("input", span_range(*exp_span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
                 .unwrap();
@@ -164,12 +166,18 @@ fn main() {
             for (i, local) in locals.iter().enumerate() {
                 println!(
                     "{} {}: {} = {}",
-                    local.mutable.var_def_string(),
+                    local
+                        .mutable
+                        .as_resolved()
+                        .expect("unresolved mutability in local")
+                        .var_def_string(),
                     local.name,
                     local
                         .ty
                         .display_rust_style(&ModuleEnv::new(&module, &other_modules)),
-                    eval_ctx.environment[eval_ctx.frame_base + i],
+                    eval_ctx.environment[eval_ctx.frame_base + i]
+                        .as_val()
+                        .expect("reference found in REPL locals"),
                 );
             }
         }

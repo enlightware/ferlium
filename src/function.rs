@@ -7,11 +7,11 @@ use std::{
 
 use crate::{
     error::RuntimeError,
-    ir::{self, EvalCtx, EvalResult},
+    ir::{self, EvalCtx, EvalResult, ValOrMut},
     module::{ModuleEnv, ModuleFunction},
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
-    value::{NativeDisplay, ValOrMut, Value},
+    value::{NativeDisplay, Value},
 };
 
 type CallCtx = EvalCtx;
@@ -103,8 +103,7 @@ impl Callable for ScriptFunction {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
         let old_frame_base = ctx.frame_base;
         ctx.frame_base = ctx.environment.len();
-        ctx.environment
-            .extend(args.into_iter().map(|arg| arg.into_val().unwrap()));
+        ctx.environment.extend(args.into_iter());
         let ret = self.code.eval(ctx)?;
         ctx.environment.truncate(ctx.frame_base);
         ctx.frame_base = old_frame_base;

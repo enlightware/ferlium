@@ -93,14 +93,14 @@ fn array_and_let_polymorphism() {
     // TODO: check return type here
     assert_eq!(run("let f = || []; let a = f(); ()"), unit());
     fail_compilation("let f = || []; var a = f(); ()").expect_unbound_ty_var();
-    // FIXME: this should fail with access error
-    // assert_eq!(run("let f = || []; let a = f(); array_append(a, 1); a[0]"), int!(1));
+    fail_compilation("let f = || []; let a = f(); array_append(a, 1); a[0]")
+        .expect_must_be_mutable();
 }
 
 #[test]
 fn array_and_lambda() {
     assert_eq!(
-        run("var a = [1,2]; (|x| array_append(x, 3))(a)"),
+        run("var a = [1,2]; (|x| array_append(x, 3))(a); a"),
         int_a![1, 2, 3]
     );
 }
@@ -110,4 +110,16 @@ fn array_access_in_module_functions() {
     assert_eq!(run("fn p(a) { let x = a[0] }"), unit());
     assert_eq!(run("fn p(a) { let x = a[0]; x }"), unit());
     assert_eq!(run("fn p(a, i) { let x = a[i]; 0 }"), unit());
+}
+
+#[test]
+fn recursive_mutable_references() {
+    assert_eq!(
+        run("fn set_1(a) { a = 1 } fn call_set_1(a) { set_1(a) } var a = 0; call_set_1(a); a"),
+        int!(1)
+    );
+    assert_eq!(
+        run("fn set_1(a) { a = 1 } fn call_set_1(a) { a = 2; set_1(a) } var a = 0; call_set_1(a); a"),
+        int!(1)
+    );
 }

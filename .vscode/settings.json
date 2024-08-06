@@ -7,6 +7,7 @@
 		"descr",
 		"foldl",
 		"indexmap",
+		"inout",
 		"isize",
 		"itertools",
 		"newtype",

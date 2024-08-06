@@ -4,8 +4,8 @@ use ustr::Ustr;
 use crate::{
     error::InternalCompilationError,
     module::{ModuleEnv, ModuleFunction},
-    mutability::MutVal,
-    r#type::Type,
+    mutability::MutType,
+    r#type::{FnArgType, Type},
     type_scheme::TypeScheme,
 };
 
@@ -13,13 +13,13 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct Local {
     pub name: Ustr,
-    pub mutable: MutVal,
+    pub mutable: MutType,
     pub ty: TypeScheme<Type>,
     pub span: Span,
 }
 
 impl Local {
-    pub fn new(name: Ustr, mutable: MutVal, ty: TypeScheme<Type>, span: Span) -> Self {
+    pub fn new(name: Ustr, mutable: MutType, ty: TypeScheme<Type>, span: Span) -> Self {
         Self {
             name,
             mutable,
@@ -27,21 +27,27 @@ impl Local {
             span,
         }
     }
+
     pub fn new_var(name: Ustr, ty: Type, span: Span) -> Self {
         Self {
             name,
-            mutable: MutVal::mutable(),
+            mutable: MutType::mutable(),
             ty: TypeScheme::new_just_type(ty),
             span,
         }
     }
+
     pub fn new_let(name: Ustr, ty: Type, span: Span) -> Self {
         Self {
             name,
-            mutable: MutVal::constant(),
+            mutable: MutType::constant(),
             ty: TypeScheme::new_just_type(ty),
             span,
         }
+    }
+
+    pub fn as_fn_arg_type(&self) -> FnArgType {
+        FnArgType::new(self.ty.ty, self.mutable)
     }
 }
 
@@ -68,13 +74,13 @@ impl<'m> TypingEnv<'m> {
         &self,
         name: Ustr,
         span: Span,
-    ) -> Result<(usize, &TypeScheme<Type>), InternalCompilationError> {
+    ) -> Result<(usize, &TypeScheme<Type>, MutType), InternalCompilationError> {
         self.locals
             .iter()
             .rev()
             .position(|local| local.name == name)
             .map(|rev_index| self.locals.len() - 1 - rev_index)
-            .map(|index| (index, &self.locals[index].ty))
+            .map(|index| (index, &self.locals[index].ty, self.locals[index].mutable))
             .ok_or(InternalCompilationError::VariableNotFound(span))
     }
 

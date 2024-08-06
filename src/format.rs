@@ -12,6 +12,17 @@ impl<'a, T, D> FormatWith<'a, T, D> {
     }
 }
 
+pub(crate) fn type_variable_index_to_string(index: u32) -> String {
+    let first = 0x3B1;
+    let last = 0x3C9;
+    let unicode_char = first + index;
+    if unicode_char <= last {
+        char::from_u32(unicode_char).unwrap_or('_').to_string()
+    } else {
+        format!("T{}", unicode_char - last)
+    }
+}
+
 pub(crate) fn write_with_separator(
     iter: impl IntoIterator<Item = impl std::fmt::Display>,
     separator: &str,

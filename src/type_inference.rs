@@ -1,10 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt::{self, Display},
     mem,
 };
 
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey};
-use itertools::Itertools;
+use itertools::{multiunzip, Itertools};
 use lrpar::Span;
 use ustr::Ustr;
 
@@ -16,9 +17,13 @@ use crate::{
     function::{FunctionRef, ScriptFunction},
     ir::{self, EnvStore, Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
-    r#type::{FnType, NativeType, TyVarKey, Type, TypeKind, TypeLike, TypeSubstitution, TypeVar},
+    mutability::{MutType, MutVal, MutVar},
+    r#type::{
+        FnArgType, FnType, NativeType, TyVarKey, Type, TypeKind, TypeLike, TypeSubstitution,
+        TypeVar,
+    },
     std::{array::array_type, math::int_type},
-    type_scheme::{PubConstraint, TypeScheme},
+    type_scheme::{PubTypeConstraint, TypeScheme},
     typing_env::{Local, TypingEnv},
     value::Value,
 };
@@ -41,37 +46,101 @@ impl UnifyKey for TyVarKey {
 
 impl EqUnifyValue for Type {}
 
+impl UnifyKey for MutVar {
+    type Value = Option<MutVal>;
+
+    fn index(&self) -> u32 {
+        self.0
+    }
+
+    fn from_index(u: u32) -> Self {
+        Self(u)
+    }
+
+    fn tag() -> &'static str {
+        "MutVar"
+    }
+}
+
+impl EqUnifyValue for MutVal {}
+
 pub type FreshTyVarGen<'g> = &'g mut (dyn FnMut() -> TypeVar + 'g);
 
 /// A constraint on types.
 #[derive(Debug, Clone)]
-pub enum Constraint {
-    TypeEqual(Type, Type, Span), // TODO: add an optional span for the other type
-    Pub(PubConstraint),
+pub enum TypeConstraint {
+    SubType {
+        current: Type,
+        current_span: Span,
+        expected: Type,
+        expected_span: Span,
+    },
+    Pub(PubTypeConstraint),
 }
 
-impl Constraint {
+impl TypeConstraint {
+    pub fn sub_type(
+        current: Type,
+        current_span: Span,
+        expected: Type,
+        expected_span: Span,
+    ) -> Self {
+        TypeConstraint::SubType {
+            current,
+            current_span,
+            expected,
+            expected_span,
+        }
+    }
+
     pub fn contains_ty_vars(&self, vars: &[TypeVar]) -> bool {
         match self {
-            Constraint::TypeEqual(ty1, ty2, _) => {
-                ty1.data().contains_ty_vars(vars) || ty2.data().contains_ty_vars(vars)
-            }
-            Constraint::Pub(pub_constraint) => pub_constraint.contains_ty_vars(vars),
+            TypeConstraint::SubType {
+                current, expected, ..
+            } => current.data().contains_ty_vars(vars) || expected.data().contains_ty_vars(vars),
+            TypeConstraint::Pub(pub_constraint) => pub_constraint.contains_ty_vars(vars),
         }
     }
 }
 
-impl FmtWithModuleEnv for Constraint {
+impl FmtWithModuleEnv for TypeConstraint {
     fn fmt_with_module_env(
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
         match self {
-            Constraint::TypeEqual(ty1, ty2, _) => {
-                write!(f, "{} = {}", ty1.format_with(env), ty2.format_with(env))
+            TypeConstraint::SubType {
+                current, expected, ..
+            } => {
+                write!(
+                    f,
+                    "{} ≤ {}",
+                    current.format_with(env),
+                    expected.format_with(env)
+                )
             }
-            Constraint::Pub(pub_constraint) => pub_constraint.fmt_with_module_env(f, env),
+            TypeConstraint::Pub(pub_constraint) => pub_constraint.fmt_with_module_env(f, env),
+        }
+    }
+}
+
+/// A constraint on mutability.
+#[derive(Debug, Clone)]
+pub enum MutConstraint {
+    MutBeAtLeast {
+        current: MutType,
+        span: Span,
+        target: MutType,
+    },
+}
+
+impl Display for MutConstraint {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            MutConstraint::MutBeAtLeast {
+                current, target, ..
+            } => write!(f, "{current} ≥ {target}"),
         }
     }
 }
@@ -79,9 +148,11 @@ impl FmtWithModuleEnv for Constraint {
 /// The type inference status, containing the unification table and the constraints
 #[derive(Default, Debug)]
 pub struct TypeInference {
-    unification_table: InPlaceUnificationTable<TyVarKey>,
+    ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     generation: u32,
-    constraints: Vec<Constraint>,
+    ty_constraints: Vec<TypeConstraint>,
+    mut_unification_table: InPlaceUnificationTable<MutVar>,
+    mut_constraints: Vec<MutConstraint>,
 }
 
 impl TypeInference {
@@ -94,15 +165,25 @@ impl TypeInference {
 
     // TODO: improve error reporting by storing the span of the expression triggering the fresh variable creation
     pub fn fresh_type_var(&mut self) -> TypeVar {
-        TypeVar::new_fresh(self.unification_table.new_key(None).0, self.generation)
+        TypeVar::new_fresh(self.ty_unification_table.new_key(None).0, self.generation)
     }
 
     pub fn fresh_type_var_ty(&mut self) -> Type {
         Type::variable(self.fresh_type_var())
     }
 
-    pub fn fresh_type_var_tys(&mut self, count: usize) -> Vec<Type> {
-        (0..count).map(|_| self.fresh_type_var_ty()).collect()
+    pub fn fresh_mut_var(&mut self) -> MutVar {
+        self.mut_unification_table.new_key(None)
+    }
+
+    pub fn fresh_mut_var_ty(&mut self) -> MutType {
+        MutType::Variable(self.fresh_mut_var())
+    }
+
+    pub fn fresh_fn_args(&mut self, count: usize) -> Vec<FnArgType> {
+        (0..count)
+            .map(|_| FnArgType::new(self.fresh_type_var_ty(), self.fresh_mut_var_ty()))
+            .collect()
     }
 
     pub fn fresh_type_var_subs(&mut self, source: &[TypeVar]) -> TypeSubstitution {
@@ -112,32 +193,33 @@ impl TypeInference {
             .collect()
     }
 
-    pub fn add_pub_constraint(&mut self, pub_constraint: PubConstraint) {
-        self.constraints.push(Constraint::Pub(pub_constraint));
+    pub fn add_pub_constraint(&mut self, pub_constraint: PubTypeConstraint) {
+        self.ty_constraints
+            .push(TypeConstraint::Pub(pub_constraint));
     }
 
     pub fn infer_expr(
         &mut self,
         env: &mut TypingEnv,
         expr: &Expr,
-    ) -> Result<(Node, Type), InternalCompilationError> {
+    ) -> Result<(Node, Type, MutType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
         use ExprKind::*;
-        let (node, ty) = match &expr.kind {
-            Literal(value, ty) => (K::Literal(value.clone()), *ty),
+        let (node, ty, mut_ty) = match &expr.kind {
+            Literal(value, ty) => (K::Literal(value.clone()), *ty, MutType::constant()),
             Variable(name) => {
                 // Retrieve the index and the type of the variable from the environment
-                let (index, var_ty_scheme) =
+                let (index, ty_scheme, mut_ty) =
                     env.get_variable_index_and_type_scheme(*name, expr.span)?;
-                let (var_ty, _) = var_ty_scheme.instantiate(self);
+                let (var_ty, _) = ty_scheme.instantiate(self);
                 let node = K::EnvLoad(index);
-                (node, var_ty)
+                (node, var_ty, mut_ty)
             }
             LetVar((name, name_span), mutable, let_expr) => {
                 let (node, ty_scheme) = if mutable.into() {
                     // Mutable variable, do not do generalization.
-                    let (node, ty) = self.infer_expr(env, let_expr)?;
+                    let (node, ty, _) = self.infer_expr(env, let_expr)?;
                     (node, TypeScheme::new_just_type(ty))
                 } else {
                     // Read-only variable, do generalization here: infer the type of the expression and generalize it.
@@ -153,101 +235,117 @@ impl TypeInference {
                     env.locals.truncate(env_size);
                     // 2. Add the external constraints of the inner expr (e.g., dealing with our own type variables)
                     // to our constraints.
-                    self.constraints.extend(constraints);
+                    self.ty_constraints.extend(constraints);
                     // 3. Collect free type variables from ty, these are our quantifiers.
                     (compiled_expr.expr, compiled_expr.ty)
                 };
-                env.locals
-                    .push(Local::new(*name, *mutable, ty_scheme.clone(), expr.span));
+                env.locals.push(Local::new(
+                    *name,
+                    MutType::resolved(*mutable),
+                    ty_scheme.clone(),
+                    expr.span,
+                ));
                 let node = K::EnvStore(B::new(EnvStore {
                     node,
                     ty_scheme,
                     name_span: *name_span,
                 }));
-                (node, Type::unit())
+                (node, Type::unit(), MutType::constant())
             }
             Abstract(args, body) => {
-                // Allocate fresh variables for the arguments in the function's scope
+                // Allocate fresh type and mutability variables for the arguments in the function's scope
                 let locals = args
                     .iter()
-                    .map(|(name, span)| Local::new_let(*name, self.fresh_type_var_ty(), *span))
+                    .map(|(name, span)| {
+                        Local::new(
+                            *name,
+                            self.fresh_mut_var_ty(),
+                            TypeScheme::new_just_type(self.fresh_type_var_ty()),
+                            *span,
+                        )
+                    })
                     .collect::<Vec<_>>();
-                let args_ty = locals.iter().map(|local| local.ty.ty).collect::<Vec<_>>();
+                let args_ty = locals.iter().map(Local::as_fn_arg_type).collect();
                 // Build environment for typing the function's body
                 let mut env = TypingEnv::new(locals, env.module_env);
                 // Infer the body's type
-                let (code, ret_ty) = self.infer_expr(&mut env, body)?;
+                let (code, ret_ty, _) = self.infer_expr(&mut env, body)?;
                 // Store and return the function's type
-                let fn_ty = FnType::new_by_val(&args_ty, ret_ty);
+                let fn_ty = FnType::new(args_ty, ret_ty);
                 let value_fn = Value::function(B::new(ScriptFunction::new(code)));
                 let node = K::Literal(value_fn);
-                (node, Type::function_type(fn_ty))
+                (node, Type::function_type(fn_ty), MutType::constant())
             }
             Apply(func, args) => {
                 // Do we have a global function?
                 if let Variable(name) = func.kind {
                     if !env.has_variable_name(name) {
-                        let (node, ty) = self.infer_static_apply(env, name, func.span, args)?;
-                        return Ok((N::new(node, ty, expr.span), ty));
+                        let (node, ty, mut_ty) =
+                            self.infer_static_apply(env, name, func.span, args)?;
+                        return Ok((N::new(node, ty, expr.span), ty, mut_ty));
                     }
                 }
                 // No, we emit code to evaluate function
-                // Infer the type of the arguments and collect their code and constraints
+                // Infer the type and mutability of the arguments and collect their code and constraints
                 // TODO: check borrow rules
-                let (args_nodes, args_ty) = self.infer_exprs(env, args)?;
+                let (args_nodes, args_tys) = self.infer_exprs_ret_arg_ty(env, args)?;
                 // Allocate a fresh variable for the return type
                 let ret_ty = self.fresh_type_var_ty();
                 // Build the function type
-                let func_ty = Type::function(&args_ty, ret_ty);
+                let func_ty = Type::function_type(FnType::new(args_tys, ret_ty));
                 // Check the function against its return type
-                let func_node = self.check_expr(env, func, func_ty)?;
-                // TODO: use generics for inout
-                let inout = args_ty.iter().map(|_arg| false).collect();
+                let func_node =
+                    self.check_expr(env, func, func_ty, MutType::constant(), func.span)?;
                 // Store and return the result
                 let node = K::Apply(B::new(ir::Application {
                     function: func_node,
                     arguments: args_nodes,
-                    inout,
                 }));
-                (node, ret_ty)
+                (node, ret_ty, MutType::constant())
             }
             StaticApply(name, args) => self.infer_static_apply(env, *name, expr.span, args)?,
             Block(exprs) => {
                 let env_size = env.locals.len();
-                let (nodes, types) = self.infer_exprs(env, exprs)?;
+                let (nodes, types) = self.infer_exprs_drop_mut(env, exprs)?;
                 env.locals.truncate(env_size);
                 let ty = types.last().copied().unwrap_or(Type::unit());
                 let node = K::Block(B::new(SVec2::from_vec(nodes)));
-                (node, ty)
+                (node, ty, MutType::constant())
             }
             Assign(place, value) => {
-                // TODO: check if place is mutable
-                let (value, value_ty) = self.infer_expr(env, value)?;
-                let (place, place_ty) = self.infer_expr(env, place)?;
-                self.constraints
-                    .push(Constraint::TypeEqual(place_ty, value_ty, expr.span));
+                let (value, value_ty, _value_mut) = self.infer_expr(env, value)?;
+                let (place, place_ty, place_mut) = self.infer_expr(env, place)?;
+                self.mut_constraints.push(MutConstraint::MutBeAtLeast {
+                    current: place_mut,
+                    span: place.span,
+                    target: MutType::mutable(),
+                });
+                self.ty_constraints.push(TypeConstraint::sub_type(
+                    value_ty, value.span, place_ty, place.span,
+                ));
                 let node = K::Assign(B::new(ir::Assignment { place, value }));
-                (node, Type::unit())
+                (node, Type::unit(), MutType::constant())
             }
             Tuple(exprs) => {
-                let (nodes, types) = self.infer_exprs(env, exprs)?;
+                let (nodes, types) = self.infer_exprs_drop_mut(env, exprs)?;
                 let node = K::Tuple(B::new(SVec2::from_vec(nodes)));
                 let ty = Type::tuple(types);
-                (node, ty)
+                (node, ty, MutType::constant())
             }
             Project(tuple_expr, index, index_span) => {
-                let (tuple_node, tuple_ty) = self.infer_expr(env, tuple_expr)?;
+                let (tuple_node, tuple_ty, tuple_mut) = self.infer_expr(env, tuple_expr)?;
                 let element_ty = self.fresh_type_var_ty();
-                self.constraints
-                    .push(Constraint::Pub(PubConstraint::new_tuple_at_index_is(
+                self.ty_constraints.push(TypeConstraint::Pub(
+                    PubTypeConstraint::new_tuple_at_index_is(
                         tuple_ty,
                         tuple_expr.span,
                         *index,
                         *index_span,
                         element_ty,
-                    )));
+                    ),
+                ));
                 let node = K::Project(B::new((tuple_node, *index)));
-                (node, element_ty)
+                (node, element_ty, tuple_mut)
             }
             Array(exprs) => {
                 if exprs.is_empty() {
@@ -255,21 +353,25 @@ impl TypeInference {
                     let element_ty = self.fresh_type_var_ty();
                     // Build an empty array node and return it
                     let node = K::Array(B::new(SVec2::new()));
-                    (node, array_type(element_ty))
+                    (node, array_type(element_ty), MutType::constant())
                 } else {
                     // The element type is the first element's type
-                    let (first_node, element_ty) = self.infer_expr(env, &exprs[0])?;
+                    let (first_node, element_ty, _) = self.infer_expr(env, &exprs[0])?;
                     // Infer the type of the elements and collect their code and constraints
-                    let (other_nodes, types) = self.infer_exprs(env, &exprs[1..])?;
+                    let (other_nodes, types) = self.infer_exprs_drop_mut(env, &exprs[1..])?;
                     // All elements must be of the first element's type
                     for (ty, expr) in types.into_iter().zip(exprs.iter().skip(1)) {
-                        self.constraints
-                            .push(Constraint::TypeEqual(ty, element_ty, expr.span));
+                        self.ty_constraints.push(TypeConstraint::sub_type(
+                            ty,
+                            expr.span,
+                            element_ty,
+                            exprs[0].span,
+                        ));
                     }
                     // Build the array node and return it
                     let element_nodes = std::iter::once(first_node).chain(other_nodes).collect();
                     let node = K::Array(B::new(element_nodes));
-                    (node, array_type(element_ty))
+                    (node, array_type(element_ty), MutType::constant())
                 }
             }
             Index(array, index) => {
@@ -277,54 +379,72 @@ impl TypeInference {
                 let element_ty = self.fresh_type_var_ty();
                 let array_ty = array_type(element_ty);
                 // Infer type of the array expression and make sure it is an array
-                let (array_node, array_expr_ty) = self.infer_expr(env, array)?;
-                self.constraints
-                    .push(Constraint::TypeEqual(array_expr_ty, array_ty, array.span));
+                let (array_node, array_expr_ty, array_expr_mut) = self.infer_expr(env, array)?;
+                self.ty_constraints.push(TypeConstraint::sub_type(
+                    array_expr_ty,
+                    array.span,
+                    array_ty,
+                    array.span,
+                ));
                 // Check type of the index expression to be int
-                let index_node = self.check_expr(env, index, int_type())?;
+                let index_node =
+                    self.check_expr(env, index, int_type(), MutType::constant(), index.span)?;
                 // Build the index node and return it
                 let node = K::Index(B::new(array_node), B::new(index_node));
-                (node, element_ty)
+                (node, element_ty, array_expr_mut)
             }
             Match(expr, alternatives, default) => {
                 // Infer condition expression and get a new return type
-                let (condition_node, pattern_ty) = self.infer_expr(env, expr)?;
-                let return_ty = self.fresh_type_var_ty();
+                let (condition_node, pattern_ty, _) = self.infer_expr(env, expr)?;
                 // Convert optional default to mandatory one
-                let node = if let Some(default) = default {
-                    let default_node = self.check_expr(env, default, return_ty)?;
-                    let alternatives =
-                        self.check_patterns(env, alternatives, pattern_ty, return_ty)?;
-                    K::Case(B::new(ir::Case {
-                        value: condition_node,
+                let (node, return_ty) = if let Some(default) = default {
+                    let (default_node, return_ty, _) = self.infer_expr(env, default)?;
+                    let alternatives = self.check_patterns(
+                        env,
                         alternatives,
-                        default: default_node,
-                    }))
+                        pattern_ty,
+                        expr.span,
+                        return_ty,
+                        default.span,
+                    )?;
+                    (
+                        K::Case(B::new(ir::Case {
+                            value: condition_node,
+                            alternatives,
+                            default: default_node,
+                        })),
+                        return_ty,
+                    )
                 } else if alternatives.is_empty() {
                     panic!("empty match without default");
                 } else {
                     let default_expr = &alternatives.last().unwrap().1;
-                    let default_node = self.check_expr(env, default_expr, return_ty)?;
-
+                    let (default_node, return_ty, _) = self.infer_expr(env, default_expr)?;
+                    let other_exprs = &alternatives[0..alternatives.len() - 1];
                     let alternatives = self.check_patterns(
                         env,
-                        &alternatives[0..alternatives.len() - 1],
+                        other_exprs,
                         pattern_ty,
+                        expr.span,
                         return_ty,
+                        default_expr.span,
                     )?;
-                    K::Case(B::new(ir::Case {
-                        value: condition_node,
-                        alternatives,
-                        default: default_node,
-                    }))
+                    (
+                        K::Case(B::new(ir::Case {
+                            value: condition_node,
+                            alternatives,
+                            default: default_node,
+                        })),
+                        return_ty,
+                    )
                 };
-                (node, return_ty)
+                (node, return_ty, MutType::constant())
             }
             Error(msg) => {
                 panic!("attempted to infer type for error node: {msg}");
             }
         };
-        Ok((N::new(node, ty, expr.span), ty))
+        Ok((N::new(node, ty, expr.span), ty, mut_ty))
     }
 
     fn infer_static_apply(
@@ -333,27 +453,26 @@ impl TypeInference {
         name: Ustr,
         span: Span,
         args: &[Expr],
-    ) -> Result<(NodeKind, Type), InternalCompilationError> {
+    ) -> Result<(NodeKind, Type, MutType), InternalCompilationError> {
         // Get the function and its type
         let function = env.get_function(name, span)?;
         // Instantiate its type scheme
-        let (inst_fn_ty, subst) = function.ty_scheme.instantiate(self);
+        let (inst_fn_ty, _subst) = function.ty_scheme.instantiate(self);
         // Get the code and make sure the types of its arguments match the expected types
-        let args_nodes = self.check_exprs(env, args, inst_fn_ty.args_ty())?;
+        let args_nodes = self.check_exprs(env, args, &inst_fn_ty.args, span)?;
         // Build and return the function node
         let function = env.get_function(name, span)?;
-        // TODO: use generics for inout
-        let inout = inst_fn_ty.args.iter().map(|arg| arg.inout).collect();
+        let ret_ty = inst_fn_ty.ret;
         let node = ir::NodeKind::StaticApply(B::new(ir::StaticApplication {
             function: FunctionRef::new_weak(&function.code),
             arguments: args_nodes,
-            subst,
-            inout,
+            ty: inst_fn_ty,
+            // subst,
         }));
-        Ok((node, inst_fn_ty.ret))
+        Ok((node, ret_ty, MutType::constant()))
     }
 
-    fn infer_exprs(
+    fn infer_exprs_drop_mut(
         &mut self,
         env: &mut TypingEnv,
         exprs: &[Expr],
@@ -361,10 +480,27 @@ impl TypeInference {
         exprs
             .iter()
             .map(|arg| {
-                let (node, ty) = self.infer_expr(env, arg)?;
+                let (node, ty, _mut_ty) = self.infer_expr(env, arg)?;
                 Ok::<(ir::Node, Type), InternalCompilationError>((node, ty))
             })
-            .process_results(|iter| iter.unzip::<_, _, Vec<_>, Vec<_>>())
+            .process_results(|iter| multiunzip(iter))
+    }
+
+    fn infer_exprs_ret_arg_ty(
+        &mut self,
+        env: &mut TypingEnv,
+        exprs: &[Expr],
+    ) -> Result<(Vec<ir::Node>, Vec<FnArgType>), InternalCompilationError> {
+        exprs
+            .iter()
+            .map(|arg| {
+                let (node, ty, mut_ty) = self.infer_expr(env, arg)?;
+                Ok::<(ir::Node, FnArgType), InternalCompilationError>((
+                    node,
+                    FnArgType::new(ty, mut_ty),
+                ))
+            })
+            .process_results(|iter| multiunzip(iter))
     }
 
     fn check_patterns<U: std::iter::FromIterator<(Value, ir::Node)>>(
@@ -372,18 +508,27 @@ impl TypeInference {
         env: &mut TypingEnv,
         pairs: &[(Expr, Expr)],
         expected_pattern_type: Type,
+        expected_pattern_span: Span,
         expected_return_type: Type,
+        expected_return_span: Span,
     ) -> Result<U, InternalCompilationError> {
         pairs
             .iter()
             .map(|(pattern, expr)| {
                 if let ExprKind::Literal(literal, ty) = &pattern.kind {
-                    self.constraints.push(Constraint::TypeEqual(
+                    self.ty_constraints.push(TypeConstraint::sub_type(
                         *ty,
-                        expected_pattern_type,
                         pattern.span,
+                        expected_pattern_type,
+                        expected_pattern_span,
                     ));
-                    let node = self.check_expr(env, expr, expected_return_type)?;
+                    let node = self.check_expr(
+                        env,
+                        expr,
+                        expected_return_type,
+                        MutType::constant(),
+                        expected_return_span,
+                    )?;
                     Ok((literal.clone(), node))
                 } else {
                     Err(InternalCompilationError::Internal(
@@ -398,13 +543,14 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         exprs: &[Expr],
-        expected_tys: impl Iterator<Item = Type>,
+        expected_tys: &[FnArgType],
+        expected_span: Span,
     ) -> Result<Vec<ir::Node>, InternalCompilationError> {
         exprs
             .iter()
             .zip(expected_tys)
-            .map(|(arg, ty)| {
-                let node = self.check_expr(env, arg, ty)?;
+            .map(|(arg, arg_ty)| {
+                let node = self.check_expr(env, arg, arg_ty.ty, arg_ty.inout, expected_span)?;
                 Ok(node)
             })
             .process_results(|iter| iter.collect())
@@ -415,6 +561,8 @@ impl TypeInference {
         env: &mut TypingEnv,
         expr: &Expr,
         expected_ty: Type,
+        expected_mut: MutType,
+        expected_span: Span,
     ) -> Result<Node, InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
@@ -423,7 +571,8 @@ impl TypeInference {
         // Literal of correct type, we are good
         if let Literal(value, ty) = &expr.kind {
             if *ty == expected_ty {
-                return Ok(N::new(K::Literal(value.clone()), expected_ty, expr.span));
+                let node = K::Literal(value.clone());
+                return Ok(N::new(node, expected_ty, expr.span));
             }
         }
 
@@ -435,25 +584,74 @@ impl TypeInference {
                 let locals = args
                     .iter()
                     .zip(&fn_ty.args)
-                    .map(|((name, span), arg_ty)| Local::new_let(*name, arg_ty.ty, *span))
+                    .map(|((name, span), arg_ty)| {
+                        Local::new(
+                            *name,
+                            arg_ty.inout,
+                            TypeScheme::new_just_type(arg_ty.ty),
+                            *span,
+                        )
+                    })
                     .collect::<Vec<_>>();
+                // Build environment for typing the function's body
                 let mut env = TypingEnv::new(locals, env.module_env);
                 // Recursively check the function's body
-                return self.check_expr(&mut env, body, fn_ty.ret);
+                let code =
+                    self.check_expr(&mut env, body, fn_ty.ret, MutType::constant(), body.span)?;
+                // Store and return the function's type
+                let value_fn = Value::function(B::new(ScriptFunction::new(code)));
+                let node = K::Literal(value_fn);
+                return Ok(N::new(node, expected_ty, expr.span));
             }
         }
 
-        // Other cases, add constraint
-        let (node, actual_ty) = self.infer_expr(env, expr)?;
-        self.constraints
-            .push(Constraint::TypeEqual(actual_ty, expected_ty, expr.span));
+        // Other cases, infer and add constraints
+        let (node, actual_ty, actual_mut) = self.infer_expr(env, expr)?;
+        self.ty_constraints.push(TypeConstraint::sub_type(
+            actual_ty,
+            expr.span,
+            expected_ty,
+            expected_span,
+        ));
+        // If expected mutability is not constant, add constraint
+        if expected_mut != MutType::constant() {
+            self.mut_constraints.push(MutConstraint::MutBeAtLeast {
+                current: actual_mut,
+                span: expr.span,
+                target: expected_mut,
+            });
+        }
         Ok(node)
     }
 
     pub fn log_debug_constraints(&self, module_env: ModuleEnv) {
-        log::debug!("Constraints before unification (gen {}):", self.generation);
-        for constraint in &self.constraints {
-            log::debug!("  {}", constraint.format_with(&module_env));
+        if self.ty_constraints.is_empty() {
+            log::debug!(
+                "No type constraints before unification (gen {}).",
+                self.generation
+            );
+        } else {
+            log::debug!(
+                "Type constraints before unification (gen {}):",
+                self.generation
+            );
+            for constraint in &self.ty_constraints {
+                log::debug!("  {}", constraint.format_with(&module_env));
+            }
+        }
+        if self.mut_constraints.is_empty() {
+            log::debug!(
+                "No mutability constraints before unification (gen {}).",
+                self.generation
+            );
+        } else {
+            log::debug!(
+                "Mutability constraints before unification (gen {}):",
+                self.generation
+            );
+            for constraint in &self.mut_constraints {
+                log::debug!("  {}", constraint);
+            }
         }
     }
 
@@ -468,12 +666,13 @@ impl TypeInference {
 /// The type inference after unification, with only public constraints remaining
 #[derive(Default, Debug)]
 pub struct UnifiedTypeInference {
-    unification_table: InPlaceUnificationTable<TyVarKey>,
+    ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     generation: u32,
-    /// Remaininig constraints that cannot be solved, will be part of the resulting type scheme
-    remaining_constraints: Vec<PubConstraint>,
+    /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
+    remaining_ty_constraints: Vec<PubTypeConstraint>,
     /// Constraints for the outer scope, e.g., involving type variables of a previous generation
-    external_constraints: Vec<Constraint>,
+    external_ty_constraints: Vec<TypeConstraint>,
+    mut_unification_table: InPlaceUnificationTable<MutVar>,
 }
 
 impl UnifiedTypeInference {
@@ -482,25 +681,67 @@ impl UnifiedTypeInference {
         outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
     ) -> Result<Self, InternalCompilationError> {
         let TypeInference {
-            unification_table,
+            ty_unification_table,
             generation,
-            constraints,
+            ty_constraints,
+            mut_unification_table,
+            mut_constraints,
         } = ty_inf;
         let mut unified_ty_inf = UnifiedTypeInference {
-            unification_table,
+            ty_unification_table,
             generation,
-            remaining_constraints: vec![],
-            external_constraints: vec![],
+            remaining_ty_constraints: vec![],
+            external_ty_constraints: vec![],
+            mut_unification_table,
         };
         let mut remaining_constraints = HashSet::new();
 
-        // First, solve all type equalities.
-        for constraint in constraints {
+        // First, resolve mutability constraints.
+        for constraint in mut_constraints {
+            use MutConstraint::*;
             match constraint {
-                Constraint::TypeEqual(left, right, span) => {
-                    unified_ty_inf.unify_types(left, right, span, outer_fresh_ty_var_gen)?
+                MutBeAtLeast {
+                    current,
+                    span,
+                    target,
+                } => {
+                    unified_ty_inf.unify_mut_must_be_at_least(current, target, span)?;
                 }
-                Constraint::Pub(cst) => {
+            }
+        }
+
+        // Make the remaining mutability variables constant.
+        for var in 0..unified_ty_inf.mut_unification_table.len() {
+            let var = MutVar(var as u32);
+            if unified_ty_inf
+                .mut_unification_table
+                .probe_value(var)
+                .is_none()
+            {
+                unified_ty_inf
+                    .mut_unification_table
+                    .unify_var_value(var, Some(MutVal::constant()))
+                    .expect("Cannot unify free mutability variable");
+            }
+        }
+
+        // Then, solve all type equalities.
+        for constraint in ty_constraints {
+            use TypeConstraint::*;
+            match constraint {
+                SubType {
+                    current,
+                    current_span,
+                    expected,
+                    expected_span,
+                } => unified_ty_inf.unify_sub_type(
+                    current,
+                    current_span,
+                    expected,
+                    expected_span,
+                    outer_fresh_ty_var_gen,
+                )?,
+                Pub(cst) => {
                     remaining_constraints.insert(cst);
                 }
             }
@@ -513,26 +754,29 @@ impl UnifiedTypeInference {
                 let mut progress = false;
 
                 // Perform simplification.
-                let mut tupes_at_index_is: HashMap<(Type, usize), Type> = HashMap::new();
+                let mut tuples_at_index_is: HashMap<(Type, usize), Type> = HashMap::new();
                 for constraint in &remaining_constraints {
+                    use PubTypeConstraint::*;
                     match constraint {
-                        PubConstraint::TupleAtIndexIs {
+                        TupleAtIndexIs {
                             tuple_ty,
+                            tuple_span,
                             index,
                             index_span,
                             element_ty,
                             ..
                         } => {
                             let key = (*tuple_ty, *index);
-                            if let Some(&expected_ty) = tupes_at_index_is.get(&key) {
-                                unified_ty_inf.unify_types(
+                            if let Some(&expected_ty) = tuples_at_index_is.get(&key) {
+                                unified_ty_inf.unify_sub_type(
                                     expected_ty,
+                                    *tuple_span,
                                     *element_ty,
                                     *index_span,
                                     outer_fresh_ty_var_gen,
                                 )?;
                             } else {
-                                tupes_at_index_is.insert(key, *element_ty);
+                                tuples_at_index_is.insert(key, *element_ty);
                             }
                         }
                     }
@@ -542,7 +786,7 @@ impl UnifiedTypeInference {
                 let mut new_remaining_constraints = HashSet::new();
                 for constraint in remaining_constraints {
                     let new_progress = match constraint {
-                        PubConstraint::TupleAtIndexIs { .. } => unified_ty_inf
+                        PubTypeConstraint::TupleAtIndexIs { .. } => unified_ty_inf
                             .unify_tuple_project(constraint.clone(), outer_fresh_ty_var_gen)?,
                     };
                     match new_progress {
@@ -562,39 +806,40 @@ impl UnifiedTypeInference {
         }
 
         // FIXME: think whether we should have an intermediate struct without the remaining_constraints in it.
-        unified_ty_inf.remaining_constraints = remaining_constraints.into_iter().collect();
+        unified_ty_inf.remaining_ty_constraints = remaining_constraints.into_iter().collect();
         Ok(unified_ty_inf)
     }
 
-    pub fn constraints(self) -> (Vec<PubConstraint>, Vec<Constraint>) {
-        (self.remaining_constraints, self.external_constraints)
+    pub fn constraints(self) -> (Vec<PubTypeConstraint>, Vec<TypeConstraint>) {
+        (self.remaining_ty_constraints, self.external_ty_constraints)
     }
 
     fn normalize_type(&mut self, ty: Type) -> Type {
         let type_data = { ty.data().clone() };
+        use TypeKind::*;
         match type_data {
-            TypeKind::Variable(v) => {
+            Variable(v) => {
                 if v.generation() == self.generation {
                     let id = v.as_key();
-                    match self.unification_table.probe_value(id) {
+                    match self.ty_unification_table.probe_value(id) {
                         Some(ty) => self.normalize_type(ty),
-                        _ => {
-                            Type::variable(self.unification_table.find(id).to_var(self.generation))
-                        }
+                        _ => Type::variable(
+                            self.ty_unification_table.find(id).to_var(self.generation),
+                        ),
                     }
                 } else {
                     ty
                 }
             }
-            TypeKind::Native(ty) => Type::native_type(NativeType::new(
+            Native(ty) => Type::native_type(NativeType::new(
                 ty.bare_ty.clone(),
                 self.normalize_types(&ty.arguments),
             )),
-            TypeKind::Variant(_) => todo!("normalize variant"),
-            TypeKind::Tuple(tys) => Type::tuple(self.normalize_types(&tys)),
-            TypeKind::Record(_) => todo!("noramlize record"),
-            TypeKind::Function(fn_ty) => Type::function_type(self.normalize_fn_type(&fn_ty)),
-            TypeKind::Newtype(name, ty) => Type::new_type(name, self.normalize_type(ty)),
+            Variant(_) => todo!("normalize variant"),
+            Tuple(tys) => Type::tuple(self.normalize_types(&tys)),
+            Record(_) => todo!("normalize record"),
+            Function(fn_ty) => Type::function_type(self.normalize_fn_type(&fn_ty)),
+            Newtype(name, ty) => Type::new_type(name, self.normalize_type(ty)),
         }
     }
 
@@ -606,104 +851,213 @@ impl UnifiedTypeInference {
         let args = fn_ty
             .args
             .iter()
-            .map(|arg| (self.normalize_type(arg.ty), arg.inout))
+            .map(|arg| {
+                FnArgType::new(
+                    self.normalize_type(arg.ty),
+                    self.normalize_mut_type(arg.inout),
+                )
+            })
             .collect::<Vec<_>>();
         let ret = self.normalize_type(fn_ty.ret);
-        FnType::new(&args, ret)
+        FnType::new(args, ret)
     }
 
-    fn unify_types(
+    fn normalize_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        match mut_ty {
+            MutType::Resolved(_) => mut_ty,
+            MutType::Variable(v) => match self.mut_unification_table.probe_value(v) {
+                Some(val) => MutType::resolved(val),
+                _ => MutType::variable(self.mut_unification_table.find(v)),
+            },
+        }
+    }
+
+    fn unify_sub_type(
         &mut self,
-        a: Type,
-        b: Type,
-        span: Span,
+        current: Type,
+        current_span: Span,
+        expected: Type,
+        expected_span: Span,
         outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
     ) -> Result<(), InternalCompilationError> {
-        let a_ty = self.normalize_type(a);
-        let b_ty = self.normalize_type(b);
-        let a_data = { a_ty.data().clone() };
-        let b_data = { b_ty.data().clone() };
+        let cur_ty = self.normalize_type(current);
+        let exp_ty = self.normalize_type(expected);
+        let cur_data = { cur_ty.data().clone() };
+        let exp_data = { exp_ty.data().clone() };
         use TypeKind::*;
-        match (a_data, b_data) {
-            (Variable(a), Variable(b)) => {
-                let a_is_local = a.generation() == self.generation;
-                let b_is_local = b.generation() == self.generation;
-                match (a_is_local, b_is_local) {
+        match (cur_data, exp_data) {
+            (Variable(cur), Variable(exp)) => {
+                let cur_is_local = cur.generation() == self.generation;
+                let exp_is_local = exp.generation() == self.generation;
+                match (cur_is_local, exp_is_local) {
                     (true, true) => {
                         // Both local, do normal unification.
-                        self.unification_table
-                            .unify_var_var(a.as_key(), b.as_key())
-                            .map_err(|_| InternalCompilationError::TypeMismatch(a_ty, b_ty, span))
+                        self.ty_unification_table
+                            .unify_var_var(cur.as_key(), exp.as_key())
+                            .map_err(|_| {
+                                InternalCompilationError::IsNotSubtype(
+                                    cur_ty,
+                                    current_span,
+                                    exp_ty,
+                                    expected_span,
+                                )
+                            })
                     }
                     (false, false) => {
                         // Both external, add a constraint.
-                        self.external_constraints
-                            .push(Constraint::TypeEqual(a_ty, b_ty, span));
+                        self.external_ty_constraints.push(TypeConstraint::sub_type(
+                            cur_ty,
+                            current_span,
+                            exp_ty,
+                            expected_span,
+                        ));
                         Ok(())
                     }
                     (true, false) => {
-                        // Var a is local, b is external, assume b by to be a normal type.
-                        self.unify_type_variable(a, b_ty, span, outer_fresh_ty_var_gen)
+                        // Var cur is local, exp is external, assume exp by to be a normal type.
+                        self.unify_type_variable(
+                            cur,
+                            current_span,
+                            exp_ty,
+                            expected_span,
+                            outer_fresh_ty_var_gen,
+                        )
                     }
                     (false, true) => {
-                        // Var a is external, b is local, assume a by to be a normal type.
-                        self.unify_type_variable(b, a_ty, span, outer_fresh_ty_var_gen)
+                        // Var cur is external, exp is local, assume cur by to be a normal type.
+                        self.unify_type_variable(
+                            exp,
+                            expected_span,
+                            cur_ty,
+                            current_span,
+                            outer_fresh_ty_var_gen,
+                        )
                     }
                 }
             }
-            (Variable(var), _) => self.unify_type_variable(var, b_ty, span, outer_fresh_ty_var_gen),
-            (_, Variable(var)) => self.unify_type_variable(var, a_ty, span, outer_fresh_ty_var_gen),
-            (Native(a), Native(b)) => {
-                if a.bare_ty != b.bare_ty {
-                    return Err(InternalCompilationError::TypeMismatch(a_ty, b_ty, span));
+            (Variable(var), _) => self.unify_type_variable(
+                var,
+                current_span,
+                exp_ty,
+                expected_span,
+                outer_fresh_ty_var_gen,
+            ),
+            (_, Variable(var)) => self.unify_type_variable(
+                var,
+                expected_span,
+                cur_ty,
+                current_span,
+                outer_fresh_ty_var_gen,
+            ),
+            (Native(cur), Native(exp)) => {
+                // TODO: add int/float subtyping
+                if cur.bare_ty != exp.bare_ty {
+                    return Err(InternalCompilationError::IsNotSubtype(
+                        cur_ty,
+                        current_span,
+                        exp_ty,
+                        expected_span,
+                    ));
                 }
-                for (a_arg_ty, b_arg_ty) in a.arguments.iter().zip(b.arguments.iter()) {
-                    self.unify_types(*a_arg_ty, *b_arg_ty, span, outer_fresh_ty_var_gen)?;
+                for (cur_arg_ty, exp_arg_ty) in cur.arguments.iter().zip(exp.arguments.iter()) {
+                    self.unify_sub_type(
+                        *cur_arg_ty,
+                        current_span,
+                        *exp_arg_ty,
+                        expected_span,
+                        outer_fresh_ty_var_gen,
+                    )?;
                 }
                 Ok(())
             }
             (Variant(_a), Variant(_b)) => todo!("implement variant unification"),
-            (Tuple(a), Tuple(b)) => {
-                if a.len() != b.len() {
-                    return Err(InternalCompilationError::TypeMismatch(a_ty, b_ty, span));
+            (Tuple(cur), Tuple(exp)) => {
+                if cur.len() != exp.len() {
+                    return Err(InternalCompilationError::IsNotSubtype(
+                        cur_ty,
+                        current_span,
+                        exp_ty,
+                        expected_span,
+                    ));
                 }
-                for (a_el_ty, b_el_ty) in a.iter().zip(b.iter()) {
-                    self.unify_types(*a_el_ty, *b_el_ty, span, outer_fresh_ty_var_gen)?;
+                for (cur_el_ty, exp_el_ty) in cur.iter().zip(exp.iter()) {
+                    self.unify_sub_type(
+                        *cur_el_ty,
+                        current_span,
+                        *exp_el_ty,
+                        expected_span,
+                        outer_fresh_ty_var_gen,
+                    )?;
                 }
                 Ok(())
             }
             (Record(_a), Record(_b)) => todo!("implement record unification"),
-            (Function(a), Function(b)) => {
-                if a.args.len() != b.args.len() {
-                    return Err(InternalCompilationError::TypeMismatch(a_ty, b_ty, span));
+            (Function(cur), Function(exp)) => {
+                if cur.args.len() != exp.args.len() {
+                    return Err(InternalCompilationError::IsNotSubtype(
+                        cur_ty,
+                        current_span,
+                        exp_ty,
+                        expected_span,
+                    ));
                 }
-                for (a_arg, b_arg) in a.args.iter().zip(b.args.iter()) {
-                    if a_arg.inout != b_arg.inout {
-                        return Err(InternalCompilationError::TypeMismatch(a_ty, b_ty, span));
-                    }
-                    self.unify_types(a_arg.ty, b_arg.ty, span, outer_fresh_ty_var_gen)?;
+                for (cur_arg, exp_arg) in cur.args.iter().zip(exp.args.iter()) {
+                    // Covariance of mutability.
+                    self.unify_mut_must_be_at_least(cur_arg.inout, exp_arg.inout, current_span)?;
+                    // Contravariance of argument types.
+                    self.unify_sub_type(
+                        exp_arg.ty,
+                        current_span,
+                        cur_arg.ty,
+                        expected_span,
+                        outer_fresh_ty_var_gen,
+                    )?;
                 }
-                self.unify_types(a.ret, b.ret, span, outer_fresh_ty_var_gen)
+                // Covariance of return type.
+                self.unify_sub_type(
+                    cur.ret,
+                    current_span,
+                    exp.ret,
+                    expected_span,
+                    outer_fresh_ty_var_gen,
+                )
             }
-            (Newtype(a_name, a_old_ty), Newtype(b_name, b_old_ty)) => {
-                if a_name != b_name {
-                    return Err(InternalCompilationError::TypeMismatch(a_ty, b_ty, span));
+            (Newtype(cur_name, cur_ty), Newtype(exp_name, exp_ty)) => {
+                if cur_name != exp_name {
+                    return Err(InternalCompilationError::IsNotSubtype(
+                        cur_ty,
+                        current_span,
+                        exp_ty,
+                        expected_span,
+                    ));
                 }
-                self.unify_types(a_old_ty, b_old_ty, span, outer_fresh_ty_var_gen)
+                self.unify_sub_type(
+                    cur_ty,
+                    current_span,
+                    exp_ty,
+                    expected_span,
+                    outer_fresh_ty_var_gen,
+                )
             }
-            _ => Err(InternalCompilationError::TypeMismatch(a_ty, b_ty, span)),
+            _ => Err(InternalCompilationError::IsNotSubtype(
+                cur_ty,
+                current_span,
+                exp_ty,
+                expected_span,
+            )),
         }
     }
 
     fn unify_type_variable(
         &mut self,
         var: TypeVar,
+        var_span: Span,
         ty: Type,
-        span: Span,
+        ty_span: Span,
         outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
     ) -> Result<(), InternalCompilationError> {
         if ty.data().contains_type_var(var) {
-            Err(InternalCompilationError::InfiniteType(var, ty, span))
+            Err(InternalCompilationError::InfiniteType(var, ty, ty_span))
         } else if var.generation() != self.generation {
             // The type variable is external, so we need to make sure that the matching type has no local type variables.
             // To do so, we iterate and create one external type variable for each local type variable.
@@ -714,52 +1068,61 @@ impl UnifiedTypeInference {
                 .map(|var| {
                     let ext_ty_var = outer_fresh_ty_var_gen();
                     let ext_ty = Type::variable(ext_ty_var);
-                    self.unification_table
+                    self.ty_unification_table
                         .unify_var_value(var.as_key(), Some(ext_ty))
-                        .map_err(|(l, r)| InternalCompilationError::TypeMismatch(l, r, span))?;
+                        .map_err(|(l, r)| {
+                            InternalCompilationError::IsNotSubtype(l, var_span, r, ty_span)
+                        })?;
                     Ok::<(TypeVar, Type), InternalCompilationError>((*var, ext_ty))
                 })
                 .collect::<Result<_, _>>()?;
             log::debug!("Unified external type variable {var}, created {} new external type variables and replaced local ones", subst.len());
             // Create a new type using these new variables, and add an external constraint for it.
             let new_ty = ty.instantiate(&subst);
-            self.external_constraints.push(Constraint::TypeEqual(
+            self.external_ty_constraints.push(TypeConstraint::sub_type(
                 Type::variable(var),
+                var_span,
                 new_ty,
-                span,
+                ty_span,
             ));
             Ok(())
         } else {
             // The type variable is internal, perform normal unification.
-            self.unification_table
+            self.ty_unification_table
                 .unify_var_value(var.as_key(), Some(ty))
-                .map_err(|(l, r)| InternalCompilationError::TypeMismatch(l, r, span))
+                .map_err(|(l, r)| InternalCompilationError::IsNotSubtype(l, var_span, r, ty_span))
         }
     }
 
     fn unify_tuple_project(
         &mut self,
-        PubConstraint::TupleAtIndexIs {
+        PubTypeConstraint::TupleAtIndexIs {
             tuple_ty,
             tuple_span,
             index,
             index_span,
             element_ty,
-        }: PubConstraint,
+        }: PubTypeConstraint,
         outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
-    ) -> Result<Option<PubConstraint>, InternalCompilationError> {
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let tuple_ty = self.normalize_type(tuple_ty);
         let element_ty = self.normalize_type(element_ty);
         let tuple_data = { tuple_ty.data().clone() };
         match tuple_data {
             // A type variable may or may not be a tuple, defer the unification
-            TypeKind::Variable(_) => Ok(Some(PubConstraint::new_tuple_at_index_is(
+            TypeKind::Variable(_) => Ok(Some(PubTypeConstraint::new_tuple_at_index_is(
                 tuple_ty, tuple_span, index, index_span, element_ty,
             ))),
             // A tuple, verify length and element type
             TypeKind::Tuple(tys) => {
                 if let Some(ty) = tys.get(index) {
-                    self.unify_types(*ty, element_ty, index_span, outer_fresh_ty_var_gen)?;
+                    self.unify_sub_type(
+                        *ty,
+                        tuple_span,
+                        element_ty,
+                        index_span,
+                        outer_fresh_ty_var_gen,
+                    )?;
                     Ok(None)
                 } else {
                     Err(InternalCompilationError::InvalidTupleIndex {
@@ -776,6 +1139,60 @@ impl UnifiedTypeInference {
                 expr_span: tuple_span,
                 index_span,
             }),
+        }
+    }
+
+    fn unify_mut_must_be_at_least(
+        &mut self,
+        current: MutType,
+        target: MutType,
+        current_span: Span,
+    ) -> Result<(), InternalCompilationError> {
+        let current_mut = self.normalize_mut_type(current);
+        let target_mut = self.normalize_mut_type(target);
+        // Note: here is the truth table of the constant/mutable relationship between current and target:
+        //            | cur cst | cur mut
+        // -----------|---------|---------
+        // target cst |   ok    |   ok
+        // target mut |   err   |   ok
+        //
+        use MutType::*;
+        match (&current_mut, &target_mut) {
+            (Variable(current), Variable(target)) => {
+                // Both variables, fuse them as it is acceptable due to the transitivity of
+                // the "must be at least mutability" relationship.
+                self.mut_unification_table
+                    .unify_var_var(*current, *target)
+                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span))
+            }
+            (Variable(current), Resolved(target)) => {
+                // Target is resolved, if it is constant, we are done as anything can be used as constant.
+                if *target == MutVal::constant() {
+                    return Ok(());
+                }
+                // If it is mutable, current must be mutable as well.
+                self.mut_unification_table
+                    .unify_var_value(*current, Some(MutVal::mutable()))
+                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span))
+            }
+            (Resolved(current), Variable(target)) => {
+                // Current is resolved, if it is mutable, we are done as it can be used for everything.
+                if *current == MutVal::mutable() {
+                    return Ok(());
+                }
+                // If it is constant, we must make the target constant as well.
+                self.mut_unification_table
+                    .unify_var_value(*target, Some(MutVal::constant()))
+                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span))
+            }
+            (Resolved(current), Resolved(target)) => {
+                // Both resolved, check mutability value coercion.
+                if current < target {
+                    Err(InternalCompilationError::MustBeMutable(current_span))
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -805,8 +1222,8 @@ impl UnifiedTypeInference {
                 if ignore.contains(&v) || v.generation() != self.generation {
                     return Type::variable(v);
                 }
-                let root = self.unification_table.find(v.as_key());
-                match self.unification_table.probe_value(root) {
+                let root = self.ty_unification_table.find(v.as_key());
+                match self.ty_unification_table.probe_value(root) {
                     Some(ty) => self.substitute_type(ty, ignore),
                     _ => Type::variable(root.to_var(self.generation)),
                 }
@@ -833,10 +1250,28 @@ impl UnifiedTypeInference {
         let args = fn_ty
             .args
             .iter()
-            .map(|arg| (self.substitute_type(arg.ty, ignore), arg.inout))
+            .map(|arg| {
+                FnArgType::new(
+                    self.substitute_type(arg.ty, ignore),
+                    self.substitute_mut_type(arg.inout),
+                )
+            })
             .collect::<Vec<_>>();
         let ret = self.substitute_type(fn_ty.ret, ignore);
-        FnType::new(&args, ret)
+        FnType::new(args, ret)
+    }
+
+    fn substitute_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        match mut_ty {
+            MutType::Resolved(_) => mut_ty,
+            MutType::Variable(v) => {
+                let root = self.mut_unification_table.find(v);
+                match self.mut_unification_table.probe_value(root) {
+                    Some(val) => MutType::resolved(val),
+                    _ => MutType::variable(root),
+                }
+            }
+        }
     }
 
     pub fn substitute_node(&mut self, node: &mut ir::Node, ignore: &[TypeVar]) {
@@ -849,7 +1284,10 @@ impl UnifiedTypeInference {
                 self.substitute_nodes(&mut app.arguments, ignore);
             }
             StaticApply(app) => {
-                // do not substitute the function because it is in a module
+                app.ty = self.substitute_fn_type(&app.ty, ignore);
+                // app.subst
+                //     .iter_mut()
+                //     .for_each(|(_, ty)| *ty = self.substitute_type(*ty, ignore));
                 self.substitute_nodes(&mut app.arguments, ignore);
             }
             EnvStore(node) => self.substitute_node(&mut node.node, &node.ty_scheme.quantifiers),
@@ -901,11 +1339,11 @@ impl UnifiedTypeInference {
 
     fn substitute_constraint(
         &mut self,
-        constraint: &PubConstraint,
+        constraint: &PubTypeConstraint,
         ignore: &[TypeVar],
-    ) -> PubConstraint {
+    ) -> PubTypeConstraint {
         match constraint {
-            PubConstraint::TupleAtIndexIs {
+            PubTypeConstraint::TupleAtIndexIs {
                 tuple_ty,
                 tuple_span,
                 index,
@@ -914,7 +1352,7 @@ impl UnifiedTypeInference {
             } => {
                 let tuple_ty = self.substitute_type(*tuple_ty, ignore);
                 let element_ty = self.substitute_type(*element_ty, ignore);
-                PubConstraint::new_tuple_at_index_is(
+                PubTypeConstraint::new_tuple_at_index_is(
                     tuple_ty,
                     *tuple_span,
                     *index,
@@ -926,16 +1364,26 @@ impl UnifiedTypeInference {
     }
 
     pub fn substitute_in_external_constraints(&mut self) {
-        let constraints = mem::take(&mut self.external_constraints);
-        self.external_constraints = constraints
+        let constraints = mem::take(&mut self.external_ty_constraints);
+        self.external_ty_constraints = constraints
             .into_iter()
             .map(|constraint| {
-                use Constraint::*;
+                use TypeConstraint::*;
                 match constraint {
-                    TypeEqual(left, right, span) => {
-                        let left = self.substitute_type(left, &[]);
-                        let right = self.substitute_type(right, &[]);
-                        TypeEqual(left, right, span)
+                    SubType {
+                        current,
+                        current_span,
+                        expected,
+                        expected_span,
+                    } => {
+                        let current = self.substitute_type(current, &[]);
+                        let expected = self.substitute_type(expected, &[]);
+                        SubType {
+                            current,
+                            current_span,
+                            expected,
+                            expected_span,
+                        }
                     }
                     Pub(cst) => Pub(self.substitute_constraint(&cst, &[])),
                 }
@@ -944,33 +1392,52 @@ impl UnifiedTypeInference {
     }
 
     pub fn log_debug_constraints(&self, module_env: ModuleEnv) {
-        log::debug!("Constraints after unification (gen {}):", self.generation);
-        if !self.remaining_constraints.is_empty() {
-            log::debug!("  Internal constraints:");
-            for constraint in &self.remaining_constraints {
-                log::debug!("    {}", constraint.format_with(&module_env));
+        if self.remaining_ty_constraints.is_empty() && self.external_ty_constraints.is_empty() {
+            log::debug!(
+                "No type constraints after unification (gen {}).",
+                self.generation
+            );
+        } else {
+            log::debug!(
+                "Type constraints after unification (gen {}):",
+                self.generation
+            );
+            if !self.remaining_ty_constraints.is_empty() {
+                log::debug!("  Internal constraints:");
+                for constraint in &self.remaining_ty_constraints {
+                    log::debug!("    {}", constraint.format_with(&module_env));
+                }
             }
-        }
-        if !self.external_constraints.is_empty() {
-            log::debug!("  External constraints:");
-            for constraint in &self.external_constraints {
-                log::debug!("    {}", constraint.format_with(&module_env));
+            if !self.external_ty_constraints.is_empty() {
+                log::debug!("  External constraints:");
+                for constraint in &self.external_ty_constraints {
+                    log::debug!("    {}", constraint.format_with(&module_env));
+                }
             }
         }
     }
 
     pub fn log_debug_substitution_table(&mut self, module_env: ModuleEnv) {
-        log::debug!("Substitution table:");
-        for i in 0..self.unification_table.len() {
+        log::debug!("Type substitution table (gen {}):", self.generation);
+        for i in 0..self.ty_unification_table.len() {
             let key = TyVarKey(i as u32);
             let var = TypeVar::new(i as u32, self.generation);
-            let value = self.unification_table.probe_value(key);
+            let value = self.ty_unification_table.probe_value(key);
             match value {
                 Some(value) => log::debug!("  {var} → {}", value.format_with(&module_env)),
                 None => log::debug!("  {var} → {}", {
-                    let key = self.unification_table.find(key);
+                    let key = self.ty_unification_table.find(key);
                     TypeVar::new(key.0, self.generation)
                 }),
+            }
+        }
+        log::debug!("Mutability substitution table (gen {}):", self.generation);
+        for i in 0..self.mut_unification_table.len() {
+            let var = MutVar(i as u32);
+            let value = self.mut_unification_table.probe_value(var);
+            match value {
+                Some(value) => log::debug!("  {var} → {}", value),
+                None => log::debug!("  {var} → {}", self.mut_unification_table.find(var)),
             }
         }
     }

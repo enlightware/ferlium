@@ -1,27 +1,33 @@
-use std::collections::HashSet;
+use std::{
+    collections::{HashSet, VecDeque},
+    fmt::Display,
+};
 
+use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use lrpar::Span;
 
 use crate::{
     containers::{SVec1, SVec2, B},
     error::RuntimeError,
+    format::{write_with_separator, FormatWith},
     function::FunctionRef,
     module::{FmtWithModuleEnv, ModuleEnv},
-    r#type::{FnArgType, Type, TypeLike, TypeSubstitution, TypeVar, TypeVarSubstitution},
+    r#type::{FnArgType, FnType, Type, TypeLike, TypeVar, TypeVarSubstitution},
     std::array,
     type_scheme::{DisplayStyle, TypeScheme},
-    value::{ValOrMut, Value},
+    value::{NativeValue, Value},
 };
 
 /// Along with the Rust native stack, corresponds to the Zinc Abstract Machine of Caml language family
 /// with the addition of Mutable Value Semantics through references to earlier stack frames
 pub struct EvalCtx {
-    /// all values of all stack frames
-    pub environment: Vec<Value>,
+    /// all values or mutable references of all stack frames
+    pub environment: Vec<ValOrMut>,
     /// base of current stack frame in `environment`
     pub frame_base: usize,
 }
+
 impl EvalCtx {
     #[allow(clippy::new_without_default)]
     pub fn new() -> EvalCtx {
@@ -32,36 +38,7 @@ impl EvalCtx {
     }
 }
 
-// TODO: later, handle tail optimisation in a special way
-
-#[derive(Debug, Clone)]
-pub struct Application {
-    pub function: Node,
-    pub arguments: Vec<Node>,
-    pub inout: Vec<bool>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StaticApplication {
-    pub function: FunctionRef,
-    pub arguments: Vec<Node>,
-    pub inout: Vec<bool>,
-    // substitution for the type variable of the function in the context of the application
-    pub subst: TypeSubstitution,
-}
-
-#[derive(Debug, Clone)]
-pub struct EnvStore {
-    pub node: Node,
-    pub ty_scheme: TypeScheme<Type>,
-    pub name_span: Span,
-}
-impl EnvStore {
-    pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
-        self.node.substitute(subst);
-        self.ty_scheme.substitute(subst);
-    }
-}
+type FormatWithEvalCtx<'a, T> = FormatWith<'a, T, EvalCtx>;
 
 /// A place in the environment (absolute position), with a path to a compound value
 /// This behaves like a global address to a Value given our Mutable Value Semantics.
@@ -72,10 +49,33 @@ pub struct Place {
     // path within the compound value located at `target`
     pub path: Vec<isize>,
 }
+
 impl Place {
-    pub fn target_ref<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, RuntimeError> {
-        let mut target = &mut ctx.environment[self.target];
-        for &index in &self.path {
+    /// Return a path and an index of a variable in the environment that is for sure a Value
+    fn resolved_path_and_index(&self, ctx: &EvalCtx) -> (VecDeque<isize>, usize) {
+        let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
+        let mut index = self.target;
+        loop {
+            match &ctx.environment[index] {
+                ValOrMut::Val(_target) => {
+                    break;
+                }
+                ValOrMut::Mut(place) => {
+                    index = place.target;
+                    for &index in place.path.iter().rev() {
+                        path.push_front(index);
+                    }
+                }
+            };
+        }
+        (path, index)
+    }
+
+    /// Get a mutable reference to the target value
+    pub fn target_mut<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, RuntimeError> {
+        let (path, index) = self.resolved_path_and_index(ctx);
+        let mut target = ctx.environment[index].as_val_mut().unwrap();
+        for &index in path.iter() {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get_mut(index as usize).unwrap(),
@@ -96,6 +96,131 @@ impl Place {
         }
         Ok(target)
     }
+
+    /// Get a shared reference to the target value
+    pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, RuntimeError> {
+        let (path, index) = self.resolved_path_and_index(ctx);
+        let mut target = ctx.environment[index].as_val().unwrap();
+        for &index in path.iter() {
+            use Value::*;
+            target = match target {
+                Tuple(tuple) => tuple.get(index as usize).unwrap(),
+                Native(primitive) => {
+                    // iif the primitive is our standard Array, we can access its elements
+                    let array = NativeValue::as_any(&**primitive)
+                        .downcast_ref::<array::Array>()
+                        .unwrap();
+                    let len = array.len();
+                    match array.get_signed(index) {
+                        Some(target) => target,
+                        None => return Err(RuntimeError::ArrayAccessOutOfBounds { index, len }),
+                    }
+                }
+                _ => panic!("Cannot access a non-compound value"),
+            };
+        }
+        Ok(target)
+    }
+}
+
+impl Display for FormatWithEvalCtx<'_, Place> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Place { target, path } = self.value;
+        let ctx = self.data;
+        let relative_index = *target as isize - ctx.frame_base as isize;
+        write!(f, "@{relative_index}")?;
+        if !path.is_empty() {
+            write!(f, ".")?;
+        }
+        write_with_separator(path, ".", f)?;
+        if relative_index < 0 {
+            write!(f, " (in a previous frame)")?;
+        }
+        Ok(())
+    }
+}
+
+/// Either a value or a unique mutable reference to a value.
+/// This allows to implement the mutable value semantics.
+#[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
+pub enum ValOrMut {
+    /// A value, itself
+    Val(Value),
+    /// A mutable reference, index in the environment plus path within the value
+    Mut(Place),
+}
+
+impl ValOrMut {
+    pub fn into_primitive<T: 'static>(self) -> Option<T> {
+        match self {
+            ValOrMut::Val(val) => val.into_primitive_ty::<T>(),
+            ValOrMut::Mut(_) => None,
+        }
+    }
+
+    pub fn as_mut_primitive<T: 'static>(
+        self,
+        ctx: &mut EvalCtx,
+    ) -> Result<Option<&mut T>, RuntimeError> {
+        Ok(match self {
+            ValOrMut::Val(_) => None,
+            ValOrMut::Mut(place) => place.target_mut(ctx)?.as_primitive_ty_mut::<T>(),
+        })
+    }
+
+    pub fn as_value(&self, ctx: &EvalCtx) -> Result<Value, RuntimeError> {
+        Ok(match self {
+            ValOrMut::Val(value) => value.clone(),
+            ValOrMut::Mut(place) => place.target_ref(ctx)?.clone(),
+        })
+    }
+
+    pub fn as_place(&self) -> &Place {
+        match self {
+            ValOrMut::Val(_) => panic!("Cannot get a place from a value"),
+            ValOrMut::Mut(place) => place,
+        }
+    }
+}
+
+impl Display for FormatWithEvalCtx<'_, ValOrMut> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.value {
+            ValOrMut::Val(value) => write!(f, "value {value}"),
+            ValOrMut::Mut(place) => write!(f, "mut. ref. {}", FormatWith::new(place, self.data)),
+        }
+    }
+}
+
+/// The result of evaluating an IR node, either a Value or a runtime error.
+pub type EvalResult = Result<Value, RuntimeError>;
+
+#[derive(Debug, Clone)]
+pub struct Application {
+    pub function: Node,
+    pub arguments: Vec<Node>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticApplication {
+    pub function: FunctionRef,
+    pub arguments: Vec<Node>,
+    pub ty: FnType,
+    // substitution for the type variable of the function in the context of the application
+    // pub subst: TypeSubstitution,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvStore {
+    pub node: Node,
+    pub ty_scheme: TypeScheme<Type>,
+    pub name_span: Span,
+}
+impl EnvStore {
+    pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
+        self.node.substitute(subst);
+        self.ty_scheme.substitute(subst);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,9 +235,6 @@ pub struct Case {
     pub alternatives: SVec1<(Value, Node)>,
     pub default: Node,
 }
-
-/// The result of evaluating an IR node
-pub type EvalResult = Result<Value, RuntimeError>;
 
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone)]
@@ -173,7 +295,7 @@ impl Node {
                 let name = env.function_name(&function);
                 match app.function.get().try_borrow() {
                     Ok(function) => {
-                        let ty = self.ty.format_with(env);
+                        let ty = app.ty.format_with(env);
                         match name {
                             Some(name) => writeln!(f, "{indent_str}⎸ {name}: {ty}")?,
                             None => {
@@ -413,11 +535,7 @@ impl Node {
     ) {
         use NodeKind::*;
         // Add type variables for this node.
-        self.ty.inner_ty_vars().iter().for_each(|ty_var| {
-            if ty_var.generation() == generation && !ignore.contains(ty_var) {
-                result.insert((*ty_var, self.span));
-            }
-        });
+        self.unbound_ty_vars_in_ty(&self.ty, result, ignore, generation);
         // Recurse.
         match &self.kind {
             Literal(_) => {} // no need to look into the value's type as it is already in this node's type
@@ -428,6 +546,7 @@ impl Node {
                 }
             }
             StaticApply(app) => {
+                self.unbound_ty_vars_in_ty(&app.ty, result, ignore, generation);
                 for arg in &app.arguments {
                     arg.unbound_ty_vars(result, ignore, generation);
                 }
@@ -472,17 +591,30 @@ impl Node {
         }
     }
 
+    pub fn unbound_ty_vars_in_ty(
+        &self,
+        ty: &impl TypeLike,
+        result: &mut HashSet<(TypeVar, Span)>,
+        ignore: &[TypeVar],
+        generation: u32,
+    ) {
+        ty.inner_ty_vars().iter().for_each(|ty_var| {
+            if ty_var.generation() == generation && !ignore.contains(ty_var) {
+                result.insert((*ty_var, self.span));
+            }
+        });
+    }
+
     pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
         use NodeKind::*;
         match &mut self.kind {
-            // FIXME: do we really need to go into the value?
             Literal(value) => value.substitute(subst),
             Apply(app) => {
                 app.function.substitute(subst);
                 substitute_nodes(&mut app.arguments, subst);
             }
             StaticApply(app) => {
-                // do not substitute the function because it is in a module
+                app.ty = app.ty.substitute(subst);
                 substitute_nodes(&mut app.arguments, subst);
             }
             EnvStore(node) => node.substitute(subst),
@@ -511,49 +643,42 @@ impl Node {
         self.ty = self.ty.substitute(subst);
     }
 
+    /// Evaluate this node given the environment and return the result.
     pub fn eval(&self, ctx: &mut EvalCtx) -> EvalResult {
         use NodeKind::*;
         match &self.kind {
             Literal(value) => Ok(value.clone()),
             Apply(app) => {
+                let args_ty = {
+                    app.function
+                        .ty
+                        .data()
+                        .as_function()
+                        .expect("Apply needs a function type")
+                        .args
+                        .clone()
+                };
                 let function_value = app.function.eval(ctx)?;
                 let function = function_value.as_function().unwrap().get();
                 let function = function.borrow();
-                let args_ty = app
-                    .arguments
-                    .iter()
-                    .zip(&app.inout)
-                    .map(|(arg, inout)| FnArgType {
-                        ty: arg.ty,
-                        inout: *inout,
-                    })
-                    .collect::<Vec<_>>();
                 let arguments = eval_args(&app.arguments, &args_ty, ctx)?;
                 function.call(arguments, ctx)
             }
             StaticApply(app) => {
+                let args_ty = &app.ty.args;
                 let function = app.function.get();
                 let function = function.borrow();
-                let args_ty = app
-                    .arguments
-                    .iter()
-                    .zip(&app.inout)
-                    .map(|(arg, inout)| FnArgType {
-                        ty: arg.ty,
-                        inout: *inout,
-                    })
-                    .collect::<Vec<_>>();
-                let arguments = eval_args(&app.arguments, &args_ty, ctx)?;
+                let arguments = eval_args(&app.arguments, args_ty, ctx)?;
                 function.call(arguments, ctx)
             }
             EnvStore(node) => {
                 let value = node.node.eval(ctx)?;
-                ctx.environment.push(value.clone());
-                Ok(value)
+                ctx.environment.push(ValOrMut::Val(value));
+                Ok(Value::unit())
             }
             EnvLoad(index) => {
                 let index = ctx.frame_base + index;
-                Ok(ctx.environment[index].clone())
+                Ok(ctx.environment[index].as_value(ctx)?)
             }
             Block(nodes) => {
                 let env_size = ctx.environment.len();
@@ -566,7 +691,7 @@ impl Node {
             }
             Assign(assignment) => {
                 let value = assignment.value.eval(ctx)?;
-                let target_ref = assignment.place.as_place(ctx)?.target_ref(ctx)?;
+                let target_ref = assignment.place.as_place(ctx)?.target_mut(ctx)?;
                 *target_ref = value;
                 Ok(Value::unit())
             }
@@ -615,6 +740,7 @@ impl Node {
         }
     }
 
+    /// Evaluate this node given the environment and print the result.
     pub fn eval_and_print(&self, ctx: &mut EvalCtx, env: &ModuleEnv) {
         match self.eval(ctx) {
             Ok(value) => println!("{value}: {}", self.ty.format_with(env)),
@@ -622,6 +748,7 @@ impl Node {
         }
     }
 
+    /// Return this node as a place in the environment.
     pub fn as_place(&self, ctx: &mut EvalCtx) -> Result<Place, RuntimeError> {
         fn resolve_node(node: &Node, ctx: &mut EvalCtx) -> Result<Place, RuntimeError> {
             use NodeKind::*;
@@ -634,7 +761,8 @@ impl Node {
                 }
                 Index(array, index) => {
                     let mut place = resolve_node(array, ctx)?;
-                    let index = index.eval(ctx)?.into_primitive_ty::<isize>().unwrap();
+                    let index_value = index.eval(ctx)?;
+                    let index = index_value.into_primitive_ty::<isize>().unwrap();
                     place.path.push(index);
                     place
                 }
@@ -670,8 +798,14 @@ fn eval_args(
     args_ty: &[FnArgType],
     ctx: &mut EvalCtx,
 ) -> Result<Vec<ValOrMut>, RuntimeError> {
+    // Automatically cast mutable references to values if the function expects values.
     let f = |(arg, ty): &(&Node, &FnArgType), ctx: &mut EvalCtx| {
-        Ok(if ty.inout {
+        let is_mutable = ty
+            .inout
+            .as_resolved()
+            .expect("Unresolved mutability variable found during execution")
+            .is_mutable();
+        Ok(if is_mutable {
             ValOrMut::Mut(arg.as_place(ctx)?)
         } else {
             ValOrMut::Val(arg.eval(ctx)?)

@@ -2,6 +2,7 @@
 
 ### Language features
 
+- Loops
 - Record types
 - Effects
 - Type classes
@@ -14,7 +15,7 @@
 ### Library and test features
 
 - Array map
-- Array from iterator
+- Array from iterator (note: functional iterators require closures)
 
 ### Compiler features
 
@@ -26,7 +27,11 @@
 
 ### Next tasks
 
-- Type check var/let and equalities
+- Borrow checker
 - Do not add trivial constraints to type inference
 - Add {} block expression
 - Add record type
+
+### Open questions
+
+- Should newtype be scoped by their module?

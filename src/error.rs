@@ -15,7 +15,8 @@ pub type LocatedError = (String, Span);
 pub enum InternalCompilationError {
     VariableNotFound(Span),
     FunctionNotFound(Span),
-    TypeMismatch(Type, Type, Span),
+    MustBeMutable(Span),
+    IsNotSubtype(Type, Span, Type, Span),
     InfiniteType(TypeVar, Type, Span),
     UnboundTypeVar {
         ty_var: TypeVar,
@@ -49,11 +50,15 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 let name = &source[span.start()..span.end()];
                 write!(f, "Function not found: {}", name)
             }
-            TypeMismatch(a, b, _span) => write!(
+            MustBeMutable(span) => {
+                let name = &source[span.start()..span.end()];
+                write!(f, "Expression must be mutable: {}", name)
+            }
+            IsNotSubtype(cur, _cur_span, exp, _exp_span) => write!(
                 f,
-                "Type \"{}\" is incompatible with type \"{}\"",
-                a.format_with(env),
-                b.format_with(env)
+                "Type \"{}\" is not a sub-type of \"{}\"",
+                cur.format_with(env),
+                exp.format_with(env)
             ),
             InfiniteType(ty_var, ty, _span) => {
                 write!(f, "Infinite type: {} = \"{}\"", ty_var, ty.format_with(env))
@@ -90,7 +95,8 @@ pub enum CompilationError {
     ParsingFailed(Vec<LocatedError>),
     VariableNotFound(String, Span),
     FunctionNotFound(String, Span),
-    TypeMismatch(String, String, Span),
+    MustBeMutable(Span),
+    IsNotSubtype(String, Span, String, Span),
     InfiniteType(String, String, Span),
     UnboundTypeVar {
         ty_var: String,
@@ -123,10 +129,12 @@ impl CompilationError {
                 let name = &src[span.start()..span.end()];
                 Self::FunctionNotFound(name.to_string(), span)
             }
-            TypeMismatch(a, b, span) => Self::TypeMismatch(
-                a.format_with(env).to_string(),
-                b.format_with(env).to_string(),
-                span,
+            MustBeMutable(span) => Self::MustBeMutable(span),
+            IsNotSubtype(cur, cur_span, exp, exp_span) => Self::IsNotSubtype(
+                cur.format_with(env).to_string(),
+                cur_span,
+                exp.format_with(env).to_string(),
+                exp_span,
             ),
             InfiniteType(ty_var, ty, span) => {
                 Self::InfiniteType(ty_var.to_string(), ty.format_with(env).to_string(), span)
@@ -160,21 +168,25 @@ impl CompilationError {
         }
     }
 
-    pub fn expect_type_mismatch(&self, expect_a_ty: &str, expect_b_ty: &str) {
+    pub fn expect_must_be_mutable(&self) {
         match self {
-            Self::TypeMismatch(a_ty, b_ty, _) => {
-                if a_ty == expect_a_ty && b_ty == expect_b_ty {
-                    return;
-                }
-                if b_ty == expect_a_ty && a_ty == expect_b_ty {
+            Self::MustBeMutable(_) => (),
+            _ => panic!("expect_must_be_mutable called on non-MustBeMutable error"),
+        }
+    }
+
+    pub fn expect_is_not_subtype(&self, cur_ty: &str, exp_ty: &str) {
+        match self {
+            Self::IsNotSubtype(cur, _, exp, _) => {
+                if cur == cur_ty && exp == exp_ty {
                     return;
                 }
                 panic!(
-                    "expect_type_mismatch failed: expected \"{}\" and \"{}\", got \"{}\" and \"{}\"",
-                    expect_a_ty, expect_b_ty, a_ty, b_ty
+                    "expect_is_not_subtype failed: expected \"{}\" ≰ \"{}\", got \"{}\" ≰ \"{}\"",
+                    cur_ty, exp_ty, cur, exp
                 );
             }
-            _ => panic!("expect_type_mismatch called on non-TypeMismatch error"),
+            _ => panic!("expect_is_not_subtype called on non-TypeMismatch error"),
         }
     }
 

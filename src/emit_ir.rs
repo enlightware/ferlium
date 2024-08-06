@@ -9,10 +9,11 @@ use crate::{
     function::ScriptFunction,
     ir,
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
+    mutability::MutType,
     r#type::{FnType, Type, TypeLike, TypeVar},
     std::logic::unit_type,
-    type_inference::{Constraint, FreshTyVarGen, TypeInference},
-    type_scheme::{PubConstraint, TypeScheme},
+    type_inference::{FreshTyVarGen, TypeConstraint, TypeInference},
+    type_scheme::{PubTypeConstraint, TypeScheme},
     typing_env::{Local, TypingEnv},
     value::Value,
 };
@@ -37,26 +38,31 @@ pub fn emit_module(
         ..
     } in &source.functions
     {
-        let args_ty = ty_inf.fresh_type_var_tys(args.len());
+        // Create type and mutability variables for the arguments.
+        // Note: the quantifiers and constraints are left empty.
+        // They will be filled in the second pass.
+        let args_ty = ty_inf.fresh_fn_args(args.len());
+        let ty_scheme = TypeScheme::new_just_type(FnType::new(
+            args_ty,
+            Type::variable(ty_inf.fresh_type_var()),
+        ));
+        // Create dummy code.
         let dummy_code = B::new(ScriptFunction::new(N::new(
             K::Literal(Value::unit()),
             unit_type(),
             *span,
         )));
-        // Note: the type is filled with type variables, and the quantifiers and constraints
-        // are left empty. They will be filled in the second pass.
+        // Assemble the spans and the description
+        let spans = module::ModuleFunctionSpans {
+            name: name.1,
+            args: args.iter().map(|(_, s)| *s).collect(),
+            args_span: *args_span,
+            span: *span,
+        };
         let descr = module::ModuleFunction {
-            ty_scheme: TypeScheme::new_just_type(FnType::new_by_val(
-                &args_ty,
-                Type::variable(ty_inf.fresh_type_var()),
-            )),
+            ty_scheme,
             code: Rc::new(RefCell::new(dummy_code)),
-            spans: Some(module::ModuleFunctionSpans {
-                name: name.1,
-                args: args.iter().map(|(_, s)| *s).collect(),
-                args_span: *args_span,
-                span: *span,
-            }),
+            spans: Some(spans),
         };
         output.functions.insert(name.0, descr);
     }
@@ -70,7 +76,14 @@ pub fn emit_module(
             descr.ty_scheme.ty.as_locals_no_bound(&function.args),
             module_env,
         );
-        let fn_node = ty_inf.check_expr(&mut ty_env, &function.body, descr.ty_scheme.ty.ret)?;
+        let expected_span = descr.spans.as_ref().unwrap().args_span;
+        let fn_node = ty_inf.check_expr(
+            &mut ty_env,
+            &function.body,
+            descr.ty_scheme.ty.ret,
+            MutType::constant(),
+            expected_span,
+        )?;
         let descr = output.functions.get_mut(&name).unwrap();
         *descr.code.borrow_mut() = B::new(ScriptFunction::new(fn_node));
     }
@@ -186,12 +199,12 @@ pub fn emit_expr(
     locals: Vec<Local>,
     generation: u32,
     outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
-) -> Result<(CompiledExpr, Vec<Constraint>), InternalCompilationError> {
+) -> Result<(CompiledExpr, Vec<TypeConstraint>), InternalCompilationError> {
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
     let mut ty_env = TypingEnv::new(locals, module_env);
     let mut ty_inf = TypeInference::new_with_generation(generation);
-    let (mut node, mut ty) = ty_inf.infer_expr(&mut ty_env, source)?;
+    let (mut node, mut ty, _) = ty_inf.infer_expr(&mut ty_env, source)?;
     let mut locals = ty_env.get_locals_and_drop();
     // FIXME: we need to emit fresh variables not in the locals before us!
     // So we need some notion of generations so that fresh ones do not clash with older ones.
@@ -276,7 +289,7 @@ pub fn emit_expr_top_level(
     source: &ast::Expr,
     module_env: ModuleEnv,
     locals: Vec<Local>,
-) -> Result<(CompiledExpr, Vec<Constraint>), InternalCompilationError> {
+) -> Result<(CompiledExpr, Vec<TypeConstraint>), InternalCompilationError> {
     emit_expr(
         source,
         module_env,
@@ -287,7 +300,10 @@ pub fn emit_expr_top_level(
 }
 
 /// Filter constraints that contain type variables listed in the quantifiers
-fn filter_constraints(constraints: &[PubConstraint], ty_vars: &[TypeVar]) -> Vec<PubConstraint> {
+fn filter_constraints(
+    constraints: &[PubTypeConstraint],
+    ty_vars: &[TypeVar],
+) -> Vec<PubTypeConstraint> {
     constraints
         .iter()
         .filter(|constraint| {
@@ -304,7 +320,7 @@ fn filter_constraints(constraints: &[PubConstraint], ty_vars: &[TypeVar]) -> Vec
 /// Extend a list of type variables with the type variables in the constraints
 fn extend_with_constraint_ty_vars(
     ty_vars: &[TypeVar],
-    constraints: &[PubConstraint],
+    constraints: &[PubTypeConstraint],
 ) -> Vec<TypeVar> {
     ty_vars
         .iter()

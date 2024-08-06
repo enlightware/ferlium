@@ -6,11 +6,11 @@ use ustr::ustr;
 use crate::{
     format::write_with_separator,
     function::{BinaryNativeFn, BinaryPartialMutNativeFn, BinaryPartialNativeFn, UnaryNativeFn},
-    ir::EvalCtx,
+    ir::{EvalCtx, ValOrMut},
     module::{Module, ModuleFunction},
     r#type::{bare_native_type, FnType, Type},
     type_scheme::TypeScheme,
-    value::{NativeDisplay, ValOrMut, Value},
+    value::{NativeDisplay, Value},
 };
 
 use super::{iterator::iterator_type, math::int_type};
@@ -64,29 +64,38 @@ impl Array {
         self.0.get(index)
     }
 
+    pub fn get_signed(&self, index: isize) -> Option<&Value> {
+        self.get(self.to_unsigned_index(index))
+    }
+
     pub fn get_mut(&mut self, index: usize) -> Option<&mut Value> {
         Rc::make_mut(&mut self.0).get_mut(index)
     }
 
     pub fn get_mut_signed(&mut self, index: isize) -> Option<&mut Value> {
-        let index = if index < 0 {
-            (self.len() as isize + index) as usize
-        } else {
-            index as usize
-        };
-        self.get_mut(index)
+        self.get_mut(self.to_unsigned_index(index))
     }
 
     pub fn append(&mut self, value: Value) {
         Rc::make_mut(&mut self.0).push_back(value);
     }
 
+    fn to_unsigned_index(&self, index: isize) -> usize {
+        if index < 0 {
+            (self.len() as isize + index) as usize
+        } else {
+            index as usize
+        }
+    }
+
     fn append_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
         let unit = Type::unit();
         let array = array_type_generic();
-        let ty_scheme =
-            TypeScheme::new_infer_quantifiers(FnType::new(&[(array, true), (gen0, false)], unit));
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            &[(array, true), (gen0, false)],
+            unit,
+        ));
         BinaryPartialMutNativeFn::description_with_ty_scheme(Array::append, ty_scheme)
     }
 
@@ -98,8 +107,10 @@ impl Array {
         let gen0 = Type::variable_id(0);
         let unit = Type::unit();
         let array = array_type_generic();
-        let ty_scheme =
-            TypeScheme::new_infer_quantifiers(FnType::new(&[(array, true), (gen0, false)], unit));
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            &[(array, true), (gen0, false)],
+            unit,
+        ));
         BinaryPartialMutNativeFn::description_with_ty_scheme(Array::prepend, ty_scheme)
     }
 
@@ -113,8 +124,10 @@ impl Array {
 
     fn len_descr() -> ModuleFunction {
         let array = array_type_generic();
-        let ty_scheme =
-            TypeScheme::new_infer_quantifiers(FnType::new(&[(array, false)], int_type()));
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            &[(array, false)],
+            int_type(),
+        ));
         UnaryNativeFn::description_with_ty_scheme(|a: Self| a.len() as isize, ty_scheme)
     }
 
@@ -126,7 +139,7 @@ impl Array {
 
     fn concat_descr() -> ModuleFunction {
         let array_ty = array_type_generic();
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new(
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
             &[(array_ty, false), (array_ty, false)],
             array_ty,
         ));
@@ -158,7 +171,7 @@ impl Array {
     fn map_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
         let gen1 = Type::variable_id(1);
-        let map_fn = Type::function(&[gen0], gen1);
+        let map_fn = Type::function_by_val(&[gen0], gen1);
         let array0 = Type::native::<Array>(vec![gen0]);
         let array1 = Type::native::<Array>(vec![gen1]);
         let ty_scheme =

@@ -23,10 +23,12 @@ use ustr::Ustr;
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::B;
+use crate::format::type_variable_index_to_string;
 use crate::graph;
 use crate::graph::find_disjoint_subgraphs;
 use crate::module::FmtWithModuleEnv;
 use crate::module::ModuleEnv;
+use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
 use crate::type_scheme::TypeScheme;
 use crate::typing_env::Local;
@@ -232,10 +234,10 @@ impl FmtWithModuleEnv for NativeType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FnArgType {
     pub ty: Type,
-    pub inout: bool,
+    pub inout: MutType,
 }
 impl FnArgType {
-    fn new(ty: Type, inout: bool) -> Self {
+    pub fn new(ty: Type, inout: MutType) -> Self {
         Self { ty, inout }
     }
     fn local_cmp(&self, other: &Self) -> Ordering {
@@ -251,14 +253,12 @@ impl FnArgType {
     ) -> bool {
         self.ty
             .can_be_used_in_place_of_with_subst(other.ty, substitutions, seen)
-            && (self.inout || !other.inout)
+            && (self.inout.is_mutable() || !other.inout.is_mutable())
     }
 }
 impl FmtWithModuleEnv for FnArgType {
     fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        if self.inout {
-            write!(f, "inout ")?;
-        }
+        self.inout.format_in_fn_arg(f)?;
         self.ty.fmt_with_module_env(f, env)
     }
 }
@@ -271,11 +271,15 @@ pub struct FnType {
 }
 
 impl FnType {
-    pub fn new(args: &[(Type, bool)], ret: Type) -> Self {
+    pub fn new(args: Vec<FnArgType>, ret: Type) -> Self {
+        Self { args, ret }
+    }
+
+    pub fn new_mut_resolved(args: &[(Type, bool)], ret: Type) -> Self {
         Self {
             args: args
                 .iter()
-                .map(|(ty, inout)| FnArgType::new(*ty, *inout))
+                .map(|(ty, inout)| FnArgType::new(*ty, MutType::from(*inout)))
                 .collect(),
             ret,
         }
@@ -285,7 +289,10 @@ impl FnType {
         Self {
             args: args
                 .iter()
-                .map(|&ty| FnArgType { ty, inout: false })
+                .map(|&ty| FnArgType {
+                    ty,
+                    inout: MutType::constant(),
+                })
                 .collect(),
             ret,
         }
@@ -296,12 +303,7 @@ impl FnType {
             .iter()
             .zip(self.args.iter())
             .map(|((name, span), arg)| {
-                Local::new(
-                    *name,
-                    arg.inout.into(),
-                    TypeScheme::new_just_type(arg.ty),
-                    *span,
-                )
+                Local::new(*name, arg.inout, TypeScheme::new_just_type(arg.ty), *span)
             })
             .collect()
     }
@@ -379,7 +381,7 @@ pub struct Type {
 impl Type {
     // helper constructors
     pub fn unit() -> Self {
-        Type::tuple(vec![])
+        Self::tuple(vec![])
     }
 
     pub fn primitive<T: Clone + 'static>() -> Self {
@@ -422,20 +424,20 @@ impl Type {
         TypeKind::Function(B::new(ty)).store()
     }
 
-    pub fn function(args: &[Self], ret: Self) -> Self {
+    pub fn function_by_val(args: &[Self], ret: Self) -> Self {
         Self::function_type(FnType::new_by_val(args, ret))
     }
 
-    pub fn nullary_function(ret: Self) -> Self {
-        Self::function(&[], ret)
+    pub fn nullary_function_by_val(ret: Self) -> Self {
+        Self::function_by_val(&[], ret)
     }
 
-    pub fn unary_function(arg: Self, ret: Self) -> Self {
-        Self::function(&[arg], ret)
+    pub fn unary_function_by_val(arg: Self, ret: Self) -> Self {
+        Self::function_by_val(&[arg], ret)
     }
 
-    pub fn binary_function(arg1: Self, arg2: Self, ret: Self) -> Self {
-        Self::function(&[arg1, arg2], ret)
+    pub fn binary_function_by_val(arg1: Self, arg2: Self, ret: Self) -> Self {
+        Self::function_by_val(&[arg1, arg2], ret)
     }
 
     pub fn new_type(name: Ustr, ty: Self) -> Self {
@@ -1109,17 +1111,6 @@ impl graph::Node for TypeKind {
     }
 }
 
-fn type_variable_index_to_string(index: u32) -> String {
-    let first = 0x3B1;
-    let last = 0x3C9;
-    let unicode_char = first + index;
-    if unicode_char <= last {
-        char::from_u32(unicode_char).unwrap_or('_').to_string()
-    } else {
-        format!("T{}", unicode_char - last)
-    }
-}
-
 fn type_variable_gen_index_to_string(index: u32, generation: u32) -> String {
     let first = 0x2080;
     let last = 0x2089;
@@ -1300,6 +1291,29 @@ pub struct TypeNames {
     pub types_to_names: HashMap<Type, Ustr>,
 }
 
+// pub struct PrimitiveType<T: Clone + 'static> {
+//     _marker: std::marker::PhantomData<T>,
+//     type_cell: &'static OnceLock<Type>,
+// }
+
+// impl<T: Clone + 'static> PrimitiveType<T> {
+//     fn new() -> Self {
+//         static INSTANCE: OnceLock<Type> = OnceLock::new();
+//         PrimitiveType {
+//             _marker: std::marker::PhantomData,
+//             type_cell: &INSTANCE,
+//         }
+//     }
+
+//     fn get_type(&self) -> Type {
+//         *self.type_cell.gt_or_init(|| Type::primitive::<T>())
+//     }
+
+//     pub fn get() -> Type {
+//         Self::new().get_type()
+//     }
+// }
+
 // Note: if we need to solve type inference, see https://github.com/andrejbauer/plzoo/blob/master/src/poly/type_infer.ml
 // Question: how to lookup local and parent variables in case of recursion with static typing? (static lexical scoping, see de Bruijn indices)
 // See if needed: Explicit substitutions, M. Abadi, L. Cardelli, P.L. Curien, J.J. Lévy, Journal of Functional Programming 6(2), 1996.
@@ -1453,12 +1467,12 @@ mod tests {
 
         // Native functions
         // unary functions
-        let _native_fn_i32_i32 = Type::unary_function(_i32, _i32);
-        let _native_fn_i32_f32 = Type::unary_function(_i32, _f32);
-        let _native_fn_f32_i32 = Type::unary_function(_f32, _i32);
-        let _native_fn_f32_f32 = Type::unary_function(_f32, _f32);
-        let _native_fn_any_i32 = Type::unary_function(_gen_arg0, _i32);
-        let _native_fn_i32_any = Type::unary_function(_i32, _gen_arg0);
+        let _native_fn_i32_i32 = Type::unary_function_by_val(_i32, _i32);
+        let _native_fn_i32_f32 = Type::unary_function_by_val(_i32, _f32);
+        let _native_fn_f32_i32 = Type::unary_function_by_val(_f32, _i32);
+        let _native_fn_f32_f32 = Type::unary_function_by_val(_f32, _f32);
+        let _native_fn_any_i32 = Type::unary_function_by_val(_gen_arg0, _i32);
+        let _native_fn_i32_any = Type::unary_function_by_val(_i32, _gen_arg0);
         assert!(_native_fn_i32_i32.can_be_used_in_place_of(_native_fn_i32_i32));
         assert!(_native_fn_i32_f32.can_be_used_in_place_of(_native_fn_i32_f32));
         assert!(!_native_fn_i32_i32.can_be_used_in_place_of(_native_fn_i32_f32));

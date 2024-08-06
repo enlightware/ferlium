@@ -101,7 +101,7 @@ fn main() {
     let option = Type::variant(vec![(ustr("None"), empty_tuple), (ustr("Some"), gen0)]);
     print!("Option: ");
     println(&option, &module_env);
-    let iterator_gen0 = Type::function(&[], Type::tuple(vec![option, Type::new_local(0)]));
+    let iterator_gen0 = Type::function_by_val(&[], Type::tuple(vec![option, Type::new_local(0)]));
     println!("Iterator: ");
     println(&iterator_gen0, &module_env);
 

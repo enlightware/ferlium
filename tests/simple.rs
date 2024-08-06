@@ -28,14 +28,14 @@ fn equalities() {
     assert_eq!(run("41 == 42"), bool!(false));
     assert_eq!(run("42 != 42"), bool!(false));
     assert_eq!(run("41 != 42"), bool!(true));
-    fail_compilation("1 == true").expect_type_mismatch("int", "bool");
+    fail_compilation("1 == true").expect_is_not_subtype("bool", "int");
     assert_eq!(run("true == true"), bool!(true));
     assert_eq!(run("true == false"), bool!(false));
     assert_eq!(run("true != true"), bool!(false));
     assert_eq!(run("true != false"), bool!(true));
     assert_eq!(run("() == ()"), bool!(true));
     assert_eq!(run("() != ()"), bool!(false));
-    fail_compilation("() == (1,)").expect_type_mismatch("()", "(int)");
+    fail_compilation("() == (1,)").expect_is_not_subtype("(int)", "()");
     assert_eq!(run("(1,) == (1,)"), bool!(true));
     assert_eq!(run("(1,) != (1,)"), bool!(false));
     assert_eq!(run("(1,) == (2,)"), bool!(false));
@@ -73,6 +73,18 @@ fn local_variables() {
         bool!(true)
     );
     assert_eq!(run("let f = || 1; let a = f(); a"), int!(1));
+}
+
+#[test]
+fn mutability() {
+    assert_eq!(run("var a = 1 ; a = 2; a"), int!(2));
+    fail_compilation("let a = 1 ; a = 2; a").expect_must_be_mutable();
+    assert_eq!(run("var a = (1,) ; a.0 = 2; a.0"), int!(2));
+    fail_compilation("let a = (1,) ; a.0 = 2; a.0").expect_must_be_mutable();
+    assert_eq!(run("var a = [1] ; a[0] = 2; a[0]"), int!(2));
+    fail_compilation("let a = [1] ; a[0] = 2; a[0]").expect_must_be_mutable();
+    assert_eq!(run("var a = ([1], 1) ; a.0[0] = 2; a.0[0]"), int!(2));
+    fail_compilation("let a = ([1], 1) ; a.0[0] = 2; a.0[0]").expect_must_be_mutable();
 }
 
 #[test]
@@ -225,6 +237,8 @@ fn lambda() {
         run("let d = |x, y| (x, y + 1); d(true, 1); d(1, 2)"),
         int_tuple!(1, 3)
     );
+    assert_eq!(run("(||1)()"), int!(1));
+    assert_eq!(run("(|x| x.1)((1,2))"), int!(2));
 }
 
 #[test]
@@ -264,11 +278,11 @@ fn execution_errors() {
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
     assert_eq!(
-        fail_run("let a = [1, 2]; a[3] = 0"),
+        fail_run("var a = [1, 2]; a[3] = 0"),
         ArrayAccessOutOfBounds { index: 3, len: 2 }
     );
     assert_eq!(
-        fail_run("let a = [1, 2]; a[-3] = 0"),
+        fail_run("var a = [1, 2]; a[-3] = 0"),
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
     assert_eq!(
@@ -280,11 +294,11 @@ fn execution_errors() {
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
     assert_eq!(
-        fail_run("let i = || 3; let a = [1, 2]; a[i()] = 0"),
+        fail_run("let i = || 3; var a = [1, 2]; a[i()] = 0"),
         ArrayAccessOutOfBounds { index: 3, len: 2 }
     );
     assert_eq!(
-        fail_run("let i = || -3; let a = [1, 2]; a[i()] = 0"),
+        fail_run("let i = || -3; var a = [1, 2]; a[i()] = 0"),
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
 }
