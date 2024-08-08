@@ -1,7 +1,8 @@
 mod utils;
 
 use painturscript::{
-    compile, error::CompilationError, module::Modules, std::new_std_module_env, type_scheme::DisplayStyle, ModuleAndExpr, Span
+    compile, error::CompilationError, module::Modules, std::new_std_module_env,
+    type_scheme::DisplayStyle, ModuleAndExpr, Span,
 };
 use utils::{set_panic_hook, CharIndexLookup};
 use wasm_bindgen::prelude::*;
@@ -51,9 +52,13 @@ fn compilation_error_to_data(error: &CompilationError) -> Vec<ErrorData> {
             span,
             format!("Function {name} not found"),
         )],
-        TypeMismatch(a, b, span) => vec![ErrorData::from_span(
+        MustBeMutable(span) => vec![ErrorData::from_span(
             span,
-            format!("Type {a} is incompatible with type {b}"),
+            "Expression must be mutable".to_string(),
+        )],
+        IsNotSubtype(cur, cur_span, exp, _exp_span) => vec![ErrorData::from_span(
+            cur_span,
+            format!("Type {cur} is incompatible with type {exp}"),
         )],
         InfiniteType(ty_var, ty, span) => vec![ErrorData::from_span(
             span,
