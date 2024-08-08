@@ -118,6 +118,17 @@ fn arithmetic_operators() {
     assert_eq!(run("1+2*3"), int!(7));
     assert_eq!(run("12/3/2"), int!(2));
     assert_eq!(run("12/(3/2)"), int!(12));
+    assert_eq!(run("0%3"), int!(0));
+    assert_eq!(run("1%3"), int!(1));
+    assert_eq!(run("2%3"), int!(2));
+    assert_eq!(run("3%3"), int!(0));
+    assert_eq!(run("4%3"), int!(1));
+    assert_eq!(run("5%3"), int!(2));
+    assert_eq!(run("-1%3"), int!(-1));
+    assert_eq!(run("-2%3"), int!(-2));
+    assert_eq!(run("-3%3"), int!(-0));
+    assert_eq!(run("-4%3"), int!(-1));
+    assert_eq!(run("-5%3"), int!(-2));
 }
 
 #[test]
