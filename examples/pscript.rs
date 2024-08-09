@@ -33,7 +33,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let offset = start_of_line_of(src, span.start());
             let name = &data.1[span_range(*span)];
             Report::build(ReportKind::Error, "input", offset)
-                .with_message(format!("Variable {} not found", name.fg(Color::Blue)))
+                .with_message(format!("Variable {} not found.", name.fg(Color::Blue)))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
@@ -43,7 +43,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let offset = start_of_line_of(src, span.start());
             let name = &data.1[span_range(*span)];
             Report::build(ReportKind::Error, "input", offset)
-                .with_message(format!("Function {} not found", name.fg(Color::Blue)))
+                .with_message(format!("Function {} not found.", name.fg(Color::Blue)))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
@@ -60,15 +60,13 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let min_pos = cur_span.start().min(reason_span.start());
             let offset = start_of_line_of(src, min_pos);
             let cur = &data.1[span_range(cur_span)];
-            let reason = &data.1[span_range(reason_span)];
             Report::build(ReportKind::Error, "input", offset)
                 .with_message(format!(
-                    "Expression {} must be mutable due to {}",
+                    "Expression {} must be mutable.",
                     cur.fg(Color::Blue),
-                    reason.fg(Color::Green)
                 ))
-                .with_label(Label::new(("input", span_range(cur_span))).with_color(Color::Blue))
-                .with_label(Label::new(("input", span_range(reason_span))).with_color(Color::Green))
+                .with_label(Label::new(("input", span_range(cur_span))).with_message("This expression is just a value.").with_color(Color::Blue))
+                .with_label(Label::new(("input", span_range(reason_span))).with_message("But it must be mutable due to this.").with_color(Color::Green).with_order(1))
                 .finish()
                 .print(("input", Source::from(src)))
                 .unwrap();
@@ -78,7 +76,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let offset = start_of_line_of(src, min_pos);
             Report::build(ReportKind::Error, "input", offset)
                 .with_message(format!(
-                    "Type {} is incompatible with type {} (i.e. not a sub-type)",
+                    "Type {} is incompatible with type {} (i.e. not a sub-type).",
                     cur.format_with(env).fg(Color::Blue),
                     exp.format_with(env).fg(Color::Blue)
                 ))
@@ -92,7 +90,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let offset = start_of_line_of(src, span.start());
             Report::build(ReportKind::Error, "input", offset)
                 .with_message(format!(
-                    "Unbound type variable {} in type {}",
+                    "Unbound type variable {} in type {}.",
                     ty_var.fg(Color::Blue),
                     ty.format_with(env).fg(Color::Blue)
                 ))
@@ -108,20 +106,22 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             tuple_span,
         } => {
             let offset = start_of_line_of(src, tuple_span.start());
+            let colored_index = (*index).fg(Color::Blue);
             Report::build(ReportKind::Error, "input", offset)
-                .with_message("Tuple index is out of bounds")
+                .with_message(format!("Tuple index {} is out of bounds.", colored_index))
                 .with_label(
                     Label::new(("input", span_range(*index_span)))
-                        .with_message(format!("Index is {}", (*index).fg(Color::Blue)))
+                        .with_message(format!("Index is {}.", colored_index))
                         .with_color(Color::Blue),
                 )
                 .with_label(
                     Label::new(("input", span_range(*tuple_span)))
                         .with_message(format!(
-                            "Tuple has only {} elements",
+                            "But tuple has only {} elements.",
                             (*tuple_length).fg(Color::Blue)
                         ))
-                        .with_color(Color::Green),
+                        .with_color(Color::Green)
+                        .with_order(1),
                 )
                 .finish()
                 .print(("input", Source::from(src)))
@@ -136,21 +136,22 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let colored_ty = expr_ty.format_with(env).fg(Color::Blue);
             Report::build(ReportKind::Error, "input", offset)
                 .with_message(format!(
-                    "Type {} cannot be projected as a tuple",
+                    "Type {} cannot be projected as a tuple.",
                     colored_ty
                 ))
                 .with_label(
                     Label::new(("input", span_range(*expr_span)))
-                        .with_message(format!("This expression has type {}", colored_ty))
+                        .with_message(format!("This expression has type {}.", colored_ty))
                         .with_color(Color::Blue),
                 )
                 .with_label(
                     Label::new(("input", span_range(*index_span)))
                         .with_message(format!(
-                            "But a tuple is needed due to projection {}",
+                            "But a tuple is needed due to projection {}.",
                             "here".fg(Color::Green)
                         ))
-                        .with_color(Color::Green),
+                        .with_color(Color::Green)
+                        .with_order(1),
                 )
                 .finish()
                 .print(("input", Source::from(src)))
