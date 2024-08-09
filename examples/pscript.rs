@@ -1,9 +1,7 @@
 use ariadne::Label;
 use lrpar::Span;
 use painturscript::emit_ir::{emit_expr_top_level, emit_module};
-use painturscript::error::{
-    extract_ith_fn_arg, resolve_must_be_mutable_ctx, InternalCompilationError, MustBeMutableContext,
-};
+use painturscript::error::{resolve_must_be_mutable_ctx, InternalCompilationError};
 use painturscript::format::FormatWith;
 use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
 use painturscript::std::{new_module_with_prelude, new_std_module_env};
@@ -292,17 +290,13 @@ fn main() {
         // Compile and evaluate expression
         let module_env = ModuleEnv::new(&module, &other_modules);
         let expr_ir = emit_expr_top_level(&expr_ast, module_env, locals.clone());
-        let (compiled_expr, constraints) = match expr_ir {
+        let compiled_expr = match expr_ir {
             Ok(res) => res,
             Err(e) => {
                 pretty_print_checking_error(&e, &(module_env, src.as_str()));
                 continue;
             }
         };
-        assert!(
-            constraints.is_empty(),
-            "No external constraints shall remain at top level"
-        );
         locals = compiled_expr.locals;
         println!("Expr IR:\n{}", compiled_expr.expr.format_with(&module_env));
 

@@ -23,6 +23,7 @@ use ustr::Ustr;
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::B;
+use crate::format::type_variable_gen_index_to_string;
 use crate::format::type_variable_index_to_string;
 use crate::graph;
 use crate::graph::find_disjoint_subgraphs;
@@ -1108,21 +1109,6 @@ impl graph::Node for TypeKind {
             .map(Type::index)
             .collect::<Vec<_>>()
             .into_iter()
-    }
-}
-
-fn type_variable_gen_index_to_string(index: u32, generation: u32) -> String {
-    let first = 0x2080;
-    let last = 0x2089;
-    let unicode_char = first + generation;
-    if unicode_char <= last {
-        format!(
-            "{}{}",
-            type_variable_index_to_string(index),
-            char::from_u32(unicode_char).unwrap_or('_')
-        )
-    } else {
-        format!("{}₋", type_variable_index_to_string(index))
     }
 }
 

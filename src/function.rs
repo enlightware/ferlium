@@ -103,7 +103,7 @@ impl Callable for ScriptFunction {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
         let old_frame_base = ctx.frame_base;
         ctx.frame_base = ctx.environment.len();
-        ctx.environment.extend(args.into_iter());
+        ctx.environment.extend(args);
         let ret = self.code.eval(ctx)?;
         ctx.environment.truncate(ctx.frame_base);
         ctx.frame_base = old_frame_base;

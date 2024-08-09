@@ -27,7 +27,6 @@
 
 ### Next tasks
 
-- Fix bugs
 - Borrow checker
 - Fix grammar with equal in lambdas
 - Do not add trivial constraints to type inference

@@ -12,7 +12,7 @@ use crate::{
     mutability::MutType,
     r#type::{FnType, Type, TypeLike, TypeVar},
     std::logic::unit_type,
-    type_inference::{FreshTyVarGen, TypeConstraint, TypeInference},
+    type_inference::{FreshTyVarGen, MutConstraint, TypeConstraint, TypeInference},
     type_scheme::{PubTypeConstraint, TypeScheme},
     typing_env::{Local, TypingEnv},
     value::Value,
@@ -102,10 +102,14 @@ pub fn emit_module(
     }
 
     // Fifth pass, get the remaining constraints and collect the free type variables.
-    let (all_constraints, external_constraints) = ty_inf.constraints();
+    let (all_constraints, external_ty_constraints, external_mut_constraints) = ty_inf.constraints();
     assert!(
-        external_constraints.is_empty(),
-        "No external constraints shall remain at top level"
+        external_ty_constraints.is_empty(),
+        "No external type constraints shall remain at top level"
+    );
+    assert!(
+        external_mut_constraints.is_empty(),
+        "No external mut constraints shall remain at top level"
     );
     for ModuleFunction { name, .. } in &source.functions {
         // Compute the quantifiers based on the type variables in the function type and
@@ -199,7 +203,7 @@ pub fn emit_expr(
     locals: Vec<Local>,
     generation: u32,
     outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
-) -> Result<(CompiledExpr, Vec<TypeConstraint>), InternalCompilationError> {
+) -> Result<(CompiledExpr, Vec<TypeConstraint>, Vec<MutConstraint>), InternalCompilationError> {
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
     let mut ty_env = TypingEnv::new(locals, module_env);
@@ -224,7 +228,7 @@ pub fn emit_expr(
 
     // Get the remaining constraints and collect the free variables.
     ty_inf.log_debug_constraints(module_env);
-    let (constraints, external_constraints) = ty_inf.constraints();
+    let (constraints, external_ty_constraints, external_mut_constraints) = ty_inf.constraints();
     let quantifiers = TypeScheme::<Type>::list_ty_vars(&ty, &constraints, generation);
 
     // Detect unbound type variables in the code and return error if any.
@@ -253,7 +257,7 @@ pub fn emit_expr(
     }
 
     // Detect external constraints that contain type variables listed in the quantifiers
-    for constraint in &external_constraints {
+    for constraint in &external_ty_constraints {
         if constraint.contains_ty_vars(&quantifiers) {
             return Err(InternalCompilationError::Internal(format!(
                 "External constraint {} contains one of the internal type variables {}",
@@ -278,7 +282,8 @@ pub fn emit_expr(
             ty: ty_scheme,
             locals,
         },
-        external_constraints,
+        external_ty_constraints,
+        external_mut_constraints,
     ))
 }
 
@@ -289,14 +294,23 @@ pub fn emit_expr_top_level(
     source: &ast::Expr,
     module_env: ModuleEnv,
     locals: Vec<Local>,
-) -> Result<(CompiledExpr, Vec<TypeConstraint>), InternalCompilationError> {
-    emit_expr(
+) -> Result<CompiledExpr, InternalCompilationError> {
+    let (expr, ty_constraints, mut_constraints) = emit_expr(
         source,
         module_env,
         locals,
         0,
         &mut invalid_outer_fresh_ty_var_gen,
-    )
+    )?;
+    assert!(
+        ty_constraints.is_empty(),
+        "No external type constraints shall remain at top level"
+    );
+    assert!(
+        mut_constraints.is_empty(),
+        "No external mut constraints shall remain at top level"
+    );
+    Ok(expr)
 }
 
 /// Filter constraints that contain type variables listed in the quantifiers

@@ -425,5 +425,6 @@ fn recursive_functions() {
 
             is_even(10)"#),
         bool!(true)
-    )
+    );
+    assert_eq!(run("fn f(a) { let p = g(a) } fn g(a) { 0 }"), unit());
 }

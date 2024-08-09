@@ -23,6 +23,21 @@ pub(crate) fn type_variable_index_to_string(index: u32) -> String {
     }
 }
 
+pub(crate) fn type_variable_gen_index_to_string(index: u32, generation: u32) -> String {
+    let first = 0x2080;
+    let last = 0x2089;
+    let unicode_char = first + generation;
+    if unicode_char <= last {
+        format!(
+            "{}{}",
+            type_variable_index_to_string(index),
+            char::from_u32(unicode_char).unwrap_or('_')
+        )
+    } else {
+        format!("{}₋", type_variable_index_to_string(index))
+    }
+}
+
 pub(crate) fn write_with_separator(
     iter: impl IntoIterator<Item = impl std::fmt::Display>,
     separator: &str,

@@ -165,12 +165,8 @@ pub fn compile(src: &str, other_modules: &Modules) -> Result<ModuleAndExpr, Comp
     // Emit IR for the expression, if any.
     let expr = if let Some(expr_ast) = expr_ast {
         let env = ModuleEnv::new(&module, other_modules);
-        let (compiled_expr, contraints) = emit_expr_top_level(&expr_ast, env, vec![])
+        let compiled_expr = emit_expr_top_level(&expr_ast, env, vec![])
             .map_err(|error| CompilationError::from_internal(error, &env, src))?;
-        assert!(
-            contraints.is_empty(),
-            "No external constraints shall remain at top level"
-        );
         log::debug!("Expr IR\n{}", compiled_expr.expr.format_with(&env));
         Some(compiled_expr)
     } else {
