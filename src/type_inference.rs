@@ -13,7 +13,7 @@ use crate::{
     ast::{Expr, ExprKind},
     containers::{SVec2, B},
     emit_ir::emit_expr,
-    error::{CompilationError, InternalCompilationError, MustBeMutableContext},
+    error::{InternalCompilationError, MustBeMutableContext},
     function::{FunctionRef, ScriptFunction},
     ir::{self, EnvStore, Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
@@ -79,20 +79,6 @@ pub enum TypeConstraint {
 }
 
 impl TypeConstraint {
-    pub fn sub_type(
-        current: Type,
-        current_span: Span,
-        expected: Type,
-        expected_span: Span,
-    ) -> Self {
-        TypeConstraint::SubType {
-            current,
-            current_span,
-            expected,
-            expected_span,
-        }
-    }
-
     pub fn contains_ty_vars(&self, vars: &[TypeVar]) -> bool {
         match self {
             TypeConstraint::SubType {
@@ -134,22 +120,6 @@ pub enum MutConstraint {
         target: MutType,
         reason_span: Span,
     },
-}
-
-impl MutConstraint {
-    pub fn mut_be_at_least(
-        current: MutType,
-        current_span: Span,
-        target: MutType,
-        reason_span: Span,
-    ) -> Self {
-        MutConstraint::MutBeAtLeast {
-            current,
-            current_span,
-            target,
-            reason_span,
-        }
-    }
 }
 
 impl Display for MutConstraint {
@@ -333,15 +303,15 @@ impl TypeInference {
             Assign(place, sign_span, value) => {
                 let (value, value_ty, _value_mut) = self.infer_expr(env, value)?;
                 let (place, place_ty, place_mut) = self.infer_expr(env, place)?;
-                self.mut_constraints.push(MutConstraint::mut_be_at_least(
+                self.add_mut_be_at_least_constraint(
                     place_mut,
                     place.span,
                     MutType::mutable(),
                     *sign_span,
-                ));
-                self.ty_constraints.push(TypeConstraint::sub_type(
+                );
+                self.add_sub_type_constraint(
                     value_ty, value.span, place_ty, place.span,
-                ));
+                );
                 let node = K::Assign(B::new(ir::Assignment { place, value }));
                 (node, Type::unit(), MutType::constant())
             }
@@ -380,12 +350,12 @@ impl TypeInference {
                     let (other_nodes, types) = self.infer_exprs_drop_mut(env, &exprs[1..])?;
                     // All elements must be of the first element's type
                     for (ty, expr) in types.into_iter().zip(exprs.iter().skip(1)) {
-                        self.ty_constraints.push(TypeConstraint::sub_type(
+                        self.add_sub_type_constraint(
                             ty,
                             expr.span,
                             element_ty,
                             exprs[0].span,
-                        ));
+                        );
                     }
                     // Build the array node and return it
                     let element_nodes = std::iter::once(first_node).chain(other_nodes).collect();
@@ -399,12 +369,12 @@ impl TypeInference {
                 let array_ty = array_type(element_ty);
                 // Infer type of the array expression and make sure it is an array
                 let (array_node, array_expr_ty, array_expr_mut) = self.infer_expr(env, array)?;
-                self.ty_constraints.push(TypeConstraint::sub_type(
+                self.add_sub_type_constraint(
                     array_expr_ty,
                     array.span,
                     array_ty,
                     array.span,
-                ));
+                );
                 // Check type of the index expression to be int
                 let index_node =
                     self.check_expr(env, index, int_type(), MutType::constant(), index.span)?;
@@ -535,12 +505,12 @@ impl TypeInference {
             .iter()
             .map(|(pattern, expr)| {
                 if let ExprKind::Literal(literal, ty) = &pattern.kind {
-                    self.ty_constraints.push(TypeConstraint::sub_type(
+                    self.add_sub_type_constraint(
                         *ty,
                         pattern.span,
                         expected_pattern_type,
                         expected_pattern_span,
-                    ));
+                    );
                     let node = self.check_expr(
                         env,
                         expr,
@@ -626,21 +596,13 @@ impl TypeInference {
 
         // Other cases, infer and add constraints
         let (node, actual_ty, actual_mut) = self.infer_expr(env, expr)?;
-        self.ty_constraints.push(TypeConstraint::sub_type(
+        self.add_sub_type_constraint(
             actual_ty,
             expr.span,
             expected_ty,
             expected_span,
-        ));
-        // If expected mutability is not constant, add constraint
-        if expected_mut != MutType::constant() {
-            self.mut_constraints.push(MutConstraint::mut_be_at_least(
-                actual_mut,
-                expr.span,
-                expected_mut,
-                expected_span,
-            ));
-        }
+        );
+        self.add_mut_be_at_least_constraint(actual_mut, expr.span, expected_mut, expected_span);
         Ok(node)
     }
 
@@ -673,6 +635,47 @@ impl TypeInference {
                 log::debug!("  {}", constraint);
             }
         }
+    }
+
+    fn add_sub_type_constraint(
+        &mut self,
+        current: Type,
+        current_span: Span,
+        expected: Type,
+        expected_span: Span,
+    ) {
+        if current == expected {
+            return;
+        }
+        self.ty_constraints.push(TypeConstraint::SubType {
+            current,
+            current_span,
+            expected,
+            expected_span,
+        });
+    }
+
+    fn add_mut_be_at_least_constraint(
+        &mut self,
+        current: MutType,
+        current_span: Span,
+        target: MutType,
+        reason_span: Span,
+    ) {
+        if target == MutType::constant() {
+            // everything has at least constant mutability
+            return;
+        }
+        if current == MutType::mutable() {
+            // mutable can be used for all cases
+            return;
+        }
+        self.mut_constraints.push(MutConstraint::MutBeAtLeast {
+            current,
+            current_span,
+            target,
+            reason_span,
+        });
     }
 
     pub fn unify(
@@ -954,12 +957,12 @@ impl UnifiedTypeInference {
                     }
                     (false, false) => {
                         // Both external, add a constraint.
-                        self.external_ty_constraints.push(TypeConstraint::sub_type(
+                        self.add_sub_type_external_constraint(
                             cur_ty,
                             current_span,
                             exp_ty,
                             expected_span,
-                        ));
+                        );
                         Ok(())
                     }
                     (true, false) => {
@@ -1134,12 +1137,12 @@ impl UnifiedTypeInference {
             log::debug!("Unified external type variable {var}, created {} new external type variables and replaced local ones", subst.len());
             // Create a new type using these new variables, and add an external constraint for it.
             let new_ty = ty.instantiate(&subst);
-            self.external_ty_constraints.push(TypeConstraint::sub_type(
+            self.add_sub_type_external_constraint(
                 Type::variable(var),
                 var_span,
                 new_ty,
                 ty_span,
-            ));
+            );
             Ok(())
         } else {
             // The type variable is internal, perform normal unification.
@@ -1234,13 +1237,12 @@ impl UnifiedTypeInference {
                     }
                     (true, false) => {
                         // Both external, add a constraint.
-                        self.external_mut_constraints
-                            .push(MutConstraint::mut_be_at_least(
-                                current_mut,
-                                current_span,
-                                target_mut,
-                                reason_span,
-                            ));
+                        self.add_mut_be_at_least_external_constraint(
+                            current_mut,
+                            current_span,
+                            target_mut,
+                            reason_span,
+                        );
                         Ok(())
                     }
                     (false, true) => {
@@ -1298,13 +1300,12 @@ impl UnifiedTypeInference {
         if target == MutType::constant() {
             Ok(())
         } else if var.generation() != self.generation {
-            self.external_mut_constraints
-                .push(MutConstraint::mut_be_at_least(
-                    MutType::Variable(var),
-                    current_span,
-                    target,
-                    reason_span,
-                ));
+            self.add_mut_be_at_least_external_constraint(
+                MutType::Variable(var),
+                current_span,
+                target,
+                reason_span,
+            );
             Ok(())
         } else {
             // If it is mutable, current must be mutable as well.
@@ -1605,5 +1606,47 @@ impl UnifiedTypeInference {
                 }),
             }
         }
+    }
+
+    fn add_sub_type_external_constraint(
+        &mut self,
+        current: Type,
+        current_span: Span,
+        expected: Type,
+        expected_span: Span,
+    ) {
+        if current == expected {
+            return;
+        }
+        self.external_ty_constraints.push(TypeConstraint::SubType {
+            current,
+            current_span,
+            expected,
+            expected_span,
+        });
+    }
+
+    fn add_mut_be_at_least_external_constraint(
+        &mut self,
+        current: MutType,
+        current_span: Span,
+        target: MutType,
+        reason_span: Span,
+    ) {
+        if target == MutType::constant() {
+            // everything has at least constant mutability
+            return;
+        }
+        if current == MutType::mutable() {
+            // mutable can be used for all cases
+            return;
+        }
+        self.external_mut_constraints
+            .push(MutConstraint::MutBeAtLeast {
+                current,
+                current_span,
+                target,
+                reason_span,
+            });
     }
 }
