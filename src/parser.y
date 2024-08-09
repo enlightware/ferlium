@@ -91,7 +91,7 @@ Expr -> Expr
     | Expr '>=' Expr
         { Expr::new(StaticApply(ustr("@>="), vec![$1, $3]), $span) }
     | Expr '=' Expr
-        { Expr::new(Assign(B::new($1), B::new($3)), $span) }
+        { Expr::new(Assign(B::new($1), lex_span($2), B::new($3)), $span) }
     | 'if' Expr '{' Expr '}' 'else' '{' Expr '}'
         { make_if_else($2, $4, $8, $span) }
     | 'if' Expr '{' Expr '}' %prec NO_ELSE

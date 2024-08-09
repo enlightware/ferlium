@@ -10,12 +10,18 @@ use crate::{
 
 pub type LocatedError = (String, Span);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MustBeMutableContext {
+    Value,
+    FnTypeArg(usize),
+}
+
 /// Compilation error, for internal use
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InternalCompilationError {
     VariableNotFound(Span),
     FunctionNotFound(Span),
-    MustBeMutable(Span),
+    MustBeMutable(Span, Span, MustBeMutableContext),
     IsNotSubtype(Type, Span, Type, Span),
     InfiniteType(TypeVar, Type, Span),
     UnboundTypeVar {
@@ -50,9 +56,13 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 let name = &source[span.start()..span.end()];
                 write!(f, "Function not found: {}", name)
             }
-            MustBeMutable(span) => {
-                let name = &source[span.start()..span.end()];
-                write!(f, "Expression must be mutable: {}", name)
+            MustBeMutable(current_span, reason_span, ctx) => {
+                let current_name = &source[current_span.start()..current_span.end()];
+                let reason_name = &source[reason_span.start()..reason_span.end()];
+                match ctx {
+                    MustBeMutableContext::Value => write!(f, "Expression \"{current_name}\" must be mutable due to \"{reason_name}\""),
+                    MustBeMutableContext::FnTypeArg(i) => write!(f, "Argument {i} of {reason_name} must be mutable because of function {current_name}"),
+                }
             }
             IsNotSubtype(cur, _cur_span, exp, _exp_span) => write!(
                 f,
@@ -95,7 +105,7 @@ pub enum CompilationError {
     ParsingFailed(Vec<LocatedError>),
     VariableNotFound(String, Span),
     FunctionNotFound(String, Span),
-    MustBeMutable(Span),
+    MustBeMutable(Span, Span),
     IsNotSubtype(String, Span, String, Span),
     InfiniteType(String, String, Span),
     UnboundTypeVar {
@@ -129,7 +139,15 @@ impl CompilationError {
                 let name = &src[span.start()..span.end()];
                 Self::FunctionNotFound(name.to_string(), span)
             }
-            MustBeMutable(span) => Self::MustBeMutable(span),
+            MustBeMutable(current_span, reason_span, ctx) => {
+                match ctx {
+                    MustBeMutableContext::Value => Self::MustBeMutable(current_span, reason_span),
+                    MustBeMutableContext::FnTypeArg(index) => {
+                        let arg_span = extract_ith_fn_arg(src, reason_span, index);
+                        Self::MustBeMutable(arg_span, current_span)
+                    },
+                }
+            }
             IsNotSubtype(cur, cur_span, exp, exp_span) => Self::IsNotSubtype(
                 cur.format_with(env).to_string(),
                 cur_span,
@@ -170,7 +188,7 @@ impl CompilationError {
 
     pub fn expect_must_be_mutable(&self) {
         match self {
-            Self::MustBeMutable(_) => (),
+            Self::MustBeMutable(_, _) => (),
             _ => panic!("expect_must_be_mutable called on non-MustBeMutable error"),
         }
     }
@@ -208,4 +226,92 @@ pub enum RuntimeError {
     ArrayAccessOutOfBounds { index: isize, len: usize },
     // TODO: add execution duration limit exhausted
     // TODO: add stack overflow
+}
+
+pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
+    let fn_text = &src[span.start()..span.end()];
+    let bytes = fn_text.as_bytes();
+    let mut count = 0;
+    let mut args_start = fn_text.len();
+
+    // Iterate backwards through the string within the span to find the start of the argument list
+    for i in (0..fn_text.len()).rev() {
+        match bytes[i] as char {
+            ')' => count += 1,
+            '(' => {
+                count -= 1;
+                if count == 0 {
+                    args_start = i;
+                    break;
+                }
+            },
+            _ => {}
+        }
+    }
+
+    // Extracting the arguments from the located position
+    let args_section = &fn_text[args_start+1..fn_text.len()-1];  // Strip the outer parentheses
+    let mut arg_count = 0;
+    let mut start = 0;
+
+    count = 0;  // Reset count for argument extraction
+    for (i, char) in args_section.char_indices() {
+        match char {
+            '(' => count += 1,
+            ')' => count -= 1,
+            ',' if count == 0 => {
+                if arg_count == index {
+                    return Span::new(
+                        span.start() + args_start + 1 + start,
+                        span.start() + args_start + 1 + i,
+                    );
+                }
+                arg_count += 1;
+                start = i + 1;
+            },
+            _ => {}
+        }
+    }
+
+    // Handling the last argument
+    if arg_count == index && start < args_section.len() {
+        return Span::new(
+            span.start() + args_start + 1 + start,
+            span.start() + args_start + 1 + args_section.len(),
+        );
+    }
+
+    panic!("Argument {index} not found");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_ith_fn_arg_single() {
+        let src = "(|x| x)((1+2))";
+        let span = Span::new(0, src.len());
+        let expected = [
+            "(1+2)",
+        ];
+        for (index, expected) in expected.into_iter().enumerate() {
+            let arg_span = super::extract_ith_fn_arg(src, span, index);
+            assert_eq!(&src[arg_span.start()..arg_span.end()], expected);
+        }
+    }
+
+    #[test]
+    fn extract_ith_fn_arg_multi() {
+        let src = "(|x,y| x*y)(12, (1 + 3))";
+        let span = Span::new(0, src.len());
+        let expected = [
+            "12",
+            " (1 + 3)",
+        ];
+        for (index, expected) in expected.into_iter().enumerate() {
+            let arg_span = super::extract_ith_fn_arg(src, span, index);
+            assert_eq!(&src[arg_span.start()..arg_span.end()], expected);
+        }
+    }
 }

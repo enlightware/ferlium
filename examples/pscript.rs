@@ -1,7 +1,7 @@
 use ariadne::Label;
 use lrpar::Span;
 use painturscript::emit_ir::{emit_expr_top_level, emit_module};
-use painturscript::error::InternalCompilationError;
+use painturscript::error::{extract_ith_fn_arg, InternalCompilationError, MustBeMutableContext};
 use painturscript::format::FormatWith;
 use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
 use painturscript::std::{new_module_with_prelude, new_std_module_env};
@@ -49,12 +49,36 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
+        MustBeMutable(cur_span, reason_span, ctx) => {
+            let (cur_span, reason_span) = match ctx {
+                MustBeMutableContext::Value => (*cur_span, *reason_span),
+                MustBeMutableContext::FnTypeArg(index) => {
+                    let arg_span = extract_ith_fn_arg(src, *reason_span, *index);
+                    (arg_span, *cur_span)
+                },
+            };
+            let min_pos = cur_span.start().min(reason_span.start());
+            let offset = start_of_line_of(src, min_pos);
+            let cur = &data.1[span_range(cur_span)];
+            let reason = &data.1[span_range(reason_span)];
+            Report::build(ReportKind::Error, "input", offset)
+                .with_message(format!(
+                    "Expression {} must be mutable due to {}",
+                    cur.fg(Color::Blue),
+                    reason.fg(Color::Green)
+                ))
+                .with_label(Label::new(("input", span_range(cur_span))).with_color(Color::Blue))
+                .with_label(Label::new(("input", span_range(reason_span))).with_color(Color::Green))
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
         IsNotSubtype(cur, cur_span, exp, exp_span) => {
             let min_pos = cur_span.start().min(exp_span.start());
             let offset = start_of_line_of(src, min_pos);
             Report::build(ReportKind::Error, "input", offset)
                 .with_message(format!(
-                    "Type {} is not a sub-type of type {}",
+                    "Type {} is incompatible with type {} (i.e. not a sub-type)",
                     cur.format_with(env).fg(Color::Blue),
                     exp.format_with(env).fg(Color::Blue)
                 ))

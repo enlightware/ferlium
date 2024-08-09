@@ -120,7 +120,7 @@ pub enum ExprKind {
     Apply(B<Expr>, Vec<Expr>),
     StaticApply(Ustr, Vec<Expr>),
     Block(Vec<Expr>),
-    Assign(B<Expr>, B<Expr>),
+    Assign(B<Expr>, Span, B<Expr>),
     Tuple(Vec<Expr>),
     Project(B<Expr>, usize, Span),
     Array(Vec<Expr>),
@@ -185,7 +185,7 @@ impl Expr {
                 }
                 Ok(())
             }
-            Assign(place, value) => {
+            Assign(place, _, value) => {
                 writeln!(f, "{indent_str}assign")?;
                 place.format_ind(f, indent + 1)?;
                 value.format_ind(f, indent + 1)
@@ -263,7 +263,7 @@ impl Expr {
             }
             ExprKind::StaticApply(_, args) => acc_errors(errors, args.iter()),
             ExprKind::Block(exprs) => acc_errors(errors, exprs.iter()),
-            ExprKind::Assign(place, value) => {
+            ExprKind::Assign(place, _, value) => {
                 place.acc_errors_rec(errors);
                 value.acc_errors_rec(errors);
             }

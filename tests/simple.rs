@@ -270,6 +270,12 @@ fn assignment() {
 }
 
 #[test]
+fn mutability_soundness() {
+    fail_compilation("let f = |x| (x[0] = 1); let a = [1]; f(a)").expect_must_be_mutable();
+    // TODO: add borrow checker tests
+}
+
+#[test]
 fn execution_errors() {
     use RuntimeError::*;
     assert_eq!(fail_run("1 / 0"), DivisionByZero);

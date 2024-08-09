@@ -10,22 +10,10 @@ use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
-    ast::{Expr, ExprKind},
-    containers::{SVec2, B},
-    emit_ir::emit_expr,
-    error::InternalCompilationError,
-    function::{FunctionRef, ScriptFunction},
-    ir::{self, EnvStore, Node, NodeKind},
-    module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
-    mutability::{MutType, MutVal, MutVar},
-    r#type::{
+    ast::{Expr, ExprKind}, containers::{SVec2, B}, emit_ir::emit_expr, error::{InternalCompilationError, MustBeMutableContext}, function::{FunctionRef, ScriptFunction}, ir::{self, EnvStore, Node, NodeKind}, module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction}, mutability::{MutType, MutVal, MutVar}, std::{array::array_type, math::int_type}, r#type::{
         FnArgType, FnType, NativeType, TyVarKey, Type, TypeKind, TypeLike, TypeSubstitution,
         TypeVar,
-    },
-    std::{array::array_type, math::int_type},
-    type_scheme::{PubTypeConstraint, TypeScheme},
-    typing_env::{Local, TypingEnv},
-    value::Value,
+    }, type_scheme::{PubTypeConstraint, TypeScheme}, typing_env::{Local, TypingEnv}, value::Value
 };
 
 impl UnifyKey for TyVarKey {
@@ -130,8 +118,9 @@ impl FmtWithModuleEnv for TypeConstraint {
 pub enum MutConstraint {
     MutBeAtLeast {
         current: MutType,
-        span: Span,
+        current_span: Span,
         target: MutType,
+        reason_span: Span,
     },
 }
 
@@ -293,9 +282,9 @@ impl TypeInference {
                 let ret_ty = self.fresh_type_var_ty();
                 // Build the function type
                 let func_ty = Type::function_type(FnType::new(args_tys, ret_ty));
-                // Check the function against its return type
+                // Check the function against its function type
                 let func_node =
-                    self.check_expr(env, func, func_ty, MutType::constant(), func.span)?;
+                    self.check_expr(env, func, func_ty, MutType::constant(), expr.span)?;
                 // Store and return the result
                 let node = K::Apply(B::new(ir::Application {
                     function: func_node,
@@ -303,7 +292,9 @@ impl TypeInference {
                 }));
                 (node, ret_ty, MutType::constant())
             }
-            StaticApply(name, args) => self.infer_static_apply(env, *name, expr.span, args)?,
+            StaticApply(name, args) => {
+                self.infer_static_apply(env, *name, expr.span, args)?
+            }
             Block(exprs) => {
                 let env_size = env.locals.len();
                 let (nodes, types) = self.infer_exprs_drop_mut(env, exprs)?;
@@ -312,13 +303,14 @@ impl TypeInference {
                 let node = K::Block(B::new(SVec2::from_vec(nodes)));
                 (node, ty, MutType::constant())
             }
-            Assign(place, value) => {
+            Assign(place, sign_span, value) => {
                 let (value, value_ty, _value_mut) = self.infer_expr(env, value)?;
                 let (place, place_ty, place_mut) = self.infer_expr(env, place)?;
                 self.mut_constraints.push(MutConstraint::MutBeAtLeast {
                     current: place_mut,
-                    span: place.span,
+                    current_span: place.span,
                     target: MutType::mutable(),
+                    reason_span: *sign_span,
                 });
                 self.ty_constraints.push(TypeConstraint::sub_type(
                     value_ty, value.span, place_ty, place.span,
@@ -617,8 +609,9 @@ impl TypeInference {
         if expected_mut != MutType::constant() {
             self.mut_constraints.push(MutConstraint::MutBeAtLeast {
                 current: actual_mut,
-                span: expr.span,
+                current_span: expr.span,
                 target: expected_mut,
+                reason_span: expected_span,
             });
         }
         Ok(node)
@@ -702,10 +695,11 @@ impl UnifiedTypeInference {
             match constraint {
                 MutBeAtLeast {
                     current,
-                    span,
+                    current_span,
                     target,
+                    reason_span,
                 } => {
-                    unified_ty_inf.unify_mut_must_be_at_least(current, target, span)?;
+                    unified_ty_inf.unify_mut_must_be_at_least(current, current_span, target, reason_span,  MustBeMutableContext::Value)?;
                 }
             }
         }
@@ -1001,10 +995,9 @@ impl UnifiedTypeInference {
                         expected_span,
                     ));
                 }
-                for (cur_arg, exp_arg) in cur.args.iter().zip(exp.args.iter()) {
-                    // Covariance of mutability.
-                    self.unify_mut_must_be_at_least(cur_arg.inout, exp_arg.inout, current_span)?;
+                for ((index, cur_arg), exp_arg) in cur.args.iter().enumerate().zip(exp.args.iter()) {
                     // Contravariance of argument types.
+                    self.unify_mut_must_be_at_least(exp_arg.inout, current_span, cur_arg.inout, expected_span, MustBeMutableContext::FnTypeArg(index))?;
                     self.unify_sub_type(
                         exp_arg.ty,
                         current_span,
@@ -1145,8 +1138,10 @@ impl UnifiedTypeInference {
     fn unify_mut_must_be_at_least(
         &mut self,
         current: MutType,
-        target: MutType,
         current_span: Span,
+        target: MutType,
+        reason_span: Span,
+        error_ctx: MustBeMutableContext,
     ) -> Result<(), InternalCompilationError> {
         let current_mut = self.normalize_mut_type(current);
         let target_mut = self.normalize_mut_type(target);
@@ -1163,7 +1158,7 @@ impl UnifiedTypeInference {
                 // the "must be at least mutability" relationship.
                 self.mut_unification_table
                     .unify_var_var(*current, *target)
-                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span))
+                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span, reason_span, error_ctx))
             }
             (Variable(current), Resolved(target)) => {
                 // Target is resolved, if it is constant, we are done as anything can be used as constant.
@@ -1173,7 +1168,7 @@ impl UnifiedTypeInference {
                 // If it is mutable, current must be mutable as well.
                 self.mut_unification_table
                     .unify_var_value(*current, Some(MutVal::mutable()))
-                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span))
+                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span, reason_span, error_ctx))
             }
             (Resolved(current), Variable(target)) => {
                 // Current is resolved, if it is mutable, we are done as it can be used for everything.
@@ -1183,12 +1178,12 @@ impl UnifiedTypeInference {
                 // If it is constant, we must make the target constant as well.
                 self.mut_unification_table
                     .unify_var_value(*target, Some(MutVal::constant()))
-                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span))
+                    .map_err(|_| InternalCompilationError::MustBeMutable(current_span, reason_span, error_ctx))
             }
             (Resolved(current), Resolved(target)) => {
                 // Both resolved, check mutability value coercion.
                 if current < target {
-                    Err(InternalCompilationError::MustBeMutable(current_span))
+                    Err(InternalCompilationError::MustBeMutable(current_span, reason_span, error_ctx))
                 } else {
                     Ok(())
                 }
