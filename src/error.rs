@@ -57,12 +57,14 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 write!(f, "Function not found: {}", name)
             }
             MustBeMutable(current_span, reason_span, ctx) => {
+                let (current_span, reason_span) =
+                    resolve_must_be_mutable_ctx(*current_span, *reason_span, *ctx, source);
                 let current_name = &source[current_span.start()..current_span.end()];
                 let reason_name = &source[reason_span.start()..reason_span.end()];
-                match ctx {
-                    MustBeMutableContext::Value => write!(f, "Expression \"{current_name}\" must be mutable due to \"{reason_name}\""),
-                    MustBeMutableContext::FnTypeArg(i) => write!(f, "Argument {i} of {reason_name} must be mutable because of function {current_name}"),
-                }
+                write!(
+                    f,
+                    "Expression \"{current_name}\" must be mutable due to \"{reason_name}\""
+                )
             }
             IsNotSubtype(cur, _cur_span, exp, _exp_span) => write!(
                 f,
@@ -140,13 +142,9 @@ impl CompilationError {
                 Self::FunctionNotFound(name.to_string(), span)
             }
             MustBeMutable(current_span, reason_span, ctx) => {
-                match ctx {
-                    MustBeMutableContext::Value => Self::MustBeMutable(current_span, reason_span),
-                    MustBeMutableContext::FnTypeArg(index) => {
-                        let arg_span = extract_ith_fn_arg(src, reason_span, index);
-                        Self::MustBeMutable(arg_span, current_span)
-                    },
-                }
+                let (current_span, reason_span) =
+                    resolve_must_be_mutable_ctx(current_span, reason_span, ctx, src);
+                Self::MustBeMutable(current_span, reason_span)
             }
             IsNotSubtype(cur, cur_span, exp, exp_span) => Self::IsNotSubtype(
                 cur.format_with(env).to_string(),
@@ -228,6 +226,21 @@ pub enum RuntimeError {
     // TODO: add stack overflow
 }
 
+pub fn resolve_must_be_mutable_ctx(
+    current_span: Span,
+    reason_span: Span,
+    ctx: MustBeMutableContext,
+    src: &str,
+) -> (Span, Span) {
+    match ctx {
+        MustBeMutableContext::Value => (current_span, reason_span),
+        MustBeMutableContext::FnTypeArg(index) => {
+            let arg_span = extract_ith_fn_arg(src, reason_span, index);
+            (arg_span, current_span)
+        }
+    }
+}
+
 pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
     let fn_text = &src[span.start()..span.end()];
     let bytes = fn_text.as_bytes();
@@ -244,17 +257,17 @@ pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
                     args_start = i;
                     break;
                 }
-            },
+            }
             _ => {}
         }
     }
 
     // Extracting the arguments from the located position
-    let args_section = &fn_text[args_start+1..fn_text.len()-1];  // Strip the outer parentheses
+    let args_section = &fn_text[args_start + 1..fn_text.len() - 1]; // Strip the outer parentheses
     let mut arg_count = 0;
     let mut start = 0;
 
-    count = 0;  // Reset count for argument extraction
+    count = 0; // Reset count for argument extraction
     for (i, char) in args_section.char_indices() {
         match char {
             '(' => count += 1,
@@ -268,7 +281,7 @@ pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
                 }
                 arg_count += 1;
                 start = i + 1;
-            },
+            }
             _ => {}
         }
     }
@@ -292,9 +305,7 @@ mod tests {
     fn extract_ith_fn_arg_single() {
         let src = "(|x| x)((1+2))";
         let span = Span::new(0, src.len());
-        let expected = [
-            "(1+2)",
-        ];
+        let expected = ["(1+2)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
             assert_eq!(&src[arg_span.start()..arg_span.end()], expected);
@@ -305,10 +316,7 @@ mod tests {
     fn extract_ith_fn_arg_multi() {
         let src = "(|x,y| x*y)(12, (1 + 3))";
         let span = Span::new(0, src.len());
-        let expected = [
-            "12",
-            " (1 + 3)",
-        ];
+        let expected = ["12", " (1 + 3)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
             assert_eq!(&src[arg_span.start()..arg_span.end()], expected);

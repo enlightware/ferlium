@@ -1,7 +1,9 @@
 use ariadne::Label;
 use lrpar::Span;
 use painturscript::emit_ir::{emit_expr_top_level, emit_module};
-use painturscript::error::{extract_ith_fn_arg, InternalCompilationError, MustBeMutableContext};
+use painturscript::error::{
+    extract_ith_fn_arg, resolve_must_be_mutable_ctx, InternalCompilationError, MustBeMutableContext,
+};
 use painturscript::format::FormatWith;
 use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
 use painturscript::std::{new_module_with_prelude, new_std_module_env};
@@ -50,13 +52,8 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         MustBeMutable(cur_span, reason_span, ctx) => {
-            let (cur_span, reason_span) = match ctx {
-                MustBeMutableContext::Value => (*cur_span, *reason_span),
-                MustBeMutableContext::FnTypeArg(index) => {
-                    let arg_span = extract_ith_fn_arg(src, *reason_span, *index);
-                    (arg_span, *cur_span)
-                },
-            };
+            let (cur_span, reason_span) =
+                resolve_must_be_mutable_ctx(*cur_span, *reason_span, *ctx, src);
             let min_pos = cur_span.start().min(reason_span.start());
             let offset = start_of_line_of(src, min_pos);
             let cur = &data.1[span_range(cur_span)];
@@ -65,8 +62,17 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                     "Expression {} must be mutable.",
                     cur.fg(Color::Blue),
                 ))
-                .with_label(Label::new(("input", span_range(cur_span))).with_message("This expression is just a value.").with_color(Color::Blue))
-                .with_label(Label::new(("input", span_range(reason_span))).with_message("But it must be mutable due to this.").with_color(Color::Green).with_order(1))
+                .with_label(
+                    Label::new(("input", span_range(cur_span)))
+                        .with_message("This expression is just a value.")
+                        .with_color(Color::Blue),
+                )
+                .with_label(
+                    Label::new(("input", span_range(reason_span)))
+                        .with_message("But it must be mutable due to this.")
+                        .with_color(Color::Green)
+                        .with_order(1),
+                )
                 .finish()
                 .print(("input", Source::from(src)))
                 .unwrap();
