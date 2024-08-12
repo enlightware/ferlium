@@ -775,12 +775,12 @@ impl Node {
                 case.default.eval(ctx)
             }
             Iterate(iteration) => {
-                let mut iterator = iteration
+                let iterator = iteration
                     .iterator
                     .eval(ctx)?
                     .into_primitive_ty::<range::RangeIterator>()
                     .unwrap();
-                while let Some(value) = iterator.next() {
+                for value in iterator {
                     ctx.environment.push(ValOrMut::Val(Value::native(value)));
                     _ = iteration.body.eval(ctx)?;
                     ctx.environment.pop();

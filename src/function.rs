@@ -547,14 +547,19 @@ where
         BinaryNativeFnVVP(f, PhantomData)
     }
 
-    pub fn description(f: F) -> ModuleFunction {
+    pub fn description_gen0_gen0(f: F) -> ModuleFunction {
         let arg_ty = Type::variable_id(0);
         let o_ty = Type::primitive::<O>();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            &[arg_ty, arg_ty],
+            o_ty,
+        ));
+        Self::description_with_ty_scheme(f, ty_scheme)
+    }
+
+    pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
         ModuleFunction {
-            ty_scheme: TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-                &[arg_ty, arg_ty],
-                o_ty,
-            )),
+            ty_scheme,
             code: Rc::new(RefCell::new(Box::new(BinaryNativeFnVVP(f, PhantomData)))),
             spans: None,
         }
@@ -587,3 +592,62 @@ where
         writeln!(f, "{}native @ {:p}", indent_str, &self.0)
     }
 }
+
+// Note: disabled for now until we have a borrow checker
+
+// pub struct BinaryNativeFnMMP<O, F>(F, PhantomData<O>);
+
+// impl<F, O> BinaryNativeFnMMP<O, F>
+// where
+//     F: Fn(&mut Value, &mut Value) -> O + 'static,
+//     O: Debug + Clone + Eq + NativeDisplay + 'static,
+// {
+//     pub fn new(f: F) -> Self {
+//         BinaryNativeFnMMP(f, PhantomData)
+//     }
+
+//     pub fn description_gen0_gen0(f: F) -> ModuleFunction {
+//         let arg_ty = Type::variable_id(0);
+//         let o_ty = Type::primitive::<O>();
+//         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+//             &[arg_ty, arg_ty],
+//             o_ty,
+//         ));
+//         Self::description_with_ty_scheme(f, ty_scheme)
+//     }
+
+//     pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
+//         ModuleFunction {
+//             ty_scheme,
+//             code: Rc::new(RefCell::new(Box::new(BinaryNativeFnMMP::new(f)))),
+//             spans: None,
+//         }
+//     }
+// }
+
+// impl<O, F> Callable for BinaryNativeFnMMP<O, F>
+// where
+//     F: Fn(&mut Value, &mut Value) -> O,
+//     O: Debug + Clone + Eq + NativeDisplay + 'static,
+// {
+//     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
+//         let mut args = args.into_iter();
+//         let a = args.next().unwrap();
+//         let a = a.as_place().target_mut(ctx)?;
+//         let b = args.next().unwrap();
+//         let b = b.as_place().target_mut(ctx)?;
+//         let o = self.0(a, b);
+
+//         Ok(Value::Native(Box::new(o)))
+//     }
+//     fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
+//     fn format_ind(
+//         &self,
+//         f: &mut std::fmt::Formatter,
+//         _env: &ModuleEnv<'_>,
+//         indent: usize,
+//     ) -> std::fmt::Result {
+//         let indent_str = "  ".repeat(indent);
+//         writeln!(f, "{}native @ {:p}", indent_str, &self.0)
+//     }
+// }

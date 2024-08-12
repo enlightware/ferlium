@@ -8,7 +8,13 @@ use painturscript::value::Value;
 #[test]
 fn quicksort() {
     assert_eq!(
-        run(r#"fn quicksort(a, lo, hi) {
+        run(r#"fn swap(a, i, j) {
+            let temp = a[i];
+            a[i] = a[j];
+            a[j] = temp
+        }
+
+        fn quicksort(a, lo, hi) {
             if lo >= hi or lo < 0 {
                 ()
             } else {
@@ -24,18 +30,14 @@ fn quicksort() {
 
             for j in lo..hi {
                 if a[j] < pivot {
-                    let temp = a[i];
-                    a[i] = a[j];
-                    a[j] = temp;
+                    swap(a, i, j);
                     i = i + 1
                 } else {
                     ()
                 }
             };
 
-            let temp = a[i];
-            a[i] = a[hi];
-            a[hi] = temp;
+            swap(a, i, hi);
 
             i
         }
