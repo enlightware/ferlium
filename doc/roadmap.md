@@ -13,7 +13,6 @@
 
 ### Library and test features
 
-- Array map
 - Array from iterator (note: functional iterators require closures)
 
 ### Compiler features
@@ -26,8 +25,8 @@
 ### Next tasks
 
 - Borrow checker
-- Fix grammar with equal in lambdas
 - Add {} block expression
+- Fix grammar with equal in lambdas
 - Add record type
 
 ### Open questions
