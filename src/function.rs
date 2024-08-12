@@ -277,6 +277,57 @@ where
     }
 }
 
+pub struct UnaryNativeFnVP<O, F>(F, PhantomData<O>);
+
+impl<F, O> UnaryNativeFnVP<O, F>
+where
+    F: Fn(&Value) -> O + 'static,
+    O: Debug + Clone + Eq + NativeDisplay + 'static,
+{
+    pub fn new(f: F) -> Self {
+        UnaryNativeFnVP(f, PhantomData)
+    }
+
+    pub fn description(f: F) -> ModuleFunction {
+        let arg_ty = Type::variable_id(0);
+        let o_ty = Type::primitive::<O>();
+        ModuleFunction {
+            ty_scheme: TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+                &[arg_ty],
+                o_ty,
+            )),
+            code: Rc::new(RefCell::new(Box::new(UnaryNativeFnVP(f, PhantomData)))),
+            spans: None,
+        }
+    }
+}
+
+impl<O, F> Callable for UnaryNativeFnVP<O, F>
+where
+    F: Fn(&Value) -> O,
+    O: Debug + Clone + Eq + NativeDisplay + 'static,
+{
+    fn call(&self, args: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
+        let mut args = args.into_iter();
+        let a = args.next().unwrap();
+        let a = a.as_val().unwrap();
+        let o = self.0(a);
+
+        Ok(Value::Native(Box::new(o)))
+    }
+    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _env: &ModuleEnv<'_>,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = "  ".repeat(indent);
+        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
+    }
+}
+
+
 pub struct BinaryNativeFn<
     A: Clone + 'static,
     B: Clone + 'static,

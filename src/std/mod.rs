@@ -3,6 +3,7 @@ use crate::module::{Module, Modules, Use};
 use ustr::ustr;
 
 pub mod array;
+pub mod io;
 pub mod iterator;
 pub mod logic;
 pub mod math;
@@ -15,6 +16,7 @@ pub fn std_module() -> Module {
     math::add_to_module(&mut module);
     range::add_to_module(&mut module);
     array::add_to_module(&mut module);
+    io::add_to_module(&mut module);
     // option::add_option_functions(&mut module);
     module
 }
