@@ -7,11 +7,13 @@ pub mod iterator;
 pub mod logic;
 pub mod math;
 pub mod option;
+pub mod range;
 
 pub fn std_module() -> Module {
     let mut module = Module::default();
     logic::add_to_module(&mut module);
     math::add_to_module(&mut module);
+    range::add_to_module(&mut module);
     array::add_to_module(&mut module);
     // option::add_option_functions(&mut module);
     module

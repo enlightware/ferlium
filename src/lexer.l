@@ -8,6 +8,9 @@ if                      "if"
 else                    "else"
 match                   "match"
 
+for                     "for"
+in                      "in"
+
 return                  "return"
 
 let                     "let"
@@ -44,6 +47,7 @@ not						"not"
 :                       ":"
 ;                       ";"
 ,                       ","
+\.\.                    ".."
 \.                      "."
 _                       "_"
 

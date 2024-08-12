@@ -22,7 +22,7 @@ use crate::{
         FnArgType, FnType, NativeType, TyVarKey, Type, TypeKind, TypeLike, TypeSubstitution,
         TypeVar,
     },
-    std::{array::array_type, math::int_type},
+    std::{array::array_type, math::int_type, range::range_iterator_type},
     type_scheme::{PubTypeConstraint, TypeScheme},
     typing_env::{Local, TypingEnv},
     value::Value,
@@ -309,9 +309,7 @@ impl TypeInference {
                     MutType::mutable(),
                     *sign_span,
                 );
-                self.add_sub_type_constraint(
-                    value_ty, value.span, place_ty, place.span,
-                );
+                self.add_sub_type_constraint(value_ty, value.span, place_ty, place.span);
                 let node = K::Assign(B::new(ir::Assignment { place, value }));
                 (node, Type::unit(), MutType::constant())
             }
@@ -350,12 +348,7 @@ impl TypeInference {
                     let (other_nodes, types) = self.infer_exprs_drop_mut(env, &exprs[1..])?;
                     // All elements must be of the first element's type
                     for (ty, expr) in types.into_iter().zip(exprs.iter().skip(1)) {
-                        self.add_sub_type_constraint(
-                            ty,
-                            expr.span,
-                            element_ty,
-                            exprs[0].span,
-                        );
+                        self.add_sub_type_constraint(ty, expr.span, element_ty, exprs[0].span);
                     }
                     // Build the array node and return it
                     let element_nodes = std::iter::once(first_node).chain(other_nodes).collect();
@@ -369,12 +362,7 @@ impl TypeInference {
                 let array_ty = array_type(element_ty);
                 // Infer type of the array expression and make sure it is an array
                 let (array_node, array_expr_ty, array_expr_mut) = self.infer_expr(env, array)?;
-                self.add_sub_type_constraint(
-                    array_expr_ty,
-                    array.span,
-                    array_ty,
-                    array.span,
-                );
+                self.add_sub_type_constraint(array_expr_ty, array.span, array_ty, array.span);
                 // Check type of the index expression to be int
                 let index_node =
                     self.check_expr(env, index, int_type(), MutType::constant(), index.span)?;
@@ -428,6 +416,27 @@ impl TypeInference {
                     )
                 };
                 (node, return_ty, MutType::constant())
+            }
+            ForLoop(var_name, iterator, body) => {
+                let iterator = self.check_expr(
+                    env,
+                    iterator,
+                    range_iterator_type(),
+                    MutType::constant(),
+                    iterator.span,
+                )?;
+                let env_size = env.locals.len();
+                env.locals.push(Local::new(
+                    var_name.0,
+                    MutType::constant(),
+                    TypeScheme::new_just_type(int_type()),
+                    var_name.1,
+                ));
+                let body =
+                    self.check_expr(env, body, Type::unit(), MutType::constant(), body.span)?;
+                env.locals.truncate(env_size);
+                let node = K::Iterate(B::new(ir::Iteration { iterator, body }));
+                (node, Type::unit(), MutType::constant())
             }
             Error(msg) => {
                 panic!("attempted to infer type for error node: {msg}");
@@ -596,12 +605,7 @@ impl TypeInference {
 
         // Other cases, infer and add constraints
         let (node, actual_ty, actual_mut) = self.infer_expr(env, expr)?;
-        self.add_sub_type_constraint(
-            actual_ty,
-            expr.span,
-            expected_ty,
-            expected_span,
-        );
+        self.add_sub_type_constraint(actual_ty, expr.span, expected_ty, expected_span);
         self.add_mut_be_at_least_constraint(actual_mut, expr.span, expected_mut, expected_span);
         Ok(node)
     }
@@ -1137,12 +1141,7 @@ impl UnifiedTypeInference {
             log::debug!("Unified external type variable {var}, created {} new external type variables and replaced local ones", subst.len());
             // Create a new type using these new variables, and add an external constraint for it.
             let new_ty = ty.instantiate(&subst);
-            self.add_sub_type_external_constraint(
-                Type::variable(var),
-                var_span,
-                new_ty,
-                ty_span,
-            );
+            self.add_sub_type_external_constraint(Type::variable(var), var_span, new_ty, ty_span);
             Ok(())
         } else {
             // The type variable is internal, perform normal unification.
@@ -1435,6 +1434,10 @@ impl UnifiedTypeInference {
                     self.substitute_node(&mut alternative.1, ignore);
                 }
                 self.substitute_node(&mut case.default, ignore);
+            }
+            Iterate(iteration) => {
+                self.substitute_node(&mut iteration.iterator, ignore);
+                self.substitute_node(&mut iteration.body, ignore);
             }
         }
     }

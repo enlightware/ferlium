@@ -126,6 +126,7 @@ pub enum ExprKind {
     Array(Vec<Expr>),
     Index(B<Expr>, B<Expr>),
     Match(B<Expr>, Vec<(Expr, Expr)>, Option<B<Expr>>),
+    ForLoop((Ustr, Span), B<Expr>, B<Expr>),
     Error(String),
 }
 
@@ -233,6 +234,12 @@ impl Expr {
                 }
                 Ok(())
             }
+            ForLoop(var_name, iterator, body) => {
+                writeln!(f, "{indent_str}for {} in", var_name.0)?;
+                iterator.format_ind(f, indent + 1)?;
+                writeln!(f, "{indent_str}do")?;
+                body.format_ind(f, indent + 1)
+            }
             Error(msg) => writeln!(f, "{indent_str}Error: {msg}"),
         }
     }
@@ -254,34 +261,39 @@ impl Expr {
                 expr.acc_errors_rec(errors);
             }
         }
+        use ExprKind::*;
         match &self.kind {
-            ExprKind::LetVar(_, _, expr) => expr.acc_errors_rec(errors),
-            ExprKind::Abstract(_, expr) => expr.acc_errors_rec(errors),
-            ExprKind::Apply(expr, args) => {
+            LetVar(_, _, expr) => expr.acc_errors_rec(errors),
+            Abstract(_, expr) => expr.acc_errors_rec(errors),
+            Apply(expr, args) => {
                 expr.acc_errors_rec(errors);
                 acc_errors(errors, args.iter());
             }
-            ExprKind::StaticApply(_, args) => acc_errors(errors, args.iter()),
-            ExprKind::Block(exprs) => acc_errors(errors, exprs.iter()),
-            ExprKind::Assign(place, _, value) => {
+            StaticApply(_, args) => acc_errors(errors, args.iter()),
+            Block(exprs) => acc_errors(errors, exprs.iter()),
+            Assign(place, _, value) => {
                 place.acc_errors_rec(errors);
                 value.acc_errors_rec(errors);
             }
-            ExprKind::Tuple(args) => acc_errors(errors, args.iter()),
-            ExprKind::Project(expr, _, _) => expr.acc_errors_rec(errors),
-            ExprKind::Array(args) => acc_errors(errors, args.iter()),
-            ExprKind::Index(expr, index) => {
+            Tuple(args) => acc_errors(errors, args.iter()),
+            Project(expr, _, _) => expr.acc_errors_rec(errors),
+            Array(args) => acc_errors(errors, args.iter()),
+            Index(expr, index) => {
                 expr.acc_errors_rec(errors);
                 index.acc_errors_rec(errors);
             }
-            ExprKind::Match(expr, cases, default) => {
+            Match(expr, cases, default) => {
                 expr.acc_errors_rec(errors);
                 acc_errors(errors, cases.iter().map(|(_, expr)| expr));
                 if let Some(default) = default {
                     default.acc_errors_rec(errors);
                 }
             }
-            ExprKind::Error(error) => errors.push((error.clone(), self.span)),
+            ForLoop(_, iterator, body) => {
+                iterator.acc_errors_rec(errors);
+                body.acc_errors_rec(errors);
+            }
+            Error(error) => errors.push((error.clone(), self.span)),
             _ => {}
         }
     }

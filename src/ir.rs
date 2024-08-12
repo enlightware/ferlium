@@ -14,7 +14,7 @@ use crate::{
     function::FunctionRef,
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{FnArgType, FnType, Type, TypeLike, TypeVar, TypeVarSubstitution},
-    std::array,
+    std::{array, range},
     type_scheme::{DisplayStyle, TypeScheme},
     value::{NativeValue, Value},
 };
@@ -236,6 +236,12 @@ pub struct Case {
     pub default: Node,
 }
 
+#[derive(Debug, Clone)]
+pub struct Iteration {
+    pub iterator: Node,
+    pub body: Node,
+}
+
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone)]
 pub enum NodeKind {
@@ -251,6 +257,7 @@ pub enum NodeKind {
     Array(B<SVec2<Node>>),
     Index(B<Node>, B<Node>),
     Case(B<Case>),
+    Iterate(B<Iteration>),
 }
 
 /// A node of the expression-based execution tree
@@ -362,6 +369,12 @@ impl Node {
                 writeln!(f, "{indent_str}default")?;
                 case.default.format_ind(f, env, indent + 1)?;
             }
+            Iterate(iteration) => {
+                writeln!(f, "{indent_str}iterate from")?;
+                iteration.iterator.format_ind(f, env, indent + 1)?;
+                writeln!(f, "{indent_str}in")?;
+                iteration.body.format_ind(f, env, indent + 1)?;
+            }
         };
         writeln!(f, "{indent_str}↳ {}", self.ty.format_with(env))
     }
@@ -454,6 +467,14 @@ impl Node {
                     return Some(ty);
                 }
             }
+            Iterate(iteration) => {
+                if let Some(ty) = iteration.iterator.type_at(pos) {
+                    return Some(ty);
+                }
+                if let Some(ty) = iteration.body.type_at(pos) {
+                    return Some(ty);
+                }
+            }
         }
 
         // No children has this position, return our type.
@@ -524,6 +545,12 @@ impl Node {
                 }
                 case.default.variable_type_annotations(style, result, env);
             }
+            Iterate(iteration) => {
+                iteration
+                    .iterator
+                    .variable_type_annotations(style, result, env);
+                iteration.body.variable_type_annotations(style, result, env);
+            }
         }
     }
 
@@ -588,6 +615,12 @@ impl Node {
                 });
                 case.default.unbound_ty_vars(result, ignore, generation);
             }
+            Iterate(iteration) => {
+                iteration
+                    .iterator
+                    .unbound_ty_vars(result, ignore, generation);
+                iteration.body.unbound_ty_vars(result, ignore, generation);
+            }
         }
     }
 
@@ -638,6 +671,10 @@ impl Node {
                     alternative.1.substitute(subst);
                 }
                 case.default.substitute(subst);
+            }
+            Iterate(iteration) => {
+                iteration.iterator.substitute(subst);
+                iteration.body.substitute(subst);
             }
         }
         self.ty = self.ty.substitute(subst);
@@ -736,6 +773,19 @@ impl Node {
                     }
                 }
                 case.default.eval(ctx)
+            }
+            Iterate(iteration) => {
+                let mut iterator = iteration
+                    .iterator
+                    .eval(ctx)?
+                    .into_primitive_ty::<range::RangeIterator>()
+                    .unwrap();
+                while let Some(value) = iterator.next() {
+                    ctx.environment.push(ValOrMut::Val(Value::native(value)));
+                    _ = iteration.body.eval(ctx)?;
+                    ctx.environment.pop();
+                }
+                Ok(Value::unit())
             }
         }
     }

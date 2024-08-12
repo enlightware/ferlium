@@ -2,7 +2,6 @@
 
 ### Language features
 
-- Loops
 - Record types
 - Effects
 - Type classes
@@ -19,7 +18,6 @@
 
 ### Compiler features
 
-- Type checking inout polymorphism
 - Execution
 - Effect checking and inference
 - Optimisations
@@ -30,7 +28,6 @@
 - Borrow checker
 - Fix grammar with equal in lambdas
 - Add {} block expression
-- Add loops
 - Add record type
 
 ### Open questions

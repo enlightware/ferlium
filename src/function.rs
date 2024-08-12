@@ -237,6 +237,21 @@ where
     pub fn new(f: F) -> Self {
         UnaryMutNativeFn(f, PhantomData)
     }
+
+    pub fn description(f: F) -> ModuleFunction {
+        let a_ty = Type::primitive::<A>();
+        let o_ty = Type::primitive::<O>();
+        let ty_scheme = TypeScheme::new_just_type(FnType::new_mut_resolved(&[(a_ty, true)], o_ty));
+        Self::description_with_ty_scheme(f, ty_scheme)
+    }
+
+    fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
+        ModuleFunction {
+            ty_scheme,
+            code: Rc::new(RefCell::new(Box::new(UnaryMutNativeFn::new(f)))),
+            spans: None,
+        }
+    }
 }
 
 impl<A, O, F> Callable for UnaryMutNativeFn<A, O, F>

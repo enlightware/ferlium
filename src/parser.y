@@ -100,6 +100,8 @@ Expr -> Expr
         { Expr::new(Match(B::new($2), $4, None), $span) }
     | 'match' Expr '{' MatchArgs ',' '_' '=>' ExprOptComma '}'
         { Expr::new(Match(B::new($2), $4, Some(B::new($8))), $span) }
+    | 'for' 'IDENT' 'in' Expr '..' Expr '{' Expr '}'
+        { make_iteration($2, $4, $6, $8, $lexer, $span) }
     | 'return' Expr
         { error("Return statements are not yet supported", $span) }
     | '(' Expr ')'

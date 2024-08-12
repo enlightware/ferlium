@@ -276,6 +276,21 @@ fn mutability_soundness() {
 }
 
 #[test]
+fn for_loops() {
+    assert_eq!(run("for i in 0..3 { () }"), unit());
+    assert_eq!(run("var s = 0; for i in 1..4 { s = s + i }; s"), int!(6));
+    assert_eq!(run("var s = 0; for i in -1..-4 { s = s + i }; s"), int!(-6));
+    assert_eq!(
+        run("var a = []; for i in 2..5 { array_append(a, i) }; a"),
+        int_a![2, 3, 4]
+    );
+    assert_eq!(
+        run("var a = []; for i in 5..2 { array_append(a, i) }; a"),
+        int_a![5, 4, 3]
+    );
+}
+
+#[test]
 fn execution_errors() {
     use RuntimeError::*;
     assert_eq!(fail_run("1 / 0"), DivisionByZero);

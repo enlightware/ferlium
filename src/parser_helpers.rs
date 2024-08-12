@@ -146,3 +146,26 @@ pub(crate) fn make_if_without_else(cond: Expr, if_true: Expr, span: Span) -> Exp
         span,
     )
 }
+
+pub(crate) fn make_iteration(
+    var: LexemeResult,
+    start: Expr,
+    end: Expr,
+    body: Expr,
+    lexer: DefaultLexer,
+    span: Span,
+) -> Expr {
+    let iterator_span = Span::new(start.span.start(), end.span.end());
+    let iterator = Expr::new(
+        StaticApply(ustr("range_iterator_new"), vec![start, end]),
+        iterator_span,
+    );
+    Expr::new(
+        ForLoop(
+            (s(var, lexer), lex_span(var)),
+            B::new(iterator),
+            B::new(body),
+        ),
+        span,
+    )
+}
