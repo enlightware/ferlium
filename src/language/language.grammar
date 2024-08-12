@@ -10,7 +10,7 @@
 
     "[" "]" "{" "}" "(" ")"
     ";" ":" "::" ","
-    "=" "=>"
+    "=" "=>" ".."
 
     @precedence { LineComment, "/", BoolLiteral, Identifier }
 }
@@ -44,6 +44,7 @@ Expr {
     | Assignment
     | IfExpression
     | MatchExpression
+    | ForExpression
     | !return kw<'return'> Expr
     | !parentheses '(' Expr ')'
     | Identifier
@@ -86,6 +87,10 @@ IfExpression {
 MatchExpression {
     !command kw<'match'> Expr '{' MatchArgsOptComma '}'
     | !command kw<'match'> Expr '{' MatchArgs ',' kw<'_'> '=>' ExprOptComma '}'
+}
+
+ForExpression {
+    !command kw<'for'> Identifier kw<'in'> Expr '..' Expr '{' Expr '}'
 }
 
 VarDefExpression {

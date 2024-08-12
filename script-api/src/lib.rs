@@ -52,8 +52,8 @@ fn compilation_error_to_data(error: &CompilationError) -> Vec<ErrorData> {
             span,
             format!("Function {name} not found"),
         )],
-        MustBeMutable(span) => vec![ErrorData::from_span(
-            span,
+        MustBeMutable(cur_span, _reason_span) => vec![ErrorData::from_span(
+            cur_span,
             "Expression must be mutable".to_string(),
         )],
         IsNotSubtype(cur, cur_span, exp, _exp_span) => vec![ErrorData::from_span(

@@ -2,10 +2,13 @@ import { parser } from "./language.grammar";
 import { LRLanguage, LanguageSupport, continuedIndent, flatIndent, indentNodeProp } from "@codemirror/language";
 import { styleTags, tags as t } from "@lezer/highlight";
 
+// Note: test grammar here: https://lezer-playground.vercel.app/
+
 // list if tags: https://lezer.codemirror.net/docs/ref/#highlight.tags
 const highlight = styleTags({
 	"fn let var": t.definitionKeyword,
-	"if else match return": t.controlKeyword,
+	"if else match for return": t.controlKeyword,
+	"in": t.operatorKeyword,
 	Identifier: t.variableName,
 	Integer: t.integer,
 	BoolLiteral: t.bool,
@@ -14,12 +17,13 @@ const highlight = styleTags({
 	ArithOp: t.arithmeticOperator,
 	LogicOp: t.logicOperator,
 	CompareOp: t.compareOperator,
+	"=": t.definitionOperator,
+	".. =>": t.punctuation,
 	"( )": t.paren,
 	"[ ]": t.squareBracket,
 	"{ }": t.brace,
+	".": t.derefOperator,
 	", : ; ::": t.separator,
-	"=": t.definitionOperator,
-	"=>": t.punctuation,
 })
 
 export function languageExtension() {
