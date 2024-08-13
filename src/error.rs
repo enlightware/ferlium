@@ -40,6 +40,11 @@ pub enum InternalCompilationError {
         expr_span: Span,
         index_span: Span,
     },
+    MutablePathsOverlap {
+        a_span: Span,
+        b_span: Span,
+        fn_span: Span,
+    },
     Internal(String),
 }
 
@@ -96,6 +101,15 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
             InvalidTupleProjection { expr_ty, .. } => {
                 write!(f, "Expected tuple, got \"{}\"", expr_ty.format_with(env))
             }
+            MutablePathsOverlap { a_span, b_span, fn_span } => {
+                write!(
+                    f,
+                    "Mutable paths overlap: {} and {} when calling {}",
+                    &source[a_span.start()..a_span.end()],
+                    &source[b_span.start()..b_span.end()],
+                    &source[fn_span.start()..fn_span.end()],
+                )
+            }
             Internal(msg) => write!(f, "ICE: {}", msg),
         }
     }
@@ -125,6 +139,11 @@ pub enum CompilationError {
         expr_ty: String,
         expr_span: Span,
         index_span: Span,
+    },
+    MutablePathOverlap {
+        a_span: Span,
+        b_span: Span,
+        fn_span: Span,
     },
     Internal(String),
 }
@@ -180,6 +199,7 @@ impl CompilationError {
                 expr_span,
                 index_span,
             },
+            MutablePathsOverlap { a_span, b_span, fn_span } => Self::MutablePathOverlap { a_span, b_span, fn_span },
             Internal(msg) => Self::Internal(msg),
         }
     }
@@ -211,6 +231,13 @@ impl CompilationError {
         match self {
             Self::UnboundTypeVar { .. } => (),
             _ => panic!("expect_unbound_ty_val called on non-UnboundTypeVar error"),
+        }
+    }
+
+    pub fn expect_mutable_paths_overlap(&self) {
+        match self {
+            Self::MutablePathOverlap { .. } => (),
+            _ => panic!("expect_mutable_paths_overlap called on non-MutablePathsOverlap error"),
         }
     }
 }

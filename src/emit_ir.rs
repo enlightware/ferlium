@@ -129,16 +129,14 @@ pub fn emit_module(
 
         // Detect unbound type variables in the code and return error if any.
         let mut unbound = HashSet::new();
-        descr.code.borrow_mut().apply_if_script(&mut |node| {
-            node.unbound_ty_vars(&mut unbound, &quantifiers, 0);
-        });
+        let mut code = descr.code.borrow_mut();
+        let node = &mut code.as_script_mut().unwrap().code;
+        node.unbound_ty_vars(&mut unbound, &quantifiers, 0);
         if let Some((ty_var, span)) = unbound.into_iter().next() {
             let pos = span.start();
-            let mut ty = None;
-            descr
-                .code
-                .borrow_mut()
-                .apply_if_script(&mut |node| ty = node.type_at(pos));
+            let mut code = descr.code.borrow_mut();
+            let node = &mut code.as_script_mut().unwrap().code;
+            let ty = node.type_at(pos);
             let ty = ty.ok_or_else(|| {
                 InternalCompilationError::Internal(format!(
                     "Type not found at pos {pos} while looking for unbound type variable {ty_var}"
@@ -174,13 +172,15 @@ pub fn emit_module(
         )));
     }
 
-    // Sixth pass, normalize the type schemes and substitute the types in the functions.
+    // Sixth pass, normalize the type schemes and substitute the types in the functions
+    // and run the borrow checker.
     for ModuleFunction { name, .. } in &source.functions {
         let descr = output.functions.get_mut(&name.0).unwrap();
         let subst = descr.ty_scheme.normalize();
-        descr.code.borrow_mut().apply_if_script(&mut |node| {
-            node.substitute(&subst);
-        });
+        let mut code = descr.code.borrow_mut();
+        let node = &mut code.as_script_mut().unwrap().code;
+        node.substitute(&subst);
+        node.check_borrows()?;
     }
 
     Ok(output)
@@ -310,6 +310,7 @@ pub fn emit_expr_top_level(
         mut_constraints.is_empty(),
         "No external mut constraints shall remain at top level"
     );
+    expr.expr.check_borrows()?;
     Ok(expr)
 }
 

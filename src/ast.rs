@@ -118,7 +118,7 @@ pub enum ExprKind {
     LetVar((Ustr, Span), MutVal, B<Expr>),
     Abstract(Vec<(Ustr, Span)>, B<Expr>),
     Apply(B<Expr>, Vec<Expr>),
-    StaticApply(Ustr, Vec<Expr>),
+    StaticApply(Ustr, Span, Vec<Expr>),
     Block(Vec<Expr>),
     Assign(B<Expr>, Span, B<Expr>),
     Tuple(Vec<Expr>),
@@ -173,7 +173,7 @@ impl Expr {
                     writeln!(f, "{indent_str})")
                 }
             }
-            StaticApply(func, args) => {
+            StaticApply(func, _, args) => {
                 writeln!(f, "{indent_str}apply {func} to (")?;
                 for arg in args {
                     arg.format_ind(f, indent + 1)?;
@@ -269,7 +269,7 @@ impl Expr {
                 expr.acc_errors_rec(errors);
                 acc_errors(errors, args.iter());
             }
-            StaticApply(_, args) => acc_errors(errors, args.iter()),
+            StaticApply(_, _, args) => acc_errors(errors, args.iter()),
             Block(exprs) => acc_errors(errors, exprs.iter()),
             Assign(place, _, value) => {
                 place.acc_errors_rec(errors);

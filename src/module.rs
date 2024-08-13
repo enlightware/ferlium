@@ -70,11 +70,10 @@ impl Module {
     /// Return the type for the source pos, if any.
     pub fn type_at(&self, pos: usize) -> Option<Type> {
         for (_, function) in self.functions.iter() {
-            let mut ty = None;
-            function
-                .code
-                .borrow_mut()
-                .apply_if_script(&mut |node| ty = node.type_at(pos));
+            let mut code = function.code.borrow_mut();
+            let ty = code
+                .as_script_mut()
+                .and_then(|script_fn| script_fn.code.type_at(pos));
             if ty.is_some() {
                 return ty;
             }

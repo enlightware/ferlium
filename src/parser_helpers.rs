@@ -157,7 +157,7 @@ pub(crate) fn make_iteration(
 ) -> Expr {
     let iterator_span = Span::new(start.span.start(), end.span.end());
     let iterator = Expr::new(
-        StaticApply(ustr("range_iterator_new"), vec![start, end]),
+        StaticApply(ustr("range_iterator_new"), iterator_span, vec![start, end]),
         iterator_span,
     );
     Expr::new(

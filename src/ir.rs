@@ -204,6 +204,7 @@ pub struct Application {
 #[derive(Debug, Clone)]
 pub struct StaticApplication {
     pub function: FunctionRef,
+    pub function_span: Span,
     pub arguments: Vec<Node>,
     pub ty: FnType,
     // substitution for the type variable of the function in the context of the application

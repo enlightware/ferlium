@@ -304,7 +304,7 @@ impl TypeInference {
                 }));
                 (node, ret_ty, MutType::constant())
             }
-            StaticApply(name, args) => self.infer_static_apply(env, *name, expr.span, args)?,
+            StaticApply(name, span, args) => self.infer_static_apply(env, *name, *span, args)?,
             Block(exprs) => {
                 let env_size = env.locals.len();
                 let (nodes, types) = self.infer_exprs_drop_mut(env, exprs)?;
@@ -480,6 +480,7 @@ impl TypeInference {
         let ret_ty = inst_fn_ty.ret;
         let node = ir::NodeKind::StaticApply(B::new(ir::StaticApplication {
             function: FunctionRef::new_weak(&function.code),
+            function_span: span,
             arguments: args_nodes,
             ty: inst_fn_ty,
             // subst,
@@ -1336,10 +1337,10 @@ impl UnifiedTypeInference {
     pub(crate) fn substitute_module_function(&mut self, descr: &mut ModuleFunction) {
         // FIXME: see whether this can be unified with quantifiers and constraints setup
         descr.ty_scheme.ty = self.substitute_fn_type(&descr.ty_scheme.ty, &[]);
-        descr
-            .code
-            .borrow_mut()
-            .apply_if_script(&mut |node| self.substitute_node(node, &[]));
+        let mut code = descr.code.borrow_mut();
+        if let Some(script_fn) = code.as_script_mut() {
+            self.substitute_node(&mut script_fn.code, &[]);
+        }
     }
 
     pub(crate) fn substitute_in_type_scheme(&mut self, ty_scheme: &mut TypeScheme<Type>) {
@@ -1478,7 +1479,9 @@ impl UnifiedTypeInference {
             Value::Function(function) => {
                 let function = function.get();
                 let mut function = function.borrow_mut();
-                function.apply_if_script(&mut |node| self.substitute_node(node, ignore));
+                if let Some(script_fn) = function.as_script_mut() {
+                    self.substitute_node(&mut script_fn.code, ignore);
+                }
             }
             _ => {}
         }

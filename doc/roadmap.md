@@ -25,7 +25,6 @@
 
 ### Next tasks
 
-- Borrow checker
 - Add {} block expression
 - Fix grammar with equal in lambdas
 - Add record type

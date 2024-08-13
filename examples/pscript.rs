@@ -33,7 +33,10 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let offset = start_of_line_of(src, span.start());
             let name = &data.1[span_range(*span)];
             Report::build(ReportKind::Error, "input", offset)
-                .with_message(format!("Variable or function {} not found.", name.fg(Color::Blue)))
+                .with_message(format!(
+                    "Variable or function {} not found.",
+                    name.fg(Color::Blue)
+                ))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
@@ -157,6 +160,26 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                         .with_color(Color::Green)
                         .with_order(1),
                 )
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
+        MutablePathsOverlap { a_span, b_span, fn_span } => {
+            let min_pos = a_span.start().min(b_span.start());
+            let offset = start_of_line_of(src, min_pos);
+            let a_name = &data.1[span_range(*a_span)];
+            let b_name = &data.1[span_range(*b_span)];
+            let fn_name = &data.1[span_range(*fn_span)];
+            Report::build(ReportKind::Error, "input", offset)
+                .with_message(format!(
+                    "Mutable paths {} and {} overlap when calling {}.",
+                    a_name.fg(Color::Blue),
+                    b_name.fg(Color::Blue),
+                    fn_name.fg(Color::Green)
+                ))
+                .with_label(Label::new(("input", span_range(*a_span))).with_color(Color::Blue))
+                .with_label(Label::new(("input", span_range(*b_span))).with_color(Color::Blue))
+                .with_label(Label::new(("input", span_range(*fn_span))).with_color(Color::Green))
                 .finish()
                 .print(("input", Source::from(src)))
                 .unwrap();

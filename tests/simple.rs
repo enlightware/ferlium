@@ -291,6 +291,20 @@ fn for_loops() {
 }
 
 #[test]
+fn borrow_checker() {
+    let swap_fn = "fn swap(a, b) { let temp = b; b = a; a = temp }";
+    assert_eq!(run(&format!("{swap_fn} var a = [0, 1]; swap(a[0], a[1]); a")), int_a![1, 0]);
+    fail_compilation(&format!("{swap_fn} var a = [0, 1]; swap(a[0], a[0]); a")).expect_mutable_paths_overlap();
+    fail_compilation(&format!("{swap_fn} var a = [0, 1]; let i = 0; swap(a[0], a[i]); a")).expect_mutable_paths_overlap();
+    assert_eq!(run(&format!("{swap_fn} var a = [0]; var b = [1]; swap(a[0], b[0]); a")), int_a![1]);
+    assert_eq!(run(&format!("{swap_fn} var a = [0]; var b = [1]; swap(a[a[0]], b[0]); a")), int_a![1]);
+    assert_eq!(run(&format!("{swap_fn} var a = [0]; var b = [1]; swap(a[a[0]], b[a[0]]); a")), int_a![1]);
+    assert_eq!(run(&format!("{swap_fn} var a = ((0,1),2); swap(a.0.1, a.1); a.0")), int_tuple!(0, 2));
+    assert_eq!(run(&format!("{swap_fn} var a = ((0,1),2); swap(a.0.1, a.0.0); a.0")), int_tuple!(1,0 ));
+    fail_compilation(&format!("{swap_fn} var a = ((0,1),2); swap(a.0, a.0); a.0")).expect_mutable_paths_overlap();
+}
+
+#[test]
 fn execution_errors() {
     use RuntimeError::*;
     assert_eq!(fail_run("1 / 0"), DivisionByZero);

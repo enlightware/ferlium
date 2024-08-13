@@ -93,6 +93,13 @@ impl Value {
         }
     }
 
+    pub fn as_primitive_ty<T: 'static>(&self) -> Option<&T> {
+        match self {
+            Value::Native(value) => NativeValue::as_any(value.as_ref()).downcast_ref::<T>(),
+            _ => None,
+        }
+    }
+
     pub fn as_primitive_ty_mut<T: 'static>(&mut self) -> Option<&mut T> {
         match self {
             Value::Native(value) => value.as_mut().as_mut_any().downcast_mut::<T>(),
@@ -149,7 +156,9 @@ impl Value {
             Function(function) => {
                 let function = function.get();
                 let mut function = function.borrow_mut();
-                function.apply_if_script(&mut |node| node.substitute(subst));
+                if let Some(script_fn) = function.as_script_mut() {
+                    script_fn.code.substitute(subst);
+                }
             }
         }
     }

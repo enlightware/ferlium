@@ -19,7 +19,9 @@ type CallCtx = EvalCtx;
 /// A function that can be called
 pub trait Callable {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult;
-    fn apply_if_script(&mut self, f: &mut dyn FnMut(&mut ir::Node));
+    fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
+        None
+    }
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -109,8 +111,8 @@ impl Callable for ScriptFunction {
         ctx.frame_base = old_frame_base;
         Ok(ret)
     }
-    fn apply_if_script(&mut self, f: &mut dyn FnMut(&mut ir::Node)) {
-        f(&mut self.code);
+    fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
+        Some(self)
     }
     fn format_ind(
         &self,
@@ -154,7 +156,6 @@ where
     fn call(&self, _: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
         Ok(Value::Native(Box::new((self.0)())))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -214,7 +215,6 @@ where
 
         Ok(Value::Native(Box::new((self.0)(a))))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -265,7 +265,6 @@ where
         let a = args.next().unwrap().as_mut_primitive::<A>(ctx)?.unwrap();
         Ok(Value::Native(Box::new((self.0)(a))))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -312,7 +311,6 @@ where
 
         Ok(Value::Native(Box::new(o)))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -373,7 +371,6 @@ where
 
         Ok(Value::Native(Box::new((self.0)(a, b))))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -429,7 +426,6 @@ where
 
         (self.0)(a, b).map(|o| Value::Native(Box::new(o)))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -475,7 +471,6 @@ where
 
         Ok(Value::Native(Box::new((self.0)(a, b))))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -520,7 +515,6 @@ where
         let b = args.next().unwrap().into_val().unwrap();
         Ok(Value::Native(Box::new((self.0)(a, b))))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -575,7 +569,6 @@ where
 
         Ok(Value::Native(Box::new(o)))
     }
-    fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -634,7 +627,6 @@ where
 
 //         Ok(Value::Native(Box::new(o)))
 //     }
-//     fn apply_if_script(&mut self, _f: &mut dyn FnMut(&mut ir::Node)) {}
 //     fn format_ind(
 //         &self,
 //         f: &mut std::fmt::Formatter,

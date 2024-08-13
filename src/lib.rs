@@ -8,6 +8,7 @@ use parser::parse;
 
 mod assert;
 mod ast;
+mod borrow_checker;
 mod containers;
 pub mod emit_ir;
 pub mod error;
@@ -51,9 +52,12 @@ impl ModuleAndExpr {
 
         // Let/var bindings just after the name.
         for function in self.module.functions.values() {
-            function.code.borrow_mut().apply_if_script(&mut |node| {
-                node.variable_type_annotations(style, &mut annotations, &env)
-            });
+            let mut code = function.code.borrow_mut();
+            if let Some(script_fn) = code.as_script_mut() {
+                script_fn
+                    .code
+                    .variable_type_annotations(style, &mut annotations, &env);
+            }
         }
         if let Some(expr) = &self.expr {
             expr.expr
