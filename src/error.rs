@@ -145,8 +145,11 @@ pub enum CompilationError {
         index_span: Span,
     },
     MutablePathsOverlap {
+        a_name: String,
         a_span: Span,
+        b_name: String,
         b_span: Span,
+        fn_name: String,
         fn_span: Span,
     },
     Internal(String),
@@ -208,8 +211,11 @@ impl CompilationError {
                 b_span,
                 fn_span,
             } => Self::MutablePathsOverlap {
+                a_name: src[a_span.start()..a_span.end()].to_string(),
                 a_span,
+                b_name: src[b_span.start()..b_span.end()].to_string(),
                 b_span,
+                fn_name: src[fn_span.start()..fn_span.end()].to_string(),
                 fn_span,
             },
             Internal(msg) => Self::Internal(msg),
