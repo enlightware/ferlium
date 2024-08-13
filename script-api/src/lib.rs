@@ -1,7 +1,7 @@
 mod utils;
 
 use painturscript::{
-    compile, error::CompilationError, module::Modules, std::new_std_module_env,
+    compile, error::CompilationError, module::{ModuleEnv, Modules}, std::new_std_module_env,
     type_scheme::DisplayStyle, ModuleAndExpr, Span,
 };
 use utils::{set_panic_hook, CharIndexLookup};
@@ -146,6 +146,24 @@ impl Compiler {
                     .map(|data| data.map(|pos| char_indices.byte_to_char_position(pos)))
                     .collect(),
             ),
+        }
+    }
+
+    pub fn run(&self) -> String {
+        if let Some(expr) = &self.user_module.expr {
+            match expr.expr.eval() {
+                Ok(value) => {
+                    let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+                    let output = format!("{}: {}", value, expr.ty.display_rust_style(&module_env));
+                    html_escape::encode_text(&output).to_string()
+                },
+                Err(err) => {
+                    let text = format!("{err}");
+                    format!("<span class=\"error\">{}</span>", html_escape::encode_text(&text))
+                },
+            }
+        } else {
+            "<span class=\"warning\">No expression to run</span>".to_string()
         }
     }
 

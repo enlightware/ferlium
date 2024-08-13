@@ -18,7 +18,20 @@ const diagnostics: Diagnostic[] = [];
 
 const compiler = new Compiler();
 
+const emit = defineEmits<{
+	runCode: []
+}>();
+
+const myKeymap = keymap.of([
+	{
+		key: "Ctrl-Enter",
+		mac: "Cmd-Enter",
+		run: () => { emit("runCode"); return true; },
+	},
+]);
+
 const extensions = [
+	myKeymap,
 	basicSetup,
 	languageExtension(),
 	positionPanel(),
@@ -63,6 +76,8 @@ function processUpdate(update: ViewUpdate) {
 	}
 }
 
+
+
 const setText = (newText: string) => {
 	if (view.value) {
 		const text = view.value.state.doc.toString();
@@ -70,9 +85,20 @@ const setText = (newText: string) => {
 	}
 };
 
+const runCode = () => {
+	try {
+		return compiler.run();
+	} catch (e) {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		return `The compiler crashed, reload the page! Error: ${(e as any).toString()}`;
+	}
+}
+
 defineExpose({
-	setText
+	setText,
+	runCode,
 });
+
 
 onMounted(() => {
 	view.value = new EditorView({
