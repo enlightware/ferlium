@@ -26,14 +26,22 @@ pub struct EvalCtx {
     pub environment: Vec<ValOrMut>,
     /// base of current stack frame in `environment`
     pub frame_base: usize,
+    /// recursion counter
+    pub recursion: usize,
+    /// maximum number of recursion
+    pub recursion_limit: usize,
 }
 
 impl EvalCtx {
+    const DEFAULT_RECURSION_LIMIT: usize = 100;
+
     #[allow(clippy::new_without_default)]
     pub fn new() -> EvalCtx {
         EvalCtx {
             environment: Vec::new(),
             frame_base: 0,
+            recursion: 0,
+            recursion_limit: Self::DEFAULT_RECURSION_LIMIT,
         }
     }
 }
@@ -681,8 +689,14 @@ impl Node {
         self.ty = self.ty.substitute(subst);
     }
 
+    /// Evaluate this node and return the result.
+    pub fn eval(&self, ) -> EvalResult {
+        let mut ctx = EvalCtx::new();
+        self.eval_with_ctx(&mut ctx)
+    }
+
     /// Evaluate this node given the environment and return the result.
-    pub fn eval(&self, ctx: &mut EvalCtx) -> EvalResult {
+    pub fn eval_with_ctx(&self, ctx: &mut EvalCtx) -> EvalResult {
         use NodeKind::*;
         match &self.kind {
             Literal(value) => Ok(value.clone()),
@@ -696,7 +710,7 @@ impl Node {
                         .args
                         .clone()
                 };
-                let function_value = app.function.eval(ctx)?;
+                let function_value = app.function.eval_with_ctx(ctx)?;
                 let function = function_value.as_function().unwrap().get();
                 let function = function.borrow();
                 let arguments = eval_args(&app.arguments, &args_ty, ctx)?;
@@ -710,7 +724,7 @@ impl Node {
                 function.call(arguments, ctx)
             }
             EnvStore(node) => {
-                let value = node.node.eval(ctx)?;
+                let value = node.node.eval_with_ctx(ctx)?;
                 ctx.environment.push(ValOrMut::Val(value));
                 Ok(Value::unit())
             }
@@ -722,26 +736,26 @@ impl Node {
                 let env_size = ctx.environment.len();
                 let return_value = nodes
                     .iter()
-                    .try_fold(None, |_, node| Ok(Some(node.eval(ctx)?)))?
+                    .try_fold(None, |_, node| Ok(Some(node.eval_with_ctx(ctx)?)))?
                     .unwrap_or(Value::unit());
                 ctx.environment.truncate(env_size);
                 Ok(return_value)
             }
             Assign(assignment) => {
-                let value = assignment.value.eval(ctx)?;
+                let value = assignment.value.eval_with_ctx(ctx)?;
                 let target_ref = assignment.place.as_place(ctx)?.target_mut(ctx)?;
                 *target_ref = value;
                 Ok(Value::unit())
             }
             Tuple(nodes) => {
                 let values = nodes.iter().try_fold(SVec2::new(), |mut nodes, node| {
-                    nodes.push(node.eval(ctx)?);
+                    nodes.push(node.eval_with_ctx(ctx)?);
                     Ok(nodes)
                 })?;
                 Ok(Value::Tuple(B::new(values)))
             }
             Project(node_and_index) => {
-                let value = node_and_index.0.eval(ctx)?;
+                let value = node_and_index.0.eval_with_ctx(ctx)?;
                 Ok(match value {
                     Value::Tuple(tuple) => tuple.into_iter().nth(node_and_index.1).unwrap(),
                     Value::Variant(variant) => variant.value,
@@ -753,9 +767,9 @@ impl Node {
                 Ok(Value::native(array::Array::from_vec(values)))
             }
             Index(array, index) => {
-                let index = index.eval(ctx)?.into_primitive_ty::<isize>().unwrap();
+                let index = index.eval_with_ctx(ctx)?.into_primitive_ty::<isize>().unwrap();
                 let mut array = array
-                    .eval(ctx)?
+                    .eval_with_ctx(ctx)?
                     .into_primitive_ty::<array::Array>()
                     .unwrap();
                 match array.get_mut_signed(index) {
@@ -767,23 +781,23 @@ impl Node {
                 }
             }
             Case(case) => {
-                let value = case.value.eval(ctx)?;
+                let value = case.value.eval_with_ctx(ctx)?;
                 for (alternative, node) in &case.alternatives {
                     if value == *alternative {
-                        return node.eval(ctx);
+                        return node.eval_with_ctx(ctx);
                     }
                 }
-                case.default.eval(ctx)
+                case.default.eval_with_ctx(ctx)
             }
             Iterate(iteration) => {
                 let iterator = iteration
                     .iterator
-                    .eval(ctx)?
+                    .eval_with_ctx(ctx)?
                     .into_primitive_ty::<range::RangeIterator>()
                     .unwrap();
                 for value in iterator {
                     ctx.environment.push(ValOrMut::Val(Value::native(value)));
-                    _ = iteration.body.eval(ctx)?;
+                    _ = iteration.body.eval_with_ctx(ctx)?;
                     ctx.environment.pop();
                 }
                 Ok(Value::unit())
@@ -793,7 +807,7 @@ impl Node {
 
     /// Evaluate this node given the environment and print the result.
     pub fn eval_and_print(&self, ctx: &mut EvalCtx, env: &ModuleEnv) {
-        match self.eval(ctx) {
+        match self.eval_with_ctx(ctx) {
             Ok(value) => println!("{value}: {}", self.ty.format_with(env)),
             Err(error) => println!("Runtime error: {error:?}"),
         }
@@ -812,7 +826,7 @@ impl Node {
                 }
                 Index(array, index) => {
                     let mut place = resolve_node(array, ctx)?;
-                    let index_value = index.eval(ctx)?;
+                    let index_value = index.eval_with_ctx(ctx)?;
                     let index = index_value.into_primitive_ty::<isize>().unwrap();
                     place.path.push(index);
                     place
@@ -841,7 +855,7 @@ impl FmtWithModuleEnv for Node {
 }
 
 fn eval_nodes(nodes: &[Node], ctx: &mut EvalCtx) -> Result<Vec<Value>, RuntimeError> {
-    eval_nodes_with(nodes.iter(), |node, ctx| node.eval(ctx), ctx)
+    eval_nodes_with(nodes.iter(), |node, ctx| node.eval_with_ctx(ctx), ctx)
 }
 
 fn eval_args(
@@ -859,7 +873,7 @@ fn eval_args(
         Ok(if is_mutable {
             ValOrMut::Mut(arg.as_place(ctx)?)
         } else {
-            ValOrMut::Val(arg.eval(ctx)?)
+            ValOrMut::Val(arg.eval_with_ctx(ctx)?)
         })
     };
     eval_nodes_with(args.iter().zip(args_ty), f, ctx)

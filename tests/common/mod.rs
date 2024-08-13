@@ -24,8 +24,7 @@ pub fn try_compile_and_run(src: &str) -> CompileRunResult {
 
     // Run the expression if any.
     if let Some(expr) = expr {
-        let mut eval_ctx = EvalCtx::new();
-        let result = expr.expr.eval(&mut eval_ctx).map_err(Error::Runtime)?;
+        let result = expr.expr.eval().map_err(Error::Runtime)?;
         drop(module); // ensure that the module will live during eval, as it holds the strong references to the functions refered in the expression
         Ok(result)
     } else {

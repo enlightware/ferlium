@@ -106,7 +106,12 @@ impl Callable for ScriptFunction {
         let old_frame_base = ctx.frame_base;
         ctx.frame_base = ctx.environment.len();
         ctx.environment.extend(args);
-        let ret = self.code.eval(ctx)?;
+        ctx.recursion += 1;
+        if ctx.recursion >= ctx.recursion_limit {
+            return Err(RuntimeError::RecursionLimitExceeded { limit: ctx.recursion_limit });
+        }
+        let ret = self.code.eval_with_ctx(ctx)?;
+        ctx.recursion -= 1;
         ctx.environment.truncate(ctx.frame_base);
         ctx.frame_base = old_frame_base;
         Ok(ret)

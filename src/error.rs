@@ -249,8 +249,8 @@ pub enum RuntimeError {
     DivisionByZero,
     RemainderByZero,
     ArrayAccessOutOfBounds { index: isize, len: usize },
+    RecursionLimitExceeded { limit: usize },
     // TODO: add execution duration limit exhausted
-    // TODO: add stack overflow
 }
 
 pub fn resolve_must_be_mutable_ctx(

@@ -347,6 +347,10 @@ fn execution_errors() {
         fail_run("let i = || -3; var a = [1, 2]; a[i()] = 0"),
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
+    assert_eq!(
+        fail_run("fn rf() { rf() } rf()"),
+        RecursionLimitExceeded { limit: 100 }
+    );
 }
 
 #[test]

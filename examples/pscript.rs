@@ -326,7 +326,7 @@ fn main() {
         // Evaluate and print result
         let old_size = eval_ctx.environment.len();
         let old_frame_base = eval_ctx.frame_base;
-        let result = compiled_expr.expr.eval(&mut eval_ctx);
+        let result = compiled_expr.expr.eval_with_ctx(&mut eval_ctx);
         match result {
             Ok(value) => println!(
                 "{value}: {}",
