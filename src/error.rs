@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Display};
 
 use lrpar::Span;
 
@@ -269,6 +269,22 @@ pub enum RuntimeError {
     ArrayAccessOutOfBounds { index: isize, len: usize },
     RecursionLimitExceeded { limit: usize },
     // TODO: add execution duration limit exhausted
+}
+
+impl Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use RuntimeError::*;
+        match self {
+            DivisionByZero => write!(f, "Division by zero"),
+            RemainderByZero => write!(f, "Remainder by zero"),
+            ArrayAccessOutOfBounds { index, len } => {
+                write!(f, "Array access out of bounds: index {} for length {}", index, len)
+            }
+            RecursionLimitExceeded { limit } => {
+                write!(f, "Recursion limit exceeded: limit is {}", limit)
+            }
+        }
+    }
 }
 
 pub fn resolve_must_be_mutable_ctx(
