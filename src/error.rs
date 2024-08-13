@@ -144,7 +144,7 @@ pub enum CompilationError {
         expr_span: Span,
         index_span: Span,
     },
-    MutablePathOverlap {
+    MutablePathsOverlap {
         a_span: Span,
         b_span: Span,
         fn_span: Span,
@@ -207,7 +207,7 @@ impl CompilationError {
                 a_span,
                 b_span,
                 fn_span,
-            } => Self::MutablePathOverlap {
+            } => Self::MutablePathsOverlap {
                 a_span,
                 b_span,
                 fn_span,
@@ -248,7 +248,7 @@ impl CompilationError {
 
     pub fn expect_mutable_paths_overlap(&self) {
         match self {
-            Self::MutablePathOverlap { .. } => (),
+            Self::MutablePathsOverlap { .. } => (),
             _ => panic!("expect_mutable_paths_overlap called on non-MutablePathsOverlap error"),
         }
     }
