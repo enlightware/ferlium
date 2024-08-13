@@ -47,7 +47,7 @@ Expr {
     | ForExpression
     | !return kw<'return'> Expr
     | !parentheses '(' Expr ')'
-    | Identifier
+    | Path
     | Literal
     | VarDefExpression
     | AbstractExpression
@@ -187,6 +187,11 @@ MatchArg {
 
 Pattern {
     Expr
+}
+
+Path {
+    Identifier
+    | Identifier '::' Path
 }
 
 Literal {

@@ -83,6 +83,13 @@ fn compilation_error_to_data(error: &CompilationError) -> Vec<ErrorData> {
             expr_span,
             format!("Expected tuple, got {expr_ty}"),
         )],
+        MutablePathsOverlap {
+            a_name, a_span, b_name, b_span, fn_name, fn_span
+        } => vec![
+            ErrorData::from_span(a_span, format!("Mutable path {a_name} (here) overlaps with {b_name} when calling function {fn_name}")),
+            ErrorData::from_span(b_span, format!("Mutable path {a_name} overlaps with {b_name} (here) when calling function {fn_name}")),
+            ErrorData::from_span(fn_span, format!("When calling function {fn_name}: mutable path {a_name} overlaps with {b_name}")),
+        ],
         Internal(msg) => vec![ErrorData::from_span(
             &Span::new(0, 0),
             format!("ICE: {msg}"),
