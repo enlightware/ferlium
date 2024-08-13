@@ -1416,7 +1416,7 @@ impl UnifiedTypeInference {
             EnvStore(node) => {
                 self.substitute_node(&mut node.node, &node.ty_scheme.quantifiers);
                 self.substitute_in_type_scheme(&mut node.ty_scheme);
-            },
+            }
             EnvLoad(_) => {}
             Block(nodes) => self.substitute_nodes(nodes, ignore),
             Assign(assignment) => {

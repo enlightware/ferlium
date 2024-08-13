@@ -61,35 +61,35 @@ Function -> Module
 
 Expr -> Expr
     : Expr '+' Expr
-        { Expr::new(StaticApply(ustr("@b+"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@b+"), vec![$1, $3]), $span) }
     | Expr '-' Expr
-        { Expr::new(StaticApply(ustr("@b-"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@b-"), vec![$1, $3]), $span) }
     | Expr '*' Expr
-        { Expr::new(StaticApply(ustr("@b*"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@b*"), vec![$1, $3]), $span) }
     | Expr '/' Expr
-        { Expr::new(StaticApply(ustr("@b/"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@b/"), vec![$1, $3]), $span) }
     | Expr '%' Expr
-        { Expr::new(StaticApply(ustr("@b%"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@b%"), vec![$1, $3]), $span) }
     | Expr 'or' Expr
-        { Expr::new(StaticApply(ustr("@or"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@or"), vec![$1, $3]), $span) }
     | Expr 'and' Expr
-        { Expr::new(StaticApply(ustr("@and"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@and"), vec![$1, $3]), $span) }
     | '-' Expr %prec U_MINUS
-        { Expr::new(StaticApply(ustr("@u-"), vec![$2]), $span) }
+        { Expr::new(StaticApply(ustr("std::@u-"), vec![$2]), $span) }
     | 'not' Expr
-        { Expr::new(StaticApply(ustr("@not"), vec![$2]), $span) }
+        { Expr::new(StaticApply(ustr("std::@not"), vec![$2]), $span) }
     | Expr '==' Expr
-        { Expr::new(StaticApply(ustr("@=="), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@=="), vec![$1, $3]), $span) }
     | Expr '!=' Expr
-        { Expr::new(StaticApply(ustr("@!="), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@!="), vec![$1, $3]), $span) }
     | Expr '<' Expr
-        { Expr::new(StaticApply(ustr("@<"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@<"), vec![$1, $3]), $span) }
     | Expr '<=' Expr
-        { Expr::new(StaticApply(ustr("@<="), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@<="), vec![$1, $3]), $span) }
     | Expr '>' Expr
-        { Expr::new(StaticApply(ustr("@>"), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@>"), vec![$1, $3]), $span) }
     | Expr '>=' Expr
-        { Expr::new(StaticApply(ustr("@>="), vec![$1, $3]), $span) }
+        { Expr::new(StaticApply(ustr("std::@>="), vec![$1, $3]), $span) }
     | Expr '=' Expr
         { Expr::new(Assign(B::new($1), lex_span($2), B::new($3)), $span) }
     | 'if' Expr '{' Expr '}' 'else' '{' Expr '}'

@@ -292,10 +292,7 @@ where
         let arg_ty = Type::variable_id(0);
         let o_ty = Type::primitive::<O>();
         ModuleFunction {
-            ty_scheme: TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-                &[arg_ty],
-                o_ty,
-            )),
+            ty_scheme: TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[arg_ty], o_ty)),
             code: Rc::new(RefCell::new(Box::new(UnaryNativeFnVP(f, PhantomData)))),
             spans: None,
         }
@@ -326,7 +323,6 @@ where
         writeln!(f, "{}native @ {:p}", indent_str, &self.0)
     }
 }
-
 
 pub struct BinaryNativeFn<
     A: Clone + 'static,
@@ -550,10 +546,8 @@ where
     pub fn description_gen0_gen0(f: F) -> ModuleFunction {
         let arg_ty = Type::variable_id(0);
         let o_ty = Type::primitive::<O>();
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-            &[arg_ty, arg_ty],
-            o_ty,
-        ));
+        let ty_scheme =
+            TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[arg_ty, arg_ty], o_ty));
         Self::description_with_ty_scheme(f, ty_scheme)
     }
 

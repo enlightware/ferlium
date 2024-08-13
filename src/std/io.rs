@@ -7,8 +7,6 @@ fn log(value: &Value) {
 }
 
 pub fn add_to_module(to: &mut Module) {
-    to.functions.insert(
-        ustr("log"),
-        UnaryNativeFnVP::description(log),
-    );
+    to.functions
+        .insert(ustr("log"), UnaryNativeFnVP::description(log));
 }

@@ -3,6 +3,7 @@
 ### Language features
 
 - Record types
+- Recursive modules
 - Effects
 - Type classes
 - Co-routine/async
@@ -17,8 +18,8 @@
 
 ### Compiler features
 
-- Execution
 - Effect checking and inference
+- Better parsing error messages
 - Optimisations
 - Just in time compilation
 

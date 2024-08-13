@@ -51,10 +51,14 @@ pub fn add_to_module(to: &mut Module) {
     // Generic equalities and inequalities
     to.functions.insert(
         ustr("@=="),
-        BinaryNativeFnVVP::description_gen0_gen0(std::cmp::PartialEq::eq as fn(&Value, &Value) -> bool),
+        BinaryNativeFnVVP::description_gen0_gen0(
+            std::cmp::PartialEq::eq as fn(&Value, &Value) -> bool,
+        ),
     );
     to.functions.insert(
         ustr("@!="),
-        BinaryNativeFnVVP::description_gen0_gen0(std::cmp::PartialEq::ne as fn(&Value, &Value) -> bool),
+        BinaryNativeFnVVP::description_gen0_gen0(
+            std::cmp::PartialEq::ne as fn(&Value, &Value) -> bool,
+        ),
     );
 }

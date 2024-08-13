@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use lrpar::Span;
 use ustr::Ustr;
 
@@ -89,10 +90,23 @@ impl<'m> TypingEnv<'m> {
         name: Ustr,
         span: Span,
     ) -> Result<&'m ModuleFunction, InternalCompilationError> {
-        // TODO: add support for looking up in other modules with qualified path
         self.module_env
             .current
             .get_function(name, self.module_env.others)
+            .or_else(|| {
+                let path = name.as_str().split("::").next_tuple();
+                if let Some(path) = path {
+                    let (module_name, function_name) = path;
+                    self.module_env
+                        .others
+                        .get(&Ustr::from(module_name))
+                        .and_then(|module| {
+                            module.get_function(Ustr::from(function_name), self.module_env.others)
+                        })
+                } else {
+                    None
+                }
+            })
             .ok_or(InternalCompilationError::FunctionNotFound(span))
     }
 }
