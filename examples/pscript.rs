@@ -164,7 +164,11 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
-        MutablePathsOverlap { a_span, b_span, fn_span } => {
+        MutablePathsOverlap {
+            a_span,
+            b_span,
+            fn_span,
+        } => {
             let min_pos = a_span.start().min(b_span.start());
             let offset = start_of_line_of(src, min_pos);
             let a_name = &data.1[span_range(*a_span)];

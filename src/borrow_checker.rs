@@ -93,8 +93,10 @@ fn check_arguments(
             let arg_i = &arguments[*arg_i];
             let arg_j = &arguments[*arg_j];
             if do_paths_overlap(arg_i, arg_j) {
-                return Err(InternalCompilationError::MutablePathsOverlap{
-                    a_span: arg_i.span, b_span: arg_j.span, fn_span
+                return Err(InternalCompilationError::MutablePathsOverlap {
+                    a_span: arg_i.span,
+                    b_span: arg_j.span,
+                    fn_span,
                 });
             }
         }

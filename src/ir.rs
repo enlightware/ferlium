@@ -690,7 +690,7 @@ impl Node {
     }
 
     /// Evaluate this node and return the result.
-    pub fn eval(&self, ) -> EvalResult {
+    pub fn eval(&self) -> EvalResult {
         let mut ctx = EvalCtx::new();
         self.eval_with_ctx(&mut ctx)
     }
@@ -767,7 +767,10 @@ impl Node {
                 Ok(Value::native(array::Array::from_vec(values)))
             }
             Index(array, index) => {
-                let index = index.eval_with_ctx(ctx)?.into_primitive_ty::<isize>().unwrap();
+                let index = index
+                    .eval_with_ctx(ctx)?
+                    .into_primitive_ty::<isize>()
+                    .unwrap();
                 let mut array = array
                     .eval_with_ctx(ctx)?
                     .into_primitive_ty::<array::Array>()

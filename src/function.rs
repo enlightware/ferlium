@@ -108,7 +108,9 @@ impl Callable for ScriptFunction {
         ctx.environment.extend(args);
         ctx.recursion += 1;
         if ctx.recursion >= ctx.recursion_limit {
-            return Err(RuntimeError::RecursionLimitExceeded { limit: ctx.recursion_limit });
+            return Err(RuntimeError::RecursionLimitExceeded {
+                limit: ctx.recursion_limit,
+            });
         }
         let ret = self.code.eval_with_ctx(ctx)?;
         ctx.recursion -= 1;

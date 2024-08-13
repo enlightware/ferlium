@@ -101,7 +101,11 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
             InvalidTupleProjection { expr_ty, .. } => {
                 write!(f, "Expected tuple, got \"{}\"", expr_ty.format_with(env))
             }
-            MutablePathsOverlap { a_span, b_span, fn_span } => {
+            MutablePathsOverlap {
+                a_span,
+                b_span,
+                fn_span,
+            } => {
                 write!(
                     f,
                     "Mutable paths overlap: {} and {} when calling {}",
@@ -199,7 +203,15 @@ impl CompilationError {
                 expr_span,
                 index_span,
             },
-            MutablePathsOverlap { a_span, b_span, fn_span } => Self::MutablePathOverlap { a_span, b_span, fn_span },
+            MutablePathsOverlap {
+                a_span,
+                b_span,
+                fn_span,
+            } => Self::MutablePathOverlap {
+                a_span,
+                b_span,
+                fn_span,
+            },
             Internal(msg) => Self::Internal(msg),
         }
     }
