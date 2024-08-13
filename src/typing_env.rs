@@ -3,7 +3,6 @@ use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
-    error::InternalCompilationError,
     module::{ModuleEnv, ModuleFunction},
     mutability::MutType,
     r#type::{FnArgType, Type},
@@ -74,22 +73,16 @@ impl<'m> TypingEnv<'m> {
     pub fn get_variable_index_and_type_scheme(
         &self,
         name: Ustr,
-        span: Span,
-    ) -> Result<(usize, &TypeScheme<Type>, MutType), InternalCompilationError> {
+    ) -> Option<(usize, &TypeScheme<Type>, MutType)> {
         self.locals
             .iter()
             .rev()
             .position(|local| local.name == name)
             .map(|rev_index| self.locals.len() - 1 - rev_index)
             .map(|index| (index, &self.locals[index].ty, self.locals[index].mutable))
-            .ok_or(InternalCompilationError::VariableNotFound(span))
     }
 
-    pub fn get_function(
-        &'m self,
-        name: Ustr,
-        span: Span,
-    ) -> Result<&'m ModuleFunction, InternalCompilationError> {
+    pub fn get_function(&'m self, name: Ustr) -> Option<&'m ModuleFunction> {
         self.module_env
             .current
             .get_function(name, self.module_env.others)
@@ -107,6 +100,5 @@ impl<'m> TypingEnv<'m> {
                     None
                 }
             })
-            .ok_or(InternalCompilationError::FunctionNotFound(span))
     }
 }

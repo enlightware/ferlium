@@ -19,7 +19,7 @@ pub enum MustBeMutableContext {
 /// Compilation error, for internal use
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InternalCompilationError {
-    VariableNotFound(Span),
+    SymbolNotFound(Span),
     FunctionNotFound(Span),
     MustBeMutable(Span, Span, MustBeMutableContext),
     IsNotSubtype(Type, Span, Type, Span),
@@ -48,9 +48,9 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
         let (env, source) = self.data;
         use InternalCompilationError::*;
         match self.value {
-            VariableNotFound(span) => {
+            SymbolNotFound(span) => {
                 let name = &source[span.start()..span.end()];
-                write!(f, "Variable not found: {}", name)
+                write!(f, "Variable or function not found: {}", name)
             }
             FunctionNotFound(span) => {
                 let name = &source[span.start()..span.end()];
@@ -133,7 +133,7 @@ impl CompilationError {
     pub fn from_internal(error: InternalCompilationError, env: &ModuleEnv<'_>, src: &str) -> Self {
         use InternalCompilationError::*;
         match error {
-            VariableNotFound(span) => {
+            SymbolNotFound(span) => {
                 let name = &src[span.start()..span.end()];
                 Self::VariableNotFound(name.to_string(), span)
             }

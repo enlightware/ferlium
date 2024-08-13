@@ -196,12 +196,25 @@ impl TypeInference {
         let (node, ty, mut_ty) = match &expr.kind {
             Literal(value, ty) => (K::Literal(value.clone()), *ty, MutType::constant()),
             Variable(name) => {
-                // Retrieve the index and the type of the variable from the environment
-                let (index, ty_scheme, mut_ty) =
-                    env.get_variable_index_and_type_scheme(*name, expr.span)?;
-                let (var_ty, _) = ty_scheme.instantiate(self);
-                let node = K::EnvLoad(index);
-                (node, var_ty, mut_ty)
+                // Retrieve the index and the type of the variable from the environment, if it exists
+                if let Some((index, ty_scheme, mut_ty)) =
+                    env.get_variable_index_and_type_scheme(*name)
+                {
+                    let (var_ty, _) = ty_scheme.instantiate(self);
+                    let node = K::EnvLoad(index);
+                    (node, var_ty, mut_ty)
+                }
+                // Retrieve the function from the environment, if it exists
+                else if let Some(function) = env.get_function(*name) {
+                    let (fn_ty, _) = function.ty_scheme.instantiate(self);
+                    let value_fn = Value::Function(FunctionRef::new_weak(&function.code));
+                    let node = K::Literal(value_fn);
+                    (node, Type::function_type(fn_ty), MutType::constant())
+                }
+                // Otherwise, the variable is not found
+                else {
+                    return Err(InternalCompilationError::SymbolNotFound(expr.span));
+                }
             }
             LetVar((name, name_span), mutable, let_expr) => {
                 let (node, ty_scheme) = if mutable.into() {
@@ -453,13 +466,17 @@ impl TypeInference {
         args: &[Expr],
     ) -> Result<(NodeKind, Type, MutType), InternalCompilationError> {
         // Get the function and its type
-        let function = env.get_function(name, span)?;
+        let function = env
+            .get_function(name)
+            .ok_or(InternalCompilationError::FunctionNotFound(span))?;
         // Instantiate its type scheme
-        let (inst_fn_ty, _subst) = function.ty_scheme.instantiate(self);
+        let (inst_fn_ty, _) = function.ty_scheme.instantiate(self);
         // Get the code and make sure the types of its arguments match the expected types
         let args_nodes = self.check_exprs(env, args, &inst_fn_ty.args, span)?;
-        // Build and return the function node
-        let function = env.get_function(name, span)?;
+        // Build and return the function node, get back the function to avoid re-borrowing
+        let function = env
+            .get_function(name)
+            .expect("function not found any more after checking");
         let ret_ty = inst_fn_ty.ret;
         let node = ir::NodeKind::StaticApply(B::new(ir::StaticApplication {
             function: FunctionRef::new_weak(&function.code),

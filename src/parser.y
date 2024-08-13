@@ -106,8 +106,8 @@ Expr -> Expr
         { error("Return statements are not yet supported", $span) }
     | '(' Expr ')'
         { $2 }
-    | 'IDENT'
-        { Expr::new(Variable(s($1, $lexer)), $span) }
+    | Path
+        { Expr::new(Variable(ustr($lexer.span_str($span))), $span) }
     | Literal
         { $1 }
     | 'let' 'IDENT' '=' Expr
@@ -141,6 +141,13 @@ Expr -> Expr
     ;
 
 // TODO: add enum, add more notations for float
+
+Path -> ()
+    : 'IDENT'
+        { () }
+    | 'IDENT' '::' Path
+        { () }
+    ;
 
 ExprOptComma -> Expr
     : Expr ','

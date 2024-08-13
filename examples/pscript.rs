@@ -29,11 +29,11 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
     let env = &data.0;
     let src = data.1;
     match error {
-        VariableNotFound(span) => {
+        SymbolNotFound(span) => {
             let offset = start_of_line_of(src, span.start());
             let name = &data.1[span_range(*span)];
             Report::build(ReportKind::Error, "input", offset)
-                .with_message(format!("Variable {} not found.", name.fg(Color::Blue)))
+                .with_message(format!("Variable or function {} not found.", name.fg(Color::Blue)))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
