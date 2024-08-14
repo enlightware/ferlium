@@ -14,7 +14,7 @@ use crate::{
     function::FunctionRef,
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{FnArgType, FnType, Type, TypeLike, TypeVar, TypeVarSubstitution},
-    std::{array, range},
+    std::{array, math::int_type, range},
     type_scheme::{DisplayStyle, TypeScheme},
     value::{NativeValue, Value},
 };
@@ -249,6 +249,7 @@ pub struct Case {
 pub struct Iteration {
     pub iterator: Node,
     pub body: Node,
+    pub var_name_span: Span,
 }
 
 /// The kind-specific part of the expression-based execution tree
@@ -555,6 +556,11 @@ impl Node {
                 case.default.variable_type_annotations(style, result, env);
             }
             Iterate(iteration) => {
+                // TODO: once the iterator is generalized, get the type from it!
+                result.push((
+                    iteration.var_name_span.end(),
+                    format!(": {}", int_type().format_with(env)),
+                ));
                 iteration
                     .iterator
                     .variable_type_annotations(style, result, env);
@@ -793,6 +799,7 @@ impl Node {
                 case.default.eval_with_ctx(ctx)
             }
             Iterate(iteration) => {
+                // TODO: use a more generic type for iterator!
                 let iterator = iteration
                     .iterator
                     .eval_with_ctx(ctx)?

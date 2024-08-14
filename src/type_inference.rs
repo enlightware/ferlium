@@ -448,7 +448,12 @@ impl TypeInference {
                 let body =
                     self.check_expr(env, body, Type::unit(), MutType::constant(), body.span)?;
                 env.locals.truncate(env_size);
-                let node = K::Iterate(B::new(ir::Iteration { iterator, body }));
+                let var_name_span = var_name.1;
+                let node = K::Iterate(B::new(ir::Iteration {
+                    iterator,
+                    body,
+                    var_name_span,
+                }));
                 (node, Type::unit(), MutType::constant())
             }
             Error(msg) => {
