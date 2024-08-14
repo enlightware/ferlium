@@ -32,6 +32,8 @@ Module -> (Module, Option<Expr>)
         { ( $1, None ) }
     | Expr
         { ( Module::default(), Some($1) ) }
+    |
+        { ( Module::default(), None ) }
     ;
 
 FunctionsOrTypes -> Module
