@@ -270,12 +270,6 @@ fn assignment() {
 }
 
 #[test]
-fn mutability_soundness() {
-    fail_compilation("let f = |x| (x[0] = 1); let a = [1]; f(a)").expect_must_be_mutable();
-    // TODO: add borrow checker tests
-}
-
-#[test]
 fn for_loops() {
     assert_eq!(run("for i in 0..3 { () }"), unit());
     assert_eq!(run("var s = 0; for i in 1..4 { s = s + i }; s"), int!(6));
@@ -288,6 +282,35 @@ fn for_loops() {
         run("var a = []; for i in 5..2 { array_append(a, i) }; a"),
         int_a![5, 4, 3]
     );
+}
+
+#[test]
+fn first_class_functions() {
+    assert_eq!(
+        run(r#"fn add(x, y) {
+            x + y
+        }
+        let x = add;
+        x(1, 2)"#),
+        int!(3)
+    );
+    assert_eq!(
+        run(r#"fn add(x, y) {
+            x + y
+        }
+        fn sub(x, y) {
+            x - y
+        }
+        var x = add;
+        x = sub;
+        x(1, 2)"#),
+        int!(-1)
+    );
+}
+
+#[test]
+fn mutability_soundness() {
+    fail_compilation("let f = |x| (x[0] = 1); let a = [1]; f(a)").expect_must_be_mutable();
 }
 
 #[test]
