@@ -32,8 +32,6 @@ fn quicksort() {
                 if a[j] < pivot {
                     swap(a, i, j);
                     i = i + 1
-                } else {
-                    ()
                 }
             };
 
