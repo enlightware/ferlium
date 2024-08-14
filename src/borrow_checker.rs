@@ -52,13 +52,11 @@ impl Path {
 
 /// Returns whether the two nodes' path to memory are overlapping.
 /// This assumes the nodes are path in the first place.
-fn do_paths_overlap(a: &Node, b: &Node) -> bool {
-    let a = Path::from_node(a);
-    let b = Path::from_node(b);
+fn do_paths_overlap(a: &Path, b: &Path) -> bool {
     if a.variable != b.variable {
         return false;
     }
-    for (a, b) in a.parts.into_iter().zip(b.parts.into_iter()) {
+    for (a, b) in a.parts.iter().zip(b.parts.iter()) {
         use PathPart::*;
         match (a, b) {
             (Projection(a), Projection(b)) => {
@@ -83,19 +81,25 @@ fn check_arguments(
     arguments: &[Node],
     fn_span: Span,
 ) -> Result<(), InternalCompilationError> {
-    let in_out_indices: Vec<_> = arg_types
+    // Collect all mutable arguments indices and their paths.
+    let in_out_args: Vec<_> = arg_types
         .iter()
         .enumerate()
-        .filter_map(|(i, ty)| if ty.inout.is_mutable() { Some(i) } else { None })
+        .filter_map(|(i, ty)| {
+            if ty.inout.is_mutable() {
+                Some((i, Path::from_node(&arguments[i])))
+            } else {
+                None
+            }
+        })
         .collect();
-    for (i, arg_i) in in_out_indices.iter().enumerate() {
-        for arg_j in in_out_indices.iter().skip(i + 1) {
-            let arg_i = &arguments[*arg_i];
-            let arg_j = &arguments[*arg_j];
-            if do_paths_overlap(arg_i, arg_j) {
+    // Compare all mutable arguments' paths pairwise.
+    for (i, arg_i) in in_out_args.iter().enumerate() {
+        for arg_j in in_out_args.iter().skip(i + 1) {
+            if do_paths_overlap(&arg_i.1, &arg_j.1) {
                 return Err(InternalCompilationError::MutablePathsOverlap {
-                    a_span: arg_i.span,
-                    b_span: arg_j.span,
+                    a_span: arguments[arg_i.0].span,
+                    b_span: arguments[arg_j.0].span,
                     fn_span,
                 });
             }

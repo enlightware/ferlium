@@ -278,7 +278,11 @@ impl Display for RuntimeError {
             DivisionByZero => write!(f, "Division by zero"),
             RemainderByZero => write!(f, "Remainder by zero"),
             ArrayAccessOutOfBounds { index, len } => {
-                write!(f, "Array access out of bounds: index {} for length {}", index, len)
+                write!(
+                    f,
+                    "Array access out of bounds: index {} for length {}",
+                    index, len
+                )
             }
             RecursionLimitExceeded { limit } => {
                 write!(f, "Recursion limit exceeded: limit is {}", limit)
