@@ -8,6 +8,7 @@ import { demoCodes } from './demo-codes';
 
 const editor = ref<typeof CodeEditor>();
 const runOutput = ref("Press Run or Ctrl/Cmd+Enter to execute the code.");
+const isRunDisabled = ref(false);
 
 function updateEditor(data: { value: string, index: number }) {
 	if (editor.value) {
@@ -20,11 +21,18 @@ function runCode() {
 		runOutput.value = editor.value.runCode();
 	}
 }
+
+function setRunAvailability(status: boolean) {
+	isRunDisabled.value = !status;
+}
 </script>
 
 <template>
 	<div class="toolbar">
-		<SimpleButton @click="runCode">
+		<SimpleButton
+			:disabled="isRunDisabled"
+			@click="runCode"
+		>
 			Run
 		</SimpleButton>
 		<DropdownSelect
@@ -35,6 +43,7 @@ function runCode() {
 	<CodeEditor
 		ref="editor"
 		@run-code="runCode()"
+		@set-run-availability="setRunAvailability"
 	/>
 	<ConsoleOutput :text="runOutput" />
 </template>

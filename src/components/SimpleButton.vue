@@ -1,11 +1,17 @@
 <script setup lang="ts">
+defineProps<{
+	disabled: boolean
+}>();
 const emit = defineEmits<{
 	click: [event: Event]
 }>();
 </script>
 
 <template>
-	<button @click="emit('click', $event)">
+	<button
+		:disabled="disabled"
+		@click="emit('click', $event)"
+	>
 		<slot /> <!-- Allows content to be inserted inside the button -->
 	</button>
 </template>
@@ -21,5 +27,10 @@ button {
 }
 button:hover {
 	background-color: #0056b3;
+}
+button:disabled {
+	background-color: #cccccc;
+	cursor: default;
+	color: #666666;
 }
 </style>

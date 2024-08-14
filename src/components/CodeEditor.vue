@@ -19,7 +19,8 @@ const diagnostics: Diagnostic[] = [];
 const compiler = new Compiler();
 
 const emit = defineEmits<{
-	runCode: []
+	runCode: [],
+	setRunAvailability: [status: boolean],
 }>();
 
 const myKeymap = keymap.of([
@@ -69,9 +70,11 @@ function processUpdate(update: ViewUpdate) {
 		if (errorData !== undefined) {
 			fillDiagnostics(errorData);
 			setAnnotations(view, []);
+			emit("setRunAvailability", false);
 		} else {
 			diagnostics.length = 0;
 			setAnnotations(view, compiler.get_annotations());
+			emit("setRunAvailability", true);
 		}
 	}
 }
