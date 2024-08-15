@@ -10,6 +10,7 @@ pub mod math;
 pub mod mem;
 pub mod option;
 pub mod range;
+pub mod string;
 
 pub fn std_module() -> Module {
     let mut module = Module::default();

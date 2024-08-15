@@ -1,7 +1,7 @@
 use std::fmt;
 
 use painturscript::{
-    function::{BinaryNativeFn, FunctionRef},
+    function::{BinaryNativeFnNNI, FunctionRef},
     module::{FmtWithModuleEnv, ModuleEnv, Modules},
     r#type::{bare_native_type, store_types, Type, TypeKind},
     std::{
@@ -88,8 +88,12 @@ fn main() {
 
     // functions
     let functions = [
-        BinaryNativeFn::description(std::ops::Add::add as fn(isize, isize) -> isize),
-        BinaryNativeFn::description(std::ops::Sub::sub as fn(isize, isize) -> isize),
+        BinaryNativeFnNNI::description_with_default_ty(
+            std::ops::Add::add as fn(isize, isize) -> isize,
+        ),
+        BinaryNativeFnNNI::description_with_default_ty(
+            std::ops::Sub::sub as fn(isize, isize) -> isize,
+        ),
     ];
     let add_fn_ty = functions[0].ty_scheme.clone();
     println!("{}", add_fn_ty.display_rust_style(&module_env));

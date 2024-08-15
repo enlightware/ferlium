@@ -5,7 +5,7 @@ use ustr::ustr;
 
 use crate::{
     error::RuntimeError,
-    function::{BinaryNativeFn, TryBinaryNativeFn, UnaryNativeFn},
+    function::{BinaryNativeFnNNF, BinaryNativeFnNNI, UnaryNativeFnNI},
     module::Module,
     r#type::Type,
     value::NativeDisplay,
@@ -42,19 +42,25 @@ pub fn add_to_module(to: &mut Module) {
     // Computations
     to.functions.insert(
         ustr("@b+"),
-        BinaryNativeFn::description(std::ops::Add::add as fn(isize, isize) -> isize),
+        BinaryNativeFnNNI::description_with_default_ty(
+            std::ops::Add::add as fn(isize, isize) -> isize,
+        ),
     );
     to.functions.insert(
         ustr("@b-"),
-        BinaryNativeFn::description(std::ops::Sub::sub as fn(isize, isize) -> isize),
+        BinaryNativeFnNNI::description_with_default_ty(
+            std::ops::Sub::sub as fn(isize, isize) -> isize,
+        ),
     );
     to.functions.insert(
         ustr("@b*"),
-        BinaryNativeFn::description(std::ops::Mul::mul as fn(isize, isize) -> isize),
+        BinaryNativeFnNNI::description_with_default_ty(
+            std::ops::Mul::mul as fn(isize, isize) -> isize,
+        ),
     );
     to.functions.insert(
         ustr("@b/"),
-        TryBinaryNativeFn::description(|lhs: isize, rhs: isize| {
+        BinaryNativeFnNNF::description_with_default_ty(|lhs: isize, rhs: isize| {
             if rhs == 0 {
                 Err(DivisionByZero)
             } else {
@@ -64,7 +70,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.functions.insert(
         ustr("@b%"),
-        TryBinaryNativeFn::description(|lhs: isize, rhs: isize| {
+        BinaryNativeFnNNF::description_with_default_ty(|lhs: isize, rhs: isize| {
             if rhs == 0 {
                 Err(RemainderByZero)
             } else {
@@ -74,24 +80,32 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.functions.insert(
         ustr("@u-"),
-        UnaryNativeFn::description(std::ops::Neg::neg as fn(isize) -> isize),
+        UnaryNativeFnNI::description_with_default_ty(std::ops::Neg::neg as fn(isize) -> isize),
     );
 
     // Comparisons
     to.functions.insert(
         ustr("@<"),
-        BinaryNativeFn::description(|lhs: isize, rhs: isize| std::cmp::PartialOrd::lt(&lhs, &rhs)),
+        BinaryNativeFnNNI::description_with_default_ty(|lhs: isize, rhs: isize| {
+            std::cmp::PartialOrd::lt(&lhs, &rhs)
+        }),
     );
     to.functions.insert(
         ustr("@<="),
-        BinaryNativeFn::description(|lhs: isize, rhs: isize| std::cmp::PartialOrd::le(&lhs, &rhs)),
+        BinaryNativeFnNNI::description_with_default_ty(|lhs: isize, rhs: isize| {
+            std::cmp::PartialOrd::le(&lhs, &rhs)
+        }),
     );
     to.functions.insert(
         ustr("@>"),
-        BinaryNativeFn::description(|lhs: isize, rhs: isize| std::cmp::PartialOrd::gt(&lhs, &rhs)),
+        BinaryNativeFnNNI::description_with_default_ty(|lhs: isize, rhs: isize| {
+            std::cmp::PartialOrd::gt(&lhs, &rhs)
+        }),
     );
     to.functions.insert(
         ustr("@>="),
-        BinaryNativeFn::description(|lhs: isize, rhs: isize| std::cmp::PartialOrd::ge(&lhs, &rhs)),
+        BinaryNativeFnNNI::description_with_default_ty(|lhs: isize, rhs: isize| {
+            std::cmp::PartialOrd::ge(&lhs, &rhs)
+        }),
     );
 }

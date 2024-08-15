@@ -2,7 +2,7 @@ use std::fmt;
 
 use ustr::ustr;
 
-use crate::{function::BinaryNativeFn, module::Module, r#type::Type, value::NativeDisplay};
+use crate::{function::BinaryNativeFnNNI, module::Module, r#type::Type, value::NativeDisplay};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Range {
@@ -90,6 +90,6 @@ pub fn add_to_module(to: &mut Module) {
     // Functions
     to.functions.insert(
         ustr("range_iterator_new"),
-        BinaryNativeFn::description(RangeIterator::new),
+        BinaryNativeFnNNI::description_with_default_ty(RangeIterator::new),
     );
 }

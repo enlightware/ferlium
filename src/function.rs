@@ -131,25 +131,131 @@ impl Callable for ScriptFunction {
     }
 }
 
-// native functions
+// Helper traits and structs for defining native functions
 
-pub struct NullaryNativeFn<O: Debug + Clone + Eq + NativeDisplay + 'static, F: Fn() -> O + 'static>(
-    F,
-    PhantomData<O>,
-);
+/// A trait that must be satisfied by the output of a native function.
+/// This is used to ensure that the output can be converted to a `Value`.
+pub trait NativeOutput: Debug + Clone + Eq + NativeDisplay + 'static {}
+impl<T: Debug + Clone + Eq + NativeDisplay + 'static> NativeOutput for T {}
 
-impl<O: Debug + Clone + Eq + NativeDisplay + 'static, F: Fn() -> O + 'static>
-    NullaryNativeFn<O, F>
-{
+/// Marker struct to declare argument by value to native functions.
+pub struct NatVal<T> {
+    _marker: PhantomData<T>,
+}
+
+/// Marker struct to declare argument by mutable reference to native functions.
+pub struct NatMut<T> {
+    _marker: PhantomData<T>,
+}
+
+/// A trait that can extract an argument from a `ValOrMut` and a `CallCtx`.
+/// This is necessary due to the lack of specialization in stable Rust.
+pub trait ArgExtractor {
+    type Output<'a>;
+    const MUTABLE: bool;
+    fn extract(arg: ValOrMut, ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError>;
+    fn default_ty() -> Type;
+}
+
+impl ArgExtractor for Value {
+    type Output<'a> = Value;
+    const MUTABLE: bool = false;
+    fn extract(arg: ValOrMut, _ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+        Ok(arg.into_val().unwrap())
+    }
+    fn default_ty() -> Type {
+        Type::variable_id(0)
+    }
+}
+
+impl ArgExtractor for &'_ mut Value {
+    type Output<'a> = &'a mut Value;
+    const MUTABLE: bool = true;
+    fn extract(arg: ValOrMut, ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+        arg.as_place().target_mut(ctx)
+    }
+    fn default_ty() -> Type {
+        Type::variable_id(0)
+    }
+}
+
+impl<T: Clone + 'static> ArgExtractor for NatVal<T> {
+    type Output<'a> = T;
+    const MUTABLE: bool = false;
+    fn extract(arg: ValOrMut, _ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+        Ok(arg.into_primitive::<T>().unwrap())
+    }
+    fn default_ty() -> Type {
+        Type::primitive::<T>()
+    }
+}
+
+impl<T: Clone + 'static> ArgExtractor for NatMut<T> {
+    type Output<'a> = &'a mut T;
+    const MUTABLE: bool = true;
+    fn extract(arg: ValOrMut, ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+        Ok(arg.as_mut_primitive::<T>(ctx)?.unwrap())
+    }
+    fn default_ty() -> Type {
+        Type::primitive::<T>()
+    }
+}
+
+/// Marker struct to declare the output of a native function as raw (the native type itself).
+pub struct Plain<T> {
+    _marker: PhantomData<T>,
+}
+
+/// Marker struct to declare the output of a native function as a fallible result.
+pub struct Fallible<T> {
+    _marker: PhantomData<T>,
+}
+
+/// A trait to dispatch over the fallibility of a native function
+pub trait OutputBuilder {
+    type NativeTy: Clone;
+    type Input;
+    fn build_output(result: Self::Input) -> EvalResult;
+}
+
+impl<O: NativeOutput> OutputBuilder for Plain<O> {
+    type NativeTy = O;
+    type Input = O;
+    fn build_output(result: Self::Input) -> EvalResult {
+        Ok(Value::Native(Box::new(result)))
+    }
+}
+
+impl<O: NativeOutput> OutputBuilder for Fallible<O> {
+    type NativeTy = O;
+    type Input = Result<O, RuntimeError>;
+    fn build_output(result: Self::Input) -> EvalResult {
+        result.map(|o| Value::Native(Box::new(o)))
+    }
+}
+
+// Shorthand names for native functions type aliases:
+// - N: Val<T> (native value)
+// - M: Mut<T> (native mutable reference)
+// - V: Value (generic value)
+// - W: &mut Value (mutable reference to generic value)
+// - I: infallible result
+// - F: fallible result
+
+// Native functions of various arities
+
+pub struct NullaryNativeFn<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static>(F, PhantomData<O>);
+
+impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<O, F> {
     pub fn new(f: F) -> Self {
         NullaryNativeFn(f, PhantomData)
     }
 
     pub fn description(f: F) -> ModuleFunction {
-        let o_ty = Type::primitive::<O>();
+        let o_ty = Type::primitive::<O::NativeTy>();
         ModuleFunction {
             ty_scheme: TypeScheme::new_just_type(FnType::new_by_val(&[], o_ty)),
-            code: Rc::new(RefCell::new(Box::new(NullaryNativeFn(f, PhantomData)))),
+            code: Rc::new(RefCell::new(Box::new(Self(f, PhantomData)))),
             spans: None,
         }
     }
@@ -157,12 +263,13 @@ impl<O: Debug + Clone + Eq + NativeDisplay + 'static, F: Fn() -> O + 'static>
 
 impl<O, F> Callable for NullaryNativeFn<O, F>
 where
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn() -> O,
+    O: OutputBuilder + 'static,
+    F: Fn() -> O::Input,
 {
     fn call(&self, _: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
-        Ok(Value::Native(Box::new((self.0)())))
+        O::build_output(self.0())
     }
+
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -170,154 +277,66 @@ where
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
+        writeln!(f, "{}nullary native @ {:p}", indent_str, &self.0)
     }
 }
 
+pub type NullaryNativeFnI<O, F> = NullaryNativeFn<Plain<O>, F>;
+
+// Unary
+
 pub struct UnaryNativeFn<
-    A: Clone + 'static,
-    O: Debug + Clone + Eq + 'static,
-    F: Fn(A) -> O + 'static,
+    A: ArgExtractor + 'static,
+    O: OutputBuilder + 'static,
+    F: for<'a> Fn(A::Output<'a>) -> O::Input + 'static,
 >(F, PhantomData<(A, O)>);
 
 impl<
-        A: Clone + 'static,
-        O: Debug + Clone + Eq + NativeDisplay + 'static,
-        F: Fn(A) -> O + 'static,
+        A: ArgExtractor + 'static,
+        O: OutputBuilder + 'static,
+        F: for<'a> Fn(A::Output<'a>) -> O::Input + 'static,
     > UnaryNativeFn<A, O, F>
 {
     pub fn new(f: F) -> Self {
         UnaryNativeFn(f, PhantomData)
     }
 
-    pub fn description(f: F) -> ModuleFunction {
-        let a_ty = Type::primitive::<A>();
-        let o_ty = Type::primitive::<O>();
-        let ty_scheme = TypeScheme::new_just_type(FnType::new_by_val(&[a_ty], o_ty));
-        Self::description_with_ty_scheme(f, ty_scheme)
-    }
-
     pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
         ModuleFunction {
             ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(UnaryNativeFn::new(f)))),
+            code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
             spans: None,
         }
+    }
+
+    pub fn description_with_ty(f: F, a_ty: Type) -> ModuleFunction {
+        let o_ty = Type::primitive::<O::NativeTy>();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            &[(a_ty, A::MUTABLE)],
+            o_ty,
+        ));
+        Self::description_with_ty_scheme(f, ty_scheme)
+    }
+
+    pub fn description_with_default_ty(f: F) -> ModuleFunction {
+        Self::description_with_ty(f, A::default_ty())
     }
 }
 
 impl<A, O, F> Callable for UnaryNativeFn<A, O, F>
 where
-    A: Clone + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn(A) -> O,
-{
-    fn call(&self, args: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
-        let a = args
-            .into_iter()
-            .next()
-            .unwrap()
-            .into_primitive::<A>()
-            .unwrap();
-
-        Ok(Value::Native(Box::new((self.0)(a))))
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
-    }
-}
-
-pub struct UnaryMutNativeFn<A, O, F>(F, PhantomData<(A, O)>);
-
-impl<A, O, F> UnaryMutNativeFn<A, O, F>
-where
-    A: Clone + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn(&mut A) -> O + 'static,
-{
-    pub fn new(f: F) -> Self {
-        UnaryMutNativeFn(f, PhantomData)
-    }
-
-    pub fn description(f: F) -> ModuleFunction {
-        let a_ty = Type::primitive::<A>();
-        let o_ty = Type::primitive::<O>();
-        let ty_scheme = TypeScheme::new_just_type(FnType::new_mut_resolved(&[(a_ty, true)], o_ty));
-        Self::description_with_ty_scheme(f, ty_scheme)
-    }
-
-    fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-        ModuleFunction {
-            ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(UnaryMutNativeFn::new(f)))),
-            spans: None,
-        }
-    }
-}
-
-impl<A, O, F> Callable for UnaryMutNativeFn<A, O, F>
-where
-    A: Clone + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn(&mut A) -> O,
+    A: ArgExtractor + 'static,
+    O: OutputBuilder + 'static,
+    F: for<'a> Fn(A::Output<'a>) -> O::Input,
 {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
         let mut args = args.into_iter();
-        let a = args.next().unwrap().as_mut_primitive::<A>(ctx)?.unwrap();
-        Ok(Value::Native(Box::new((self.0)(a))))
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
-    }
-}
-
-pub struct UnaryNativeFnVP<O, F>(F, PhantomData<O>);
-
-impl<F, O> UnaryNativeFnVP<O, F>
-where
-    F: Fn(&Value) -> O + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-{
-    pub fn new(f: F) -> Self {
-        UnaryNativeFnVP(f, PhantomData)
-    }
-
-    pub fn description(f: F) -> ModuleFunction {
-        let arg_ty = Type::variable_id(0);
-        let o_ty = Type::primitive::<O>();
-        ModuleFunction {
-            ty_scheme: TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[arg_ty], o_ty)),
-            code: Rc::new(RefCell::new(Box::new(UnaryNativeFnVP(f, PhantomData)))),
-            spans: None,
-        }
-    }
-}
-
-impl<O, F> Callable for UnaryNativeFnVP<O, F>
-where
-    F: Fn(&Value) -> O,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-{
-    fn call(&self, args: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
-        let mut args = args.into_iter();
         let a = args.next().unwrap();
-        let a = a.as_val().unwrap();
-        let o = self.0(a);
+        let a = A::extract(a, ctx)?;
 
-        Ok(Value::Native(Box::new(o)))
+        O::build_output((self.0)(a))
     }
+
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -325,257 +344,77 @@ where
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
+        writeln!(f, "{}unary native @ {:p}", indent_str, &self.0)
     }
 }
+
+// The arguments are by native value
+pub type UnaryNativeFnNI<A, O, F> = UnaryNativeFn<NatVal<A>, Plain<O>, F>;
+pub type UnaryNativeFnVI<O, F> = UnaryNativeFn<Value, Plain<O>, F>;
+
+// Binary
 
 pub struct BinaryNativeFn<
-    A: Clone + 'static,
-    B: Clone + 'static,
-    O: Debug + Clone + Eq + 'static,
-    F: Fn(A, B) -> O + 'static,
+    A: ArgExtractor + 'static,
+    B: ArgExtractor + 'static,
+    O: OutputBuilder + 'static,
+    F: for<'a> Fn(A::Output<'a>, B::Output<'a>) -> O::Input + 'static,
 >(F, PhantomData<(A, B, O)>);
 
 impl<
-        A: Clone + 'static,
-        B: Clone + 'static,
-        O: Debug + Clone + Eq + NativeDisplay + 'static,
-        F: Fn(A, B) -> O + 'static,
+        A: ArgExtractor + 'static,
+        B: ArgExtractor + 'static,
+        O: OutputBuilder + 'static,
+        F: for<'a> Fn(A::Output<'a>, B::Output<'a>) -> O::Input + 'static,
     > BinaryNativeFn<A, B, O, F>
 {
     pub fn new(f: F) -> Self {
         BinaryNativeFn(f, PhantomData)
     }
 
-    pub fn description(f: F) -> ModuleFunction {
-        let a_ty = Type::primitive::<A>();
-        let b_ty = Type::primitive::<B>();
-        let o_ty = Type::primitive::<O>();
-        let ty_scheme = TypeScheme::new_just_type(FnType::new_by_val(&[a_ty, b_ty], o_ty));
-        Self::description_with_ty_scheme(f, ty_scheme)
-    }
-
     pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
         ModuleFunction {
             ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(BinaryNativeFn::new(f)))),
+            code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
             spans: None,
         }
+    }
+
+    pub fn description_with_ty(f: F, a_ty: Type, b_ty: Type) -> ModuleFunction {
+        let o_ty = Type::primitive::<O::NativeTy>();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            &[(a_ty, A::MUTABLE), (b_ty, B::MUTABLE)],
+            o_ty,
+        ));
+        Self::description_with_ty_scheme(f, ty_scheme)
+    }
+
+    pub fn description_with_default_ty(f: F) -> ModuleFunction {
+        Self::description_with_ty(f, A::default_ty(), B::default_ty())
     }
 }
 
 impl<A, B, O, F> Callable for BinaryNativeFn<A, B, O, F>
 where
-    A: Clone + 'static,
-    B: Clone + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn(A, B) -> O,
-{
-    fn call(&self, args: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
-        let mut args = args.into_iter();
-        let a = args.next().unwrap().into_primitive::<A>().unwrap();
-        let b = args.next().unwrap().into_primitive::<B>().unwrap();
-
-        Ok(Value::Native(Box::new((self.0)(a, b))))
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
-    }
-}
-
-pub struct TryBinaryNativeFn<
-    A: Clone + 'static,
-    B: Clone + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn(A, B) -> Result<O, RuntimeError> + 'static,
->(F, PhantomData<(A, B, O)>);
-
-impl<
-        A: Clone + 'static,
-        B: Clone + 'static,
-        O: Debug + Clone + Eq + NativeDisplay + 'static,
-        F: Fn(A, B) -> Result<O, RuntimeError> + 'static,
-    > TryBinaryNativeFn<A, B, O, F>
-{
-    pub fn new(f: F) -> Self {
-        TryBinaryNativeFn(f, PhantomData)
-    }
-
-    pub fn description(f: F) -> ModuleFunction {
-        let a_ty = Type::primitive::<A>();
-        let b_ty = Type::primitive::<B>();
-        let o_ty = Type::primitive::<O>();
-        ModuleFunction {
-            ty_scheme: TypeScheme::new_just_type(FnType::new_by_val(&[a_ty, b_ty], o_ty)),
-            code: Rc::new(RefCell::new(Box::new(TryBinaryNativeFn(f, PhantomData)))),
-            spans: None,
-        }
-    }
-}
-
-impl<A, B, O, F> Callable for TryBinaryNativeFn<A, B, O, F>
-where
-    A: Clone + 'static,
-    B: Clone + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn(A, B) -> Result<O, RuntimeError>,
-{
-    fn call(&self, args: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
-        let mut args = args.into_iter();
-        let a = args.next().unwrap().into_primitive::<A>().unwrap();
-        let b = args.next().unwrap().into_primitive::<B>().unwrap();
-
-        (self.0)(a, b).map(|o| Value::Native(Box::new(o)))
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
-    }
-}
-
-pub struct BinaryPartialNativeFn<A, O, F>(F, PhantomData<(A, O)>);
-
-impl<
-        A: Clone + 'static,
-        O: Debug + Clone + Eq + NativeDisplay + 'static,
-        F: Fn(A, Value) -> O + 'static,
-    > BinaryPartialNativeFn<A, O, F>
-{
-    pub fn new(f: F) -> Self {
-        BinaryPartialNativeFn(f, PhantomData)
-    }
-
-    pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-        ModuleFunction {
-            ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(BinaryPartialNativeFn::new(f)))),
-            spans: None,
-        }
-    }
-}
-
-impl<A, O, F> Callable for BinaryPartialNativeFn<A, O, F>
-where
-    A: Clone + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn(A, Value) -> O,
-{
-    fn call(&self, args: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
-        let mut args = args.into_iter();
-        let a = args.next().unwrap().into_primitive::<A>().unwrap();
-        let b = args.next().unwrap().into_val().unwrap();
-
-        Ok(Value::Native(Box::new((self.0)(a, b))))
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
-    }
-}
-
-pub struct BinaryPartialMutNativeFn<A, O, F>(F, PhantomData<(A, O)>);
-
-impl<
-        A: Clone + 'static,
-        O: Debug + Clone + Eq + NativeDisplay + 'static,
-        F: Fn(&mut A, Value) -> O + 'static,
-    > BinaryPartialMutNativeFn<A, O, F>
-{
-    pub fn new(f: F) -> Self {
-        BinaryPartialMutNativeFn(f, PhantomData)
-    }
-
-    pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-        ModuleFunction {
-            ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(BinaryPartialMutNativeFn::new(f)))),
-            spans: None,
-        }
-    }
-}
-
-impl<A, O, F> Callable for BinaryPartialMutNativeFn<A, O, F>
-where
-    A: Clone + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-    F: Fn(&mut A, Value) -> O,
+    A: ArgExtractor + 'static,
+    B: ArgExtractor + 'static,
+    O: OutputBuilder + 'static,
+    F: for<'a> Fn(A::Output<'a>, B::Output<'a>) -> O::Input + 'static,
 {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
         let mut args = args.into_iter();
-        let a = args.next().unwrap().as_mut_primitive::<A>(ctx)?.unwrap();
-        let b = args.next().unwrap().into_val().unwrap();
-        Ok(Value::Native(Box::new((self.0)(a, b))))
-    }
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
-    }
-}
-
-pub struct BinaryNativeFnVVP<O, F>(F, PhantomData<O>);
-
-impl<F, O> BinaryNativeFnVVP<O, F>
-where
-    F: Fn(&Value, &Value) -> O + 'static,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-{
-    pub fn new(f: F) -> Self {
-        BinaryNativeFnVVP(f, PhantomData)
-    }
-
-    pub fn description_gen0_gen0(f: F) -> ModuleFunction {
-        let arg_ty = Type::variable_id(0);
-        let o_ty = Type::primitive::<O>();
-        let ty_scheme =
-            TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[arg_ty, arg_ty], o_ty));
-        Self::description_with_ty_scheme(f, ty_scheme)
-    }
-
-    pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-        ModuleFunction {
-            ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(BinaryNativeFnVVP(f, PhantomData)))),
-            spans: None,
-        }
-    }
-}
-
-impl<O, F> Callable for BinaryNativeFnVVP<O, F>
-where
-    F: Fn(&Value, &Value) -> O,
-    O: Debug + Clone + Eq + NativeDisplay + 'static,
-{
-    fn call(&self, args: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
-        let mut args = args.into_iter();
         let a = args.next().unwrap();
-        let a = a.as_val().unwrap();
+        // SAFETY: the borrow checker ensures that all mutable references are disjoint
+        let ctx_a = unsafe { &mut *(ctx as *mut CallCtx) };
+        let a = A::extract(a, ctx_a)?;
         let b = args.next().unwrap();
-        let b = b.as_val().unwrap();
-        let o = self.0(a, b);
+        // SAFETY: the borrow checker ensures that all mutable references are disjoint
+        let ctx_b = unsafe { &mut *(ctx as *mut CallCtx) };
+        let b = B::extract(b, ctx_b)?;
 
-        Ok(Value::Native(Box::new(o)))
+        O::build_output((self.0)(a, b))
     }
+
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -583,64 +422,13 @@ where
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
-        writeln!(f, "{}native @ {:p}", indent_str, &self.0)
+        writeln!(f, "{}binary native @ {:p}", indent_str, &self.0)
     }
 }
 
-// Note: disabled for now until we have a borrow checker
-
-// pub struct BinaryNativeFnMMP<O, F>(F, PhantomData<O>);
-
-// impl<F, O> BinaryNativeFnMMP<O, F>
-// where
-//     F: Fn(&mut Value, &mut Value) -> O + 'static,
-//     O: Debug + Clone + Eq + NativeDisplay + 'static,
-// {
-//     pub fn new(f: F) -> Self {
-//         BinaryNativeFnMMP(f, PhantomData)
-//     }
-
-//     pub fn description_gen0_gen0(f: F) -> ModuleFunction {
-//         let arg_ty = Type::variable_id(0);
-//         let o_ty = Type::primitive::<O>();
-//         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-//             &[arg_ty, arg_ty],
-//             o_ty,
-//         ));
-//         Self::description_with_ty_scheme(f, ty_scheme)
-//     }
-
-//     pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-//         ModuleFunction {
-//             ty_scheme,
-//             code: Rc::new(RefCell::new(Box::new(BinaryNativeFnMMP::new(f)))),
-//             spans: None,
-//         }
-//     }
-// }
-
-// impl<O, F> Callable for BinaryNativeFnMMP<O, F>
-// where
-//     F: Fn(&mut Value, &mut Value) -> O,
-//     O: Debug + Clone + Eq + NativeDisplay + 'static,
-// {
-//     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
-//         let mut args = args.into_iter();
-//         let a = args.next().unwrap();
-//         let a = a.as_place().target_mut(ctx)?;
-//         let b = args.next().unwrap();
-//         let b = b.as_place().target_mut(ctx)?;
-//         let o = self.0(a, b);
-
-//         Ok(Value::Native(Box::new(o)))
-//     }
-//     fn format_ind(
-//         &self,
-//         f: &mut std::fmt::Formatter,
-//         _env: &ModuleEnv<'_>,
-//         indent: usize,
-//     ) -> std::fmt::Result {
-//         let indent_str = "  ".repeat(indent);
-//         writeln!(f, "{}native @ {:p}", indent_str, &self.0)
-//     }
-// }
+// See above for shorthand names
+pub type BinaryNativeFnNNI<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Plain<O>, F>;
+pub type BinaryNativeFnNNF<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Fallible<O>, F>;
+pub type BinaryNativeFnNVI<A, O, F> = BinaryNativeFn<NatVal<A>, Value, Plain<O>, F>;
+pub type BinaryNativeFnMVI<A, O, F> = BinaryNativeFn<NatMut<A>, Value, Plain<O>, F>;
+pub type BinaryNativeFnVVI<O, F> = BinaryNativeFn<Value, Value, Plain<O>, F>;

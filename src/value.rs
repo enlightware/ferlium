@@ -117,8 +117,8 @@ impl Value {
         use Value::*;
         match self {
             Native(value) => {
-                // TODO: later, optionally have pretty print for native values
-                writeln!(f, "{indent_str}{:?}", value)
+                writeln!(f, "{indent_str}")?;
+                value.native_fmt(f)
             }
             Variant(variant) => {
                 writeln!(f, "{indent_str}{}(", variant.tag)?;

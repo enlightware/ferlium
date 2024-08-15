@@ -5,7 +5,9 @@ use ustr::ustr;
 
 use crate::{
     format::write_with_separator,
-    function::{BinaryNativeFn, BinaryPartialMutNativeFn, BinaryPartialNativeFn, UnaryNativeFn},
+    function::{
+        BinaryNativeFnMVI, BinaryNativeFnNNI, BinaryNativeFnNVI, UnaryNativeFnNI, UnaryNativeFnVI,
+    },
     ir::{EvalCtx, ValOrMut},
     module::{Module, ModuleFunction},
     r#type::{bare_native_type, FnType, Type},
@@ -57,7 +59,7 @@ impl Array {
             &[iterator_type()],
             array_type_generic(),
         ));
-        UnaryNativeFn::description_with_ty_scheme(Array::from_iterator, ty_scheme)
+        UnaryNativeFnVI::description_with_ty_scheme(Array::from_iterator, ty_scheme)
     }
 
     pub fn get(&self, index: usize) -> Option<&Value> {
@@ -96,7 +98,7 @@ impl Array {
             &[(array, true), (gen0, false)],
             unit,
         ));
-        BinaryPartialMutNativeFn::description_with_ty_scheme(Array::append, ty_scheme)
+        BinaryNativeFnMVI::description_with_ty_scheme(Array::append, ty_scheme)
     }
 
     pub fn prepend(&mut self, value: Value) {
@@ -111,7 +113,7 @@ impl Array {
             &[(array, true), (gen0, false)],
             unit,
         ));
-        BinaryPartialMutNativeFn::description_with_ty_scheme(Array::prepend, ty_scheme)
+        BinaryNativeFnMVI::description_with_ty_scheme(Array::prepend, ty_scheme)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -124,11 +126,8 @@ impl Array {
 
     fn len_descr() -> ModuleFunction {
         let array = array_type_generic();
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(array, false)],
-            int_type(),
-        ));
-        UnaryNativeFn::description_with_ty_scheme(|a: Self| a.len() as isize, ty_scheme)
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[array], int_type()));
+        UnaryNativeFnNI::description_with_ty_scheme(|a: Self| a.len() as isize, ty_scheme)
     }
 
     fn concat(a: &Self, b: &Self) -> Self {
@@ -143,7 +142,7 @@ impl Array {
             &[(array_ty, false), (array_ty, false)],
             array_ty,
         ));
-        BinaryNativeFn::description_with_ty_scheme(
+        BinaryNativeFnNNI::description_with_ty_scheme(
             |a: Self, b: Self| Self::concat(&a, &b),
             ty_scheme,
         )
@@ -176,7 +175,7 @@ impl Array {
         let array1 = Type::native::<Array>(vec![gen1]);
         let ty_scheme =
             TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[array0, map_fn], array1));
-        BinaryPartialNativeFn::description_with_ty_scheme(Array::map, ty_scheme)
+        BinaryNativeFnNVI::description_with_ty_scheme(Array::map, ty_scheme)
     }
 }
 

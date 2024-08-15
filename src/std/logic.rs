@@ -3,7 +3,7 @@ use std::fmt;
 use ustr::ustr;
 
 use crate::{
-    function::{BinaryNativeFn, BinaryNativeFnVVP, UnaryNativeFn},
+    function::{BinaryNativeFnNNI, BinaryNativeFnVVI, UnaryNativeFnNI},
     module::Module,
     r#type::Type,
     value::{NativeDisplay, Value},
@@ -37,28 +37,28 @@ pub fn add_to_module(to: &mut Module) {
     // Operations on booleans
     to.functions.insert(
         ustr("@or"),
-        BinaryNativeFn::description(std::ops::BitOr::bitor as fn(bool, bool) -> bool),
+        BinaryNativeFnNNI::description_with_default_ty(
+            std::ops::BitOr::bitor as fn(bool, bool) -> bool,
+        ),
     );
     to.functions.insert(
         ustr("@and"),
-        BinaryNativeFn::description(std::ops::BitAnd::bitand as fn(bool, bool) -> bool),
+        BinaryNativeFnNNI::description_with_default_ty(
+            std::ops::BitAnd::bitand as fn(bool, bool) -> bool,
+        ),
     );
     to.functions.insert(
         ustr("@not"),
-        UnaryNativeFn::description(std::ops::Not::not as fn(bool) -> bool),
+        UnaryNativeFnNI::description_with_default_ty(std::ops::Not::not as fn(bool) -> bool),
     );
 
     // Generic equalities and inequalities
     to.functions.insert(
         ustr("@=="),
-        BinaryNativeFnVVP::description_gen0_gen0(
-            std::cmp::PartialEq::eq as fn(&Value, &Value) -> bool,
-        ),
+        BinaryNativeFnVVI::description_with_default_ty(|a: Value, b: Value| a == b),
     );
     to.functions.insert(
         ustr("@!="),
-        BinaryNativeFnVVP::description_gen0_gen0(
-            std::cmp::PartialEq::ne as fn(&Value, &Value) -> bool,
-        ),
+        BinaryNativeFnVVI::description_with_default_ty(|a: Value, b: Value| a != b),
     );
 }
