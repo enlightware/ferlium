@@ -2,6 +2,7 @@
 name = "painturscript"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -31,4 +32,5 @@ lrlex = "0.13"
 lrpar = "0.13"
 num-traits = "0.2.19"
 ena = "0.14.3"
+regex = "1"
 log = "0.4.22"

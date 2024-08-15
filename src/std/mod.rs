@@ -20,6 +20,7 @@ pub fn std_module() -> Module {
     range::add_to_module(&mut module);
     array::add_to_module(&mut module);
     io::add_to_module(&mut module);
+    string::add_to_module(&mut module);
     // option::add_option_functions(&mut module);
     module
 }

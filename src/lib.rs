@@ -13,6 +13,7 @@ mod containers;
 pub mod emit_ir;
 pub mod error;
 pub mod format;
+mod format_string;
 pub mod function;
 mod graph;
 pub mod ir;

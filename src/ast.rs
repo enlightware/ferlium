@@ -110,10 +110,14 @@ impl FmtWithModuleEnv for Module {
     }
 }
 
+// FIXME: think whether it would be better to only use span here
+// and pass the source code in the type inference phase.
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     Literal(Value, Type),
+    FormattedString(String),
     Variable(Ustr),
     LetVar((Ustr, Span), MutVal, B<Expr>),
     Abstract(Vec<(Ustr, Span)>, B<Expr>),
@@ -146,6 +150,7 @@ impl Expr {
         use ExprKind::*;
         match &self.kind {
             Literal(value, _) => writeln!(f, "{indent_str}{value}"),
+            FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
             Variable(name) => writeln!(f, "{indent_str}{name} (local)"),
             LetVar((name, _), mutable, expr) => {
                 let kw = mutable.var_def_string();

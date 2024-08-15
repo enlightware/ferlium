@@ -45,6 +45,10 @@ pub enum InternalCompilationError {
         b_span: Span,
         fn_span: Span,
     },
+    UndefinedVarInStringFormatting {
+        var_span: Span,
+        string_span: Span,
+    },
     Internal(String),
 }
 
@@ -114,6 +118,17 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     &source[fn_span.start()..fn_span.end()],
                 )
             }
+            UndefinedVarInStringFormatting {
+                var_span,
+                string_span,
+            } => {
+                let var_name = &source[var_span.start()..var_span.end()];
+                let string_text = &source[string_span.start()..string_span.end()];
+                write!(
+                    f,
+                    "Undefined variable {var_name} used in string formatting {string_text}"
+                )
+            }
             Internal(msg) => write!(f, "ICE: {}", msg),
         }
     }
@@ -151,6 +166,12 @@ pub enum CompilationError {
         b_span: Span,
         fn_name: String,
         fn_span: Span,
+    },
+    UndefinedVarInStringFormatting {
+        var_name: String,
+        var_span: Span,
+        string_text: String,
+        string_span: Span,
     },
     Internal(String),
 }
@@ -218,6 +239,19 @@ impl CompilationError {
                 fn_name: src[fn_span.start()..fn_span.end()].to_string(),
                 fn_span,
             },
+            UndefinedVarInStringFormatting {
+                var_span,
+                string_span,
+            } => {
+                let var_name = &src[var_span.start()..var_span.end()];
+                let string_text = &src[string_span.start()..string_span.end()];
+                Self::UndefinedVarInStringFormatting {
+                    var_name: var_name.to_string(),
+                    var_span,
+                    string_text: string_text.to_string(),
+                    string_span,
+                }
+            }
             Internal(msg) => Self::Internal(msg),
         }
     }
@@ -256,6 +290,21 @@ impl CompilationError {
         match self {
             Self::MutablePathsOverlap { .. } => (),
             _ => panic!("expect_mutable_paths_overlap called on non-MutablePathsOverlap error"),
+        }
+    }
+
+    pub fn expect_undefined_var_in_string_formatting(&self, exp_name: &str) {
+        match self {
+            Self::UndefinedVarInStringFormatting { var_name, .. } => if var_name == exp_name {
+            } else {
+                panic!(
+                    "expect_undefined_var_in_string_formatting failed: expected \"{}\", got \"{}\"",
+                    exp_name, var_name
+                );
+            },
+            _ => panic!(
+                "expect_undefined_var_in_string_formatting called on non-UndefinedVarInStringFormatting error"
+            ),
         }
     }
 }

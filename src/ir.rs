@@ -338,9 +338,11 @@ impl Node {
             }
             EnvLoad(index) => writeln!(f, "{indent_str}load {index}")?,
             Block(nodes) => {
+                writeln!(f, "{indent_str}{{")?;
                 for node in nodes.iter() {
-                    node.format_ind(f, env, indent)?;
+                    node.format_ind(f, env, indent + 1)?;
                 }
+                writeln!(f, "{indent_str}}}")?;
             }
             Assign(assignment) => {
                 writeln!(f, "{indent_str}assign")?;

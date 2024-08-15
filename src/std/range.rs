@@ -70,7 +70,7 @@ impl Iterator for RangeIterator {
 }
 
 impl NativeDisplay for RangeIterator {
-    fn native_fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "{} in {}‥{}",

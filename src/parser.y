@@ -52,7 +52,7 @@ Function -> Module
     : 'fn' 'IDENT' '(' StringArgsOptComma ')' '{' Expr '}'
         {
             let args_span = Span::new(lex_span($3).start(), lex_span($5).end());
-            Module::new_with_function((s($2, $lexer), lex_span($2)), $4, args_span, $7, $span)
+            Module::new_with_function((us($2, $lexer), lex_span($2)), $4, args_span, $7, $span)
         }
     ;
 
@@ -113,9 +113,9 @@ Expr -> Expr
     | Literal
         { $1 }
     | 'let' 'IDENT' '=' Expr
-        { Expr::new(LetVar((s($2, $lexer), lex_span($2)), MutVal::constant(), B::new($4)), $span) }
+        { Expr::new(LetVar((us($2, $lexer), lex_span($2)), MutVal::constant(), B::new($4)), $span) }
     | 'var' 'IDENT' '=' Expr
-        { Expr::new(LetVar((s($2, $lexer), lex_span($2)), MutVal::mutable(), B::new($4)), $span) }
+        { Expr::new(LetVar((us($2, $lexer), lex_span($2)), MutVal::mutable(), B::new($4)), $span) }
     | '|' StringArgsOptComma '|' Expr
         { Expr::new(Abstract($2, B::new($4)), $span) }
     | '(' ')'
@@ -167,9 +167,9 @@ StringArgsOptComma -> Vec<(Ustr, Span)>
 
 StringArgs -> Vec<(Ustr, Span)>
     : StringArgs ',' 'IDENT'
-        { let mut args = $1; args.push((s($3, $lexer), lex_span($3))); args }
+        { let mut args = $1; args.push((us($3, $lexer), lex_span($3))); args }
     | 'IDENT'
-        { vec![(s($1, $lexer), lex_span($1))] }
+        { vec![(us($1, $lexer), lex_span($1))] }
     | %empty
         { vec![] }
     ;
@@ -236,8 +236,12 @@ Pattern -> Expr
     ;
 
 Literal -> Expr
-    : INT
-        { parse_num::<isize>(&s($1, $lexer), lex_span($1)) }
+    : 'INT'
+        { parse_num::<isize>(s($1, $lexer), lex_span($1)) }
+    | 'STRING'
+        { string_literal(s($1, $lexer), lex_span($1)) }
+    | 'F_STRING'
+        { formatted_string(s($1, $lexer), lex_span($1)) }
     | BoolLiteral
         { Expr::new(Literal($1, Type::primitive::<bool>()), $span) }
     ;

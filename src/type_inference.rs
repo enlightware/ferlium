@@ -14,6 +14,7 @@ use crate::{
     containers::{SVec2, B},
     emit_ir::emit_expr,
     error::{InternalCompilationError, MustBeMutableContext},
+    format_string::emit_format_string_ast,
     function::{FunctionRef, ScriptFunction},
     ir::{self, EnvStore, Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
@@ -195,10 +196,14 @@ impl TypeInference {
         use ExprKind::*;
         let (node, ty, mut_ty) = match &expr.kind {
             Literal(value, ty) => (K::Literal(value.clone()), *ty, MutType::constant()),
+            FormattedString(s) => {
+                let expr = emit_format_string_ast(s, expr.span, env)?;
+                return self.infer_expr(env, &expr);
+            }
             Variable(name) => {
                 // Retrieve the index and the type of the variable from the environment, if it exists
                 if let Some((index, ty_scheme, mut_ty)) =
-                    env.get_variable_index_and_type_scheme(*name)
+                    env.get_variable_index_and_type_scheme(name)
                 {
                     let (var_ty, _) = ty_scheme.instantiate(self);
                     let node = K::EnvLoad(index);

@@ -21,7 +21,7 @@ fn println(value: &impl FmtWithModuleEnv, data: &ModuleEnv) {
 struct List(Vec<Value>);
 
 impl NativeDisplay for List {
-    fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[")?;
         for (i, v) in self.0.iter().enumerate() {
             if i > 0 {

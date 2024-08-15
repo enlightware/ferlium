@@ -44,11 +44,28 @@ pub(crate) fn write_with_separator(
     f: &mut fmt::Formatter,
 ) -> fmt::Result {
     let mut iter = iter.into_iter();
-    if let Some(e) = iter.next() {
-        write!(f, "{}", e)?;
+    if let Some(element) = iter.next() {
+        write!(f, "{}", element)?;
     }
-    for e in iter {
-        write!(f, "{separator}{e}")?;
+    for element in iter {
+        write!(f, "{separator}{element}")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn write_with_separator_and_format_fn<T>(
+    iter: impl IntoIterator<Item = T>,
+    separator: &str,
+    format_fn: impl Fn(T, &mut fmt::Formatter) -> fmt::Result,
+    f: &mut fmt::Formatter,
+) -> fmt::Result {
+    let mut iter = iter.into_iter();
+    if let Some(element) = iter.next() {
+        format_fn(element, f)?;
+    }
+    for element in iter {
+        write!(f, "{separator}")?;
+        format_fn(element, f)?;
     }
     Ok(())
 }

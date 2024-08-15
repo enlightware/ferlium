@@ -16,7 +16,7 @@ pub fn int_type() -> Type {
 }
 
 impl NativeDisplay for isize {
-    fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
     }
 }
@@ -26,7 +26,7 @@ pub fn float_type() -> Type {
 }
 
 impl NativeDisplay for NotNan<f64> {
-    fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.into_inner())
     }
 }

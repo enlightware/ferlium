@@ -3,6 +3,8 @@ use crate::ast::ExprKind::*;
 use crate::containers::SVec2;
 use crate::containers::B;
 use crate::r#type::Type;
+use crate::std::string::string_type;
+use crate::std::string::String as MyString;
 use crate::value::NativeDisplay;
 use crate::value::Value;
 use cfgrammar::span::Span;
@@ -28,9 +30,14 @@ pub(crate) fn lex_span(lexeme: LexemeResult) -> Span {
     }
 }
 
+/// Take a lexeme, make sure it is correct, and get its string as ustr
+pub(crate) fn us(lexeme: LexemeResult, lexer: DefaultLexer) -> Ustr {
+    ustr(s(lexeme, lexer))
+}
+
 /// Take a lexeme, make sure it is correct, and get its string
-pub(crate) fn s(lexeme: LexemeResult, lexer: DefaultLexer) -> Ustr {
-    ustr(lexer.span_str(lex_span(lexeme)))
+pub(crate) fn s<'i>(lexeme: LexemeResult, lexer: DefaultLexer<'_, 'i>) -> &'i str {
+    lexer.span_str(lex_span(lexeme))
 }
 
 /// Make a syntax error.
@@ -44,6 +51,34 @@ where
     T: Any + Clone + Debug + Eq + NativeDisplay + 'static,
 {
     Expr::new(Literal(Value::native(value), Type::primitive::<T>()), span)
+}
+
+/// Make a string literal
+pub(crate) fn string_literal(s: &str, span: Span) -> Expr {
+    fn rem_first_and_last(value: &str) -> &str {
+        let mut chars = value.chars();
+        chars.next();
+        chars.next_back();
+        chars.as_str()
+    }
+    let s = rem_first_and_last(s);
+    Expr::new(
+        Literal(Value::native(MyString::from_str(s).unwrap()), string_type()),
+        span,
+    )
+}
+
+/// Make formatted string
+pub(crate) fn formatted_string(s: &str, span: Span) -> Expr {
+    fn rem_first2_and_last(value: &str) -> &str {
+        let mut chars = value.chars();
+        chars.next();
+        chars.next();
+        chars.next_back();
+        chars.as_str()
+    }
+    let s = rem_first2_and_last(s);
+    Expr::new(FormattedString(s.to_string()), span)
 }
 
 /// Parse an integer, if it is too big, return an error
@@ -72,7 +107,7 @@ pub(crate) fn make_proj_or_float(
     span: Span,
 ) -> Expr {
     let rhs_span = rhs.unwrap().span();
-    let rhs = s(rhs, lexer);
+    let rhs = us(rhs, lexer);
     // see if we actually have a float
     if let Literal(literal, _ty) = &lhs.kind {
         if let Some(value) = literal.clone().into_primitive_ty::<isize>() {
@@ -162,7 +197,7 @@ pub(crate) fn make_iteration(
     );
     Expr::new(
         ForLoop(
-            (s(var, lexer), lex_span(var)),
+            (us(var, lexer), lex_span(var)),
             B::new(iterator),
             B::new(body),
         ),

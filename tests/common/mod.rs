@@ -112,3 +112,12 @@ macro_rules! int_tuple {
         ])
     };
 }
+
+/// A primitive string value
+#[macro_export]
+macro_rules! string {
+    ($s:expr) => {{
+        use std::str::FromStr;
+        Value::native(painturscript::std::string::String::from_str($s).unwrap())
+    }};
+}

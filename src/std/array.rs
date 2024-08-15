@@ -186,7 +186,7 @@ impl Default for Array {
 }
 
 impl NativeDisplay for Array {
-    fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[")?;
         write_with_separator(self.0.iter(), ", ", f)?;
         write!(f, "]")

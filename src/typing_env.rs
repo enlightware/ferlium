@@ -72,7 +72,7 @@ impl<'m> TypingEnv<'m> {
 
     pub fn get_variable_index_and_type_scheme(
         &self,
-        name: Ustr,
+        name: &str,
     ) -> Option<(usize, &TypeScheme<Type>, MutType)> {
         self.locals
             .iter()

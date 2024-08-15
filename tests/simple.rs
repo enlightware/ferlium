@@ -479,6 +479,81 @@ fn array_concat() {
 }
 
 #[test]
+fn string() {
+    assert_eq!(run(r#""""#), string!(""));
+    assert_eq!(run(r#""hello world""#), string!("hello world"));
+    assert_eq!(run(r#""hello \"world\"""#), string!(r#"hello \"world\""#));
+}
+
+#[test]
+fn string_concat() {
+    assert_eq!(run(r#"string_concat("", "")"#), string!(""));
+    assert_eq!(
+        run(r#"string_concat("hello", "world")"#),
+        string!("helloworld")
+    );
+    assert_eq!(
+        run(r#"string_concat("hello", " world")"#),
+        string!("hello world")
+    );
+    assert_eq!(
+        run(r#"string_concat("hello ", "world")"#),
+        string!("hello world")
+    );
+    assert_eq!(
+        run(r#"string_concat("hello ", " world")"#),
+        string!("hello  world")
+    );
+    assert_eq!(
+        run(r#"string_concat("hello ", "world!")"#),
+        string!("hello world!")
+    );
+}
+
+#[test]
+fn string_push_str() {
+    assert_eq!(run(r#"var s = ""; string_push_str(s, ""); s"#), string!(""));
+    assert_eq!(
+        run(r#"var s = ""; string_push_str(s, "hello"); s"#),
+        string!("hello")
+    );
+    assert_eq!(
+        run(r#"var s = "hello"; string_push_str(s, " world"); s"#),
+        string!("hello world")
+    );
+    assert_eq!(
+        run(r#"var s = "hello"; string_push_str(s, " world!"); s"#),
+        string!("hello world!")
+    );
+}
+
+#[test]
+fn string_formatting() {
+    assert_eq!(run(r#"f"hello world""#), string!("hello world"));
+    assert_eq!(
+        run(r#"let a = 1; let b = true; f"hello {a} world {b}""#),
+        string!("hello 1 world true")
+    );
+    assert_eq!(
+        run(r#"let a = [1, 2]; let b = (0, true, "hi"); f"hello {a} world {b}""#),
+        string!("hello [1, 2] world (0, true, hi)")
+    );
+    fail_compilation(r#"f"hello {a} world""#).expect_undefined_var_in_string_formatting("a");
+    fail_compilation(r#"let a = 1; f"{a} is {b}""#).expect_undefined_var_in_string_formatting("b");
+}
+
+#[test]
+fn to_string() {
+    assert_eq!(run("to_string(true)"), string!("true"));
+    assert_eq!(run("to_string(false)"), string!("false"));
+    assert_eq!(run("to_string(1)"), string!("1"));
+    assert_eq!(run("to_string(-17)"), string!("-17"));
+    assert_eq!(run("to_string(0.0)"), string!("0"));
+    assert_eq!(run("to_string(0.1)"), string!("0.1"));
+    assert_eq!(run("to_string(\"hello world\")"), string!("hello world"));
+}
+
+#[test]
 fn modules() {
     assert_eq!(run("fn a(x) { x }"), unit());
     assert_eq!(run("fn a(x) { x } a(1)"), int!(1));

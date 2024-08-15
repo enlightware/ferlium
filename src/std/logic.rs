@@ -14,7 +14,7 @@ pub fn bool_type() -> Type {
 }
 
 impl NativeDisplay for bool {
-    fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
     }
 }
@@ -24,7 +24,7 @@ pub fn unit_type() -> Type {
 }
 
 impl NativeDisplay for () {
-    fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "()")
     }
 }

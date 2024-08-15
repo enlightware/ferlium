@@ -188,6 +188,25 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
+        UndefinedVarInStringFormatting {
+            var_span,
+            string_span,
+        } => {
+            let offset = start_of_line_of(src, string_span.start());
+            let var_name = &data.1[span_range(*var_span)];
+            let string = &data.1[span_range(*string_span)];
+            Report::build(ReportKind::Error, "input", offset)
+                .with_message(format!(
+                    "Undefined variable {} used in string formatting {}.",
+                    var_name.fg(Color::Blue),
+                    string.fg(Color::Blue)
+                ))
+                .with_label(Label::new(("input", span_range(*var_span))).with_color(Color::Blue))
+                .with_label(Label::new(("input", span_range(*string_span))))
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
         _ => println!(
             "Module emission error: {}",
             FormatWith { value: error, data }

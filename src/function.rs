@@ -244,7 +244,10 @@ impl<O: NativeOutput> OutputBuilder for Fallible<O> {
 
 // Native functions of various arities
 
-pub struct NullaryNativeFn<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static>(F, PhantomData<O>);
+pub struct NullaryNativeFn<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static>(
+    F,
+    PhantomData<O>,
+);
 
 impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<O, F> {
     pub fn new(f: F) -> Self {
@@ -431,4 +434,5 @@ pub type BinaryNativeFnNNI<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Pl
 pub type BinaryNativeFnNNF<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Fallible<O>, F>;
 pub type BinaryNativeFnNVI<A, O, F> = BinaryNativeFn<NatVal<A>, Value, Plain<O>, F>;
 pub type BinaryNativeFnMVI<A, O, F> = BinaryNativeFn<NatMut<A>, Value, Plain<O>, F>;
+pub type BinaryNativeFnMNI<A, B, O, F> = BinaryNativeFn<NatMut<A>, NatVal<B>, Plain<O>, F>;
 pub type BinaryNativeFnVVI<O, F> = BinaryNativeFn<Value, Value, Plain<O>, F>;

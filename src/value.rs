@@ -11,7 +11,7 @@ use ustr::Ustr;
 
 use crate::{
     containers::{SVec2, B},
-    format::write_with_separator,
+    format::{write_with_separator, write_with_separator_and_format_fn},
     function::{Function, FunctionRef},
     module::ModuleEnv,
     r#type::TypeVarSubstitution,
@@ -21,7 +21,12 @@ use crate::{
 
 /// Native types must implement this so that they can be displayed.
 pub trait NativeDisplay {
-    fn native_fmt(&self, f: &mut fmt::Formatter) -> fmt::Result;
+    /// Format the native value as it would be written in the language.
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter) -> fmt::Result;
+    /// Format the native value when converted to a string.
+    fn fmt_in_to_string(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.fmt_as_literal(f)
+    }
 }
 
 pub trait NativeValue: Any + fmt::Debug + DynClone + DynEq + NativeDisplay + 'static {
@@ -107,6 +112,28 @@ impl Value {
         }
     }
 
+    pub fn format_as_string(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use Value::*;
+        match self {
+            Native(value) => value.fmt_in_to_string(f),
+            Variant(variant) => {
+                write!(f, "{}(", variant.tag)?;
+                variant.value.format_as_string(f)?;
+                write!(f, ")")
+            }
+            Tuple(tuple) => {
+                write!(f, "(")?;
+                write_with_separator_and_format_fn(tuple.iter(), ", ", Value::format_as_string, f)?;
+                write!(f, ")")
+            }
+            Function(function) => {
+                let function = function.get();
+                let function = function.borrow();
+                write!(f, "{:?}", function)
+            }
+        }
+    }
+
     pub fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -117,8 +144,9 @@ impl Value {
         use Value::*;
         match self {
             Native(value) => {
-                writeln!(f, "{indent_str}")?;
-                value.native_fmt(f)
+                write!(f, "{indent_str}")?;
+                value.fmt_as_literal(f)?;
+                writeln!(f)
             }
             Variant(variant) => {
                 writeln!(f, "{indent_str}{}(", variant.tag)?;
@@ -166,17 +194,18 @@ impl Value {
 
 impl Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Value::*;
         match self {
-            Value::Native(value) => value.native_fmt(f),
-            Value::Variant(variant) => {
+            Native(value) => value.fmt_as_literal(f),
+            Variant(variant) => {
                 write!(f, "{}({})", variant.tag, variant.value)
             }
-            Value::Tuple(tuple) => {
+            Tuple(tuple) => {
                 write!(f, "(")?;
                 write_with_separator(tuple.iter(), ", ", f)?;
                 write!(f, ")")
             }
-            Value::Function(function) => {
+            Function(function) => {
                 let function = function.get();
                 let function = function.borrow();
                 write!(f, "{:?}", function)
