@@ -34,7 +34,7 @@ defineExpose({
 div {
 	resize: none;
 	font-family: JuliaMono, monospace;
-	background-color: #1e1e1e;
+	background-color: black;
 	color: #dcdcdc;
 	padding: 4px;
 	white-space: pre-wrap; /* Maintains whitespace formatting */

@@ -19,7 +19,7 @@ function updateEditor(data: { value: string, index: number }) {
 };
 
 function runCode() {
-	if (editor.value) {
+	if (editor.value && !isRunDisabled.value) {
 		runOutput.value = editor.value.runCode();
 		defined(console.value).highlight();
 	}
