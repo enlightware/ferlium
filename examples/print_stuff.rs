@@ -5,7 +5,6 @@ use painturscript::{
     module::{FmtWithModuleEnv, ModuleEnv, Modules},
     r#type::{bare_native_type, store_types, Type, TypeKind},
     std::{
-        logic::unit_type,
         math::{float_type, int_type},
         std_module,
     },
@@ -39,7 +38,7 @@ fn main() {
     let u32 = Type::primitive::<u32>();
     let float = float_type();
     let string = Type::primitive::<String>();
-    let empty_tuple = unit_type();
+    let empty_tuple = Type::unit();
     let gen0 = Type::variable_id(0);
 
     // environment

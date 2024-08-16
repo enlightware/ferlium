@@ -382,7 +382,7 @@ pub struct Type {
 impl Type {
     // helper constructors
     pub fn unit() -> Self {
-        Self::tuple(vec![])
+        Self::primitive::<()>()
     }
 
     pub fn primitive<T: Clone + 'static>() -> Self {

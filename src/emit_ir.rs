@@ -11,7 +11,6 @@ use crate::{
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
     mutability::MutType,
     r#type::{FnType, Type, TypeLike, TypeVar},
-    std::logic::unit_type,
     type_inference::{FreshTyVarGen, MutConstraint, TypeConstraint, TypeInference},
     type_scheme::{PubTypeConstraint, TypeScheme},
     typing_env::{Local, TypingEnv},
@@ -49,7 +48,7 @@ pub fn emit_module(
         // Create dummy code.
         let dummy_code = B::new(ScriptFunction::new(N::new(
             K::Literal(Value::unit()),
-            unit_type(),
+            Type::unit(),
             *span,
         )));
         // Assemble the spans and the description
