@@ -1,4 +1,7 @@
-use crate::{module::{Module, Modules, Use}, r#type::Type};
+use crate::{
+    module::{Module, Modules, Use},
+    r#type::Type,
+};
 
 use ustr::ustr;
 

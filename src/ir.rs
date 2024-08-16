@@ -514,17 +514,20 @@ impl Node {
                 }
             }
             EnvStore(node) => {
-                result.push((
-                    node.name_span.end(),
-                    match style {
-                        DisplayStyle::Mathematical => {
-                            format!(": {}", node.ty_scheme.display_math_style(env))
-                        }
-                        DisplayStyle::Rust => {
-                            format!(": {}", node.ty_scheme.display_rust_style(env))
-                        }
-                    },
-                ));
+                // Note: synthesized let nodes have empty name span, so we ignore these.
+                if node.name_span.end() != node.name_span.start() {
+                    result.push((
+                        node.name_span.end(),
+                        match style {
+                            DisplayStyle::Mathematical => {
+                                format!(": {}", node.ty_scheme.display_math_style(env))
+                            }
+                            DisplayStyle::Rust => {
+                                format!(": {}", node.ty_scheme.display_rust_style(env))
+                            }
+                        },
+                    ));
+                }
                 node.node.variable_type_annotations(style, result, env);
             }
             EnvLoad(_) => {}
