@@ -1,8 +1,12 @@
 mod utils;
 
 use painturscript::{
-    compile, error::CompilationError, module::{ModuleEnv, Modules}, std::new_std_module_env,
-    type_scheme::DisplayStyle, ModuleAndExpr, Span,
+    compile,
+    error::CompilationError,
+    module::{ModuleEnv, Modules},
+    std::new_std_module_env,
+    type_scheme::DisplayStyle,
+    ModuleAndExpr, Span,
 };
 use utils::{set_panic_hook, CharIndexLookup};
 use wasm_bindgen::prelude::*;
@@ -90,6 +94,10 @@ fn compilation_error_to_data(error: &CompilationError) -> Vec<ErrorData> {
             ErrorData::from_span(b_span, format!("Mutable path {a_name} overlaps with {b_name} (here) when calling function {fn_name}")),
             ErrorData::from_span(fn_span, format!("When calling function {fn_name}: mutable path {a_name} overlaps with {b_name}")),
         ],
+        UndefinedVarInStringFormatting { var_name, var_span, string_text, .. } => vec![ErrorData::from_span(
+            var_span,
+            format!("Undefined variable {var_name} used in string formatting: {string_text}"),
+        )],
         Internal(msg) => vec![ErrorData::from_span(
             &Span::new(0, 0),
             format!("ICE: {msg}"),
@@ -156,11 +164,14 @@ impl Compiler {
                     let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
                     let output = format!("{}: {}", value, expr.ty.display_rust_style(&module_env));
                     html_escape::encode_text(&output).to_string()
-                },
+                }
                 Err(err) => {
                     let text = format!("{err}");
-                    format!("<span class=\"error\">{}</span>", html_escape::encode_text(&text))
-                },
+                    format!(
+                        "<span class=\"error\">{}</span>",
+                        html_escape::encode_text(&text)
+                    )
+                }
             }
         } else {
             "<span class=\"warning\">No expression to run</span>".to_string()

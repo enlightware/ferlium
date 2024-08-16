@@ -2,7 +2,7 @@
 @tokens {
     Identifier { $[a-zA-Z_]$[a-zA-Z0-9_]* }
     Integer { $[0-9]$[0-9]* }
-    String { '"' (!["\\] | "\\" _)* '"' }
+    String { 'f'? '"' (!["\\] | "\\" _)* '"' }
     BoolLiteral { "true" | "false" }
     LineComment[isolate] { "//" ![\n]* }
     BlockComment[isolate] { "/*" blockCommentRest }
@@ -16,7 +16,7 @@
     "=" "=>" ".."
 
     @precedence { LineComment, BlockComment, "/" }
-    @precedence { BoolLiteral, Identifier }
+    @precedence { BoolLiteral, String, Identifier }
 }
 
 kw<term> { @specialize[@name={term}]<Identifier, term> }
@@ -200,6 +200,7 @@ Path {
 
 Literal {
     Integer
+    | String
     | BoolLiteral
 }
 
