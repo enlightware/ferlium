@@ -29,6 +29,12 @@ pub trait NativeDisplay {
     }
 }
 
+impl NativeDisplay for () {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "()")
+    }
+}
+
 pub trait NativeValue: Any + fmt::Debug + DynClone + DynEq + NativeDisplay + 'static {
     fn as_any(&self) -> &dyn Any;
     fn as_mut_any(&mut self) -> &mut dyn Any;

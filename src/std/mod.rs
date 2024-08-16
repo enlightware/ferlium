@@ -1,4 +1,4 @@
-use crate::module::{Module, Modules, Use};
+use crate::{module::{Module, Modules, Use}, r#type::Type};
 
 use ustr::ustr;
 
@@ -14,6 +14,7 @@ pub mod string;
 
 pub fn std_module() -> Module {
     let mut module = Module::default();
+    module.types.set(ustr("()"), Type::unit());
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);
     math::add_to_module(&mut module);

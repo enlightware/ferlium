@@ -19,16 +19,9 @@ impl NativeDisplay for bool {
     }
 }
 
-impl NativeDisplay for () {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "()")
-    }
-}
-
 pub fn add_to_module(to: &mut Module) {
     // Types
     to.types.set(ustr("bool"), bool_type());
-    to.types.set(ustr("()"), Type::unit());
 
     // Operations on booleans
     to.functions.insert(
