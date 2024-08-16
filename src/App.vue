@@ -36,7 +36,7 @@ function setRunAvailability(status: boolean) {
 			Run
 		</SimpleButton>
 		<DropdownSelect
-			:items="['Empty', 'Factorial', 'Is even', 'Polymorphic let (function)', 'Polymorphic let (value)', 'Quicksort']"
+			:items="['Empty', 'Factorial', 'Is even', 'Polymorphic let (function)', 'Polymorphic let (value)', 'Quicksort', 'String']"
 			@selection-changed="updateEditor"
 		/>
 	</div>

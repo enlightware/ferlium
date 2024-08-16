@@ -68,5 +68,11 @@ fn swap(a, i, j) {
 var a = [5, 4, 11, 3, 2, 1, 0, 7];
 quicksort(a, 0, array_len(a) - 1);
 a
+`,
+`let a = "hello";
+let count = 3;
+var text = f"{a} {count} worlds!";
+string_push_str(text, " ...and more");
+string_concat("He said: ", text)
 `
 ];
