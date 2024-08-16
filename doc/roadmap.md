@@ -2,7 +2,6 @@
 
 ### Language features
 
-- String + interpolation
 - Record types
 - Recursive modules
 - Effects
