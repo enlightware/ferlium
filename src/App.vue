@@ -5,8 +5,10 @@ import DropdownSelect from './components/DropdownSelect.vue';
 import SimpleButton from './components/SimpleButton.vue';
 import ConsoleOutput from './components/ConsoleOutput.vue';
 import { demoCodes } from './demo-codes';
+import { defined } from './types';
 
 const editor = ref<typeof CodeEditor>();
+const console = ref<typeof ConsoleOutput>();
 const runOutput = ref("Press Run or Ctrl/Cmd+Enter to execute the code.");
 const isRunDisabled = ref(false);
 
@@ -19,6 +21,7 @@ function updateEditor(data: { value: string, index: number }) {
 function runCode() {
 	if (editor.value) {
 		runOutput.value = editor.value.runCode();
+		defined(console.value).highlight();
 	}
 }
 
@@ -45,7 +48,10 @@ function setRunAvailability(status: boolean) {
 		@run-code="runCode()"
 		@set-run-availability="setRunAvailability"
 	/>
-	<ConsoleOutput :text="runOutput" />
+	<ConsoleOutput
+		ref="console"
+		:text="runOutput"
+	/>
 </template>
 
 <style scoped>
