@@ -129,6 +129,18 @@ fn arithmetic_operators() {
     assert_eq!(run("-3%3"), int!(-0));
     assert_eq!(run("-4%3"), int!(-1));
     assert_eq!(run("-5%3"), int!(-2));
+    assert_eq!(run("min(1,2)"), int!(1));
+    assert_eq!(run("min(2,1)"), int!(1));
+    assert_eq!(run("min(-2,-3)"), int!(-3));
+    assert_eq!(run("min(-3,-2)"), int!(-3));
+    assert_eq!(run("min(-3,2)"), int!(-3));
+    assert_eq!(run("min(2,-3)"), int!(-3));
+    assert_eq!(run("max(1,2)"), int!(2));
+    assert_eq!(run("max(2,1)"), int!(2));
+    assert_eq!(run("max(-2,-3)"), int!(-2));
+    assert_eq!(run("max(-3,-2)"), int!(-2));
+    assert_eq!(run("max(-3,2)"), int!(2));
+    assert_eq!(run("max(2,-3)"), int!(2));
 }
 
 #[test]

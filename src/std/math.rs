@@ -82,6 +82,14 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@u-"),
         UnaryNativeFnNI::description_with_default_ty(std::ops::Neg::neg as fn(isize) -> isize),
     );
+    to.functions.insert(
+        ustr("min"),
+        BinaryNativeFnNNI::description_with_default_ty(std::cmp::min as fn(isize, isize) -> isize),
+    );
+    to.functions.insert(
+        ustr("max"),
+        BinaryNativeFnNNI::description_with_default_ty(std::cmp::max as fn(isize, isize) -> isize),
+    );
 
     // Comparisons
     to.functions.insert(
