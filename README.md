@@ -21,7 +21,7 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 ### For developers and integrators
 
 * Intermediate representation (IR) as close as possible to a textbook functional language (for readability and correctness)
-* But access necessary extensions for performance reasons (e.g., special case for functions not as values)
+* But be pragmatic about it: e.g. provides a mutable value semantics
 * Avoid native code in the IR when not necessary (i.e., no int, bool, etc. explicit there)
 * Smooth binding with native code (to bring int, bool, etc. on demand)
 * Rich integration possibilities with the native platform (e.g. for platform-managed values)

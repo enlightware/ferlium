@@ -7,7 +7,9 @@ use std::{
 
 use crate::{
     error::RuntimeError,
-    ir::{self, EvalCtx, EvalResult, ValOrMut},
+    eval::{EvalCtx, EvalResult, ValOrMut},
+    format::FormatWith,
+    ir::{self},
     module::{ModuleEnv, ModuleFunction},
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
@@ -20,6 +22,9 @@ type CallCtx = EvalCtx;
 pub trait Callable {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult;
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
+        None
+    }
+    fn into_script(self: Box<Self>) -> Option<ScriptFunction> {
         None
     }
     fn format_ind(
@@ -90,7 +95,9 @@ impl PartialEq for FunctionRef {
 }
 impl Eq for FunctionRef {}
 
-/// A function holding user-defined code
+/// A function holding user-defined code.
+/// If captured is non-empty it is a closure, and these will be passed
+/// as extra first arguments to the environment of the function.
 #[derive(Debug, Clone)]
 pub struct ScriptFunction {
     pub code: ir::Node,
@@ -128,6 +135,47 @@ impl Callable for ScriptFunction {
         indent: usize,
     ) -> std::fmt::Result {
         self.code.format_ind(f, env, indent)
+    }
+}
+
+pub struct Closure {
+    pub function: FunctionRef,
+    pub captured: Vec<Value>,
+}
+impl Closure {
+    pub fn new(function: FunctionRef, captured: Vec<Value>) -> Self {
+        Closure { function, captured }
+    }
+}
+impl Callable for Closure {
+    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
+        let args = self
+            .captured
+            .iter()
+            .cloned()
+            .map(ValOrMut::Val)
+            .chain(args)
+            .collect();
+        self.function.get().borrow().call(args, ctx)
+    }
+
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &ModuleEnv<'_>,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = "⎸ ".repeat(indent);
+        writeln!(f, "{indent_str}closure of")?;
+        self.function
+            .get()
+            .borrow()
+            .format_ind(f, env, indent + 1)?;
+        writeln!(f, "{indent_str}with captured [")?;
+        for captured in &self.captured {
+            captured.format_ind(f, env, indent + 1)?;
+        }
+        writeln!(f, "{indent_str}]")
     }
 }
 
@@ -182,8 +230,15 @@ impl ArgExtractor for &'_ mut Value {
 impl<T: Clone + 'static> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
     const MUTABLE: bool = false;
-    fn extract(arg: ValOrMut, _ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
-        Ok(arg.into_primitive::<T>().unwrap())
+    fn extract(arg: ValOrMut, ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+        let arg2 = arg.clone();
+        Ok(arg.into_primitive::<T>().unwrap_or_else(|| {
+            panic!(
+                "Expected a primitive of type {}, found {}",
+                std::any::type_name::<T>(),
+                FormatWith::new(&arg2, ctx)
+            )
+        }))
     }
     fn default_ty() -> Type {
         Type::primitive::<T>()
@@ -279,7 +334,7 @@ where
         _env: &ModuleEnv<'_>,
         indent: usize,
     ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
+        let indent_str = "⎸ ".repeat(indent);
         writeln!(f, "{}nullary native @ {:p}", indent_str, &self.0)
     }
 }
@@ -346,7 +401,7 @@ where
         _env: &ModuleEnv<'_>,
         indent: usize,
     ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
+        let indent_str = "⎸ ".repeat(indent);
         writeln!(f, "{}unary native @ {:p}", indent_str, &self.0)
     }
 }
@@ -424,7 +479,7 @@ where
         _env: &ModuleEnv<'_>,
         indent: usize,
     ) -> std::fmt::Result {
-        let indent_str = "  ".repeat(indent);
+        let indent_str = "⎸ ".repeat(indent);
         writeln!(f, "{}binary native @ {:p}", indent_str, &self.0)
     }
 }

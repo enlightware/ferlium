@@ -415,9 +415,8 @@ impl Type {
         TypeKind::Tuple(elements).store()
     }
 
-    pub fn record(mut fields: Vec<(Ustr, Self)>) -> Self {
+    pub fn record(fields: Vec<(Ustr, Self)>) -> Self {
         assert_unique_strings(&fields);
-        fields.sort_by(|(a, _), (b, _)| a.cmp(b));
         TypeKind::Record(fields).store()
     }
 
@@ -1079,16 +1078,15 @@ impl FmtWithModuleEnv for TypeKind {
 
 impl Ord for TypeKind {
     fn cmp(&self, other: &Self) -> Ordering {
+        use TypeKind::*;
         match (self, other) {
             // Compare the raw pointers (addresses) of the weak references
-            (TypeKind::Native(a), TypeKind::Native(b)) => a.cmp(b),
-            (TypeKind::Variable(a), TypeKind::Variable(b)) => a.cmp(b),
-            (TypeKind::Variant(a), TypeKind::Variant(b)) => a.cmp(b),
-            (TypeKind::Tuple(a), TypeKind::Tuple(b)) => a.cmp(b),
-            (TypeKind::Record(a), TypeKind::Record(b)) => a.cmp(b),
-            (TypeKind::Function(a), TypeKind::Function(b)) => {
-                a.args.cmp(&b.args).then_with(|| a.ret.cmp(&b.ret))
-            }
+            (Native(a), Native(b)) => a.cmp(b),
+            (Variable(a), Variable(b)) => a.cmp(b),
+            (Variant(a), Variant(b)) => a.cmp(b),
+            (Tuple(a), Tuple(b)) => a.cmp(b),
+            (Record(a), Record(b)) => a.cmp(b),
+            (Function(a), Function(b)) => a.args.cmp(&b.args).then_with(|| a.ret.cmp(&b.ret)),
             _ => self.rank().cmp(&other.rank()),
         }
     }

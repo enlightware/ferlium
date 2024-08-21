@@ -1,7 +1,7 @@
 use painturscript::{
     compile,
     error::{CompilationError, RuntimeError},
-    ir::EvalResult,
+    eval::EvalResult,
     std::new_std_module_env,
     value::Value,
     ModuleAndExpr,

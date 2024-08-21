@@ -321,6 +321,49 @@ fn first_class_functions() {
 }
 
 #[test]
+fn records() {
+    assert_eq!(run("{a:1}.a"), int!(1));
+    assert_eq!(run("{a:1, b:2}.a"), int!(1));
+    assert_eq!(run("{a:1, b:2}.b"), int!(2));
+    fail_compilation("{a:1, a:2}").expect_duplicate_record_field("a");
+    fail_compilation("{a:1, a:true, b:2}").expect_duplicate_record_field("a");
+    assert_eq!(run("(|| {a:1, b:2})().a"), int!(1));
+    assert_eq!(run("(|| {a:1, b:2})().b"), int!(2));
+    assert_eq!(run("let r = || {a:1, b:2}; r().a + r().b"), int!(3));
+    assert_eq!(
+        run("let r = || {a:1, a_o: true, b:2}; r().a + r().b"),
+        int!(3)
+    );
+    assert_eq!(run("fn s(v) { v.x + v.y } s({x:1, y:2})"), int!(3));
+    assert_eq!(
+        run("fn s(v) { v.x + v.y } s({name: \"toto\", x:1, y:2})"),
+        int!(3)
+    );
+    assert_eq!(
+        run("fn s(v) { v.x + v.y } s({name: \"toto\", x:1, z: true, y:2, noise: (1,2)})"),
+        int!(3)
+    );
+    assert_eq!(
+        run("fn sq(x) { x * x } fn l2(v) { sq(v.x) + sq(v.y) } l2({x:1, y:2})"),
+        int!(5)
+    );
+    assert_eq!(run("let f = |x| x.a; f({a:1})"), int!(1));
+    assert_eq!(
+        run("let l2 = |v| (let sq = |x| x * x; sq(v.x) + sq(v.y)); l2({x:1, y:2})"),
+        int!(5)
+    );
+    assert_eq!(
+        run("let l = |v| (let ex = |v| v.x; let ey = |v| v.y; ex(v) + ey(v)); l({a: true, x:1, x_n: \"hi\", y:2, y_n: false})"),
+        int!(3)
+    );
+    assert_eq!(run("(|v| v.x + v.y)({x:1, y:2})"), int!(3));
+    assert_eq!(
+        run("fn s(v) { v.x + v.y } ((s,).0)({x:1, bla: true, y:2})"),
+        int!(3)
+    );
+}
+
+#[test]
 fn mutability_soundness() {
     fail_compilation("let f = |x| (x[0] = 1); let a = [1]; f(a)").expect_must_be_mutable();
 }

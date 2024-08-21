@@ -6,16 +6,19 @@ Currently, Painturscript transforms the source code into an abstract syntax tree
 
 ## Compiler
 
-The following phases (will 🚧) happen in the compiler:
+The following phases happen in the compiler:
 
 - Source code parsing
   - Lexing
   - Parsing and AST generation
 - Analysis of the AST
+  - String formatting desugaring
   - Symbol resolution
-  - Type checking and inference
+  - Type and passing strategy inference
   - ADT desugaring 🚧
   - IR generation
+- Borrow checking on IR
+- Struct field access desugaring on IR
 - IR optimisation 🚧
 - IR execution.
 

@@ -125,7 +125,7 @@ Expr -> Expr
     | Expr '.' 'INT'
         { make_proj_or_float($1, $3, $lexer, $span) }
     | Expr '.' 'IDENT'
-        { error("Named field projection and record are not yet supported", $span) }
+        { Expr::new(FieldAccess(B::new($1), us($3, $lexer), lex_span($3)), $span) }
     | '[' ']'
         { Expr::new(Array(vec![]), $span) }
     | '[' ExprArgsOptComma ']'
@@ -137,7 +137,7 @@ Expr -> Expr
     | Expr '[' Expr ']'
         { Expr::new(Index(B::new($1), B::new($3)), $span) }
     | '{' RecordFieldsOptComma '}'
-        { error("Record is not yet supported", $span) }
+        { Expr::new(Record($2), $span) }
     | Expr ';' Expr
         { make_block($1, $3, $span) }
     ;
@@ -197,18 +197,18 @@ TupleArgs -> Vec<Expr>
         { vec![$1] }
     ;
 
-RecordFieldsOptComma -> ()
+RecordFieldsOptComma -> Vec<(Ustr, Span, Expr)>
     : RecordFields ','
-        {}
+        { $1 }
     | RecordFields
-        {}
+        { $1 }
     ;
 
-RecordFields -> ()
+RecordFields -> Vec<(Ustr, Span, Expr)>
     : RecordFields ',' 'IDENT' ':' Expr
-        {}
+        { let mut args = $1; args.push((us($3, $lexer), lex_span($3), $5)); args }
     | 'IDENT' ':' Expr
-        {}
+        { vec![(us($1, $lexer), lex_span($1), $3)] }
     ;
 
 MatchArgsOptComma -> Vec<(Expr, Expr)>

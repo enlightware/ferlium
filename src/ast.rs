@@ -127,6 +127,8 @@ pub enum ExprKind {
     Assign(B<Expr>, Span, B<Expr>),
     Tuple(Vec<Expr>),
     Project(B<Expr>, usize, Span),
+    Record(Vec<(Ustr, Span, Expr)>),
+    FieldAccess(B<Expr>, Ustr, Span),
     Array(Vec<Expr>),
     Index(B<Expr>, B<Expr>),
     Match(B<Expr>, Vec<(Expr, Expr)>, Option<B<Expr>>),
@@ -206,6 +208,19 @@ impl Expr {
             Project(expr, index, _) => {
                 expr.format_ind(f, indent)?;
                 writeln!(f, "{indent_str}  .{index}")
+            }
+            Record(fields) => {
+                writeln!(f, "{indent_str}{{")?;
+                for (name, _, value) in fields.iter() {
+                    writeln!(f, "{indent_str}  {name}:")?;
+                    value.format_ind(f, indent + 2)?;
+                    writeln!(f, "{indent_str}  ,")?;
+                }
+                writeln!(f, "{indent_str}}}")
+            }
+            FieldAccess(expr, field, _) => {
+                expr.format_ind(f, indent)?;
+                writeln!(f, "{indent_str}  .{field}")
             }
             Array(args) => {
                 if args.is_empty() {

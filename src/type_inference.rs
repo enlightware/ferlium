@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     collections::{HashMap, HashSet},
     fmt::{self, Display},
     mem,
@@ -12,11 +13,12 @@ use ustr::Ustr;
 use crate::{
     ast::{Expr, ExprKind},
     containers::{SVec2, B},
+    dictionary_passing::DictionaryReq,
     emit_ir::emit_expr,
     error::{InternalCompilationError, MustBeMutableContext},
     format_string::emit_format_string_ast,
     function::{FunctionRef, ScriptFunction},
-    ir::{self, EnvStore, Node, NodeKind},
+    ir::{self, EnvStore, FnInstData, Immediate, Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
     mutability::{MutType, MutVal, MutVar, MutVarKey},
     r#type::{
@@ -195,7 +197,11 @@ impl TypeInference {
         use ir::NodeKind as K;
         use ExprKind::*;
         let (node, ty, mut_ty) = match &expr.kind {
-            Literal(value, ty) => (K::Literal(value.clone()), *ty, MutType::constant()),
+            Literal(value, ty) => (
+                K::Immediate(Immediate::new(value.clone())),
+                *ty,
+                MutType::constant(),
+            ),
             FormattedString(s) => {
                 let expr = emit_format_string_ast(s, expr.span, env)?;
                 return self.infer_expr(env, &expr);
@@ -205,15 +211,18 @@ impl TypeInference {
                 if let Some((index, ty_scheme, mut_ty)) =
                     env.get_variable_index_and_type_scheme(name)
                 {
-                    let (var_ty, _) = ty_scheme.instantiate(self);
-                    let node = K::EnvLoad(index);
+                    let (var_ty, dicts_req) = ty_scheme.instantiate(self);
+                    // If the variable is a function that requires dictionaries, store the necessary information
+                    let inst_data = FnInstData::new(dicts_req);
+                    let node = K::EnvLoad(B::new(ir::EnvLoad { index, inst_data }));
                     (node, var_ty, mut_ty)
                 }
                 // Retrieve the function from the environment, if it exists
                 else if let Some(function) = env.get_function(*name) {
-                    let (fn_ty, _) = function.ty_scheme.instantiate(self);
-                    let value_fn = Value::Function(FunctionRef::new_weak(&function.code));
-                    let node = K::Literal(value_fn);
+                    let (fn_ty, dicts_req) = function.ty_scheme.instantiate(self);
+                    let inst_data = FnInstData::new(dicts_req);
+                    let value = Value::Function(FunctionRef::new_weak(&function.code));
+                    let node = K::Immediate(B::new(ir::Immediate { value, inst_data }));
                     (node, Type::function_type(fn_ty), MutType::constant())
                 }
                 // Otherwise, the variable is not found
@@ -279,7 +288,7 @@ impl TypeInference {
                 // Store and return the function's type
                 let fn_ty = FnType::new(args_ty, ret_ty);
                 let value_fn = Value::function(B::new(ScriptFunction::new(code)));
-                let node = K::Literal(value_fn);
+                let node = K::Immediate(Immediate::new(value_fn));
                 (node, Type::function_type(fn_ty), MutType::constant())
             }
             Apply(func, args) => {
@@ -351,6 +360,57 @@ impl TypeInference {
                 ));
                 let node = K::Project(B::new((tuple_node, *index)));
                 (node, element_ty, tuple_mut)
+            }
+            Record(fields) => {
+                let (exprs, names): (Vec<_>, Vec<_>) = fields
+                    .iter()
+                    .map(|(name, span, expr)| (expr, (*name, *span)))
+                    .unzip();
+                // Check that all fields are unique.
+                let mut names_seen = HashMap::new();
+                for (name, span) in names.iter().copied() {
+                    if let Some(prev_span) = names_seen.insert(name, span) {
+                        return Err(InternalCompilationError::DuplicatedRecordField {
+                            first_occurrence_span: prev_span,
+                            second_occurrence_span: span,
+                        });
+                    }
+                }
+                // Infer the types of the nodes.
+                let (nodes, types) = self.infer_exprs_drop_mut(env, &exprs)?;
+                // Reorder the names, the types and the nodes to have fields sorted by name.
+                let mut names = names.into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+                let mut named_nodes = HashMap::new();
+                for (name, node_and_ty) in
+                    names.iter().zip(nodes.into_iter().zip(types.into_iter()))
+                {
+                    named_nodes.insert(*name, node_and_ty);
+                }
+                names.sort();
+                let (nodes, types): (Vec<_>, Vec<_>) = names
+                    .iter()
+                    .map(|name| named_nodes.remove(name).unwrap())
+                    .unzip();
+                // Build the record node and return it.
+                // Note: we assume that while building the record, if the names are sorted, they won't be shuffled.
+                let node = K::Record(B::new(SVec2::from_vec(nodes)));
+                let ty = Type::record(names.into_iter().zip(types).collect());
+                (node, ty, MutType::constant())
+            }
+            FieldAccess(record_expr, field, field_span) => {
+                let (record_node, record_ty, record_mut) = self.infer_expr(env, record_expr)?;
+                let element_ty = self.fresh_type_var_ty();
+                self.ty_constraints.push(TypeConstraint::Pub(
+                    PubTypeConstraint::new_record_field_is(
+                        record_ty,
+                        record_expr.span,
+                        *field,
+                        *field_span,
+                        element_ty,
+                    ),
+                ));
+                let node = K::FieldAccess(B::new((record_node, *field)));
+                (node, element_ty, record_mut)
             }
             Array(exprs) => {
                 if exprs.is_empty() {
@@ -473,14 +533,14 @@ impl TypeInference {
         env: &mut TypingEnv,
         name: Ustr,
         span: Span,
-        args: &[Expr],
+        args: &[impl Borrow<Expr>],
     ) -> Result<(NodeKind, Type, MutType), InternalCompilationError> {
         // Get the function and its type
         let function = env
             .get_function(name)
             .ok_or(InternalCompilationError::FunctionNotFound(span))?;
         // Instantiate its type scheme
-        let (inst_fn_ty, _) = function.ty_scheme.instantiate(self);
+        let (inst_fn_ty, dicts_req) = function.ty_scheme.instantiate(self);
         // Get the code and make sure the types of its arguments match the expected types
         let args_nodes = self.check_exprs(env, args, &inst_fn_ty.args, span)?;
         // Build and return the function node, get back the function to avoid re-borrowing
@@ -490,10 +550,11 @@ impl TypeInference {
         let ret_ty = inst_fn_ty.ret;
         let node = ir::NodeKind::StaticApply(B::new(ir::StaticApplication {
             function: FunctionRef::new_weak(&function.code),
+            function_name: name,
             function_span: span,
             arguments: args_nodes,
             ty: inst_fn_ty,
-            // subst,
+            inst_data: FnInstData::new(dicts_req),
         }));
         Ok((node, ret_ty, MutType::constant()))
     }
@@ -501,12 +562,12 @@ impl TypeInference {
     fn infer_exprs_drop_mut(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[Expr],
+        exprs: &[impl Borrow<Expr>],
     ) -> Result<(Vec<ir::Node>, Vec<Type>), InternalCompilationError> {
         exprs
             .iter()
             .map(|arg| {
-                let (node, ty, _mut_ty) = self.infer_expr(env, arg)?;
+                let (node, ty, _mut_ty) = self.infer_expr(env, arg.borrow())?;
                 Ok::<(ir::Node, Type), InternalCompilationError>((node, ty))
             })
             .process_results(|iter| multiunzip(iter))
@@ -515,12 +576,12 @@ impl TypeInference {
     fn infer_exprs_ret_arg_ty(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[Expr],
+        exprs: &[impl Borrow<Expr>],
     ) -> Result<(Vec<ir::Node>, Vec<FnArgType>), InternalCompilationError> {
         exprs
             .iter()
             .map(|arg| {
-                let (node, ty, mut_ty) = self.infer_expr(env, arg)?;
+                let (node, ty, mut_ty) = self.infer_expr(env, arg.borrow())?;
                 Ok::<(ir::Node, FnArgType), InternalCompilationError>((
                     node,
                     FnArgType::new(ty, mut_ty),
@@ -568,7 +629,7 @@ impl TypeInference {
     fn check_exprs(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[Expr],
+        exprs: &[impl Borrow<Expr>],
         expected_tys: &[FnArgType],
         expected_span: Span,
     ) -> Result<Vec<ir::Node>, InternalCompilationError> {
@@ -576,7 +637,8 @@ impl TypeInference {
             .iter()
             .zip(expected_tys)
             .map(|(arg, arg_ty)| {
-                let node = self.check_expr(env, arg, arg_ty.ty, arg_ty.inout, expected_span)?;
+                let node =
+                    self.check_expr(env, arg.borrow(), arg_ty.ty, arg_ty.inout, expected_span)?;
                 Ok(node)
             })
             .process_results(|iter| iter.collect())
@@ -597,7 +659,7 @@ impl TypeInference {
         // Literal of correct type, we are good
         if let Literal(value, ty) = &expr.kind {
             if *ty == expected_ty {
-                let node = K::Literal(value.clone());
+                let node = K::Immediate(Immediate::new(value.clone()));
                 return Ok(N::new(node, expected_ty, expr.span));
             }
         }
@@ -626,7 +688,7 @@ impl TypeInference {
                     self.check_expr(&mut env, body, fn_ty.ret, MutType::constant(), body.span)?;
                 // Store and return the function's type
                 let value_fn = Value::function(B::new(ScriptFunction::new(code)));
-                let node = K::Literal(value_fn);
+                let node = K::Immediate(Immediate::new(value_fn));
                 return Ok(N::new(node, expected_ty, expr.span));
             }
         }
@@ -818,30 +880,51 @@ impl UnifiedTypeInference {
                 // Loop as long as we make progress.
                 let mut progress = false;
 
-                // Perform simplification.
-                let mut tuples_at_index_is: HashMap<(Type, usize), Type> = HashMap::new();
+                // Perform simplification for tuple and record constraints.
+                let mut tuples_at_index_is: HashMap<(Type, usize), (Type, Span)> = HashMap::new();
+                let mut records_field_is: HashMap<(Type, Ustr), (Type, Span)> = HashMap::new();
                 for constraint in &remaining_constraints {
                     use PubTypeConstraint::*;
                     match constraint {
                         TupleAtIndexIs {
                             tuple_ty,
-                            tuple_span,
                             index,
                             index_span,
                             element_ty,
                             ..
                         } => {
                             let key = (*tuple_ty, *index);
-                            if let Some(&expected_ty) = tuples_at_index_is.get(&key) {
+                            if let Some((expected_ty, expected_span)) = tuples_at_index_is.get(&key)
+                            {
                                 unified_ty_inf.unify_sub_type(
-                                    expected_ty,
-                                    *tuple_span,
                                     *element_ty,
                                     *index_span,
+                                    *expected_ty,
+                                    *expected_span,
                                     outer_fresh_ty_var_gen,
                                 )?;
                             } else {
-                                tuples_at_index_is.insert(key, *element_ty);
+                                tuples_at_index_is.insert(key, (*element_ty, *index_span));
+                            }
+                        }
+                        RecordFieldIs {
+                            record_ty,
+                            field,
+                            field_span,
+                            element_ty,
+                            ..
+                        } => {
+                            let key = (*record_ty, *field);
+                            if let Some((expected_ty, expected_span)) = records_field_is.get(&key) {
+                                unified_ty_inf.unify_sub_type(
+                                    *element_ty,
+                                    *field_span,
+                                    *expected_ty,
+                                    *expected_span,
+                                    outer_fresh_ty_var_gen,
+                                )?;
+                            } else {
+                                records_field_is.insert(key, (*element_ty, *field_span));
                             }
                         }
                     }
@@ -851,8 +934,34 @@ impl UnifiedTypeInference {
                 let mut new_remaining_constraints = HashSet::new();
                 for constraint in remaining_constraints {
                     let new_progress = match constraint {
-                        PubTypeConstraint::TupleAtIndexIs { .. } => unified_ty_inf
-                            .unify_tuple_project(constraint.clone(), outer_fresh_ty_var_gen)?,
+                        PubTypeConstraint::TupleAtIndexIs {
+                            tuple_ty,
+                            tuple_span,
+                            index,
+                            index_span,
+                            element_ty,
+                        } => unified_ty_inf.unify_tuple_project(
+                            tuple_ty,
+                            tuple_span,
+                            index,
+                            index_span,
+                            element_ty,
+                            outer_fresh_ty_var_gen,
+                        )?,
+                        PubTypeConstraint::RecordFieldIs {
+                            record_ty,
+                            record_span,
+                            field,
+                            field_span,
+                            element_ty,
+                        } => unified_ty_inf.unify_record_field_access(
+                            record_ty,
+                            record_span,
+                            field,
+                            field_span,
+                            element_ty,
+                            outer_fresh_ty_var_gen,
+                        )?,
                     };
                     match new_progress {
                         Some(new_constraint) => {
@@ -912,7 +1021,12 @@ impl UnifiedTypeInference {
             )),
             Variant(_) => todo!("normalize variant"),
             Tuple(tys) => Type::tuple(self.normalize_types(&tys)),
-            Record(_) => todo!("normalize record"),
+            Record(fields) => Type::record(
+                fields
+                    .into_iter()
+                    .map(|(name, ty)| (name, self.normalize_type(ty)))
+                    .collect(),
+            ),
             Function(fn_ty) => Type::function_type(self.normalize_fn_type(&fn_ty)),
             Newtype(name, ty) => Type::new_type(name, self.normalize_type(ty)),
         }
@@ -1043,11 +1157,13 @@ impl UnifiedTypeInference {
                         expected_span,
                     ));
                 }
-                for (cur_arg_ty, exp_arg_ty) in cur.arguments.iter().zip(exp.arguments.iter()) {
+                for (cur_arg_ty, exp_arg_ty) in
+                    cur.arguments.into_iter().zip(exp.arguments.into_iter())
+                {
                     self.unify_sub_type(
-                        *cur_arg_ty,
+                        cur_arg_ty,
                         current_span,
-                        *exp_arg_ty,
+                        exp_arg_ty,
                         expected_span,
                         outer_fresh_ty_var_gen,
                     )?;
@@ -1064,18 +1180,37 @@ impl UnifiedTypeInference {
                         expected_span,
                     ));
                 }
-                for (cur_el_ty, exp_el_ty) in cur.iter().zip(exp.iter()) {
+                for (cur_el_ty, exp_el_ty) in cur.into_iter().zip(exp.into_iter()) {
                     self.unify_sub_type(
-                        *cur_el_ty,
+                        cur_el_ty,
                         current_span,
-                        *exp_el_ty,
+                        exp_el_ty,
                         expected_span,
                         outer_fresh_ty_var_gen,
                     )?;
                 }
                 Ok(())
             }
-            (Record(_a), Record(_b)) => todo!("implement record unification"),
+            (Record(cur), Record(exp)) => {
+                for (cur_field, exp_field) in cur.into_iter().zip(exp) {
+                    if cur_field.0 != exp_field.0 {
+                        return Err(InternalCompilationError::IsNotSubtype(
+                            cur_ty,
+                            current_span,
+                            exp_ty,
+                            expected_span,
+                        ));
+                    }
+                    self.unify_sub_type(
+                        cur_field.1,
+                        current_span,
+                        exp_field.1,
+                        expected_span,
+                        outer_fresh_ty_var_gen,
+                    )?;
+                }
+                Ok(())
+            }
             (Function(cur), Function(exp)) => {
                 if cur.args.len() != exp.args.len() {
                     return Err(InternalCompilationError::IsNotSubtype(
@@ -1181,13 +1316,11 @@ impl UnifiedTypeInference {
 
     fn unify_tuple_project(
         &mut self,
-        PubTypeConstraint::TupleAtIndexIs {
-            tuple_ty,
-            tuple_span,
-            index,
-            index_span,
-            element_ty,
-        }: PubTypeConstraint,
+        tuple_ty: Type,
+        tuple_span: Span,
+        index: usize,
+        index_span: Span,
+        element_ty: Type,
         outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let tuple_ty = self.normalize_type(tuple_ty);
@@ -1220,9 +1353,61 @@ impl UnifiedTypeInference {
             }
             // Not a tuple, error
             _ => Err(InternalCompilationError::InvalidTupleProjection {
-                expr_ty: tuple_ty,
-                expr_span: tuple_span,
+                tuple_ty,
+                tuple_span,
                 index_span,
+            }),
+        }
+    }
+
+    fn unify_record_field_access(
+        &mut self,
+        record_ty: Type,
+        record_span: Span,
+        field: Ustr,
+        field_span: Span,
+        element_ty: Type,
+        outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        let record_ty = self.normalize_type(record_ty);
+        let element_ty = self.normalize_type(element_ty);
+        let record_data = { record_ty.data().clone() };
+        match record_data {
+            // A type variable may or may not be a tuple, defer the unification
+            TypeKind::Variable(_) => Ok(Some(PubTypeConstraint::new_record_field_is(
+                record_ty,
+                record_span,
+                field,
+                field_span,
+                element_ty,
+            ))),
+            // A record, verify element type
+            TypeKind::Record(tys) => {
+                if let Some(ty) = tys
+                    .iter()
+                    .find_map(|(name, ty)| if *name == field { Some(*ty) } else { None })
+                {
+                    self.unify_sub_type(
+                        ty,
+                        record_span,
+                        element_ty,
+                        field_span,
+                        outer_fresh_ty_var_gen,
+                    )?;
+                    Ok(None)
+                } else {
+                    Err(InternalCompilationError::InvalidRecordField {
+                        field_span,
+                        record_ty,
+                        record_span,
+                    })
+                }
+            }
+            // Not a record, error
+            _ => Err(InternalCompilationError::InvalidRecordFieldAccess {
+                record_ty,
+                record_span,
+                field_span,
             }),
         }
     }
@@ -1382,7 +1567,12 @@ impl UnifiedTypeInference {
             )),
             Variant(_) => todo!("substitute variant"),
             Tuple(tys) => Type::tuple(self.substitute_types(&tys, ignore)),
-            Record(_) => todo!("substitute record"),
+            Record(fields) => Type::record(
+                fields
+                    .into_iter()
+                    .map(|(name, ty)| (name, self.substitute_type(ty, ignore)))
+                    .collect(),
+            ),
             Function(fn_ty) => Type::function_type(self.substitute_fn_type(&fn_ty, ignore)),
             Newtype(name, ty) => Type::new_type(name, self.substitute_type(ty, ignore)),
         }
@@ -1429,30 +1619,37 @@ impl UnifiedTypeInference {
         use ir::NodeKind::*;
         node.ty = self.substitute_type(node.ty, ignore);
         match &mut node.kind {
-            Literal(value) => self.substitute_value(value, ignore),
+            Immediate(immediate) => {
+                self.substitute_value(&mut immediate.value, ignore);
+                self.substitute_fn_inst_data(&mut immediate.inst_data, ignore);
+            }
+            BuildClosure(_) => panic!("BuildClosure should not be present at this stage"),
             Apply(app) => {
                 self.substitute_node(&mut app.function, ignore);
                 self.substitute_nodes(&mut app.arguments, ignore);
             }
             StaticApply(app) => {
                 app.ty = self.substitute_fn_type(&app.ty, ignore);
-                // app.subst
-                //     .iter_mut()
-                //     .for_each(|(_, ty)| *ty = self.substitute_type(*ty, ignore));
                 self.substitute_nodes(&mut app.arguments, ignore);
+                self.substitute_fn_inst_data(&mut app.inst_data, ignore);
             }
             EnvStore(node) => {
                 self.substitute_node(&mut node.node, &node.ty_scheme.quantifiers);
                 self.substitute_in_type_scheme(&mut node.ty_scheme);
             }
-            EnvLoad(_) => {}
+            EnvLoad(node) => {
+                self.substitute_fn_inst_data(&mut node.inst_data, ignore);
+            }
             Block(nodes) => self.substitute_nodes(nodes, ignore),
             Assign(assignment) => {
                 self.substitute_node(&mut assignment.place, ignore);
                 self.substitute_node(&mut assignment.value, ignore);
             }
             Tuple(nodes) => self.substitute_nodes(nodes, ignore),
-            Project(node_and_index) => self.substitute_node(&mut node_and_index.0, ignore),
+            Project(projection) => self.substitute_node(&mut projection.0, ignore),
+            Record(nodes) => self.substitute_nodes(nodes, ignore),
+            FieldAccess(node_and_field) => self.substitute_node(&mut node_and_field.0, ignore),
+            ProjectAt(projection) => self.substitute_node(&mut projection.0, ignore),
             Array(nodes) => self.substitute_nodes(nodes, ignore),
             Index(array, index) => {
                 self.substitute_node(array, ignore);
@@ -1477,6 +1674,14 @@ impl UnifiedTypeInference {
         for node in nodes {
             self.substitute_node(node, ignore);
         }
+    }
+
+    fn substitute_fn_inst_data(&mut self, inst_data: &mut FnInstData, ignore: &[TypeVar]) {
+        inst_data.dicts_req = inst_data
+            .dicts_req
+            .iter()
+            .map(|dict| DictionaryReq::new(self.substitute_type(dict.ty, ignore), dict.kind))
+            .collect();
     }
 
     fn substitute_value(&mut self, value: &mut Value, ignore: &[TypeVar]) {
@@ -1517,6 +1722,23 @@ impl UnifiedTypeInference {
                     *tuple_span,
                     *index,
                     *index_span,
+                    element_ty,
+                )
+            }
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                record_span,
+                field,
+                field_span,
+                element_ty,
+            } => {
+                let record_ty = self.substitute_type(*record_ty, ignore);
+                let element_ty = self.substitute_type(*element_ty, ignore);
+                PubTypeConstraint::new_record_field_is(
+                    record_ty,
+                    *record_span,
+                    *field,
+                    *field_span,
                     element_ty,
                 )
             }

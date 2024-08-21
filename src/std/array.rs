@@ -4,11 +4,11 @@ use itertools::Itertools;
 use ustr::ustr;
 
 use crate::{
+    eval::{EvalCtx, ValOrMut},
     format::write_with_separator,
     function::{
         BinaryNativeFnMVI, BinaryNativeFnNNI, BinaryNativeFnNVI, UnaryNativeFnNI, UnaryNativeFnVI,
     },
-    ir::{EvalCtx, ValOrMut},
     module::{Module, ModuleFunction},
     r#type::{bare_native_type, FnType, Type},
     type_scheme::TypeScheme,

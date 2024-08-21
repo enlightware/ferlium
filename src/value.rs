@@ -160,16 +160,16 @@ impl Value {
                 writeln!(f, "{indent_str})")
             }
             Tuple(tuple) => {
-                writeln!(f, "(")?;
+                writeln!(f, "{indent_str}(")?;
                 for element in tuple.iter() {
                     element.format_ind(f, env, indent + 1)?;
                 }
-                writeln!(f, ")")
+                writeln!(f, "{indent_str})")
             }
             Function(function) => {
                 let function = function.get();
                 let function = function.borrow();
-                writeln!(f, "{indent_str}lambda @ {:p}", *function,)?;
+                writeln!(f, "{indent_str}function @ {:p}", *function,)?;
                 function.format_ind(f, env, indent + 1)
             }
         }

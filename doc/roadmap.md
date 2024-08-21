@@ -23,6 +23,10 @@
 - Optimisations
 - Just in time compilation
 
+### IDE features
+
+- Should location of execution error
+
 ### Next tasks
 
 - Add {} block expression
@@ -32,3 +36,4 @@
 ### Open questions
 
 - Should newtype be scoped by their module?
+- Should integer overflow be caught?

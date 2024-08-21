@@ -7,7 +7,7 @@ use crate::{
     containers::B,
     error::InternalCompilationError,
     function::ScriptFunction,
-    ir,
+    ir::{self, Immediate},
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
     mutability::MutType,
     r#type::{FnType, Type, TypeLike, TypeVar},
@@ -47,7 +47,7 @@ pub fn emit_module(
         ));
         // Create dummy code.
         let dummy_code = B::new(ScriptFunction::new(N::new(
-            K::Literal(Value::unit()),
+            K::Immediate(Immediate::new(Value::unit())),
             Type::unit(),
             *span,
         )));
@@ -171,8 +171,8 @@ pub fn emit_module(
         )));
     }
 
-    // Sixth pass, normalize the type schemes and substitute the types in the functions
-    // and run the borrow checker.
+    // Sixth pass, normalize the type schemes, substitute the types in the functions,
+    // run the borrow checker and elaborate the dictionaries.
     for ModuleFunction { name, .. } in &source.functions {
         let descr = output.functions.get_mut(&name.0).unwrap();
         let subst = descr.ty_scheme.normalize();
@@ -180,6 +180,8 @@ pub fn emit_module(
         let node = &mut code.as_script_mut().unwrap().code;
         node.substitute(&subst);
         node.check_borrows()?;
+        let dicts = descr.ty_scheme.extra_parameters();
+        node.elaborate_dictionaries(&dicts);
     }
 
     Ok(output)
@@ -294,7 +296,7 @@ pub fn emit_expr_top_level(
     module_env: ModuleEnv,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
-    let (expr, ty_constraints, mut_constraints) = emit_expr(
+    let (mut expr, ty_constraints, mut_constraints) = emit_expr(
         source,
         module_env,
         locals,
@@ -309,7 +311,12 @@ pub fn emit_expr_top_level(
         mut_constraints.is_empty(),
         "No external mut constraints shall remain at top level"
     );
+
+    // Do borrow checking and dictionary elaboration.
     expr.expr.check_borrows()?;
+    let dicts = expr.ty.extra_parameters();
+    expr.expr.elaborate_dictionaries(&dicts);
+
     Ok(expr)
 }
 

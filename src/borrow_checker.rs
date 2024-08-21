@@ -1,4 +1,5 @@
 use lrpar::Span;
+use ustr::Ustr;
 
 use crate::{
     error::InternalCompilationError,
@@ -8,6 +9,7 @@ use crate::{
 
 enum PathPart {
     Projection(usize),
+    FieldAccess(Ustr),
     IndexStatic(usize),
     IndexDynamic,
 }
@@ -27,10 +29,16 @@ impl Path {
                 path.parts.push(PathPart::Projection(index));
                 path
             }
+            FieldAccess(access) => {
+                let (ref node, field) = **access;
+                let mut path = Self::from_node(node);
+                path.parts.push(PathPart::FieldAccess(field));
+                path
+            }
             Index(array, index) => {
                 let mut path = Self::from_node(array);
-                if let NodeKind::Literal(index) = &index.kind {
-                    let index = *index.as_primitive_ty::<isize>().unwrap();
+                if let NodeKind::Immediate(immediate) = &index.kind {
+                    let index = *immediate.value.as_primitive_ty::<isize>().unwrap();
                     if index >= 0 {
                         path.parts.push(PathPart::IndexStatic(index as usize));
                     } else {
@@ -41,8 +49,8 @@ impl Path {
                 }
                 path
             }
-            EnvLoad(index) => Path {
-                variable: *index,
+            EnvLoad(node) => Path {
+                variable: node.index,
                 parts: Vec::new(),
             },
             _ => panic!("Cannot resolve a non-place node"),
@@ -60,6 +68,11 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
         use PathPart::*;
         match (a, b) {
             (Projection(a), Projection(b)) => {
+                if a != b {
+                    return false;
+                }
+            }
+            (FieldAccess(a), FieldAccess(b)) => {
                 if a != b {
                     return false;
                 }
@@ -112,7 +125,8 @@ impl Node {
     pub fn check_borrows(&self) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
         match &self.kind {
-            Literal(_) => (),
+            Immediate(_) => (),
+            BuildClosure(_) => panic!("Closure should not be in the IR at this point"),
             Apply(app) => {
                 app.function.check_borrows()?;
                 for arg in &app.arguments {
@@ -148,6 +162,17 @@ impl Node {
             }
             Project(projection) => {
                 projection.0.check_borrows()?;
+            }
+            ProjectAt(_) => {
+                panic!("ProjectAt should not be in the IR at this point");
+            }
+            Record(nodes) => {
+                for node in nodes.iter() {
+                    node.check_borrows()?;
+                }
+            }
+            FieldAccess(access) => {
+                access.0.check_borrows()?;
             }
             Array(nodes) => {
                 for node in nodes.iter() {

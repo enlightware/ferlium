@@ -2,11 +2,13 @@ use std::hash::{Hash, Hasher};
 
 use itertools::Itertools;
 use lrpar::Span;
+use ustr::Ustr;
 
 use crate::{
     containers::vec_difference,
+    dictionary_passing::{instantiate_dictionaries_req, DictionariesTyReq, DictionaryReq},
     module::{FmtWithModuleEnv, FormatWithModuleEnv, ModuleEnv},
-    r#type::{Type, TypeLike, TypeSubstitution, TypeVar, TypeVarSubstitution},
+    r#type::{Type, TypeKind, TypeLike, TypeSubstitution, TypeVar, TypeVarSubstitution},
     type_inference::TypeInference,
 };
 
@@ -31,6 +33,14 @@ pub enum PubTypeConstraint {
         index_span: Span,
         element_ty: Type,
     },
+    /// Record field access constraint: record_ty.field = element_ty
+    RecordFieldIs {
+        record_ty: Type,
+        record_span: Span,
+        field: Ustr,
+        field_span: Span,
+        element_ty: Type,
+    },
 }
 
 impl PubTypeConstraint {
@@ -50,6 +60,22 @@ impl PubTypeConstraint {
         }
     }
 
+    pub fn new_record_field_is(
+        record_ty: Type,
+        record_span: Span,
+        field: Ustr,
+        field_span: Span,
+        element_ty: Type,
+    ) -> Self {
+        Self::RecordFieldIs {
+            record_ty,
+            record_span,
+            field,
+            field_span,
+            element_ty,
+        }
+    }
+
     pub fn contains_ty_vars(&self, vars: &[TypeVar]) -> bool {
         match self {
             PubTypeConstraint::TupleAtIndexIs {
@@ -57,6 +83,13 @@ impl PubTypeConstraint {
                 element_ty,
                 ..
             } => tuple_ty.data().contains_ty_vars(vars) || element_ty.data().contains_ty_vars(vars),
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                element_ty,
+                ..
+            } => {
+                record_ty.data().contains_ty_vars(vars) || element_ty.data().contains_ty_vars(vars)
+            }
         }
     }
 }
@@ -77,6 +110,19 @@ impl TypeLike for PubTypeConstraint {
                 *index_span,
                 element_ty.instantiate(subst),
             ),
+            Self::RecordFieldIs {
+                record_ty,
+                record_span,
+                field,
+                field_span,
+                element_ty,
+            } => Self::new_record_field_is(
+                record_ty.instantiate(subst),
+                *record_span,
+                *field,
+                *field_span,
+                element_ty.instantiate(subst),
+            ),
         }
     }
 
@@ -95,6 +141,19 @@ impl TypeLike for PubTypeConstraint {
                 *index_span,
                 element_ty.substitute(subst),
             ),
+            Self::RecordFieldIs {
+                record_ty,
+                record_span,
+                field,
+                field_span,
+                element_ty,
+            } => Self::new_record_field_is(
+                record_ty.substitute(subst),
+                *record_span,
+                *field,
+                *field_span,
+                element_ty.substitute(subst),
+            ),
         }
     }
 
@@ -105,6 +164,16 @@ impl TypeLike for PubTypeConstraint {
                 element_ty,
                 ..
             } => tuple_ty
+                .inner_ty_vars()
+                .into_iter()
+                .chain(element_ty.inner_ty_vars())
+                .unique()
+                .collect(),
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                element_ty,
+                ..
+            } => record_ty
                 .inner_ty_vars()
                 .into_iter()
                 .chain(element_ty.inner_ty_vars())
@@ -130,7 +199,22 @@ impl PartialEq for PubTypeConstraint {
                     element_ty: e_ty2,
                     ..
                 },
-            ) => t_ty1 == t_ty2 && idx1 == idx2 && e_ty1 == e_ty2, // Add more match arms if you add more variants to the enum
+            ) => t_ty1 == t_ty2 && idx1 == idx2 && e_ty1 == e_ty2,
+            (
+                PubTypeConstraint::RecordFieldIs {
+                    record_ty: r_ty1,
+                    field: f1,
+                    element_ty: e_ty1,
+                    ..
+                },
+                PubTypeConstraint::RecordFieldIs {
+                    record_ty: r_ty2,
+                    field: f2,
+                    element_ty: e_ty2,
+                    ..
+                },
+            ) => r_ty1 == r_ty2 && f1 == f2 && e_ty1 == e_ty2,
+            _ => false,
         }
     }
 }
@@ -147,7 +231,17 @@ impl Hash for PubTypeConstraint {
                 tuple_ty.hash(state);
                 index.hash(state);
                 element_ty.hash(state);
-            } // Add more match arms if you add more variants to the enum
+            }
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                field,
+                element_ty,
+                ..
+            } => {
+                record_ty.hash(state);
+                field.hash(state);
+                element_ty.hash(state);
+            }
         }
     }
 }
@@ -170,6 +264,20 @@ impl FmtWithModuleEnv for PubTypeConstraint {
                     "{}.{} = {}",
                     tuple_ty.format_with(env),
                     index,
+                    element_ty.format_with(env)
+                )
+            }
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                field,
+                element_ty,
+                ..
+            } => {
+                write!(
+                    f,
+                    "{}.{} = {}",
+                    record_ty.format_with(env),
+                    field,
                     element_ty.format_with(env)
                 )
             }
@@ -211,12 +319,14 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Instantiate this type scheme with fresh type variables in ty_inf.
-    pub(crate) fn instantiate(&self, ty_inf: &mut TypeInference) -> (Ty, TypeSubstitution) {
+    pub(crate) fn instantiate(&self, ty_inf: &mut TypeInference) -> (Ty, DictionariesTyReq) {
         let subst = ty_inf.fresh_type_var_subs(&self.quantifiers);
         for constraint in &self.constraints {
             ty_inf.add_pub_constraint(constraint.instantiate(&subst));
         }
-        (self.ty.instantiate(&subst), subst)
+        let ty = self.ty.instantiate(&subst);
+        let dict_req = instantiate_dictionaries_req(&self.extra_parameters(), &subst);
+        (ty, dict_req)
     }
 
     /// Substitute type variables in this type scheme.
@@ -276,6 +386,27 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             .collect();
         // Return
         var_subst
+    }
+
+    /// Extra functions parameters that must be passed to resolve polymorphism.
+    pub(crate) fn extra_parameters(&self) -> Vec<DictionaryReq<TypeVar>> {
+        self.constraints
+            .iter()
+            .filter_map(|constraint| {
+                if let PubTypeConstraint::RecordFieldIs {
+                    record_ty, field, ..
+                } = constraint
+                {
+                    if let TypeKind::Variable(var) = *record_ty.data() {
+                        Some(DictionaryReq::new_field_index(var, *field))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn format_quantifiers(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

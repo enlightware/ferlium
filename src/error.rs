@@ -36,9 +36,23 @@ pub enum InternalCompilationError {
         tuple_span: Span,
     },
     InvalidTupleProjection {
-        expr_ty: Type,
-        expr_span: Span,
+        tuple_ty: Type,
+        tuple_span: Span,
         index_span: Span,
+    },
+    DuplicatedRecordField {
+        first_occurrence_span: Span,
+        second_occurrence_span: Span,
+    },
+    InvalidRecordField {
+        field_span: Span,
+        record_ty: Type,
+        record_span: Span,
+    },
+    InvalidRecordFieldAccess {
+        field_span: Span,
+        record_ty: Type,
+        record_span: Span,
     },
     MutablePathsOverlap {
         a_span: Span,
@@ -102,8 +116,44 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     "Invalid index {index} of a tuple of length {tuple_length}"
                 )
             }
-            InvalidTupleProjection { expr_ty, .. } => {
+            InvalidTupleProjection {
+                tuple_ty: expr_ty, ..
+            } => {
                 write!(f, "Expected tuple, got \"{}\"", expr_ty.format_with(env))
+            }
+            DuplicatedRecordField {
+                first_occurrence_span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Duplicated record field: {}",
+                    &source[first_occurrence_span.start()..first_occurrence_span.end()]
+                )
+            }
+            InvalidRecordField {
+                field_span,
+                record_ty,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Field {} not found in record {}",
+                    &source[field_span.start()..field_span.end()],
+                    record_ty.format_with(env)
+                )
+            }
+            InvalidRecordFieldAccess {
+                field_span,
+                record_ty,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Field {} not found in record {}",
+                    &source[field_span.start()..field_span.end()],
+                    record_ty.format_with(env)
+                )
             }
             MutablePathsOverlap {
                 a_span,
@@ -158,6 +208,21 @@ pub enum CompilationError {
         expr_ty: String,
         expr_span: Span,
         index_span: Span,
+    },
+    DuplicatedRecordField {
+        name: String,
+        first_occurrence_span: Span,
+        second_occurrence_span: Span,
+    },
+    InvalidRecordField {
+        field_span: Span,
+        record_ty: String,
+        record_span: Span,
+    },
+    InvalidRecordFieldAccess {
+        field_span: Span,
+        record_ty: String,
+        record_span: Span,
     },
     MutablePathsOverlap {
         a_name: String,
@@ -219,13 +284,39 @@ impl CompilationError {
                 tuple_span,
             },
             InvalidTupleProjection {
-                expr_ty,
-                expr_span,
+                tuple_ty: expr_ty,
+                tuple_span: expr_span,
                 index_span,
             } => Self::InvalidTupleProjection {
                 expr_ty: expr_ty.format_with(env).to_string(),
                 expr_span,
                 index_span,
+            },
+            DuplicatedRecordField {
+                first_occurrence_span,
+                second_occurrence_span,
+            } => Self::DuplicatedRecordField {
+                name: src[first_occurrence_span.start()..first_occurrence_span.end()].to_string(),
+                first_occurrence_span,
+                second_occurrence_span,
+            },
+            InvalidRecordField {
+                field_span,
+                record_ty,
+                record_span,
+            } => Self::InvalidRecordField {
+                field_span,
+                record_ty: record_ty.format_with(env).to_string(),
+                record_span,
+            },
+            InvalidRecordFieldAccess {
+                field_span,
+                record_ty,
+                record_span,
+            } => Self::InvalidRecordFieldAccess {
+                field_span,
+                record_ty: record_ty.format_with(env).to_string(),
+                record_span,
             },
             MutablePathsOverlap {
                 a_span,
@@ -283,6 +374,21 @@ impl CompilationError {
         match self {
             Self::UnboundTypeVar { .. } => (),
             _ => panic!("expect_unbound_ty_val called on non-UnboundTypeVar error"),
+        }
+    }
+
+    pub fn expect_duplicate_record_field(&self, exp_name: &str) {
+        match self {
+            Self::DuplicatedRecordField { name, .. } => {
+                if name == exp_name {
+                } else {
+                    panic!(
+                        "expect_duplicate_record_field failed: expected \"{}\", got \"{}\"",
+                        exp_name, name
+                    );
+                }
+            }
+            _ => panic!("expect_duplicate_record_field called on non-DuplicatedRecordField error"),
         }
     }
 

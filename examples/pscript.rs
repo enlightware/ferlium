@@ -9,7 +9,7 @@ use painturscript::typing_env::Local;
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 
-use painturscript::ir::EvalCtx;
+use painturscript::eval::EvalCtx;
 
 fn start_of_line_of(src: &str, pos: usize) -> usize {
     if pos >= src.len() {
@@ -135,8 +135,8 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         InvalidTupleProjection {
-            expr_ty,
-            expr_span,
+            tuple_ty: expr_ty,
+            tuple_span: expr_span,
             index_span,
         } => {
             let offset = start_of_line_of(src, expr_span.start());
@@ -159,6 +159,29 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                         ))
                         .with_color(Color::Green)
                         .with_order(1),
+                )
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
+        DuplicatedRecordField {
+            first_occurrence_span,
+            second_occurrence_span,
+        } => {
+            let offset = start_of_line_of(src, first_occurrence_span.start());
+            let name = &data.1[span_range(*first_occurrence_span)];
+            Report::build(ReportKind::Error, "input", offset)
+                .with_message(format!(
+                    "Duplicated field \"{}\" in record.",
+                    name.fg(Color::Blue)
+                ))
+                .with_label(
+                    Label::new(("input", span_range(*first_occurrence_span)))
+                        .with_color(Color::Blue),
+                )
+                .with_label(
+                    Label::new(("input", span_range(*second_occurrence_span)))
+                        .with_color(Color::Blue),
                 )
                 .finish()
                 .print(("input", Source::from(src)))
