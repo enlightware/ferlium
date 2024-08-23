@@ -106,6 +106,35 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
+        InvalidPolymorphicValue {
+            ty_scheme,
+            name_span,
+            expr_span,
+        } => {
+            let offset = start_of_line_of(src, name_span.start());
+            let ty_scheme = ty_scheme.display_rust_style(env).fg(Color::Blue);
+            let name = &data.1[span_range(*name_span)];
+            Report::build(ReportKind::Error, "input", offset)
+                .with_message(format!(
+                    "The 'let' binding for {} inferred the polymorphic type {}, which is not allowed because it is not a function. Please adjust the expression to ensure a more specific type is inferred, such as an integer or a string.",
+                    name.fg(Color::Blue),
+                    &ty_scheme,
+                ))
+                .with_label(
+                    Label::new(("input", span_range(*name_span)))
+                        .with_message("This 'let' binding.")
+                        .with_color(Color::Blue),
+                )
+                .with_label(
+                    Label::new(("input", span_range(*expr_span)))
+                        .with_message(format!("Inferred {} from {}.", &ty_scheme, "this expression".fg(Color::Green)))
+                        .with_color(Color::Green)
+                        .with_order(1),
+                )
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
         InvalidTupleIndex {
             index,
             index_span,

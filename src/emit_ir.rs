@@ -179,7 +179,7 @@ pub fn emit_module(
         let mut code = descr.code.borrow_mut();
         let node = &mut code.as_script_mut().unwrap().code;
         node.substitute(&subst);
-        node.check_borrows()?;
+        node.check_borrows_and_let_poly()?;
         let dicts = descr.ty_scheme.extra_parameters();
         node.elaborate_dictionaries(&dicts);
     }
@@ -313,7 +313,7 @@ pub fn emit_expr_top_level(
     );
 
     // Do borrow checking and dictionary elaboration.
-    expr.expr.check_borrows()?;
+    expr.expr.check_borrows_and_let_poly()?;
     let dicts = expr.ty.extra_parameters();
     expr.expr.elaborate_dictionaries(&dicts);
 

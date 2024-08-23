@@ -90,11 +90,14 @@ fn array_and_let_polymorphism() {
         run("let f = || []; var a = f(); array_append(a, 1); a[0]"),
         int!(1)
     );
-    // TODO: check return type here
-    assert_eq!(run("let f = || []; let a = f(); ()"), unit());
+    fail_compilation("let f = || []; let a = f(); ()").expect_invalid_polymorphic_value();
     fail_compilation("let f = || []; var a = f(); ()").expect_unbound_ty_var();
     fail_compilation("let f = || []; let a = f(); array_append(a, 1); a[0]")
         .expect_must_be_mutable();
+    assert_eq!(
+        run("let f = || []; var a = f(); array_append(a, 1); a[0]"),
+        int!(1)
+    );
 }
 
 #[test]
