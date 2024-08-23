@@ -365,6 +365,10 @@ fn records() {
         run("fn s(v) { v.x + v.y } ((s,).0)({x:1, bla: true, y:2})"),
         int!(3)
     );
+    assert_eq!(
+        run("fn a(x) { x.a } fn b(x) { a(x) } b({a:3})"),
+        int!(3)
+    );
     fail_compilation(
         "fn swap(a,b) { var temp = a; a = b; b = temp } var v = { x:1, y:2 }; swap(v.x, v.x)",
     )
