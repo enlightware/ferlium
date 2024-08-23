@@ -44,6 +44,7 @@ impl Debug for dyn Callable {
 // Function access types
 
 pub type Function = Box<dyn Callable>;
+pub type FunctionPtr = *mut Function;
 pub type FunctionRc = Rc<RefCell<Function>>;
 pub type FunctionWeak = Weak<RefCell<Function>>;
 

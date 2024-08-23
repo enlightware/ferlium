@@ -121,6 +121,7 @@ impl Module {
         if !self.functions.is_empty() {
             writeln!(f, "Functions:")?;
             for (name, function) in self.functions.iter() {
+                // function.ty_scheme.format_quantifiers(f)?; write!(f, ". ")?;
                 if function.ty_scheme.is_just_type() {
                     writeln!(f, "fn {name} {}", function.ty_scheme.ty.format_with(&env))?;
                 } else {

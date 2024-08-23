@@ -1,5 +1,4 @@
-use std::collections::HashSet;
-
+use indexmap::IndexMap;
 use itertools::Itertools;
 use lrpar::Span;
 use ustr::Ustr;
@@ -261,7 +260,7 @@ impl Node {
             ProjectAt(access) => {
                 writeln!(f, "{indent_str}access")?;
                 access.0.format_ind(f, env, indent + 1)?;
-                writeln!(f, "{indent_str}at field refererenced by local {}", access.1)?;
+                writeln!(f, "{indent_str}at field referenced by local {}", access.1)?;
             }
             Array(nodes) => {
                 writeln!(f, "{indent_str}array")?;
@@ -513,7 +512,7 @@ impl Node {
 
     pub fn unbound_ty_vars(
         &self,
-        result: &mut HashSet<(TypeVar, Span)>,
+        result: &mut IndexMap<TypeVar, Span>,
         ignore: &[TypeVar],
         generation: u32,
     ) {
@@ -594,13 +593,13 @@ impl Node {
     pub fn unbound_ty_vars_in_ty(
         &self,
         ty: &impl TypeLike,
-        result: &mut HashSet<(TypeVar, Span)>,
+        result: &mut IndexMap<TypeVar, Span>,
         ignore: &[TypeVar],
         generation: u32,
     ) {
         ty.inner_ty_vars().iter().for_each(|ty_var| {
             if ty_var.generation() == generation && !ignore.contains(ty_var) {
-                result.insert((*ty_var, self.span));
+                result.insert(*ty_var, self.span);
             }
         });
     }
@@ -620,7 +619,7 @@ impl Node {
                 substitute_nodes(&mut app.arguments, subst);
             }
             StaticApply(app) => {
-                app.ty.substitute(subst);
+                app.ty = app.ty.substitute(subst);
                 app.inst_data.substitute(subst);
                 substitute_nodes(&mut app.arguments, subst);
             }

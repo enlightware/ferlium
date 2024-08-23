@@ -82,12 +82,16 @@ pub enum TypeConstraint {
 }
 
 impl TypeConstraint {
-    pub fn contains_ty_vars(&self, vars: &[TypeVar]) -> bool {
+    pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
+        use TypeConstraint::*;
         match self {
-            TypeConstraint::SubType {
+            SubType {
                 current, expected, ..
-            } => current.data().contains_ty_vars(vars) || expected.data().contains_ty_vars(vars),
-            TypeConstraint::Pub(pub_constraint) => pub_constraint.contains_ty_vars(vars),
+            } => {
+                current.data().contains_any_ty_vars(vars)
+                    || expected.data().contains_any_ty_vars(vars)
+            }
+            Pub(pub_constraint) => pub_constraint.contains_any_ty_vars(vars),
         }
     }
 }
@@ -98,8 +102,9 @@ impl FmtWithModuleEnv for TypeConstraint {
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
+        use TypeConstraint::*;
         match self {
-            TypeConstraint::SubType {
+            SubType {
                 current, expected, ..
             } => {
                 write!(
@@ -109,7 +114,7 @@ impl FmtWithModuleEnv for TypeConstraint {
                     expected.format_with(env)
                 )
             }
-            TypeConstraint::Pub(pub_constraint) => pub_constraint.fmt_with_module_env(f, env),
+            Pub(pub_constraint) => pub_constraint.fmt_with_module_env(f, env),
         }
     }
 }
@@ -211,16 +216,14 @@ impl TypeInference {
                 if let Some((index, ty_scheme, mut_ty)) =
                     env.get_variable_index_and_type_scheme(name)
                 {
-                    let (var_ty, dicts_req) = ty_scheme.instantiate(self);
+                    let (var_ty, inst_data) = ty_scheme.instantiate(self);
                     // If the variable is a function that requires dictionaries, store the necessary information
-                    let inst_data = FnInstData::new(dicts_req);
                     let node = K::EnvLoad(B::new(ir::EnvLoad { index, inst_data }));
                     (node, var_ty, mut_ty)
                 }
                 // Retrieve the function from the environment, if it exists
                 else if let Some(function) = env.get_function(*name) {
-                    let (fn_ty, dicts_req) = function.ty_scheme.instantiate(self);
-                    let inst_data = FnInstData::new(dicts_req);
+                    let (fn_ty, inst_data) = function.ty_scheme.instantiate(self);
                     let value = Value::Function(FunctionRef::new_weak(&function.code));
                     let node = K::Immediate(B::new(ir::Immediate { value, inst_data }));
                     (node, Type::function_type(fn_ty), MutType::constant())
@@ -540,7 +543,7 @@ impl TypeInference {
             .get_function(name)
             .ok_or(InternalCompilationError::FunctionNotFound(span))?;
         // Instantiate its type scheme
-        let (inst_fn_ty, dicts_req) = function.ty_scheme.instantiate(self);
+        let (inst_fn_ty, inst_data) = function.ty_scheme.instantiate(self);
         // Get the code and make sure the types of its arguments match the expected types
         let args_nodes = self.check_exprs(env, args, &inst_fn_ty.args, span)?;
         // Build and return the function node, get back the function to avoid re-borrowing
@@ -554,7 +557,7 @@ impl TypeInference {
             function_span: span,
             arguments: args_nodes,
             ty: inst_fn_ty,
-            inst_data: FnInstData::new(dicts_req),
+            inst_data,
         }));
         Ok((node, ret_ty, MutType::constant()))
     }
@@ -1281,7 +1284,7 @@ impl UnifiedTypeInference {
         ty_span: Span,
         outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
     ) -> Result<(), InternalCompilationError> {
-        if ty.data().contains_type_var(var) {
+        if ty.data().contains_any_type_var(var) {
             Err(InternalCompilationError::InfiniteType(var, ty, ty_span))
         } else if var.generation() != self.generation {
             // The type variable is external, so we need to make sure that the matching type has no local type variables.

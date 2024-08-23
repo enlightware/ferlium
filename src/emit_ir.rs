@@ -1,5 +1,10 @@
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
+use indexmap::IndexMap;
 use itertools::Itertools;
 
 use crate::{
@@ -111,37 +116,40 @@ pub fn emit_module(
         "No external mut constraints shall remain at top level"
     );
     for ModuleFunction { name, .. } in &source.functions {
-        // Compute the quantifiers based on the type variables in the function type and
-        // the constraints referring to them.
+        // Collect all type variables unbound in the body of the function.
         let descr = output.functions.get_mut(&name.0).unwrap();
-        let mut quantifiers = descr.ty_scheme.ty.inner_ty_vars();
-        let mut constraints;
-        loop {
-            // Loop because new constraints may introduce new type variables.
-            let initial_count = quantifiers.len();
-            constraints = filter_constraints(&all_constraints, &quantifiers);
-            quantifiers = extend_with_constraint_ty_vars(&quantifiers, &constraints);
-            if quantifiers.len() == initial_count {
-                break;
-            }
-        }
-
-        // Detect unbound type variables in the code and return error if any.
-        let mut unbound = HashSet::new();
         let mut code = descr.code.borrow_mut();
         let node = &mut code.as_script_mut().unwrap().code;
-        node.unbound_ty_vars(&mut unbound, &quantifiers, 0);
-        if let Some((ty_var, span)) = unbound.into_iter().next() {
-            let pos = span.start();
-            let mut code = descr.code.borrow_mut();
-            let node = &mut code.as_script_mut().unwrap().code;
-            let ty = node.type_at(pos);
-            let ty = ty.ok_or_else(|| {
-                InternalCompilationError::Internal(format!(
-                    "Type not found at pos {pos} while looking for unbound type variable {ty_var}"
-                ))
-            })?;
-            return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
+        let mut unbound = IndexMap::new();
+        node.unbound_ty_vars(&mut unbound, &[], 0);
+        let all_ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
+
+        // Keep the constraints that are fully related to the types found in the function.
+        // We can drop the other ones because they are not relevant for the function we are compiling.
+        let constraints = filter_constraints_only_ty_vars(&all_constraints, &all_ty_vars);
+
+        // Compute the quantifiers based on the function type and its contraints.
+        let quantifiers: Vec<_> = descr
+            .ty_scheme
+            .ty
+            .inner_ty_vars()
+            .into_iter()
+            .chain(constraints.iter().flat_map(|c| c.inner_ty_vars()))
+            .unique()
+            .collect();
+
+        // Detect unbound type variables in the code and return error if any.
+        // These are neither part of the function signature nor of the constraints.
+        for (ty_var, span) in unbound {
+            if !quantifiers.contains(&ty_var) {
+                let pos = span.start();
+                let ty = node.type_at(pos).ok_or_else(|| {
+                    InternalCompilationError::Internal(format!(
+                        "Type not found at pos {pos} while looking for unbound type variable {ty_var}"
+                    ))
+                })?;
+                return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
+            }
         }
 
         // Write the final type scheme.
@@ -171,17 +179,33 @@ pub fn emit_module(
         )));
     }
 
-    // Sixth pass, normalize the type schemes, substitute the types in the functions,
-    // run the borrow checker and elaborate the dictionaries.
+    // Sixth pass, run the borrow checker and elaborate dictionaries.
+    let mut module_inst_data = HashMap::new();
     for ModuleFunction { name, .. } in &source.functions {
         let descr = output.functions.get_mut(&name.0).unwrap();
+        let fn_ptr = descr.code.as_ptr();
+        let dicts = descr.ty_scheme.extra_parameters();
+        module_inst_data.insert(fn_ptr, dicts);
+    }
+    for ModuleFunction { name, .. } in &source.functions {
+        let descr = output.functions.get_mut(&name.0).unwrap();
+        let mut code = descr.code.borrow_mut();
+        let fn_ptr = descr.code.as_ptr();
+        let dicts = module_inst_data.get(&fn_ptr).unwrap();
+        let node = &mut code.as_script_mut().unwrap().code;
+        node.check_borrows_and_let_poly()?;
+        node.elaborate_dictionaries(dicts, Some(&module_inst_data));
+    }
+
+    // Seventh pass, normalize the type schemes, substitute the types in the functions.
+    for ModuleFunction { name, .. } in &source.functions {
+        let descr = output.functions.get_mut(&name.0).unwrap();
+        // Note: after that normalization, the functions do not share the same
+        // type variables anymore.
         let subst = descr.ty_scheme.normalize();
         let mut code = descr.code.borrow_mut();
         let node = &mut code.as_script_mut().unwrap().code;
         node.substitute(&subst);
-        node.check_borrows_and_let_poly()?;
-        let dicts = descr.ty_scheme.extra_parameters();
-        node.elaborate_dictionaries(&dicts);
     }
 
     Ok(output)
@@ -233,7 +257,7 @@ pub fn emit_expr(
     let quantifiers = TypeScheme::<Type>::list_ty_vars(&ty, &constraints, generation);
 
     // Detect unbound type variables in the code and return error if any.
-    let mut unbound = HashSet::new();
+    let mut unbound = IndexMap::new();
     node.unbound_ty_vars(&mut unbound, &quantifiers, generation);
     if let Some((ty_var, span)) = unbound.into_iter().next() {
         let pos = span.start();
@@ -245,7 +269,7 @@ pub fn emit_expr(
         return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
     }
 
-    // Detect unbound inner type variables in locals and return internal error if any.
+    // Detect unbound inner type variables in locals and return an error if any.
     for local in locals.iter().skip(initial_local_count) {
         let unbounds = local.ty.unbound_ty_vars(generation);
         if let Some(&ty_var) = unbounds.first() {
@@ -259,7 +283,7 @@ pub fn emit_expr(
 
     // Detect external constraints that contain type variables listed in the quantifiers
     for constraint in &external_ty_constraints {
-        if constraint.contains_ty_vars(&quantifiers) {
+        if constraint.contains_any_ty_vars(&quantifiers) {
             return Err(InternalCompilationError::Internal(format!(
                 "External constraint {} contains one of the internal type variables {}",
                 constraint.format_with(&module_env),
@@ -315,23 +339,41 @@ pub fn emit_expr_top_level(
     // Do borrow checking and dictionary elaboration.
     expr.expr.check_borrows_and_let_poly()?;
     let dicts = expr.ty.extra_parameters();
-    expr.expr.elaborate_dictionaries(&dicts);
+    expr.expr.elaborate_dictionaries(&dicts, None);
 
     Ok(expr)
 }
 
-/// Filter constraints that contain type variables listed in the quantifiers
-fn filter_constraints(
+/// Filter constraints that contain at least of of the type variables listed in the quantifiers
+fn filter_constraints_any_ty_vars(
     constraints: &[PubTypeConstraint],
     ty_vars: &[TypeVar],
 ) -> Vec<PubTypeConstraint> {
     constraints
         .iter()
         .filter(|constraint| {
-            let ret = constraint.contains_ty_vars(ty_vars);
-            if ret {
-                log::debug!("Constraint {constraint:?} contains: {ret}");
-            }
+            let ret = constraint.contains_any_ty_vars(ty_vars);
+            // if ret {
+            //     log::debug!("Constraint {constraint:?} contains: {ret}");
+            // }
+            ret
+        })
+        .cloned()
+        .collect()
+}
+
+/// Filter constraints that contain only type variables listed in the quantifiers
+fn filter_constraints_only_ty_vars(
+    constraints: &[PubTypeConstraint],
+    ty_vars: &[TypeVar],
+) -> Vec<PubTypeConstraint> {
+    constraints
+        .iter()
+        .filter(|constraint| {
+            let ret = constraint.contains_only_ty_vars(ty_vars);
+            // if ret {
+            //     log::debug!("Constraint {constraint:?} contains: {ret}");
+            // }
             ret
         })
         .cloned()

@@ -919,89 +919,115 @@ impl TypeKind {
     }
 
     // recursive checking
-    pub fn contains_type_var(&self, var: TypeVar) -> bool {
-        self.contains_ty_vars(&[var])
+    pub fn contains_any_type_var(&self, var: TypeVar) -> bool {
+        self.contains_any_ty_vars(&[var])
     }
 
     // recursive checking
-    pub fn contains_ty_vars(&self, vars: &[TypeVar]) -> bool {
+    pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
         // FIXME: support recursive types
+        use TypeKind::*;
         match self {
-            TypeKind::Variable(v) => vars.contains(v),
-            TypeKind::Native(native) => native
+            Variable(v) => vars.contains(v),
+            Native(native) => native
                 .arguments
                 .iter()
-                .any(|ty| ty.data().contains_ty_vars(vars)),
-            TypeKind::Variant(types) => {
-                types.iter().any(|(_, ty)| ty.data().contains_ty_vars(vars))
-            }
-            TypeKind::Tuple(types) => types.iter().any(|ty| ty.data().contains_ty_vars(vars)),
-            TypeKind::Record(fields) => fields
+                .any(|ty| ty.data().contains_any_ty_vars(vars)),
+            Variant(types) => types
                 .iter()
-                .any(|(_, ty)| ty.data().contains_ty_vars(vars)),
-            TypeKind::Function(ty) => {
+                .any(|(_, ty)| ty.data().contains_any_ty_vars(vars)),
+            Tuple(types) => types.iter().any(|ty| ty.data().contains_any_ty_vars(vars)),
+            Record(fields) => fields
+                .iter()
+                .any(|(_, ty)| ty.data().contains_any_ty_vars(vars)),
+            Function(ty) => {
                 ty.args
                     .iter()
-                    .any(|arg| arg.ty.data().contains_ty_vars(vars))
-                    || ty.ret.data().contains_ty_vars(vars)
+                    .any(|arg| arg.ty.data().contains_any_ty_vars(vars))
+                    || ty.ret.data().contains_any_ty_vars(vars)
             }
-            TypeKind::Newtype(_, ty) => ty.data().contains_ty_vars(vars),
+            Newtype(_, ty) => ty.data().contains_any_ty_vars(vars),
+        }
+    }
+
+    pub fn contains_only_ty_vars(&self, vars: &[TypeVar]) -> bool {
+        // FIXME: support recursive types
+        use TypeKind::*;
+        match self {
+            Variable(v) => vars.contains(v),
+            Native(native) => native
+                .arguments
+                .iter()
+                .all(|ty| ty.data().contains_only_ty_vars(vars)),
+            Variant(types) => types
+                .iter()
+                .all(|(_, ty)| ty.data().contains_only_ty_vars(vars)),
+            Tuple(types) => types.iter().all(|ty| ty.data().contains_only_ty_vars(vars)),
+            Record(fields) => fields
+                .iter()
+                .all(|(_, ty)| ty.data().contains_only_ty_vars(vars)),
+            Function(ty) => {
+                ty.args
+                    .iter()
+                    .all(|arg| arg.ty.data().contains_only_ty_vars(vars))
+                    && ty.ret.data().contains_only_ty_vars(vars)
+            }
+            Newtype(_, ty) => ty.data().contains_only_ty_vars(vars),
         }
     }
 
     pub fn inner_types(&self) -> B<dyn Iterator<Item = Type> + '_> {
+        use TypeKind::*;
         match self {
-            TypeKind::Native(g) => B::new(g.arguments.iter().copied()),
-            TypeKind::Variable(_) => B::new(iter::empty()),
-            TypeKind::Variant(types) => B::new(types.iter().map(|(_, ty)| *ty)),
-            TypeKind::Tuple(types) => B::new(types.iter().copied()),
-            TypeKind::Record(fields) => B::new(fields.iter().map(|(_, ty)| *ty)),
-            TypeKind::Function(function) => B::new(
+            Native(g) => B::new(g.arguments.iter().copied()),
+            Variable(_) => B::new(iter::empty()),
+            Variant(types) => B::new(types.iter().map(|(_, ty)| *ty)),
+            Tuple(types) => B::new(types.iter().copied()),
+            Record(fields) => B::new(fields.iter().map(|(_, ty)| *ty)),
+            Function(function) => B::new(
                 function
                     .args
                     .iter()
                     .map(|arg| arg.ty)
                     .chain(iter::once(function.ret)),
             ),
-            TypeKind::Newtype(_, ty) => B::new(iter::once(*ty)),
+            Newtype(_, ty) => B::new(iter::once(*ty)),
         }
     }
 
     pub fn inner_types_mut(&mut self) -> B<dyn Iterator<Item = &mut Type> + '_> {
+        use TypeKind::*;
         match self {
-            TypeKind::Native(g) => B::new(g.arguments.iter_mut()),
-            TypeKind::Variable(_) => B::new(iter::empty()),
-            TypeKind::Variant(types) => B::new(types.iter_mut().map(|(_, ty)| ty)),
-            TypeKind::Tuple(types) => B::new(types.iter_mut()),
-            TypeKind::Record(fields) => B::new(fields.iter_mut().map(|(_, ty)| ty)),
-            TypeKind::Function(function) => B::new(
+            Native(g) => B::new(g.arguments.iter_mut()),
+            Variable(_) => B::new(iter::empty()),
+            Variant(types) => B::new(types.iter_mut().map(|(_, ty)| ty)),
+            Tuple(types) => B::new(types.iter_mut()),
+            Record(fields) => B::new(fields.iter_mut().map(|(_, ty)| ty)),
+            Function(function) => B::new(
                 function
                     .args
                     .iter_mut()
                     .map(|arg| &mut arg.ty)
                     .chain(iter::once(&mut function.ret)),
             ),
-            TypeKind::Newtype(_, ty) => B::new(iter::once(ty)),
+            Newtype(_, ty) => B::new(iter::once(ty)),
         }
     }
 
     fn local_cmp(&self, other: &Self) -> Ordering {
+        use TypeKind::*;
         match (self, other) {
             // Compare the raw pointers (addresses) of the weak references
-            (TypeKind::Native(a), TypeKind::Native(b)) => a.local_cmp(b),
-            (TypeKind::Variable(a), TypeKind::Variable(b)) => a.cmp(b),
-            (TypeKind::Variant(a), TypeKind::Variant(b)) => {
-                compare_by(a, b, |(a_s, a_t), (b_s, b_t)| {
-                    a_s.cmp(b_s).then(a_t.local_cmp(b_t))
-                })
-            }
-            (TypeKind::Tuple(a), TypeKind::Tuple(b)) => compare_by(a, b, Type::local_cmp),
-            (TypeKind::Record(a), TypeKind::Record(b)) => {
-                compare_by(a, b, |(a_s, a_t), (b_s, b_t)| {
-                    a_s.cmp(b_s).then(a_t.local_cmp(b_t))
-                })
-            }
-            (TypeKind::Function(a), TypeKind::Function(b)) => a.local_cmp(b),
+            (Native(a), Native(b)) => a.local_cmp(b),
+            (Variable(a), Variable(b)) => a.cmp(b),
+            (Variant(a), Variant(b)) => compare_by(a, b, |(a_s, a_t), (b_s, b_t)| {
+                a_s.cmp(b_s).then(a_t.local_cmp(b_t))
+            }),
+            (Tuple(a), Tuple(b)) => compare_by(a, b, Type::local_cmp),
+            (Record(a), Record(b)) => compare_by(a, b, |(a_s, a_t), (b_s, b_t)| {
+                a_s.cmp(b_s).then(a_t.local_cmp(b_t))
+            }),
+            (Function(a), Function(b)) => a.local_cmp(b),
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -1032,10 +1058,11 @@ impl TypeKind {
 
 impl FmtWithModuleEnv for TypeKind {
     fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        use TypeKind::*;
         match self {
-            TypeKind::Variable(var) => write!(f, "{var}"),
-            TypeKind::Native(native) => native.fmt_with_module_env(f, env),
-            TypeKind::Variant(types) => {
+            Variable(var) => write!(f, "{var}"),
+            Native(native) => native.fmt_with_module_env(f, env),
+            Variant(types) => {
                 for (i, (name, ty)) in types.iter().enumerate() {
                     if i > 0 {
                         write!(f, " | ")?;
@@ -1045,7 +1072,7 @@ impl FmtWithModuleEnv for TypeKind {
                 }
                 Ok(())
             }
-            TypeKind::Tuple(elements) => {
+            Tuple(elements) => {
                 write!(f, "(")?;
                 for (i, ty) in elements.iter().enumerate() {
                     if i > 0 {
@@ -1055,7 +1082,7 @@ impl FmtWithModuleEnv for TypeKind {
                 }
                 write!(f, ")")
             }
-            TypeKind::Record(fields) => {
+            Record(fields) => {
                 write!(f, "{{ ")?;
                 for (i, (name, ty)) in fields.iter().enumerate() {
                     if i > 0 {
@@ -1066,8 +1093,8 @@ impl FmtWithModuleEnv for TypeKind {
                 }
                 write!(f, " }}")
             }
-            TypeKind::Function(function) => function.fmt_with_module_env(f, env),
-            TypeKind::Newtype(name, ty) => {
+            Function(function) => function.fmt_with_module_env(f, env),
+            Newtype(name, ty) => {
                 write!(f, "{name}(")?;
                 ty.fmt_with_module_env(f, env)?;
                 write!(f, ")")

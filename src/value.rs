@@ -3,7 +3,7 @@ use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use std::{
     any::Any,
-    cell::{Ref, RefCell},
+    cell::RefCell,
     collections::HashSet,
     fmt::{self, Display},
     rc::Rc,
@@ -13,7 +13,7 @@ use ustr::Ustr;
 use crate::{
     containers::{SVec2, B},
     format::{write_with_separator, write_with_separator_and_format_fn},
-    function::{self, Function, FunctionRef},
+    function::{Function, FunctionPtr, FunctionRef},
     module::ModuleEnv,
     r#type::TypeVarSubstitution,
 };
@@ -149,7 +149,7 @@ impl Value {
     ) -> std::fmt::Result {
         // Thread-local hash-map for cycle detection
         thread_local! {
-            static FN_VISITED: RefCell<HashSet<*mut function::Function>> = RefCell::new(HashSet::new());
+            static FN_VISITED: RefCell<HashSet<FunctionPtr>> = RefCell::new(HashSet::new());
         }
 
         let indent_str = "⎸ ".repeat(indent);

@@ -239,6 +239,10 @@ fn tuple_projection() {
         unit()
     );
     assert_eq!(run("fn f(v) { v.1.2.3 } ()"), unit());
+    assert_eq!(
+        run("fn a(x) { x.0 } fn b(x) { x.1 } fn c(x) { (a(x), b(x)) } c((1,2))"),
+        int_tuple!(1, 2)
+    );
 }
 
 #[test]
@@ -352,6 +356,8 @@ fn records() {
         int!(5)
     );
     assert_eq!(run("let f = |x| x.a; f({a:1})"), int!(1));
+    assert_eq!(run("fn e(v) { v.toto } (e,).0({toto: 3})"), int!(3));
+    // FIXME: fn e(v) { v.toto } let a = e; a({toto: 3})
     assert_eq!(
         run("let l2 = |v| (let sq = |x| x * x; sq(v.x) + sq(v.y)); l2({x:1, y:2})"),
         int!(5)
@@ -365,9 +371,18 @@ fn records() {
         run("fn s(v) { v.x + v.y } ((s,).0)({x:1, bla: true, y:2})"),
         int!(3)
     );
+    assert_eq!(run("fn a(x) { x.a } fn b(x) { a(x) } b({a:3})"), int!(3));
     assert_eq!(
-        run("fn a(x) { x.a } fn b(x) { a(x) } b({a:3})"),
-        int!(3)
+        run("fn a(x) { x.a } fn b(x) { x.b } fn c(x, y) { (a(x), b(y)) } c({a:1},{b:2})"),
+        int_tuple!(1, 2)
+    );
+    assert_eq!(
+        run("fn sum(i, l) { if i < l.count { sum(i + 1, l) + 1 } else { 0 } } sum(0, {count: 4})"),
+        int!(4)
+    );
+    assert_eq!(
+        run("let f = |x, y| (x.a, x.a.b, y == x.a); f({a: {a: 3, b: 1}}, {a: 4, b: 1})"),
+        Value::tuple(vec![int_tuple!(3, 1), int!(1), bool!(false)])
     );
     fail_compilation(
         "fn swap(a,b) { var temp = a; a = b; b = temp } var v = { x:1, y:2 }; swap(v.x, v.x)",

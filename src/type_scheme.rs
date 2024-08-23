@@ -6,7 +6,8 @@ use ustr::Ustr;
 
 use crate::{
     containers::vec_difference,
-    dictionary_passing::{instantiate_dictionaries_req, DictionariesTyReq, DictionaryReq},
+    dictionary_passing::{instantiate_dictionaries_req, DictionaryReq},
+    ir::FnInstData,
     module::{FmtWithModuleEnv, FormatWithModuleEnv, ModuleEnv},
     r#type::{Type, TypeKind, TypeLike, TypeSubstitution, TypeVar, TypeVarSubstitution},
     type_inference::TypeInference,
@@ -76,19 +77,44 @@ impl PubTypeConstraint {
         }
     }
 
-    pub fn contains_ty_vars(&self, vars: &[TypeVar]) -> bool {
+    pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
         match self {
             PubTypeConstraint::TupleAtIndexIs {
                 tuple_ty,
                 element_ty,
                 ..
-            } => tuple_ty.data().contains_ty_vars(vars) || element_ty.data().contains_ty_vars(vars),
+            } => {
+                tuple_ty.data().contains_any_ty_vars(vars)
+                    || element_ty.data().contains_any_ty_vars(vars)
+            }
             PubTypeConstraint::RecordFieldIs {
                 record_ty,
                 element_ty,
                 ..
             } => {
-                record_ty.data().contains_ty_vars(vars) || element_ty.data().contains_ty_vars(vars)
+                record_ty.data().contains_any_ty_vars(vars)
+                    || element_ty.data().contains_any_ty_vars(vars)
+            }
+        }
+    }
+
+    pub fn contains_only_ty_vars(&self, vars: &[TypeVar]) -> bool {
+        match self {
+            PubTypeConstraint::TupleAtIndexIs {
+                tuple_ty,
+                element_ty,
+                ..
+            } => {
+                tuple_ty.data().contains_only_ty_vars(vars)
+                    && element_ty.data().contains_only_ty_vars(vars)
+            }
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                element_ty,
+                ..
+            } => {
+                record_ty.data().contains_only_ty_vars(vars)
+                    && element_ty.data().contains_only_ty_vars(vars)
             }
         }
     }
@@ -319,14 +345,14 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Instantiate this type scheme with fresh type variables in ty_inf.
-    pub(crate) fn instantiate(&self, ty_inf: &mut TypeInference) -> (Ty, DictionariesTyReq) {
+    pub(crate) fn instantiate(&self, ty_inf: &mut TypeInference) -> (Ty, FnInstData) {
         let subst = ty_inf.fresh_type_var_subs(&self.quantifiers);
         for constraint in &self.constraints {
             ty_inf.add_pub_constraint(constraint.instantiate(&subst));
         }
         let ty = self.ty.instantiate(&subst);
         let dict_req = instantiate_dictionaries_req(&self.extra_parameters(), &subst);
-        (ty, dict_req)
+        (ty, FnInstData::new(dict_req))
     }
 
     /// Substitute type variables in this type scheme.
