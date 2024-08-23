@@ -318,6 +318,10 @@ fn first_class_functions() {
         x(1, 2)"#),
         int!(-1)
     );
+    assert_eq!(
+        run("fn fact(i) { if i > 1 { i * ((fact,).0)(i - 1) } else { 1 } } fact(3)"),
+        int!(6)
+    );
 }
 
 #[test]

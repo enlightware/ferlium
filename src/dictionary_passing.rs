@@ -140,10 +140,15 @@ impl Node {
         use NodeKind::*;
         match &mut self.kind {
             Immediate(immediate) => {
-                if let Some(func) = immediate.value.as_function_mut() {
+                if let Some(function) = immediate.value.as_function_mut() {
                     if immediate.inst_data.dicts_req.is_empty() {
-                        if let Some(script_fn) = func.get().borrow_mut().as_script_mut() {
-                            script_fn.code.elaborate_dictionaries(dicts);
+                        let function = function.get();
+                        // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
+                        let function = function.try_borrow_mut();
+                        if let Ok(mut function) = function {
+                            if let Some(script_fn) = function.as_script_mut() {
+                                script_fn.code.elaborate_dictionaries(dicts);
+                            }
                         }
                     } else {
                         // We have an instantiation, so we need a closure to pass dictionary requirements.

@@ -3,7 +3,8 @@ use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Ref, RefCell},
+    collections::HashSet,
     fmt::{self, Display},
     rc::Rc,
 };
@@ -12,7 +13,7 @@ use ustr::Ustr;
 use crate::{
     containers::{SVec2, B},
     format::{write_with_separator, write_with_separator_and_format_fn},
-    function::{Function, FunctionRef},
+    function::{self, Function, FunctionRef},
     module::ModuleEnv,
     r#type::TypeVarSubstitution,
 };
@@ -146,6 +147,11 @@ impl Value {
         env: &ModuleEnv<'_>,
         indent: usize,
     ) -> std::fmt::Result {
+        // Thread-local hash-map for cycle detection
+        thread_local! {
+            static FN_VISITED: RefCell<HashSet<*mut function::Function>> = RefCell::new(HashSet::new());
+        }
+
         let indent_str = "⎸ ".repeat(indent);
         use Value::*;
         match self {
@@ -168,9 +174,28 @@ impl Value {
             }
             Function(function) => {
                 let function = function.get();
+                let fn_ptr = function.as_ptr();
                 let function = function.borrow();
                 writeln!(f, "{indent_str}function @ {:p}", *function,)?;
-                function.format_ind(f, env, indent + 1)
+                let cycle_detected = FN_VISITED.with(|visited| {
+                    let mut visited = visited.borrow_mut();
+                    if visited.contains(&fn_ptr) {
+                        true
+                    } else {
+                        visited.insert(fn_ptr);
+                        false
+                    }
+                });
+                if cycle_detected {
+                    writeln!(f, "{indent_str}⎸ self")?;
+                    return Ok(());
+                } else {
+                    function.format_ind(f, env, indent + 1)?;
+                }
+                FN_VISITED.with(|visited| {
+                    visited.borrow_mut().remove(&fn_ptr);
+                });
+                Ok(())
             }
         }
     }
@@ -189,9 +214,12 @@ impl Value {
             }
             Function(function) => {
                 let function = function.get();
-                let mut function = function.borrow_mut();
-                if let Some(script_fn) = function.as_script_mut() {
-                    script_fn.code.substitute(subst);
+                // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
+                let function = function.try_borrow_mut();
+                if let Ok(mut function) = function {
+                    if let Some(script_fn) = function.as_script_mut() {
+                        script_fn.code.substitute(subst);
+                    }
                 }
             }
         }

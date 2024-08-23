@@ -1693,9 +1693,12 @@ impl UnifiedTypeInference {
             }
             Value::Function(function) => {
                 let function = function.get();
-                let mut function = function.borrow_mut();
-                if let Some(script_fn) = function.as_script_mut() {
-                    self.substitute_node(&mut script_fn.code, ignore);
+                // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
+                let function = function.try_borrow_mut();
+                if let Ok(mut function) = function {
+                    if let Some(script_fn) = function.as_script_mut() {
+                        self.substitute_node(&mut script_fn.code, ignore);
+                    }
                 }
             }
             _ => {}
