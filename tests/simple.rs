@@ -355,7 +355,7 @@ fn records() {
     );
     assert_eq!(run("let f = |x| x.a; f({a:1})"), int!(1));
     assert_eq!(run("fn e(v) { v.toto } (e,).0({toto: 3})"), int!(3));
-    // FIXME: fn e(v) { v.toto } let a = e; a({toto: 3})
+    assert_eq!(run("fn e(v) { v.toto } let a = e; a({toto: 3})"), int!(3));
     assert_eq!(
         run("let l2 = |v| (let sq = |x| x * x; sq(v.x) + sq(v.y)); l2({x:1, y:2})"),
         int!(5)
@@ -377,6 +377,10 @@ fn records() {
     assert_eq!(
         run("fn sum(i, l) { if i < l.count { sum(i + 1, l) + 1 } else { 0 } } sum(0, {count: 4})"),
         int!(4)
+    );
+    assert_eq!(
+        run("fn a(x) { x.a } fn b(x) { ((a,).0)(x) } b({a: 3})"),
+        int!(3)
     );
     assert_eq!(
         run("let f = |x, y| (x.a, x.a.b, y == x.a); f({a: {a: 3, b: 1}}, {a: 4, b: 1})"),

@@ -42,12 +42,14 @@ impl FnInstData {
 pub struct Immediate {
     pub value: Value,
     pub inst_data: FnInstData,
+    pub substitute_in_value_fn: bool,
 }
 impl Immediate {
     pub fn new(value: Value) -> B<Self> {
         B::new(Self {
             value,
             inst_data: FnInstData::none(),
+            substitute_in_value_fn: true,
         })
     }
 }
@@ -497,7 +499,7 @@ impl Node {
         match &self.kind {
             Immediate(_) => {} // no need to look into the value's type as it is already in this node's type
             BuildClosure(_) => {
-                panic!("Closure should not be in the IR at this point");
+                panic!("BuildClosure should not be in the IR at this point");
             }
             Apply(app) => {
                 app.function.unbound_ty_vars(result, ignore);
@@ -569,11 +571,15 @@ impl Node {
         use NodeKind::*;
         match &mut self.kind {
             Immediate(immediate) => {
-                immediate.value.substitute(subst);
+                // If the value is a top-level function, do not substitute in its code.
+                if immediate.substitute_in_value_fn {
+                    immediate.value.substitute(subst);
+                }
                 immediate.inst_data.substitute(subst);
             }
             BuildClosure(_) => {
-                panic!("Closure should not be in the IR at this point");
+                // Note: at the moment build closure is used only for dictionary
+                // passing so we can ignore the substitution here.
             }
             Apply(app) => {
                 app.function.substitute(subst);

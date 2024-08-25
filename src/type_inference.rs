@@ -210,7 +210,11 @@ impl TypeInference {
                 else if let Some(function) = env.get_function(*name) {
                     let (fn_ty, inst_data) = function.ty_scheme.instantiate(self);
                     let value = Value::Function(FunctionRef::new_weak(&function.code));
-                    let node = K::Immediate(B::new(ir::Immediate { value, inst_data }));
+                    let node = K::Immediate(B::new(ir::Immediate {
+                        value,
+                        inst_data,
+                        substitute_in_value_fn: false,
+                    }));
                     (node, Type::function_type(fn_ty), MutType::constant())
                 }
                 // Otherwise, the variable is not found

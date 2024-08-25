@@ -213,13 +213,27 @@ impl Node {
                 if let Some(function) = immediate.value.as_function_mut() {
                     if immediate.inst_data.dicts_req.is_empty() {
                         let function = function.get();
-                        // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
-                        let function = function.try_borrow_mut();
-                        if let Ok(mut function) = function {
-                            if let Some(script_fn) = function.as_script_mut() {
-                                script_fn
-                                    .code
-                                    .elaborate_dictionaries(dicts, module_inst_data);
+                        // No instantiation, check if it is a module function
+                        let fn_ptr = function.as_ptr();
+                        if let Some(inst_data) =
+                            module_inst_data.and_then(|inst_data| inst_data.get(&fn_ptr))
+                        {
+                            // Yes, build the dictionary requirements for the function.
+                            let (captures, _) =
+                                extra_args_for_module_function(inst_data, self.span, dicts);
+                            self.kind = BuildClosure(B::new(ir::BuildClosure {
+                                function: self.clone(),
+                                captures,
+                            }));
+                        } else {
+                            // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
+                            let function = function.try_borrow_mut();
+                            if let Ok(mut function) = function {
+                                if let Some(script_fn) = function.as_script_mut() {
+                                    script_fn
+                                        .code
+                                        .elaborate_dictionaries(dicts, module_inst_data);
+                                }
                             }
                         }
                     } else {
