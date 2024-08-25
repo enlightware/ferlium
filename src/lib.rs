@@ -1,6 +1,6 @@
 use std::new_module_with_prelude;
 
-use emit_ir::{emit_expr_top_level, emit_module, CompiledExpr};
+use emit_ir::{emit_expr, emit_module, CompiledExpr};
 use error::CompilationError;
 use format::FormatWith;
 use module::{FmtWithModuleEnv, Module, ModuleEnv, Modules};
@@ -59,12 +59,11 @@ impl ModuleAndExpr {
             if let Some(script_fn) = code.as_script_mut() {
                 script_fn
                     .code
-                    .variable_type_annotations(style, &mut annotations, &env);
+                    .variable_type_annotations(&mut annotations, &env);
             }
         }
         if let Some(expr) = &self.expr {
-            expr.expr
-                .variable_type_annotations(style, &mut annotations, &env);
+            expr.expr.variable_type_annotations(&mut annotations, &env);
         }
 
         // Function signatures.
@@ -172,7 +171,7 @@ pub fn compile(src: &str, other_modules: &Modules) -> Result<ModuleAndExpr, Comp
     // Emit IR for the expression, if any.
     let expr = if let Some(expr_ast) = expr_ast {
         let env = ModuleEnv::new(&module, other_modules);
-        let compiled_expr = emit_expr_top_level(&expr_ast, env, vec![])
+        let compiled_expr = emit_expr(&expr_ast, env, vec![])
             .map_err(|error| CompilationError::from_internal(error, &env, src))?;
         log::debug!("Expr IR\n{}", compiled_expr.expr.format_with(&env));
         Some(compiled_expr)

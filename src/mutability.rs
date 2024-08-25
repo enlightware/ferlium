@@ -2,7 +2,7 @@ use std::fmt::{self, Display};
 
 use enum_as_inner::EnumAsInner;
 
-use crate::format::{type_variable_gen_index_to_string, type_variable_index_to_string};
+use crate::format::type_variable_index_to_string;
 
 /// A mutability value, newtype because we must implement EqUnifyValue for it
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -45,62 +45,29 @@ impl Display for MutVal {
     }
 }
 
-/// A key for the mutability variable in the unification table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MutVarKey(pub(crate) u32);
-impl MutVarKey {
-    pub fn to_var(&self, generation: u32) -> MutVar {
-        MutVar::new(self.0, generation)
-    }
-}
-
-impl Display for MutVarKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}ₘ", type_variable_index_to_string(self.0))
-    }
-}
-
 /// A generic variable for mutability
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MutVar {
-    /// The generation of this mutability variable, to avoid name clashing in let polymorphism
-    generation: u32,
     /// The name of this mutability variable, its identity in the context considered
     name: u32,
 }
 
 impl MutVar {
-    pub fn new(name: u32, generation: u32) -> Self {
-        Self { generation, name }
-    }
-    pub fn generation(&self) -> u32 {
-        self.generation
+    pub fn new(name: u32) -> Self {
+        Self { name }
     }
     pub fn name(&self) -> u32 {
         self.name
-    }
-    pub fn as_key(&self) -> MutVarKey {
-        MutVarKey(self.name)
-    }
-
-    pub(crate) fn new_fresh(name: u32, generation: u32) -> Self {
-        Self { generation, name }
     }
 }
 
 impl Display for MutVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.generation > 0 {
-            write!(
-                f,
-                "{}ₘ",
-                type_variable_gen_index_to_string(self.name, self.generation)
-            )
-        } else {
-            write!(f, "{}ₘ", type_variable_index_to_string(self.name))
-        }
+        write!(f, "{}ₘ", type_variable_index_to_string(self.name))
     }
 }
+
+pub type MutVarKey = MutVar;
 
 /// A mutability type, can be a variable or a resolved value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EnumAsInner)]

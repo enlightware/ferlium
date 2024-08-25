@@ -23,7 +23,6 @@ use ustr::Ustr;
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::B;
-use crate::format::type_variable_gen_index_to_string;
 use crate::format::type_variable_index_to_string;
 use crate::graph;
 use crate::graph::find_disjoint_subgraphs;
@@ -31,7 +30,6 @@ use crate::module::FmtWithModuleEnv;
 use crate::module::ModuleEnv;
 use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
-use crate::type_scheme::TypeScheme;
 use crate::typing_env::Local;
 
 /// Something that is a type or part of it, and that can
@@ -45,46 +43,19 @@ pub trait TypeLike {
     fn inner_ty_vars(&self) -> Vec<TypeVar>;
 }
 
-/// A key for the type variable in the unification table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TyVarKey(pub(crate) u32);
-impl TyVarKey {
-    pub fn to_var(&self, generation: u32) -> TypeVar {
-        TypeVar::new(self.0, generation)
-    }
-}
-
-impl Display for TyVarKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", type_variable_index_to_string(self.0))
-    }
-}
-
 /// A generic variable for a type
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypeVar {
-    /// The generation of this type variable, to avoid name clashing in let polymorphism
-    generation: u32,
     /// The name of this type variable, its identity in the context considered
     name: u32,
 }
 
 impl TypeVar {
-    pub fn new(name: u32, generation: u32) -> Self {
-        Self { generation, name }
-    }
-    pub fn generation(&self) -> u32 {
-        self.generation
+    pub fn new(name: u32) -> Self {
+        Self { name }
     }
     pub fn name(&self) -> u32 {
         self.name
-    }
-    pub fn as_key(&self) -> TyVarKey {
-        TyVarKey(self.name)
-    }
-
-    pub(crate) fn new_fresh(name: u32, generation: u32) -> Self {
-        Self { generation, name }
     }
 
     pub(crate) fn substitute(self, subst: &TypeVarSubstitution) -> Self {
@@ -94,17 +65,12 @@ impl TypeVar {
 
 impl Display for TypeVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.generation > 0 {
-            write!(
-                f,
-                "{}",
-                type_variable_gen_index_to_string(self.name, self.generation)
-            )
-        } else {
-            write!(f, "{}", type_variable_index_to_string(self.name))
-        }
+        write!(f, "{}", type_variable_index_to_string(self.name))
     }
 }
+
+pub type TyVarKey = TypeVar;
+
 pub trait BareNativeType: DynClone + DynEq + Send + Sync {
     fn type_id(&self) -> TypeId {
         TypeId::of::<Self>()
@@ -303,9 +269,7 @@ impl FnType {
         arg_names
             .iter()
             .zip(self.args.iter())
-            .map(|((name, span), arg)| {
-                Local::new(*name, arg.inout, TypeScheme::new_just_type(arg.ty), *span)
-            })
+            .map(|((name, span), arg)| Local::new(*name, arg.inout, arg.ty, *span))
             .collect()
     }
 
@@ -399,7 +363,7 @@ impl Type {
     }
 
     pub fn variable_id(id: u32) -> Self {
-        Self::variable(TypeVar::new(id, 0))
+        Self::variable(TypeVar::new(id))
     }
 
     pub fn variable(var: TypeVar) -> Self {

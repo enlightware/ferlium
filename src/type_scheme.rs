@@ -367,19 +367,15 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Return the type variables that are not bound by the quantifiers.
-    pub(crate) fn unbound_ty_vars(&self, generation: u32) -> Vec<TypeVar> {
+    pub(crate) fn unbound_ty_vars(&self) -> Vec<TypeVar> {
         vec_difference(
-            &Self::list_ty_vars(&self.ty, &self.constraints, generation),
+            &Self::list_ty_vars(&self.ty, &self.constraints),
             &self.quantifiers,
         )
     }
 
     /// Helper function to list free type variables in a type and its constraints.
-    pub(crate) fn list_ty_vars(
-        ty: &Ty,
-        constraints: &[PubTypeConstraint],
-        generation: u32,
-    ) -> Vec<TypeVar> {
+    pub(crate) fn list_ty_vars(ty: &Ty, constraints: &[PubTypeConstraint]) -> Vec<TypeVar> {
         ty.inner_ty_vars()
             .into_iter()
             .chain(
@@ -388,7 +384,6 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                     .flat_map(PubTypeConstraint::inner_ty_vars),
             )
             .unique()
-            .filter(|var| var.generation() == generation)
             .collect()
     }
 
@@ -399,7 +394,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             .iter_mut()
             .enumerate()
             .for_each(|(i, quantifier)| {
-                let new_var = TypeVar::new(i as u32, 0);
+                let new_var = TypeVar::new(i as u32);
                 var_subst.insert(*quantifier, new_var);
                 *quantifier = new_var;
             });

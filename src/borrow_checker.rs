@@ -2,7 +2,6 @@ use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
-    containers::B,
     error::InternalCompilationError,
     ir::{Node, NodeKind},
     r#type::FnArgType,
@@ -123,15 +122,15 @@ fn check_arguments(
 }
 
 impl Node {
-    pub fn check_borrows_and_let_poly(&self) -> Result<(), InternalCompilationError> {
+    pub fn check_borrows(&self) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
         match &self.kind {
             Immediate(_) => (),
             BuildClosure(_) => panic!("Closure should not be in the IR at this point"),
             Apply(app) => {
-                app.function.check_borrows_and_let_poly()?;
+                app.function.check_borrows()?;
                 for arg in &app.arguments {
-                    arg.check_borrows_and_let_poly()?;
+                    arg.check_borrows()?;
                 }
                 let fn_type = app.function.ty.data();
                 let fn_type = fn_type.as_function().unwrap();
@@ -139,69 +138,61 @@ impl Node {
             }
             StaticApply(app) => {
                 for arg in &app.arguments {
-                    arg.check_borrows_and_let_poly()?;
+                    arg.check_borrows()?;
                 }
                 check_arguments(&app.ty.args, &app.arguments, app.function_span)?;
             }
             EnvStore(node) => {
-                node.node.check_borrows_and_let_poly()?;
-                if !node.ty_scheme.ty.data().is_function() && !node.ty_scheme.quantifiers.is_empty()
-                {
-                    return Err(InternalCompilationError::InvalidPolymorphicValue {
-                        ty_scheme: B::new(node.ty_scheme.clone()),
-                        name_span: node.name_span,
-                        expr_span: node.node.span,
-                    });
-                }
+                node.node.check_borrows()?;
             }
             EnvLoad(_) => {}
             Block(nodes) => {
                 for node in nodes.iter() {
-                    node.check_borrows_and_let_poly()?;
+                    node.check_borrows()?;
                 }
             }
             Assign(assignment) => {
-                assignment.place.check_borrows_and_let_poly()?;
-                assignment.value.check_borrows_and_let_poly()?;
+                assignment.place.check_borrows()?;
+                assignment.value.check_borrows()?;
             }
             Tuple(nodes) => {
                 for node in nodes.iter() {
-                    node.check_borrows_and_let_poly()?;
+                    node.check_borrows()?;
                 }
             }
             Project(projection) => {
-                projection.0.check_borrows_and_let_poly()?;
+                projection.0.check_borrows()?;
             }
             ProjectAt(_) => {
                 panic!("ProjectAt should not be in the IR at this point");
             }
             Record(nodes) => {
                 for node in nodes.iter() {
-                    node.check_borrows_and_let_poly()?;
+                    node.check_borrows()?;
                 }
             }
             FieldAccess(access) => {
-                access.0.check_borrows_and_let_poly()?;
+                access.0.check_borrows()?;
             }
             Array(nodes) => {
                 for node in nodes.iter() {
-                    node.check_borrows_and_let_poly()?;
+                    node.check_borrows()?;
                 }
             }
             Index(array, index) => {
-                array.check_borrows_and_let_poly()?;
-                index.check_borrows_and_let_poly()?;
+                array.check_borrows()?;
+                index.check_borrows()?;
             }
             Case(case) => {
-                case.value.check_borrows_and_let_poly()?;
+                case.value.check_borrows()?;
                 for (_, node) in case.alternatives.iter() {
-                    node.check_borrows_and_let_poly()?;
+                    node.check_borrows()?;
                 }
-                case.default.check_borrows_and_let_poly()?;
+                case.default.check_borrows()?;
             }
             Iterate(iteration) => {
-                iteration.iterator.check_borrows_and_let_poly()?;
-                iteration.body.check_borrows_and_let_poly()?;
+                iteration.iterator.check_borrows()?;
+                iteration.body.check_borrows()?;
             }
         }
         Ok(())

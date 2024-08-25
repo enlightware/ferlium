@@ -259,11 +259,9 @@ fn lambda() {
         run("let sq = |x| x * x; let inc = |x| x + 1; sq(inc(inc(2)))"),
         int!(16)
     );
-    assert_eq!(run("let id = |x| x; id(1); id(true)"), bool!(true));
-    assert_eq!(
-        run("let d = |x, y| (x, y + 1); d(true, 1); d(1, 2)"),
-        int_tuple!(1, 3)
-    );
+    fail_compilation("let id = |x| x; id(1); id(true)").expect_is_not_subtype("bool", "int");
+    fail_compilation("let d = |x, y| (x, y + 1); d(true, 1); d(1, 2)")
+        .expect_is_not_subtype("int", "bool");
     assert_eq!(run("(||1)()"), int!(1));
     assert_eq!(run("(|x| x.1)((1,2))"), int!(2));
 }

@@ -16,7 +16,7 @@ use crate::{
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
     mutability::MutType,
     r#type::{FnType, Type, TypeLike, TypeVar},
-    type_inference::{FreshTyVarGen, MutConstraint, TypeConstraint, TypeInference},
+    type_inference::TypeInference,
     type_scheme::{PubTypeConstraint, TypeScheme},
     typing_env::{Local, TypingEnv},
     value::Value,
@@ -95,7 +95,7 @@ pub fn emit_module(
     ty_inf.log_debug_constraints(module_env);
 
     // Third pass, perform the unification.
-    let mut ty_inf = ty_inf.unify(&mut invalid_outer_fresh_ty_var_gen)?;
+    let mut ty_inf = ty_inf.unify()?;
     ty_inf.log_debug_substitution_table(module_env);
     ty_inf.log_debug_constraints(module_env);
 
@@ -106,22 +106,14 @@ pub fn emit_module(
     }
 
     // Fifth pass, get the remaining constraints and collect the free type variables.
-    let (all_constraints, external_ty_constraints, external_mut_constraints) = ty_inf.constraints();
-    assert!(
-        external_ty_constraints.is_empty(),
-        "No external type constraints shall remain at top level"
-    );
-    assert!(
-        external_mut_constraints.is_empty(),
-        "No external mut constraints shall remain at top level"
-    );
+    let all_constraints = ty_inf.constraints();
     for ModuleFunction { name, .. } in &source.functions {
         // Collect all type variables unbound in the body of the function.
         let descr = output.functions.get_mut(&name.0).unwrap();
         let mut code = descr.code.borrow_mut();
         let node = &mut code.as_script_mut().unwrap().code;
         let mut unbound = IndexMap::new();
-        node.unbound_ty_vars(&mut unbound, &[], 0);
+        node.unbound_ty_vars(&mut unbound, &[]);
         let all_ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
 
         // Keep the constraints that are fully related to the types found in the function.
@@ -193,7 +185,7 @@ pub fn emit_module(
         let fn_ptr = descr.code.as_ptr();
         let dicts = module_inst_data.get(&fn_ptr).unwrap();
         let node = &mut code.as_script_mut().unwrap().code;
-        node.check_borrows_and_let_poly()?;
+        node.check_borrows()?;
         node.elaborate_dictionaries(dicts, Some(&module_inst_data));
     }
 
@@ -226,13 +218,11 @@ pub fn emit_expr(
     source: &ast::Expr,
     module_env: ModuleEnv,
     locals: Vec<Local>,
-    generation: u32,
-    outer_fresh_ty_var_gen: FreshTyVarGen<'_>,
-) -> Result<(CompiledExpr, Vec<TypeConstraint>, Vec<MutConstraint>), InternalCompilationError> {
+) -> Result<CompiledExpr, InternalCompilationError> {
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
     let mut ty_env = TypingEnv::new(locals, module_env);
-    let mut ty_inf = TypeInference::new_with_generation(generation);
+    let mut ty_inf = TypeInference::new();
     let (mut node, mut ty, _) = ty_inf.infer_expr(&mut ty_env, source)?;
     let mut locals = ty_env.get_locals_and_drop();
     // FIXME: we need to emit fresh variables not in the locals before us!
@@ -240,25 +230,24 @@ pub fn emit_expr(
     ty_inf.log_debug_constraints(module_env);
 
     // Perform the unification.
-    let mut ty_inf = ty_inf.unify(outer_fresh_ty_var_gen)?;
+    let mut ty_inf = ty_inf.unify()?;
     ty_inf.log_debug_substitution_table(module_env);
 
     // Substitute the result of the unification.
     ty_inf.substitute_node(&mut node, &[]);
     ty = ty_inf.substitute_type(ty, &[]);
     for local in locals.iter_mut().skip(initial_local_count) {
-        ty_inf.substitute_in_type_scheme(&mut local.ty);
+        local.ty = ty_inf.substitute_type(local.ty, &[]);
     }
-    ty_inf.substitute_in_external_constraints();
 
     // Get the remaining constraints and collect the free variables.
     ty_inf.log_debug_constraints(module_env);
-    let (constraints, external_ty_constraints, external_mut_constraints) = ty_inf.constraints();
-    let quantifiers = TypeScheme::<Type>::list_ty_vars(&ty, &constraints, generation);
+    let constraints = ty_inf.constraints();
+    let quantifiers = TypeScheme::<Type>::list_ty_vars(&ty, &constraints);
 
     // Detect unbound type variables in the code and return error if any.
     let mut unbound = IndexMap::new();
-    node.unbound_ty_vars(&mut unbound, &quantifiers, generation);
+    node.unbound_ty_vars(&mut unbound, &quantifiers);
     if let Some((ty_var, span)) = unbound.into_iter().next() {
         let pos = span.start();
         let ty = node.type_at(pos).ok_or_else(|| {
@@ -267,29 +256,6 @@ pub fn emit_expr(
             ))
         })?;
         return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
-    }
-
-    // Detect unbound inner type variables in locals and return an error if any.
-    for local in locals.iter().skip(initial_local_count) {
-        let unbounds = local.ty.unbound_ty_vars(generation);
-        if let Some(&ty_var) = unbounds.first() {
-            return Err(InternalCompilationError::Internal(format!(
-                "Unbound type variable {ty_var} in local {} with type {}",
-                local.name,
-                local.ty.display_rust_style(&module_env)
-            )));
-        }
-    }
-
-    // Detect external constraints that contain type variables listed in the quantifiers
-    for constraint in &external_ty_constraints {
-        if constraint.contains_any_ty_vars(&quantifiers) {
-            return Err(InternalCompilationError::Internal(format!(
-                "External constraint {} contains one of the internal type variables {}",
-                constraint.format_with(&module_env),
-                quantifiers.iter().map(|var| format!("{var}")).join(", ")
-            )));
-        }
     }
 
     // Normalize the type scheme
@@ -301,47 +267,16 @@ pub fn emit_expr(
     let subst = ty_scheme.normalize();
     node.substitute(&subst);
 
-    Ok((
-        CompiledExpr {
-            expr: node,
-            ty: ty_scheme,
-            locals,
-        },
-        external_ty_constraints,
-        external_mut_constraints,
-    ))
-}
-
-/// Emit IR for an expression
-/// Return the compiled expression and any remaining external constraints
-/// referring to lower-generation type variables.
-pub fn emit_expr_top_level(
-    source: &ast::Expr,
-    module_env: ModuleEnv,
-    locals: Vec<Local>,
-) -> Result<CompiledExpr, InternalCompilationError> {
-    let (mut expr, ty_constraints, mut_constraints) = emit_expr(
-        source,
-        module_env,
-        locals,
-        0,
-        &mut invalid_outer_fresh_ty_var_gen,
-    )?;
-    assert!(
-        ty_constraints.is_empty(),
-        "No external type constraints shall remain at top level"
-    );
-    assert!(
-        mut_constraints.is_empty(),
-        "No external mut constraints shall remain at top level"
-    );
-
     // Do borrow checking and dictionary elaboration.
-    expr.expr.check_borrows_and_let_poly()?;
-    let dicts = expr.ty.extra_parameters();
-    expr.expr.elaborate_dictionaries(&dicts, None);
+    node.check_borrows()?;
+    let dicts = ty_scheme.extra_parameters();
+    node.elaborate_dictionaries(&dicts, None);
 
-    Ok(expr)
+    Ok(CompiledExpr {
+        expr: node,
+        ty: ty_scheme,
+        locals,
+    })
 }
 
 /// Filter constraints that contain at least of of the type variables listed in the quantifiers
@@ -391,8 +326,4 @@ fn extend_with_constraint_ty_vars(
         .chain(constraints.iter().flat_map(|c| c.inner_ty_vars()))
         .unique()
         .collect()
-}
-
-fn invalid_outer_fresh_ty_var_gen() -> TypeVar {
-    panic!("Already at outer-most level, cannot have an even outer fresh type variable generator.")
 }

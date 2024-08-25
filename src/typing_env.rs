@@ -6,7 +6,6 @@ use crate::{
     module::{ModuleEnv, ModuleFunction},
     mutability::MutType,
     r#type::{FnArgType, Type},
-    type_scheme::TypeScheme,
 };
 
 /// A local variable within a typing environment.
@@ -14,12 +13,12 @@ use crate::{
 pub struct Local {
     pub name: Ustr,
     pub mutable: MutType,
-    pub ty: TypeScheme<Type>,
+    pub ty: Type,
     pub span: Span,
 }
 
 impl Local {
-    pub fn new(name: Ustr, mutable: MutType, ty: TypeScheme<Type>, span: Span) -> Self {
+    pub fn new(name: Ustr, mutable: MutType, ty: Type, span: Span) -> Self {
         Self {
             name,
             mutable,
@@ -32,7 +31,7 @@ impl Local {
         Self {
             name,
             mutable: MutType::mutable(),
-            ty: TypeScheme::new_just_type(ty),
+            ty,
             span,
         }
     }
@@ -41,13 +40,13 @@ impl Local {
         Self {
             name,
             mutable: MutType::constant(),
-            ty: TypeScheme::new_just_type(ty),
+            ty,
             span,
         }
     }
 
     pub fn as_fn_arg_type(&self) -> FnArgType {
-        FnArgType::new(self.ty.ty, self.mutable)
+        FnArgType::new(self.ty, self.mutable)
     }
 }
 
@@ -70,16 +69,13 @@ impl<'m> TypingEnv<'m> {
         self.locals.iter().any(|local| local.name == name)
     }
 
-    pub fn get_variable_index_and_type_scheme(
-        &self,
-        name: &str,
-    ) -> Option<(usize, &TypeScheme<Type>, MutType)> {
+    pub fn get_variable_index_and_type_scheme(&self, name: &str) -> Option<(usize, Type, MutType)> {
         self.locals
             .iter()
             .rev()
             .position(|local| local.name == name)
             .map(|rev_index| self.locals.len() - 1 - rev_index)
-            .map(|index| (index, &self.locals[index].ty, self.locals[index].mutable))
+            .map(|index| (index, self.locals[index].ty, self.locals[index].mutable))
     }
 
     pub fn get_function(&'m self, name: Ustr) -> Option<&'m ModuleFunction> {

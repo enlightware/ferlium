@@ -6,7 +6,7 @@ use ustr::Ustr;
 use crate::{
     containers::B,
     function::FunctionPtr,
-    ir::{self, FnInstData, Node, NodeKind},
+    ir::{self, Node, NodeKind},
     module::FmtWithModuleEnv,
     mutability::MutType,
     r#type::{FnArgType, Type, TypeKind, TypeLike, TypeSubstitution, TypeVar, TypeVarSubstitution},
@@ -144,10 +144,7 @@ fn extra_args_from_inst_data(
                             let index = find_field_dict_index(dicts, var, name).expect(
                                 "Dictionary for field not found, type inference should have failed",
                             );
-                            K::EnvLoad(B::new(ir::EnvLoad {
-                                index,
-                                inst_data: FnInstData::none(),
-                            }))
+                            K::EnvLoad(B::new(ir::EnvLoad { index }))
                         }
                         Record(rec) => {
                             // Known type, get the index from the type and create an immediate with it.
@@ -188,10 +185,7 @@ fn extra_args_for_module_function(
                 .expect("Target dictionary not found in ours");
             (
                 Node::new(
-                    NodeKind::EnvLoad(B::new(ir::EnvLoad {
-                        index,
-                        inst_data: FnInstData::none(),
-                    })),
+                    NodeKind::EnvLoad(B::new(ir::EnvLoad { index })),
                     int_type(),
                     span,
                 ),
@@ -297,23 +291,10 @@ impl Node {
                 }
             }
             EnvStore(store) => {
-                // As we have no capture at the moment, this let expression is fully shielded from the outer scope.
-                // So we can consider its type scheme to elaborate the corresponding dictionaries.
-                let dicts = store.ty_scheme.extra_parameters();
-                store.node.elaborate_dictionaries(&dicts, module_inst_data);
+                store.node.elaborate_dictionaries(dicts, module_inst_data);
             }
             EnvLoad(load) => {
                 load.index += dicts.len();
-                if load.inst_data.any() {
-                    // This load has dictionary requirements, so we need a closure to pass them.
-                    let (captures, _) =
-                        extra_args_from_inst_data(&load.inst_data, self.span, dicts);
-                    load.inst_data.dicts_req.clear();
-                    self.kind = BuildClosure(B::new(ir::BuildClosure {
-                        function: self.clone(),
-                        captures,
-                    }));
-                }
             }
             Block(nodes) => {
                 for node in nodes.iter_mut() {

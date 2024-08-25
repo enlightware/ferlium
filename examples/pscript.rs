@@ -1,6 +1,6 @@
 use ariadne::Label;
 use lrpar::Span;
-use painturscript::emit_ir::{emit_expr_top_level, emit_module};
+use painturscript::emit_ir::{emit_expr, emit_module};
 use painturscript::error::{resolve_must_be_mutable_ctx, InternalCompilationError};
 use painturscript::format::FormatWith;
 use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
@@ -102,35 +102,6 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                     ty.format_with(env).fg(Color::Blue)
                 ))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
-                .finish()
-                .print(("input", Source::from(src)))
-                .unwrap();
-        }
-        InvalidPolymorphicValue {
-            ty_scheme,
-            name_span,
-            expr_span,
-        } => {
-            let offset = start_of_line_of(src, name_span.start());
-            let ty_scheme = ty_scheme.display_rust_style(env).fg(Color::Blue);
-            let name = &data.1[span_range(*name_span)];
-            Report::build(ReportKind::Error, "input", offset)
-                .with_message(format!(
-                    "The 'let' binding for {} inferred the polymorphic type {}, which is not allowed because it is not a function. Please adjust the expression to ensure a more specific type is inferred, such as an integer or a string.",
-                    name.fg(Color::Blue),
-                    &ty_scheme,
-                ))
-                .with_label(
-                    Label::new(("input", span_range(*name_span)))
-                        .with_message("This 'let' binding.")
-                        .with_color(Color::Blue),
-                )
-                .with_label(
-                    Label::new(("input", span_range(*expr_span)))
-                        .with_message(format!("Inferred {} from {}.", &ty_scheme, "this expression".fg(Color::Green)))
-                        .with_color(Color::Green)
-                        .with_order(1),
-                )
                 .finish()
                 .print(("input", Source::from(src)))
                 .unwrap();
@@ -290,6 +261,7 @@ fn main() {
             println!("No locals.");
         } else {
             println!("Locals:");
+            let env = ModuleEnv::new(&module, &other_modules);
             for (i, local) in locals.iter().enumerate() {
                 println!(
                     "{} {}: {} = {}",
@@ -299,9 +271,7 @@ fn main() {
                         .expect("unresolved mutability in local")
                         .var_def_string(),
                     local.name,
-                    local
-                        .ty
-                        .display_rust_style(&ModuleEnv::new(&module, &other_modules)),
+                    local.ty.format_with(&env),
                     eval_ctx.environment[eval_ctx.frame_base + i]
                         .as_val()
                         .expect("reference found in REPL locals"),
@@ -387,7 +357,7 @@ fn main() {
 
         // Compile and evaluate expression
         let module_env = ModuleEnv::new(&module, &other_modules);
-        let expr_ir = emit_expr_top_level(&expr_ast, module_env, locals.clone());
+        let expr_ir = emit_expr(&expr_ast, module_env, locals.clone());
         let compiled_expr = match expr_ir {
             Ok(res) => res,
             Err(e) => {

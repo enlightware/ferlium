@@ -3,11 +3,9 @@ use std::fmt::{self, Display};
 use lrpar::Span;
 
 use crate::{
-    containers::B,
     format::FormatWith,
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{Type, TypeVar},
-    type_scheme::TypeScheme,
 };
 
 pub type LocatedError = (String, Span);
@@ -30,11 +28,6 @@ pub enum InternalCompilationError {
         ty_var: TypeVar,
         ty: Type,
         span: Span,
-    },
-    InvalidPolymorphicValue {
-        ty_scheme: B<TypeScheme<Type>>,
-        name_span: Span,
-        expr_span: Span,
     },
     InvalidTupleIndex {
         index: usize,
@@ -112,14 +105,6 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     ty_var,
                     ty.format_with(env)
                 )
-            }
-            InvalidPolymorphicValue {
-                name_span: span,
-                ty_scheme,
-                ..
-            } => {
-                let name = &source[span.start()..span.end()];
-                write!(f, "The 'let' binding for {name} inferred the polymorphic type {}, which is not allowed because it is not a function.", ty_scheme.display_rust_style(env))
             }
             InvalidTupleIndex {
                 index,
@@ -213,11 +198,6 @@ pub enum CompilationError {
         ty: String,
         span: Span,
     },
-    InvalidPolymorphicValue {
-        ty_scheme: String,
-        name_span: Span,
-        expr_span: Span,
-    },
     InvalidTupleIndex {
         index: usize,
         index_span: Span,
@@ -287,15 +267,6 @@ impl CompilationError {
                 ty_var: ty_var.to_string(),
                 ty: ty.format_with(env).to_string(),
                 span,
-            },
-            InvalidPolymorphicValue {
-                ty_scheme,
-                name_span,
-                expr_span,
-            } => Self::InvalidPolymorphicValue {
-                ty_scheme: ty_scheme.display_rust_style(env).to_string(),
-                name_span,
-                expr_span,
             },
             InvalidTupleIndex {
                 index,
@@ -394,15 +365,6 @@ impl CompilationError {
         match self {
             Self::UnboundTypeVar { .. } => (),
             _ => panic!("expect_unbound_ty_val called on non-UnboundTypeVar error"),
-        }
-    }
-
-    pub fn expect_invalid_polymorphic_value(&self) {
-        match self {
-            Self::InvalidPolymorphicValue { .. } => (),
-            _ => panic!(
-                "expect_invalid_polymorphic_value called on non-InvalidPolymorphicValue error"
-            ),
         }
     }
 

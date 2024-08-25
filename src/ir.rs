@@ -1,5 +1,4 @@
 use indexmap::IndexMap;
-use itertools::Itertools;
 use lrpar::Span;
 use ustr::Ustr;
 
@@ -10,7 +9,6 @@ use crate::{
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{FnType, Type, TypeLike, TypeVar, TypeVarSubstitution},
     std::math::int_type,
-    type_scheme::{DisplayStyle, TypeScheme},
     value::Value,
 };
 
@@ -73,20 +71,19 @@ pub struct StaticApplication {
 #[derive(Debug, Clone)]
 pub struct EnvStore {
     pub node: Node,
-    pub ty_scheme: TypeScheme<Type>,
+    pub ty: Type,
     pub name_span: Span,
 }
 impl EnvStore {
     pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
         self.node.substitute(subst);
-        self.ty_scheme.substitute(subst);
+        self.ty.substitute(subst);
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct EnvLoad {
     pub index: usize,
-    pub inst_data: FnInstData,
 }
 
 #[derive(Debug, Clone)]
@@ -418,30 +415,25 @@ impl Node {
         Some(self.ty)
     }
 
-    pub fn variable_type_annotations(
-        &self,
-        style: DisplayStyle,
-        result: &mut Vec<(usize, String)>,
-        env: &ModuleEnv,
-    ) {
+    pub fn variable_type_annotations(&self, result: &mut Vec<(usize, String)>, env: &ModuleEnv) {
         use NodeKind::*;
         match &self.kind {
             Immediate(_) => {}
             BuildClosure(build_closure) => {
                 build_closure
                     .function
-                    .variable_type_annotations(style, result, env);
+                    .variable_type_annotations(result, env);
                 // We do not look into captures as they are generated code.
             }
             Apply(app) => {
-                app.function.variable_type_annotations(style, result, env);
+                app.function.variable_type_annotations(result, env);
                 for arg in &app.arguments {
-                    arg.variable_type_annotations(style, result, env);
+                    arg.variable_type_annotations(result, env);
                 }
             }
             StaticApply(app) => {
                 for arg in &app.arguments {
-                    arg.variable_type_annotations(style, result, env);
+                    arg.variable_type_annotations(result, env);
                 }
             }
             EnvStore(node) => {
@@ -449,52 +441,41 @@ impl Node {
                 if node.name_span.end() != node.name_span.start() {
                     result.push((
                         node.name_span.end(),
-                        match style {
-                            DisplayStyle::Mathematical => {
-                                format!(": {}", node.ty_scheme.display_math_style(env))
-                            }
-                            DisplayStyle::Rust => {
-                                format!(": {}", node.ty_scheme.display_rust_style(env))
-                            }
-                        },
+                        format!(": {}", node.ty.format_with(env)),
                     ));
                 }
-                node.node.variable_type_annotations(style, result, env);
+                node.node.variable_type_annotations(result, env);
             }
             EnvLoad(_) => {}
             Block(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(style, result, env)),
+                .for_each(|node| node.variable_type_annotations(result, env)),
             Assign(assignment) => {
-                assignment
-                    .place
-                    .variable_type_annotations(style, result, env);
-                assignment
-                    .value
-                    .variable_type_annotations(style, result, env);
+                assignment.place.variable_type_annotations(result, env);
+                assignment.value.variable_type_annotations(result, env);
             }
             Tuple(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(style, result, env)),
-            Project(projection) => projection.0.variable_type_annotations(style, result, env),
+                .for_each(|node| node.variable_type_annotations(result, env)),
+            Project(projection) => projection.0.variable_type_annotations(result, env),
             Record(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(style, result, env)),
-            FieldAccess(access) => access.0.variable_type_annotations(style, result, env),
-            ProjectAt(access) => access.0.variable_type_annotations(style, result, env),
+                .for_each(|node| node.variable_type_annotations(result, env)),
+            FieldAccess(access) => access.0.variable_type_annotations(result, env),
+            ProjectAt(access) => access.0.variable_type_annotations(result, env),
             Array(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(style, result, env)),
+                .for_each(|node| node.variable_type_annotations(result, env)),
             Index(array, index) => {
-                array.variable_type_annotations(style, result, env);
-                index.variable_type_annotations(style, result, env);
+                array.variable_type_annotations(result, env);
+                index.variable_type_annotations(result, env);
             }
             Case(case) => {
-                case.value.variable_type_annotations(style, result, env);
+                case.value.variable_type_annotations(result, env);
                 for (_, node) in &case.alternatives {
-                    node.variable_type_annotations(style, result, env);
+                    node.variable_type_annotations(result, env);
                 }
-                case.default.variable_type_annotations(style, result, env);
+                case.default.variable_type_annotations(result, env);
             }
             Iterate(iteration) => {
                 // TODO: once the iterator is generalized, get the type from it!
@@ -502,23 +483,16 @@ impl Node {
                     iteration.var_name_span.end(),
                     format!(": {}", int_type().format_with(env)),
                 ));
-                iteration
-                    .iterator
-                    .variable_type_annotations(style, result, env);
-                iteration.body.variable_type_annotations(style, result, env);
+                iteration.iterator.variable_type_annotations(result, env);
+                iteration.body.variable_type_annotations(result, env);
             }
         }
     }
 
-    pub fn unbound_ty_vars(
-        &self,
-        result: &mut IndexMap<TypeVar, Span>,
-        ignore: &[TypeVar],
-        generation: u32,
-    ) {
+    pub fn unbound_ty_vars(&self, result: &mut IndexMap<TypeVar, Span>, ignore: &[TypeVar]) {
         use NodeKind::*;
         // Add type variables for this node.
-        self.unbound_ty_vars_in_ty(&self.ty, result, ignore, generation);
+        self.unbound_ty_vars_in_ty(&self.ty, result, ignore);
         // Recurse.
         match &self.kind {
             Immediate(_) => {} // no need to look into the value's type as it is already in this node's type
@@ -526,66 +500,54 @@ impl Node {
                 panic!("Closure should not be in the IR at this point");
             }
             Apply(app) => {
-                app.function.unbound_ty_vars(result, ignore, generation);
+                app.function.unbound_ty_vars(result, ignore);
                 for arg in &app.arguments {
-                    arg.unbound_ty_vars(result, ignore, generation);
+                    arg.unbound_ty_vars(result, ignore);
                 }
             }
             StaticApply(app) => {
-                self.unbound_ty_vars_in_ty(&app.ty, result, ignore, generation);
+                self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for arg in &app.arguments {
-                    arg.unbound_ty_vars(result, ignore, generation);
+                    arg.unbound_ty_vars(result, ignore);
                 }
             }
-            EnvStore(node) => {
-                let new_ignore = node
-                    .ty_scheme
-                    .quantifiers
-                    .iter()
-                    .chain(ignore)
-                    .copied()
-                    .unique()
-                    .collect::<Vec<_>>();
-                node.node.unbound_ty_vars(result, &new_ignore, generation)
-            }
+            EnvStore(node) => node.node.unbound_ty_vars(result, ignore),
             EnvLoad(_) => {}
             Block(nodes) => nodes
                 .iter()
-                .for_each(|node| node.unbound_ty_vars(result, ignore, generation)),
+                .for_each(|node| node.unbound_ty_vars(result, ignore)),
             Assign(assignment) => {
-                assignment.place.unbound_ty_vars(result, ignore, generation);
-                assignment.value.unbound_ty_vars(result, ignore, generation);
+                assignment.place.unbound_ty_vars(result, ignore);
+                assignment.value.unbound_ty_vars(result, ignore);
             }
             Tuple(nodes) => nodes
                 .iter()
-                .for_each(|node| node.unbound_ty_vars(result, ignore, generation)),
-            Project(projection) => projection.0.unbound_ty_vars(result, ignore, generation),
+                .for_each(|node| node.unbound_ty_vars(result, ignore)),
+            Project(projection) => projection.0.unbound_ty_vars(result, ignore),
             Record(nodes) => nodes
                 .iter()
-                .for_each(|node| node.unbound_ty_vars(result, ignore, generation)),
-            FieldAccess(access) => access.0.unbound_ty_vars(result, ignore, generation),
+                .for_each(|node| node.unbound_ty_vars(result, ignore)),
+            FieldAccess(access) => access.0.unbound_ty_vars(result, ignore),
             ProjectAt(_) => {
                 panic!("ProjectAt should not be in the IR at this point");
             }
             Array(nodes) => nodes
                 .iter()
-                .for_each(|node| node.unbound_ty_vars(result, ignore, generation)),
+                .for_each(|node| node.unbound_ty_vars(result, ignore)),
             Index(array, index) => {
-                array.unbound_ty_vars(result, ignore, generation);
-                index.unbound_ty_vars(result, ignore, generation);
+                array.unbound_ty_vars(result, ignore);
+                index.unbound_ty_vars(result, ignore);
             }
             Case(case) => {
-                case.value.unbound_ty_vars(result, ignore, generation);
+                case.value.unbound_ty_vars(result, ignore);
                 case.alternatives.iter().for_each(|(_alternative, node)| {
-                    node.unbound_ty_vars(result, ignore, generation);
+                    node.unbound_ty_vars(result, ignore);
                 });
-                case.default.unbound_ty_vars(result, ignore, generation);
+                case.default.unbound_ty_vars(result, ignore);
             }
             Iterate(iteration) => {
-                iteration
-                    .iterator
-                    .unbound_ty_vars(result, ignore, generation);
-                iteration.body.unbound_ty_vars(result, ignore, generation);
+                iteration.iterator.unbound_ty_vars(result, ignore);
+                iteration.body.unbound_ty_vars(result, ignore);
             }
         }
     }
@@ -595,10 +557,9 @@ impl Node {
         ty: &impl TypeLike,
         result: &mut IndexMap<TypeVar, Span>,
         ignore: &[TypeVar],
-        generation: u32,
     ) {
         ty.inner_ty_vars().iter().for_each(|ty_var| {
-            if ty_var.generation() == generation && !ignore.contains(ty_var) {
+            if !ignore.contains(ty_var) {
                 result.insert(*ty_var, self.span);
             }
         });
@@ -624,9 +585,7 @@ impl Node {
                 substitute_nodes(&mut app.arguments, subst);
             }
             EnvStore(node) => node.substitute(subst),
-            EnvLoad(node) => {
-                node.inst_data.substitute(subst);
-            }
+            EnvLoad(_) => {}
             Block(nodes) => substitute_nodes(nodes, subst),
             Assign(assignment) => {
                 assignment.place.substitute(subst);
