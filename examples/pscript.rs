@@ -84,10 +84,10 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             Report::build(ReportKind::Error, "input", offset)
                 .with_message(format!(
                     "Type {} is incompatible with type {} (i.e. not a sub-type).",
-                    cur.format_with(env).fg(Color::Blue),
+                    cur.format_with(env).fg(Color::Magenta),
                     exp.format_with(env).fg(Color::Blue)
                 ))
-                .with_label(Label::new(("input", span_range(*cur_span))).with_color(Color::Blue))
+                .with_label(Label::new(("input", span_range(*cur_span))).with_color(Color::Magenta))
                 .with_label(Label::new(("input", span_range(*exp_span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
