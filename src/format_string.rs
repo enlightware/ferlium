@@ -35,7 +35,7 @@ fn variable_to_string(
             string_span,
         });
     };
-    let var_expr = Expr::new(ExprKind::Variable(ustr(var_name)), var_span);
+    let var_expr = Expr::new(ExprKind::Identifier(ustr(var_name)), var_span);
     Ok(Expr::new(
         ExprKind::StaticApply(ustr("std::to_string"), var_span, vec![var_expr]),
         var_span,
@@ -72,7 +72,7 @@ pub fn emit_format_string_ast(
             ExprKind::StaticApply(
                 ustr("std::string_push_str"),
                 span,
-                vec![Expr::new(ExprKind::Variable(ustr("@s")), span), expr],
+                vec![Expr::new(ExprKind::Identifier(ustr("@s")), span), expr],
             ),
             span,
         );
@@ -113,7 +113,7 @@ pub fn emit_format_string_ast(
 
     // Evaluate the mutable string and return it.
     let end_span = Span::new(span.end(), span.end());
-    exprs.push(Expr::new(ExprKind::Variable(ustr("@s")), end_span));
+    exprs.push(Expr::new(ExprKind::Identifier(ustr("@s")), end_span));
 
     Ok(Expr::new(ExprKind::Block(exprs), span))
 }

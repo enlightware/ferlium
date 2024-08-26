@@ -331,8 +331,10 @@ fn records() {
     assert_eq!(run("{a:1}.a"), int!(1));
     assert_eq!(run("{a:1, b:2}.a"), int!(1));
     assert_eq!(run("{a:1, b:2}.b"), int!(2));
-    fail_compilation("{a:1, a:2}").expect_duplicate_record_field("a");
-    fail_compilation("{a:1, a:true, b:2}").expect_duplicate_record_field("a");
+    let s = "{a:1, a:2}";
+    fail_compilation(s).expect_duplicate_record_field(s, "a");
+    let s = "{a:1, a:true, b:2}";
+    fail_compilation(s).expect_duplicate_record_field(s, "a");
     assert_eq!(run("(|| {a:1, b:2})().a"), int!(1));
     assert_eq!(run("(|| {a:1, b:2})().b"), int!(2));
     assert_eq!(run("let r = || {a:1, b:2}; r().a + r().b"), int!(3));
@@ -406,6 +408,35 @@ fn records() {
         "fn swap(a,b) { var temp = a; a = b; b = temp } var v = { x:1, y:2 }; swap(v.x, v.x)",
     )
     .expect_mutable_paths_overlap();
+}
+
+#[test]
+fn variants() {
+    let match_exhaustive = r#"fn s(x) { match x { None => "no", Some(x) => f"hi {x}" } }"#;
+    assert_eq!(
+        run(&format!("{match_exhaustive} s(Some(1))")),
+        string!("hi 1")
+    );
+    assert_eq!(run(&format!("{match_exhaustive} s(None)")), string!("no"));
+    assert_eq!(
+        run(&format!("{match_exhaustive} fn f() {{ s(Some(1)) }} f(1)")),
+        string!("hi 1")
+    );
+    assert_eq!(
+        run(&format!("{match_exhaustive} fn f() {{ s(None) }} f()")),
+        string!("no")
+    );
+    let match_open = r#"fn s(x) { match x { None => "no", Some(x) => f"hi {x}", _ => "?" } }"#;
+    assert_eq!(run(&format!("{match_open} s(Some(1))")), string!("hi 1"));
+    assert_eq!(run(&format!("{match_open} s(None)")), string!("no"));
+    assert_eq!(
+        run(&format!("{match_open} fn f() {{ s(Some(1)) }} f(1)")),
+        string!("hi 1")
+    );
+    assert_eq!(
+        run(&format!("{match_open} fn f() {{ s(None) }} f()")),
+        string!("no")
+    );
 }
 
 #[test]
@@ -643,8 +674,10 @@ fn string_formatting() {
         run(r#"let a = [1, 2]; let b = (0, true, "hi"); f"hello {a} world {b}""#),
         string!("hello [1, 2] world (0, true, hi)")
     );
-    fail_compilation(r#"f"hello {a} world""#).expect_undefined_var_in_string_formatting("a");
-    fail_compilation(r#"let a = 1; f"{a} is {b}""#).expect_undefined_var_in_string_formatting("b");
+    let s = r#"f"hello {a} world""#;
+    fail_compilation(s).expect_undefined_var_in_string_formatting(s, "a");
+    let s = r#"let a = 1; f"{a} is {b}""#;
+    fail_compilation(s).expect_undefined_var_in_string_formatting(s, "b");
 }
 
 #[test]

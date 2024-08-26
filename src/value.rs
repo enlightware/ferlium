@@ -15,7 +15,7 @@ use crate::{
     format::{write_with_separator, write_with_separator_and_format_fn},
     function::{Function, FunctionPtr, FunctionRef},
     module::ModuleEnv,
-    r#type::TypeVarSubstitution,
+    r#type::TypeSubstitution,
 };
 
 // Support for primitive values
@@ -70,6 +70,11 @@ pub struct VariantValue {
     pub tag: Ustr,
     pub value: Value,
 }
+impl VariantValue {
+    pub fn tag_as_isize(&self) -> isize {
+        self.tag.as_char_ptr() as isize
+    }
+}
 
 /// A value in the system
 #[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
@@ -87,6 +92,10 @@ impl Value {
 
     pub fn native<T: NativeValue + 'static>(value: T) -> Self {
         Value::Native(B::new(value))
+    }
+
+    pub fn variant(tag: Ustr, value: Value) -> Self {
+        Value::Variant(B::new(VariantValue { tag, value }))
     }
 
     pub fn tuple(values: impl Into<SVec2<Value>>) -> Self {
@@ -161,9 +170,12 @@ impl Value {
                 writeln!(f)
             }
             Variant(variant) => {
-                writeln!(f, "{indent_str}{}(", variant.tag)?;
-                variant.value.format_ind(f, env, indent + 1)?;
-                writeln!(f, "{indent_str})")
+                if variant.value == Value::unit() {
+                    writeln!(f, "{indent_str}{}", variant.tag)
+                } else {
+                    writeln!(f, "{indent_str}{} ", variant.tag)?;
+                    variant.value.format_ind(f, env, indent + 1)
+                }
             }
             Tuple(tuple) => {
                 writeln!(f, "{indent_str}(")?;
@@ -200,16 +212,16 @@ impl Value {
         }
     }
 
-    pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
+    pub fn instantiate(&mut self, subst: &TypeSubstitution) {
         use Value::*;
         match self {
             Native(_) => {}
             Variant(variant) => {
-                variant.value.substitute(subst);
+                variant.value.instantiate(subst);
             }
             Tuple(tuple) => {
                 for element in tuple.iter_mut() {
-                    element.substitute(subst);
+                    element.instantiate(subst);
                 }
             }
             Function(function) => {
@@ -218,7 +230,7 @@ impl Value {
                 let function = function.try_borrow_mut();
                 if let Ok(mut function) = function {
                     if let Some(script_fn) = function.as_script_mut() {
-                        script_fn.code.substitute(subst);
+                        script_fn.code.instantiate(subst);
                     }
                 }
             }

@@ -1,9 +1,9 @@
 use std::fmt::{self, Display};
 
 use lrpar::Span;
-use ustr::Ustr;
 
 use crate::{
+    ast::PatternType,
     format::FormatWith,
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{Type, TypeVar},
@@ -13,14 +13,17 @@ pub type LocatedError = (String, Span);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ADTAccessType {
-    RecordAccess(Ustr),
-    TupleProject(usize),
+    RecordAccess,
+    TupleProject,
+    Variant,
 }
 impl ADTAccessType {
     pub fn adt_kind(&self) -> &'static str {
+        use ADTAccessType::*;
         match self {
-            Self::RecordAccess(_) => "record",
-            Self::TupleProject(_) => "tuple",
+            RecordAccess => "record",
+            TupleProject => "tuple",
+            Variant => "variant",
         }
     }
 }
@@ -56,8 +59,8 @@ pub enum InternalCompilationError {
         index_span: Span,
     },
     DuplicatedRecordField {
-        first_occurrence_span: Span,
-        second_occurrence_span: Span,
+        first_occurrence: Span,
+        second_occurrence: Span,
     },
     InvalidRecordField {
         field_span: Span,
@@ -69,11 +72,29 @@ pub enum InternalCompilationError {
         record_ty: Type,
         record_span: Span,
     },
+    InvalidVariantName {
+        name_span: Span,
+        ty: Type,
+    },
+    InvalidVariantType {
+        expr_span: Span,
+        ty: Type,
+    },
     InconsistentADT {
         a_type: ADTAccessType,
         a_span: Span,
         b_type: ADTAccessType,
         b_span: Span,
+    },
+    InconsistentPattern {
+        a_type: PatternType,
+        a_span: Span,
+        b_type: PatternType,
+        b_span: Span,
+    },
+    DuplicatedVariant {
+        first_occurrence: Span,
+        second_occurrence: Span,
     },
     MutablePathsOverlap {
         a_span: Span,
@@ -162,7 +183,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 write!(f, "Expected tuple, got \"{}\"", expr_ty.format_with(env))
             }
             DuplicatedRecordField {
-                first_occurrence_span,
+                first_occurrence: first_occurrence_span,
                 ..
             } => {
                 write!(
@@ -195,6 +216,28 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     record_ty.format_with(env)
                 )
             }
+            InvalidVariantName {
+                name_span: name,
+                ty,
+            } => {
+                write!(
+                    f,
+                    "Variant name {} does not exist for variant type {}",
+                    &source[name.start()..name.end()],
+                    ty.format_with(env)
+                )
+            }
+            InvalidVariantType {
+                expr_span: name,
+                ty,
+            } => {
+                write!(
+                    f,
+                    "Type {} is not a variant, but variant constructor {} requires it",
+                    ty.format_with(env),
+                    &source[name.start()..name.end()]
+                )
+            }
             InconsistentADT {
                 a_type,
                 b_type,
@@ -208,6 +251,31 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     &source[a_span.start()..a_span.end()],
                     b_type.adt_kind(),
                     &source[b_span.start()..b_span.end()],
+                )
+            }
+            InconsistentPattern {
+                a_type,
+                b_type,
+                a_span,
+                b_span,
+            } => {
+                write!(
+                    f,
+                    "Inconsistent pattern types: {} due to {} is incompatible with {} due to {}",
+                    a_type.name(),
+                    &source[a_span.start()..a_span.end()],
+                    b_type.name(),
+                    &source[b_span.start()..b_span.end()],
+                )
+            }
+            DuplicatedVariant {
+                first_occurrence: first_occurrence_span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Duplicated variant: {}",
+                    &source[first_occurrence_span.start()..first_occurrence_span.end()]
                 )
             }
             MutablePathsOverlap {
@@ -265,9 +333,8 @@ pub enum CompilationError {
         index_span: Span,
     },
     DuplicatedRecordField {
-        name: String,
-        first_occurrence_span: Span,
-        second_occurrence_span: Span,
+        first_occurrence: Span,
+        second_occurrence: Span,
     },
     InvalidRecordField {
         field_span: Span,
@@ -279,11 +346,29 @@ pub enum CompilationError {
         record_ty: String,
         record_span: Span,
     },
+    InvalidVariantName {
+        name: Span,
+        ty: String,
+    },
+    InvalidVariantType {
+        name: Span,
+        ty: String,
+    },
     InconsistentADT {
         a_type: ADTAccessType,
         a_span: Span,
         b_type: ADTAccessType,
         b_span: Span,
+    },
+    InconsistentPattern {
+        a_type: PatternType,
+        a_span: Span,
+        b_type: PatternType,
+        b_span: Span,
+    },
+    DuplicatedVariant {
+        first_occurrence: Span,
+        second_occurrence: Span,
     },
     MutablePathsOverlap {
         a_span: Span,
@@ -292,7 +377,6 @@ pub enum CompilationError {
     },
     UndefinedVarInStringFormatting {
         var_span: Span,
-        var_name: String,
         string_span: Span,
     },
     Internal(String),
@@ -350,12 +434,11 @@ impl CompilationError {
                 index_span,
             },
             DuplicatedRecordField {
-                first_occurrence_span,
-                second_occurrence_span,
+                first_occurrence,
+                second_occurrence,
             } => Self::DuplicatedRecordField {
-                name: src[first_occurrence_span.start()..first_occurrence_span.end()].to_string(),
-                first_occurrence_span,
-                second_occurrence_span,
+                first_occurrence,
+                second_occurrence,
             },
             InvalidRecordField {
                 field_span,
@@ -375,6 +458,20 @@ impl CompilationError {
                 record_ty: record_ty.format_with(env).to_string(),
                 record_span,
             },
+            InvalidVariantName {
+                name_span: name,
+                ty,
+            } => Self::InvalidVariantName {
+                name,
+                ty: ty.format_with(env).to_string(),
+            },
+            InvalidVariantType {
+                expr_span: name,
+                ty,
+            } => Self::InvalidVariantType {
+                name,
+                ty: ty.format_with(env).to_string(),
+            },
             InconsistentADT {
                 a_type,
                 a_span,
@@ -385,6 +482,24 @@ impl CompilationError {
                 a_span,
                 b_type,
                 b_span,
+            },
+            InconsistentPattern {
+                a_type,
+                a_span,
+                b_type,
+                b_span,
+            } => Self::InconsistentPattern {
+                a_type,
+                a_span,
+                b_type,
+                b_span,
+            },
+            DuplicatedVariant {
+                first_occurrence,
+                second_occurrence,
+            } => Self::DuplicatedVariant {
+                first_occurrence,
+                second_occurrence,
             },
             MutablePathsOverlap {
                 a_span,
@@ -398,14 +513,10 @@ impl CompilationError {
             UndefinedVarInStringFormatting {
                 var_span,
                 string_span,
-            } => {
-                let var_name = &src[var_span.start()..var_span.end()];
-                Self::UndefinedVarInStringFormatting {
-                    var_span,
-                    var_name: var_name.to_string(),
-                    string_span,
-                }
-            }
+            } => Self::UndefinedVarInStringFormatting {
+                var_span,
+                string_span,
+            },
             Internal(msg) => Self::Internal(msg),
         }
     }
@@ -440,9 +551,14 @@ impl CompilationError {
         }
     }
 
-    pub fn expect_duplicate_record_field(&self, exp_name: &str) {
+    pub fn expect_duplicate_record_field(&self, src: &str, exp_name: &str) {
         match self {
-            Self::DuplicatedRecordField { name, .. } => {
+            Self::DuplicatedRecordField {
+                first_occurrence: first_occurrence_span,
+                ..
+            } => {
+                let name =
+                    src[first_occurrence_span.start()..first_occurrence_span.end()].to_string();
                 if name == exp_name {
                 } else {
                     panic!(
@@ -462,6 +578,25 @@ impl CompilationError {
         }
     }
 
+    pub fn expect_duplicated_variant(&self, src: &str, exp_name: &str) {
+        match self {
+            Self::DuplicatedVariant {
+                first_occurrence: first_occurrence_span,
+                ..
+            } => {
+                let name = &src[first_occurrence_span.start()..first_occurrence_span.end()];
+                if name == exp_name {
+                } else {
+                    panic!(
+                        "expect_duplicated_variant failed: expected \"{}\", got \"{}\"",
+                        exp_name, name
+                    );
+                }
+            }
+            _ => panic!("expect_duplicated_variant called on non-DuplicatedVariant error"),
+        }
+    }
+
     pub fn expect_mutable_paths_overlap(&self) {
         match self {
             Self::MutablePathsOverlap { .. } => (),
@@ -469,14 +604,17 @@ impl CompilationError {
         }
     }
 
-    pub fn expect_undefined_var_in_string_formatting(&self, exp_name: &str) {
+    pub fn expect_undefined_var_in_string_formatting(&self, src: &str, exp_name: &str) {
         match self {
-            Self::UndefinedVarInStringFormatting { var_name, .. } => if var_name == exp_name {
-            } else {
-                panic!(
-                    "expect_undefined_var_in_string_formatting failed: expected \"{}\", got \"{}\"",
-                    exp_name, var_name
-                );
+            Self::UndefinedVarInStringFormatting { var_span, .. } => {
+                let var_name = &src[var_span.start()..var_span.end()];
+                if var_name == exp_name {
+                } else {
+                    panic!(
+                        "expect_undefined_var_in_string_formatting failed: expected \"{}\", got \"{}\"",
+                        exp_name, var_name
+                    );
+                }
             },
             _ => panic!(
                 "expect_undefined_var_in_string_formatting called on non-UndefinedVarInStringFormatting error"

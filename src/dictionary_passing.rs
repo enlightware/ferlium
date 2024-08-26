@@ -9,7 +9,7 @@ use crate::{
     ir::{self, Node, NodeKind},
     module::FmtWithModuleEnv,
     mutability::MutType,
-    r#type::{FnArgType, Type, TypeKind, TypeLike, TypeSubstitution, TypeVar, TypeVarSubstitution},
+    r#type::{FnArgType, Type, TypeKind, TypeLike, TypeSubstitution, TypeVar},
     std::math::int_type,
     value::Value,
 };
@@ -50,9 +50,9 @@ impl DictionaryReq<TypeVar> {
     }
 }
 impl DictionaryReq<Type> {
-    pub fn substitute(&self, subst: &TypeVarSubstitution) -> Self {
+    pub fn instantiate(&self, subst: &TypeSubstitution) -> Self {
         Self {
-            ty: self.ty.substitute(subst),
+            ty: self.ty.instantiate(subst),
             kind: self.kind,
         }
     }
@@ -115,13 +115,6 @@ pub fn instantiate_dictionaries_req(
     subst: &TypeSubstitution,
 ) -> DictionariesTyReq {
     dicts.iter().map(|dict| dict.instantiate(subst)).collect()
-}
-
-pub fn substitute_dictionaries_req(
-    dicts: &DictionariesTyReq,
-    subst: &TypeVarSubstitution,
-) -> DictionariesTyReq {
-    dicts.iter().map(|dict| dict.substitute(subst)).collect()
 }
 
 fn extra_args_from_inst_data(
@@ -239,13 +232,15 @@ impl Node {
                                     .code
                                     .elaborate_dictionaries(dicts, module_inst_data);
                                 // Build closure to capture the dictionaries of this function.
-                                let captures = (0..dicts.len()).map(|i| {
-                                    Node::new(
-                                        EnvLoad(B::new(ir::EnvLoad { index: i })),
-                                        int_type(),
-                                        self.span,
-                                    )
-                                }).collect();
+                                let captures = (0..dicts.len())
+                                    .map(|i| {
+                                        Node::new(
+                                            EnvLoad(B::new(ir::EnvLoad { index: i })),
+                                            int_type(),
+                                            self.span,
+                                        )
+                                    })
+                                    .collect();
                                 self.kind = BuildClosure(B::new(ir::BuildClosure {
                                     function: self.clone(),
                                     captures,
@@ -392,6 +387,12 @@ impl Node {
             }
             ProjectAt(_) => {
                 panic!("ProjectAt should not be present at this stage");
+            }
+            Variant(variant) => {
+                variant.1.elaborate_dictionaries(dicts, module_inst_data);
+            }
+            ExtractTag(node) => {
+                node.elaborate_dictionaries(dicts, module_inst_data);
             }
             Array(nodes) => {
                 for node in nodes.iter_mut() {

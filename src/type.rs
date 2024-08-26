@@ -37,10 +37,14 @@ use crate::typing_env::Local;
 pub trait TypeLike {
     /// Instantiate the type variables within this type with the given substitutions
     fn instantiate(&self, subst: &TypeSubstitution) -> Self;
-    /// Substitute the type variables within this type wih the given substitutions
-    fn substitute(&self, subst: &TypeVarSubstitution) -> Self;
     /// Return all type variables contained in this type
     fn inner_ty_vars(&self) -> Vec<TypeVar>;
+}
+
+/// Something that is like a type and can be casted to a type.
+pub trait CastableToType: TypeLike {
+    /// Return this as a type
+    fn to_type(&self) -> Type;
 }
 
 /// A generic variable for a type
@@ -56,10 +60,6 @@ impl TypeVar {
     }
     pub fn name(&self) -> u32 {
         self.name
-    }
-
-    pub(crate) fn substitute(self, subst: &TypeVarSubstitution) -> Self {
-        subst.get(&self).copied().unwrap_or(self)
     }
 }
 
@@ -281,6 +281,31 @@ impl FnType {
         compare_by(&self.args, &other.args, FnArgType::local_cmp)
             .then(self.ret.local_cmp(&other.ret))
     }
+
+    fn fold<V: Clone, F>(&self, f: &F, v: V) -> V
+    where
+        F: Fn(&TypeKind, V) -> V,
+    {
+        let v = self.args.iter().fold(v, |v, arg| arg.ty.data().fold(f, v));
+        self.ret.data().fold(f, v)
+    }
+
+    fn fold_in_place<V, F>(&self, f: &F, v: &mut V)
+    where
+        F: Fn(&TypeKind, &mut V),
+    {
+        self.args
+            .iter()
+            .for_each(|arg| arg.ty.data().fold_in_place(f, v));
+        self.ret.data().fold_in_place(f, v);
+    }
+
+    fn visit(&self, visitor: &mut impl TypeKindVisitor) {
+        self.args
+            .iter()
+            .for_each(|arg| arg.ty.data().visit(visitor));
+        self.ret.data().visit(visitor);
+    }
 }
 
 impl TypeLike for FnType {
@@ -298,27 +323,16 @@ impl TypeLike for FnType {
         }
     }
 
-    fn substitute(&self, subst: &TypeVarSubstitution) -> Self {
-        Self {
-            args: self
-                .args
-                .iter()
-                .map(|arg| FnArgType {
-                    ty: arg.ty.substitute(subst),
-                    inout: arg.inout,
-                })
-                .collect(),
-            ret: self.ret.substitute(subst),
-        }
-    }
-
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
-        self.args
-            .iter()
-            .flat_map(|arg| arg.ty.inner_ty_vars())
-            .chain(self.ret.inner_ty_vars())
-            .unique()
-            .collect()
+        let mut vars = vec![];
+        self.fold_in_place(&TypeKind::extend_ty_vars, &mut vars);
+        vars.into_iter().unique().collect()
+    }
+}
+
+impl CastableToType for FnType {
+    fn to_type(&self) -> Type {
+        Type::function_type(self.clone())
     }
 }
 
@@ -346,7 +360,8 @@ pub struct Type {
 impl Type {
     // helper constructors
     pub fn unit() -> Self {
-        Self::primitive::<()>()
+        static TY: OnceLock<Type> = OnceLock::new();
+        *TY.get_or_init(Self::primitive::<()>)
     }
 
     pub fn primitive<T: Clone + 'static>() -> Self {
@@ -407,6 +422,11 @@ impl Type {
 
     pub fn new_type(name: Ustr, ty: Self) -> Self {
         TypeKind::Newtype(name, ty).store()
+    }
+
+    pub fn never() -> Self {
+        static TY: OnceLock<Type> = OnceLock::new();
+        *TY.get_or_init(|| TypeKind::Never.store())
     }
 
     pub fn new_local(index: u32) -> Self {
@@ -545,19 +565,14 @@ impl TypeLike for Type {
         )
     }
 
-    fn substitute(&self, subst: &TypeVarSubstitution) -> Self {
-        self.with_cycle_detection(
-            |ty, _| {
-                let kind = ty.data().clone();
-                kind.substitute(subst)
-            },
-            |ty, _| *ty,
-            (),
-        )
-    }
-
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
         self.with_cycle_detection(|ty, _| ty.data().inner_ty_vars(), |_, _| vec![], ())
+    }
+}
+
+impl CastableToType for Type {
+    fn to_type(&self) -> Type {
+        *self
     }
 }
 
@@ -591,8 +606,6 @@ impl PartialOrd for Type {
 }
 
 pub type TypeSubstitution = HashMap<TypeVar, Type>;
-
-pub type TypeVarSubstitution = HashMap<TypeVar, TypeVar>;
 
 /// Named types
 #[derive(Debug, Clone, Default)]
@@ -657,6 +670,8 @@ pub enum TypeKind {
     Function(B<FnType>),
     /// A named newtype
     Newtype(Ustr, Type),
+    /// Bottom type
+    Never,
 }
 // TODO: traits as bounds of generics
 
@@ -697,72 +712,124 @@ impl TypeKind {
             ),
             Function(fn_type) => Type::function_type(fn_type.instantiate(subst)),
             Newtype(name, ty) => Type::new_type(*name, ty.instantiate(subst)),
-        }
-    }
-
-    /// Substitute the type variables within this type wih the given substitutions, recursively
-    fn substitute(&self, subst: &TypeVarSubstitution) -> Type {
-        use TypeKind::*;
-        match self {
-            Variable(var) => match subst.get(var) {
-                Some(ty_var) => Type::variable(*ty_var),
-                None => Type::variable(*var),
-            },
-            Native(native_ty) => Type::native_type(NativeType::new(
-                native_ty.bare_ty.clone(),
-                native_ty
-                    .arguments
-                    .iter()
-                    .map(|ty| ty.substitute(subst))
-                    .collect(),
-            )),
-            Variant(types) => Type::variant(
-                types
-                    .iter()
-                    .map(|(name, ty)| (*name, ty.substitute(subst)))
-                    .collect(),
-            ),
-            Tuple(tuple) => Type::tuple(tuple.iter().map(|ty| ty.substitute(subst)).collect()),
-            Record(fields) => Type::record(
-                fields
-                    .iter()
-                    .map(|(name, ty)| (*name, ty.substitute(subst)))
-                    .collect(),
-            ),
-            Function(fn_type) => Type::function_type(fn_type.substitute(subst)),
-            Newtype(name, ty) => Type::new_type(*name, ty.substitute(subst)),
+            Never => Type::never(),
         }
     }
 
     /// Return all type variables contained in this type, recursively
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        let mut vars = vec![];
+        self.fold_in_place(&Self::extend_ty_vars, &mut vars);
+        vars.into_iter().unique().collect()
+    }
+
+    fn extend_ty_vars(&self, vars: &mut Vec<TypeVar>) {
+        if let TypeKind::Variable(var) = self {
+            vars.push(*var);
+        }
+    }
+
+    /// Return true if the type variable is only found in variants
+    pub fn is_ty_var_only_in_variants(&self, ty_var: TypeVar) -> bool {
+        struct Visitor {
+            ty_var: TypeVar,
+            depth: usize,
+            variant_start: Option<usize>,
+            output: bool,
+        }
+        impl TypeKindVisitor for Visitor {
+            fn visit_start(&mut self, ty: &TypeKind) {
+                if self.variant_start.is_none() {
+                    if ty.is_variant() {
+                        self.variant_start = Some(self.depth);
+                    } else if let Some(var) = ty.as_variable() {
+                        if var == &self.ty_var {
+                            self.output = false;
+                        }
+                    }
+                }
+                self.depth += 1;
+            }
+
+            fn visit_end(&mut self, _ty: &TypeKind) {
+                self.depth -= 1;
+                if let Some(start_depth) = self.variant_start {
+                    if start_depth == self.depth {
+                        self.variant_start = None;
+                    }
+                }
+            }
+        }
+
+        let mut visitor = Visitor {
+            ty_var,
+            depth: 0,
+            variant_start: None,
+            output: true,
+        };
+        self.visit(&mut visitor);
+        visitor.output
+    }
+
+    /// Reduce using fold function f and initial value v, post-order traversal
+    fn fold<V: Clone>(&self, f: &impl Fn(&Self, V) -> V, v: V) -> V {
+        struct Visitor<'a, V: Clone, F: Fn(&TypeKind, V) -> V> {
+            f: &'a F,
+            v: V,
+        }
+        impl<'a, V: Clone, F: Fn(&TypeKind, V) -> V> TypeKindVisitor for Visitor<'a, V, F> {
+            fn visit_end(&mut self, ty: &TypeKind) {
+                self.v = (self.f)(ty, self.v.clone());
+            }
+        }
+
+        let mut visitor = Visitor { f, v };
+        self.visit(&mut visitor);
+        visitor.v
+    }
+
+    /// Reduce using fold function f and a mutable value v, post-order traversal
+    fn fold_in_place<V>(&self, f: &impl Fn(&Self, &mut V), v: &mut V) {
+        struct Visitor<'a, V, F: Fn(&TypeKind, &mut V)> {
+            f: &'a F,
+            v: &'a mut V,
+        }
+        impl<'a, V, F: Fn(&TypeKind, &mut V)> TypeKindVisitor for Visitor<'a, V, F> {
+            fn visit_end(&mut self, ty: &TypeKind) {
+                (self.f)(ty, self.v);
+            }
+        }
+
+        self.visit(&mut Visitor { f, v });
+    }
+
+    /// Visit this type, allowing for multiple travesal strategies thanks to the TypeKindVisitor trait.
+    fn visit(&self, visitor: &mut impl TypeKindVisitor) {
+        // helper for doing cycle detection on type
+        fn process_ty(ty: Type, visitor: &mut impl TypeKindVisitor) {
+            ty.with_cycle_detection(|ty, visitor| ty.data().visit(visitor), |_, _| (), visitor)
+        }
+
+        // start visit
+        visitor.visit_start(self);
+
+        // recurse
         use TypeKind::*;
         match self {
-            Variable(v) => vec![*v],
+            Variable(_) | Never => (),
             Native(native) => native
                 .arguments
                 .iter()
-                .flat_map(Type::inner_ty_vars)
-                .unique()
-                .collect(),
-            Variant(types) => types
-                .iter()
-                .flat_map(|(_, ty)| ty.inner_ty_vars())
-                .unique()
-                .collect(),
-            Tuple(types) => types
-                .iter()
-                .flat_map(Type::inner_ty_vars)
-                .unique()
-                .collect(),
-            Record(fields) => fields
-                .iter()
-                .flat_map(|(_, ty)| ty.inner_ty_vars())
-                .unique()
-                .collect(),
-            Function(fn_type) => fn_type.inner_ty_vars(),
-            Newtype(_, ty) => ty.inner_ty_vars(),
-        }
+                .for_each(|ty| process_ty(*ty, visitor)),
+            Variant(types) => types.iter().for_each(|(_, ty)| process_ty(*ty, visitor)),
+            Tuple(types) => types.iter().for_each(|ty| process_ty(*ty, visitor)),
+            Record(fields) => fields.iter().for_each(|(_, ty)| process_ty(*ty, visitor)),
+            Function(fn_type) => fn_type.visit(visitor),
+            Newtype(_, ty) => process_ty(*ty, visitor),
+        };
+
+        // process self
+        visitor.visit_end(self);
     }
 
     /// Somewhat a sub-type, but named differently to accommodate generics
@@ -876,6 +943,8 @@ impl TypeKind {
             TypeKind::Newtype(_, this_ty) => {
                 this_ty.can_be_used_in_place_of_with_subst(other, substitutions, seen)
             }
+            // The never type cannot be used in place of any type
+            TypeKind::Never => false,
         }
     }
 
@@ -883,62 +952,39 @@ impl TypeKind {
         self.can_be_used_in_place_of_with_subst(that, &mut HashMap::new(), &mut HashSet::new())
     }
 
-    // recursive checking
+    /// Returns whether the type contains the given type variable
     pub fn contains_any_type_var(&self, var: TypeVar) -> bool {
         self.contains_any_ty_vars(&[var])
     }
 
-    // recursive checking
+    /// Returns whether the type contains any of the given type variables
     pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
-        // FIXME: support recursive types
-        use TypeKind::*;
-        match self {
-            Variable(v) => vars.contains(v),
-            Native(native) => native
-                .arguments
-                .iter()
-                .any(|ty| ty.data().contains_any_ty_vars(vars)),
-            Variant(types) => types
-                .iter()
-                .any(|(_, ty)| ty.data().contains_any_ty_vars(vars)),
-            Tuple(types) => types.iter().any(|ty| ty.data().contains_any_ty_vars(vars)),
-            Record(fields) => fields
-                .iter()
-                .any(|(_, ty)| ty.data().contains_any_ty_vars(vars)),
-            Function(ty) => {
-                ty.args
-                    .iter()
-                    .any(|arg| arg.ty.data().contains_any_ty_vars(vars))
-                    || ty.ret.data().contains_any_ty_vars(vars)
-            }
-            Newtype(_, ty) => ty.data().contains_any_ty_vars(vars),
-        }
+        self.fold(
+            &|kind, found| {
+                found
+                    || if let TypeKind::Variable(v) = kind {
+                        vars.contains(v)
+                    } else {
+                        false
+                    }
+            },
+            false,
+        )
     }
 
+    /// Returns whether all type variables in the type are in the given list
     pub fn contains_only_ty_vars(&self, vars: &[TypeVar]) -> bool {
-        // FIXME: support recursive types
-        use TypeKind::*;
-        match self {
-            Variable(v) => vars.contains(v),
-            Native(native) => native
-                .arguments
-                .iter()
-                .all(|ty| ty.data().contains_only_ty_vars(vars)),
-            Variant(types) => types
-                .iter()
-                .all(|(_, ty)| ty.data().contains_only_ty_vars(vars)),
-            Tuple(types) => types.iter().all(|ty| ty.data().contains_only_ty_vars(vars)),
-            Record(fields) => fields
-                .iter()
-                .all(|(_, ty)| ty.data().contains_only_ty_vars(vars)),
-            Function(ty) => {
-                ty.args
-                    .iter()
-                    .all(|arg| arg.ty.data().contains_only_ty_vars(vars))
-                    && ty.ret.data().contains_only_ty_vars(vars)
-            }
-            Newtype(_, ty) => ty.data().contains_only_ty_vars(vars),
-        }
+        self.fold(
+            &|kind, all_in| {
+                all_in
+                    && if let TypeKind::Variable(v) = kind {
+                        vars.contains(v)
+                    } else {
+                        true
+                    }
+            },
+            true,
+        )
     }
 
     pub fn inner_types(&self) -> B<dyn Iterator<Item = Type> + '_> {
@@ -957,6 +1003,7 @@ impl TypeKind {
                     .chain(iter::once(function.ret)),
             ),
             Newtype(_, ty) => B::new(iter::once(*ty)),
+            Never => B::new(iter::empty()),
         }
     }
 
@@ -976,6 +1023,7 @@ impl TypeKind {
                     .chain(iter::once(&mut function.ret)),
             ),
             Newtype(_, ty) => B::new(iter::once(ty)),
+            Never => B::new(iter::empty()),
         }
     }
 
@@ -1017,6 +1065,7 @@ impl TypeKind {
             Record(_) => 5,
             Function(_) => 6,
             Newtype(_, _) => 7,
+            Never => 8,
         }
     }
 }
@@ -1032,8 +1081,12 @@ impl FmtWithModuleEnv for TypeKind {
                     if i > 0 {
                         write!(f, " | ")?;
                     }
-                    write!(f, "{name} of ")?;
-                    ty.fmt_with_module_env(f, env)?;
+                    if *ty == Type::unit() {
+                        write!(f, "{name}")?;
+                    } else {
+                        write!(f, "{name} ")?;
+                        ty.fmt_with_module_env(f, env)?;
+                    }
                 }
                 Ok(())
             }
@@ -1064,6 +1117,7 @@ impl FmtWithModuleEnv for TypeKind {
                 ty.fmt_with_module_env(f, env)?;
                 write!(f, ")")
             }
+            Never => write!(f, "!"),
         }
     }
 }
@@ -1100,6 +1154,12 @@ impl graph::Node for TypeKind {
             .collect::<Vec<_>>()
             .into_iter()
     }
+}
+
+/// Allow for multiple TypeKind traversal strategies
+trait TypeKindVisitor {
+    fn visit_start(&mut self, _ty: &TypeKind) {}
+    fn visit_end(&mut self, _ty: &TypeKind) {}
 }
 
 type TypeWorld = IndexSet<TypeKind>;

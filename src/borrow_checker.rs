@@ -166,6 +166,12 @@ impl Node {
             ProjectAt(_) => {
                 panic!("ProjectAt should not be in the IR at this point");
             }
+            Variant(variant) => {
+                variant.1.check_borrows()?;
+            }
+            ExtractTag(node) => {
+                node.check_borrows()?;
+            }
             Record(nodes) => {
                 for node in nodes.iter() {
                     node.check_borrows()?;

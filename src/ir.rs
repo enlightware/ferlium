@@ -4,19 +4,13 @@ use ustr::Ustr;
 
 use crate::{
     containers::{SVec1, SVec2, B},
-    dictionary_passing::{substitute_dictionaries_req, DictionariesTyReq},
+    dictionary_passing::DictionariesTyReq,
     function::FunctionRef,
     module::{FmtWithModuleEnv, ModuleEnv},
-    r#type::{FnType, Type, TypeLike, TypeVar, TypeVarSubstitution},
+    r#type::{CastableToType, FnType, Type, TypeLike, TypeSubstitution, TypeVar},
     std::math::int_type,
     value::Value,
 };
-
-#[derive(Debug, Clone)]
-pub struct Application {
-    pub function: Node,
-    pub arguments: Vec<Node>,
-}
 
 /// Function instantiation data that are needed to fill dictionaries
 #[derive(Debug, Clone)]
@@ -33,10 +27,43 @@ impl FnInstData {
     pub fn any(&self) -> bool {
         !self.dicts_req.is_empty()
     }
-    pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
-        self.dicts_req = substitute_dictionaries_req(&self.dicts_req, subst);
+    pub fn instantiate(&mut self, subst: &TypeSubstitution) {
+        self.dicts_req = self
+            .dicts_req
+            .iter()
+            .map(|req| req.instantiate(subst))
+            .collect();
     }
 }
+
+/// A type variable that is not bound in the current scope
+#[derive(Debug, Clone)]
+pub(crate) struct UnboundTyCtx {
+    pub ty: Type,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UnboundTyCtxs(Vec<UnboundTyCtx>);
+impl UnboundTyCtxs {
+    pub fn push(&mut self, ty: Type, span: Span) {
+        self.0.push(UnboundTyCtx { ty, span });
+    }
+
+    pub fn first(&self) -> (Type, Span) {
+        let ctx = &self.0[0];
+        (ctx.ty, ctx.span)
+    }
+
+    pub fn seen_only_in_variants(&self, ty_var: TypeVar) -> bool {
+        self.0
+            .iter()
+            .all(|ctx| ctx.ty.data().is_ty_var_only_in_variants(ty_var))
+    }
+}
+
+/// A map of unbound type variables to the context of their first appearance
+pub(crate) type UnboundTyVars = IndexMap<TypeVar, UnboundTyCtxs>;
 
 #[derive(Debug, Clone)]
 pub struct Immediate {
@@ -61,6 +88,12 @@ pub struct BuildClosure {
 }
 
 #[derive(Debug, Clone)]
+pub struct Application {
+    pub function: Node,
+    pub arguments: Vec<Node>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StaticApplication {
     pub function: FunctionRef,
     pub function_name: Ustr,
@@ -77,9 +110,9 @@ pub struct EnvStore {
     pub name_span: Span,
 }
 impl EnvStore {
-    pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
-        self.node.substitute(subst);
-        self.ty.substitute(subst);
+    pub fn instantiate(&mut self, subst: &TypeSubstitution) {
+        self.node.instantiate(subst);
+        self.ty = self.ty.instantiate(subst);
     }
 }
 
@@ -126,6 +159,10 @@ pub enum NodeKind {
     FieldAccess(B<(Node, Ustr)>),
     /// Access a tuple value using a local variable as index, after dictionary passing phase
     ProjectAt(B<(Node, usize)>),
+    /// Build a variant (tagged union) with a name and a value
+    Variant(B<(Ustr, Node)>),
+    /// Extract the tag of a variant as an isize, by casting the pointer to the string
+    ExtractTag(B<Node>),
     Array(B<SVec2<Node>>),
     Index(B<Node>, B<Node>),
     Case(B<Case>),
@@ -207,12 +244,12 @@ impl Node {
                 }
             }
             EnvStore(node) => {
-                writeln!(f, "{indent_str}push")?;
+                writeln!(f, "{indent_str}store")?;
                 node.node.format_ind(f, env, indent + 1)?;
             }
             EnvLoad(node) => writeln!(f, "{indent_str}load {}", node.index)?,
             Block(nodes) => {
-                writeln!(f, "{indent_str}{{")?;
+                writeln!(f, "{indent_str}block {{")?;
                 for node in nodes.iter() {
                     node.format_ind(f, env, indent + 1)?;
                 }
@@ -224,7 +261,7 @@ impl Node {
                 assignment.value.format_ind(f, env, indent + 1)?;
             }
             Tuple(nodes) => {
-                writeln!(f, "{indent_str}tuple (")?;
+                writeln!(f, "{indent_str}build tuple (")?;
                 for node in nodes.iter() {
                     node.format_ind(f, env, indent + 1)?;
                 }
@@ -236,7 +273,7 @@ impl Node {
                 writeln!(f, "{indent_str}at {index}", index = projection.1)?;
             }
             Record(nodes) => {
-                writeln!(f, "{indent_str}record {{")?;
+                writeln!(f, "{indent_str}build record {{")?;
                 let fields: Vec<_> = self
                     .ty
                     .data()
@@ -261,11 +298,20 @@ impl Node {
                 access.0.format_ind(f, env, indent + 1)?;
                 writeln!(f, "{indent_str}at field referenced by local {}", access.1)?;
             }
+            Variant(variant) => {
+                writeln!(f, "{indent_str}variant with tag: {}", variant.0)?;
+                variant.1.format_ind(f, env, indent + 1)?;
+            }
+            ExtractTag(node) => {
+                writeln!(f, "{indent_str}extract tag of")?;
+                node.format_ind(f, env, indent + 1)?;
+            }
             Array(nodes) => {
-                writeln!(f, "{indent_str}array")?;
+                writeln!(f, "{indent_str}build array [")?;
                 for node in nodes.iter() {
                     node.format_ind(f, env, indent + 1)?;
                 }
+                writeln!(f, "{indent_str}]")?;
             }
             Index(array, index) => {
                 writeln!(f, "{indent_str}index")?;
@@ -375,6 +421,16 @@ impl Node {
                     return Some(ty);
                 }
             }
+            Variant(variant) => {
+                if let Some(ty) = variant.1.type_at(pos) {
+                    return Some(ty);
+                }
+            }
+            ExtractTag(node) => {
+                if let Some(ty) = node.type_at(pos) {
+                    return Some(ty);
+                }
+            }
             Array(nodes) => {
                 for node in nodes.iter() {
                     if let Some(ty) = node.type_at(pos) {
@@ -465,6 +521,8 @@ impl Node {
                 .for_each(|node| node.variable_type_annotations(result, env)),
             FieldAccess(access) => access.0.variable_type_annotations(result, env),
             ProjectAt(access) => access.0.variable_type_annotations(result, env),
+            Variant(variant) => variant.1.variable_type_annotations(result, env),
+            ExtractTag(node) => node.variable_type_annotations(result, env),
             Array(nodes) => nodes
                 .iter()
                 .for_each(|node| node.variable_type_annotations(result, env)),
@@ -491,7 +549,13 @@ impl Node {
         }
     }
 
-    pub fn unbound_ty_vars(&self, result: &mut IndexMap<TypeVar, Span>, ignore: &[TypeVar]) {
+    pub(crate) fn all_unbound_ty_vars(&self) -> UnboundTyVars {
+        let mut unbound = IndexMap::new();
+        self.unbound_ty_vars(&mut unbound, &[]);
+        unbound
+    }
+
+    pub(crate) fn unbound_ty_vars(&self, result: &mut UnboundTyVars, ignore: &[TypeVar]) {
         use NodeKind::*;
         // Add type variables for this node.
         self.unbound_ty_vars_in_ty(&self.ty, result, ignore);
@@ -533,6 +597,8 @@ impl Node {
             ProjectAt(_) => {
                 panic!("ProjectAt should not be in the IR at this point");
             }
+            Variant(variant) => variant.1.unbound_ty_vars(result, ignore),
+            ExtractTag(node) => node.unbound_ty_vars(result, ignore),
             Array(nodes) => nodes
                 .iter()
                 .for_each(|node| node.unbound_ty_vars(result, ignore)),
@@ -554,73 +620,78 @@ impl Node {
         }
     }
 
-    pub fn unbound_ty_vars_in_ty(
+    pub(crate) fn unbound_ty_vars_in_ty(
         &self,
-        ty: &impl TypeLike,
-        result: &mut IndexMap<TypeVar, Span>,
+        ty: &impl CastableToType,
+        result: &mut UnboundTyVars,
         ignore: &[TypeVar],
     ) {
         ty.inner_ty_vars().iter().for_each(|ty_var| {
             if !ignore.contains(ty_var) {
-                result.insert(*ty_var, self.span);
+                result
+                    .entry(*ty_var)
+                    .or_default()
+                    .push(ty.to_type(), self.span);
             }
         });
     }
 
-    pub fn substitute(&mut self, subst: &TypeVarSubstitution) {
+    pub fn instantiate(&mut self, subst: &TypeSubstitution) {
         use NodeKind::*;
         match &mut self.kind {
             Immediate(immediate) => {
-                // If the value is a top-level function, do not substitute in its code.
+                // If the value is a top-level function, do not instantiate in its code.
                 if immediate.substitute_in_value_fn {
-                    immediate.value.substitute(subst);
+                    immediate.value.instantiate(subst);
                 }
-                immediate.inst_data.substitute(subst);
+                immediate.inst_data.instantiate(subst);
             }
             BuildClosure(_) => {
                 // Note: at the moment build closure is used only for dictionary
                 // passing so we can ignore the substitution here.
             }
             Apply(app) => {
-                app.function.substitute(subst);
-                substitute_nodes(&mut app.arguments, subst);
+                app.function.instantiate(subst);
+                instantiate_nodes(&mut app.arguments, subst);
             }
             StaticApply(app) => {
-                app.ty = app.ty.substitute(subst);
-                app.inst_data.substitute(subst);
-                substitute_nodes(&mut app.arguments, subst);
+                app.ty = app.ty.instantiate(subst);
+                app.inst_data.instantiate(subst);
+                instantiate_nodes(&mut app.arguments, subst);
             }
-            EnvStore(node) => node.substitute(subst),
+            EnvStore(node) => node.instantiate(subst),
             EnvLoad(_) => {}
-            Block(nodes) => substitute_nodes(nodes, subst),
+            Block(nodes) => instantiate_nodes(nodes, subst),
             Assign(assignment) => {
-                assignment.place.substitute(subst);
-                assignment.value.substitute(subst);
+                assignment.place.instantiate(subst);
+                assignment.value.instantiate(subst);
             }
-            Tuple(nodes) => substitute_nodes(nodes, subst),
-            Project(projection) => projection.0.substitute(subst),
-            Record(nodes) => substitute_nodes(nodes, subst),
-            FieldAccess(access) => access.0.substitute(subst),
-            ProjectAt(projection) => projection.0.substitute(subst),
-            Array(nodes) => substitute_nodes(nodes, subst),
+            Tuple(nodes) => instantiate_nodes(nodes, subst),
+            Project(projection) => projection.0.instantiate(subst),
+            Record(nodes) => instantiate_nodes(nodes, subst),
+            FieldAccess(access) => access.0.instantiate(subst),
+            ProjectAt(projection) => projection.0.instantiate(subst),
+            Variant(variant) => variant.1.instantiate(subst),
+            ExtractTag(node) => node.instantiate(subst),
+            Array(nodes) => instantiate_nodes(nodes, subst),
             Index(array, index) => {
-                array.substitute(subst);
-                index.substitute(subst);
+                array.instantiate(subst);
+                index.instantiate(subst);
             }
             Case(case) => {
-                case.value.substitute(subst);
+                case.value.instantiate(subst);
                 for alternative in case.alternatives.iter_mut() {
-                    alternative.0.substitute(subst);
-                    alternative.1.substitute(subst);
+                    alternative.0.instantiate(subst);
+                    alternative.1.instantiate(subst);
                 }
-                case.default.substitute(subst);
+                case.default.instantiate(subst);
             }
             Iterate(iteration) => {
-                iteration.iterator.substitute(subst);
-                iteration.body.substitute(subst);
+                iteration.iterator.instantiate(subst);
+                iteration.body.instantiate(subst);
             }
         }
-        self.ty = self.ty.substitute(subst);
+        self.ty = self.ty.instantiate(subst);
     }
 }
 
@@ -634,8 +705,8 @@ impl FmtWithModuleEnv for Node {
     }
 }
 
-pub(crate) fn substitute_nodes(nodes: &mut [Node], subst: &TypeVarSubstitution) {
+pub(crate) fn instantiate_nodes(nodes: &mut [Node], subst: &TypeSubstitution) {
     for node in nodes {
-        node.substitute(subst);
+        node.instantiate(subst);
     }
 }

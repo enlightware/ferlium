@@ -1,9 +1,10 @@
 use crate::ast::Expr;
-use crate::ast::ExprKind::*;
+use crate::ast::ExprKind;
+use crate::ast::Pattern;
+use crate::ast::PatternKind;
 use crate::containers::SVec2;
 use crate::containers::B;
 use crate::r#type::Type;
-use crate::std::string::string_type;
 use crate::std::string::String as MyString;
 use crate::value::NativeDisplay;
 use crate::value::Value;
@@ -42,19 +43,41 @@ pub(crate) fn s<'i>(lexeme: LexemeResult, lexer: DefaultLexer<'_, 'i>) -> &'i st
 
 /// Make a syntax error.
 pub(crate) fn error(text: &str, span: Span) -> Expr {
-    Expr::new(Error(text.into()), span)
+    Expr::new(ExprKind::Error(text.into()), span)
 }
 
 /// Make a literal
-pub(crate) fn literal<T>(value: T, span: Span) -> Expr
+pub(crate) fn literal_value<T>(value: T) -> (Value, Type)
 where
     T: Any + Clone + Debug + Eq + NativeDisplay + 'static,
 {
-    Expr::new(Literal(Value::native(value), Type::primitive::<T>()), span)
+    (Value::native(value), Type::primitive::<T>())
+}
+
+/// Make a literal
+pub(crate) fn literal_expr<T>(value: T, span: Span) -> Expr
+where
+    T: Any + Clone + Debug + Eq + NativeDisplay + 'static,
+{
+    Expr::new(
+        ExprKind::Literal(Value::native(value), Type::primitive::<T>()),
+        span,
+    )
+}
+
+/// Make a literal
+pub(crate) fn literal_pattern<T>(value: T, span: Span) -> Pattern
+where
+    T: Any + Clone + Debug + Eq + NativeDisplay + 'static,
+{
+    Pattern::new(
+        PatternKind::Literal(Value::native(value), Type::primitive::<T>()),
+        span,
+    )
 }
 
 /// Make a string literal
-pub(crate) fn string_literal(s: &str, span: Span) -> Expr {
+pub(crate) fn string_literal(s: &str) -> Value {
     fn rem_first_and_last(value: &str) -> &str {
         let mut chars = value.chars();
         chars.next();
@@ -62,14 +85,11 @@ pub(crate) fn string_literal(s: &str, span: Span) -> Expr {
         chars.as_str()
     }
     let s = rem_first_and_last(s);
-    Expr::new(
-        Literal(Value::native(MyString::from_str(s).unwrap()), string_type()),
-        span,
-    )
+    Value::native(MyString::from_str(s).unwrap())
 }
 
 /// Make formatted string
-pub(crate) fn formatted_string(s: &str, span: Span) -> Expr {
+pub(crate) fn formatted_string(s: &str) -> ExprKind {
     fn rem_first2_and_last(value: &str) -> &str {
         let mut chars = value.chars();
         chars.next();
@@ -78,24 +98,45 @@ pub(crate) fn formatted_string(s: &str, span: Span) -> Expr {
         chars.as_str()
     }
     let s = rem_first2_and_last(s);
-    Expr::new(FormattedString(s.to_string()), span)
+    ExprKind::FormattedString(s.to_string())
 }
 
-/// Parse an integer, if it is too big, return an error
-pub(crate) fn parse_num<F>(s: &str, span: Span) -> Expr
+/// Parse a number, if it is too big, return an error
+pub(crate) fn parse_num<F>(s: &str) -> Result<(Value, Type), String>
 where
     F: FromStr + Bounded + Display + Clone + Debug + Eq + NativeDisplay + 'static,
 {
     match s.parse::<F>() {
-        Ok(value) => literal(value, span),
-        Err(_) => Expr::new(
-            Error(format!(
-                "integer {s} too large to fit in the range [{}, {}]",
-                F::min_value(),
-                F::max_value()
-            )),
-            span,
-        ),
+        Ok(value) => Ok(literal_value(value)),
+        Err(_) => Err(format!(
+            "value {s} too large to fit in the range [{}, {}]",
+            F::min_value(),
+            F::max_value()
+        )),
+    }
+}
+
+/// Parse a number into an expression, if it is too big, return an error
+pub(crate) fn parse_num_expr<F>(s: &str, span: Span) -> Expr
+where
+    F: FromStr + Bounded + Display + Clone + Debug + Eq + NativeDisplay + 'static,
+{
+    use ExprKind::*;
+    match parse_num::<F>(s) {
+        Ok((value, ty)) => Expr::new(Literal(value, ty), span),
+        Err(err) => Expr::new(Error(err), span),
+    }
+}
+
+/// Parse a number into a pattern, if it is too big, return an error
+pub(crate) fn parse_num_pattern<F>(s: &str, span: Span) -> Pattern
+where
+    F: FromStr + Bounded + Display + Clone + Debug + Eq + NativeDisplay + 'static,
+{
+    use PatternKind::*;
+    match parse_num::<F>(s) {
+        Ok((value, ty)) => Pattern::new(Literal(value, ty), span),
+        Err(err) => Pattern::new(Error(err), span),
     }
 }
 
@@ -106,13 +147,14 @@ pub(crate) fn make_proj_or_float(
     lexer: DefaultLexer,
     span: Span,
 ) -> Expr {
+    use ExprKind::*;
     let rhs_span = rhs.unwrap().span();
     let rhs = us(rhs, lexer);
     // see if we actually have a float
     if let Literal(literal, _ty) = &lhs.kind {
         if let Some(value) = literal.clone().into_primitive_ty::<isize>() {
             let float_value = format!("{value}.{rhs}");
-            return parse_num::<NotNan<f64>>(&float_value, span);
+            return parse_num_expr::<NotNan<f64>>(&float_value, span);
         }
     }
     let index = match rhs.parse::<usize>() {
@@ -124,6 +166,7 @@ pub(crate) fn make_proj_or_float(
 
 /// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor
 pub(crate) fn make_tuple(args: Vec<Expr>, span: Span) -> Expr {
+    use ExprKind::*;
     let mut values_and_tys = Vec::new();
     for arg in &args {
         if let Literal(val, ty) = &arg.kind {
@@ -155,11 +198,12 @@ pub(crate) fn make_block(lhs: Expr, rhs: Expr, span: Span) -> Expr {
 
 /// Create an if else block.
 pub(crate) fn make_if_else(cond: Expr, if_true: Expr, if_false: Expr, span: Span) -> Expr {
+    use ExprKind::*;
     let cond_span = cond.span;
     Expr::new(
         Match(
             B::new(cond),
-            vec![(literal(true, cond_span), if_true)],
+            vec![(literal_pattern(true, cond_span), if_true)],
             Some(B::new(if_false)),
         ),
         span,
@@ -168,6 +212,7 @@ pub(crate) fn make_if_else(cond: Expr, if_true: Expr, if_false: Expr, span: Span
 
 /// Create an if block without an else, make it return ().
 pub(crate) fn make_if_without_else(cond: Expr, if_true: Expr, span: Span) -> Expr {
+    use ExprKind::*;
     let cond_span = cond.span;
     let if_true_span = if_true.span;
     let unit_val = Expr::new(Literal(Value::native(()), Type::unit()), if_true_span);
@@ -175,7 +220,7 @@ pub(crate) fn make_if_without_else(cond: Expr, if_true: Expr, span: Span) -> Exp
     Expr::new(
         Match(
             B::new(cond),
-            vec![(literal(true, cond_span), if_true)],
+            vec![(literal_pattern(true, cond_span), if_true)],
             Some(B::new(unit_val)),
         ),
         span,
@@ -190,6 +235,7 @@ pub(crate) fn make_iteration(
     lexer: DefaultLexer,
     span: Span,
 ) -> Expr {
+    use ExprKind::*;
     let iterator_span = Span::new(start.span.start(), end.span.end());
     let iterator = Expr::new(
         StaticApply(ustr("range_iterator_new"), iterator_span, vec![start, end]),

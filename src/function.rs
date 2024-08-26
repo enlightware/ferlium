@@ -1,5 +1,8 @@
 use std::{
-    cell::RefCell, fmt::{self, Debug}, hash::Hash, marker::PhantomData, rc::{Rc, Weak}
+    cell::RefCell,
+    fmt::{self, Debug},
+    marker::PhantomData,
+    rc::{Rc, Weak},
 };
 
 use crate::{

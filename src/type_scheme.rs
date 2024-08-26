@@ -1,15 +1,19 @@
-use std::hash::{Hash, Hasher};
+use std::{
+    borrow::Borrow,
+    collections::HashMap,
+    hash::{Hash, Hasher},
+};
 
+use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
-    containers::vec_difference,
     dictionary_passing::{instantiate_dictionaries_req, DictionaryReq},
     ir::FnInstData,
     module::{FmtWithModuleEnv, FormatWithModuleEnv, ModuleEnv},
-    r#type::{Type, TypeKind, TypeLike, TypeSubstitution, TypeVar, TypeVarSubstitution},
+    r#type::{Type, TypeKind, TypeLike, TypeSubstitution, TypeVar},
     type_inference::TypeInference,
 };
 
@@ -24,7 +28,7 @@ pub enum DisplayStyle {
 
 /// A constraint that can be part of a type scheme.
 /// This corresponds to a solved constraint in HM(X).
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Clone, Eq, EnumAsInner)]
 pub enum PubTypeConstraint {
     /// Tuple projection constraint: tuple_ty.index = element_ty
     TupleAtIndexIs {
@@ -41,6 +45,13 @@ pub enum PubTypeConstraint {
         field: Ustr,
         field_span: Span,
         element_ty: Type,
+    },
+    /// Variant for type: variant_ty ⊇ tag(payload_ty)
+    TypeHasVariant {
+        variant_ty: Type,
+        tag: Ustr,
+        payload_ty: Type,
+        span: Span,
     },
 }
 
@@ -77,9 +88,19 @@ impl PubTypeConstraint {
         }
     }
 
+    pub fn new_type_has_variant(ty: Type, tag: Ustr, payload_ty: Type, span: Span) -> Self {
+        Self::TypeHasVariant {
+            variant_ty: ty,
+            tag,
+            payload_ty,
+            span,
+        }
+    }
+
     pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
+        use PubTypeConstraint::*;
         match self {
-            PubTypeConstraint::TupleAtIndexIs {
+            TupleAtIndexIs {
                 tuple_ty,
                 element_ty,
                 ..
@@ -87,7 +108,7 @@ impl PubTypeConstraint {
                 tuple_ty.data().contains_any_ty_vars(vars)
                     || element_ty.data().contains_any_ty_vars(vars)
             }
-            PubTypeConstraint::RecordFieldIs {
+            RecordFieldIs {
                 record_ty,
                 element_ty,
                 ..
@@ -95,12 +116,21 @@ impl PubTypeConstraint {
                 record_ty.data().contains_any_ty_vars(vars)
                     || element_ty.data().contains_any_ty_vars(vars)
             }
+            TypeHasVariant {
+                variant_ty,
+                payload_ty,
+                ..
+            } => {
+                variant_ty.data().contains_any_ty_vars(vars)
+                    || payload_ty.data().contains_any_ty_vars(vars)
+            }
         }
     }
 
     pub fn contains_only_ty_vars(&self, vars: &[TypeVar]) -> bool {
+        use PubTypeConstraint::*;
         match self {
-            PubTypeConstraint::TupleAtIndexIs {
+            TupleAtIndexIs {
                 tuple_ty,
                 element_ty,
                 ..
@@ -108,7 +138,7 @@ impl PubTypeConstraint {
                 tuple_ty.data().contains_only_ty_vars(vars)
                     && element_ty.data().contains_only_ty_vars(vars)
             }
-            PubTypeConstraint::RecordFieldIs {
+            RecordFieldIs {
                 record_ty,
                 element_ty,
                 ..
@@ -116,14 +146,23 @@ impl PubTypeConstraint {
                 record_ty.data().contains_only_ty_vars(vars)
                     && element_ty.data().contains_only_ty_vars(vars)
             }
+            TypeHasVariant {
+                variant_ty,
+                payload_ty,
+                ..
+            } => {
+                variant_ty.data().contains_only_ty_vars(vars)
+                    && payload_ty.data().contains_only_ty_vars(vars)
+            }
         }
     }
 }
 
 impl TypeLike for PubTypeConstraint {
     fn instantiate(&self, subst: &TypeSubstitution) -> Self {
+        use PubTypeConstraint::*;
         match self {
-            Self::TupleAtIndexIs {
+            TupleAtIndexIs {
                 tuple_ty,
                 tuple_span,
                 index,
@@ -136,7 +175,7 @@ impl TypeLike for PubTypeConstraint {
                 *index_span,
                 element_ty.instantiate(subst),
             ),
-            Self::RecordFieldIs {
+            RecordFieldIs {
                 record_ty,
                 record_span,
                 field,
@@ -149,43 +188,24 @@ impl TypeLike for PubTypeConstraint {
                 *field_span,
                 element_ty.instantiate(subst),
             ),
-        }
-    }
-
-    fn substitute(&self, subst: &TypeVarSubstitution) -> Self {
-        match self {
-            Self::TupleAtIndexIs {
-                tuple_ty,
-                tuple_span,
-                index,
-                index_span,
-                element_ty,
-            } => Self::new_tuple_at_index_is(
-                tuple_ty.substitute(subst),
-                *tuple_span,
-                *index,
-                *index_span,
-                element_ty.substitute(subst),
-            ),
-            Self::RecordFieldIs {
-                record_ty,
-                record_span,
-                field,
-                field_span,
-                element_ty,
-            } => Self::new_record_field_is(
-                record_ty.substitute(subst),
-                *record_span,
-                *field,
-                *field_span,
-                element_ty.substitute(subst),
+            TypeHasVariant {
+                variant_ty,
+                tag: variant,
+                payload_ty,
+                span,
+            } => Self::new_type_has_variant(
+                variant_ty.instantiate(subst),
+                *variant,
+                payload_ty.instantiate(subst),
+                *span,
             ),
         }
     }
 
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        use PubTypeConstraint::*;
         match self {
-            PubTypeConstraint::TupleAtIndexIs {
+            TupleAtIndexIs {
                 tuple_ty,
                 element_ty,
                 ..
@@ -195,7 +215,7 @@ impl TypeLike for PubTypeConstraint {
                 .chain(element_ty.inner_ty_vars())
                 .unique()
                 .collect(),
-            PubTypeConstraint::RecordFieldIs {
+            RecordFieldIs {
                 record_ty,
                 element_ty,
                 ..
@@ -205,21 +225,32 @@ impl TypeLike for PubTypeConstraint {
                 .chain(element_ty.inner_ty_vars())
                 .unique()
                 .collect(),
+            TypeHasVariant {
+                variant_ty,
+                payload_ty,
+                ..
+            } => variant_ty
+                .inner_ty_vars()
+                .into_iter()
+                .chain(payload_ty.inner_ty_vars())
+                .unique()
+                .collect(),
         }
     }
 }
 
 impl PartialEq for PubTypeConstraint {
     fn eq(&self, other: &Self) -> bool {
+        use PubTypeConstraint::*;
         match (self, other) {
             (
-                PubTypeConstraint::TupleAtIndexIs {
+                TupleAtIndexIs {
                     tuple_ty: t_ty1,
                     index: idx1,
                     element_ty: e_ty1,
                     ..
                 },
-                PubTypeConstraint::TupleAtIndexIs {
+                TupleAtIndexIs {
                     tuple_ty: t_ty2,
                     index: idx2,
                     element_ty: e_ty2,
@@ -227,19 +258,33 @@ impl PartialEq for PubTypeConstraint {
                 },
             ) => t_ty1 == t_ty2 && idx1 == idx2 && e_ty1 == e_ty2,
             (
-                PubTypeConstraint::RecordFieldIs {
+                RecordFieldIs {
                     record_ty: r_ty1,
                     field: f1,
                     element_ty: e_ty1,
                     ..
                 },
-                PubTypeConstraint::RecordFieldIs {
+                RecordFieldIs {
                     record_ty: r_ty2,
                     field: f2,
                     element_ty: e_ty2,
                     ..
                 },
             ) => r_ty1 == r_ty2 && f1 == f2 && e_ty1 == e_ty2,
+            (
+                TypeHasVariant {
+                    variant_ty: v_ty1,
+                    tag: v1,
+                    payload_ty: p_ty1,
+                    ..
+                },
+                TypeHasVariant {
+                    variant_ty: v_ty2,
+                    tag: v2,
+                    payload_ty: p_ty2,
+                    ..
+                },
+            ) => v_ty1 == v_ty2 && v1 == v2 && p_ty1 == p_ty2,
             _ => false,
         }
     }
@@ -247,8 +292,9 @@ impl PartialEq for PubTypeConstraint {
 
 impl Hash for PubTypeConstraint {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        use PubTypeConstraint::*;
         match self {
-            PubTypeConstraint::TupleAtIndexIs {
+            TupleAtIndexIs {
                 tuple_ty,
                 index,
                 element_ty,
@@ -258,7 +304,7 @@ impl Hash for PubTypeConstraint {
                 index.hash(state);
                 element_ty.hash(state);
             }
-            PubTypeConstraint::RecordFieldIs {
+            RecordFieldIs {
                 record_ty,
                 field,
                 element_ty,
@@ -267,6 +313,16 @@ impl Hash for PubTypeConstraint {
                 record_ty.hash(state);
                 field.hash(state);
                 element_ty.hash(state);
+            }
+            TypeHasVariant {
+                variant_ty,
+                tag: variant,
+                payload_ty,
+                ..
+            } => {
+                variant_ty.hash(state);
+                variant.hash(state);
+                payload_ty.hash(state);
             }
         }
     }
@@ -278,8 +334,9 @@ impl FmtWithModuleEnv for PubTypeConstraint {
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
+        use PubTypeConstraint::*;
         match self {
-            PubTypeConstraint::TupleAtIndexIs {
+            TupleAtIndexIs {
                 tuple_ty,
                 index,
                 element_ty,
@@ -293,7 +350,7 @@ impl FmtWithModuleEnv for PubTypeConstraint {
                     element_ty.format_with(env)
                 )
             }
-            PubTypeConstraint::RecordFieldIs {
+            RecordFieldIs {
                 record_ty,
                 field,
                 element_ty,
@@ -307,16 +364,39 @@ impl FmtWithModuleEnv for PubTypeConstraint {
                     element_ty.format_with(env)
                 )
             }
+            TypeHasVariant {
+                variant_ty,
+                tag: variant,
+                payload_ty,
+                ..
+            } => {
+                if *payload_ty == Type::unit() {
+                    write!(f, "{} ⊇ {}", variant_ty.format_with(env), variant,)
+                } else {
+                    write!(
+                        f,
+                        "{} ⊇ {} {}",
+                        variant_ty.format_with(env),
+                        variant,
+                        payload_ty.format_with(env)
+                    )
+                }
+            }
         }
     }
 }
 
+/// Aggregated TypeHasVariant constraints to be use for checking and display.
+pub type VariantConstraint = HashMap<Ustr, Type>;
+
 /// A type, with quantified type variables and associated constraints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeScheme<Ty: TypeLike> {
+    // for a compiled module, quantifiers should be equalt to the type variables in the type
+    // and the constraints.
     pub(crate) quantifiers: Vec<TypeVar>,
-    pub(crate) constraints: Vec<PubTypeConstraint>,
     pub(crate) ty: Ty,
+    pub(crate) constraints: Vec<PubTypeConstraint>,
 }
 
 impl<Ty: TypeLike> TypeScheme<Ty> {
@@ -324,8 +404,8 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     pub(crate) fn new_just_type(ty: Ty) -> Self {
         Self {
             quantifiers: vec![],
-            constraints: vec![],
             ty,
+            constraints: vec![],
         }
     }
 
@@ -334,9 +414,14 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         let quantifiers = ty.inner_ty_vars();
         Self {
             quantifiers,
-            constraints: vec![],
             ty,
+            constraints: vec![],
         }
+    }
+
+    /// Return the quantifiers of this type scheme.
+    pub(crate) fn quantifiers_from_signature(&self) -> Vec<TypeVar> {
+        Self::list_ty_vars(&self.ty, self.constraints.iter())
     }
 
     /// Returns whether there are no quantifiers nor constraints.
@@ -355,55 +440,36 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         (ty, FnInstData::new(dict_req))
     }
 
-    /// Substitute type variables in this type scheme.
-    pub(crate) fn substitute(&mut self, subst: &TypeVarSubstitution) {
-        self.quantifiers.iter_mut().for_each(|var| {
-            *var = var.substitute(subst);
-        });
-        self.constraints.iter_mut().for_each(|constraint| {
-            *constraint = constraint.substitute(subst);
-        });
-        self.ty = self.ty.substitute(subst);
-    }
-
-    /// Return the type variables that are not bound by the quantifiers.
-    pub(crate) fn unbound_ty_vars(&self) -> Vec<TypeVar> {
-        vec_difference(
-            &Self::list_ty_vars(&self.ty, &self.constraints),
-            &self.quantifiers,
-        )
-    }
-
     /// Helper function to list free type variables in a type and its constraints.
-    pub(crate) fn list_ty_vars(ty: &Ty, constraints: &[PubTypeConstraint]) -> Vec<TypeVar> {
+    pub(crate) fn list_ty_vars(
+        ty: &Ty,
+        constraints: impl Iterator<Item = impl Borrow<PubTypeConstraint>>,
+    ) -> Vec<TypeVar> {
         ty.inner_ty_vars()
             .into_iter()
-            .chain(
-                constraints
-                    .iter()
-                    .flat_map(PubTypeConstraint::inner_ty_vars),
-            )
+            .chain(constraints.flat_map(|constraint| constraint.borrow().inner_ty_vars()))
             .unique()
+            .sorted()
             .collect()
     }
 
-    pub(crate) fn normalize(&mut self) -> TypeVarSubstitution {
+    pub(crate) fn normalize(&mut self) -> TypeSubstitution {
         // Build a substitution that maps each quantifier to a fresh type variable from 0.
-        let mut var_subst = TypeVarSubstitution::new();
+        let mut var_subst = TypeSubstitution::new();
         self.quantifiers
             .iter_mut()
             .enumerate()
             .for_each(|(i, quantifier)| {
                 let new_var = TypeVar::new(i as u32);
-                var_subst.insert(*quantifier, new_var);
+                var_subst.insert(*quantifier, Type::variable(new_var));
                 *quantifier = new_var;
             });
         // Apply to type and constraints
-        self.ty = self.ty.substitute(&var_subst);
+        self.ty = self.ty.instantiate(&var_subst);
         self.constraints = self
             .constraints
             .iter()
-            .map(|constraint| constraint.substitute(&var_subst))
+            .map(|constraint| constraint.instantiate(&var_subst))
             .collect();
         // Return
         var_subst
@@ -495,7 +561,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         if self.constraints.is_empty() {
             return Ok(());
         }
-        write!(f, "| ")?;
+        write!(f, "where ")?;
         self.format_constraints(DisplayStyle::Rust, f, env)
     }
 

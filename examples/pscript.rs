@@ -165,8 +165,8 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         DuplicatedRecordField {
-            first_occurrence_span,
-            second_occurrence_span,
+            first_occurrence: first_occurrence_span,
+            second_occurrence: second_occurrence_span,
         } => {
             let offset = start_of_line_of(src, first_occurrence_span.start());
             let name = &data.1[span_range(*first_occurrence_span)];

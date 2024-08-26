@@ -109,8 +109,8 @@ Expr -> Expr
     | '(' Expr ')'
         { $2 }
     | Path
-        { Expr::new(Variable(ustr($lexer.span_str($span))), $span) }
-    | Literal
+        { Expr::new(Identifier(ustr($lexer.span_str($span))), $span) }
+    | LiteralExpr
         { $1 }
     | 'let' 'IDENT' '=' Expr
         { Expr::new(LetVar((us($2, $lexer), lex_span($2)), MutVal::constant(), B::new($4)), $span) }
@@ -211,39 +211,52 @@ RecordFields -> Vec<(Ustr, Span, Expr)>
         { vec![(us($1, $lexer), lex_span($1), $3)] }
     ;
 
-MatchArgsOptComma -> Vec<(Expr, Expr)>
+MatchArgsOptComma -> Vec<(Pattern, Expr)>
     : MatchArgs ','
         { $1 }
     | MatchArgs
         { $1 }
     ;
 
-MatchArgs -> Vec<(Expr, Expr)>
+MatchArgs -> Vec<(Pattern, Expr)>
     : MatchArgs ',' MatchArg
         { let mut args = $1; args.push($3); args }
     | MatchArg
         { vec![$1] }
     ;
 
-MatchArg -> (Expr, Expr)
+MatchArg -> (Pattern, Expr)
     : Pattern '=>' Expr
         { ($1, $3) }
     ;
 
-Pattern -> Expr
-    : Expr
+Pattern -> Pattern
+    : LiteralPattern
         { $1 }
+    | 'IDENT'
+        { Pattern::new(PatternKind::Variant{tag: us($1, $lexer), tag_span: lex_span($1),var: None}, $span) }
+    | 'IDENT' '(' 'IDENT' ')'
+        { Pattern::new(PatternKind::Variant{tag: us($1, $lexer), tag_span: lex_span($1),var: Some((us($3, $lexer), lex_span($3)))}, $span) }
     ;
 
-Literal -> Expr
+LiteralPattern -> Pattern
     : 'INT'
-        { parse_num::<isize>(s($1, $lexer), lex_span($1)) }
-    | 'STRING'
-        { string_literal(s($1, $lexer), lex_span($1)) }
-    | 'F_STRING'
-        { formatted_string(s($1, $lexer), lex_span($1)) }
+        { parse_num_pattern::<isize>(s($1, $lexer), $span) }
+    | StringLiteral
+        { Pattern::new(PatternKind::Literal($1, string_type()), $span) }
     | BoolLiteral
-        { Expr::new(Literal($1, Type::primitive::<bool>()), $span) }
+        { Pattern::new(PatternKind::Literal($1, bool_type()), $span) }
+    ;
+
+LiteralExpr -> Expr
+    : 'INT'
+        { parse_num_expr::<isize>(s($1, $lexer), $span) }
+    | StringLiteral
+        { Expr::new(Literal($1, string_type()), $span) }
+    | FormattedString
+        { Expr::new($1, $span) }
+    | BoolLiteral
+        { Expr::new(Literal($1, bool_type()), $span) }
     ;
 
 BoolLiteral -> Value
@@ -253,18 +266,30 @@ BoolLiteral -> Value
         { Value::native(false) }
     ;
 
+StringLiteral -> Value
+    : 'STRING'
+        { string_literal(s($1, $lexer)) }
+    ;
+
+FormattedString -> ExprKind
+    : 'F_STRING'
+        { formatted_string(s($1, $lexer)) }
+    ;
+
 Unmatched -> ()
     : 'UNMATCHED' { }
     ;
 
 %%
 
-use crate::ast::{Expr, Module};
+use crate::ast::{Expr, ExprKind, Pattern, PatternKind, Module};
 use crate::ast::ExprKind::*;
 use crate::value::Value;
 use crate::r#type::Type;
 use crate::containers::B;
 use crate::mutability::MutVal;
+use crate::std::string::string_type;
+use crate::std::logic::bool_type;
 use ustr::{Ustr, ustr};
 use lrpar::Span;
 

@@ -19,6 +19,7 @@ mod format_string;
 pub mod function;
 mod graph;
 pub mod ir;
+mod r#match;
 pub mod module;
 pub mod mutability;
 pub mod parser;

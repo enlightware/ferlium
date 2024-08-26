@@ -2,18 +2,19 @@
 
 ### Language features
 
-- Recursive modules
-- Effects
-- Type classes
-- Co-routine/async
 - Algebraic data types
-- Generalised match
+- Recursive modules
+- Type classes
+- Effects
+- Co-routine/async
+- Generalised match following Maranget 2008
+- User-defined closures
 - Object-oriented style function calls
-- Early return
+- Early return and breaks
 
 ### Library and test features
 
-- Array from iterator (note: functional iterators require closures)
+- Array from iterator (note: functional iterators require closures or type classes)
 
 ### Compiler features
 
@@ -24,14 +25,16 @@
 
 ### IDE features
 
-- Should location of execution error
+- Show location of execution error
 
 ### Next tasks
 
+- Add match for tagged unions
+- Add tests for tagged unions
+- Add better user facing constraints
 - Add {} block expression
 - Fix grammar with equal in lambdas
 
 ### Open questions
 
-- Should newtype be scoped by their module?
 - Should integer overflow be caught?

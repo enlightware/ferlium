@@ -1,4 +1,5 @@
 use cfgrammar::span::Span;
+use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use std::fmt::Debug;
 
@@ -118,10 +119,12 @@ impl FmtWithModuleEnv for Module {
 pub enum ExprKind {
     Literal(Value, Type),
     FormattedString(String),
-    Variable(Ustr),
+    /// A variable, or a function from the module environment, or a null-ary variant constructor
+    Identifier(Ustr),
     LetVar((Ustr, Span), MutVal, B<Expr>),
     Abstract(Vec<(Ustr, Span)>, B<Expr>),
     Apply(B<Expr>, Vec<Expr>),
+    /// A function from the module environment, or a variant constructor
     StaticApply(Ustr, Span, Vec<Expr>),
     Block(Vec<Expr>),
     Assign(B<Expr>, Span, B<Expr>),
@@ -131,7 +134,7 @@ pub enum ExprKind {
     FieldAccess(B<Expr>, Ustr, Span),
     Array(Vec<Expr>),
     Index(B<Expr>, B<Expr>),
-    Match(B<Expr>, Vec<(Expr, Expr)>, Option<B<Expr>>),
+    Match(B<Expr>, Vec<(Pattern, Expr)>, Option<B<Expr>>),
     ForLoop((Ustr, Span), B<Expr>, B<Expr>),
     Error(String),
 }
@@ -153,7 +156,7 @@ impl Expr {
         match &self.kind {
             Literal(value, _) => writeln!(f, "{indent_str}{value}"),
             FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
-            Variable(name) => writeln!(f, "{indent_str}{name} (local)"),
+            Identifier(name) => writeln!(f, "{indent_str}{name} (local)"),
             LetVar((name, _), mutable, expr) => {
                 let kw = mutable.var_def_string();
                 writeln!(f, "{indent_str}{kw} {name} =")?;
@@ -324,6 +327,70 @@ impl std::fmt::Display for Expr {
         self.format(f)
     }
 }
+/// The kind-specific part of an expression as an Abstract Syntax Tree
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum PatternKind {
+    Literal(Value, Type),
+    Variant {
+        tag: Ustr,
+        tag_span: Span,
+        var: Option<(Ustr, Span)>,
+    },
+    Error(String),
+}
+impl PatternKind {
+    pub fn r#type(&self) -> PatternType {
+        use PatternKind::*;
+        match self {
+            Literal(_, _) => PatternType::Literal,
+            Variant { .. } => PatternType::Variant,
+            Error(_) => PatternType::Error,
+        }
+    }
+}
 
-// TODO: add an paths_overlap function that checks whether function call paths overlap
-// see page 11 of Implementation Strategies for Mutable Value Semantics
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumAsInner)]
+pub enum PatternType {
+    Literal,
+    Variant,
+    Error,
+}
+impl PatternType {
+    pub fn name(&self) -> &'static str {
+        use PatternType::*;
+        match self {
+            Literal => "literal",
+            Variant => "variant",
+            Error => "error",
+        }
+    }
+}
+
+/// An expression as an Abstract Syntax Tree
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+impl Pattern {
+    pub fn new(kind: PatternKind, span: Span) -> Self {
+        Self { kind, span }
+    }
+
+    pub fn format_ind(&self, f: &mut std::fmt::Formatter, indent: usize) -> std::fmt::Result {
+        let indent_str = "  ".repeat(indent);
+        use PatternKind::*;
+        match &self.kind {
+            Literal(value, _) => writeln!(f, "{indent_str}{value}"),
+            Variant { tag, var, .. } => {
+                if let Some(var) = var {
+                    writeln!(f, "{indent_str}{} {}", tag, var.0)
+                } else {
+                    writeln!(f, "{indent_str}{}", tag)
+                }
+            }
+            Error(s) => writeln!(f, "{indent_str}Pattern error: {s}"),
+        }
+    }
+}

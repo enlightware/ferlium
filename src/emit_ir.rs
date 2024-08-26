@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -6,18 +7,19 @@ use std::{
 
 use indexmap::IndexMap;
 use itertools::Itertools;
+use ustr::Ustr;
 
 use crate::{
     ast::{self, *},
-    containers::B,
+    containers::{iterable_to_string, B},
     error::InternalCompilationError,
     function::ScriptFunction,
-    ir::{self, Immediate},
+    ir::{self, Immediate, Node},
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
     mutability::MutType,
-    r#type::{FnType, Type, TypeLike, TypeVar},
+    r#type::{FnType, Type, TypeLike, TypeSubstitution, TypeVar},
     type_inference::TypeInference,
-    type_scheme::{PubTypeConstraint, TypeScheme},
+    type_scheme::{PubTypeConstraint, TypeScheme, VariantConstraint},
     typing_env::{Local, TypingEnv},
     value::Value,
 };
@@ -102,62 +104,60 @@ pub fn emit_module(
     // Fourth pass, substitute the mono type variables with the inferred types.
     for ModuleFunction { name, .. } in &source.functions {
         let descr = output.functions.get_mut(&name.0).unwrap();
-        ty_inf.substitute_module_function(descr);
+        ty_inf.substitute_in_module_function(descr);
     }
 
     // Fifth pass, get the remaining constraints and collect the free type variables.
     let all_constraints = ty_inf.constraints();
+    let mut used_constraints: HashSet<&PubTypeConstraint> = HashSet::new();
     for ModuleFunction { name, .. } in &source.functions {
-        // Collect all type variables unbound in the body of the function.
         let descr = output.functions.get_mut(&name.0).unwrap();
         let mut code = descr.code.borrow_mut();
         let node = &mut code.as_script_mut().unwrap().code;
-        let mut unbound = IndexMap::new();
-        node.unbound_ty_vars(&mut unbound, &[]);
-        let all_ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
 
-        // Keep the constraints that are fully related to the types found in the function.
-        // We can drop the other ones because they are not relevant for the function we are compiling.
-        let constraints = filter_constraints_only_ty_vars(&all_constraints, &all_ty_vars);
-
-        // Compute the quantifiers based on the function type and its contraints.
-        let quantifiers: Vec<_> = descr
-            .ty_scheme
-            .ty
-            .inner_ty_vars()
-            .into_iter()
-            .chain(constraints.iter().flat_map(|c| c.inner_ty_vars()))
-            .unique()
+        // Clean-up constraints and validate them.
+        let ConstraintValidationOutput {
+            quantifiers,
+            related_constraints,
+            retained_constraints,
+            constraint_subst,
+        } = validate_and_cleanup_constraints(&descr.ty_scheme.ty, &all_constraints, node)?;
+        let constraints = all_constraints
+            .iter()
+            .filter(|c| {
+                let ptr = *c as *const PubTypeConstraint;
+                if related_constraints.contains(&ptr) {
+                    used_constraints.insert(c);
+                }
+                retained_constraints.contains(&ptr)
+            })
+            .cloned()
             .collect();
 
-        // Detect unbound type variables in the code and return error if any.
-        // These are neither part of the function signature nor of the constraints.
-        for (ty_var, span) in unbound {
-            if !quantifiers.contains(&ty_var) {
-                let pos = span.start();
-                let ty = node.type_at(pos).ok_or_else(|| {
-                    InternalCompilationError::Internal(format!(
-                        "Type not found at pos {pos} while looking for unbound type variable {ty_var}"
-                    ))
-                })?;
-                return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
-            }
-        }
+        // Substitute the constraint-originating types in the node.
+        node.instantiate(&constraint_subst);
 
         // Write the final type scheme.
-        descr.ty_scheme.quantifiers = quantifiers;
+        descr.ty_scheme.quantifiers = quantifiers.clone();
         descr.ty_scheme.constraints = constraints;
+        assert_eq!(descr.ty_scheme.quantifiers_from_signature(), quantifiers);
+
+        // Log the dropped constraints.
+        drop(code);
+        let module_env = ModuleEnv::new(&output, others);
+        log_dropped_constraints_module(
+            name.0,
+            &all_constraints,
+            &related_constraints,
+            &retained_constraints,
+            module_env,
+        );
     }
 
     // Safety check: make sure that there are no unused constraints.
-    let used_constraints: HashSet<_> = source
-        .functions
-        .iter()
-        .flat_map(|f| output.functions[&f.name.0].ty_scheme.constraints.clone())
-        .collect();
     let unused_constraints = all_constraints
         .iter()
-        .filter(|c| !used_constraints.contains(c))
+        .filter(|c| !used_constraints.contains(c) && !c.is_type_has_variant())
         .collect::<Vec<_>>();
     if !unused_constraints.is_empty() {
         let module_env = ModuleEnv::new(&output, others);
@@ -197,10 +197,30 @@ pub fn emit_module(
         let subst = descr.ty_scheme.normalize();
         let mut code = descr.code.borrow_mut();
         let node = &mut code.as_script_mut().unwrap().code;
-        node.substitute(&subst);
+        node.instantiate(&subst);
     }
 
     Ok(output)
+}
+
+/// Check all unbound variables from unbound that are not in bounds,
+/// and if they are not only seen in variants, return an error.
+fn check_unbounds(
+    unbound: IndexMap<TypeVar, ir::UnboundTyCtxs>,
+    bounds: &[TypeVar],
+) -> Result<HashSet<TypeVar>, InternalCompilationError> {
+    let mut uninstantiated_unbound = HashSet::new();
+    for (ty_var, ctxs) in unbound {
+        if !bounds.contains(&ty_var) {
+            if ctxs.seen_only_in_variants(ty_var) {
+                uninstantiated_unbound.insert(ty_var);
+            } else {
+                let (ty, span) = ctxs.first();
+                return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
+            }
+        }
+    }
+    Ok(uninstantiated_unbound)
 }
 
 /// A compiled expression
@@ -225,8 +245,6 @@ pub fn emit_expr(
     let mut ty_inf = TypeInference::new();
     let (mut node, mut ty, _) = ty_inf.infer_expr(&mut ty_env, source)?;
     let mut locals = ty_env.get_locals_and_drop();
-    // FIXME: we need to emit fresh variables not in the locals before us!
-    // So we need some notion of generations so that fresh ones do not clash with older ones.
     ty_inf.log_debug_constraints(module_env);
 
     // Perform the unification.
@@ -234,29 +252,28 @@ pub fn emit_expr(
     ty_inf.log_debug_substitution_table(module_env);
 
     // Substitute the result of the unification.
-    ty_inf.substitute_node(&mut node, &[]);
-    ty = ty_inf.substitute_type(ty, &[]);
+    ty_inf.substitute_in_node(&mut node, &[]);
+    ty = ty_inf.substitute_in_type(ty, &[]);
     for local in locals.iter_mut().skip(initial_local_count) {
-        local.ty = ty_inf.substitute_type(local.ty, &[]);
+        local.ty = ty_inf.substitute_in_type(local.ty, &[]);
     }
 
     // Get the remaining constraints and collect the free variables.
     ty_inf.log_debug_constraints(module_env);
     let constraints = ty_inf.constraints();
-    let quantifiers = TypeScheme::<Type>::list_ty_vars(&ty, &constraints);
 
-    // Detect unbound type variables in the code and return error if any.
-    let mut unbound = IndexMap::new();
-    node.unbound_ty_vars(&mut unbound, &quantifiers);
-    if let Some((ty_var, span)) = unbound.into_iter().next() {
-        let pos = span.start();
-        let ty = node.type_at(pos).ok_or_else(|| {
-            InternalCompilationError::Internal(format!(
-                "Type not found at pos {pos} while looking for unbound type variable {ty_var}"
-            ))
-        })?;
-        return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
-    }
+    // Clean-up constraints and validate them.
+    let ConstraintValidationOutput {
+        quantifiers,
+        retained_constraints,
+        constraint_subst,
+        ..
+    } = validate_and_cleanup_constraints(&ty, &constraints, &node)?;
+    log_dropped_constraints_expr(&constraints, &retained_constraints, module_env);
+    let constraints: Vec<_> = constraints
+        .into_iter()
+        .filter(|c| retained_constraints.contains(&(c as *const PubTypeConstraint)))
+        .collect();
 
     // Normalize the type scheme
     let mut ty_scheme = TypeScheme {
@@ -265,7 +282,10 @@ pub fn emit_expr(
         constraints,
     };
     let subst = ty_scheme.normalize();
-    node.substitute(&subst);
+
+    // Substitute the normalized and constraint-originating types in the node.
+    let subst = subst.into_iter().chain(constraint_subst).collect();
+    node.instantiate(&subst);
 
     // Do borrow checking and dictionary elaboration.
     node.check_borrows()?;
@@ -297,33 +317,207 @@ fn filter_constraints_any_ty_vars(
         .collect()
 }
 
-/// Filter constraints that contain only type variables listed in the quantifiers
-fn filter_constraints_only_ty_vars(
-    constraints: &[PubTypeConstraint],
+/// Filter constraints that contain only type variables listed in the ty_vars
+fn select_constraints_only_these_ty_vars<'c>(
+    constraints: &'c [PubTypeConstraint],
     ty_vars: &[TypeVar],
-) -> Vec<PubTypeConstraint> {
+) -> Vec<&'c PubTypeConstraint> {
     constraints
         .iter()
-        .filter(|constraint| {
-            let ret = constraint.contains_only_ty_vars(ty_vars);
-            // if ret {
-            //     log::debug!("Constraint {constraint:?} contains: {ret}");
-            // }
-            ret
-        })
-        .cloned()
+        .filter(|constraint| constraint.contains_only_ty_vars(ty_vars))
         .collect()
 }
 
-/// Extend a list of type variables with the type variables in the constraints
-fn extend_with_constraint_ty_vars(
+/// Return the constraints that are transitively accessible from the ty_vars
+fn select_constraints_accessible_from<'c: 'r, 'r, C, T>(
+    constraints: &'r C,
     ty_vars: &[TypeVar],
+) -> (
+    HashSet<&'c PubTypeConstraint>,
+    HashSet<&'c PubTypeConstraint>,
+)
+where
+    &'r C: IntoIterator<Item = &'c T>,
+    T: Borrow<PubTypeConstraint> + 'c,
+{
+    // Split the constraints into those that contain at least one of the ty_vars and those that don't.
+    fn partition<'c: 'r, 'r, C, T>(
+        constraints: &'r C,
+        ty_vars: &[TypeVar],
+    ) -> (
+        HashSet<&'c PubTypeConstraint>,
+        HashSet<&'c PubTypeConstraint>,
+    )
+    where
+        &'r C: IntoIterator<Item = &'c T>,
+        T: Borrow<PubTypeConstraint> + 'c,
+    {
+        constraints
+            .into_iter()
+            .map(|item| item.borrow())
+            .partition(|constraint| constraint.contains_any_ty_vars(ty_vars))
+    }
+
+    // First partition with the input ty_vars.
+    let (mut ins, mut outs) = partition(constraints, ty_vars);
+
+    // As long as there is progress, loop.
+    loop {
+        // Collect the type variables that are accessible from the constraints in ins.
+        let accessible_ty_vars: Vec<_> = ins
+            .iter()
+            .flat_map(|c| c.inner_ty_vars())
+            .unique()
+            .collect();
+
+        // Re-partition with the new type variables.
+        let (new_ins, new_outs) = partition(constraints, &accessible_ty_vars);
+
+        // In case we did not collect any new constraints, we are done.
+        if new_ins.len() == ins.len() {
+            break;
+        }
+        ins = new_ins;
+        outs = new_outs;
+    }
+    (ins, outs)
+}
+
+/// Partition the orphan variant constraints and the others, and for the variant constraints,
+/// create a substitution into a minimalist variant type.
+fn partition_variant_constraints<'c>(
+    constraints: impl Iterator<Item = &'c PubTypeConstraint>,
+) -> (TypeSubstitution, Vec<&'c PubTypeConstraint>) {
+    // Extract the variant constraints and partition them by type variable.
+    let mut variants: HashMap<TypeVar, VariantConstraint> = HashMap::new();
+    let mut others = Vec::new();
+    for constraint in constraints {
+        match constraint {
+            PubTypeConstraint::TypeHasVariant {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => {
+                if let Some(ty_var) = variant_ty.data().as_variable() {
+                    let existing = variants
+                        .entry(*ty_var)
+                        .or_default()
+                        .insert(*tag, *payload_ty);
+                    assert!(existing.is_none(), "Duplicate variant constraint for {tag}");
+                } else {
+                    others.push(constraint);
+                }
+            }
+            _ => others.push(constraint),
+        }
+    }
+    // Create minimalist variant type for them.
+    let subst = variants
+        .into_iter()
+        .map(|(ty_var, variant)| {
+            let variant_ty = Type::variant(variant.into_iter().collect());
+            (ty_var, variant_ty)
+        })
+        .collect();
+    (subst, others)
+}
+
+struct ConstraintValidationOutput {
+    quantifiers: Vec<TypeVar>,
+    related_constraints: HashSet<*const PubTypeConstraint>,
+    retained_constraints: HashSet<*const PubTypeConstraint>,
+    constraint_subst: TypeSubstitution,
+}
+
+fn validate_and_cleanup_constraints(
+    ty: &impl TypeLike,
     constraints: &[PubTypeConstraint],
-) -> Vec<TypeVar> {
-    ty_vars
+    node: &Node,
+) -> Result<ConstraintValidationOutput, InternalCompilationError> {
+    // Filter out constraints that have types not found in our code.
+    let unbound = node.all_unbound_ty_vars();
+    let ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
+    let constraints = select_constraints_only_these_ty_vars(constraints, &ty_vars);
+    let related_constraints = constraints
         .iter()
-        .cloned()
-        .chain(constraints.iter().flat_map(|c| c.inner_ty_vars()))
-        .unique()
-        .collect()
+        .map(|c| *c as *const PubTypeConstraint)
+        .collect();
+
+    // Find constraints that are not transitively accessible from the fn signature
+    let sig_ty_vars = ty.inner_ty_vars();
+    let (constraints, orphan_constraints) =
+        select_constraints_accessible_from(&constraints, &sig_ty_vars);
+
+    // Partition the orphan constraints into variant constraint substitutions and the others.
+    let (subst, other_orphans) = partition_variant_constraints(orphan_constraints.into_iter());
+    if !other_orphans.is_empty() {
+        return Err(InternalCompilationError::Internal(format!(
+            "Orphan constraints found: {other_orphans:?}"
+        )));
+    }
+
+    // Compute the quantifiers based on the function type and its contraints.
+    let quantifiers = TypeScheme::list_ty_vars(ty, constraints.iter().cloned());
+
+    // Detect unbound type variables in the code and return error if not in unused variants only.
+    // These are neither part of the function signature nor of the constraints.
+    let bounds: Vec<_> = quantifiers.iter().chain(subst.keys()).cloned().collect();
+    let uninstantiated_unbound = check_unbounds(unbound, &bounds)?;
+    let constraint_subst = subst
+        .into_iter()
+        .chain(
+            uninstantiated_unbound
+                .into_iter()
+                .map(|ty_var| (ty_var, Type::never())),
+        )
+        .collect();
+    let retained_constraints = constraints
+        .iter()
+        .map(|c| *c as *const PubTypeConstraint)
+        .collect();
+
+    Ok(ConstraintValidationOutput {
+        quantifiers,
+        related_constraints,
+        retained_constraints,
+        constraint_subst,
+    })
+}
+
+fn log_dropped_constraints_expr(
+    all: &[PubTypeConstraint],
+    retained: &HashSet<*const PubTypeConstraint>,
+    module_env: ModuleEnv,
+) {
+    if retained.len() == all.len() {
+        return;
+    }
+    let dropped = all
+        .iter()
+        .filter(|c| !retained.contains(&(*c as *const PubTypeConstraint)))
+        .map(|c| c.format_with(&module_env));
+    let dropped = iterable_to_string(dropped, " ∧ ");
+    log::debug!("Dropped constraints in expr: {dropped}");
+}
+
+fn log_dropped_constraints_module(
+    ctx: Ustr,
+    all: &[PubTypeConstraint],
+    related: &HashSet<*const PubTypeConstraint>,
+    retained: &HashSet<*const PubTypeConstraint>,
+    module_env: ModuleEnv,
+) {
+    if retained.len() == related.len() {
+        return;
+    }
+    let dropped = all
+        .iter()
+        .filter(|c| {
+            let ptr = *c as *const PubTypeConstraint;
+            related.contains(&ptr) && !retained.contains(&ptr)
+        })
+        .map(|c| c.format_with(&module_env));
+    let dropped = iterable_to_string(dropped, " ∧ ");
+    log::debug!("Dropped constraints in {ctx}: {dropped}");
 }

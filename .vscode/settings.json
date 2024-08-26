@@ -11,6 +11,7 @@
 		"inout",
 		"isize",
 		"itertools",
+		"multiunzip",
 		"newtype",
 		"nonassoc",
 		"nonmax",
@@ -29,5 +30,6 @@
 	],
 	"rust-analyzer.linkedProjects": [
 		"./Cargo.toml"
-	]
+	],
+	"makefile.configureOnOpen": false
 }

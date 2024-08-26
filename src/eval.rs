@@ -301,6 +301,15 @@ impl Node {
                     _ => panic!("Cannot access field from a non-compound value"),
                 })
             }
+            Variant(variant) => {
+                let value = variant.1.eval_with_ctx(ctx)?;
+                Ok(Value::variant(variant.0, value))
+            }
+            ExtractTag(node) => {
+                let value = node.eval_with_ctx(ctx)?;
+                let variant = value.into_variant().unwrap();
+                Ok(Value::native(variant.tag_as_isize()))
+            }
             Array(nodes) => {
                 let values = eval_nodes(nodes, ctx)?;
                 Ok(Value::native(array::Array::from_vec(values)))
