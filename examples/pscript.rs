@@ -187,6 +187,35 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
+        InconsistentADT {
+            a_type,
+            a_span,
+            b_type,
+            b_span,
+        } => {
+            let min_pos = a_span.start().min(b_span.start());
+            let offset = start_of_line_of(src, min_pos);
+            let a_ty = a_type.adt_kind().fg(Color::Blue);
+            let b_ty = b_type.adt_kind().fg(Color::Magenta);
+            Report::build(ReportKind::Error, "input", offset)
+                .with_message(format!(
+                    "Data type {} is different than data type {}.",
+                    a_ty, b_ty
+                ))
+                .with_label(
+                    Label::new(("input", span_range(*a_span)))
+                        .with_message(format!("type is {} here", a_ty))
+                        .with_color(Color::Blue),
+                )
+                .with_label(
+                    Label::new(("input", span_range(*b_span)))
+                        .with_message(format!("but type is {} here", b_ty))
+                        .with_color(Color::Magenta),
+                )
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
         MutablePathsOverlap {
             a_span,
             b_span,

@@ -393,6 +393,11 @@ fn records() {
 }
 
 #[test]
+fn adt() {
+    fail_compilation("fn f(x) { (x.0, x.a) }").expect_inconsistent_adt();
+}
+
+#[test]
 fn mutability_soundness() {
     fail_compilation("let f = |x| (x[0] = 1); let a = [1]; f(a)").expect_must_be_mutable();
 }

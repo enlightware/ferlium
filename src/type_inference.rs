@@ -13,7 +13,7 @@ use crate::{
     ast::{Expr, ExprKind},
     containers::{SVec2, B},
     dictionary_passing::DictionaryReq,
-    error::{InternalCompilationError, MustBeMutableContext},
+    error::{ADTAccessType, InternalCompilationError, MustBeMutableContext},
     format_string::emit_format_string_ast,
     function::{FunctionRef, ScriptFunction},
     ir::{self, EnvStore, FnInstData, Immediate, Node, NodeKind},
@@ -814,29 +814,44 @@ impl UnifiedTypeInference {
                 let mut progress = false;
 
                 // Perform simplification for tuple and record constraints.
-                let mut tuples_at_index_is: HashMap<(Type, usize), (Type, Span)> = HashMap::new();
-                let mut records_field_is: HashMap<(Type, Ustr), (Type, Span)> = HashMap::new();
+                // Check for incompatible constraints as well.
+                let mut tuples_at_index_is: HashMap<Type, HashMap<usize, (Type, Span)>> =
+                    HashMap::new();
+                let mut records_field_is: HashMap<Type, HashMap<Ustr, (Type, Span)>> =
+                    HashMap::new();
                 for constraint in &remaining_constraints {
                     use PubTypeConstraint::*;
                     match constraint {
                         TupleAtIndexIs {
                             tuple_ty,
+                            tuple_span,
                             index,
                             index_span,
                             element_ty,
-                            ..
                         } => {
-                            let key = (*tuple_ty, *index);
-                            if let Some((expected_ty, expected_span)) = tuples_at_index_is.get(&key)
-                            {
-                                unified_ty_inf.unify_sub_type(
-                                    *element_ty,
-                                    *index_span,
-                                    *expected_ty,
-                                    *expected_span,
-                                )?;
+                            let span = Span::new(tuple_span.start(), index_span.end());
+                            if let Some(record) = records_field_is.get(tuple_ty) {
+                                let (field_name, (_, field_span)) = record.iter().next().unwrap();
+                                return Err(InternalCompilationError::new_inconsistent_adt(
+                                    ADTAccessType::RecordAccess(*field_name),
+                                    *field_span,
+                                    ADTAccessType::TupleProject(*index),
+                                    span,
+                                ));
+                            } else if let Some(tuple) = tuples_at_index_is.get_mut(tuple_ty) {
+                                if let Some((expected_ty, expected_span)) = tuple.get(index) {
+                                    unified_ty_inf.unify_sub_type(
+                                        *element_ty,
+                                        span,
+                                        *expected_ty,
+                                        *expected_span,
+                                    )?;
+                                } else {
+                                    tuple.insert(*index, (*element_ty, span));
+                                }
                             } else {
-                                tuples_at_index_is.insert(key, (*element_ty, *index_span));
+                                let tuple = HashMap::from([(*index, (*element_ty, span))]);
+                                tuples_at_index_is.insert(*tuple_ty, tuple);
                             }
                         }
                         RecordFieldIs {
@@ -844,18 +859,31 @@ impl UnifiedTypeInference {
                             field,
                             field_span,
                             element_ty,
-                            ..
+                            record_span,
                         } => {
-                            let key = (*record_ty, *field);
-                            if let Some((expected_ty, expected_span)) = records_field_is.get(&key) {
-                                unified_ty_inf.unify_sub_type(
-                                    *element_ty,
-                                    *field_span,
-                                    *expected_ty,
-                                    *expected_span,
-                                )?;
+                            let span = Span::new(record_span.start(), field_span.end());
+                            if let Some(tuple) = tuples_at_index_is.get(record_ty) {
+                                let (index, (_, index_span)) = tuple.iter().next().unwrap();
+                                return Err(InternalCompilationError::new_inconsistent_adt(
+                                    ADTAccessType::TupleProject(*index),
+                                    *index_span,
+                                    ADTAccessType::RecordAccess(*field),
+                                    span,
+                                ));
+                            } else if let Some(record) = records_field_is.get_mut(record_ty) {
+                                if let Some((expected_ty, expected_span)) = record.get(field) {
+                                    unified_ty_inf.unify_sub_type(
+                                        *element_ty,
+                                        span,
+                                        *expected_ty,
+                                        *expected_span,
+                                    )?;
+                                } else {
+                                    record.insert(*field, (*element_ty, span));
+                                }
                             } else {
-                                records_field_is.insert(key, (*element_ty, *field_span));
+                                let record = HashMap::from([(*field, (*element_ty, span))]);
+                                records_field_is.insert(*record_ty, record);
                             }
                         }
                     }

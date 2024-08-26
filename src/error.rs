@@ -1,6 +1,7 @@
 use std::fmt::{self, Display};
 
 use lrpar::Span;
+use ustr::Ustr;
 
 use crate::{
     format::FormatWith,
@@ -9,6 +10,20 @@ use crate::{
 };
 
 pub type LocatedError = (String, Span);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ADTAccessType {
+    RecordAccess(Ustr),
+    TupleProject(usize),
+}
+impl ADTAccessType {
+    pub fn adt_kind(&self) -> &'static str {
+        match self {
+            Self::RecordAccess(_) => "record",
+            Self::TupleProject(_) => "tuple",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MustBeMutableContext {
@@ -54,6 +69,12 @@ pub enum InternalCompilationError {
         record_ty: Type,
         record_span: Span,
     },
+    InconsistentADT {
+        a_type: ADTAccessType,
+        a_span: Span,
+        b_type: ADTAccessType,
+        b_span: Span,
+    },
     MutablePathsOverlap {
         a_span: Span,
         b_span: Span,
@@ -64,6 +85,25 @@ pub enum InternalCompilationError {
         string_span: Span,
     },
     Internal(String),
+}
+impl InternalCompilationError {
+    pub fn new_inconsistent_adt(
+        mut a_type: ADTAccessType,
+        mut a_span: Span,
+        mut b_type: ADTAccessType,
+        mut b_span: Span,
+    ) -> Self {
+        if a_span.start() > b_span.start() {
+            std::mem::swap(&mut a_type, &mut b_type);
+            std::mem::swap(&mut a_span, &mut b_span);
+        }
+        Self::InconsistentADT {
+            a_type,
+            a_span,
+            b_type,
+            b_span,
+        }
+    }
 }
 
 impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &str)> {
@@ -155,6 +195,21 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     record_ty.format_with(env)
                 )
             }
+            InconsistentADT {
+                a_type,
+                b_type,
+                a_span,
+                b_span,
+            } => {
+                write!(
+                    f,
+                    "Inconsistent data types: {} due to .{} is incompatible with {} due to .{}",
+                    a_type.adt_kind(),
+                    &source[a_span.start()..a_span.end()],
+                    b_type.adt_kind(),
+                    &source[b_span.start()..b_span.end()],
+                )
+            }
             MutablePathsOverlap {
                 a_span,
                 b_span,
@@ -223,6 +278,12 @@ pub enum CompilationError {
         field_span: Span,
         record_ty: String,
         record_span: Span,
+    },
+    InconsistentADT {
+        a_type: ADTAccessType,
+        a_span: Span,
+        b_type: ADTAccessType,
+        b_span: Span,
     },
     MutablePathsOverlap {
         a_span: Span,
@@ -314,6 +375,17 @@ impl CompilationError {
                 record_ty: record_ty.format_with(env).to_string(),
                 record_span,
             },
+            InconsistentADT {
+                a_type,
+                a_span,
+                b_type,
+                b_span,
+            } => Self::InconsistentADT {
+                a_type,
+                a_span,
+                b_type,
+                b_span,
+            },
             MutablePathsOverlap {
                 a_span,
                 b_span,
@@ -380,6 +452,13 @@ impl CompilationError {
                 }
             }
             _ => panic!("expect_duplicate_record_field called on non-DuplicatedRecordField error"),
+        }
+    }
+
+    pub fn expect_inconsistent_adt(&self) {
+        match self {
+            Self::InconsistentADT { .. } => (),
+            _ => panic!("expect_inconsistent_adt called on non-InconsistentADT error"),
         }
     }
 
