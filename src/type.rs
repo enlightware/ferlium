@@ -371,6 +371,7 @@ impl Type {
     }
 
     pub fn variant(mut types: Vec<(Ustr, Self)>) -> Self {
+        assert_unique_strings(&types);
         types.sort_by(|(a, _), (b, _)| a.cmp(b));
         TypeKind::Variant(types).store()
     }
