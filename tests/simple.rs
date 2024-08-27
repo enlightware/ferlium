@@ -386,6 +386,22 @@ fn records() {
         run("let f = |x, y| (x.a, x.a.b, y == x.a); f({a: {a: 3, b: 1}}, {a: 4, b: 1})"),
         Value::tuple(vec![int_tuple!(3, 1), int!(1), bool!(false)])
     );
+    assert_eq!(
+        run("fn l(v) { ((|v| v.x)(v), (|v| v.y)(v)) } l({x:1, y:2})"),
+        int_tuple!(1, 2)
+    );
+    assert_eq!(
+        run("fn l(v) { let x = |v| v.x; let y = |v| v.y; (x(v), y(v)) } l({x:1, y:2})"),
+        int_tuple!(1, 2)
+    );
+    assert_eq!(
+        run("fn l(v) { (((|v| v.x),).0(v), ((|v| v.y),).0(v)) } l({x:1, y:2})"),
+        int_tuple!(1, 2)
+    );
+    assert_eq!(
+        run("fn x() { |v| v.x } fn y() { |v| v.y } fn e(v) { (x()(v), y()(v)) } e({x:1, y:2})"),
+        int_tuple!(1, 2)
+    );
     fail_compilation(
         "fn swap(a,b) { var temp = a; a = b; b = temp } var v = { x:1, y:2 }; swap(v.x, v.x)",
     )

@@ -1,8 +1,5 @@
 use std::{
-    cell::RefCell,
-    fmt::{self, Debug},
-    marker::PhantomData,
-    rc::{Rc, Weak},
+    cell::RefCell, fmt::{self, Debug}, hash::Hash, marker::PhantomData, rc::{Rc, Weak}
 };
 
 use crate::{
@@ -102,6 +99,7 @@ impl Eq for FunctionRef {}
 #[derive(Debug, Clone)]
 pub struct ScriptFunction {
     pub code: ir::Node,
+    // pub monomorphised: HashMap<Vec<Type>, ir::Node>,
 }
 impl ScriptFunction {
     pub fn new(code: ir::Node) -> Self {
