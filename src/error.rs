@@ -190,7 +190,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
             } => {
                 write!(
                     f,
-                    "Field {} not found in record {}",
+                    "Expected record due to {}, got \"{}\"",
                     &source[field_span.start()..field_span.end()],
                     record_ty.format_with(env)
                 )
