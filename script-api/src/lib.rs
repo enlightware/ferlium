@@ -41,7 +41,7 @@ impl ErrorData {
     }
 }
 
-fn compilation_error_to_data(error: &CompilationError) -> Vec<ErrorData> {
+fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorData> {
     use CompilationError::*;
     match error {
         ParsingFailed(errors) => errors
@@ -82,22 +82,90 @@ fn compilation_error_to_data(error: &CompilationError) -> Vec<ErrorData> {
             format!("Invalid index {index} of a tuple of length {tuple_length}"),
         )],
         InvalidTupleProjection {
-            expr_ty, expr_span, ..
-        } => vec![ErrorData::from_span(
+            expr_ty,
             expr_span,
-            format!("Expected tuple, got {expr_ty}"),
-        )],
-        MutablePathsOverlap {
-            a_name, a_span, b_name, b_span, fn_name, fn_span
+            index_span,
+        } => {
+            let index_name = &src[index_span.start()..index_span.end()];
+            vec![ErrorData::from_span(
+                expr_span,
+                format!("Expected tuple because of .{index_name}, got {expr_ty}"),
+            )]
+        }
+        DuplicatedRecordField {
+            name,
+            first_occurrence_span,
+            second_occurrence_span,
         } => vec![
-            ErrorData::from_span(a_span, format!("Mutable path {a_name} (here) overlaps with {b_name} when calling function {fn_name}")),
-            ErrorData::from_span(b_span, format!("Mutable path {a_name} overlaps with {b_name} (here) when calling function {fn_name}")),
-            ErrorData::from_span(fn_span, format!("When calling function {fn_name}: mutable path {a_name} overlaps with {b_name}")),
+            ErrorData::from_span(first_occurrence_span, format!("Duplicated field {name}")),
+            ErrorData::from_span(second_occurrence_span, format!("Duplicated field {name}")),
         ],
-        UndefinedVarInStringFormatting { var_name, var_span, string_text, .. } => vec![ErrorData::from_span(
+        InvalidRecordField {
+            field_span,
+            record_ty,
+            ..
+        } => {
+            let field_name = &src[field_span.start()..field_span.end()];
+            vec![ErrorData::from_span(
+                field_span,
+                format!("Field {field_name} not found in record {record_ty}"),
+            )]
+        }
+        InvalidRecordFieldAccess {
+            field_span,
+            record_ty,
+            ..
+        } => {
+            let field_name = &src[field_span.start()..field_span.end()];
+            vec![ErrorData::from_span(
+                field_span,
+                format!("Expected record because of .{field_name}, got {record_ty}"),
+            )]
+        }
+        InconsistentADT {
+            a_type,
+            a_span,
+            b_type,
+            b_span,
+        } => {
+            let a_name = a_type.adt_kind();
+            let b_name = b_type.adt_kind();
+            vec![
+                ErrorData::from_span(
+                    a_span,
+                    format!("Data type {a_name} here is different than data type {b_name}"),
+                ),
+                ErrorData::from_span(
+                    b_span,
+                    format!("Data type {b_name} here is different than data type {a_name}"),
+                ),
+            ]
+        }
+        MutablePathsOverlap {
+            a_span,
+            b_span,
+            fn_span,
+        } => {
+            let a_name = &src[a_span.start()..a_span.end()];
+            let b_name = &src[b_span.start()..b_span.end()];
+            let fn_name = &src[fn_span.start()..fn_span.end()];
+            vec![
+                ErrorData::from_span(a_span, format!("Mutable path {a_name} (here) overlaps with {b_name} when calling function {fn_name}")),
+                ErrorData::from_span(b_span, format!("Mutable path {a_name} overlaps with {b_name} (here) when calling function {fn_name}")),
+                ErrorData::from_span(fn_span, format!("When calling function {fn_name}: mutable path {a_name} overlaps with {b_name}")),
+            ]
+        }
+        UndefinedVarInStringFormatting {
+            var_name,
             var_span,
-            format!("Undefined variable {var_name} used in string formatting: {string_text}"),
-        )],
+            string_span,
+        } => {
+            let string_text = &src[string_span.start()..string_span.end()];
+            vec![ErrorData::from_span(
+                var_span,
+                format!("Undefined variable {var_name} used in string formatting: {string_text}"),
+            )]
+        }
         Internal(msg) => vec![ErrorData::from_span(
             &Span::new(0, 0),
             format!("ICE: {msg}"),
@@ -149,7 +217,7 @@ impl Compiler {
         match self.compile_internal(src) {
             Ok(()) => None,
             Err(err) => Some(
-                compilation_error_to_data(&err)
+                compilation_error_to_data(&err, src)
                     .into_iter()
                     .map(|data| data.map(|pos| char_indices.byte_to_char_position(pos)))
                     .collect(),

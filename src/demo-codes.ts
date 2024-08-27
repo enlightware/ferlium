@@ -1,6 +1,6 @@
 export const demoCodes = [
 	``,
-	`fn factorial(n) {
+`fn factorial(n) {
 	if n <= 1 {
 		1
 	} else {
@@ -10,7 +10,7 @@ export const demoCodes = [
 
 factorial(5)
 `,
-	`fn is_even(n) {
+`fn is_even(n) {
 	if n == 0 {
 		true
 	} else {
@@ -28,12 +28,20 @@ fn is_odd(n) {
 
 is_even(10)
 `,
-	`let f = |x, y| (x.1, x.1.0, y == x.1);
-let id = |x| x;
-(id(1), id(true), id(|x, y| (y, x)))
-`,
-	`let a = [];
-(array_concat(a, [1]), array_concat(a, [true]))
+`fn f(x, y) {
+	(x.1, x.1.0, y == x.1)
+}
+
+fn l2(v) {
+	let sq = |x| x * x;
+	sq(v.x) + sq(v.y)
+}
+
+fn id(x) {
+	x
+}
+
+(id(1), id(true), id(|x, y| (y, x)), l2({x:1, y:2}))
 `,
 `fn quicksort(a, lo, hi) {
 	if lo >= 0 and lo < hi {
