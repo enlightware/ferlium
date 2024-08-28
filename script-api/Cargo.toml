@@ -13,7 +13,7 @@ console_error_panic_hook = { version = "0.1.7" }
 log = "0.4"
 wasm-logger = "0.2.0"
 html-escape = "0.2.13"
-painturscript = { git = "https://gitlab.zwoggel.net/enlightware/paint-ur-script.git" }
+painturscript = { git = "ssh://git@gitlab.zwoggel.net/enlightware/paint-ur-script.git" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.42"
