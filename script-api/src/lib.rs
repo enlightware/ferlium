@@ -56,6 +56,21 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             span,
             format!("Function {name} not found"),
         )],
+        WrongNumberOfArguments {
+            expected,
+            expected_span,
+            got,
+            got_span,
+        } => vec![
+            ErrorData::from_span(
+                expected_span,
+                format!("Expected {expected} arguments here, got {got}"),
+            ),
+            ErrorData::from_span(
+                got_span,
+                format!("Expected {expected} arguments, got {got} here"),
+            ),
+        ],
         MustBeMutable(cur_span, _reason_span) => vec![ErrorData::from_span(
             cur_span,
             "Expression must be mutable".to_string(),
@@ -93,13 +108,15 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             )]
         }
         DuplicatedRecordField {
-            name,
-            first_occurrence_span,
-            second_occurrence_span,
-        } => vec![
-            ErrorData::from_span(first_occurrence_span, format!("Duplicated field {name}")),
-            ErrorData::from_span(second_occurrence_span, format!("Duplicated field {name}")),
-        ],
+            first_occurrence,
+            second_occurrence,
+        } => {
+            let name = &src[first_occurrence.start()..first_occurrence.end()];
+            vec![
+                ErrorData::from_span(first_occurrence, format!("Duplicated field {name}")),
+                ErrorData::from_span(second_occurrence, format!("Duplicated field {name}")),
+            ]
+        }
         InvalidRecordField {
             field_span,
             record_ty,
@@ -122,6 +139,22 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
                 format!("Expected record because of .{field_name}, got {record_ty}"),
             )]
         }
+        InvalidVariantName { name, ty } => {
+            let name_text = &src[name.start()..name.end()];
+            vec![ErrorData::from_span(
+                name,
+                format!("Variant name {name_text} does not exist for variant type {ty}"),
+            )]
+        }
+        InvalidVariantType { name, ty } => {
+            let name_text = &src[name.start()..name.end()];
+            vec![ErrorData::from_span(
+                name,
+                format!(
+                    "Type {ty} is not a variant, but variant constructor {name_text} requires it"
+                ),
+            )]
+        }
         InconsistentADT {
             a_type,
             a_span,
@@ -141,6 +174,36 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
                 ),
             ]
         }
+        InconsistentPattern {
+            a_type,
+            a_span,
+            b_type,
+            b_span,
+        } => {
+            let a_name = a_type.name();
+            let b_name = b_type.name();
+            vec![
+                ErrorData::from_span(
+                    a_span,
+                    format!("Pattern expects {a_name}, but got {b_name}"),
+                ),
+                ErrorData::from_span(
+                    b_span,
+                    format!("Pattern expects {b_name}, but got {a_name}"),
+                ),
+            ]
+        }
+        DuplicatedVariant {
+            first_occurrence,
+            second_occurrence,
+        } => {
+            let name = &src[first_occurrence.start()..first_occurrence.end()];
+            let text = format!("Duplicated variant {name}");
+            vec![
+                ErrorData::from_span(first_occurrence, text.clone()),
+                ErrorData::from_span(second_occurrence, text),
+            ]
+        }
         MutablePathsOverlap {
             a_span,
             b_span,
@@ -156,14 +219,14 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             ]
         }
         UndefinedVarInStringFormatting {
-            var_name,
             var_span,
             string_span,
         } => {
+            let var_text = &src[var_span.start()..var_span.end()];
             let string_text = &src[string_span.start()..string_span.end()];
             vec![ErrorData::from_span(
                 var_span,
-                format!("Undefined variable {var_name} used in string formatting: {string_text}"),
+                format!("Undefined variable {var_text} used in string formatting: {string_text}"),
             )]
         }
         Internal(msg) => vec![ErrorData::from_span(
