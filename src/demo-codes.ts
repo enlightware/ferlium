@@ -28,7 +28,7 @@ fn is_odd(n) {
 
 is_even(10)
 `],
-['Fancy type schemes', `fn f(x, y) {
+['Product types', `fn f(x, y) {
 	(x.1, x.1.0, y == x.1)
 }
 
@@ -42,6 +42,23 @@ fn id(x) {
 }
 
 (id(1), id(true), id(|x, y| (y, x)), l2({x:1, y:2}))
+`],
+['Sum types', `fn s_full(x) {
+	match x {
+		None => "no",
+		Some(x) => f"hi {x}"
+	}
+}
+
+fn s_def(x) {
+	match x {
+		None => "no",
+		Some(x) => f"hi {x}",
+		_ => "?"
+	}
+}
+
+(s_full(Some(1)), s_full(None), s_def(Some(1)), s_def(Other))
 `],
 ['Quicksort', `fn quicksort(a, lo, hi) {
 	if lo >= 0 and lo < hi {
