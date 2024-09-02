@@ -602,14 +602,14 @@ impl<Ty: TypeLike + FmtWithModuleEnv> TypeScheme<Ty> {
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
         let has_constraints = !self.constraints.is_empty();
-        if has_constraints {
-            write!(f, "{{")?;
-        }
+        // if has_constraints {
+        //     write!(f, "{{")?;
+        // }
         write!(f, "{}", self.ty.format_with(env))?;
         if has_constraints {
             write!(f, " ")?;
             self.format_constraints_rust_style(f, env)?;
-            write!(f, "}}")?;
+            // write!(f, "}}")?;
         }
         Ok(())
     }
