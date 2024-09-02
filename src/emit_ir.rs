@@ -10,7 +10,6 @@ use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
-    assert,
     ast::{self, *},
     containers::{iterable_to_string, B},
     error::InternalCompilationError,
@@ -306,13 +305,7 @@ fn filter_constraints_any_ty_vars(
 ) -> Vec<PubTypeConstraint> {
     constraints
         .iter()
-        .filter(|constraint| {
-            let ret = constraint.contains_any_ty_vars(ty_vars);
-            // if ret {
-            //     log::debug!("Constraint {constraint:?} contains: {ret}");
-            // }
-            ret
-        })
+        .filter(|constraint| constraint.contains_any_ty_vars(ty_vars))
         .cloned()
         .collect()
 }

@@ -1152,33 +1152,6 @@ pub struct TypeNames {
     pub types_to_names: HashMap<Type, Ustr>,
 }
 
-// pub struct PrimitiveType<T: Clone + 'static> {
-//     _marker: std::marker::PhantomData<T>,
-//     type_cell: &'static OnceLock<Type>,
-// }
-
-// impl<T: Clone + 'static> PrimitiveType<T> {
-//     fn new() -> Self {
-//         static INSTANCE: OnceLock<Type> = OnceLock::new();
-//         PrimitiveType {
-//             _marker: std::marker::PhantomData,
-//             type_cell: &INSTANCE,
-//         }
-//     }
-
-//     fn get_type(&self) -> Type {
-//         *self.type_cell.gt_or_init(|| Type::primitive::<T>())
-//     }
-
-//     pub fn get() -> Type {
-//         Self::new().get_type()
-//     }
-// }
-
-// Note: if we need to solve type inference, see https://github.com/andrejbauer/plzoo/blob/master/src/poly/type_infer.ml
-// Question: how to lookup local and parent variables in case of recursion with static typing? (static lexical scoping, see de Bruijn indices)
-// See if needed: Explicit substitutions, M. Abadi, L. Cardelli, P.L. Curien, J.J. Lévy, Journal of Functional Programming 6(2), 1996.
-
 #[cfg(test)]
 mod tests {
     use super::*;

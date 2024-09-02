@@ -1,6 +1,6 @@
 use std::{
     borrow::Borrow,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
 };
 
@@ -386,8 +386,17 @@ impl FmtWithModuleEnv for PubTypeConstraint {
     }
 }
 
-/// Aggregated TypeHasVariant constraints to be use for checking and display.
-pub type VariantConstraint = HashMap<Ustr, Type>;
+/// Aggregated TypeHasVariant or RecordFieldIs constraints to be use for checking and display.
+pub type VariantConstraint = BTreeMap<Ustr, Type>;
+/// Aggregated TupleAtIndexIs constraints to be use for checking and display.
+pub type TupleConstraint = BTreeMap<usize, Type>;
+
+#[derive(EnumAsInner)]
+enum AggregatedConstraint {
+    Tuple(TupleConstraint),
+    Record(VariantConstraint),
+    Variant(VariantConstraint),
+}
 
 /// A type, with quantified type variables and associated constraints.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -513,6 +522,9 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
         use DisplayStyle::*;
+        if style == Rust && !self.constraints.is_empty() {
+            return self.format_constraints_consolidated(f, env);
+        }
         for (i, constraint) in self.constraints.iter().enumerate() {
             if i > 0 {
                 match style {
@@ -524,6 +536,108 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                 Mathematical => write!(f, "({})", constraint.format_with(env)),
                 Rust => write!(f, "{}", constraint.format_with(env)),
             }?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn format_constraints_consolidated(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &ModuleEnv<'_>,
+    ) -> std::fmt::Result {
+        // Build aggregated constraints
+        let mut aggregated = BTreeMap::new();
+        for constraint in &self.constraints {
+            use PubTypeConstraint::*;
+            match constraint {
+                TupleAtIndexIs {
+                    tuple_ty,
+                    index,
+                    element_ty,
+                    ..
+                } => {
+                    aggregated
+                        .entry(tuple_ty)
+                        .or_insert_with(|| AggregatedConstraint::Tuple(TupleConstraint::new()))
+                        .as_tuple_mut()
+                        .unwrap()
+                        .insert(*index, *element_ty);
+                }
+                RecordFieldIs {
+                    record_ty,
+                    field,
+                    element_ty,
+                    ..
+                } => {
+                    aggregated
+                        .entry(record_ty)
+                        .or_insert_with(|| AggregatedConstraint::Record(VariantConstraint::new()))
+                        .as_record_mut()
+                        .unwrap()
+                        .insert(*field, *element_ty);
+                }
+                TypeHasVariant {
+                    variant_ty,
+                    tag,
+                    payload_ty,
+                    ..
+                } => {
+                    aggregated
+                        .entry(variant_ty)
+                        .or_insert_with(|| AggregatedConstraint::Variant(VariantConstraint::new()))
+                        .as_variant_mut()
+                        .unwrap()
+                        .insert(*tag, *payload_ty);
+                }
+            }
+        }
+        // Format aggregated constraints
+        let mut first_ty = true;
+        for (ty, constraint) in aggregated {
+            use AggregatedConstraint::*;
+            if first_ty {
+                first_ty = false;
+            } else {
+                f.write_str(", ")?;
+            }
+            write!(f, "{}: ", ty.format_with(env))?;
+            match constraint {
+                Tuple(tuple) => {
+                    f.write_str("(")?;
+                    let mut last_index = 0;
+                    for (index, element_ty) in tuple {
+                        while last_index < index {
+                            write!(f, "_, ")?;
+                            last_index += 1;
+                        }
+                        write!(f, "{}, ", element_ty.format_with(env))?;
+                    }
+                    f.write_str("…)")?;
+                }
+                Record(record) => {
+                    f.write_str("{ ")?;
+                    let mut first = true;
+                    for (field, element_ty) in record {
+                        if first {
+                            first = false;
+                        } else {
+                            f.write_str(", ")?;
+                        }
+                        write!(f, "{}: {}", field, element_ty.format_with(env))?;
+                    }
+                    f.write_str(" }")?;
+                }
+                Variant(variant) => {
+                    for (tag, payload_ty) in variant {
+                        if payload_ty == Type::unit() {
+                            write!(f, "{} | ", tag)?;
+                        } else {
+                            write!(f, "{} {} | ", tag, payload_ty.format_with(env))?;
+                        }
+                    }
+                    f.write_str("…")?;
+                }
+            }
         }
         Ok(())
     }
