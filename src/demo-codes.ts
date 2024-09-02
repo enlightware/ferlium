@@ -1,6 +1,6 @@
 export const demoCodes = [
-	``,
-`fn factorial(n) {
+['Empty', ``],
+['Factorial', `fn factorial(n) {
 	if n <= 1 {
 		1
 	} else {
@@ -9,8 +9,8 @@ export const demoCodes = [
 }
 
 factorial(5)
-`,
-`fn is_even(n) {
+`],
+['Is even', `fn is_even(n) {
 	if n == 0 {
 		true
 	} else {
@@ -27,8 +27,8 @@ fn is_odd(n) {
 }
 
 is_even(10)
-`,
-`fn f(x, y) {
+`],
+['Fancy type schemes', `fn f(x, y) {
 	(x.1, x.1.0, y == x.1)
 }
 
@@ -42,8 +42,8 @@ fn id(x) {
 }
 
 (id(1), id(true), id(|x, y| (y, x)), l2({x:1, y:2}))
-`,
-`fn quicksort(a, lo, hi) {
+`],
+['Quicksort', `fn quicksort(a, lo, hi) {
 	if lo >= 0 and lo < hi {
 		let p = partition(a, lo, hi);
 		quicksort(a, lo, p - 1);
@@ -76,11 +76,11 @@ fn swap(a, i, j) {
 var a = [5, 4, 11, 3, 2, 1, 0, 7];
 quicksort(a, 0, array_len(a) - 1);
 a
-`,
-`let a = "hello";
+`],
+['String', `let a = "hello";
 let count = 3;
 var text = f"{a} {count} worlds!";
 string_push_str(text, " ...and more");
 string_concat("He said: ", text)
-`
-];
+`]
+] as const;

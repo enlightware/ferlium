@@ -7,6 +7,7 @@ import ConsoleOutput from './components/ConsoleOutput.vue';
 import { demoCodes } from './demo-codes';
 import { defined } from './types';
 
+const demoTitles = demoCodes.map(([title, _]) => title);
 const editor = ref<typeof CodeEditor>();
 const console = ref<typeof ConsoleOutput>();
 const runOutput = ref("Press Run or Ctrl/Cmd+Enter to execute the code.");
@@ -14,7 +15,7 @@ const isRunDisabled = ref(false);
 
 function updateEditor(data: { value: string, index: number }) {
 	if (editor.value) {
-		editor.value.setText(demoCodes[data.index]);
+		editor.value.setText(demoCodes[data.index]?.[1] ?? '');
 	}
 };
 
@@ -39,7 +40,7 @@ function setRunAvailability(status: boolean) {
 			Run
 		</SimpleButton>
 		<DropdownSelect
-			:items="['Empty', 'Factorial', 'Is even', 'Fancy type schemes', 'Quicksort', 'String']"
+			:items="demoTitles"
 			@selection-changed="updateEditor"
 		/>
 	</div>
