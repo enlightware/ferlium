@@ -52,6 +52,27 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
+        WrongNumberOfArguments {
+            expected,
+            expected_span,
+            got,
+            got_span,
+        } => {
+            let offset = start_of_line_of(src, expected_span.start());
+            Report::build(ReportKind::Error, "input", offset)
+                .with_message(format!(
+                    "Wrong number of arguments: expected {} but found {}.",
+                    expected.fg(Color::Blue),
+                    got.fg(Color::Magenta)
+                ))
+                .with_label(
+                    Label::new(("input", span_range(*expected_span))).with_color(Color::Blue),
+                )
+                .with_label(Label::new(("input", span_range(*got_span))).with_color(Color::Magenta))
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
         MustBeMutable(cur_span, reason_span, ctx) => {
             let (cur_span, reason_span) =
                 resolve_must_be_mutable_ctx(*cur_span, *reason_span, *ctx, src);

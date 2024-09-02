@@ -246,6 +246,38 @@ fn tuple_projection() {
 }
 
 #[test]
+fn static_function_arity() {
+    let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y }";
+    assert_eq!(run(&format!("{text} a()")), int!(0));
+    fail_compilation(&format!("{text} b()")).expect_wrong_number_of_arguments(1, 0);
+    fail_compilation(&format!("{text} c()")).expect_wrong_number_of_arguments(2, 0);
+    fail_compilation(&format!("{text} a(1)")).expect_wrong_number_of_arguments(0, 1);
+    assert_eq!(run(&format!("{text} b(1)")), int!(2));
+    fail_compilation(&format!("{text} c(1)")).expect_wrong_number_of_arguments(2, 1);
+    fail_compilation(&format!("{text} a(1, 2)")).expect_wrong_number_of_arguments(0, 2);
+    fail_compilation(&format!("{text} b(1, 2)")).expect_wrong_number_of_arguments(1, 2);
+    assert_eq!(run(&format!("{text} c(1, 2)")), int!(3));
+}
+
+#[test]
+fn value_function_arity() {
+    let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y }";
+    assert_eq!(run(&format!("{text} (a,).0()")), int!(0));
+    fail_compilation(&format!("{text} (b,).0()")).expect_is_not_subtype("(int) → int", "() → α");
+    fail_compilation(&format!("{text} (c,).0()"))
+        .expect_is_not_subtype("(int, int) → int", "() → α");
+    fail_compilation(&format!("{text} (a,).0(1)")).expect_is_not_subtype("() → int", "(int) → α");
+    assert_eq!(run(&format!("{text} (b,).0(1)")), int!(2));
+    fail_compilation(&format!("{text} (c,).0(1)"))
+        .expect_is_not_subtype("(int, int) → int", "(int) → α");
+    fail_compilation(&format!("{text} (a,).0(1, 2)"))
+        .expect_is_not_subtype("() → int", "(int, int) → α");
+    fail_compilation(&format!("{text} (b,).0(1, 2)"))
+        .expect_is_not_subtype("(int) → int", "(int, int) → α");
+    assert_eq!(run(&format!("{text} (c,).0(1, 2)")), int!(3));
+}
+
+#[test]
 fn lambda() {
     assert_eq!(run("let f = || 1; f()"), int!(1));
     assert_eq!(run("let f = |x| x; f(1)"), int!(1));
@@ -419,7 +451,7 @@ fn variants() {
     );
     assert_eq!(run(&format!("{match_exhaustive} s(None)")), string!("no"));
     assert_eq!(
-        run(&format!("{match_exhaustive} fn f() {{ s(Some(1)) }} f(1)")),
+        run(&format!("{match_exhaustive} fn f() {{ s(Some(1)) }} f()")),
         string!("hi 1")
     );
     assert_eq!(
@@ -430,7 +462,7 @@ fn variants() {
     assert_eq!(run(&format!("{match_open} s(Some(1))")), string!("hi 1"));
     assert_eq!(run(&format!("{match_open} s(None)")), string!("no"));
     assert_eq!(
-        run(&format!("{match_open} fn f() {{ s(Some(1)) }} f(1)")),
+        run(&format!("{match_open} fn f() {{ s(Some(1)) }} f()")),
         string!("hi 1")
     );
     assert_eq!(

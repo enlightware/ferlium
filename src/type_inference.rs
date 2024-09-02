@@ -483,6 +483,19 @@ impl TypeInference {
         use ir::NodeKind as K;
         // Get the function and its type from the environment.
         Ok(if let Some(function) = env.get_function(name) {
+            if function.ty_scheme.ty.args.len() != args.len() {
+                let got_span = args
+                    .iter()
+                    .map(|arg| arg.borrow().span)
+                    .reduce(|a, b| Span::new(a.start(), b.end()))
+                    .unwrap_or(span);
+                return Err(InternalCompilationError::WrongNumberOfArguments {
+                    expected: function.ty_scheme.ty.args.len(),
+                    expected_span: span,
+                    got: args.len(),
+                    got_span,
+                });
+            }
             // Instantiate its type scheme
             let (inst_fn_ty, inst_data) = function.ty_scheme.instantiate(self);
             // Get the code and make sure the types of its arguments match the expected types
@@ -1321,14 +1334,14 @@ impl UnifiedTypeInference {
                     Ok(None)
                 } else {
                     Err(InternalCompilationError::InvalidVariantName {
-                        name_span: variant_span,
+                        name: variant_span,
                         ty,
                     })
                 }
             }
             // Not a variant, error
             _ => Err(InternalCompilationError::InvalidVariantType {
-                expr_span: variant_span,
+                name: variant_span,
                 ty,
             }),
         }

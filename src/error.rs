@@ -39,6 +39,12 @@ pub enum MustBeMutableContext {
 pub enum InternalCompilationError {
     SymbolNotFound(Span),
     FunctionNotFound(Span),
+    WrongNumberOfArguments {
+        expected: usize,
+        expected_span: Span,
+        got: usize,
+        got_span: Span,
+    },
     MustBeMutable(Span, Span, MustBeMutableContext),
     IsNotSubtype(Type, Span, Type, Span),
     InfiniteType(TypeVar, Type, Span),
@@ -73,11 +79,11 @@ pub enum InternalCompilationError {
         record_span: Span,
     },
     InvalidVariantName {
-        name_span: Span,
+        name: Span,
         ty: Type,
     },
     InvalidVariantType {
-        expr_span: Span,
+        name: Span,
         ty: Type,
     },
     InconsistentADT {
@@ -139,6 +145,13 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
             FunctionNotFound(span) => {
                 let name = &source[span.start()..span.end()];
                 write!(f, "Function not found: {}", name)
+            }
+            WrongNumberOfArguments { expected, got, .. } => {
+                write!(
+                    f,
+                    "Wrong number of arguments: expected {}, got {}",
+                    expected, got
+                )
             }
             MustBeMutable(current_span, reason_span, ctx) => {
                 let (current_span, reason_span) =
@@ -216,10 +229,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     record_ty.format_with(env)
                 )
             }
-            InvalidVariantName {
-                name_span: name,
-                ty,
-            } => {
+            InvalidVariantName { name, ty } => {
                 write!(
                     f,
                     "Variant name {} does not exist for variant type {}",
@@ -227,10 +237,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     ty.format_with(env)
                 )
             }
-            InvalidVariantType {
-                expr_span: name,
-                ty,
-            } => {
+            InvalidVariantType { name, ty } => {
                 write!(
                     f,
                     "Type {} is not a variant, but variant constructor {} requires it",
@@ -313,6 +320,12 @@ pub enum CompilationError {
     ParsingFailed(Vec<LocatedError>),
     VariableNotFound(String, Span),
     FunctionNotFound(String, Span),
+    WrongNumberOfArguments {
+        expected: usize,
+        expected_span: Span,
+        got: usize,
+        got_span: Span,
+    },
     MustBeMutable(Span, Span),
     IsNotSubtype(String, Span, String, Span),
     InfiniteType(String, String, Span),
@@ -394,6 +407,17 @@ impl CompilationError {
                 let name = &src[span.start()..span.end()];
                 Self::FunctionNotFound(name.to_string(), span)
             }
+            WrongNumberOfArguments {
+                expected,
+                expected_span,
+                got,
+                got_span,
+            } => Self::WrongNumberOfArguments {
+                expected,
+                expected_span,
+                got,
+                got_span,
+            },
             MustBeMutable(current_span, reason_span, ctx) => {
                 let (current_span, reason_span) =
                     resolve_must_be_mutable_ctx(current_span, reason_span, ctx, src);
@@ -458,17 +482,11 @@ impl CompilationError {
                 record_ty: record_ty.format_with(env).to_string(),
                 record_span,
             },
-            InvalidVariantName {
-                name_span: name,
-                ty,
-            } => Self::InvalidVariantName {
+            InvalidVariantName { name, ty } => Self::InvalidVariantName {
                 name,
                 ty: ty.format_with(env).to_string(),
             },
-            InvalidVariantType {
-                expr_span: name,
-                ty,
-            } => Self::InvalidVariantType {
+            InvalidVariantType { name, ty } => Self::InvalidVariantType {
                 name,
                 ty: ty.format_with(env).to_string(),
             },
@@ -521,10 +539,29 @@ impl CompilationError {
         }
     }
 
+    pub fn expect_wrong_number_of_arguments(&self, expected: usize, got: usize) {
+        match self {
+            Self::WrongNumberOfArguments {
+                expected: exp,
+                got: g,
+                ..
+            } => {
+                if exp == &expected && g == &got {
+                    return;
+                }
+                panic!(
+                    "expect_wrong_number_of_arguments failed: expected {} != {}, got {} != {}",
+                    exp, g, expected, got
+                );
+            }
+            _ => panic!("expect_wrong_number_of_arguments called on non-WrongNumberOfArguments error {self:?}"),
+        }
+    }
+
     pub fn expect_must_be_mutable(&self) {
         match self {
             Self::MustBeMutable(_, _) => (),
-            _ => panic!("expect_must_be_mutable called on non-MustBeMutable error"),
+            _ => panic!("expect_must_be_mutable called on non-MustBeMutable error {self:?}"),
         }
     }
 
@@ -539,7 +576,7 @@ impl CompilationError {
                     cur_ty, exp_ty, cur, exp
                 );
             }
-            _ => panic!("expect_is_not_subtype called on non-TypeMismatch error"),
+            _ => panic!("expect_is_not_subtype called on non-TypeMismatch error {self:?}"),
         }
     }
 
@@ -547,7 +584,7 @@ impl CompilationError {
         // TODO: once ty_var normalization is implemented, pass the ty_var as parameter
         match self {
             Self::UnboundTypeVar { .. } => (),
-            _ => panic!("expect_unbound_ty_val called on non-UnboundTypeVar error"),
+            _ => panic!("expect_unbound_ty_val called on non-UnboundTypeVar error {self:?}"),
         }
     }
 
@@ -567,14 +604,16 @@ impl CompilationError {
                     );
                 }
             }
-            _ => panic!("expect_duplicate_record_field called on non-DuplicatedRecordField error"),
+            _ => panic!(
+                "expect_duplicate_record_field called on non-DuplicatedRecordField error {self:?}"
+            ),
         }
     }
 
     pub fn expect_inconsistent_adt(&self) {
         match self {
             Self::InconsistentADT { .. } => (),
-            _ => panic!("expect_inconsistent_adt called on non-InconsistentADT error"),
+            _ => panic!("expect_inconsistent_adt called on non-InconsistentADT error {self:?}"),
         }
     }
 
@@ -593,14 +632,16 @@ impl CompilationError {
                     );
                 }
             }
-            _ => panic!("expect_duplicated_variant called on non-DuplicatedVariant error"),
+            _ => panic!("expect_duplicated_variant called on non-DuplicatedVariant error {self:?}"),
         }
     }
 
     pub fn expect_mutable_paths_overlap(&self) {
         match self {
             Self::MutablePathsOverlap { .. } => (),
-            _ => panic!("expect_mutable_paths_overlap called on non-MutablePathsOverlap error"),
+            _ => panic!(
+                "expect_mutable_paths_overlap called on non-MutablePathsOverlap error {self:?}"
+            ),
         }
     }
 
@@ -617,7 +658,7 @@ impl CompilationError {
                 }
             },
             _ => panic!(
-                "expect_undefined_var_in_string_formatting called on non-UndefinedVarInStringFormatting error"
+                "expect_undefined_var_in_string_formatting called on non-UndefinedVarInStringFormatting error {self:?}"
             ),
         }
     }
