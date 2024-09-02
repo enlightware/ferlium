@@ -10,6 +10,7 @@ use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
+    assert,
     ast::{self, *},
     containers::{iterable_to_string, B},
     error::InternalCompilationError,
@@ -122,10 +123,10 @@ pub fn emit_module(
             retained_constraints,
             constraint_subst,
         } = validate_and_cleanup_constraints(&descr.ty_scheme.ty, &all_constraints, node)?;
-        let constraints = all_constraints
+        let constraints: Vec<_> = all_constraints
             .iter()
             .filter(|c| {
-                let ptr = *c as *const PubTypeConstraint;
+                let ptr = constraint_ptr(c);
                 if related_constraints.contains(&ptr) {
                     used_constraints.insert(c);
                 }
@@ -133,6 +134,7 @@ pub fn emit_module(
             })
             .cloned()
             .collect();
+        assert_eq!(constraints.len(), retained_constraints.len());
 
         // Substitute the constraint-originating types in the node.
         node.instantiate(&constraint_subst);
@@ -260,7 +262,7 @@ pub fn emit_expr(
 
     // Get the remaining constraints and collect the free variables.
     ty_inf.log_debug_constraints(module_env);
-    let constraints = ty_inf.constraints();
+    let mut constraints = ty_inf.constraints();
 
     // Clean-up constraints and validate them.
     let ConstraintValidationOutput {
@@ -270,10 +272,8 @@ pub fn emit_expr(
         ..
     } = validate_and_cleanup_constraints(&ty, &constraints, &node)?;
     log_dropped_constraints_expr(&constraints, &retained_constraints, module_env);
-    let constraints: Vec<_> = constraints
-        .into_iter()
-        .filter(|c| retained_constraints.contains(&(c as *const PubTypeConstraint)))
-        .collect();
+    constraints.retain(|c| retained_constraints.contains(&constraint_ptr(c)));
+    assert_eq!(constraints.len(), retained_constraints.len());
 
     // Normalize the type scheme
     let mut ty_scheme = TypeScheme {
@@ -423,10 +423,16 @@ fn partition_variant_constraints<'c>(
     (subst, others)
 }
 
+type PubTypeConstraintPtr = *const PubTypeConstraint;
+
+fn constraint_ptr(c: &PubTypeConstraint) -> PubTypeConstraintPtr {
+    c as *const PubTypeConstraint
+}
+
 struct ConstraintValidationOutput {
     quantifiers: Vec<TypeVar>,
-    related_constraints: HashSet<*const PubTypeConstraint>,
-    retained_constraints: HashSet<*const PubTypeConstraint>,
+    related_constraints: HashSet<PubTypeConstraintPtr>,
+    retained_constraints: HashSet<PubTypeConstraintPtr>,
     constraint_subst: TypeSubstitution,
 }
 
@@ -439,10 +445,7 @@ fn validate_and_cleanup_constraints(
     let unbound = node.all_unbound_ty_vars();
     let ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
     let constraints = select_constraints_only_these_ty_vars(constraints, &ty_vars);
-    let related_constraints = constraints
-        .iter()
-        .map(|c| *c as *const PubTypeConstraint)
-        .collect();
+    let related_constraints = constraints.iter().map(|c| constraint_ptr(c)).collect();
 
     // Find constraints that are not transitively accessible from the fn signature
     let sig_ty_vars = ty.inner_ty_vars();
@@ -472,10 +475,7 @@ fn validate_and_cleanup_constraints(
                 .map(|ty_var| (ty_var, Type::never())),
         )
         .collect();
-    let retained_constraints = constraints
-        .iter()
-        .map(|c| *c as *const PubTypeConstraint)
-        .collect();
+    let retained_constraints = constraints.iter().map(|c| constraint_ptr(c)).collect();
 
     Ok(ConstraintValidationOutput {
         quantifiers,
@@ -487,7 +487,7 @@ fn validate_and_cleanup_constraints(
 
 fn log_dropped_constraints_expr(
     all: &[PubTypeConstraint],
-    retained: &HashSet<*const PubTypeConstraint>,
+    retained: &HashSet<PubTypeConstraintPtr>,
     module_env: ModuleEnv,
 ) {
     if retained.len() == all.len() {
@@ -495,7 +495,10 @@ fn log_dropped_constraints_expr(
     }
     let dropped = all
         .iter()
-        .filter(|c| !retained.contains(&(*c as *const PubTypeConstraint)))
+        .filter(|c| {
+            let ptr = constraint_ptr(c);
+            !retained.contains(&ptr)
+        })
         .map(|c| c.format_with(&module_env));
     let dropped = iterable_to_string(dropped, " ∧ ");
     log::debug!("Dropped constraints in expr: {dropped}");
@@ -504,8 +507,8 @@ fn log_dropped_constraints_expr(
 fn log_dropped_constraints_module(
     ctx: Ustr,
     all: &[PubTypeConstraint],
-    related: &HashSet<*const PubTypeConstraint>,
-    retained: &HashSet<*const PubTypeConstraint>,
+    related: &HashSet<PubTypeConstraintPtr>,
+    retained: &HashSet<PubTypeConstraintPtr>,
     module_env: ModuleEnv,
 ) {
     if retained.len() == related.len() {
@@ -514,7 +517,7 @@ fn log_dropped_constraints_module(
     let dropped = all
         .iter()
         .filter(|c| {
-            let ptr = *c as *const PubTypeConstraint;
+            let ptr = constraint_ptr(c);
             related.contains(&ptr) && !retained.contains(&ptr)
         })
         .map(|c| c.format_with(&module_env));
