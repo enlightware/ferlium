@@ -152,7 +152,7 @@ impl TypeInference {
                         let store_projected_inner = N::new(
                             K::EnvStore(B::new(EnvStore {
                                 node: project_inner,
-                                ty: Type::unit(),
+                                ty: *inner_ty,
                                 name_span: *bind_var_span,
                             })),
                             Type::unit(),
