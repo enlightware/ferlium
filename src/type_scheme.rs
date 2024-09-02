@@ -618,14 +618,9 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                     f.write_str("{ ")?;
                     let mut first = true;
                     for (field, element_ty) in record {
-                        if first {
-                            first = false;
-                        } else {
-                            f.write_str(", ")?;
-                        }
-                        write!(f, "{}: {}", field, element_ty.format_with(env))?;
+                        write!(f, "{}: {}, ", field, element_ty.format_with(env))?;
                     }
-                    f.write_str(" }")?;
+                    f.write_str("… }")?;
                 }
                 Variant(variant) => {
                     for (tag, payload_ty) in variant {
