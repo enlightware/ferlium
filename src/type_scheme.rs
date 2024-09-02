@@ -545,7 +545,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
-        // Build aggregated constraints
+        // Build aggregated constraints.
         let mut aggregated = BTreeMap::new();
         for constraint in &self.constraints {
             use PubTypeConstraint::*;
@@ -591,7 +591,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                 }
             }
         }
-        // Format aggregated constraints
+        // Format aggregated constraints.
         let mut first_ty = true;
         for (ty, constraint) in aggregated {
             use AggregatedConstraint::*;

@@ -2,7 +2,6 @@
 
 ### Language features
 
-- Algebraic data types
 - Recursive modules
 - Type classes
 - Effects
@@ -25,13 +24,11 @@
 
 ### IDE features
 
+- Add patterns to the IDE grammar
 - Show location of execution error
 
 ### Next tasks
 
-- Add match for tagged unions
-- Add tests for tagged unions
-- Add better user facing constraints
 - Add {} block expression
 - Fix grammar with equal in lambdas
 
