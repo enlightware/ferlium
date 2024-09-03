@@ -90,7 +90,7 @@ const setText = (newText: string) => {
 
 const runCode = () => {
 	try {
-		return compiler.run();
+		return compiler.run_expr_to_html();
 	} catch (e) {
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		return `The compiler crashed, reload the page! Error: ${(e as any).toString()}`;
