@@ -3,6 +3,7 @@ install-deps:
 
 test:
 	RUST_LOG=painturscript=debug cargo nextest run
+	wasm-pack test --node --test simple --test complex --test algorithm
 
 repl:
 	RUST_BACKTRACE=1 RUST_LOG=painturscript=debug cargo run --example pscript

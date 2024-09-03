@@ -5,7 +5,11 @@ use test_log::test;
 use common::{fail_compilation, run, unit};
 use painturscript::value::Value;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn logic_and_comparison() {
     assert_eq!(run("1 < 2 and 2 < 3"), bool!(true));
     assert_eq!(run("1 < 2 and 2 > 3"), bool!(false));
@@ -42,6 +46,7 @@ fn logic_and_comparison() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lambdas_in_containers() {
     assert_eq!(run("(|| 1,).0()"), int!(1));
     assert_eq!(run("[|| 1][0]()"), int!(1));
@@ -54,6 +59,7 @@ fn lambdas_in_containers() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn exprs_in_match() {
     assert_eq!(
         run("match 0 { 0 => let a = 1; a, _ => let a = 2; 2 }"),
@@ -76,6 +82,7 @@ fn exprs_in_match() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn stuff_in_single_if() {
     assert_eq!(run("var a = 0; if true { a = a + 1}; a"), int!(1));
     assert_eq!(
@@ -85,6 +92,7 @@ fn stuff_in_single_if() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_and_let_polymorphism() {
     assert_eq!(
         run("let f = || []; var a = f(); array_append(a, 1); a[0]"),
@@ -101,6 +109,7 @@ fn array_and_let_polymorphism() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_and_lambda() {
     assert_eq!(
         run("var a = [1,2]; (|x| array_append(x, 3))(a); a"),
@@ -109,6 +118,7 @@ fn array_and_lambda() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_access_in_module_functions() {
     assert_eq!(run("fn p(a) { let x = a[0] }"), unit());
     assert_eq!(run("fn p(a) { let x = a[0]; x }"), unit());
@@ -116,6 +126,7 @@ fn array_access_in_module_functions() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_mutable_references() {
     assert_eq!(
         run("fn set_1(a) { a = 1 } fn call_set_1(a) { set_1(a) } var a = 0; call_set_1(a); a"),

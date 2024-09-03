@@ -5,7 +5,11 @@ use test_log::test;
 use common::run;
 use painturscript::value::Value;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn quicksort() {
     assert_eq!(
         run(r#"fn swap(a, i, j) {

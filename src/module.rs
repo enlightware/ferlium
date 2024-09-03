@@ -31,21 +31,21 @@ pub struct ModuleFunction {
 pub type FunctionsMap = HashMap<Ustr, ModuleFunction>;
 
 #[derive(Debug, Clone)]
-pub(crate) struct UseSome {
+pub struct UseSome {
     module: Ustr,
     symbols: Vec<Ustr>,
 }
 
 /// A use directive
 #[derive(Debug, Clone)]
-pub(crate) enum Use {
+pub enum Use {
     /// Use all symbols from a module
     All(Ustr),
     /// Use only some symbols from a module
     Some(UseSome),
 }
 
-pub(crate) type Uses = Vec<Use>;
+pub type Uses = Vec<Use>;
 
 /// A module is a collection of functions, type aliases and use statements.
 #[derive(Clone, Debug, Default)]

@@ -20,7 +20,7 @@ pub fn try_compile_and_run(src: &str) -> CompileRunResult {
     // Compile the source.
     let other_modules = new_std_module_env();
     let ModuleAndExpr { module, expr } =
-        compile(src, &other_modules).map_err(Error::Compilation)?;
+        compile(src, &other_modules, &[]).map_err(Error::Compilation)?;
 
     // Run the expression if any.
     if let Some(expr) = expr {

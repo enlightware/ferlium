@@ -3,7 +3,7 @@ use std::new_module_with_prelude;
 use emit_ir::{emit_expr, emit_module, CompiledExpr};
 use error::CompilationError;
 use format::FormatWith;
-use module::{FmtWithModuleEnv, Module, ModuleEnv, Modules};
+use module::{FmtWithModuleEnv, Module, ModuleEnv, Modules, Use};
 use parser::parse;
 
 mod assert;
@@ -31,6 +31,11 @@ mod type_inference;
 pub mod type_scheme;
 pub mod typing_env;
 pub mod value;
+
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+#[cfg(target_arch = "wasm32")]
+pub use web::Compiler;
 
 pub use lrpar::Span;
 use type_scheme::DisplayStyle;
@@ -141,8 +146,13 @@ impl ModuleAndExpr {
 
 /// Compile a source code, given some other modules, and return the compiled module and an expression (if any), or an error.
 /// All spans are in byte offsets.
-pub fn compile(src: &str, other_modules: &Modules) -> Result<ModuleAndExpr, CompilationError> {
-    let module = new_module_with_prelude();
+pub fn compile(
+    src: &str,
+    other_modules: &Modules,
+    extra_uses: &[Use],
+) -> Result<ModuleAndExpr, CompilationError> {
+    let mut module = new_module_with_prelude();
+    module.uses.extend(extra_uses.iter().cloned());
 
     // Parse the source code.
     log::debug!("Input: {src}");

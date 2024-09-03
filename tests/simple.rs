@@ -5,7 +5,11 @@ use test_log::test;
 use common::{fail_compilation, fail_run, run, unit};
 use painturscript::{error::RuntimeError, std::array::Array, value::Value};
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn whitespaces() {
     assert_eq!(run(""), unit());
     assert_eq!(run(" "), unit());
@@ -16,6 +20,7 @@ fn whitespaces() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn literals() {
     assert_eq!(run("42"), int!(42));
     assert_eq!(run("true"), bool!(true));
@@ -23,6 +28,7 @@ fn literals() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn equalities() {
     assert_eq!(run("42 == 42"), bool!(true));
     assert_eq!(run("41 == 42"), bool!(false));
@@ -59,6 +65,7 @@ fn equalities() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn local_variables() {
     assert_eq!(run("let a = 1 ; a"), int!(1));
     assert_eq!(run("var a = 1 ; a"), int!(1));
@@ -76,6 +83,7 @@ fn local_variables() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutability() {
     assert_eq!(run("var a = 1 ; a = 2; a"), int!(2));
     fail_compilation("let a = 1 ; a = 2; a").expect_must_be_mutable();
@@ -88,6 +96,7 @@ fn mutability() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn logic_operators() {
     assert_eq!(run("not true"), bool!(false));
     assert_eq!(run("not false"), bool!(true));
@@ -102,6 +111,7 @@ fn logic_operators() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn arithmetic_operators() {
     assert_eq!(run("1+2"), int!(3));
     assert_eq!(run("  1  + 2 "), int!(3));
@@ -144,6 +154,7 @@ fn arithmetic_operators() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn comparison_operators() {
     assert_eq!(run("1 < 2"), bool!(true));
     assert_eq!(run("1 <= 2"), bool!(true));
@@ -160,6 +171,7 @@ fn comparison_operators() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn expression_grouping() {
     assert_eq!(run("(1)"), int!(1));
     assert_eq!(run("((1))"), int!(1));
@@ -173,6 +185,7 @@ fn expression_grouping() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn if_expr() {
     assert_eq!(run("if 1 < 2 { 1 } else { 2 }"), int!(1));
     assert_eq!(run("if 1 <= 2 { 1 } else { 2 }"), int!(1));
@@ -189,6 +202,7 @@ fn if_expr() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_expr() {
     assert_eq!(run("match true { true => 0, _ => 1 }"), int!(0));
     assert_eq!(run("match false { true => 0, _ => 1 }"), int!(1));
@@ -213,6 +227,7 @@ fn match_expr() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn tuple_creation() {
     assert_eq!(run("()"), unit());
     assert_eq!(run("(1,)"), int_tuple!(1));
@@ -223,6 +238,7 @@ fn tuple_creation() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn tuple_projection() {
     assert_eq!(run("(1,).0"), int!(1));
     assert_eq!(run("(1,2).1"), int!(2));
@@ -246,6 +262,7 @@ fn tuple_projection() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn static_function_arity() {
     let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y }";
     assert_eq!(run(&format!("{text} a()")), int!(0));
@@ -260,6 +277,7 @@ fn static_function_arity() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn value_function_arity() {
     let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y }";
     assert_eq!(run(&format!("{text} (a,).0()")), int!(0));
@@ -278,6 +296,7 @@ fn value_function_arity() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lambda() {
     assert_eq!(run("let f = || 1; f()"), int!(1));
     assert_eq!(run("let f = |x| x; f(1)"), int!(1));
@@ -299,6 +318,7 @@ fn lambda() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn assignment() {
     assert_eq!(run("let a = 1; a"), int!(1));
     assert_eq!(run("var a = 1; a = 2"), unit());
@@ -316,6 +336,7 @@ fn assignment() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn for_loops() {
     assert_eq!(run("for i in 0..3 { () }"), unit());
     assert_eq!(run("var s = 0; for i in 1..4 { s = s + i }; s"), int!(6));
@@ -331,6 +352,7 @@ fn for_loops() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_functions() {
     assert_eq!(
         run(r#"fn add(x, y) {
@@ -359,6 +381,7 @@ fn first_class_functions() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn records() {
     assert_eq!(run("{a:1}.a"), int!(1));
     assert_eq!(run("{a:1, b:2}.a"), int!(1));
@@ -443,6 +466,7 @@ fn records() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variants() {
     let match_exhaustive = r#"fn s(x) { match x { None => "no", Some(x) => f"hi {x}" } }"#;
     assert_eq!(
@@ -472,16 +496,19 @@ fn variants() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn adt() {
     fail_compilation("fn f(x) { (x.0, x.a) }").expect_inconsistent_adt();
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutability_soundness() {
     fail_compilation("let f = |x| (x[0] = 1); let a = [1]; f(a)").expect_must_be_mutable();
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn borrow_checker() {
     let swap_fn = "fn swap(a, b) { let temp = b; b = a; a = temp }";
     assert_eq!(
@@ -529,6 +556,7 @@ fn borrow_checker() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn execution_errors() {
     use RuntimeError::*;
     assert_eq!(fail_run("1 / 0"), DivisionByZero);
@@ -578,6 +606,7 @@ fn execution_errors() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_creation() {
     assert_eq!(run("[]"), int_a![]);
     assert_eq!(run("[1]"), int_a![1]);
@@ -589,6 +618,7 @@ fn array_creation() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_index() {
     assert_eq!(run("[1][0]"), int!(1));
     assert_eq!(run("[1][-1]"), int!(1));
@@ -609,6 +639,7 @@ fn array_index() {
 // TODO: add array from iterator
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_append() {
     assert_eq!(run("var a = []; array_append(a, 1); a"), int_a![1]);
     assert_eq!(run("var a = [1]; array_append(a, 1); a"), int_a![1, 1]);
@@ -616,6 +647,7 @@ fn array_append() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_prepend() {
     assert_eq!(run("var a = []; array_prepend(a, 1); a"), int_a![1]);
     assert_eq!(run("var a = [1]; array_prepend(a, 1); a"), int_a![1, 1]);
@@ -623,6 +655,7 @@ fn array_prepend() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_len() {
     fail_compilation("let a = []; array_len(a)").expect_unbound_ty_var();
     assert_eq!(run("let a = [1]; array_len(a)"), int!(1));
@@ -632,6 +665,7 @@ fn array_len() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_concat() {
     assert_eq!(run("array_concat([], [])"), int_a![]);
     assert_eq!(run("array_concat([1], [])"), int_a![1]);
@@ -647,6 +681,7 @@ fn array_concat() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string() {
     assert_eq!(run(r#""""#), string!(""));
     assert_eq!(run(r#""hello world""#), string!("hello world"));
@@ -654,6 +689,7 @@ fn string() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_concat() {
     assert_eq!(run(r#"string_concat("", "")"#), string!(""));
     assert_eq!(
@@ -679,6 +715,7 @@ fn string_concat() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_push_str() {
     assert_eq!(run(r#"var s = ""; string_push_str(s, ""); s"#), string!(""));
     assert_eq!(
@@ -696,6 +733,7 @@ fn string_push_str() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_formatting() {
     assert_eq!(run(r#"f"hello world""#), string!("hello world"));
     assert_eq!(
@@ -713,6 +751,7 @@ fn string_formatting() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn to_string() {
     assert_eq!(run("to_string(true)"), string!("true"));
     assert_eq!(run("to_string(false)"), string!("false"));
@@ -724,6 +763,7 @@ fn to_string() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn modules() {
     assert_eq!(run("fn a(x) { x }"), unit());
     assert_eq!(run("fn a(x) { x } a(1)"), int!(1));
@@ -735,6 +775,7 @@ fn modules() {
 }
 
 #[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_functions() {
     assert_eq!(
         run("fn fact(x) { if x > 1 { x * fact(x-1) } else { 1 } } fact(5)"),
