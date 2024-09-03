@@ -45,7 +45,9 @@ impl CharIndexLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
     fn test_char_index_lookup() {
         let s = "éaé";
         let lookup = CharIndexLookup::new(s);
