@@ -39,6 +39,7 @@ pub use web::Compiler;
 
 pub use lrpar::Span;
 use type_scheme::DisplayStyle;
+pub use ustr::{ustr, Ustr};
 
 /// A compiled module and an expression (if any).
 #[derive(Default, Debug)]
