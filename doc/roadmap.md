@@ -3,9 +3,12 @@
 ### Language features
 
 - Recursive modules
+- Split compilation of moudles by analysing the dependency graph
 - Type classes
+- Recursive types inference
 - Effects
 - Co-routine/async
+- Recursive types
 - Generalised match following Maranget 2008
 - User-defined closures
 - Object-oriented style function calls

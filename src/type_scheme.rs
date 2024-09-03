@@ -391,6 +391,7 @@ pub type VariantConstraint = BTreeMap<Ustr, Type>;
 /// Aggregated TupleAtIndexIs constraints to be use for checking and display.
 pub type TupleConstraint = BTreeMap<usize, Type>;
 
+/// Aggregated constraint for display.
 #[derive(EnumAsInner)]
 enum AggregatedConstraint {
     Tuple(TupleConstraint),
@@ -611,12 +612,12 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                             last_index += 1;
                         }
                         write!(f, "{}, ", element_ty.format_with(env))?;
+                        last_index += 1;
                     }
                     f.write_str("…)")?;
                 }
                 Record(record) => {
                     f.write_str("{ ")?;
-                    let mut first = true;
                     for (field, element_ty) in record {
                         write!(f, "{}: {}, ", field, element_ty.format_with(env))?;
                     }
