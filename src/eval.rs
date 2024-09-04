@@ -25,6 +25,10 @@ pub enum ValOrMut {
 }
 
 impl ValOrMut {
+    pub fn from_primitive(value: impl NativeValue) -> Self {
+        ValOrMut::Val(Value::native(value))
+    }
+
     pub fn into_primitive<T: 'static>(self) -> Option<T> {
         match self {
             ValOrMut::Val(val) => val.into_primitive_ty::<T>(),

@@ -1,7 +1,16 @@
+use std::fmt::{self, Display};
+
 use crate::{
-    compile, module::Uses, std::new_std_module_env, CompilationError, DisplayStyle, Module,
-    ModuleAndExpr, ModuleEnv, Modules, Span,
+    compile,
+    eval::{EvalCtx, ValOrMut},
+    module::{FmtWithModuleEnv, Uses},
+    r#type::{FnType, Type},
+    std::new_std_module_env,
+    std::string::String as Str,
+    value::NativeValue,
+    CompilationError, DisplayStyle, Module, ModuleAndExpr, ModuleEnv, Modules, Span,
 };
+use ustr::ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -35,6 +44,12 @@ impl ErrorData {
             to: f(self.to),
             text: self.text,
         }
+    }
+}
+
+impl Display for ErrorData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.text)
     }
 }
 
@@ -287,6 +302,79 @@ impl Compiler {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(skip))]
+    pub fn run_fn_unit_o<O: NativeValue + Clone>(&self, name: &str) -> Result<O, String> {
+        if let Some(func) = self
+            .user_module
+            .module
+            .get_function(ustr(name), &self.modules)
+        {
+            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+            let o_ty = Type::primitive::<O>();
+            let o_ty_fmt = o_ty.format_with(&module_env);
+            if !func.ty_scheme.is_just_type() || func.ty_scheme.ty != FnType::new_by_val(&[], o_ty)
+            {
+                Err(format!(
+                    "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
+                    o_ty_fmt,
+                    func.ty_scheme.display_rust_style(&module_env)
+                ))
+            } else {
+                let mut ctx = EvalCtx::new();
+                let ret = func
+                    .code
+                    .borrow()
+                    .call(vec![], &mut ctx)
+                    .map_err(|err| format!("Execution error: {err}"))?;
+                ret.into_primitive_ty::<O>()
+                    .ok_or(format!("Function did not return an {}", o_ty_fmt))
+            }
+        } else {
+            Err(format!("Function {name} not found"))
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(skip))]
+    pub fn run_fn_i_o<I: NativeValue + Clone, O: NativeValue + Clone>(
+        &self,
+        name: &str,
+        input: I,
+    ) -> Result<O, String> {
+        if let Some(func) = self
+            .user_module
+            .module
+            .get_function(ustr(name), &self.modules)
+        {
+            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+            let i_ty = Type::primitive::<I>();
+            let i_ty_fmt = i_ty.format_with(&module_env);
+            let o_ty = Type::primitive::<O>();
+            let o_ty_fmt = o_ty.format_with(&module_env);
+            if !func.ty_scheme.is_just_type()
+                || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], o_ty)
+            {
+                let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+                Err(format!(
+                    "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
+                    i_ty_fmt,
+                    o_ty_fmt,
+                    func.ty_scheme.display_rust_style(&module_env)
+                ))
+            } else {
+                let mut ctx = EvalCtx::new();
+                let ret = func
+                    .code
+                    .borrow()
+                    .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
+                    .map_err(|err| format!("Execution error: {err}"))?;
+                ret.into_primitive_ty::<O>()
+                    .ok_or(format!("Function did not return an {}", o_ty_fmt))
+            }
+        } else {
+            Err(format!("Function {name} not found"))
+        }
+    }
+
     pub fn run_expr_to_html(&self) -> String {
         if let Some(expr) = &self.user_module.expr {
             match expr.expr.eval() {
@@ -329,5 +417,51 @@ impl Compiler {
         self.modules.insert(name.into(), module);
         self.extra_uses.extend(extra_uses);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use crate::containers::iterable_to_string;
+
+    use super::*;
+
+    fn build(code: &str) -> Compiler {
+        let mut compiler = Compiler::new();
+        let errors = compiler.compile(code);
+        if let Some(errors) = errors {
+            panic!("Compilation errors: {}", iterable_to_string(&errors, ", "));
+        }
+        compiler
+    }
+
+    #[test]
+    fn run_fn_unit_int() {
+        let compiler = build("fn main() { 42 }");
+        let result = compiler
+            .run_fn_unit_o::<isize>("main")
+            .expect("Execution failed");
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn run_fn_int_int() {
+        let compiler = build("fn main(x) { x+1 }");
+        let result = compiler
+            .run_fn_i_o::<_, isize>("main", 1)
+            .expect("Execution failed");
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn run_fn_string_int() {
+        let compiler = build("fn main(x) { string_len(x) }");
+        let input = Str::from_str("hi world").unwrap();
+        let result = compiler
+            .run_fn_i_o::<_, isize>("main", input)
+            .expect("Execution failed");
+        assert_eq!(result, 8);
     }
 }

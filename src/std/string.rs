@@ -3,7 +3,7 @@ use std::{fmt, fmt::Display, rc::Rc, str::FromStr};
 use ustr::ustr;
 
 use crate::{
-    function::{BinaryNativeFnMNI, BinaryNativeFnNNI, UnaryNativeFnVI},
+    function::{BinaryNativeFnMNI, BinaryNativeFnNNI, UnaryNativeFnNI, UnaryNativeFnVI},
     module::Module,
     r#type::Type,
     value::{NativeDisplay, Value},
@@ -36,6 +36,14 @@ impl String {
         let mut new = l.clone();
         new.push_str(r.clone());
         new
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -94,5 +102,13 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNI::description_with_default_ty(|a: String, b: String| {
             String::concat(&a, &b)
         }),
+    );
+    to.functions.insert(
+        ustr("string_len"),
+        UnaryNativeFnNI::description_with_default_ty(|a: String| a.len() as isize),
+    );
+    to.functions.insert(
+        ustr("string_is_empty"),
+        UnaryNativeFnNI::description_with_default_ty(|a: String| a.is_empty() as isize),
     );
 }
