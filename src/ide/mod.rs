@@ -2,22 +2,23 @@ use crate::{
     compile, module::Uses, std::new_std_module_env, CompilationError, DisplayStyle, Module,
     ModuleAndExpr, ModuleEnv, Modules, Span,
 };
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 mod char_index_lookup;
 use char_index_lookup::CharIndexLookup;
 
 /// An error-data structure to be used in IDEs
-#[wasm_bindgen(getter_with_clone)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 pub struct ErrorData {
     pub from: usize,
     pub to: usize,
     pub text: String,
 }
 
-#[wasm_bindgen]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl ErrorData {
-    #[wasm_bindgen(constructor)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new(from: usize, to: usize, text: String) -> Self {
         Self { from, to, text }
     }
@@ -233,22 +234,22 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
 }
 
 /// An annotation data structer to be used in IDEs
-#[wasm_bindgen(getter_with_clone)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 pub struct AnnotationData {
     pub pos: usize,
     pub hint: String,
 }
 
-#[wasm_bindgen]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl AnnotationData {
-    #[wasm_bindgen(constructor)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new(pos: usize, hint: String) -> Self {
         Self { pos, hint }
     }
 }
 
 #[derive(Default)]
-#[wasm_bindgen]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Compiler {
     modules: Modules,
     extra_uses: Uses,
@@ -257,9 +258,9 @@ pub struct Compiler {
 }
 
 /// The compiler to be used in the web IDE, wasm-available part
-#[wasm_bindgen]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl Compiler {
-    #[wasm_bindgen(constructor)]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new() -> Self {
         Self {
             modules: new_std_module_env(),

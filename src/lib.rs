@@ -32,10 +32,8 @@ pub mod type_scheme;
 pub mod typing_env;
 pub mod value;
 
-#[cfg(target_arch = "wasm32")]
-pub mod web;
-#[cfg(target_arch = "wasm32")]
-pub use web::Compiler;
+pub mod ide;
+pub use ide::Compiler;
 
 pub use lrpar::Span;
 use type_scheme::DisplayStyle;
