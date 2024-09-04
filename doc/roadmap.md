@@ -3,7 +3,7 @@
 ### Language features
 
 - Recursive modules
-- Split compilation of moudles by analysing the dependency graph
+- Split compilation of modules by analysing the dependency graph
 - Type classes
 - Recursive types inference
 - Effects

@@ -11,6 +11,7 @@ use ustr::Ustr;
 
 use crate::{
     dictionary_passing::{instantiate_dictionaries_req, DictionaryReq},
+    format::FormatWith,
     ir::FnInstData,
     module::{FmtWithModuleEnv, FormatWithModuleEnv, ModuleEnv},
     r#type::{Type, TypeKind, TypeLike, TypeSubstitution, TypeVar},
@@ -663,6 +664,27 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         })
     }
 
+    pub(crate) fn format_quantifiers_rust_style(
+        &self,
+        f: &mut std::fmt::Formatter,
+    ) -> std::fmt::Result {
+        write!(f, "<")?;
+        for (i, quantifier) in self.quantifiers.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", quantifier)?;
+        }
+        write!(f, ">")
+    }
+
+    pub(crate) fn display_quantifiers_rust_style(&self) -> FormatQuantifiersRustStyle<Self> {
+        FormatQuantifiersRustStyle(FormatWith {
+            value: self,
+            data: &(),
+        })
+    }
+
     pub(crate) fn format_constraints_rust_style(
         &self,
         f: &mut std::fmt::Formatter,
@@ -751,6 +773,14 @@ impl<'m, Ty: TypeLike + FmtWithModuleEnv> std::fmt::Display
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.value.format_math_style(f, self.0.data)
+    }
+}
+
+pub(crate) struct FormatQuantifiersRustStyle<'a, T>(FormatWith<'a, T, ()>);
+
+impl<'m, Ty: TypeLike> std::fmt::Display for FormatQuantifiersRustStyle<'m, TypeScheme<Ty>> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.value.format_quantifiers_rust_style(f)
     }
 }
 

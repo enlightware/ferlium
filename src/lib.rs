@@ -76,16 +76,26 @@ impl ModuleAndExpr {
         // Function signatures.
         for function in self.module.functions.values() {
             if let Some(spans) = &function.spans {
-                if style == Mathematical && !function.ty_scheme.is_just_type() {
-                    annotations.push((
-                        spans.span.start(),
-                        format!(
-                            "{} ",
-                            function
-                                .ty_scheme
-                                .display_quantifiers_and_constraints_math_style(&env)
-                        ),
-                    ));
+                if !function.ty_scheme.is_just_type() {
+                    match style {
+                        Mathematical => {
+                            annotations.push((
+                                spans.span.start(),
+                                format!(
+                                    "{} ",
+                                    function
+                                        .ty_scheme
+                                        .display_quantifiers_and_constraints_math_style(&env)
+                                ),
+                            ));
+                        }
+                        Rust => {
+                            annotations.push((
+                                spans.name.end(),
+                                format!("{}", function.ty_scheme.display_quantifiers_rust_style()),
+                            ));
+                        }
+                    }
                 }
                 for (span, arg_ty) in spans.args.iter().zip(&function.ty_scheme.ty.args) {
                     annotations.push((span.end(), format!(": {}", arg_ty.format_with(&env))));
