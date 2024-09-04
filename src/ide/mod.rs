@@ -302,6 +302,19 @@ impl Compiler {
         }
     }
 
+    pub fn fn_signature(&self, name: &str) -> Option<String> {
+        if let Some(func) = self
+            .user_module
+            .module
+            .get_function(ustr(name), &self.modules)
+        {
+            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+            Some(format!("{}", func.ty_scheme.display_rust_style(&module_env)))
+        } else {
+            None
+        }
+    }
+
     pub fn run_expr_to_html(&self) -> String {
         if let Some(expr) = &self.user_module.expr {
             match expr.expr.eval() {
@@ -461,5 +474,12 @@ mod tests {
             .run_fn_i_o::<_, isize>("main", input)
             .expect("Execution failed");
         assert_eq!(result, 8);
+    }
+
+    #[test]
+    fn fn_signature() {
+        let compiler = build("fn main(x) { string_len(x) }");
+        let signature = compiler.fn_signature("main").unwrap();
+        assert_eq!(signature, "(string) → int");
     }
 }
