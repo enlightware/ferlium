@@ -302,79 +302,6 @@ impl Compiler {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(skip))]
-    pub fn run_fn_unit_o<O: NativeValue + Clone>(&self, name: &str) -> Result<O, String> {
-        if let Some(func) = self
-            .user_module
-            .module
-            .get_function(ustr(name), &self.modules)
-        {
-            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
-            let o_ty = Type::primitive::<O>();
-            let o_ty_fmt = o_ty.format_with(&module_env);
-            if !func.ty_scheme.is_just_type() || func.ty_scheme.ty != FnType::new_by_val(&[], o_ty)
-            {
-                Err(format!(
-                    "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
-                    o_ty_fmt,
-                    func.ty_scheme.display_rust_style(&module_env)
-                ))
-            } else {
-                let mut ctx = EvalCtx::new();
-                let ret = func
-                    .code
-                    .borrow()
-                    .call(vec![], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?;
-                ret.into_primitive_ty::<O>()
-                    .ok_or(format!("Function did not return an {}", o_ty_fmt))
-            }
-        } else {
-            Err(format!("Function {name} not found"))
-        }
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(skip))]
-    pub fn run_fn_i_o<I: NativeValue + Clone, O: NativeValue + Clone>(
-        &self,
-        name: &str,
-        input: I,
-    ) -> Result<O, String> {
-        if let Some(func) = self
-            .user_module
-            .module
-            .get_function(ustr(name), &self.modules)
-        {
-            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
-            let i_ty = Type::primitive::<I>();
-            let i_ty_fmt = i_ty.format_with(&module_env);
-            let o_ty = Type::primitive::<O>();
-            let o_ty_fmt = o_ty.format_with(&module_env);
-            if !func.ty_scheme.is_just_type()
-                || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], o_ty)
-            {
-                let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
-                Err(format!(
-                    "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
-                    i_ty_fmt,
-                    o_ty_fmt,
-                    func.ty_scheme.display_rust_style(&module_env)
-                ))
-            } else {
-                let mut ctx = EvalCtx::new();
-                let ret = func
-                    .code
-                    .borrow()
-                    .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?;
-                ret.into_primitive_ty::<O>()
-                    .ok_or(format!("Function did not return an {}", o_ty_fmt))
-            }
-        } else {
-            Err(format!("Function {name} not found"))
-        }
-    }
-
     pub fn run_expr_to_html(&self) -> String {
         if let Some(expr) = &self.user_module.expr {
             match expr.expr.eval() {
@@ -417,6 +344,77 @@ impl Compiler {
         self.modules.insert(name.into(), module);
         self.extra_uses.extend(extra_uses);
         self
+    }
+
+    pub fn run_fn_unit_o<O: NativeValue + Clone>(&self, name: &str) -> Result<O, String> {
+        if let Some(func) = self
+            .user_module
+            .module
+            .get_function(ustr(name), &self.modules)
+        {
+            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+            let o_ty = Type::primitive::<O>();
+            let o_ty_fmt = o_ty.format_with(&module_env);
+            if !func.ty_scheme.is_just_type() || func.ty_scheme.ty != FnType::new_by_val(&[], o_ty)
+            {
+                Err(format!(
+                    "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
+                    o_ty_fmt,
+                    func.ty_scheme.display_rust_style(&module_env)
+                ))
+            } else {
+                let mut ctx = EvalCtx::new();
+                let ret = func
+                    .code
+                    .borrow()
+                    .call(vec![], &mut ctx)
+                    .map_err(|err| format!("Execution error: {err}"))?;
+                ret.into_primitive_ty::<O>()
+                    .ok_or(format!("Function did not return an {}", o_ty_fmt))
+            }
+        } else {
+            Err(format!("Function {name} not found"))
+        }
+    }
+
+    pub fn run_fn_i_o<I: NativeValue + Clone, O: NativeValue + Clone>(
+        &self,
+        name: &str,
+        input: I,
+    ) -> Result<O, String> {
+        if let Some(func) = self
+            .user_module
+            .module
+            .get_function(ustr(name), &self.modules)
+        {
+            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+            let i_ty = Type::primitive::<I>();
+            let i_ty_fmt = i_ty.format_with(&module_env);
+            let o_ty = Type::primitive::<O>();
+            let o_ty_fmt = o_ty.format_with(&module_env);
+            if !func.ty_scheme.is_just_type()
+                || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], o_ty)
+            {
+                let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+                Err(format!(
+                    "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
+                    i_ty_fmt,
+                    o_ty_fmt,
+                    func.ty_scheme.display_rust_style(&module_env)
+                ))
+            } else {
+                let mut ctx = EvalCtx::new();
+                let ret = func
+                    .code
+                    .borrow()
+                    .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
+                    .map_err(|err| format!("Execution error: {err}"))?;
+                ret.into_primitive_ty::<O>()
+                    .ok_or(format!("Function did not return an {}", o_ty_fmt))
+            }
+        } else {
+            Err(format!("Function {name} not found"))
+        }
     }
 }
 
