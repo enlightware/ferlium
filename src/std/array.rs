@@ -177,6 +177,13 @@ impl Array {
             TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[array0, map_fn], array1));
         BinaryNativeFnNVI::description_with_ty_scheme(Array::map, ty_scheme)
     }
+
+    pub fn iter(&self) -> ArrayIterator {
+        ArrayIterator {
+            array: &self.0,
+            index: 0,
+        }
+    }
 }
 
 impl Default for Array {
@@ -190,6 +197,25 @@ impl NativeDisplay for Array {
         write!(f, "[")?;
         write_with_separator(self.0.iter(), ", ", f)?;
         write!(f, "]")
+    }
+}
+
+pub struct ArrayIterator<'a> {
+    array: &'a VecDeque<Value>,
+    index: usize,
+}
+
+impl<'a> Iterator for ArrayIterator<'a> {
+    type Item = &'a Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.array.len() {
+            let item = &self.array[self.index];
+            self.index += 1;
+            Some(item)
+        } else {
+            None
+        }
     }
 }
 
