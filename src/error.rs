@@ -668,6 +668,7 @@ impl CompilationError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeError {
+    Aborted,
     DivisionByZero,
     RemainderByZero,
     ArrayAccessOutOfBounds { index: isize, len: usize },
@@ -679,6 +680,7 @@ impl Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use RuntimeError::*;
         match self {
+            Aborted => write!(f, "Aborted"),
             DivisionByZero => write!(f, "Division by zero"),
             RemainderByZero => write!(f, "Remainder by zero"),
             ArrayAccessOutOfBounds { index, len } => {

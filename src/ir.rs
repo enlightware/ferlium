@@ -130,7 +130,7 @@ pub struct Assignment {
 #[derive(Debug, Clone)]
 pub struct Case {
     pub value: Node,
-    pub alternatives: SVec1<(Value, Node)>,
+    pub alternatives: Vec<(Value, Node)>,
     pub default: Node,
 }
 

@@ -132,7 +132,7 @@ impl TypeInference {
                         ));
                     }
 
-                    // Typecheck the alternative and generate its code
+                    // Type check the alternative and generate its code
                     let mut node = if let Some(return_ty) = return_ty {
                         self.check_expr(env, expr, return_ty, MutType::constant(), return_ty_span)?
                     } else {
@@ -167,7 +167,7 @@ impl TypeInference {
                     env.locals.truncate(alt_start_env_size);
                     Result::<_, InternalCompilationError>::Ok((tag_value, node))
                 })
-                .collect::<Result<SVec1<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()?;
             let return_ty = return_ty.unwrap();
 
             // Do we have a default?
@@ -208,9 +208,11 @@ impl TypeInference {
             let node = K::Block(B::new(SVec2::from_vec(vec![store_variant_node, case_node])));
             (node, return_ty, MutType::constant())
         } else {
-            // Litteral patterns, convert optional default to mandatory one
+            // Literal patterns, convert optional default to mandatory one
+            let return_ty = self.fresh_type_var_ty();
             let (node, return_ty) = if let Some(default) = default {
-                let (default_node, return_ty, _) = self.infer_expr(env, default)?;
+                let default =
+                    self.check_expr(env, default, return_ty, MutType::constant(), expr.span)?;
                 let alternatives = self.check_literal_patterns(
                     env,
                     alternatives,
@@ -218,34 +220,32 @@ impl TypeInference {
                     pattern_ty,
                     cond_expr.span,
                     return_ty,
-                    default.span,
+                    expr.span,
                 )?;
                 (
                     K::Case(B::new(ir::Case {
                         value: condition_node,
                         alternatives,
-                        default: default_node,
+                        default,
                     })),
                     return_ty,
                 )
             } else {
-                let default_expr = &alternatives.last().unwrap().1;
-                let (default_node, return_ty, _) = self.infer_expr(env, default_expr)?;
-                let other_exprs = &alternatives[0..alternatives.len() - 1];
-                let alternatives = self.check_literal_patterns(
+                let mut alternatives: Vec<_> = self.check_literal_patterns(
                     env,
-                    other_exprs,
+                    alternatives,
                     first_alternative_span,
                     pattern_ty,
                     cond_expr.span,
                     return_ty,
-                    default_expr.span,
+                    expr.span,
                 )?;
+                let default = alternatives.pop().unwrap().1;
                 (
                     K::Case(B::new(ir::Case {
                         value: condition_node,
                         alternatives,
-                        default: default_node,
+                        default,
                     })),
                     return_ty,
                 )

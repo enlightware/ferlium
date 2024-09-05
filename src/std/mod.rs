@@ -6,6 +6,7 @@ use crate::{
 use ustr::ustr;
 
 pub mod array;
+pub mod flow;
 pub mod io;
 pub mod iterator;
 pub mod logic;
@@ -18,6 +19,7 @@ pub mod string;
 pub fn std_module() -> Module {
     let mut module = Module::default();
     module.types.set(ustr("()"), Type::unit());
+    flow::add_to_module(&mut module);
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);
     math::add_to_module(&mut module);

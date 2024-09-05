@@ -311,6 +311,14 @@ impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<
         NullaryNativeFn(f, PhantomData)
     }
 
+    pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
+        ModuleFunction {
+            ty_scheme,
+            code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
+            spans: None,
+        }
+    }
+
     pub fn description(f: F) -> ModuleFunction {
         let o_ty = Type::primitive::<O::NativeTy>();
         ModuleFunction {
@@ -342,6 +350,7 @@ where
 }
 
 pub type NullaryNativeFnI<O, F> = NullaryNativeFn<Plain<O>, F>;
+pub type NullaryNativeFnF<O, F> = NullaryNativeFn<Fallible<O>, F>;
 
 // Unary
 

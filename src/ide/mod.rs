@@ -309,7 +309,10 @@ impl Compiler {
             .get_function(ustr(name), &self.modules)
         {
             let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
-            Some(format!("{}", func.ty_scheme.display_rust_style(&module_env)))
+            Some(format!(
+                "{}",
+                func.ty_scheme.display_rust_style(&module_env)
+            ))
         } else {
             None
         }

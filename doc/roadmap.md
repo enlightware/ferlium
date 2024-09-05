@@ -32,6 +32,8 @@
 
 ### Next tasks
 
+- Renamed ty var to latin letters
+- Tuple expansion in match
 - Add {} block expression
 - Fix grammar with equal in lambdas
 

@@ -1078,6 +1078,8 @@ impl UnifiedTypeInference {
         let exp_data = { exp_ty.data().clone() };
         use TypeKind::*;
         match (cur_data, exp_data) {
+            (Never, _) => Ok(()),
+            (_, Never) => Ok(()),
             (Variable(cur), Variable(exp)) => self
                 .ty_unification_table
                 .unify_var_var(cur, exp)
