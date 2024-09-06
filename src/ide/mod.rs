@@ -6,7 +6,7 @@ use crate::{
     module::{FmtWithModuleEnv, ModuleFunction, Uses},
     r#type::{FnType, Type},
     std::{new_std_module_env, string::String as Str},
-    value::NativeValue,
+    value::{NativeValue, Value},
     CompilationError, DisplayStyle, Module, ModuleAndExpr, ModuleEnv, Modules, Span,
 };
 use ustr::ustr;
@@ -417,8 +417,80 @@ impl Compiler {
                     .borrow()
                     .call(vec![], &mut ctx)
                     .map_err(|err| format!("Execution error: {err}"))?;
-                ret.into_primitive_ty::<O>()
-                    .ok_or(format!("Function did not return an {}", o_ty_fmt))
+                Ok(ret.into_primitive_ty::<O>().unwrap())
+            }
+        })
+    }
+
+    pub fn run_fn_unit_tuple<OA: NativeValue + Clone, OB: NativeValue + Clone>(
+        &self,
+        name: &str,
+    ) -> Result<(OA, OB), String> {
+        self.run_fn(name, |func, module_env| {
+            let oa_ty = Type::primitive::<OA>();
+            let ob_ty = Type::primitive::<OB>();
+            let o_ty = Type::tuple(vec![oa_ty, ob_ty]);
+            let o_ty_fmt = o_ty.format_with(module_env);
+            if !func.ty_scheme.is_just_type() || func.ty_scheme.ty != FnType::new_by_val(&[], o_ty)
+            {
+                Err(format!(
+                    "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
+                    o_ty_fmt,
+                    func.ty_scheme.display_rust_style(module_env)
+                ))
+            } else {
+                let mut ctx = EvalCtx::new();
+                let ret = func
+                    .code
+                    .borrow()
+                    .call(vec![], &mut ctx)
+                    .map_err(|err| format!("Execution error: {err}"))?;
+                let ret_tuple = ret.into_tuple().unwrap();
+                let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
+                let oa = oa.into_primitive_ty::<OA>().unwrap();
+                let ob = ob.into_primitive_ty::<OB>().unwrap();
+                Ok((oa, ob))
+            }
+        })
+    }
+
+    pub fn run_fn_i_tuple<
+        I: NativeValue + Clone,
+        OA: NativeValue + Clone,
+        OB: NativeValue + Clone,
+    >(
+        &self,
+        name: &str,
+        input: I,
+    ) -> Result<(OA, OB), String> {
+        self.run_fn(name, |func, module_env| {
+            let i_ty = Type::primitive::<I>();
+            let i_ty_fmt = i_ty.format_with(module_env);
+            let oa_ty = Type::primitive::<OA>();
+            let ob_ty = Type::primitive::<OB>();
+            let o_ty = Type::tuple(vec![oa_ty, ob_ty]);
+            let o_ty_fmt = o_ty.format_with(module_env);
+            if !func.ty_scheme.is_just_type()
+                || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], o_ty)
+            {
+                Err(format!(
+                    "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
+                    i_ty_fmt,
+                    o_ty_fmt,
+                    func.ty_scheme.display_rust_style(module_env)
+                ))
+            } else {
+                let mut ctx = EvalCtx::new();
+                let ret = func
+                    .code
+                    .borrow()
+                    .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
+                    .map_err(|err| format!("Execution error: {err}"))?;
+                let ret_tuple = ret.into_tuple().unwrap();
+                let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
+                let oa = oa.into_primitive_ty::<OA>().unwrap();
+                let ob = ob.into_primitive_ty::<OB>().unwrap();
+                Ok((oa, ob))
             }
         })
     }
@@ -477,8 +549,7 @@ impl Compiler {
                     .borrow()
                     .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
                     .map_err(|err| format!("Execution error: {err}"))?;
-                ret.into_primitive_ty::<O>()
-                    .ok_or(format!("Function did not return an {}", o_ty_fmt))
+                Ok(ret.into_primitive_ty::<O>().unwrap())
             }
         })
     }
@@ -541,6 +612,24 @@ mod tests {
             .run_fn_i_o::<_, isize>("main", input)
             .expect("Execution failed");
         assert_eq!(result, 8);
+    }
+
+    #[test]
+    fn run_fn_unit_tuple() {
+        let compiler = build("fn main() { (true, 43) }");
+        let result = compiler
+            .run_fn_unit_tuple::<bool, isize>("main")
+            .expect("Execution failed");
+        assert_eq!(result, (true, 43));
+    }
+
+    #[test]
+    fn run_fn_int_tuple() {
+        let compiler = build("fn main(x) { (true, x+1) }");
+        let result = compiler
+            .run_fn_i_tuple::<isize, bool, isize>("main", 42)
+            .expect("Execution failed");
+        assert_eq!(result, (true, 43));
     }
 
     #[test]
