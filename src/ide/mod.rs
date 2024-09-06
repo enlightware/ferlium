@@ -3,10 +3,9 @@ use std::fmt::{self, Display};
 use crate::{
     compile,
     eval::{EvalCtx, ValOrMut},
-    module::{FmtWithModuleEnv, Uses},
+    module::{FmtWithModuleEnv, ModuleFunction, Uses},
     r#type::{FnType, Type},
-    std::new_std_module_env,
-    std::string::String as Str,
+    std::{new_std_module_env, string::String as Str},
     value::NativeValue,
     CompilationError, DisplayStyle, Module, ModuleAndExpr, ModuleEnv, Modules, Span,
 };
@@ -362,21 +361,54 @@ impl Compiler {
         self
     }
 
-    pub fn run_fn_unit_o<O: NativeValue + Clone>(&self, name: &str) -> Result<O, String> {
+    fn run_fn<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&ModuleFunction, &ModuleEnv<'_>) -> Result<R, String>,
+    ) -> Result<R, String> {
         if let Some(func) = self
             .user_module
             .module
             .get_function(ustr(name), &self.modules)
         {
             let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+            f(func, &module_env)
+        } else {
+            Err(format!("Function {name} not found"))
+        }
+    }
+
+    pub fn run_fn_unit_unit(&self, name: &str) -> Result<(), String> {
+        self.run_fn(name, |func, module_env| {
+            if !func.ty_scheme.is_just_type()
+                || func.ty_scheme.ty != FnType::new_by_val(&[], Type::unit())
+            {
+                Err(format!(
+                    "Function {name} does not have type \"() -> ()\", it has \"{}\" instead",
+                    func.ty_scheme.display_rust_style(module_env)
+                ))
+            } else {
+                let mut ctx = EvalCtx::new();
+                let _ret = func
+                    .code
+                    .borrow()
+                    .call(vec![], &mut ctx)
+                    .map_err(|err| format!("Execution error: {err}"))?;
+                Ok(())
+            }
+        })
+    }
+
+    pub fn run_fn_unit_o<O: NativeValue + Clone>(&self, name: &str) -> Result<O, String> {
+        self.run_fn(name, |func, module_env| {
             let o_ty = Type::primitive::<O>();
-            let o_ty_fmt = o_ty.format_with(&module_env);
+            let o_ty_fmt = o_ty.format_with(module_env);
             if !func.ty_scheme.is_just_type() || func.ty_scheme.ty != FnType::new_by_val(&[], o_ty)
             {
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
                     o_ty_fmt,
-                    func.ty_scheme.display_rust_style(&module_env)
+                    func.ty_scheme.display_rust_style(module_env)
                 ))
             } else {
                 let mut ctx = EvalCtx::new();
@@ -388,9 +420,35 @@ impl Compiler {
                 ret.into_primitive_ty::<O>()
                     .ok_or(format!("Function did not return an {}", o_ty_fmt))
             }
-        } else {
-            Err(format!("Function {name} not found"))
-        }
+        })
+    }
+
+    pub fn run_fn_i_unit<I: NativeValue + Clone>(
+        &self,
+        name: &str,
+        input: I,
+    ) -> Result<(), String> {
+        self.run_fn(name, |func, module_env| {
+            let i_ty = Type::primitive::<I>();
+            let i_ty_fmt = i_ty.format_with(module_env);
+            if !func.ty_scheme.is_just_type()
+                || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], Type::unit())
+            {
+                Err(format!(
+                    "Function {name} does not have type \"({}) -> ()\", it has \"{}\" instead",
+                    i_ty_fmt,
+                    func.ty_scheme.display_rust_style(module_env)
+                ))
+            } else {
+                let mut ctx = EvalCtx::new();
+                let _ret = func
+                    .code
+                    .borrow()
+                    .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
+                    .map_err(|err| format!("Execution error: {err}"))?;
+                Ok(())
+            }
+        })
     }
 
     pub fn run_fn_i_o<I: NativeValue + Clone, O: NativeValue + Clone>(
@@ -398,25 +456,19 @@ impl Compiler {
         name: &str,
         input: I,
     ) -> Result<O, String> {
-        if let Some(func) = self
-            .user_module
-            .module
-            .get_function(ustr(name), &self.modules)
-        {
-            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+        self.run_fn(name, |func, module_env| {
             let i_ty = Type::primitive::<I>();
-            let i_ty_fmt = i_ty.format_with(&module_env);
+            let i_ty_fmt = i_ty.format_with(module_env);
             let o_ty = Type::primitive::<O>();
-            let o_ty_fmt = o_ty.format_with(&module_env);
+            let o_ty_fmt = o_ty.format_with(module_env);
             if !func.ty_scheme.is_just_type()
                 || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], o_ty)
             {
-                let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
                 Err(format!(
                     "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
                     i_ty_fmt,
                     o_ty_fmt,
-                    func.ty_scheme.display_rust_style(&module_env)
+                    func.ty_scheme.display_rust_style(module_env)
                 ))
             } else {
                 let mut ctx = EvalCtx::new();
@@ -428,9 +480,7 @@ impl Compiler {
                 ret.into_primitive_ty::<O>()
                     .ok_or(format!("Function did not return an {}", o_ty_fmt))
             }
-        } else {
-            Err(format!("Function {name} not found"))
-        }
+        })
     }
 }
 
@@ -452,12 +502,26 @@ mod tests {
     }
 
     #[test]
+    fn run_fn_unit_unit() {
+        let compiler = build("fn main() { () }");
+        compiler.run_fn_unit_unit("main").expect("Execution failed");
+    }
+
+    #[test]
     fn run_fn_unit_int() {
         let compiler = build("fn main() { 42 }");
         let result = compiler
             .run_fn_unit_o::<isize>("main")
             .expect("Execution failed");
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn run_fn_int_unit() {
+        let compiler = build("fn main(x) { let a = x + 0; () }");
+        compiler
+            .run_fn_i_unit("main", 42)
+            .expect("Execution failed");
     }
 
     #[test]
