@@ -4,8 +4,6 @@ use std::{cmp, collections::HashMap};
 /// Alias to keep code shorter
 pub(crate) type B<T> = Box<T>;
 
-/// Small vector having one element inline
-pub type SVec1<T> = smallvec::SmallVec<[T; 1]>;
 /// Small vector having two elements inline
 pub type SVec2<T> = smallvec::SmallVec<[T; 2]>;
 

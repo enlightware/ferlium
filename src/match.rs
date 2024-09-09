@@ -6,7 +6,7 @@ use ustr::ustr;
 
 use crate::{
     ast::{Expr, Pattern, PatternKind, PatternType},
-    containers::{SVec1, SVec2, B},
+    containers::{SVec2, B},
     error::InternalCompilationError,
     ir::{self, EnvLoad, EnvStore, NodeKind},
     mutability::MutType,

@@ -3,7 +3,7 @@ use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
-    containers::{SVec1, SVec2, B},
+    containers::{SVec2, B},
     dictionary_passing::DictionariesTyReq,
     function::FunctionRef,
     module::{FmtWithModuleEnv, ModuleEnv},
