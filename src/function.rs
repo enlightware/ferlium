@@ -301,51 +301,94 @@ impl<O: NativeOutput> OutputBuilder for Fallible<O> {
 
 // Native functions of various arities
 
-pub struct NullaryNativeFn<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static>(
-    F,
-    PhantomData<O>,
-);
+macro_rules! n_ary_native_fn {
+    // Entry point for generating n-ary function structures
+    ($struct_name:ident $(, $arg:ident)*) => {
+        #[allow(unused_parens)]
+        pub struct $struct_name<
+            $($arg: ArgExtractor + 'static,)*
+            O: OutputBuilder + 'static,
+            F: for<'a> Fn($($arg::Output<'a>),*) -> O::Input + 'static,
+        >(F, PhantomData<($($arg,)* O)>);
 
-impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<O, F> {
-    pub fn new(f: F) -> Self {
-        NullaryNativeFn(f, PhantomData)
-    }
+        impl<
+            $($arg: ArgExtractor + 'static,)*
+            O: OutputBuilder + 'static,
+            F: for<'a> Fn($($arg::Output<'a>),*) -> O::Input + 'static,
+        > $struct_name<$($arg,)* O, F>
+        {
+            pub fn new(f: F) -> Self {
+                $struct_name(f, PhantomData)
+            }
 
-    pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-        ModuleFunction {
-            ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
-            spans: None,
+            pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
+                ModuleFunction {
+                    ty_scheme,
+                    code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
+                    spans: None,
+                }
+            }
+
+            paste::paste! {
+            pub fn description_with_ty(f: F, $([<$arg:lower _ty>]: Type),*) -> ModuleFunction {
+                let o_ty = Type::primitive::<O::NativeTy>();
+                let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+                    &[$(([<$arg:lower _ty>], $arg::MUTABLE)), *],
+                    o_ty,
+                ));
+                Self::description_with_ty_scheme(f, ty_scheme)
+            }
+            }
+
+            pub fn description_with_default_ty(f: F) -> ModuleFunction {
+                Self::description_with_ty(f, $($arg::default_ty()),*)
+            }
         }
-    }
 
-    pub fn description(f: F) -> ModuleFunction {
-        let o_ty = Type::primitive::<O::NativeTy>();
-        ModuleFunction {
-            ty_scheme: TypeScheme::new_just_type(FnType::new_by_val(&[], o_ty)),
-            code: Rc::new(RefCell::new(Box::new(Self(f, PhantomData)))),
-            spans: None,
+        impl<$($arg,)* O, F> Callable for $struct_name<$($arg,)* O, F>
+        where
+            $($arg: ArgExtractor + 'static,)*
+            O: OutputBuilder + 'static,
+            F: for<'a> Fn($($arg::Output<'a>),*) -> O::Input + 'static,
+        {
+            paste::paste! {
+            #[allow(unused_variables)]
+            fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
+                // Extract arguments by applying repetition for each ArgExtractor
+                #[allow(unused_variables, unused_mut)]
+                let mut args_iter = args.into_iter();
+                $(
+                    let [<$arg:lower>] = args_iter.next().unwrap();
+                    // SAFETY: the borrow checker ensures that all mutable references are disjoint
+                    let arg_ctx = unsafe { &mut *(ctx as *mut CallCtx) };
+                    let [<$arg:lower>] = $arg::extract([<$arg:lower>], arg_ctx)?;
+                )*
+
+                // Call the function using the extracted arguments
+                O::build_output((self.0)($([<$arg:lower>]),*))
+            }
+            }
+
+            fn format_ind(
+                &self,
+                f: &mut std::fmt::Formatter,
+                _env: &ModuleEnv<'_>,
+                indent: usize,
+            ) -> std::fmt::Result {
+                let indent_str = "⎸ ".repeat(indent);
+                writeln!(f, "{}{} @ {:p}", indent_str, stringify!($struct_name), &self.0)
+            }
         }
-    }
+    };
 }
 
-impl<O, F> Callable for NullaryNativeFn<O, F>
-where
-    O: OutputBuilder + 'static,
-    F: Fn() -> O::Input,
-{
-    fn call(&self, _: Vec<ValOrMut>, _: &mut CallCtx) -> EvalResult {
-        O::build_output(self.0())
-    }
+// Nullary
 
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "⎸ ".repeat(indent);
-        writeln!(f, "{}nullary native @ {:p}", indent_str, &self.0)
+n_ary_native_fn!(NullaryNativeFn);
+
+impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<O, F> {
+    pub fn description(f: F) -> ModuleFunction {
+        Self::description_with_ty(f)
     }
 }
 
@@ -354,68 +397,7 @@ pub type NullaryNativeFnF<O, F> = NullaryNativeFn<Fallible<O>, F>;
 
 // Unary
 
-pub struct UnaryNativeFn<
-    A: ArgExtractor + 'static,
-    O: OutputBuilder + 'static,
-    F: for<'a> Fn(A::Output<'a>) -> O::Input + 'static,
->(F, PhantomData<(A, O)>);
-
-impl<
-        A: ArgExtractor + 'static,
-        O: OutputBuilder + 'static,
-        F: for<'a> Fn(A::Output<'a>) -> O::Input + 'static,
-    > UnaryNativeFn<A, O, F>
-{
-    pub fn new(f: F) -> Self {
-        UnaryNativeFn(f, PhantomData)
-    }
-
-    pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-        ModuleFunction {
-            ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
-            spans: None,
-        }
-    }
-
-    pub fn description_with_ty(f: F, a_ty: Type) -> ModuleFunction {
-        let o_ty = Type::primitive::<O::NativeTy>();
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(a_ty, A::MUTABLE)],
-            o_ty,
-        ));
-        Self::description_with_ty_scheme(f, ty_scheme)
-    }
-
-    pub fn description_with_default_ty(f: F) -> ModuleFunction {
-        Self::description_with_ty(f, A::default_ty())
-    }
-}
-
-impl<A, O, F> Callable for UnaryNativeFn<A, O, F>
-where
-    A: ArgExtractor + 'static,
-    O: OutputBuilder + 'static,
-    F: for<'a> Fn(A::Output<'a>) -> O::Input,
-{
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
-        let mut args = args.into_iter();
-        let a = args.next().unwrap();
-        let a = A::extract(a, ctx)?;
-
-        O::build_output((self.0)(a))
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "⎸ ".repeat(indent);
-        writeln!(f, "{}unary native @ {:p}", indent_str, &self.0)
-    }
-}
+n_ary_native_fn!(UnaryNativeFn, A);
 
 // The arguments are by native value
 pub type UnaryNativeFnNI<A, O, F> = UnaryNativeFn<NatVal<A>, Plain<O>, F>;
@@ -423,77 +405,7 @@ pub type UnaryNativeFnVI<O, F> = UnaryNativeFn<Value, Plain<O>, F>;
 
 // Binary
 
-pub struct BinaryNativeFn<
-    A: ArgExtractor + 'static,
-    B: ArgExtractor + 'static,
-    O: OutputBuilder + 'static,
-    F: for<'a> Fn(A::Output<'a>, B::Output<'a>) -> O::Input + 'static,
->(F, PhantomData<(A, B, O)>);
-
-impl<
-        A: ArgExtractor + 'static,
-        B: ArgExtractor + 'static,
-        O: OutputBuilder + 'static,
-        F: for<'a> Fn(A::Output<'a>, B::Output<'a>) -> O::Input + 'static,
-    > BinaryNativeFn<A, B, O, F>
-{
-    pub fn new(f: F) -> Self {
-        BinaryNativeFn(f, PhantomData)
-    }
-
-    pub fn description_with_ty_scheme(f: F, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-        ModuleFunction {
-            ty_scheme,
-            code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
-            spans: None,
-        }
-    }
-
-    pub fn description_with_ty(f: F, a_ty: Type, b_ty: Type) -> ModuleFunction {
-        let o_ty = Type::primitive::<O::NativeTy>();
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(a_ty, A::MUTABLE), (b_ty, B::MUTABLE)],
-            o_ty,
-        ));
-        Self::description_with_ty_scheme(f, ty_scheme)
-    }
-
-    pub fn description_with_default_ty(f: F) -> ModuleFunction {
-        Self::description_with_ty(f, A::default_ty(), B::default_ty())
-    }
-}
-
-impl<A, B, O, F> Callable for BinaryNativeFn<A, B, O, F>
-where
-    A: ArgExtractor + 'static,
-    B: ArgExtractor + 'static,
-    O: OutputBuilder + 'static,
-    F: for<'a> Fn(A::Output<'a>, B::Output<'a>) -> O::Input + 'static,
-{
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
-        let mut args = args.into_iter();
-        let a = args.next().unwrap();
-        // SAFETY: the borrow checker ensures that all mutable references are disjoint
-        let ctx_a = unsafe { &mut *(ctx as *mut CallCtx) };
-        let a = A::extract(a, ctx_a)?;
-        let b = args.next().unwrap();
-        // SAFETY: the borrow checker ensures that all mutable references are disjoint
-        let ctx_b = unsafe { &mut *(ctx as *mut CallCtx) };
-        let b = B::extract(b, ctx_b)?;
-
-        O::build_output((self.0)(a, b))
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        _env: &ModuleEnv<'_>,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = "⎸ ".repeat(indent);
-        writeln!(f, "{}binary native @ {:p}", indent_str, &self.0)
-    }
-}
+n_ary_native_fn!(BinaryNativeFn, A, B);
 
 // See above for shorthand names
 pub type BinaryNativeFnNNI<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Plain<O>, F>;
@@ -502,3 +414,13 @@ pub type BinaryNativeFnNVI<A, O, F> = BinaryNativeFn<NatVal<A>, Value, Plain<O>,
 pub type BinaryNativeFnMVI<A, O, F> = BinaryNativeFn<NatMut<A>, Value, Plain<O>, F>;
 pub type BinaryNativeFnMNI<A, B, O, F> = BinaryNativeFn<NatMut<A>, NatVal<B>, Plain<O>, F>;
 pub type BinaryNativeFnVVI<O, F> = BinaryNativeFn<Value, Value, Plain<O>, F>;
+
+// Ternary
+
+n_ary_native_fn!(TernaryNativeFn, A, B, C);
+
+// See above for shorthand names
+pub type TernaryNativeFnNNNI<A, B, C, O, F> =
+    TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, Plain<O>, F>;
+pub type TernaryNativeFnNNVI<A, B, O, F> =
+    TernaryNativeFn<NatVal<A>, NatVal<B>, Value, Plain<O>, F>;
