@@ -351,6 +351,25 @@ impl Compiler {
         annotations.sort_by_key(|a| a.pos);
         annotations
     }
+
+    pub fn list_module_fns(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for module in &self.modules {
+            let mod_name = *module.0;
+            for f in &module.1.functions {
+                let sym_name = *f.0;
+                if sym_name.starts_with('@') {
+                    continue; // skip hidden functions
+                }
+                if self.user_module.module.uses(mod_name, sym_name) {
+                    names.push(f.0.to_string());
+                } else {
+                    names.push(format!("{mod_name}::{sym_name}"));
+                }
+            }
+        }
+        names
+    }
 }
 
 /// The compiler to be used in the web IDE, non-wasm-available part
