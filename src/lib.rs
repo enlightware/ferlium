@@ -46,6 +46,10 @@ pub struct ModuleAndExpr {
     pub expr: Option<CompiledExpr>,
 }
 impl ModuleAndExpr {
+    pub fn new_just_module(module: Module) -> Self {
+        Self { module, expr: None }
+    }
+
     /// Type and other annotations for display in a IDE
     /// Returns a vector of positions in byte offsets and annotations.
     pub fn display_annotations(

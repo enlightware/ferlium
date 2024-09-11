@@ -5,7 +5,7 @@ use crate::{
     eval::{EvalCtx, ValOrMut},
     module::{FmtWithModuleEnv, ModuleFunction, Uses},
     r#type::{FnType, Type},
-    std::{new_std_module_env, string::String as Str},
+    std::{new_module_with_prelude, new_std_module_env, string::String as Str},
     value::{NativeValue, Value},
     CompilationError, DisplayStyle, Module, ModuleAndExpr, ModuleEnv, Modules, Span,
 };
@@ -278,6 +278,7 @@ impl Compiler {
     pub fn new() -> Self {
         Self {
             modules: new_std_module_env(),
+            user_module: ModuleAndExpr::new_just_module(new_module_with_prelude()),
             ..Default::default()
         }
     }
@@ -376,7 +377,8 @@ impl Compiler {
 impl Compiler {
     pub fn with_module(mut self, name: &str, module: Module, extra_uses: Uses) -> Self {
         self.modules.insert(name.into(), module);
-        self.extra_uses.extend(extra_uses);
+        self.extra_uses.extend(extra_uses.iter().cloned());
+        self.user_module.module.uses.extend(extra_uses);
         self
     }
 
@@ -589,6 +591,13 @@ mod tests {
             panic!("Compilation errors: {}", iterable_to_string(&errors, ", "));
         }
         compiler
+    }
+
+    #[test]
+    fn compiler_has_some_std_fns() {
+        let compiler = Compiler::new();
+        let names = compiler.list_module_fns();
+        assert!(names.contains(&"string_len".to_string()));
     }
 
     #[test]
