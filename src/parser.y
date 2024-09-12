@@ -94,10 +94,8 @@ Expr -> Expr
         { Expr::new(StaticApply(ustr("std::@>="), lex_span($2), vec![$1, $3]), $span) }
     | Expr '=' Expr
         { Expr::new(Assign(B::new($1), lex_span($2), B::new($3)), $span) }
-    | 'if' Expr '{' Expr '}' 'else' '{' Expr '}'
-        { make_if_else($2, $4, $8, $span) }
-    | 'if' Expr '{' Expr '}' %prec NO_ELSE
-        { make_if_without_else($2, $4, $span) }
+    | IfExpr
+        { $1 }
     | 'match' Expr '{' MatchArgsOptComma '}'
         { Expr::new(Match(B::new($2), $4, None), $span) }
     | 'match' Expr '{' MatchArgs ',' '_' '=>' ExprOptComma '}'
@@ -143,6 +141,15 @@ Expr -> Expr
     ;
 
 // TODO: add enum, add more notations for float
+
+IfExpr -> Expr
+    : 'if' Expr '{' Expr '}' 'else' IfExpr
+        { make_if_else($2, $4, $7, $span) }
+    | 'if' Expr '{' Expr '}' 'else' '{' Expr '}'
+        { make_if_else($2, $4, $8, $span) }
+    | 'if' Expr '{' Expr '}' %prec NO_ELSE
+        { make_if_without_else($2, $4, $span) }
+    ;
 
 Path -> ()
     : 'IDENT'

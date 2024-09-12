@@ -32,7 +32,6 @@
 
 ### Next tasks
 
-- Combined if else
 - Renamed ty var to latin letters
 - Tuple expansion in match
 - Add {} block expression
