@@ -32,6 +32,14 @@ use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
 use crate::typing_env::Local;
 
+#[macro_export]
+macro_rules! cached_primitive_ty {
+    ($ty:ty) => {{
+        static TY: std::sync::OnceLock<Type> = std::sync::OnceLock::new();
+        *TY.get_or_init(Type::primitive::<$ty>)
+    }};
+}
+
 /// Something that is a type or part of it, and that can
 /// be instantiated and queried for its free type variables.
 pub trait TypeLike {
@@ -350,8 +358,7 @@ pub struct Type {
 impl Type {
     // helper constructors
     pub fn unit() -> Self {
-        static TY: OnceLock<Type> = OnceLock::new();
-        *TY.get_or_init(Self::primitive::<()>)
+        cached_primitive_ty!(())
     }
 
     pub fn primitive<T: Clone + 'static>() -> Self {

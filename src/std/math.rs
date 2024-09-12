@@ -4,6 +4,7 @@ use ordered_float::NotNan;
 use ustr::ustr;
 
 use crate::{
+    cached_primitive_ty,
     error::RuntimeError,
     function::{BinaryNativeFnNNF, BinaryNativeFnNNI, UnaryNativeFnNI},
     module::Module,
@@ -12,7 +13,7 @@ use crate::{
 };
 
 pub fn int_type() -> Type {
-    Type::primitive::<isize>()
+    cached_primitive_ty!(isize)
 }
 
 impl NativeDisplay for isize {
@@ -22,7 +23,7 @@ impl NativeDisplay for isize {
 }
 
 pub fn float_type() -> Type {
-    Type::primitive::<NotNan<f64>>()
+    cached_primitive_ty!(NotNan<f64>)
 }
 
 impl NativeDisplay for NotNan<f64> {

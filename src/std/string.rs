@@ -8,6 +8,7 @@ use std::{
 use ustr::ustr;
 
 use crate::{
+    cached_primitive_ty,
     function::{BinaryNativeFnMNI, BinaryNativeFnNNI, UnaryNativeFnNI, UnaryNativeFnVI},
     module::Module,
     r#type::Type,
@@ -100,7 +101,7 @@ impl NativeDisplay for String {
 }
 
 pub fn string_type() -> Type {
-    Type::primitive::<String>()
+    cached_primitive_ty!(String)
 }
 
 pub fn add_to_module(to: &mut Module) {

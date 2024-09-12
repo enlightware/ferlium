@@ -3,6 +3,7 @@ use std::fmt;
 use ustr::ustr;
 
 use crate::{
+    cached_primitive_ty,
     function::{BinaryNativeFnNNI, BinaryNativeFnVVI, UnaryNativeFnNI},
     module::Module,
     r#type::Type,
@@ -10,7 +11,7 @@ use crate::{
 };
 
 pub fn bool_type() -> Type {
-    Type::primitive::<bool>()
+    cached_primitive_ty!(bool)
 }
 
 impl NativeDisplay for bool {
