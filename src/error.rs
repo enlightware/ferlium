@@ -362,6 +362,7 @@ pub enum CompilationError {
     InvalidVariantName {
         name: Span,
         ty: String,
+        valids: Vec<String>,
     },
     InvalidVariantType {
         name: Span,
@@ -485,6 +486,13 @@ impl CompilationError {
             InvalidVariantName { name, ty } => Self::InvalidVariantName {
                 name,
                 ty: ty.format_with(env).to_string(),
+                valids: ty
+                    .data()
+                    .as_variant()
+                    .unwrap()
+                    .iter()
+                    .map(|(name, _)| name.to_string())
+                    .collect(),
             },
             InvalidVariantType { name, ty } => Self::InvalidVariantType {
                 name,

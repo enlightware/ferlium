@@ -150,11 +150,11 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
                 format!("Expected record because of .{field_name}, got {record_ty}"),
             )]
         }
-        InvalidVariantName { name, ty } => {
+        InvalidVariantName { name, ty, valids } => {
             let name_text = &src[name.start()..name.end()];
             vec![ErrorData::from_span(
                 name,
-                format!("Variant name {name_text} does not exist for variant type {ty}"),
+                format!("Variant name {name_text} does not exist for variant type {ty}, valid names are {}", valids.join(", ")),
             )]
         }
         InvalidVariantType { name, ty } => {

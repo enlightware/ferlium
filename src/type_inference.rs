@@ -278,7 +278,7 @@ impl TypeInference {
                 (node, Type::function_type(fn_ty), MutType::constant())
             }
             Apply(func, args) => {
-                // Do we have a global function?
+                // Do we have a global function or variant?
                 if let Identifier(name) = func.kind {
                     if !env.has_variable_name(name) {
                         let (node, ty, mut_ty) =
