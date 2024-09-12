@@ -1,4 +1,9 @@
-use std::{fmt, fmt::Display, rc::Rc, str::FromStr};
+use std::{
+    fmt::{self, Display},
+    ops::Deref,
+    rc::Rc,
+    str::FromStr,
+};
 
 use ustr::ustr;
 
@@ -55,6 +60,18 @@ impl FromStr for String {
     }
 }
 
+impl From<std::string::String> for String {
+    fn from(value: std::string::String) -> Self {
+        Self(Rc::new(value))
+    }
+}
+
+impl From<String> for std::string::String {
+    fn from(value: String) -> Self {
+        value.0.deref().clone()
+    }
+}
+
 impl AsRef<str> for String {
     fn as_ref(&self) -> &str {
         self.0.as_str()
@@ -63,7 +80,7 @@ impl AsRef<str> for String {
 
 impl Display for String {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        self.0.fmt(f)
     }
 }
 
