@@ -85,7 +85,8 @@ Assignment {
 }
 
 IfExpression {
-    !command kw<'if'> Expr '{' Expr '}' (!command kw<'else'> '{' Expr '}')?
+	!command kw<'if'> Expr '{' Expr '}' kw<'else'> IfExpression
+    | !command kw<'if'> Expr '{' Expr '}' (!command kw<'else'> '{' Expr '}')?
 }
 
 MatchExpression {

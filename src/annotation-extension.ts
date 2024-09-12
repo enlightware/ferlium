@@ -25,7 +25,7 @@ const AnnotationsField = StateField.define<AnnotationData[]>({
 class AnnotationWidget extends WidgetType {
     constructor(readonly hint: string) { super() }
 
-    eq(other: AnnotationWidget) { return other.hint == this.hint }
+    eq(other: AnnotationWidget) { return other.hint === this.hint }
 
     toDOM() {
         const hint = document.createElement("span");
