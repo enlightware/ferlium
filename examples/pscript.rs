@@ -431,7 +431,7 @@ fn main() {
                 // We must restore the context as before starting the evaluation
                 eval_ctx.environment.truncate(old_size);
                 eval_ctx.frame_base = old_frame_base;
-                println!("Runtime error: {error:?}")
+                println!("Runtime error: {error}")
             }
         }
 

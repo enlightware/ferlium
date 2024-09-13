@@ -201,11 +201,26 @@ fn if_expr() {
     assert_eq!(run("if 2 == 2 { 1 } else { 2 }"), int!(1));
     assert_eq!(run("if true { 1 } else if false { 2 } else { 3 }"), int!(1));
     assert_eq!(run("if false { 1 } else if true { 2 } else { 3 }"), int!(2));
-    assert_eq!(run("if false { 1 } else if false { 2 } else { 3 }"), int!(3));
-    assert_eq!(run("if false { 1 } else if false { 2 } else if false { 3 } else { 4 }"), int!(4));
-    assert_eq!(run("var a = 0; if false { a = 1 } else if false { a = 2 }; a"), int!(0));
-    assert_eq!(run("var a = 0; if true { a = 1 } else if true { a = 2 }; a"), int!(1));
-    assert_eq!(run("var a = 0; if false { a = 1 } else if true { a = 2 }; a"), int!(2));
+    assert_eq!(
+        run("if false { 1 } else if false { 2 } else { 3 }"),
+        int!(3)
+    );
+    assert_eq!(
+        run("if false { 1 } else if false { 2 } else if false { 3 } else { 4 }"),
+        int!(4)
+    );
+    assert_eq!(
+        run("var a = 0; if false { a = 1 } else if false { a = 2 }; a"),
+        int!(0)
+    );
+    assert_eq!(
+        run("var a = 0; if true { a = 1 } else if true { a = 2 }; a"),
+        int!(1)
+    );
+    assert_eq!(
+        run("var a = 0; if false { a = 1 } else if true { a = 2 }; a"),
+        int!(2)
+    );
 }
 
 #[test]

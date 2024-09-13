@@ -422,5 +422,7 @@ n_ary_native_fn!(TernaryNativeFn, A, B, C);
 // See above for shorthand names
 pub type TernaryNativeFnNNNI<A, B, C, O, F> =
     TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, Plain<O>, F>;
+pub type TernaryNativeFnNNNF<A, B, C, O, F> =
+    TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, Fallible<O>, F>;
 pub type TernaryNativeFnNNVI<A, B, O, F> =
     TernaryNativeFn<NatVal<A>, NatVal<B>, Value, Plain<O>, F>;

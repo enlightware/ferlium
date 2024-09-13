@@ -1,6 +1,7 @@
 use std::fmt::{self, Display};
 
 use lrpar::Span;
+use ustr::Ustr;
 
 use crate::{
     ast::PatternType,
@@ -679,6 +680,7 @@ pub enum RuntimeError {
     Aborted,
     DivisionByZero,
     RemainderByZero,
+    InvalidArgument(Ustr),
     ArrayAccessOutOfBounds { index: isize, len: usize },
     RecursionLimitExceeded { limit: usize },
     // TODO: add execution duration limit exhausted
@@ -691,6 +693,7 @@ impl Display for RuntimeError {
             Aborted => write!(f, "Aborted"),
             DivisionByZero => write!(f, "Division by zero"),
             RemainderByZero => write!(f, "Remainder by zero"),
+            InvalidArgument(reason) => write!(f, "Invalid argument: {reason}"),
             ArrayAccessOutOfBounds { index, len } => {
                 write!(
                     f,

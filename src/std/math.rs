@@ -6,7 +6,7 @@ use ustr::ustr;
 use crate::{
     cached_primitive_ty,
     error::RuntimeError,
-    function::{BinaryNativeFnNNF, BinaryNativeFnNNI, UnaryNativeFnNI},
+    function::{BinaryNativeFnNNF, BinaryNativeFnNNI, TernaryNativeFnNNNF, UnaryNativeFnNI},
     module::Module,
     r#type::Type,
     value::NativeDisplay,
@@ -90,6 +90,18 @@ pub fn add_to_module(to: &mut Module) {
     to.functions.insert(
         ustr("max"),
         BinaryNativeFnNNI::description_with_default_ty(std::cmp::max as fn(isize, isize) -> isize),
+    );
+    to.functions.insert(
+        ustr("clamp"),
+        TernaryNativeFnNNNF::description_with_default_ty(|value: isize, min: isize, max: isize| {
+            if min > max {
+                Err(InvalidArgument(ustr(
+                    "min must be less than or equal to max",
+                )))
+            } else {
+                Ok(value.min(max).max(min))
+            }
+        }),
     );
 
     // Comparisons
