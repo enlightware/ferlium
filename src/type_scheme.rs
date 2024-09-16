@@ -632,8 +632,10 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                     for (tag, payload_ty) in variant {
                         if payload_ty == Type::unit() {
                             write!(f, "{} | ", tag)?;
-                        } else {
+                        } else if payload_ty.data().is_tuple() {
                             write!(f, "{} {} | ", tag, payload_ty.format_with(env))?;
+                        } else {
+                            write!(f, "{} ({}) | ", tag, payload_ty.format_with(env))?;
                         }
                     }
                     f.write_str("…")?;

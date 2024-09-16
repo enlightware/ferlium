@@ -924,7 +924,13 @@ impl FmtWithModuleEnv for TypeKind {
                         write!(f, "{name}")?;
                     } else {
                         write!(f, "{name} ")?;
-                        ty.fmt_with_module_env(f, env)?;
+                        if ty.data().is_tuple() {
+                            ty.fmt_with_module_env(f, env)?;
+                        } else {
+                            write!(f, "(")?;
+                            ty.fmt_with_module_env(f, env)?;
+                            write!(f, ")")?;
+                        }
                     }
                 }
                 Ok(())

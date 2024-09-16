@@ -133,9 +133,14 @@ impl Value {
         match self {
             Native(value) => value.fmt_in_to_string(f),
             Variant(variant) => {
-                write!(f, "{}(", variant.tag)?;
-                variant.value.format_as_string(f)?;
-                write!(f, ")")
+                if variant.value.is_tuple() {
+                    write!(f, "{}", variant.tag)?;
+                    variant.value.format_as_string(f)
+                } else {
+                    write!(f, "{}(", variant.tag)?;
+                    variant.value.format_as_string(f)?;
+                    write!(f, ")")
+                }
             }
             Tuple(tuple) => {
                 write!(f, "(")?;
@@ -244,7 +249,11 @@ impl Display for Value {
         match self {
             Native(value) => value.fmt_as_literal(f),
             Variant(variant) => {
-                write!(f, "{}({})", variant.tag, variant.value)
+                if variant.value.is_tuple() {
+                    write!(f, "{}{}", variant.tag, variant.value)
+                } else {
+                    write!(f, "{}({})", variant.tag, variant.value)
+                }
             }
             Tuple(tuple) => {
                 write!(f, "(")?;
