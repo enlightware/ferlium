@@ -103,6 +103,10 @@ pub enum InternalCompilationError {
         first_occurrence: Span,
         second_occurrence: Span,
     },
+    IdentifierBoundMoreThanOnceInAPattern {
+        first_occurrence: Span,
+        second_occurrence: Span,
+    },
     MutablePathsOverlap {
         a_span: Span,
         b_span: Span,
@@ -286,6 +290,16 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     &source[first_occurrence_span.start()..first_occurrence_span.end()]
                 )
             }
+            IdentifierBoundMoreThanOnceInAPattern {
+                first_occurrence: first_occurrence_span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Identifier {} bound more than once in a pattern",
+                    &source[first_occurrence_span.start()..first_occurrence_span.end()]
+                )
+            }
             MutablePathsOverlap {
                 a_span,
                 b_span,
@@ -382,6 +396,10 @@ pub enum CompilationError {
         b_span: Span,
     },
     DuplicatedVariant {
+        first_occurrence: Span,
+        second_occurrence: Span,
+    },
+    IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Span,
         second_occurrence: Span,
     },
@@ -525,6 +543,13 @@ impl CompilationError {
                 first_occurrence,
                 second_occurrence,
             } => Self::DuplicatedVariant {
+                first_occurrence,
+                second_occurrence,
+            },
+            IdentifierBoundMoreThanOnceInAPattern {
+                first_occurrence,
+                second_occurrence,
+            } => Self::IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,
             },

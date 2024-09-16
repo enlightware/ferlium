@@ -67,6 +67,15 @@ impl TypeInference {
                                 second_occurrence: *tag_span,
                             });
                         }
+                        let mut seen_identifier = HashMap::new();
+                        for (var, span) in vars {
+                            if let Some(old_span) = seen_identifier.insert(*var, *span) {
+                                return Err(InternalCompilationError::IdentifierBoundMoreThanOnceInAPattern {
+                                    first_occurrence: old_span,
+                                    second_occurrence: *span,
+                                });
+                            }
+                        }
                         let (inner_tys, variant_inner_ty) = match vars.len() {
                             0 => (vec![], Type::unit()),
                             1 => {

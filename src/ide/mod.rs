@@ -215,6 +215,17 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
                 ErrorData::from_span(second_occurrence, text),
             ]
         }
+        IdentifierBoundMoreThanOnceInAPattern {
+            first_occurrence,
+            second_occurrence,
+        } => {
+            let name_text = &src[first_occurrence.start()..first_occurrence.end()];
+            let text = format!("Identifier {name_text} bound more than once in a pattern");
+            vec![
+                ErrorData::from_span(first_occurrence, text.clone()),
+                ErrorData::from_span(second_occurrence, text),
+            ]
+        }
         MutablePathsOverlap {
             a_span,
             b_span,
