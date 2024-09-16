@@ -156,6 +156,10 @@ impl TypeInference {
         Type::variable(self.fresh_type_var())
     }
 
+    pub fn fresh_type_var_tys(&mut self, count: usize) -> Vec<Type> {
+        (0..count).map(|_| self.fresh_type_var_ty()).collect()
+    }
+
     pub fn fresh_mut_var(&mut self) -> MutVar {
         self.mut_unification_table.new_key(None)
     }

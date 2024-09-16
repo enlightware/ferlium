@@ -60,19 +60,26 @@ impl TypeInference {
             let (types, exprs): (Vec<_>, Vec<_>) = alternatives
                 .iter()
                 .map(|(pattern, expr)| {
-                    if let Some((tag, tag_span, var)) = pattern.kind.as_variant() {
+                    if let Some((tag, tag_span, vars)) = pattern.kind.as_variant() {
                         if let Some(old_tag_span) = seen_tags.insert(tag, tag_span) {
                             return Err(InternalCompilationError::DuplicatedVariant {
                                 first_occurrence: *old_tag_span,
                                 second_occurrence: *tag_span,
                             });
                         }
-                        let inner_ty = if var.is_some() {
-                            self.fresh_type_var_ty()
-                        } else {
-                            Type::unit()
+                        let (inner_tys, variant_inner_ty) = match vars.len() {
+                            0 => (vec![], Type::unit()),
+                            1 => {
+                                let ty = self.fresh_type_var_ty();
+                                (vec![ty], ty)
+                            }
+                            n => {
+                                let inner_tys = self.fresh_type_var_tys(n);
+                                let variant_inner_ty = Type::tuple(inner_tys.clone());
+                                (inner_tys, variant_inner_ty)
+                            }
                         };
-                        Ok(((*tag, inner_ty), (expr, var)))
+                        Ok(((*tag, inner_tys, variant_inner_ty), (expr, vars)))
                     } else {
                         Err(InternalCompilationError::InconsistentPattern {
                             a_type: PatternType::Variant,
@@ -118,66 +125,100 @@ impl TypeInference {
             let mut alternatives = types
                 .iter()
                 .zip(exprs)
-                .map(|((tag, inner_ty), (expr, bind_var_name))| {
-                    let tag_value = Value::native(tag.as_char_ptr() as isize);
+                .map(
+                    |((tag, inner_tys, variant_inner_ty), (expr, bind_var_names))| {
+                        let tag_value = Value::native(tag.as_char_ptr() as isize);
 
-                    // Prepare the environment for the alternative by adapting the type of the variant value
-                    let alt_start_env_size = env.locals.len();
-                    if let Some((bind_var_name, _)) = bind_var_name {
-                        env.locals.push(Local::new(
-                            *bind_var_name,
-                            MutType::constant(),
-                            *inner_ty,
-                            first_alternative_span,
-                        ));
-                    }
+                        // Prepare the environment for the alternative by adapting the type of the variant value
+                        let alt_start_env_size = env.locals.len();
+                        assert_eq!(inner_tys.len(), bind_var_names.len());
+                        for ((name, span), inner_ty) in bind_var_names.iter().zip(inner_tys.iter())
+                        {
+                            env.locals.push(Local::new(
+                                *name,
+                                MutType::constant(),
+                                *inner_ty,
+                                *span,
+                            ));
+                        }
 
-                    // Type check the alternative and generate its code
-                    let mut node = if let Some(return_ty) = return_ty {
-                        self.check_expr(env, expr, return_ty, MutType::constant(), return_ty_span)?
-                    } else {
-                        let (node, expr_return_ty, _) = self.infer_expr(env, expr)?;
-                        return_ty = Some(expr_return_ty);
-                        return_ty_span = expr.span;
-                        node
-                    };
+                        // Type check the alternative and generate its code
+                        let mut node = if let Some(return_ty) = return_ty {
+                            self.check_expr(
+                                env,
+                                expr,
+                                return_ty,
+                                MutType::constant(),
+                                return_ty_span,
+                            )?
+                        } else {
+                            let (node, expr_return_ty, _) = self.infer_expr(env, expr)?;
+                            return_ty = Some(expr_return_ty);
+                            return_ty_span = expr.span;
+                            node
+                        };
 
-                    // Generate the variable binding code
-                    if let Some((_, bind_var_span)) = bind_var_name {
-                        let project_inner = N::new(
-                            K::Project(B::new((load_variant.clone(), 0))),
-                            *inner_ty,
-                            expr.span,
-                        );
-                        let store_projected_inner = N::new(
-                            K::EnvStore(B::new(EnvStore {
-                                node: project_inner,
-                                ty: *inner_ty,
-                                name_span: *bind_var_span,
-                            })),
-                            Type::unit(),
-                            expr.span,
-                        );
-                        node = N::new(
-                            K::Block(B::new(SVec2::from_vec(vec![store_projected_inner, node]))),
-                            return_ty.unwrap(),
-                            expr.span,
-                        );
-                    }
-                    env.locals.truncate(alt_start_env_size);
-                    Result::<_, InternalCompilationError>::Ok((tag_value, node))
-                })
+                        // Generate the variable binding code
+                        if !bind_var_names.is_empty() {
+                            let mut project_nodes = Vec::new();
+                            let mut add_projection = |i, is_tuple| {
+                                let project_variant_inner = N::new(
+                                    K::Project(B::new((load_variant.clone(), 0))),
+                                    *variant_inner_ty,
+                                    expr.span,
+                                );
+                                let inner_ty = inner_tys[i];
+                                let project_tuple_inner = if is_tuple {
+                                    N::new(
+                                        K::Project(B::new((project_variant_inner, i))),
+                                        inner_ty,
+                                        expr.span,
+                                    )
+                                } else {
+                                    project_variant_inner
+                                };
+                                let store_projected_inner = N::new(
+                                    K::EnvStore(B::new(EnvStore {
+                                        node: project_tuple_inner,
+                                        ty: inner_ty,
+                                        name_span: bind_var_names[i].1,
+                                    })),
+                                    Type::unit(),
+                                    expr.span,
+                                );
+                                project_nodes.push(store_projected_inner);
+                            };
+                            if bind_var_names.len() == 1 {
+                                // single value payload, payload is the stored directly
+                                add_projection(0, false);
+                            } else {
+                                // multiple value payload, payload is a tuple
+                                for i in 0..inner_tys.len() {
+                                    add_projection(i, true);
+                                }
+                            }
+                            project_nodes.push(node);
+                            node = N::new(
+                                K::Block(B::new(SVec2::from_vec(project_nodes))),
+                                return_ty.unwrap(),
+                                expr.span,
+                            );
+                        }
+                        env.locals.truncate(alt_start_env_size);
+                        Result::<_, InternalCompilationError>::Ok((tag_value, node))
+                    },
+                )
                 .collect::<Result<Vec<_>, _>>()?;
             let return_ty = return_ty.unwrap();
 
             // Do we have a default?
             let default = if let Some(default) = default {
                 // Yes, so the pattern_ty is our type and we add constraints towards it.
-                for (tag, inner_ty) in types {
+                for (tag, _, variant_inner_ty) in types {
                     self.add_pub_constraint(PubTypeConstraint::new_type_has_variant(
                         pattern_ty,
                         tag,
-                        inner_ty,
+                        variant_inner_ty,
                         variants_span,
                     ));
                 }
@@ -186,7 +227,8 @@ impl TypeInference {
                 self.check_expr(env, default, return_ty, MutType::constant(), return_ty_span)?
             } else {
                 // No default, compute a full variant type.
-                let variant_ty = Type::variant(types);
+                let variant_inner_tys = types.into_iter().map(|(tag, _, ty)| (tag, ty)).collect();
+                let variant_ty = Type::variant(variant_inner_tys);
                 self.add_sub_type_constraint(pattern_ty, cond_expr.span, variant_ty, variants_span);
 
                 // Generate the default code node

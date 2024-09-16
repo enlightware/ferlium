@@ -6,8 +6,8 @@ use std::fmt::Debug;
 use ustr::Ustr;
 
 use crate::{
-    containers::B, error::LocatedError, module::FmtWithModuleEnv, mutability::MutVal, r#type::Type,
-    value::Value,
+    containers::B, error::LocatedError, format::write_with_separator, module::FmtWithModuleEnv,
+    mutability::MutVal, r#type::Type, value::Value,
 };
 
 #[derive(Debug, Clone)]
@@ -334,7 +334,7 @@ pub enum PatternKind {
     Variant {
         tag: Ustr,
         tag_span: Span,
-        var: Option<(Ustr, Span)>,
+        vars: Vec<(Ustr, Span)>,
     },
     Error(String),
 }
@@ -383,11 +383,14 @@ impl Pattern {
         use PatternKind::*;
         match &self.kind {
             Literal(value, _) => writeln!(f, "{indent_str}{value}"),
-            Variant { tag, var, .. } => {
-                if let Some(var) = var {
-                    writeln!(f, "{indent_str}{} {}", tag, var.0)
+            Variant { tag, vars, .. } => {
+                write!(f, "{indent_str}{} ", tag)?;
+                if !vars.is_empty() {
+                    write!(f, "(")?;
+                    write_with_separator(vars.iter().map(|(var, _)| var), ", ", f)?;
+                    writeln!(f, ")")
                 } else {
-                    writeln!(f, "{indent_str}{}", tag)
+                    writeln!(f)
                 }
             }
             Error(s) => writeln!(f, "{indent_str}Pattern error: {s}"),

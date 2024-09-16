@@ -490,6 +490,7 @@ fn records() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variants() {
+    // option example
     let match_exhaustive = r#"fn s(x) { match x { None => "no", Some(x) => f"hi {x}" } }"#;
     assert_eq!(
         run(&format!("{match_exhaustive} s(Some(1))")),
@@ -515,6 +516,14 @@ fn variants() {
         run(&format!("{match_open} fn f() {{ s(None) }} f()")),
         string!("no")
     );
+    // area example
+    let match_exhaustive = r#"fn a(x) { match x { Square(r) => r * r, Rect(w, h) => w * h } }"#;
+    assert_eq!(run(&format!("{match_exhaustive} a(Square(3))")), int!(9));
+    assert_eq!(run(&format!("{match_exhaustive} a(Rect(3, 2))")), int!(6));
+    let match_open = r#"fn a(x) { match x { Square(r) => r * r, Rect(w, h) => w * h, _ => 0 } }"#;
+    assert_eq!(run(&format!("{match_open} a(Square(3))")), int!(9));
+    assert_eq!(run(&format!("{match_open} a(Rect(3, 2))")), int!(6));
+    assert_eq!(run(&format!("{match_open} a(Triangle(3, 3, 5))")), int!(0));
 }
 
 #[test]

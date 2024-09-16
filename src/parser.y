@@ -241,9 +241,9 @@ Pattern -> Pattern
     : LiteralPattern
         { $1 }
     | 'IDENT'
-        { Pattern::new(PatternKind::Variant{tag: us($1, $lexer), tag_span: lex_span($1),var: None}, $span) }
-    | 'IDENT' '(' 'IDENT' ')'
-        { Pattern::new(PatternKind::Variant{tag: us($1, $lexer), tag_span: lex_span($1),var: Some((us($3, $lexer), lex_span($3)))}, $span) }
+        { Pattern::new(PatternKind::Variant{tag: us($1, $lexer), tag_span: lex_span($1), vars: vec![]}, $span) }
+    | 'IDENT' '(' StringArgsOptComma ')'
+        { Pattern::new(PatternKind::Variant{tag: us($1, $lexer), tag_span: lex_span($1), vars: $3}, $span) }
     ;
 
 LiteralPattern -> Pattern
