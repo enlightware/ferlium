@@ -507,12 +507,16 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             .collect()
     }
 
-    pub(crate) fn format_quantifiers(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    pub(crate) fn format_quantifiers_math_style(
+        &self,
+        f: &mut std::fmt::Formatter,
+    ) -> std::fmt::Result {
         for (i, quantifier) in self.quantifiers.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "∀{}", quantifier)?;
+            write!(f, "∀")?;
+            quantifier.format_math_style(f)?;
         }
         Ok(())
     }
@@ -644,7 +648,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
-        self.format_quantifiers(f)?;
+        self.format_quantifiers_math_style(f)?;
         if !self.quantifiers.is_empty() {
             write!(f, ".")?;
         }
@@ -673,7 +677,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{}", quantifier)?;
+            quantifier.format_rust_style(f)?;
         }
         write!(f, ">")
     }

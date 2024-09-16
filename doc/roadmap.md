@@ -32,7 +32,6 @@
 
 ### Next tasks
 
-- Renamed ty var to latin letters
 - Tuple expansion in match
 - Switch grammar to lalrpop
 - Add {} block expression

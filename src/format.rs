@@ -12,15 +12,26 @@ impl<'a, T, D> FormatWith<'a, T, D> {
     }
 }
 
-pub(crate) fn type_variable_index_to_string(index: u32) -> String {
-    let first = 0x3B1;
-    let last = 0x3C9;
+pub(crate) fn type_variable_index_to_string(
+    index: u32,
+    first: u32,
+    last: u32,
+    fallback: &str,
+) -> String {
     let unicode_char = first + index;
     if unicode_char <= last {
         char::from_u32(unicode_char).unwrap_or('_').to_string()
     } else {
-        format!("T{}", unicode_char - last)
+        format!("{fallback}{}", unicode_char - last)
     }
+}
+
+pub(crate) fn type_variable_index_to_string_greek(index: u32) -> String {
+    type_variable_index_to_string(index, 0x3B1, 0x3C9, "T")
+}
+
+pub(crate) fn type_variable_index_to_string_latin(index: u32) -> String {
+    type_variable_index_to_string(index, 'A' as u32, 'Y' as u32, "Z")
 }
 
 pub(crate) fn write_with_separator(

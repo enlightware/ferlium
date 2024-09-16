@@ -2,7 +2,7 @@ use std::fmt::{self, Display};
 
 use enum_as_inner::EnumAsInner;
 
-use crate::format::type_variable_index_to_string;
+use crate::format::type_variable_index_to_string_greek;
 
 /// A mutability value, newtype because we must implement EqUnifyValue for it
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -63,7 +63,7 @@ impl MutVar {
 
 impl Display for MutVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}ₘ", type_variable_index_to_string(self.name))
+        write!(f, "{}ₘ", type_variable_index_to_string_greek(self.name))
     }
 }
 

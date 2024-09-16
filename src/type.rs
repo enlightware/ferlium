@@ -23,7 +23,8 @@ use ustr::Ustr;
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::B;
-use crate::format::type_variable_index_to_string;
+use crate::format::type_variable_index_to_string_greek;
+use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::graph::find_disjoint_subgraphs;
 use crate::module::FmtWithModuleEnv;
@@ -69,11 +70,17 @@ impl TypeVar {
     pub fn name(&self) -> u32 {
         self.name
     }
+    pub fn format_rust_style(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", type_variable_index_to_string_latin(self.name))
+    }
+    pub fn format_math_style(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", type_variable_index_to_string_greek(self.name))
+    }
 }
 
 impl Display for TypeVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", type_variable_index_to_string(self.name))
+        self.format_rust_style(f)
     }
 }
 

@@ -303,17 +303,17 @@ fn static_function_arity() {
 fn value_function_arity() {
     let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y }";
     assert_eq!(run(&format!("{text} (a,).0()")), int!(0));
-    fail_compilation(&format!("{text} (b,).0()")).expect_is_not_subtype("(int) → int", "() → α");
+    fail_compilation(&format!("{text} (b,).0()")).expect_is_not_subtype("(int) → int", "() → A");
     fail_compilation(&format!("{text} (c,).0()"))
-        .expect_is_not_subtype("(int, int) → int", "() → α");
-    fail_compilation(&format!("{text} (a,).0(1)")).expect_is_not_subtype("() → int", "(int) → α");
+        .expect_is_not_subtype("(int, int) → int", "() → A");
+    fail_compilation(&format!("{text} (a,).0(1)")).expect_is_not_subtype("() → int", "(int) → A");
     assert_eq!(run(&format!("{text} (b,).0(1)")), int!(2));
     fail_compilation(&format!("{text} (c,).0(1)"))
-        .expect_is_not_subtype("(int, int) → int", "(int) → α");
+        .expect_is_not_subtype("(int, int) → int", "(int) → A");
     fail_compilation(&format!("{text} (a,).0(1, 2)"))
-        .expect_is_not_subtype("() → int", "(int, int) → α");
+        .expect_is_not_subtype("() → int", "(int, int) → A");
     fail_compilation(&format!("{text} (b,).0(1, 2)"))
-        .expect_is_not_subtype("(int) → int", "(int, int) → α");
+        .expect_is_not_subtype("(int) → int", "(int, int) → A");
     assert_eq!(run(&format!("{text} (c,).0(1, 2)")), int!(3));
 }
 
