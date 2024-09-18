@@ -4,9 +4,9 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+use crate::Span;
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
-use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{

@@ -2,6 +2,7 @@
 
 ### Language features
 
+- Short circuiting logical operators
 - Split compilation of modules by analysing the dependency graph
 - Type classes
 - Tuple deconstruction on assignation
@@ -20,7 +21,6 @@
 
 ### Compiler features
 
-- Better parsing error messages
 - Basic optimisations: replace constructors of literals with constructed literals
 - Advanced optimisations: generic partial evaluation (constant propagation)
 - Just in time compilation
@@ -31,9 +31,6 @@
 
 ### Next tasks
 
-- Switch grammar to lalrpop
-- Add {} block expression
-- Fix grammar with equal in lambdas
 
 ### Open questions
 

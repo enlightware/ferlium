@@ -1,11 +1,12 @@
 use ariadne::Label;
-use lrpar::Span;
 use painturscript::emit_ir::{emit_expr, emit_module};
-use painturscript::error::{resolve_must_be_mutable_ctx, InternalCompilationError};
+use painturscript::error::{resolve_must_be_mutable_ctx, InternalCompilationError, LocatedError};
 use painturscript::format::FormatWith;
 use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
+use painturscript::parse_module_and_expr;
 use painturscript::std::{new_module_with_prelude, new_std_module_env};
 use painturscript::typing_env::Local;
+use painturscript::Span;
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 
@@ -21,6 +22,19 @@ fn start_of_line_of(src: &str, pos: usize) -> usize {
 
 fn span_range(span: Span) -> std::ops::Range<usize> {
     span.start()..span.end()
+}
+
+fn pretty_print_parse_errors(src: &str, errors: &[LocatedError]) {
+    use ariadne::{Color, Report, ReportKind, Source};
+    for (text, span) in errors {
+        let offset = start_of_line_of(src, span.start());
+        Report::build(ReportKind::Error, "input", offset)
+            .with_message(format!("Parse error: {text}.",))
+            .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
+            .finish()
+            .print(("input", Source::from(src)))
+            .unwrap();
+    }
 }
 
 fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleEnv<'_>, &str)) {
@@ -354,23 +368,20 @@ fn main() {
         }
 
         // Parse input
-        let (module_ast, expr_ast) = painturscript::parser::parse(&src);
+        let parse_result = parse_module_and_expr(&src);
+        let (module_ast, expr_ast) = match parse_result {
+            Ok(result) => result,
+            Err(errors) => {
+                pretty_print_parse_errors(&src, &errors);
+                continue;
+            }
+        };
         if !module_ast.is_empty() {
             let env = ModuleEnv::new(&module, &other_modules);
             println!("Module AST:\n{}", module_ast.format_with(&env));
         }
         if let Some(expr_ast) = expr_ast.as_ref() {
             println!("Expr AST:\n{expr_ast}");
-        }
-
-        // Validate module AST
-        let parse_errors = module_ast.errors();
-        if !parse_errors.is_empty() {
-            println!("Module parse errors:");
-            for e in parse_errors {
-                println!("{}", e.0);
-            }
-            continue;
         }
 
         // Compile module
@@ -394,16 +405,6 @@ fn main() {
                 continue;
             }
         };
-
-        // Validate expression AST
-        let expr_errors = expr_ast.errors();
-        if !expr_errors.is_empty() {
-            println!("Expression parse errors:");
-            for e in expr_errors {
-                println!("{}", e.0);
-            }
-            continue;
-        }
 
         // Compile and evaluate expression
         let module_env = ModuleEnv::new(&module, &other_modules);

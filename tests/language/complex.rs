@@ -60,11 +60,11 @@ fn lambdas_in_containers() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn exprs_in_match() {
     assert_eq!(
-        run("match 0 { 0 => let a = 1; a, _ => let a = 2; 2 }"),
+        run("match 0 { 0 => { let a = 1; a }, _ => { let a = 2; 2 } }"),
         int!(1)
     );
     assert_eq!(
-        run("match 5 { 0 => let a = 1; a, _ => let a = 2; 2 }"),
+        run("match 5 { 0 => { let a = 1; a }, _ => { let a = 2; 2 } }"),
         int!(2)
     );
     assert_eq!(
@@ -118,7 +118,7 @@ fn array_and_lambda() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_access_in_module_functions() {
-    assert_eq!(run("fn p(a) { let x = a[0] }"), unit());
+    assert_eq!(run("fn p(a) { let x = a[0]; }"), unit());
     assert_eq!(run("fn p(a) { let x = a[0]; x }"), unit());
     assert_eq!(run("fn p(a, i) { let x = a[i]; 0 }"), unit());
 }

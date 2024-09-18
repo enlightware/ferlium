@@ -1,6 +1,6 @@
 use std::{collections::HashMap, mem};
 
-use lrpar::Span;
+use crate::Span;
 use ustr::Ustr;
 
 use crate::{

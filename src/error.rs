@@ -1,7 +1,7 @@
 use std::fmt::{self, Display};
 
+use crate::Span;
 use enum_as_inner::EnumAsInner;
-use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{

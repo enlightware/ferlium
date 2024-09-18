@@ -1,11 +1,11 @@
 use itertools::Itertools;
-use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
     module::{ModuleEnv, ModuleFunction},
     mutability::MutType,
     r#type::{FnArgType, Type},
+    Span,
 };
 
 /// A local variable within a typing environment.

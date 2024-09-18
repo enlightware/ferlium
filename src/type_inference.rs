@@ -7,9 +7,9 @@ use std::{
     mem,
 };
 
+use crate::Span;
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
-use lrpar::Span;
 use ustr::{ustr, Ustr};
 
 use crate::{
@@ -361,8 +361,9 @@ impl TypeInference {
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
             }
-            StaticApply(name, span, args) => self.infer_static_apply(env, name, *span, args)?,
+            StaticApply((name, span), args) => self.infer_static_apply(env, name, *span, args)?,
             Block(exprs) => {
+                assert!(!exprs.is_empty());
                 let env_size = env.locals.len();
                 let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
                 env.locals.truncate(env_size);
@@ -401,7 +402,7 @@ impl TypeInference {
                 };
                 (node, ty, MutType::constant(), effects)
             }
-            Project(tuple_expr, index, index_span) => {
+            Project(tuple_expr, (index, index_span)) => {
                 let (tuple_node, tuple_mut) = self.infer_expr(env, tuple_expr)?;
                 let element_ty = self.fresh_type_var_ty();
                 self.ty_constraints.push(TypeConstraint::Pub(
@@ -418,10 +419,8 @@ impl TypeInference {
                 (node, element_ty, tuple_mut, effects)
             }
             Record(fields) => {
-                let (exprs, names): (Vec<_>, Vec<_>) = fields
-                    .iter()
-                    .map(|(name, span, expr)| (expr, (*name, *span)))
-                    .unzip();
+                let (exprs, names): (Vec<_>, Vec<_>) =
+                    fields.iter().map(|(name, expr)| (expr, *name)).unzip();
                 // Check that all fields are unique.
                 let mut names_seen = HashMap::new();
                 for (name, span) in names.iter().copied() {
@@ -457,7 +456,7 @@ impl TypeInference {
                 };
                 (node, ty, MutType::constant(), effects)
             }
-            FieldAccess(record_expr, field, field_span) => {
+            FieldAccess(record_expr, (field, field_span)) => {
                 let (record_node, record_mut) = self.infer_expr(env, record_expr)?;
                 let element_ty = self.fresh_type_var_ty();
                 self.ty_constraints.push(TypeConstraint::Pub(
@@ -567,8 +566,8 @@ impl TypeInference {
                     property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
                 self.infer_static_apply(env, &fn_name, expr.span, &[] as &[Expr])?
             }
-            Error(msg) => {
-                panic!("attempted to infer type for error node: {msg}");
+            Error => {
+                panic!("attempted to infer type for error node");
             }
         };
         Ok((N::new(node, ty, effects.clone(), expr.span), mut_ty))

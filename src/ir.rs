@@ -1,5 +1,5 @@
+use crate::Span;
 use indexmap::IndexMap;
-use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{

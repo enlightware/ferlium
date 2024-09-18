@@ -1,11 +1,12 @@
 use std::new_module_with_prelude;
 
 use emit_ir::{emit_expr, emit_module, CompiledExpr};
-use error::CompilationError;
+use error::{CompilationError, LocatedError};
 use format::FormatWith;
 use itertools::Itertools;
+use lalrpop_util::lalrpop_mod;
 use module::{FmtWithModuleEnv, Module, ModuleEnv, Modules, Use};
-use parser::parse;
+use parser_helpers::error_recovery_to_error;
 
 mod assert;
 mod ast;
@@ -21,12 +22,13 @@ pub mod format;
 mod format_string;
 pub mod function;
 mod graph;
+pub mod ide;
 pub mod ir;
 mod r#match;
 pub mod module;
 pub mod mutability;
-pub mod parser;
 mod parser_helpers;
+mod span;
 pub mod std;
 mod sync;
 pub mod r#type;
@@ -35,12 +37,17 @@ pub mod type_scheme;
 pub mod typing_env;
 pub mod value;
 
-pub mod ide;
 pub use ide::Compiler;
+pub use span::Span;
 
-pub use lrpar::Span;
 use type_scheme::DisplayStyle;
 pub use ustr::{ustr, Ustr};
+
+lalrpop_mod!(
+    #[allow(clippy::ptr_arg)]
+    #[rustfmt::skip]
+    parser
+);
 
 /// A compiled module and an expression (if any).
 #[derive(Default, Debug)]
@@ -166,6 +173,22 @@ impl ModuleAndExpr {
     }
 }
 
+/// Parse a module and an expression (if any) from a source code and return the corresponding ASTs.
+pub fn parse_module_and_expr(
+    src: &str,
+) -> Result<(ast::Module, Option<ast::Expr>), Vec<LocatedError>> {
+    let mut errors = Vec::new();
+    let module_and_expr = parser::ModuleAndExprParser::new()
+        .parse(&mut errors, src)
+        .unwrap();
+    if !errors.is_empty() {
+        let errors = errors.into_iter().map(error_recovery_to_error).collect();
+        Err(errors)
+    } else {
+        Ok(module_and_expr)
+    }
+}
+
 /// Compile a source code, given some other modules, and return the compiled module and an expression (if any), or an error.
 /// All spans are in byte offsets.
 pub fn compile(
@@ -179,7 +202,8 @@ pub fn compile(
     // Parse the source code.
     log::debug!("Using other modules: {}", other_modules.keys().join(", "));
     log::debug!("Input: {src}");
-    let (module_ast, expr_ast) = parse(src);
+    let (module_ast, expr_ast) =
+        parse_module_and_expr(src).map_err(CompilationError::ParsingFailed)?;
     {
         let env = ModuleEnv::new(&module, other_modules);
         log::debug!("Module AST\n{}", module_ast.format_with(&env));
@@ -187,10 +211,6 @@ pub fn compile(
     assert_eq!(module_ast.errors(), &[]);
     if let Some(expr) = expr_ast.as_ref() {
         log::debug!("Expr AST\n{expr}");
-        let errors = expr.errors();
-        if !errors.is_empty() {
-            return Err(CompilationError::ParsingFailed(errors));
-        }
     }
 
     // Emit IR for the module.

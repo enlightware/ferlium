@@ -11,12 +11,12 @@ use std::iter;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use crate::Span;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
 use itertools::Itertools;
-use lrpar::Span;
 use nonmax::NonMaxU32;
 use ustr::Ustr;
 

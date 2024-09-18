@@ -1,4 +1,3 @@
-use cfgrammar::span::Span;
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use std::fmt::Debug;
@@ -7,21 +6,24 @@ use ustr::Ustr;
 
 use crate::{
     containers::B, error::LocatedError, format::write_with_separator, module::FmtWithModuleEnv,
-    mutability::MutVal, r#type::Type, value::Value,
+    mutability::MutVal, r#type::Type, value::Value, Span,
 };
+
+/// A spanned Ustr
+pub type UstrSpan = (Ustr, Span);
 
 #[derive(Debug, Clone)]
 pub struct ModuleFunction {
-    pub name: (Ustr, Span),
-    pub args: Vec<(Ustr, Span)>,
+    pub name: UstrSpan,
+    pub args: Vec<UstrSpan>,
     pub args_span: Span,
     pub body: B<Expr>,
     pub span: Span,
 }
 impl ModuleFunction {
     pub fn new(
-        name: (Ustr, Span),
-        args: Vec<(Ustr, Span)>,
+        name: UstrSpan,
+        args: Vec<UstrSpan>,
         args_span: Span,
         body: B<Expr>,
         span: Span,
@@ -44,8 +46,8 @@ pub struct Module {
 }
 impl Module {
     pub fn new_with_function(
-        name: (Ustr, Span),
-        args: Vec<(Ustr, Span)>,
+        name: UstrSpan,
+        args: Vec<UstrSpan>,
         args_span: Span,
         body: Expr,
         span: Span,
@@ -65,6 +67,11 @@ impl Module {
     pub fn extend(&mut self, other: Self) {
         self.functions.extend(other.functions);
         self.types.extend(other.types);
+    }
+
+    pub fn merge(mut self, other: Self) -> Self {
+        self.extend(other);
+        self
     }
 
     pub fn errors(&self) -> Vec<LocatedError> {
@@ -121,23 +128,23 @@ pub enum ExprKind {
     FormattedString(String),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Ustr),
-    Let((Ustr, Span), MutVal, B<Expr>),
-    Abstract(Vec<(Ustr, Span)>, B<Expr>),
+    Let(UstrSpan, MutVal, B<Expr>),
+    Abstract(Vec<UstrSpan>, B<Expr>),
     Apply(B<Expr>, Vec<Expr>),
     /// A function from the module environment, or a variant constructor
-    StaticApply(Ustr, Span, Vec<Expr>),
+    StaticApply(UstrSpan, Vec<Expr>),
     Block(Vec<Expr>),
     Assign(B<Expr>, Span, B<Expr>),
     PropertyPath(Ustr, Ustr),
     Tuple(Vec<Expr>),
-    Project(B<Expr>, usize, Span),
-    Record(Vec<(Ustr, Span, Expr)>),
-    FieldAccess(B<Expr>, Ustr, Span),
+    Project(B<Expr>, (usize, Span)),
+    Record(Vec<(UstrSpan, Expr)>),
+    FieldAccess(B<Expr>, UstrSpan),
     Array(Vec<Expr>),
     Index(B<Expr>, B<Expr>),
     Match(B<Expr>, Vec<(Pattern, Expr)>, Option<B<Expr>>),
-    ForLoop((Ustr, Span), B<Expr>, B<Expr>),
-    Error(String),
+    ForLoop(UstrSpan, B<Expr>, B<Expr>),
+    Error,
 }
 
 /// An expression as an Abstract Syntax Tree
@@ -184,7 +191,7 @@ impl Expr {
                     writeln!(f, "{indent_str})")
                 }
             }
-            StaticApply(func, _, args) => {
+            StaticApply((func, _), args) => {
                 writeln!(f, "{indent_str}apply {func} to (")?;
                 for arg in args {
                     arg.format_ind(f, indent + 1)?;
@@ -209,20 +216,20 @@ impl Expr {
                 }
                 writeln!(f, "{indent_str})")
             }
-            Project(expr, index, _) => {
+            Project(expr, (index, _)) => {
                 expr.format_ind(f, indent)?;
                 writeln!(f, "{indent_str}  .{index}")
             }
             Record(fields) => {
                 writeln!(f, "{indent_str}{{")?;
-                for (name, _, value) in fields.iter() {
+                for ((name, _), value) in fields.iter() {
                     writeln!(f, "{indent_str}  {name}:")?;
                     value.format_ind(f, indent + 2)?;
                     writeln!(f, "{indent_str}  ,")?;
                 }
                 writeln!(f, "{indent_str}}}")
             }
-            FieldAccess(expr, field, _) => {
+            FieldAccess(expr, (field, _)) => {
                 expr.format_ind(f, indent)?;
                 writeln!(f, "{indent_str}  .{field}")
             }
@@ -265,7 +272,7 @@ impl Expr {
                 body.format_ind(f, indent + 1)
             }
             PropertyPath(scope, name) => writeln!(f, "{indent_str}@{}.{}", scope, name),
-            Error(msg) => writeln!(f, "{indent_str}Error: {msg}"),
+            Error => writeln!(f, "{indent_str}Error"),
         }
     }
     pub fn format(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -294,14 +301,14 @@ impl Expr {
                 expr.acc_errors_rec(errors);
                 acc_errors(errors, args.iter());
             }
-            StaticApply(_, _, args) => acc_errors(errors, args.iter()),
+            StaticApply(_, args) => acc_errors(errors, args.iter()),
             Block(exprs) => acc_errors(errors, exprs.iter()),
             Assign(place, _, value) => {
                 place.acc_errors_rec(errors);
                 value.acc_errors_rec(errors);
             }
             Tuple(args) => acc_errors(errors, args.iter()),
-            Project(expr, _, _) => expr.acc_errors_rec(errors),
+            Project(expr, _) => expr.acc_errors_rec(errors),
             Array(args) => acc_errors(errors, args.iter()),
             Index(expr, index) => {
                 expr.acc_errors_rec(errors);
@@ -318,7 +325,7 @@ impl Expr {
                 iterator.acc_errors_rec(errors);
                 body.acc_errors_rec(errors);
             }
-            Error(error) => errors.push((error.clone(), self.span)),
+            Error => errors.push(("parse error".into(), self.span)),
             _ => {}
         }
     }
@@ -333,11 +340,7 @@ impl std::fmt::Display for Expr {
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum PatternKind {
     Literal(Value, Type),
-    Variant {
-        tag: Ustr,
-        tag_span: Span,
-        vars: Vec<(Ustr, Span)>,
-    },
+    Variant { tag: UstrSpan, vars: Vec<UstrSpan> },
     Error(String),
 }
 impl PatternKind {
@@ -386,7 +389,7 @@ impl Pattern {
         match &self.kind {
             Literal(value, _) => writeln!(f, "{indent_str}{value}"),
             Variant { tag, vars, .. } => {
-                write!(f, "{indent_str}{} ", tag)?;
+                write!(f, "{indent_str}{} ", tag.0)?;
                 if !vars.is_empty() {
                     write!(f, "(")?;
                     write_with_separator(vars.iter().map(|(var, _)| var), ", ", f)?;

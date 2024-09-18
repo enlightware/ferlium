@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use crate::Span;
 use itertools::{multiunzip, Itertools};
-use lrpar::Span;
 use ustr::ustr;
 
 use crate::{
@@ -63,7 +63,7 @@ impl TypeInference {
             let (types, exprs): (Vec<_>, Vec<_>) = alternatives
                 .iter()
                 .map(|(pattern, expr)| {
-                    if let Some((tag, tag_span, vars)) = pattern.kind.as_variant() {
+                    if let Some(((tag, tag_span), vars)) = pattern.kind.as_variant() {
                         if let Some(old_tag_span) = seen_tags.insert(tag, tag_span) {
                             return Err(InternalCompilationError::DuplicatedVariant {
                                 first_occurrence: *old_tag_span,

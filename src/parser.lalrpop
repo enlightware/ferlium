@@ -1,0 +1,360 @@
+use crate::{Span, LocatedError};
+use crate::ast::{UstrSpan, Expr, ExprKind, ExprKind::*, Pattern, PatternKind as PatK, Module};
+use crate::value::Value;
+use crate::r#type::Type;
+use crate::parser_helpers::*;
+use crate::std::string::string_type;
+use crate::containers::B;
+use crate::mutability::MutVal;
+
+use ustr::{Ustr, ustr};
+
+use lalrpop_util::ErrorRecovery;
+
+grammar<'err>(errors: &'err mut Vec<ErrorRecovery<usize, Token<'input>, LocatedError>>);
+
+extern {
+    type Error = LocatedError;
+}
+
+pub ModuleAndExpr: (Module, Option<Expr>) = {
+    <m:Module> <e:Es<ExtraExpr>?> => (m, e),
+}
+
+ExtraExpr: ExprKind = {
+    <e:Stmts> <r:Expr> => Block(ext_b(e, r)),
+}
+
+pub Module: Module = {
+    FunctionOrType* => {
+        <>.into_iter().fold(Module::default(), |a, m| a.merge(m))
+    }
+}
+
+FunctionOrType = {
+    Function
+}
+
+Function: Module = {
+    <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrArgs> ")" <ar:@R> <body:Es<Block>> <r:@R> =>
+        Module::new_with_function(name, args, span(al, ar), body, span(l, r)),
+}
+
+// Expressions inspired from Rust: https://doc.rust-lang.org/reference/expressions.html
+// Also: https://github.com/bleibig/rust-grammar/blob/master/parser-lalr.y
+// Also: https://github.com/nikomatsakis/rustypop/blob/master/src/rusty.lalrpop
+
+// TODO: add Rust-style optional semicolons in block expressions using
+// the guard macro features of lalrpop as in Niko's rustypop.
+
+pub Expr = {
+    Es<TopExpr>
+}
+
+TopExpr = {
+    LogicOrExpr,
+    AssignExpr,
+    ReturnExpr,
+    AbstractExpr,
+}
+
+AssignExpr: ExprKind = {
+    <le:Es<LogicOrExpr>> <ls:@L>"=" <rs:@R> <re:Expr> => Assign(B::new(le), span(ls, rs), B::new(re)),
+}
+
+ReturnExpr: ExprKind = {
+    <l:@L> "return" <r:@R> <e:Expr> =>? error("return keyword is not implemented yet".to_string(), span(l, r)),
+}
+
+AbstractExpr: ExprKind = {
+    "|" <args:StrArgs> "|" <body:Expr> => Abstract(args, B::new(body)),
+}
+
+LogicOrExpr = {
+    LogicAndExpr,
+    <l:Es<LogicOrExpr>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr>> => StaticApply(o, vec![l, r]),
+}
+
+LogicAndExpr = {
+    CompExpr,
+    <l:Es<LogicAndExpr>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr>> => StaticApply(o, vec![l, r]),
+}
+
+CompExpr = {
+    AddExpr,
+    <l:Es<CompExpr>> <o:Sp<CompOp>> <r:Es<AddExpr>> => StaticApply(o, vec![l, r]),
+}
+
+AddExpr = {
+    MultExpr,
+    <l:Es<AddExpr>> <o:Sp<AddOp>> <r:Es<MultExpr>> => StaticApply(o, vec![l, r]),
+}
+
+MultExpr = {
+    UnaryExpr,
+    <l:Es<MultExpr>> <o:Sp<MultOp>> <r:Es<UnaryExpr>> => StaticApply(o, vec![l, r]),
+}
+
+UnaryExpr = {
+    SuffixExpr,
+    <o:Sp<UnaryOp>> <e:Es<UnaryExpr>> => StaticApply(o, vec![e]),
+}
+
+SuffixExpr = {
+    AtomExpr,
+    <e:Es<SuffixExpr>> "." <f:Sp<UIdentifier>> => FieldAccess(B::new(e), f),
+    <e:Es<SuffixExpr>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
+    <e:Es<SuffixExpr>> "[" <i:Expr> "]" => Index(B::new(e), B::new(i)),
+    <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(B::new(e), a),
+}
+
+AtomExpr = {
+    ParExpr,
+    PathExpr,
+    PropertyPathExpr,
+    ForExpr,
+    IfExpr,
+    MatchExpr,
+    LiteralExpr,
+    FormattedString,
+    TupleExpr,
+    ArrayExpr,
+    RecordExpr,
+    Block,
+    BrokenExpr,
+}
+
+ParExpr: ExprKind = {
+    "(" <e:Expr> ")" => e.kind,
+}
+
+PathExpr: ExprKind = {
+    <p:Path> => Identifier(ustr(&p)),
+}
+
+PropertyPathExpr: ExprKind = {
+    <p:PropertyPath> => PropertyPath(p.0, p.1),
+}
+
+Path: String = {
+    Identifier => <>.to_string(),
+    <l:Path> "::" <r:Identifier> => l + "::" + r,
+}
+
+ForExpr: ExprKind = {
+    "for" <id:Sp<UIdentifier>> "in" <start:Expr> ".." <end:Expr> <body:Es<Block>> =>
+        for_loop(id, start, end, body),
+}
+
+IfExpr: ExprKind = {
+    "if" <c:Expr> <t:Es<Block>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f),
+    "if" <c:Expr> <t:Es<Block>> "else" <f:Es<Block>> => cond_if_else(c, t, f),
+    "if" <c:Expr> <t:Es<Block>> => cond_if(c, t),
+}
+
+MatchExpr: ExprKind = {
+    "match" <e:Expr> "{" <m:Sep<MatchArg, ",">> "}" =>
+        Match(B::new(e), m, None),
+    "match" <e:Expr> "{" <m:(<MatchArg> ",")*> "_" "=>" <d:Expr> ","? "}" =>
+        Match(B::new(e), m, Some(B::new(d))),
+}
+
+MatchArg: (Pattern, Expr) = {
+    <p:Pattern> "=>" <e:Expr> => (p, e),
+}
+
+Pattern: Pattern = {
+    Ps<LiteralPattern>,
+    Ps<NullaryVariantPattern>,
+    Ps<NAryVariantPattern>,
+}
+
+LiteralPattern: PatK = {
+    Sp<LiteralValue> => PatK::Literal(<>.0.0, <>.0.1),
+}
+
+NullaryVariantPattern: PatK = {
+    Sp<UIdentifier> => PatK::Variant { tag: <>, vars: vec![] },
+}
+
+NAryVariantPattern: PatK = {
+    <tag:Sp<UIdentifier>> "(" <vars:StrArgs> ")" => PatK::Variant { tag, vars },
+}
+
+LiteralExpr: ExprKind = {
+    LiteralValue => Literal(<>.0, <>.1),
+}
+
+LiteralValue = {
+    IntLiteral,
+    BoolLiteral,
+    StringLiteral,
+};
+
+TupleExpr: ExprKind = {
+    "(" ")" => Literal(Value::unit(), Type::unit()),
+    "(" <a:TupleArgs> ")" => tuple(a),
+}
+
+// Note: we need this to make the difference between a parenthesized expression
+// and a tuple with a single element
+TupleArgs: Vec<Expr> = {
+    <f:Expr> "," <r:Sep<Expr, ",">> => {
+        let mut v = vec![f];
+        v.extend(r);
+        v
+    },
+}
+
+ArrayExpr: ExprKind = {
+    "[" <a:Sep<Expr, ",">> "]" => Array(a),
+}
+
+// Note: we need this to make the difference between an empty block
+// and a record, disallowing records with no elements
+RecordExpr: ExprKind = {
+    "{" <f:RecordField> "}" => Record(vec![f]),
+    "{" <f:RecordField> "," <r:Sep<RecordField, ",">> "}" => Record(ext_f(f, r)),
+}
+
+RecordField: (UstrSpan, Expr) = {
+    <n:Sp<UIdentifier>> ":" <e:Expr> => (n, e),
+}
+
+PropertyPath: (Ustr, Ustr) = {
+    "@" <p:Path> "." <f:UIdentifier> => (p.into(), f),
+}
+
+Block: ExprKind = {
+    "{" <e:Stmts> <r:Expr> "}" => Block(ext_b(e, r)),
+    "{" <e:Stmts> <r:Loc<"}">> => Block(ext_b(e, unit_literal_expr(r))),
+}
+
+#[inline]
+Stmts = { Stmt* }
+
+Stmt = {
+    Es<LetStmt>,
+    ExprStmt,
+}
+
+LetStmt: ExprKind = {
+    "let" <id:Sp<UIdentifier>> "=" <e:Expr> ";" => Let(id, MutVal::constant(), B::new(e)),
+    "let" "mut" <id:Sp<UIdentifier>> "=" <e:Expr> ";" => Let(id, MutVal::mutable(), B::new(e)),
+}
+
+ExprStmt: Expr = {
+    <e:Expr> ";" => e,
+}
+
+// Error recovery
+
+BrokenExpr: ExprKind = {
+    ! => { errors.push(<>); Error },
+}
+
+// Common non-terminals
+
+// String arguments with optional trailing comma
+StrArgs = {
+    Sep<Sp<UIdentifier>, ",">
+}
+
+// Terminals
+
+UnaryOp: Ustr = {
+    "-" => ustr("std::@u-"),
+    "not" => ustr("std::@not"),
+}
+
+MultOp: Ustr = {
+    "*" => ustr("std::@b*"),
+    "/" => ustr("std::@b/"),
+    "%" => ustr("std::@b%"),
+}
+
+AddOp: Ustr = {
+    "+" => ustr("std::@b+"),
+    "-" => ustr("std::@b-"),
+}
+
+CompOp: Ustr = {
+    "==" => ustr("std::@=="),
+    "!=" => ustr("std::@!="),
+    "<=" => ustr("std::@<="),
+    "<" => ustr("std::@<"),
+    ">=" => ustr("std::@>="),
+    ">" => ustr("std::@>"),
+}
+
+LogicalAndOp: Ustr = {
+    "and" => ustr("std::@and"),
+}
+
+LogicalOrOp: Ustr = {
+    "or" => ustr("std::@or"),
+}
+
+UIdentifier: Ustr = {
+    Identifier => ustr(<>),
+}
+
+Identifier: &'input str = r"[\p{L}_][\p{L}\p{N}_]*" => <>;
+
+BoolLiteral: (Value, Type) = {
+    "true" => literal_value(true),
+    "false" => literal_value(false),
+};
+
+IntLiteral: (Value, Type) = {
+    IntValue => literal_value(<>),
+};
+
+IntValue: isize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<isize>(s) {
+    Ok(value) => Ok(value),
+    Err(msg) => error(msg, span(l, r)),
+};
+
+UIntValue: usize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<usize>(s) {
+    Ok(value) => Ok(value),
+    Err(msg) => error(msg, span(l, r)),
+};
+
+StringLiteral: (Value, Type) = r#"\"([^\\\"]|\\.)*\""# => (string_literal(<>), string_type());
+
+FormattedString: ExprKind = r#"f\"([^\\\"]|\\.)*\""# => formatted_string(<>);
+
+// Macros
+
+// Build an Expr out of an ExprKind by adding its span
+#[inline]
+Es<K>: Expr = {
+    Sp<K> => Expr::new(<>.0, <>.1),
+};
+
+// Build a Pattern out of an PatternKind by adding its span
+#[inline]
+Ps<T>: Pattern = {
+    Sp<T> => Pattern::new(<>.0, <>.1),
+};
+
+// Return T along with its location
+Sp<T>: (T, Span) = {
+    <l:@L> <t: T> <r:@R> => (t, span(l, r)),
+};
+
+// Return the location of T, ignoring its content
+Loc<T>: Span = {
+    <l:@L> T <r:@R> => span(l, r),
+};
+
+// S-separated list of T, with optional trailing S
+Sep<T, S>: Vec<T> = {
+    <mut v:(<T> S)*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};

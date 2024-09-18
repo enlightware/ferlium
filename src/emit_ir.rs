@@ -118,11 +118,16 @@ pub fn emit_module(
         // Union duplicated effects from function arguments, and build a substitution for the
         // fully unioned effects, to removed duplications.
         ty_inf.unify_fn_arg_effects(&descr.ty_scheme.ty);
-        let effect_subst = descr.ty_scheme.ty.inner_effect_vars()
+        let effect_subst = descr
+            .ty_scheme
+            .ty
+            .inner_effect_vars()
             .iter()
-            .filter_map(|var|
-                ty_inf.effect_unioned(*var).map(|target| (*var, EffType::single_variable(target)))
-            )
+            .filter_map(|var| {
+                ty_inf
+                    .effect_unioned(*var)
+                    .map(|target| (*var, EffType::single_variable(target)))
+            })
             .collect();
         let mut code = descr.code.borrow_mut();
         let node = &mut code.as_script_mut().unwrap().code;

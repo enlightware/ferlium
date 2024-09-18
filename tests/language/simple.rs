@@ -29,6 +29,20 @@ fn literals() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blocks() {
+    assert_eq!(run("{}"), unit());
+    assert_eq!(run("{ 1 }"), int!(1));
+    assert_eq!(run("{ true; 1 }"), int!(1));
+    assert_eq!(run("{ 1; true }"), bool!(true));
+    assert_eq!(run("{ {} }"), unit());
+    assert_eq!(run("{ { 1 } }"), int!(1));
+    assert_eq!(run("{ {}; 1 }"), int!(1));
+    assert_eq!(run("{ { true }; 1 }"), int!(1));
+    assert_eq!(run("{ { 1 }; true }"), bool!(true));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn equalities() {
     assert_eq!(run("42 == 42"), bool!(true));
     assert_eq!(run("41 == 42"), bool!(false));
@@ -187,6 +201,7 @@ fn expression_grouping() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn if_expr() {
+    assert_eq!(run("if 1 < 2 { () }"), unit());
     assert_eq!(run("if 1 < 2 { 1 } else { 2 }"), int!(1));
     assert_eq!(run("if 1 <= 2 { 1 } else { 2 }"), int!(1));
     assert_eq!(run("if 1 > 2 { 1 } else { 2 }"), int!(2));
@@ -227,11 +242,12 @@ fn if_expr() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_expr() {
+    assert_eq!(run("match true { _ => 0 }"), int!(0));
     assert_eq!(run("match true { true => 0, _ => 1 }"), int!(0));
     assert_eq!(run("match false { true => 0, _ => 1 }"), int!(1));
     assert_eq!(run("match true { true => 0, _ => 1, }"), int!(0));
     assert_eq!(run("match true { false => 1, true => 0 }"), int!(0));
-    assert_eq!(run("match true { false => 1, true => 0, }"), int!(0));
+    assert_eq!(run("match false { false => 1, true => 0, }"), int!(1));
     assert_eq!(run("let a = 0; match a { 0 => 1, _ => 3 }"), int!(1));
     assert_eq!(run("let a = 1; match a { 0 => 1, _ => 3 }"), int!(3));
     assert_eq!(
@@ -340,6 +356,10 @@ fn lambda() {
         .expect_is_not_subtype("int", "bool");
     assert_eq!(run("(||1)()"), int!(1));
     assert_eq!(run("(|x| x.1)((1,2))"), int!(2));
+    assert_eq!(
+        run("let f = |x| x[0] = 1; let mut a = [0]; f(a); a"),
+        int_a!(1)
+    );
 }
 
 #[test]
@@ -350,9 +370,15 @@ fn assignment() {
     assert_eq!(run("let mut a = 1; a = 2; a"), int!(2));
     assert_eq!(run("let mut a = 1; let b = 2; a = b; a"), int!(2));
     assert_eq!(run("let mut a = 1; let b = 2; a = b; b"), int!(2));
-    assert_eq!(run("let mut a = 1; let mut b = 2; a = b; b = a; b"), int!(2));
+    assert_eq!(
+        run("let mut a = 1; let mut b = 2; a = b; b = a; b"),
+        int!(2)
+    );
     assert_eq!(run("let mut a = (1, 2); a.0 = 3; a"), int_tuple!(3, 2));
-    assert_eq!(run("let mut a = ((1, 2), 3); a.0.1 = 5; a.0"), int_tuple!(1, 5));
+    assert_eq!(
+        run("let mut a = ((1, 2), 3); a.0.1 = 5; a.0"),
+        int_tuple!(1, 5)
+    );
     assert_eq!(run("let mut a = [1, 2]; a[0] = 3; a"), int_a![3, 2]);
     assert_eq!(
         run("let mut a = [[1, 2], [3, 4]]; a[0][1] = 5; a[0]"),
@@ -364,8 +390,14 @@ fn assignment() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn for_loops() {
     assert_eq!(run("for i in 0..3 { () }"), unit());
-    assert_eq!(run("let mut s = 0; for i in 1..4 { s = s + i }; s"), int!(6));
-    assert_eq!(run("let mut s = 0; for i in -1..-4 { s = s + i }; s"), int!(-6));
+    assert_eq!(
+        run("let mut s = 0; for i in 1..4 { s = s + i }; s"),
+        int!(6)
+    );
+    assert_eq!(
+        run("let mut s = 0; for i in -1..-4 { s = s + i }; s"),
+        int!(-6)
+    );
     assert_eq!(
         run("let mut a = []; for i in 2..5 { array_append(a, i) }; a"),
         int_a![2, 3, 4]
@@ -439,11 +471,11 @@ fn records() {
     assert_eq!(run("fn e(v) { v.toto } (e,).0({toto: 3})"), int!(3));
     assert_eq!(run("fn e(v) { v.toto } let a = e; a({toto: 3})"), int!(3));
     assert_eq!(
-        run("let l2 = |v| (let sq = |x| x * x; sq(v.x) + sq(v.y)); l2({x:1, y:2})"),
+        run("let l2 = |v| { let sq = |x| x * x; sq(v.x) + sq(v.y) }; l2({x:1, y:2})"),
         int!(5)
     );
     assert_eq!(
-        run("let l = |v| (let ex = |v| v.x; let ey = |v| v.y; ex(v) + ey(v)); l({a: true, x:1, x_n: \"hi\", y:2, y_n: false})"),
+        run("let l = |v| { let ex = |v| v.x; let ey = |v| v.y; ex(v) + ey(v) }; l({a: true, x:1, x_n: \"hi\", y:2, y_n: false})"),
         int!(3)
     );
     assert_eq!(run("(|v| v.x + v.y)({x:1, y:2})"), int!(3));
@@ -582,11 +614,15 @@ fn mutability_soundness() {
 fn borrow_checker() {
     let swap_fn = "fn swap(a, b) { let temp = b; b = a; a = temp }";
     assert_eq!(
-        run(&format!("{swap_fn} let mut a = [0, 1]; swap(a[0], a[1]); a")),
+        run(&format!(
+            "{swap_fn} let mut a = [0, 1]; swap(a[0], a[1]); a"
+        )),
         int_a![1, 0]
     );
-    fail_compilation(&format!("{swap_fn} let mut a = [0, 1]; swap(a[0], a[0]); a"))
-        .expect_mutable_paths_overlap();
+    fail_compilation(&format!(
+        "{swap_fn} let mut a = [0, 1]; swap(a[0], a[0]); a"
+    ))
+    .expect_mutable_paths_overlap();
     fail_compilation(&format!(
         "{swap_fn} let mut a = [0, 1]; let i = 0; swap(a[0], a[i]); a"
     ))
@@ -621,8 +657,10 @@ fn borrow_checker() {
         )),
         int_tuple!(1, 0)
     );
-    fail_compilation(&format!("{swap_fn} let mut a = ((0,1),2); swap(a.0, a.0); a.0"))
-        .expect_mutable_paths_overlap();
+    fail_compilation(&format!(
+        "{swap_fn} let mut a = ((0,1),2); swap(a.0, a.0); a.0"
+    ))
+    .expect_mutable_paths_overlap();
 }
 
 #[test]
@@ -802,7 +840,10 @@ fn string_concat() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_push_str() {
-    assert_eq!(run(r#"let mut s = ""; string_push_str(s, ""); s"#), string!(""));
+    assert_eq!(
+        run(r#"let mut s = ""; string_push_str(s, ""); s"#),
+        string!("")
+    );
     assert_eq!(
         run(r#"let mut s = ""; string_push_str(s, "hello"); s"#),
         string!("hello")
@@ -886,7 +927,7 @@ fn recursive_functions() {
             is_even(10)"#),
         bool!(true)
     );
-    assert_eq!(run("fn f(a) { let p = g(a) } fn g(a) { 0 }"), unit());
+    assert_eq!(run("fn f(a) { let p = g(a); } fn g(a) { 0 }"), unit());
 }
 
 #[test]

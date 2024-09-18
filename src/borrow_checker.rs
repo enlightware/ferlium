@@ -1,10 +1,10 @@
-use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
     error::InternalCompilationError,
     ir::{Node, NodeKind},
     r#type::FnArgType,
+    Span,
 };
 
 enum PathPart {
