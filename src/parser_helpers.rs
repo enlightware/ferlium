@@ -4,6 +4,7 @@ use crate::ast::Pattern;
 use crate::ast::PatternKind;
 use crate::containers::SVec2;
 use crate::containers::B;
+use crate::escapes::apply_string_escapes;
 use crate::r#type::Type;
 use crate::std::string::String as MyString;
 use crate::value::NativeDisplay;
@@ -78,26 +79,13 @@ where
 
 /// Make a string literal
 pub(crate) fn string_literal(s: &str) -> Value {
-    fn rem_first_and_last(value: &str) -> &str {
-        let mut chars = value.chars();
-        chars.next();
-        chars.next_back();
-        chars.as_str()
-    }
-    let s = rem_first_and_last(s);
-    Value::native(MyString::from_str(s).unwrap())
+    let s = apply_string_escapes(&s[1..s.len()-1]);
+    Value::native(MyString::from_str(&s).unwrap())
 }
 
 /// Make formatted string
 pub(crate) fn formatted_string(s: &str) -> ExprKind {
-    fn rem_first2_and_last(value: &str) -> &str {
-        let mut chars = value.chars();
-        chars.next();
-        chars.next();
-        chars.next_back();
-        chars.as_str()
-    }
-    let s = rem_first2_and_last(s);
+    let s = apply_string_escapes(&s[2..s.len()-1]);
     ExprKind::FormattedString(s.to_string())
 }
 

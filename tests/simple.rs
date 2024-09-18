@@ -731,7 +731,7 @@ fn array_concat() {
 fn string() {
     assert_eq!(run(r#""""#), string!(""));
     assert_eq!(run(r#""hello world""#), string!("hello world"));
-    assert_eq!(run(r#""hello \"world\"""#), string!(r#"hello \"world\""#));
+    assert_eq!(run(r#""hello \"world\"""#), string!(r#"hello "world""#));
 }
 
 #[test]

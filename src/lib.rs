@@ -31,6 +31,7 @@ mod type_inference;
 pub mod type_scheme;
 pub mod typing_env;
 pub mod value;
+mod escapes;
 
 pub mod ide;
 pub use ide::Compiler;
