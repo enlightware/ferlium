@@ -79,13 +79,13 @@ where
 
 /// Make a string literal
 pub(crate) fn string_literal(s: &str) -> Value {
-    let s = apply_string_escapes(&s[1..s.len()-1]);
+    let s = apply_string_escapes(&s[1..s.len() - 1]);
     Value::native(MyString::from_str(&s).unwrap())
 }
 
 /// Make formatted string
 pub(crate) fn formatted_string(s: &str) -> ExprKind {
-    let s = apply_string_escapes(&s[2..s.len()-1]);
+    let s = apply_string_escapes(&s[2..s.len() - 1]);
     ExprKind::FormattedString(s.to_string())
 }
 

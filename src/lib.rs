@@ -13,6 +13,7 @@ mod containers;
 mod dictionary_passing;
 pub mod emit_ir;
 pub mod error;
+mod escapes;
 pub mod eval;
 pub mod format;
 mod format_string;
@@ -31,7 +32,6 @@ mod type_inference;
 pub mod type_scheme;
 pub mod typing_env;
 pub mod value;
-mod escapes;
 
 pub mod ide;
 pub use ide::Compiler;

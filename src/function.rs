@@ -426,3 +426,9 @@ pub type TernaryNativeFnNNNF<A, B, C, O, F> =
     TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, Fallible<O>, F>;
 pub type TernaryNativeFnNNVI<A, B, O, F> =
     TernaryNativeFn<NatVal<A>, NatVal<B>, Value, Plain<O>, F>;
+
+// Quaternary
+
+n_ary_native_fn!(QuaternaryNativeFn, A, B, C, D);
+pub type QuaternaryNativeFnNNNNI<A, B, C, D, O, F> =
+    QuaternaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, NatVal<D>, Plain<O>, F>;
