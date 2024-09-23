@@ -5,12 +5,14 @@ use ustr::Ustr;
 
 use crate::{
     containers::B,
+    effects::no_effects,
     function::FunctionPtr,
     ir::{self, Node, NodeKind},
     module::FmtWithModuleEnv,
     mutability::MutType,
-    r#type::{FnArgType, Type, TypeKind, TypeLike, TypeSubstitution, TypeVar},
+    r#type::{FnArgType, Type, TypeKind, TypeLike, TypeVar},
     std::math::int_type,
+    type_inference::InstSubstitution,
     value::Value,
 };
 
@@ -39,9 +41,10 @@ impl<T> DictionaryReq<T> {
     }
 }
 impl DictionaryReq<TypeVar> {
-    pub fn instantiate(&self, subst: &TypeSubstitution) -> DictionaryReq<Type> {
+    pub fn instantiate(&self, subst: &InstSubstitution) -> DictionaryReq<Type> {
         DictionaryReq {
             ty: subst
+                .0
                 .get(&self.ty)
                 .cloned()
                 .unwrap_or_else(|| Type::variable(self.ty)),
@@ -50,7 +53,7 @@ impl DictionaryReq<TypeVar> {
     }
 }
 impl DictionaryReq<Type> {
-    pub fn instantiate(&self, subst: &TypeSubstitution) -> Self {
+    pub fn instantiate(&self, subst: &InstSubstitution) -> Self {
         Self {
             ty: self.ty.instantiate(subst),
             kind: self.kind,
@@ -112,7 +115,7 @@ pub fn find_field_dict_index(
 
 pub fn instantiate_dictionaries_req(
     dicts: &DictionariesVarReq,
-    subst: &TypeSubstitution,
+    subst: &InstSubstitution,
 ) -> DictionariesTyReq {
     dicts.iter().map(|dict| dict.instantiate(subst)).collect()
 }
@@ -154,7 +157,7 @@ fn extra_args_from_inst_data(
                 }
             };
             (
-                Node::new(node_kind, node_ty, span),
+                Node::new(node_kind, node_ty, no_effects(), span),
                 FnArgType::new(node_ty, MutType::constant()),
             )
         })
@@ -180,6 +183,7 @@ fn extra_args_for_module_function(
                 Node::new(
                     NodeKind::EnvLoad(B::new(ir::EnvLoad { index })),
                     int_type(),
+                    no_effects(),
                     span,
                 ),
                 FnArgType::new(int_type(), MutType::constant()),
@@ -217,6 +221,7 @@ impl Node {
                                 // We have an instantiation, so we need a closure to pass dictionary requirements.
                                 let (captures, _) =
                                     extra_args_for_module_function(inst_data, self.span, dicts);
+                                assert!(immediate.inst_data.dicts_req.is_empty());
                                 self.kind = BuildClosure(B::new(ir::BuildClosure {
                                     function: self.clone(),
                                     captures,
@@ -231,20 +236,23 @@ impl Node {
                                 script_fn
                                     .code
                                     .elaborate_dictionaries(dicts, module_inst_data);
-                                // Build closure to capture the dictionaries of this function.
-                                let captures = (0..dicts.len())
-                                    .map(|i| {
-                                        Node::new(
-                                            EnvLoad(B::new(ir::EnvLoad { index: i })),
-                                            int_type(),
-                                            self.span,
-                                        )
-                                    })
-                                    .collect();
-                                self.kind = BuildClosure(B::new(ir::BuildClosure {
-                                    function: self.clone(),
-                                    captures,
-                                }));
+                                // Build closure to capture the dictionaries of this function, if any.
+                                if !dicts.is_empty() {
+                                    let captures = (0..dicts.len())
+                                        .map(|i| {
+                                            Node::new(
+                                                EnvLoad(B::new(ir::EnvLoad { index: i })),
+                                                int_type(),
+                                                no_effects(),
+                                                self.span,
+                                            )
+                                        })
+                                        .collect();
+                                    self.kind = BuildClosure(B::new(ir::BuildClosure {
+                                        function: self.clone(),
+                                        captures,
+                                    }));
+                                }
                             }
                         }
                     } else {
@@ -363,6 +371,7 @@ impl Node {
                         Node::new(
                             Immediate(ir::Immediate::new(Value::unit())),
                             Type::unit(),
+                            no_effects(),
                             span,
                         ),
                     );
@@ -377,6 +386,7 @@ impl Node {
                         Node::new(
                             Immediate(ir::Immediate::new(Value::unit())),
                             Type::unit(),
+                            no_effects(),
                             span,
                         ),
                     );

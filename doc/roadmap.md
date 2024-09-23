@@ -6,7 +6,6 @@
 - Split compilation of modules by analysing the dependency graph
 - Type classes
 - Recursive types inference
-- Effects
 - Co-routine/async
 - Recursive types
 - Generalised match following Maranget 2008
@@ -21,7 +20,6 @@
 ### Compiler features
 
 - Better parsing error messages
-- Effect checking and inference
 - Optimisations
 - Just in time compilation
 

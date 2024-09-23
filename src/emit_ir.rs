@@ -12,6 +12,7 @@ use ustr::Ustr;
 use crate::{
     ast::{self, *},
     containers::{iterable_to_string, B},
+    effects::EffType,
     error::InternalCompilationError,
     function::ScriptFunction,
     ir::{self, Immediate, Node},
@@ -45,17 +46,23 @@ pub fn emit_module(
     } in &source.functions
     {
         // Create type and mutability variables for the arguments.
-        // Note: the quantifiers and constraints are left empty.
+        // Note: the type quantifiers and constraints are left empty.
         // They will be filled in the second pass.
+        // The effect quantifiers are filled with the output effect variable.
         let args_ty = ty_inf.fresh_fn_args(args.len());
+        let effect_var = ty_inf.fresh_effect_var();
+        // log::debug!("Fresh effect variable for {}: {effect_var}", name.0);
+        let effects = EffType::single_variable(effect_var);
         let ty_scheme = TypeScheme::new_just_type(FnType::new(
             args_ty,
-            Type::variable(ty_inf.fresh_type_var()),
+            ty_inf.fresh_type_var_ty(),
+            effects.clone(),
         ));
         // Create dummy code.
         let dummy_code = B::new(ScriptFunction::new(N::new(
             K::Immediate(Immediate::new(Value::unit())),
             Type::unit(),
+            effects,
             *span,
         )));
         // Assemble the spans and the description
@@ -83,7 +90,7 @@ pub fn emit_module(
             module_env,
         );
         let expected_span = descr.spans.as_ref().unwrap().args_span;
-        let fn_node = ty_inf.check_expr(
+        let (fn_node, effects) = ty_inf.check_expr(
             &mut ty_env,
             &function.body,
             descr.ty_scheme.ty.ret,
@@ -92,13 +99,14 @@ pub fn emit_module(
         )?;
         let descr = output.functions.get_mut(&name).unwrap();
         *descr.code.borrow_mut() = B::new(ScriptFunction::new(fn_node));
+        descr.ty_scheme.ty.effects = ty_inf.unify_effects(&effects, &descr.ty_scheme.ty.effects);
     }
     let module_env = ModuleEnv::new(&output, others);
     ty_inf.log_debug_constraints(module_env);
 
     // Third pass, perform the unification.
     let mut ty_inf = ty_inf.unify()?;
-    ty_inf.log_debug_substitution_table(module_env);
+    ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
 
     // Fourth pass, substitute the mono type variables with the inferred types.
@@ -136,12 +144,13 @@ pub fn emit_module(
         assert_eq!(constraints.len(), retained_constraints.len());
 
         // Substitute the constraint-originating types in the node.
-        node.instantiate(&constraint_subst);
+        node.instantiate(&(constraint_subst, HashMap::new()));
 
         // Write the final type scheme.
-        descr.ty_scheme.quantifiers = quantifiers.clone();
+        descr.ty_scheme.ty_quantifiers = quantifiers.clone();
+        descr.ty_scheme.eff_quantifiers = descr.ty_scheme.ty.input_effect_vars();
         descr.ty_scheme.constraints = constraints;
-        assert_eq!(descr.ty_scheme.quantifiers_from_signature(), quantifiers);
+        assert_eq!(descr.ty_scheme.ty_quantifiers_from_signature(), quantifiers);
 
         // Log the dropped constraints.
         drop(code);
@@ -229,6 +238,7 @@ fn check_unbounds(
 pub struct CompiledExpr {
     pub expr: ir::Node,
     pub ty: TypeScheme<Type>,
+    pub effects: EffType,
     pub locals: Vec<Local>,
 }
 
@@ -244,17 +254,18 @@ pub fn emit_expr(
     let initial_local_count = locals.len();
     let mut ty_env = TypingEnv::new(locals, module_env);
     let mut ty_inf = TypeInference::new();
-    let (mut node, mut ty, _) = ty_inf.infer_expr(&mut ty_env, source)?;
+    let (mut node, mut ty, _, mut effects) = ty_inf.infer_expr(&mut ty_env, source)?;
     let mut locals = ty_env.get_locals_and_drop();
     ty_inf.log_debug_constraints(module_env);
 
     // Perform the unification.
     let mut ty_inf = ty_inf.unify()?;
-    ty_inf.log_debug_substitution_table(module_env);
+    ty_inf.log_debug_substitution_tables(module_env);
 
     // Substitute the result of the unification.
     ty_inf.substitute_in_node(&mut node, &[]);
     ty = ty_inf.substitute_in_type(ty, &[]);
+    effects = ty_inf.substitute_effect_type(&effects);
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = ty_inf.substitute_in_type(local.ty, &[]);
     }
@@ -277,14 +288,28 @@ pub fn emit_expr(
     // Normalize the type scheme
     let mut ty_scheme = TypeScheme {
         ty,
-        quantifiers,
+        eff_quantifiers: ty.inner_effect_vars(),
+        ty_quantifiers: quantifiers,
         constraints,
     };
-    let subst = ty_scheme.normalize();
+    let mut subst = ty_scheme.normalize();
 
-    // Substitute the normalized and constraint-originating types in the node.
-    let subst = subst.into_iter().chain(constraint_subst).collect();
+    // Remove output effects of the expression (i.e. not in the type of the expression).
+    for effect in effects.iter() {
+        if let Some(var) = effect.as_variable() {
+            if !subst.1.contains_key(var) {
+                subst.1.insert(*var, EffType::empty());
+            }
+        }
+    }
+
+    // Substitute the normalized and constraint-originating types in the node, effects and locals.
+    subst.0.extend(constraint_subst);
     node.instantiate(&subst);
+    let effects = effects.instantiate(&subst.1);
+    for local in locals.iter_mut().skip(initial_local_count) {
+        local.ty = local.ty.instantiate(&subst);
+    }
 
     // Do borrow checking and dictionary elaboration.
     node.check_borrows()?;
@@ -294,12 +319,14 @@ pub fn emit_expr(
     Ok(CompiledExpr {
         expr: node,
         ty: ty_scheme,
+        effects,
         locals,
     })
 }
 
-/// Filter constraints that contain at least of of the type variables listed in the quantifiers
-fn filter_constraints_any_ty_vars(
+/// Filter constraints that contain at least of the type variables listed in ty_vars
+#[allow(dead_code)]
+fn select_constraints_any_of_these_ty_vars(
     constraints: &[PubTypeConstraint],
     ty_vars: &[TypeVar],
 ) -> Vec<PubTypeConstraint> {
@@ -453,7 +480,7 @@ fn validate_and_cleanup_constraints(
         )));
     }
 
-    // Compute the quantifiers based on the function type and its contraints.
+    // Compute the quantifiers based on the function type and its constraints.
     let quantifiers = TypeScheme::list_ty_vars(ty, constraints.iter().cloned());
 
     // Detect unbound type variables in the code and return error if not in unused variants only.

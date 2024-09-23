@@ -1,7 +1,10 @@
 use painturscript::{
-    compile,
+    effects::{effect, effects, PrimitiveEffect},
     error::{CompilationError, RuntimeError},
     eval::EvalResult,
+    function::{NullaryNativeFnI, UnaryNativeFnVI},
+    module::{Module, Modules},
+    r#type::{FnType, Type},
     std::new_std_module_env,
     value::Value,
     ModuleAndExpr,
@@ -15,17 +18,64 @@ pub enum Error {
 
 pub type CompileRunResult = Result<Value, Error>;
 
+fn test_effect_module() -> Module {
+    let mut module: Module = Default::default();
+    module.functions.insert(
+        "read".into(),
+        NullaryNativeFnI::description_with_default_ty(|| (), effect(PrimitiveEffect::Read)),
+    );
+    module.functions.insert(
+        "write".into(),
+        NullaryNativeFnI::description_with_default_ty(|| (), effect(PrimitiveEffect::Write)),
+    );
+    module.functions.insert(
+        "read_write".into(),
+        NullaryNativeFnI::description_with_default_ty(
+            || (),
+            effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
+        ),
+    );
+    module.functions.insert(
+        "take_read".into(),
+        UnaryNativeFnVI::description_with_ty(
+            |_x: Value| 0,
+            Type::function_type(FnType::new(
+                vec![],
+                Type::unit(),
+                effect(PrimitiveEffect::Read),
+            )),
+            effect(PrimitiveEffect::Read),
+        ),
+    );
+    module
+}
+
+/// Compile and run the src and return its module and expression
+pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationError> {
+    let mut other_modules = new_std_module_env();
+    other_modules.insert("effects".into(), test_effect_module());
+    Ok((
+        painturscript::compile(src, &other_modules, &[])?,
+        other_modules,
+    ))
+}
+
+/// Compile the src and return its module and expression
+pub fn compile(src: &str) -> (ModuleAndExpr, Modules) {
+    try_compile(src).unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
+}
+
 /// Compile and run the src and return its execution result (either a value or an error)
 pub fn try_compile_and_run(src: &str) -> CompileRunResult {
     // Compile the source.
-    let other_modules = new_std_module_env();
-    let ModuleAndExpr { module, expr } =
-        compile(src, &other_modules, &[]).map_err(Error::Compilation)?;
+    let (ModuleAndExpr { module, expr }, others) = try_compile(src).map_err(Error::Compilation)?;
 
     // Run the expression if any.
     if let Some(expr) = expr {
         let result = expr.expr.eval().map_err(Error::Runtime)?;
-        drop(module); // ensure that the module will live during eval, as it holds the strong references to the functions refered in the expression
+        // ensure that the modules will live during eval, as it holds the strong references to the functions referred in the expression
+        drop(module);
+        drop(others);
         Ok(result)
     } else {
         Ok(Value::unit())

@@ -1,10 +1,13 @@
 use std::{
     borrow::Borrow,
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::{self, Display},
+    iter::once,
+    mem,
 };
 
-use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey};
+use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
 use lrpar::Span;
 use ustr::Ustr;
@@ -13,6 +16,7 @@ use crate::{
     ast::{Expr, ExprKind},
     containers::{SVec2, B},
     dictionary_passing::DictionaryReq,
+    effects::{no_effects, EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution},
     error::{ADTAccessType, InternalCompilationError, MustBeMutableContext},
     format_string::emit_format_string_ast,
     function::{FunctionRef, ScriptFunction},
@@ -25,6 +29,8 @@ use crate::{
     typing_env::{Local, TypingEnv},
     value::Value,
 };
+
+pub type InstSubstitution = (TypeSubstitution, EffectsSubstitution);
 
 impl UnifyKey for TyVarKey {
     type Value = Option<Type>;
@@ -62,6 +68,31 @@ impl UnifyKey for MutVarKey {
 
 impl EqUnifyValue for MutVal {}
 
+impl UnifyKey for EffectVarKey {
+    type Value = Option<EffType>;
+
+    fn index(&self) -> u32 {
+        self.name()
+    }
+
+    fn from_index(u: u32) -> Self {
+        Self::new(u)
+    }
+
+    fn tag() -> &'static str {
+        "EffectVarKey"
+    }
+}
+
+/// Effects can always be unified through the union operation
+impl UnifyValue for EffType {
+    type Error = ena::unify::NoError;
+
+    fn unify_values(a: &Self, b: &Self) -> Result<Self, Self::Error> {
+        Ok(a.union(b))
+    }
+}
+
 /// A constraint on types.
 #[derive(Debug, Clone)]
 pub enum TypeConstraint {
@@ -72,21 +103,6 @@ pub enum TypeConstraint {
         expected_span: Span,
     },
     Pub(PubTypeConstraint),
-}
-
-impl TypeConstraint {
-    pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
-        use TypeConstraint::*;
-        match self {
-            SubType {
-                current, expected, ..
-            } => {
-                current.data().contains_any_ty_vars(vars)
-                    || expected.data().contains_any_ty_vars(vars)
-            }
-            Pub(pub_constraint) => pub_constraint.contains_any_ty_vars(vars),
-        }
-    }
 }
 
 impl FmtWithModuleEnv for TypeConstraint {
@@ -140,6 +156,7 @@ pub struct TypeInference {
     ty_constraints: Vec<TypeConstraint>,
     mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     mut_constraints: Vec<MutConstraint>,
+    effect_constraints: InPlaceUnificationTable<EffectVarKey>,
 }
 
 impl TypeInference {
@@ -168,16 +185,31 @@ impl TypeInference {
         MutType::Variable(self.fresh_mut_var())
     }
 
+    pub fn fresh_effect_var(&mut self) -> EffectVar {
+        self.effect_constraints.new_key(None)
+    }
+
+    pub fn fresh_effect_var_ty(&mut self) -> EffType {
+        EffType::single_variable(self.fresh_effect_var())
+    }
+
     pub fn fresh_fn_args(&mut self, count: usize) -> Vec<FnArgType> {
         (0..count)
             .map(|_| FnArgType::new(self.fresh_type_var_ty(), self.fresh_mut_var_ty()))
             .collect()
     }
 
-    pub fn fresh_type_var_subs(&mut self, source: &[TypeVar]) -> TypeSubstitution {
+    pub fn fresh_type_var_subst(&mut self, source: &[TypeVar]) -> TypeSubstitution {
         source
             .iter()
             .map(|&ty_var| (ty_var, self.fresh_type_var_ty()))
+            .collect()
+    }
+
+    pub fn fresh_effect_var_subst(&mut self, source: &HashSet<EffectVar>) -> EffectsSubstitution {
+        source
+            .iter()
+            .map(|&eff_var| (eff_var, self.fresh_effect_var_ty()))
             .collect()
     }
 
@@ -190,15 +222,16 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         expr: &Expr,
-    ) -> Result<(Node, Type, MutType), InternalCompilationError> {
+    ) -> Result<(Node, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
         use ExprKind::*;
-        let (node, ty, mut_ty) = match &expr.kind {
+        let (node, ty, mut_ty, effects) = match &expr.kind {
             Literal(value, ty) => (
                 K::Immediate(Immediate::new(value.clone())),
                 *ty,
                 MutType::constant(),
+                no_effects(),
             ),
             FormattedString(s) => {
                 let expr = emit_format_string_ast(s, expr.span, env)?;
@@ -208,7 +241,7 @@ impl TypeInference {
                 // Retrieve the index and the type of the variable from the environment, if it exists
                 if let Some((index, ty, mut_ty)) = env.get_variable_index_and_type_scheme(name) {
                     let node = K::EnvLoad(B::new(ir::EnvLoad { index }));
-                    (node, ty, mut_ty)
+                    (node, ty, mut_ty, no_effects())
                 }
                 // Retrieve the function from the environment, if it exists
                 else if let Some(function) = env.get_function(*name) {
@@ -219,7 +252,12 @@ impl TypeInference {
                         inst_data,
                         substitute_in_value_fn: false,
                     }));
-                    (node, Type::function_type(fn_ty), MutType::constant())
+                    (
+                        node,
+                        Type::function_type(fn_ty),
+                        MutType::constant(),
+                        no_effects(),
+                    )
                 }
                 // Otherwise, the name is neither a known variable or function, assume it to be a variant constructor
                 else {
@@ -235,15 +273,15 @@ impl TypeInference {
                     let payload_node = N::new(
                         K::Immediate(Immediate::new(Value::unit())),
                         payload_ty,
+                        no_effects(),
                         expr.span,
                     );
                     let node = K::Variant(B::new((*name, payload_node)));
-                    (node, variant_ty, MutType::constant())
+                    (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
             LetVar((name, name_span), mutable, let_expr) => {
-                // Mutable variable, do not do generalization.
-                let (node, ty, _) = self.infer_expr(env, let_expr)?;
+                let (node, ty, _, effects) = self.infer_expr(env, let_expr)?;
                 env.locals.push(Local::new(
                     *name,
                     MutType::resolved(*mutable),
@@ -255,7 +293,7 @@ impl TypeInference {
                     ty,
                     name_span: *name_span,
                 }));
-                (node, Type::unit(), MutType::constant())
+                (node, Type::unit(), MutType::constant(), effects)
             }
             Abstract(args, body) => {
                 // Allocate fresh type and mutability variables for the arguments in the function's scope
@@ -274,52 +312,68 @@ impl TypeInference {
                 // Build environment for typing the function's body
                 let mut env = TypingEnv::new(locals, env.module_env);
                 // Infer the body's type
-                let (code, ret_ty, _) = self.infer_expr(&mut env, body)?;
+                let (code, ret_ty, _, effects) = self.infer_expr(&mut env, body)?;
                 // Store and return the function's type
-                let fn_ty = FnType::new(args_ty, ret_ty);
+                let fn_ty = FnType::new(args_ty, ret_ty, effects);
                 let value_fn = Value::function(B::new(ScriptFunction::new(code)));
                 let node = K::Immediate(Immediate::new(value_fn));
-                (node, Type::function_type(fn_ty), MutType::constant())
+                (
+                    node,
+                    Type::function_type(fn_ty),
+                    MutType::constant(),
+                    no_effects(),
+                )
             }
             Apply(func, args) => {
                 // Do we have a global function or variant?
                 if let Identifier(name) = func.kind {
                     if !env.has_variable_name(name) {
-                        let (node, ty, mut_ty) =
+                        let (node, ty, mut_ty, effects) =
                             self.infer_static_apply(env, name, func.span, args)?;
-                        return Ok((N::new(node, ty, expr.span), ty, mut_ty));
+                        return Ok((
+                            N::new(node, ty, effects.clone(), expr.span),
+                            ty,
+                            mut_ty,
+                            effects,
+                        ));
                     }
                 }
                 // No, we emit code to evaluate function
                 // Infer the type and mutability of the arguments and collect their code and constraints
                 // TODO: check borrow rules
-                let (args_nodes, args_tys) = self.infer_exprs_ret_arg_ty(env, args)?;
-                // Allocate a fresh variable for the return type
+                let (args_nodes, args_tys, args_effects) =
+                    self.infer_exprs_ret_arg_ty(env, args)?;
+                // Allocate a fresh variable for the return type and effects of the function
                 let ret_ty = self.fresh_type_var_ty();
+                let call_effects = self.fresh_effect_var_ty();
                 // Build the function type
-                let func_ty = Type::function_type(FnType::new(args_tys, ret_ty));
+                let func_ty =
+                    Type::function_type(FnType::new(args_tys, ret_ty, call_effects.clone()));
                 // Check the function against its function type
-                let func_node =
+                let (func_node, func_effects) =
                     self.check_expr(env, func, func_ty, MutType::constant(), expr.span)?;
+                // Unify effects
+                let combined_effects =
+                    self.make_dependent_effect([&args_effects, &func_effects, &call_effects]);
                 // Store and return the result
                 let node = K::Apply(B::new(ir::Application {
                     function: func_node,
                     arguments: args_nodes,
                 }));
-                (node, ret_ty, MutType::constant())
+                (node, ret_ty, MutType::constant(), combined_effects)
             }
             StaticApply(name, span, args) => self.infer_static_apply(env, *name, *span, args)?,
             Block(exprs) => {
                 let env_size = env.locals.len();
-                let (nodes, types) = self.infer_exprs_drop_mut(env, exprs)?;
+                let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
                 env.locals.truncate(env_size);
-                let ty = types.last().copied().unwrap_or(Type::unit());
                 let node = K::Block(B::new(SVec2::from_vec(nodes)));
-                (node, ty, MutType::constant())
+                let ty = types.last().copied().unwrap_or(Type::unit());
+                (node, ty, MutType::constant(), effects)
             }
             Assign(place, sign_span, value) => {
-                let (value, value_ty, _value_mut) = self.infer_expr(env, value)?;
-                let (place, place_ty, place_mut) = self.infer_expr(env, place)?;
+                let (value, value_ty, _value_mut, value_eff) = self.infer_expr(env, value)?;
+                let (place, place_ty, place_mut, place_eff) = self.infer_expr(env, place)?;
                 self.add_mut_be_at_least_constraint(
                     place_mut,
                     place.span,
@@ -328,16 +382,18 @@ impl TypeInference {
                 );
                 self.add_sub_type_constraint(value_ty, value.span, place_ty, place.span);
                 let node = K::Assign(B::new(ir::Assignment { place, value }));
-                (node, Type::unit(), MutType::constant())
+                let combined_effects = self.make_dependent_effect([value_eff, place_eff]);
+                (node, Type::unit(), MutType::constant(), combined_effects)
             }
             Tuple(exprs) => {
-                let (nodes, types) = self.infer_exprs_drop_mut(env, exprs)?;
+                let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
                 let node = K::Tuple(B::new(SVec2::from_vec(nodes)));
                 let ty = Type::tuple(types);
-                (node, ty, MutType::constant())
+                (node, ty, MutType::constant(), effects)
             }
             Project(tuple_expr, index, index_span) => {
-                let (tuple_node, tuple_ty, tuple_mut) = self.infer_expr(env, tuple_expr)?;
+                let (tuple_node, tuple_ty, tuple_mut, effects) =
+                    self.infer_expr(env, tuple_expr)?;
                 let element_ty = self.fresh_type_var_ty();
                 self.ty_constraints.push(TypeConstraint::Pub(
                     PubTypeConstraint::new_tuple_at_index_is(
@@ -349,7 +405,7 @@ impl TypeInference {
                     ),
                 ));
                 let node = K::Project(B::new((tuple_node, *index)));
-                (node, element_ty, tuple_mut)
+                (node, element_ty, tuple_mut, effects)
             }
             Record(fields) => {
                 let (exprs, names): (Vec<_>, Vec<_>) = fields
@@ -367,7 +423,7 @@ impl TypeInference {
                     }
                 }
                 // Infer the types of the nodes.
-                let (nodes, types) = self.infer_exprs_drop_mut(env, &exprs)?;
+                let (nodes, types, effects) = self.infer_exprs_drop_mut(env, &exprs)?;
                 // Reorder the names, the types and the nodes to have fields sorted by name.
                 let mut names = names.into_iter().map(|(name, _)| name).collect::<Vec<_>>();
                 let mut named_nodes = HashMap::new();
@@ -385,10 +441,11 @@ impl TypeInference {
                 // Note: we assume that while building the record, if the names are sorted, they won't be shuffled.
                 let node = K::Record(B::new(SVec2::from_vec(nodes)));
                 let ty = Type::record(names.into_iter().zip(types).collect());
-                (node, ty, MutType::constant())
+                (node, ty, MutType::constant(), effects)
             }
             FieldAccess(record_expr, field, field_span) => {
-                let (record_node, record_ty, record_mut) = self.infer_expr(env, record_expr)?;
+                let (record_node, record_ty, record_mut, effects) =
+                    self.infer_expr(env, record_expr)?;
                 let element_ty = self.fresh_type_var_ty();
                 self.ty_constraints.push(TypeConstraint::Pub(
                     PubTypeConstraint::new_record_field_is(
@@ -400,7 +457,7 @@ impl TypeInference {
                     ),
                 ));
                 let node = K::FieldAccess(B::new((record_node, *field)));
-                (node, element_ty, record_mut)
+                (node, element_ty, record_mut, effects)
             }
             Array(exprs) => {
                 if exprs.is_empty() {
@@ -408,20 +465,35 @@ impl TypeInference {
                     let element_ty = self.fresh_type_var_ty();
                     // Build an empty array node and return it
                     let node = K::Array(B::new(SVec2::new()));
-                    (node, array_type(element_ty), MutType::constant())
+                    (
+                        node,
+                        array_type(element_ty),
+                        MutType::constant(),
+                        no_effects(),
+                    )
                 } else {
                     // The element type is the first element's type
-                    let (first_node, element_ty, _) = self.infer_expr(env, &exprs[0])?;
+                    let (first_node, element_ty, _, first_effects) =
+                        self.infer_expr(env, &exprs[0])?;
                     // Infer the type of the elements and collect their code and constraints
-                    let (other_nodes, types) = self.infer_exprs_drop_mut(env, &exprs[1..])?;
+                    let (other_nodes, types, other_effects) =
+                        self.infer_exprs_drop_mut(env, &exprs[1..])?;
                     // All elements must be of the first element's type
                     for (ty, expr) in types.into_iter().zip(exprs.iter().skip(1)) {
                         self.add_sub_type_constraint(ty, expr.span, element_ty, exprs[0].span);
                     }
+                    // Unify effects
+                    let combined_effects =
+                        self.make_dependent_effect([first_effects, other_effects]);
                     // Build the array node and return it
-                    let element_nodes = std::iter::once(first_node).chain(other_nodes).collect();
+                    let element_nodes = once(first_node).chain(other_nodes).collect();
                     let node = K::Array(B::new(element_nodes));
-                    (node, array_type(element_ty), MutType::constant())
+                    (
+                        node,
+                        array_type(element_ty),
+                        MutType::constant(),
+                        combined_effects,
+                    )
                 }
             }
             Index(array, index) => {
@@ -429,22 +501,24 @@ impl TypeInference {
                 let element_ty = self.fresh_type_var_ty();
                 let array_ty = array_type(element_ty);
                 // Infer type of the array expression and make sure it is an array
-                let (array_node, array_expr_ty, array_expr_mut) = self.infer_expr(env, array)?;
+                let (array_node, array_expr_ty, array_expr_mut, array_effects) =
+                    self.infer_expr(env, array)?;
                 self.add_sub_type_constraint(array_expr_ty, array.span, array_ty, array.span);
                 // Check type of the index expression to be int
-                let index_node =
+                let (index_node, index_effects) =
                     self.check_expr(env, index, int_type(), MutType::constant(), index.span)?;
                 // Build the index node and return it
                 let node = K::Index(B::new(array_node), B::new(index_node));
-                (node, element_ty, array_expr_mut)
+                let combined_effects = self.make_dependent_effect([array_effects, index_effects]);
+                (node, element_ty, array_expr_mut, combined_effects)
             }
             Match(cond_expr, alternatives, default) => {
-                let (node, ty, mut_ty) =
+                let (node, ty, mut_ty, effects) =
                     self.infer_match(env, expr, cond_expr, alternatives, default)?;
-                return Ok((N::new(node, ty, expr.span), ty, mut_ty));
+                (node, ty, mut_ty, effects)
             }
             ForLoop(var_name, iterator, body) => {
-                let iterator = self.check_expr(
+                let (iterator, iterator_effects) = self.check_expr(
                     env,
                     iterator,
                     range_iterator_type(),
@@ -458,7 +532,7 @@ impl TypeInference {
                     int_type(),
                     var_name.1,
                 ));
-                let body =
+                let (body, body_effects) =
                     self.check_expr(env, body, Type::unit(), MutType::constant(), body.span)?;
                 env.locals.truncate(env_size);
                 let var_name_span = var_name.1;
@@ -467,13 +541,19 @@ impl TypeInference {
                     body,
                     var_name_span,
                 }));
-                (node, Type::unit(), MutType::constant())
+                let combined_effects = self.make_dependent_effect([iterator_effects, body_effects]);
+                (node, Type::unit(), MutType::constant(), combined_effects)
             }
             Error(msg) => {
                 panic!("attempted to infer type for error node: {msg}");
             }
         };
-        Ok((N::new(node, ty, expr.span), ty, mut_ty))
+        Ok((
+            N::new(node, ty, effects.clone(), expr.span),
+            ty,
+            mut_ty,
+            effects,
+        ))
     }
 
     fn infer_static_apply(
@@ -482,7 +562,7 @@ impl TypeInference {
         name: Ustr,
         span: Span,
         args: &[impl Borrow<Expr>],
-    ) -> Result<(NodeKind, Type, MutType), InternalCompilationError> {
+    ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
         // Get the function and its type from the environment.
@@ -503,12 +583,13 @@ impl TypeInference {
             // Instantiate its type scheme
             let (inst_fn_ty, inst_data) = function.ty_scheme.instantiate(self);
             // Get the code and make sure the types of its arguments match the expected types
-            let args_nodes = self.check_exprs(env, args, &inst_fn_ty.args, span)?;
+            let (args_nodes, args_effects) = self.check_exprs(env, args, &inst_fn_ty.args, span)?;
             // Build and return the function node, get back the function to avoid re-borrowing
             let function = env
                 .get_function(name)
                 .expect("function not found any more after checking");
             let ret_ty = inst_fn_ty.ret;
+            let combined_effects = self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
             let node = K::StaticApply(B::new(ir::StaticApplication {
                 function: FunctionRef::new_weak(&function.code),
                 function_name: name,
@@ -517,18 +598,19 @@ impl TypeInference {
                 ty: inst_fn_ty,
                 inst_data,
             }));
-            (node, ret_ty, MutType::constant())
+            (node, ret_ty, MutType::constant(), combined_effects)
         } else {
             // If it is not a known function, assume it to be a variant constructor
             // Create a fresh type and add a constraint for that type to include this variant.
             let variant_ty = self.fresh_type_var_ty();
-            let (payload_nodes, payload_types) = self.infer_exprs_drop_mut(env, args)?;
+            let (payload_nodes, payload_types, effects) = self.infer_exprs_drop_mut(env, args)?;
             let (payload_ty, payload_node) = match payload_nodes.len() {
                 0 => (
                     Type::unit(),
                     N::new(
                         K::Immediate(Immediate::new(Value::unit())),
                         Type::unit(),
+                        no_effects(),
                         span,
                     ),
                 ),
@@ -544,6 +626,7 @@ impl TypeInference {
                         N::new(
                             K::Tuple(B::new(SVec2::from_vec(payload_nodes))),
                             payload_ty,
+                            effects.clone(),
                             span,
                         ),
                     )
@@ -554,7 +637,7 @@ impl TypeInference {
             ));
             // Build the variant construction node.
             let node = K::Variant(B::new((name, payload_node)));
-            (node, variant_ty, MutType::constant())
+            (node, variant_ty, MutType::constant(), effects)
         })
     }
 
@@ -562,31 +645,37 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         exprs: &[impl Borrow<Expr>],
-    ) -> Result<(Vec<ir::Node>, Vec<Type>), InternalCompilationError> {
-        exprs
+    ) -> Result<(Vec<ir::Node>, Vec<Type>, EffType), InternalCompilationError> {
+        let (nodes, tys, effects): (_, _, Vec<_>) = exprs
             .iter()
             .map(|arg| {
-                let (node, ty, _mut_ty) = self.infer_expr(env, arg.borrow())?;
-                Ok::<(ir::Node, Type), InternalCompilationError>((node, ty))
+                let (node, ty, _mut_ty, effects) = self.infer_expr(env, arg.borrow())?;
+                Ok::<(ir::Node, Type, EffType), InternalCompilationError>((node, ty, effects))
             })
-            .process_results(|iter| multiunzip(iter))
+            .process_results(|iter| multiunzip(iter))?;
+
+        let combined_effects = self.make_dependent_effect(&effects);
+        Ok((nodes, tys, combined_effects))
     }
 
     fn infer_exprs_ret_arg_ty(
         &mut self,
         env: &mut TypingEnv,
         exprs: &[impl Borrow<Expr>],
-    ) -> Result<(Vec<ir::Node>, Vec<FnArgType>), InternalCompilationError> {
-        exprs
+    ) -> Result<(Vec<ir::Node>, Vec<FnArgType>, EffType), InternalCompilationError> {
+        let (nodes, tys, effects): (_, _, Vec<_>) = exprs
             .iter()
             .map(|arg| {
-                let (node, ty, mut_ty) = self.infer_expr(env, arg.borrow())?;
-                Ok::<(ir::Node, FnArgType), InternalCompilationError>((
+                let (node, ty, mut_ty, effects) = self.infer_expr(env, arg.borrow())?;
+                Ok::<(ir::Node, FnArgType, EffType), InternalCompilationError>((
                     node,
                     FnArgType::new(ty, mut_ty),
+                    effects,
                 ))
             })
-            .process_results(|iter| multiunzip(iter))
+            .process_results(|iter| multiunzip(iter))?;
+        let combined_effects = self.make_dependent_effect(&effects);
+        Ok((nodes, tys, combined_effects))
     }
 
     fn check_exprs(
@@ -595,16 +684,18 @@ impl TypeInference {
         exprs: &[impl Borrow<Expr>],
         expected_tys: &[FnArgType],
         expected_span: Span,
-    ) -> Result<Vec<ir::Node>, InternalCompilationError> {
-        exprs
+    ) -> Result<(Vec<ir::Node>, EffType), InternalCompilationError> {
+        let (nodes, effects): (_, Vec<_>) = exprs
             .iter()
             .zip(expected_tys)
             .map(|(arg, arg_ty)| {
-                let node =
+                let (node, effects) =
                     self.check_expr(env, arg.borrow(), arg_ty.ty, arg_ty.inout, expected_span)?;
-                Ok(node)
+                Ok((node, effects))
             })
-            .process_results(|iter| iter.collect())
+            .process_results(|iter| multiunzip(iter))?;
+        let combined_effects = self.make_dependent_effect(&effects);
+        Ok((nodes, combined_effects))
     }
 
     pub fn check_expr(
@@ -614,7 +705,7 @@ impl TypeInference {
         expected_ty: Type,
         expected_mut: MutType,
         expected_span: Span,
-    ) -> Result<Node, InternalCompilationError> {
+    ) -> Result<(Node, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
         use ExprKind::*;
@@ -623,11 +714,14 @@ impl TypeInference {
         if let Literal(value, ty) = &expr.kind {
             if *ty == expected_ty {
                 let node = K::Immediate(Immediate::new(value.clone()));
-                return Ok(N::new(node, expected_ty, expr.span));
+                return Ok((
+                    N::new(node, expected_ty, no_effects(), expr.span),
+                    no_effects(),
+                ));
             }
         }
 
-        // Functions call
+        // Functions abstraction
         if let Abstract(args, body) = &expr.kind {
             let ty_data = { expected_ty.data().clone() };
             if let TypeKind::Function(fn_ty) = ty_data {
@@ -640,20 +734,24 @@ impl TypeInference {
                 // Build environment for typing the function's body
                 let mut env = TypingEnv::new(locals, env.module_env);
                 // Recursively check the function's body
-                let code =
+                let (code, effects) =
                     self.check_expr(&mut env, body, fn_ty.ret, MutType::constant(), body.span)?;
+                self.unify_effects(&effects, &fn_ty.effects);
                 // Store and return the function's type
                 let value_fn = Value::function(B::new(ScriptFunction::new(code)));
                 let node = K::Immediate(Immediate::new(value_fn));
-                return Ok(N::new(node, expected_ty, expr.span));
+                return Ok((
+                    N::new(node, expected_ty, no_effects(), expr.span),
+                    no_effects(),
+                ));
             }
         }
 
         // Other cases, infer and add constraints
-        let (node, actual_ty, actual_mut) = self.infer_expr(env, expr)?;
+        let (node, actual_ty, actual_mut, effects) = self.infer_expr(env, expr)?;
         self.add_sub_type_constraint(actual_ty, expr.span, expected_ty, expected_span);
         self.add_mut_be_at_least_constraint(actual_mut, expr.span, expected_mut, expected_span);
-        Ok(node)
+        Ok((node, effects))
     }
 
     pub fn log_debug_constraints(&self, module_env: ModuleEnv) {
@@ -671,6 +769,21 @@ impl TypeInference {
             log::debug!("Mutability constraints before unification:");
             for constraint in &self.mut_constraints {
                 log::debug!("  {}", constraint);
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn log_debug_effect_constraints(&mut self) {
+        log::debug!("Effect substitution table:");
+        for i in 0..self.effect_constraints.len() {
+            let var = EffectVar::new(i as u32);
+            let value = self.effect_constraints.probe_value(var);
+            match value {
+                Some(value) => log::debug!("  {var} → {}", value),
+                None => log::debug!("  {var} → {} (unbound)", {
+                    self.effect_constraints.find(var)
+                }),
             }
         }
     }
@@ -716,6 +829,61 @@ impl TypeInference {
         });
     }
 
+    /// Make a new effect depending on the given effects
+    pub fn make_dependent_effect<T: Borrow<EffType> + Clone>(
+        &mut self,
+        deps: impl AsRef<[T]>,
+    ) -> EffType {
+        let deps = deps.as_ref();
+
+        // Handle the trivial cases.
+        if deps.is_empty() {
+            return EffType::empty();
+        } else if deps.len() == 1 {
+            return deps[0].borrow().clone();
+        }
+
+        // Partition the effects into primitive and unresolved ones.
+        let (primitives, variables) = deps
+            .iter()
+            .flat_map(|eff| eff.borrow().iter())
+            .partition::<HashSet<_>, _>(|eff| eff.is_primitive());
+
+        // If all effects are primitive, we can just return them.
+        if variables.is_empty() {
+            return EffType::from_iter(primitives);
+        } else if variables.len() == 1 && primitives.is_empty() {
+            // If there is only one variable and no primitive, we can just return it.
+            return EffType::single(*variables.iter().next().unwrap());
+        }
+
+        // Otherwise, we need to create a new effect variable.
+        let effects = EffType::from_iter(variables.into_iter().chain(primitives).unique());
+        let effect_var = self.effect_constraints.new_key(Some(effects));
+        EffType::single_variable(effect_var)
+    }
+
+    /// Make the two effects equal and fuse their dependencies
+    pub fn unify_effects(&mut self, eff1: &EffType, eff2: &EffType) -> EffType {
+        let var1 = eff1.is_single_variable();
+        let var2 = eff2.is_single_variable();
+        match (var1, var2) {
+            (None, None) => eff1.union(eff2),
+            (None, Some(var)) => {
+                self.effect_constraints.union_value(var, Some(eff1.clone()));
+                eff1.clone()
+            }
+            (Some(var), None) => {
+                self.effect_constraints.union_value(var, Some(eff2.clone()));
+                eff2.clone()
+            }
+            (Some(var1), Some(var2)) => {
+                self.effect_constraints.union(var1, var2);
+                eff1.clone()
+            }
+        }
+    }
+
     pub fn unify(self) -> Result<UnifiedTypeInference, InternalCompilationError> {
         UnifiedTypeInference::unify_type_inference(self)
     }
@@ -728,6 +896,8 @@ pub struct UnifiedTypeInference {
     /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
     remaining_ty_constraints: Vec<PubTypeConstraint>,
     mut_unification_table: InPlaceUnificationTable<MutVarKey>,
+    effect_constraints: InPlaceUnificationTable<EffectVarKey>,
+    effect_constraints_inv: HashMap<EffType, EffectVarKey>,
 }
 
 impl UnifiedTypeInference {
@@ -737,11 +907,14 @@ impl UnifiedTypeInference {
             ty_constraints,
             mut_unification_table,
             mut_constraints,
+            effect_constraints,
         } = ty_inf;
         let mut unified_ty_inf = UnifiedTypeInference {
             ty_unification_table,
             remaining_ty_constraints: vec![],
             mut_unification_table,
+            effect_constraints,
+            effect_constraints_inv: HashMap::new(),
         };
         let mut remaining_constraints = HashSet::new();
 
@@ -998,6 +1171,12 @@ impl UnifiedTypeInference {
             }
         }
 
+        // Flatten inverted effect constraints into normal constraints
+        let effect_constraints_inv = mem::take(&mut unified_ty_inf.effect_constraints_inv);
+        for (eff, var) in effect_constraints_inv {
+            unified_ty_inf.expand_inv_effect_dep(eff, var);
+        }
+
         // FIXME: think whether we should have an intermediate struct without the remaining_constraints in it.
         unified_ty_inf.remaining_ty_constraints = remaining_constraints.into_iter().collect();
         Ok(unified_ty_inf)
@@ -1056,7 +1235,8 @@ impl UnifiedTypeInference {
             })
             .collect::<Vec<_>>();
         let ret = self.normalize_type(fn_ty.ret);
-        FnType::new(args, ret)
+        let effects = fn_ty.effects.clone();
+        FnType::new(args, ret, effects)
     }
 
     fn normalize_mut_type(&mut self, mut_ty: MutType) -> MutType {
@@ -1188,6 +1368,8 @@ impl UnifiedTypeInference {
                     )?;
                     self.unify_sub_type(exp_arg.ty, current_span, cur_arg.ty, expected_span)?;
                 }
+                // Covariant effects.
+                self.add_effect_dep(&cur.effects, current_span, &exp.effects, expected_span)?;
                 // Covariance of return type.
                 self.unify_sub_type(cur.ret, current_span, exp.ret, expected_span)
             }
@@ -1426,6 +1608,51 @@ impl UnifiedTypeInference {
         }
     }
 
+    pub fn add_effect_dep(
+        &mut self,
+        current: &EffType,
+        current_span: Span,
+        target: &EffType,
+        target_span: Span,
+    ) -> Result<(), InternalCompilationError> {
+        if current.is_empty() || current == target {
+            return Ok(());
+        }
+        let cur_single = current.as_single();
+        let cur_var = cur_single.and_then(|eff| eff.as_variable().cloned());
+        let tgt_single = target.as_single();
+        let tgt_var = tgt_single.and_then(|eff| eff.as_variable().cloned());
+        if let Some(var) = cur_var {
+            // Left is a variable, put the effect dependency on the right.
+            self.effect_constraints
+                .union_value(var, Some(target.clone()));
+        } else if let Some(var) = tgt_var {
+            // Right is a variable, put the effect dependency to the inverted constraints,
+            // to be resolved later.
+            self.effect_constraints_inv.insert(current.clone(), var);
+        } else {
+            return Err(InternalCompilationError::InvalidEffectDependency {
+                source: current.clone(),
+                source_span: current_span,
+                target: target.clone(),
+                target_span,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn expand_inv_effect_dep(&mut self, current: EffType, target: EffectVarKey) {
+        if let Some(existing_effects) = self.effect_constraints.probe_value(target) {
+            for eff in existing_effects.iter() {
+                if let Some(var) = eff.as_variable() {
+                    self.expand_inv_effect_dep(current.clone(), *var);
+                }
+            }
+        } else {
+            self.effect_constraints.union_value(target, Some(current));
+        }
+    }
+
     pub(crate) fn substitute_in_module_function(&mut self, descr: &mut ModuleFunction) {
         descr.ty_scheme.ty = self.substitute_in_fn_type(&descr.ty_scheme.ty, &[]);
         assert!(descr.ty_scheme.constraints.is_empty());
@@ -1489,7 +1716,8 @@ impl UnifiedTypeInference {
             })
             .collect::<Vec<_>>();
         let ret = self.substitute_in_type(fn_ty.ret, ignore);
-        FnType::new(args, ret)
+        let effects = self.substitute_effect_type(&fn_ty.effects);
+        FnType::new(args, ret, effects)
     }
 
     fn substitute_mut_type(&mut self, mut_ty: MutType) -> MutType {
@@ -1499,15 +1727,59 @@ impl UnifiedTypeInference {
                 let root = self.mut_unification_table.find(var);
                 match self.mut_unification_table.probe_value(root) {
                     Some(val) => MutType::resolved(val),
-                    _ => MutType::variable(root),
+                    _ => panic!("Unresolved mutability variable"),
                 }
             }
         }
     }
 
+    /// Substitute the effect type by flattening the effect variables.
+    pub fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
+        use Effect::*;
+
+        // Thread-local hash-map for cycle detection
+        thread_local! {
+            static VAR_VISITED: RefCell<HashSet<EffectVar>> = RefCell::new(HashSet::new());
+        }
+
+        let res = EffType::from_iter(eff_ty.iter().flat_map(|eff| {
+            EffType::into_iter(match eff {
+                Primitive(effect) => EffType::single_primitive(*effect),
+                Variable(var) => {
+                    let cycle_detected = VAR_VISITED.with(|visited| {
+                        let mut visited = visited.borrow_mut();
+                        if visited.contains(var) {
+                            true // Cycle detected
+                        } else {
+                            visited.insert(*var);
+                            false
+                        }
+                    });
+
+                    if cycle_detected {
+                        return EffType::empty().into_iter();
+                    }
+
+                    let effects = match self.effect_constraints.probe_value(*var) {
+                        Some(effects) => self.substitute_effect_type(&effects),
+                        None => EffType::single_variable(*var),
+                    };
+
+                    VAR_VISITED.with(|visited| {
+                        visited.borrow_mut().remove(var);
+                    });
+
+                    effects
+                }
+            } as EffType)
+        }));
+        res
+    }
+
     pub fn substitute_in_node(&mut self, node: &mut ir::Node, ignore: &[TypeVar]) {
         use ir::NodeKind::*;
         node.ty = self.substitute_in_type(node.ty, ignore);
+        node.effects = self.substitute_effect_type(&node.effects);
         match &mut node.kind {
             Immediate(immediate) => {
                 self.substitute_in_value(&mut immediate.value, ignore);
@@ -1595,6 +1867,7 @@ impl UnifiedTypeInference {
         }
     }
 
+    #[allow(dead_code)]
     fn substitute_in_constraint(
         &mut self,
         constraint: &PubTypeConstraint,
@@ -1662,14 +1935,16 @@ impl UnifiedTypeInference {
         }
     }
 
-    pub fn log_debug_substitution_table(&mut self, module_env: ModuleEnv) {
+    pub fn log_debug_substitution_tables(&mut self, module_env: ModuleEnv) {
         log::debug!("Type substitution table:");
         for i in 0..self.ty_unification_table.len() {
             let var = TypeVar::new(i as u32);
             let value = self.ty_unification_table.probe_value(var);
             match value {
                 Some(value) => log::debug!("  {var} → {}", value.format_with(&module_env)),
-                None => log::debug!("  {var} → {}", { self.ty_unification_table.find(var) }),
+                None => log::debug!("  {var} → {} (unbound)", {
+                    self.ty_unification_table.find(var)
+                }),
             }
         }
         log::debug!("Mutability substitution table:");
@@ -1678,7 +1953,30 @@ impl UnifiedTypeInference {
             let value = self.mut_unification_table.probe_value(var);
             match value {
                 Some(value) => log::debug!("  {var} → {}", value),
-                None => log::debug!("  {var} → {}", { self.mut_unification_table.find(var) }),
+                None => log::debug!("  {var} → {} (unbound)", {
+                    self.mut_unification_table.find(var)
+                }),
+            }
+        }
+        self.log_debug_effect_constraints();
+    }
+
+    fn log_debug_effect_constraints(&mut self) {
+        log::debug!("Effect substitution table:");
+        for i in 0..self.effect_constraints.len() {
+            let var = EffectVar::new(i as u32);
+            let value = self.effect_constraints.probe_value(var);
+            match value {
+                Some(value) => log::debug!("  {var} → {}", value),
+                None => log::debug!("  {var} → {} (unbound)", {
+                    self.effect_constraints.find(var)
+                }),
+            }
+        }
+        if !self.effect_constraints_inv.is_empty() {
+            log::debug!("Inverted effect constraints:");
+            for (eff, var) in &self.effect_constraints_inv {
+                log::debug!("  {} → {var}", eff);
             }
         }
     }

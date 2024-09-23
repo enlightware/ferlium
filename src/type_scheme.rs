@@ -1,6 +1,6 @@
 use std::{
     borrow::Borrow,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     hash::{Hash, Hasher},
 };
 
@@ -11,11 +11,12 @@ use ustr::Ustr;
 
 use crate::{
     dictionary_passing::{instantiate_dictionaries_req, DictionaryReq},
+    effects::{EffType, EffectVar, EffectsSubstitution},
     format::FormatWith,
     ir::FnInstData,
     module::{FmtWithModuleEnv, FormatWithModuleEnv, ModuleEnv},
     r#type::{Type, TypeKind, TypeLike, TypeSubstitution, TypeVar},
-    type_inference::TypeInference,
+    type_inference::{InstSubstitution, TypeInference},
 };
 
 /// The display style for type schemes.
@@ -99,36 +100,24 @@ impl PubTypeConstraint {
     }
 
     pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
-        use PubTypeConstraint::*;
-        match self {
-            TupleAtIndexIs {
-                tuple_ty,
-                element_ty,
-                ..
-            } => {
-                tuple_ty.data().contains_any_ty_vars(vars)
-                    || element_ty.data().contains_any_ty_vars(vars)
-            }
-            RecordFieldIs {
-                record_ty,
-                element_ty,
-                ..
-            } => {
-                record_ty.data().contains_any_ty_vars(vars)
-                    || element_ty.data().contains_any_ty_vars(vars)
-            }
-            TypeHasVariant {
-                variant_ty,
-                payload_ty,
-                ..
-            } => {
-                variant_ty.data().contains_any_ty_vars(vars)
-                    || payload_ty.data().contains_any_ty_vars(vars)
-            }
-        }
+        let merge_outputs = |ty: &Type, output: &mut bool| {
+            *output = *output || ty.data().contains_any_ty_vars(vars);
+        };
+        let mut output = false;
+        self.fold_ty_in_place(&merge_outputs, &mut output);
+        output
     }
 
     pub fn contains_only_ty_vars(&self, vars: &[TypeVar]) -> bool {
+        let merge_outputs = |ty: &Type, output: &mut bool| {
+            *output = *output && ty.data().contains_only_ty_vars(vars);
+        };
+        let mut output = true;
+        self.fold_ty_in_place(&merge_outputs, &mut output);
+        output
+    }
+
+    fn fold_ty_in_place<V>(&self, f: &impl Fn(&Type, &mut V), v: &mut V) {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs {
@@ -136,31 +125,31 @@ impl PubTypeConstraint {
                 element_ty,
                 ..
             } => {
-                tuple_ty.data().contains_only_ty_vars(vars)
-                    && element_ty.data().contains_only_ty_vars(vars)
+                f(tuple_ty, v);
+                f(element_ty, v);
             }
             RecordFieldIs {
                 record_ty,
                 element_ty,
                 ..
             } => {
-                record_ty.data().contains_only_ty_vars(vars)
-                    && element_ty.data().contains_only_ty_vars(vars)
+                f(record_ty, v);
+                f(element_ty, v);
             }
             TypeHasVariant {
                 variant_ty,
                 payload_ty,
                 ..
             } => {
-                variant_ty.data().contains_only_ty_vars(vars)
-                    && payload_ty.data().contains_only_ty_vars(vars)
+                f(variant_ty, v);
+                f(payload_ty, v);
             }
         }
     }
 }
 
 impl TypeLike for PubTypeConstraint {
-    fn instantiate(&self, subst: &TypeSubstitution) -> Self {
+    fn instantiate(&self, subst: &InstSubstitution) -> Self {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs {
@@ -204,39 +193,21 @@ impl TypeLike for PubTypeConstraint {
     }
 
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
-        use PubTypeConstraint::*;
-        match self {
-            TupleAtIndexIs {
-                tuple_ty,
-                element_ty,
-                ..
-            } => tuple_ty
-                .inner_ty_vars()
-                .into_iter()
-                .chain(element_ty.inner_ty_vars())
-                .unique()
-                .collect(),
-            RecordFieldIs {
-                record_ty,
-                element_ty,
-                ..
-            } => record_ty
-                .inner_ty_vars()
-                .into_iter()
-                .chain(element_ty.inner_ty_vars())
-                .unique()
-                .collect(),
-            TypeHasVariant {
-                variant_ty,
-                payload_ty,
-                ..
-            } => variant_ty
-                .inner_ty_vars()
-                .into_iter()
-                .chain(payload_ty.inner_ty_vars())
-                .unique()
-                .collect(),
-        }
+        let extend_vars = |ty: &Type, vars: &mut Vec<TypeVar>| {
+            vars.extend(ty.inner_ty_vars());
+        };
+        let mut vars = Vec::new();
+        self.fold_ty_in_place(&extend_vars, &mut vars);
+        vars.sort();
+        vars.dedup();
+        vars
+    }
+
+    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+        let extend_vars = |ty: &Type, vars: &mut HashSet<EffectVar>| {
+            ty.fill_with_inner_effect_vars(vars);
+        };
+        self.fold_ty_in_place(&extend_vars, vars);
     }
 }
 
@@ -403,9 +374,10 @@ enum AggregatedConstraint {
 /// A type, with quantified type variables and associated constraints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypeScheme<Ty: TypeLike> {
-    // for a compiled module, quantifiers should be equalt to the type variables in the type
+    // for a compiled module, quantifiers should be equal to the type variables in the type
     // and the constraints.
-    pub(crate) quantifiers: Vec<TypeVar>,
+    pub(crate) ty_quantifiers: Vec<TypeVar>,
+    pub(crate) eff_quantifiers: HashSet<EffectVar>,
     pub(crate) ty: Ty,
     pub(crate) constraints: Vec<PubTypeConstraint>,
 }
@@ -414,7 +386,8 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     /// Create a new type scheme with no quantifier nor constraints.
     pub(crate) fn new_just_type(ty: Ty) -> Self {
         Self {
-            quantifiers: vec![],
+            ty_quantifiers: vec![],
+            eff_quantifiers: HashSet::new(),
             ty,
             constraints: vec![],
         }
@@ -422,27 +395,36 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
 
     /// Create a new type scheme by inferring quantifiers from the type, and no constraints.
     pub(crate) fn new_infer_quantifiers(ty: Ty) -> Self {
-        let quantifiers = ty.inner_ty_vars();
+        let ty_quantifiers = ty.inner_ty_vars();
+        let eff_quantifiers = ty.input_effect_vars();
         Self {
-            quantifiers,
+            ty_quantifiers,
+            eff_quantifiers,
             ty,
             constraints: vec![],
         }
     }
 
-    /// Return the quantifiers of this type scheme.
-    pub(crate) fn quantifiers_from_signature(&self) -> Vec<TypeVar> {
+    /// Return the type quantifiers of this type scheme.
+    pub(crate) fn ty_quantifiers_from_signature(&self) -> Vec<TypeVar> {
         Self::list_ty_vars(&self.ty, self.constraints.iter())
     }
 
     /// Returns whether there are no quantifiers nor constraints.
-    pub fn is_just_type(&self) -> bool {
-        self.quantifiers.is_empty() && self.constraints.is_empty()
+    pub fn is_just_type_and_effects(&self) -> bool {
+        self.ty_quantifiers.is_empty() && self.constraints.is_empty()
+    }
+
+    /// Return the type of this type scheme.
+    pub fn ty(&self) -> &Ty {
+        &self.ty
     }
 
     /// Instantiate this type scheme with fresh type variables in ty_inf.
     pub(crate) fn instantiate(&self, ty_inf: &mut TypeInference) -> (Ty, FnInstData) {
-        let subst = ty_inf.fresh_type_var_subs(&self.quantifiers);
+        let ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
+        let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
+        let subst = (ty_subst, eff_subst);
         for constraint in &self.constraints {
             ty_inf.add_pub_constraint(constraint.instantiate(&subst));
         }
@@ -464,26 +446,50 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             .collect()
     }
 
-    pub(crate) fn normalize(&mut self) -> TypeSubstitution {
-        // Build a substitution that maps each quantifier to a fresh type variable from 0.
-        let mut var_subst = TypeSubstitution::new();
-        self.quantifiers
+    pub(crate) fn normalize(&mut self) -> InstSubstitution {
+        // Build a substitution that maps each type quantifier to a fresh type variable from 0.
+        let mut ty_subst = TypeSubstitution::new();
+        self.ty_quantifiers
             .iter_mut()
             .enumerate()
             .for_each(|(i, quantifier)| {
                 let new_var = TypeVar::new(i as u32);
-                var_subst.insert(*quantifier, Type::variable(new_var));
+                ty_subst.insert(*quantifier, Type::variable(new_var));
                 *quantifier = new_var;
             });
+
+        // Build a substitution that maps each input effect quantifier to a fresh effect variable from 0.,
+        // Note: in case of recursive functions, we might have output-only effects.
+        // In this case, replace them with empty effects.
+        let mut eff_subst = EffectsSubstitution::new();
+        let input_effect_vars = self.ty.input_effect_vars();
+        self.ty.output_effect_vars().iter().for_each(|var| {
+            if !input_effect_vars.contains(var) {
+                eff_subst.insert(*var, EffType::empty());
+            }
+        });
+        self.eff_quantifiers = self
+            .eff_quantifiers
+            .iter()
+            .enumerate()
+            .map(|(i, var)| {
+                let new_var = EffectVar::new(i as u32);
+                eff_subst.insert(*var, EffType::single_variable(new_var));
+                new_var
+            })
+            .collect();
+
         // Apply to type and constraints
-        self.ty = self.ty.instantiate(&var_subst);
+        let subst = (ty_subst, eff_subst);
+        self.ty = self.ty.instantiate(&subst);
         self.constraints = self
             .constraints
             .iter()
-            .map(|constraint| constraint.instantiate(&var_subst))
+            .map(|constraint| constraint.instantiate(&subst))
             .collect();
+
         // Return
-        var_subst
+        subst
     }
 
     /// Extra functions parameters that must be passed to resolve polymorphism.
@@ -511,7 +517,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         &self,
         f: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
-        for (i, quantifier) in self.quantifiers.iter().enumerate() {
+        for (i, quantifier) in self.ty_quantifiers.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
@@ -651,7 +657,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
         self.format_quantifiers_math_style(f)?;
-        if !self.quantifiers.is_empty() {
+        if !self.ty_quantifiers.is_empty() {
             write!(f, ".")?;
         }
         if !self.constraints.is_empty() {
@@ -675,7 +681,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         f: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
         write!(f, "<")?;
-        for (i, quantifier) in self.quantifiers.iter().enumerate() {
+        for (i, quantifier) in self.ty_quantifiers.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
@@ -721,7 +727,7 @@ impl<Ty: TypeLike + FmtWithModuleEnv> TypeScheme<Ty> {
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
         self.format_quantifiers_and_constraints_math_style(f, env)?;
-        if !self.is_just_type() {
+        if !self.is_just_type_and_effects() {
             write!(f, " ⇒ ")?;
         }
         write!(f, "{}", self.ty.format_with(env))

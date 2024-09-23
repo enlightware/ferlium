@@ -92,9 +92,10 @@ impl Module {
     /// Look-up a function by name in this module or in any of the modules this module uses.
     pub fn get_function<'a>(
         &'a self,
-        name: Ustr,
+        name: &str,
         others: &'a Modules,
     ) -> Option<&'a ModuleFunction> {
+        let name = Ustr::from(name);
         self.functions.get(&name).or_else(|| {
             self.uses.iter().find_map(|use_module| match use_module {
                 Use::All(module) => others.get(module)?.functions.get(&name),
@@ -107,6 +108,11 @@ impl Module {
                 }
             })
         })
+    }
+
+    /// Look-up a function by name in this module only.
+    pub fn get_local_function<'a>(&'a self, name: &str) -> Option<&'a ModuleFunction> {
+        self.functions.get(&Ustr::from(name))
     }
 
     fn format_with_modules(&self, f: &mut fmt::Formatter, modules: &Modules) -> fmt::Result {
@@ -122,7 +128,7 @@ impl Module {
             writeln!(f, "Functions:")?;
             for (name, function) in self.functions.iter() {
                 // function.ty_scheme.format_quantifiers(f)?; write!(f, ". ")?;
-                if function.ty_scheme.is_just_type() {
+                if function.ty_scheme.is_just_type_and_effects() {
                     writeln!(f, "fn {name} {}", function.ty_scheme.ty.format_with(&env))?;
                 } else {
                     writeln!(

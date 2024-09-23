@@ -4,6 +4,7 @@ use itertools::Itertools;
 use ustr::ustr;
 
 use crate::{
+    effects::no_effects,
     eval::{EvalCtx, ValOrMut},
     format::write_with_separator,
     function::{
@@ -58,6 +59,7 @@ impl Array {
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
             &[iterator_type()],
             array_type_generic(),
+            no_effects(),
         ));
         UnaryNativeFnVI::description_with_ty_scheme(Array::from_iterator, ty_scheme)
     }
@@ -97,6 +99,7 @@ impl Array {
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
             &[(array, true), (gen0, false)],
             unit,
+            no_effects(),
         ));
         BinaryNativeFnMVI::description_with_ty_scheme(Array::append, ty_scheme)
     }
@@ -112,6 +115,7 @@ impl Array {
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
             &[(array, true), (gen0, false)],
             unit,
+            no_effects(),
         ));
         BinaryNativeFnMVI::description_with_ty_scheme(Array::prepend, ty_scheme)
     }
@@ -126,7 +130,11 @@ impl Array {
 
     fn len_descr() -> ModuleFunction {
         let array = array_type_generic();
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[array], int_type()));
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            &[array],
+            int_type(),
+            no_effects(),
+        ));
         UnaryNativeFnNI::description_with_ty_scheme(|a: Self| a.len() as isize, ty_scheme)
     }
 
@@ -141,6 +149,7 @@ impl Array {
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
             &[(array_ty, false), (array_ty, false)],
             array_ty,
+            no_effects(),
         ));
         BinaryNativeFnNNI::description_with_ty_scheme(
             |a: Self, b: Self| Self::concat(&a, &b),
@@ -173,8 +182,11 @@ impl Array {
         let map_fn = Type::function_by_val(&[gen0], gen1);
         let array0 = Type::native::<Array>(vec![gen0]);
         let array1 = Type::native::<Array>(vec![gen1]);
-        let ty_scheme =
-            TypeScheme::new_infer_quantifiers(FnType::new_by_val(&[array0, map_fn], array1));
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            &[array0, map_fn],
+            array1,
+            no_effects(),
+        ));
         BinaryNativeFnNVI::description_with_ty_scheme(Array::map, ty_scheme)
     }
 

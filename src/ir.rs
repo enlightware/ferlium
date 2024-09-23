@@ -5,10 +5,12 @@ use ustr::Ustr;
 use crate::{
     containers::{SVec2, B},
     dictionary_passing::DictionariesTyReq,
+    effects::EffType,
     function::FunctionRef,
     module::{FmtWithModuleEnv, ModuleEnv},
-    r#type::{CastableToType, FnType, Type, TypeLike, TypeSubstitution, TypeVar},
+    r#type::{CastableToType, FnType, Type, TypeLike, TypeVar},
     std::math::int_type,
+    type_inference::InstSubstitution,
     value::Value,
 };
 
@@ -27,7 +29,7 @@ impl FnInstData {
     pub fn any(&self) -> bool {
         !self.dicts_req.is_empty()
     }
-    pub fn instantiate(&mut self, subst: &TypeSubstitution) {
+    pub fn instantiate(&mut self, subst: &InstSubstitution) {
         self.dicts_req = self
             .dicts_req
             .iter()
@@ -110,7 +112,7 @@ pub struct EnvStore {
     pub name_span: Span,
 }
 impl EnvStore {
-    pub fn instantiate(&mut self, subst: &TypeSubstitution) {
+    pub fn instantiate(&mut self, subst: &InstSubstitution) {
         self.node.instantiate(subst);
         self.ty = self.ty.instantiate(subst);
     }
@@ -174,12 +176,18 @@ pub enum NodeKind {
 pub struct Node {
     pub kind: NodeKind,
     pub ty: Type,
+    pub effects: EffType,
     pub span: Span,
 }
 
 impl Node {
-    pub fn new(kind: NodeKind, ty: Type, span: Span) -> Self {
-        Self { kind, ty, span }
+    pub fn new(kind: NodeKind, ty: Type, effects: EffType, span: Span) -> Self {
+        Self {
+            kind,
+            ty,
+            effects,
+            span,
+        }
     }
 
     pub fn format_ind(
@@ -218,7 +226,7 @@ impl Node {
                 }
             }
             StaticApply(app) => {
-                writeln!(f, "{indent_str}apply")?;
+                writeln!(f, "{indent_str}static apply")?;
                 let function = app.function.get();
                 let name = env.function_name(&function);
                 match app.function.get().try_borrow() {
@@ -335,7 +343,11 @@ impl Node {
                 iteration.body.format_ind(f, env, indent + 1)?;
             }
         };
-        writeln!(f, "{indent_str}↳ {}", self.ty.format_with(env))
+        write!(f, "{indent_str}↳ {}", self.ty.format_with(env))?;
+        if !self.effects.is_empty() {
+            write!(f, " ⇒ {}", self.effects)?;
+        }
+        writeln!(f)
     }
 
     pub fn type_at(&self, pos: usize) -> Option<Type> {
@@ -636,7 +648,7 @@ impl Node {
         });
     }
 
-    pub fn instantiate(&mut self, subst: &TypeSubstitution) {
+    pub fn instantiate(&mut self, subst: &InstSubstitution) {
         use NodeKind::*;
         match &mut self.kind {
             Immediate(immediate) => {
@@ -646,9 +658,10 @@ impl Node {
                 }
                 immediate.inst_data.instantiate(subst);
             }
-            BuildClosure(_) => {
+            BuildClosure(build_closure) => {
                 // Note: at the moment build closure is used only for dictionary
-                // passing so we can ignore the substitution here.
+                // passing so we can ignore the substitution of the captures
+                build_closure.function.instantiate(subst);
             }
             Apply(app) => {
                 app.function.instantiate(subst);
@@ -692,6 +705,7 @@ impl Node {
             }
         }
         self.ty = self.ty.instantiate(subst);
+        self.effects = self.effects.instantiate(&subst.1);
     }
 }
 
@@ -705,7 +719,7 @@ impl FmtWithModuleEnv for Node {
     }
 }
 
-pub(crate) fn instantiate_nodes(nodes: &mut [Node], subst: &TypeSubstitution) {
+pub(crate) fn instantiate_nodes(nodes: &mut [Node], subst: &InstSubstitution) {
     for node in nodes {
         node.instantiate(subst);
     }

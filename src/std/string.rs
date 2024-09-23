@@ -9,6 +9,7 @@ use ustr::ustr;
 
 use crate::{
     cached_primitive_ty,
+    effects::no_effects,
     function::{BinaryNativeFnMNI, BinaryNativeFnNNI, UnaryNativeFnNI, UnaryNativeFnVI},
     module::Module,
     r#type::Type,
@@ -109,24 +110,28 @@ pub fn add_to_module(to: &mut Module) {
 
     to.functions.insert(
         ustr("to_string"),
-        UnaryNativeFnVI::description_with_default_ty(String::any_to_string),
+        UnaryNativeFnVI::description_with_default_ty(String::any_to_string, no_effects()),
     );
     to.functions.insert(
         ustr("string_push_str"),
-        BinaryNativeFnMNI::description_with_default_ty(String::push_str),
+        BinaryNativeFnMNI::description_with_default_ty(String::push_str, no_effects()),
     );
     to.functions.insert(
         ustr("string_concat"),
-        BinaryNativeFnNNI::description_with_default_ty(|a: String, b: String| {
-            String::concat(&a, &b)
-        }),
+        BinaryNativeFnNNI::description_with_default_ty(
+            |a: String, b: String| String::concat(&a, &b),
+            no_effects(),
+        ),
     );
     to.functions.insert(
         ustr("string_len"),
-        UnaryNativeFnNI::description_with_default_ty(|a: String| a.len() as isize),
+        UnaryNativeFnNI::description_with_default_ty(|a: String| a.len() as isize, no_effects()),
     );
     to.functions.insert(
         ustr("string_is_empty"),
-        UnaryNativeFnNI::description_with_default_ty(|a: String| a.is_empty() as isize),
+        UnaryNativeFnNI::description_with_default_ty(
+            |a: String| a.is_empty() as isize,
+            no_effects(),
+        ),
     );
 }

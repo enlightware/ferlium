@@ -3,6 +3,7 @@ use std::new_module_with_prelude;
 use emit_ir::{emit_expr, emit_module, CompiledExpr};
 use error::CompilationError;
 use format::FormatWith;
+use itertools::Itertools;
 use module::{FmtWithModuleEnv, Module, ModuleEnv, Modules, Use};
 use parser::parse;
 
@@ -11,6 +12,7 @@ mod ast;
 mod borrow_checker;
 mod containers;
 mod dictionary_passing;
+pub mod effects;
 pub mod emit_ir;
 pub mod error;
 mod escapes;
@@ -79,7 +81,7 @@ impl ModuleAndExpr {
         // Function signatures.
         for function in self.module.functions.values() {
             if let Some(spans) = &function.spans {
-                if !function.ty_scheme.is_just_type() {
+                if !function.ty_scheme.is_just_type_and_effects() {
                     match style {
                         Mathematical => {
                             annotations.push((
@@ -107,7 +109,7 @@ impl ModuleAndExpr {
                     spans.args_span.end(),
                     format!(" → {}", function.ty_scheme.ty.ret.format_with(&env)),
                 ));
-                if style == Rust && !function.ty_scheme.is_just_type() {
+                if style == Rust && !function.ty_scheme.is_just_type_and_effects() {
                     annotations.push((
                         spans.args_span.end(),
                         format!(
@@ -169,6 +171,7 @@ pub fn compile(
     module.uses.extend(extra_uses.iter().cloned());
 
     // Parse the source code.
+    log::debug!("Using other modules: {}", other_modules.keys().join(", "));
     log::debug!("Input: {src}");
     let (module_ast, expr_ast) = parse(src);
     {

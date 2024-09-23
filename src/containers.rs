@@ -69,6 +69,7 @@ where
 
 /// Returns a vector containing the elements of this that are not in that
 /// O(this.len() * that.len())
+#[allow(dead_code)]
 pub fn vec_difference<T: Clone + PartialEq>(this: &[T], that: &[T]) -> Vec<T> {
     this.iter()
         .filter(|&x| !that.contains(x))

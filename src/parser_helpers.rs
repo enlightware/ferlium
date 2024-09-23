@@ -56,6 +56,7 @@ where
 }
 
 /// Make a literal
+#[allow(dead_code)]
 pub(crate) fn literal_expr<T>(value: T, span: Span) -> Expr
 where
     T: Any + Clone + Debug + Eq + NativeDisplay + 'static,

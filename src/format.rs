@@ -34,6 +34,21 @@ pub(crate) fn type_variable_index_to_string_latin(index: u32) -> String {
     type_variable_index_to_string(index, 'A' as u32, 'Y' as u32, "Z")
 }
 
+pub(crate) fn type_variable_subscript(index: u32) -> String {
+    let mut result = String::new();
+    if index == 0 {
+        return "₀".to_string();
+    } else {
+        let mut index = index;
+        while index > 0 {
+            let digit = index % 10;
+            result.insert(0, char::from_u32(0x2080 + digit).unwrap());
+            index /= 10;
+        }
+    }
+    result
+}
+
 pub(crate) fn write_with_separator(
     iter: impl IntoIterator<Item = impl std::fmt::Display>,
     separator: &str,
@@ -64,19 +79,4 @@ pub(crate) fn write_with_separator_and_format_fn<T>(
         format_fn(element, f)?;
     }
     Ok(())
-}
-
-pub(crate) fn newline_indices_of_non_empty_lines(text: &str) -> Vec<usize> {
-    let mut last_char = '\n';
-    text.char_indices()
-        .filter_map(|(i, c)| {
-            let prev_last_char = last_char;
-            last_char = c;
-            if c == '\n' && prev_last_char != '\n' {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect()
 }

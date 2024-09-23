@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    effects::EffType,
     error::RuntimeError,
     eval::{EvalCtx, EvalResult, ValOrMut},
     format::FormatWith,
@@ -330,18 +331,19 @@ macro_rules! n_ary_native_fn {
             }
 
             paste::paste! {
-            pub fn description_with_ty(f: F, $([<$arg:lower _ty>]: Type),*) -> ModuleFunction {
+            pub fn description_with_ty(f: F, $([<$arg:lower _ty>]: Type,)* effects: EffType) -> ModuleFunction {
                 let o_ty = Type::primitive::<O::NativeTy>();
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
                     &[$(([<$arg:lower _ty>], $arg::MUTABLE)), *],
                     o_ty,
+                    effects,
                 ));
                 Self::description_with_ty_scheme(f, ty_scheme)
             }
             }
 
-            pub fn description_with_default_ty(f: F) -> ModuleFunction {
-                Self::description_with_ty(f, $($arg::default_ty()),*)
+            pub fn description_with_default_ty(f: F, effects: EffType) -> ModuleFunction {
+                Self::description_with_ty(f, $($arg::default_ty(),)* effects)
             }
         }
 
@@ -387,8 +389,8 @@ macro_rules! n_ary_native_fn {
 n_ary_native_fn!(NullaryNativeFn);
 
 impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<O, F> {
-    pub fn description(f: F) -> ModuleFunction {
-        Self::description_with_ty(f)
+    pub fn description(f: F, effects: EffType) -> ModuleFunction {
+        Self::description_with_ty(f, effects)
     }
 }
 

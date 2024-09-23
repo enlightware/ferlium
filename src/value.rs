@@ -15,7 +15,7 @@ use crate::{
     format::{write_with_separator, write_with_separator_and_format_fn},
     function::{Function, FunctionPtr, FunctionRef},
     module::ModuleEnv,
-    r#type::TypeSubstitution,
+    type_inference::InstSubstitution,
 };
 
 // Support for primitive values
@@ -217,7 +217,7 @@ impl Value {
         }
     }
 
-    pub fn instantiate(&mut self, subst: &TypeSubstitution) {
+    pub fn instantiate(&mut self, subst: &InstSubstitution) {
         use Value::*;
         match self {
             Native(_) => {}

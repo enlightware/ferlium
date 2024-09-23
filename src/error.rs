@@ -5,6 +5,7 @@ use ustr::Ustr;
 
 use crate::{
     ast::PatternType,
+    effects::EffType,
     format::FormatWith,
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{Type, TypeVar},
@@ -115,6 +116,12 @@ pub enum InternalCompilationError {
     UndefinedVarInStringFormatting {
         var_span: Span,
         string_span: Span,
+    },
+    InvalidEffectDependency {
+        source: EffType,
+        source_span: Span,
+        target: EffType,
+        target_span: Span,
     },
     Internal(String),
 }
@@ -324,6 +331,21 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     "Undefined variable {var_name} used in string formatting {string_text}"
                 )
             }
+            InvalidEffectDependency {
+                source: cur,
+                source_span,
+                target,
+                target_span,
+            } => {
+                write!(
+                    f,
+                    "Invalid effect dependency: {} due to {} is incompatible with {} due to {}",
+                    cur,
+                    &source[source_span.start()..source_span.end()],
+                    target,
+                    &source[target_span.start()..target_span.end()],
+                )
+            }
             Internal(msg) => write!(f, "ICE: {}", msg),
         }
     }
@@ -411,6 +433,12 @@ pub enum CompilationError {
     UndefinedVarInStringFormatting {
         var_span: Span,
         string_span: Span,
+    },
+    InvalidEffectDependency {
+        source: EffType,
+        source_span: Span,
+        target: EffType,
+        target_span: Span,
     },
     Internal(String),
 }
@@ -569,6 +597,17 @@ impl CompilationError {
                 var_span,
                 string_span,
             },
+            InvalidEffectDependency {
+                source,
+                source_span,
+                target,
+                target_span,
+            } => Self::InvalidEffectDependency {
+                source,
+                source_span,
+                target,
+                target_span,
+            },
             Internal(msg) => Self::Internal(msg),
         }
     }
@@ -610,7 +649,7 @@ impl CompilationError {
                     cur_ty, exp_ty, cur, exp
                 );
             }
-            _ => panic!("expect_is_not_subtype called on non-TypeMismatch error {self:?}"),
+            _ => panic!("expect_is_not_subtype called on non-IsNotSubtype error {self:?}"),
         }
     }
 
@@ -693,6 +732,23 @@ impl CompilationError {
             },
             _ => panic!(
                 "expect_undefined_var_in_string_formatting called on non-UndefinedVarInStringFormatting error {self:?}"
+            ),
+        }
+    }
+
+    pub fn expect_invalid_effect_dependency(&self, cur_eff: EffType, target_eff: EffType) {
+        match self {
+            Self::InvalidEffectDependency { source, target, .. } => {
+                if source == &cur_eff && target == &target_eff {
+                    return;
+                }
+                panic!(
+                    "expect_invalid_effect_dependency failed: expected {} ≰ {}, got {} ≰ {}",
+                    cur_eff, target_eff, source, target
+                );
+            },
+            _ => panic!(
+                "expect_invalid_effect_dependency called on non-InvalidEffectDependency error {self:?}"
             ),
         }
     }

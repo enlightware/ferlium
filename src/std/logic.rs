@@ -4,6 +4,7 @@ use ustr::ustr;
 
 use crate::{
     cached_primitive_ty,
+    effects::no_effects,
     function::{BinaryNativeFnNNI, BinaryNativeFnVVI, UnaryNativeFnNI},
     module::Module,
     r#type::Type,
@@ -29,26 +30,31 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@or"),
         BinaryNativeFnNNI::description_with_default_ty(
             std::ops::BitOr::bitor as fn(bool, bool) -> bool,
+            no_effects(),
         ),
     );
     to.functions.insert(
         ustr("@and"),
         BinaryNativeFnNNI::description_with_default_ty(
             std::ops::BitAnd::bitand as fn(bool, bool) -> bool,
+            no_effects(),
         ),
     );
     to.functions.insert(
         ustr("@not"),
-        UnaryNativeFnNI::description_with_default_ty(std::ops::Not::not as fn(bool) -> bool),
+        UnaryNativeFnNI::description_with_default_ty(
+            std::ops::Not::not as fn(bool) -> bool,
+            no_effects(),
+        ),
     );
 
     // Generic equalities and inequalities
     to.functions.insert(
         ustr("@=="),
-        BinaryNativeFnVVI::description_with_default_ty(|a: Value, b: Value| a == b),
+        BinaryNativeFnVVI::description_with_default_ty(|a: Value, b: Value| a == b, no_effects()),
     );
     to.functions.insert(
         ustr("@!="),
-        BinaryNativeFnVVI::description_with_default_ty(|a: Value, b: Value| a != b),
+        BinaryNativeFnVVI::description_with_default_ty(|a: Value, b: Value| a != b, no_effects()),
     );
 }

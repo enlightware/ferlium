@@ -81,7 +81,7 @@ impl<'m> TypingEnv<'m> {
     pub fn get_function(&'m self, name: Ustr) -> Option<&'m ModuleFunction> {
         self.module_env
             .current
-            .get_function(name, self.module_env.others)
+            .get_function(&name, self.module_env.others)
             .or_else(|| {
                 let path = name.as_str().split("::").next_tuple();
                 if let Some(path) = path {
@@ -90,7 +90,7 @@ impl<'m> TypingEnv<'m> {
                         .others
                         .get(&Ustr::from(module_name))
                         .and_then(|module| {
-                            module.get_function(Ustr::from(function_name), self.module_env.others)
+                            module.get_function(function_name, self.module_env.others)
                         })
                 } else {
                     None

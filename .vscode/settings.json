@@ -5,6 +5,7 @@
 		"bindgen",
 		"bitand",
 		"caml",
+		"Castable",
 		"chumsky",
 		"deque",
 		"descr",

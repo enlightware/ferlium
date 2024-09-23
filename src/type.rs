@@ -23,6 +23,8 @@ use ustr::Ustr;
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::B;
+use crate::effects::EffType;
+use crate::effects::EffectVar;
 use crate::format::type_variable_index_to_string_greek;
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
@@ -31,6 +33,7 @@ use crate::module::FmtWithModuleEnv;
 use crate::module::ModuleEnv;
 use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
+use crate::type_inference::InstSubstitution;
 use crate::typing_env::Local;
 
 #[macro_export]
@@ -45,9 +48,45 @@ macro_rules! cached_primitive_ty {
 /// be instantiated and queried for its free type variables.
 pub trait TypeLike {
     /// Instantiate the type variables within this type with the given substitutions
-    fn instantiate(&self, subst: &TypeSubstitution) -> Self;
+    fn instantiate(&self, subst: &InstSubstitution) -> Self;
+
     /// Return all type variables contained in this type
     fn inner_ty_vars(&self) -> Vec<TypeVar>;
+
+    /// Return all effect variables contained as input (i.e. must be retained)
+    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>);
+
+    /// Return all effect variables contained as input (i.e. must be retained)
+    fn input_effect_vars(&self) -> HashSet<EffectVar> {
+        let mut vars = HashSet::new();
+        self.fill_with_input_effect_vars(&mut vars);
+        vars
+    }
+
+    /// Return all effect variables contained as output (i.e. can be dropped if not used as input)
+    fn fill_with_output_effect_vars(&self, _vars: &mut HashSet<EffectVar>) {
+        // default no output effect variables
+    }
+
+    /// Return all effect variables contained as output (i.e. can be dropped if not used as input)
+    fn output_effect_vars(&self) -> HashSet<EffectVar> {
+        let mut vars = HashSet::new();
+        self.fill_with_output_effect_vars(&mut vars);
+        vars
+    }
+
+    /// Fill the given set with all effect variables contained in this type, union of input and output ones
+    fn fill_with_inner_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+        self.fill_with_input_effect_vars(vars);
+        self.fill_with_output_effect_vars(vars);
+    }
+
+    /// Return all effect variables contained in this type, union of input and output ones
+    fn inner_effect_vars(&self) -> HashSet<EffectVar> {
+        let mut vars = HashSet::new();
+        self.fill_with_inner_effect_vars(&mut vars);
+        vars
+    }
 }
 
 /// Something that is like a type and can be casted to a type.
@@ -222,6 +261,12 @@ impl FnArgType {
     pub fn new(ty: Type, inout: MutType) -> Self {
         Self { ty, inout }
     }
+    pub fn new_by_val(ty: Type) -> Self {
+        Self {
+            ty,
+            inout: MutType::constant(),
+        }
+    }
     fn local_cmp(&self, other: &Self) -> Ordering {
         self.ty
             .local_cmp(&other.ty)
@@ -240,24 +285,26 @@ impl FmtWithModuleEnv for FnArgType {
 pub struct FnType {
     pub args: Vec<FnArgType>,
     pub ret: Type,
+    pub effects: EffType,
 }
 
 impl FnType {
-    pub fn new(args: Vec<FnArgType>, ret: Type) -> Self {
-        Self { args, ret }
+    pub fn new(args: Vec<FnArgType>, ret: Type, effects: EffType) -> Self {
+        Self { args, ret, effects }
     }
 
-    pub fn new_mut_resolved(args: &[(Type, bool)], ret: Type) -> Self {
+    pub fn new_mut_resolved(args: &[(Type, bool)], ret: Type, effects: EffType) -> Self {
         Self {
             args: args
                 .iter()
                 .map(|(ty, inout)| FnArgType::new(*ty, MutType::from(*inout)))
                 .collect(),
             ret,
+            effects,
         }
     }
 
-    pub fn new_by_val(args: &[Type], ret: Type) -> Self {
+    pub fn new_by_val(args: &[Type], ret: Type, effects: EffType) -> Self {
         Self {
             args: args
                 .iter()
@@ -267,6 +314,7 @@ impl FnType {
                 })
                 .collect(),
             ret,
+            effects,
         }
     }
 
@@ -287,6 +335,7 @@ impl FnType {
             .then(self.ret.local_cmp(&other.ret))
     }
 
+    #[allow(dead_code)]
     fn fold<V: Clone, F>(&self, f: &F, v: V) -> V
     where
         F: Fn(&TypeKind, V) -> V,
@@ -314,7 +363,7 @@ impl FnType {
 }
 
 impl TypeLike for FnType {
-    fn instantiate(&self, subst: &TypeSubstitution) -> Self {
+    fn instantiate(&self, subst: &InstSubstitution) -> Self {
         Self {
             args: self
                 .args
@@ -325,6 +374,7 @@ impl TypeLike for FnType {
                 })
                 .collect(),
             ret: self.ret.instantiate(subst),
+            effects: self.effects.instantiate(&subst.1),
         }
     }
 
@@ -332,6 +382,17 @@ impl TypeLike for FnType {
         let mut vars = vec![];
         self.fold_in_place(&TypeKind::extend_ty_vars, &mut vars);
         vars.into_iter().unique().collect()
+    }
+
+    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+        for arg in &self.args {
+            arg.ty.fill_with_inner_effect_vars(vars);
+        }
+        self.ret.fill_with_inner_effect_vars(vars);
+    }
+
+    fn fill_with_output_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+        self.effects.fill_with_inner_effect_vars(vars);
     }
 }
 
@@ -351,7 +412,12 @@ impl FmtWithModuleEnv for FnType {
             arg.fmt_with_module_env(f, env)?;
         }
         write!(f, ") → ")?;
-        self.ret.fmt_with_module_env(f, env)
+        self.ret.fmt_with_module_env(f, env)?;
+        if self.effects.is_empty() {
+            Ok(())
+        } else {
+            write!(f, " ⇒ {}", self.effects)
+        }
     }
 }
 
@@ -409,7 +475,7 @@ impl Type {
     }
 
     pub fn function_by_val(args: &[Self], ret: Self) -> Self {
-        Self::function_type(FnType::new_by_val(args, ret))
+        Self::function_type(FnType::new_by_val(args, ret, EffType::empty()))
     }
 
     pub fn nullary_function_by_val(ret: Self) -> Self {
@@ -513,7 +579,7 @@ impl Type {
 }
 
 impl TypeLike for Type {
-    fn instantiate(&self, subst: &TypeSubstitution) -> Self {
+    fn instantiate(&self, subst: &InstSubstitution) -> Self {
         self.with_cycle_detection(
             |ty, _| {
                 let kind = ty.data().clone();
@@ -526,6 +592,14 @@ impl TypeLike for Type {
 
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
         self.with_cycle_detection(|ty, _| ty.data().inner_ty_vars(), |_, _| vec![], ())
+    }
+
+    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+        self.with_cycle_detection(
+            |ty, vars| ty.data().fill_with_inner_effect_vars(vars),
+            |_, _| (),
+            vars,
+        )
     }
 }
 
@@ -641,10 +715,10 @@ impl TypeKind {
     }
 
     /// Instantiate the type variables within this type with the given substitutions, recursively
-    fn instantiate(&self, subst: &TypeSubstitution) -> Type {
+    fn instantiate(&self, subst: &InstSubstitution) -> Type {
         use TypeKind::*;
         match self {
-            Variable(var) => match subst.get(var) {
+            Variable(var) => match subst.0.get(var) {
                 Some(ty) => *ty,
                 None => Type::variable(*var),
             },
@@ -728,6 +802,16 @@ impl TypeKind {
         };
         self.visit(&mut visitor);
         visitor.output
+    }
+
+    fn fill_with_inner_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+        self.fold_in_place(&Self::extend_effect_vars, vars);
+    }
+
+    fn extend_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+        if let TypeKind::Function(fn_type) = self {
+            fn_type.effects.fill_with_inner_effect_vars(vars);
+        }
     }
 
     /// Reduce using fold function f and initial value v, post-order traversal

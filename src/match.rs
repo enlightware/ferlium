@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
-use itertools::Itertools;
+use itertools::{multiunzip, Itertools};
 use lrpar::Span;
 use ustr::ustr;
 
 use crate::{
     ast::{Expr, Pattern, PatternKind, PatternType},
     containers::{SVec2, B},
+    effects::{no_effects, EffType},
     error::InternalCompilationError,
     ir::{self, EnvLoad, EnvStore, NodeKind},
     mutability::MutType,
@@ -26,15 +27,15 @@ impl TypeInference {
         cond_expr: &Expr,
         alternatives: &[(Pattern, Expr)],
         default: &Option<Box<Expr>>,
-    ) -> Result<(NodeKind, Type, MutType), InternalCompilationError> {
+    ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
 
         // Do we have a degenerate match with no alternative?
         if alternatives.is_empty() {
             if let Some(default) = default {
-                let (node, ty, mut_ty) = self.infer_expr(env, default)?;
-                return Ok((node.kind, ty, mut_ty));
+                let (node, ty, mut_ty, effects) = self.infer_expr(env, default)?;
+                return Ok((node.kind, ty, mut_ty, effects));
             } else {
                 panic!("empty match without default");
             }
@@ -42,7 +43,7 @@ impl TypeInference {
 
         // Infer the condition expression and get the pattern type.
         // Currently the type must be the same for all alternatives.
-        let (condition_node, pattern_ty, _) = self.infer_expr(env, cond_expr)?;
+        let (condition_node, pattern_ty, _, cond_eff) = self.infer_expr(env, cond_expr)?;
         let first_alternative = alternatives.first().unwrap();
         let first_alternative_span = first_alternative.0.span;
         let is_variant = first_alternative.0.kind.is_variant();
@@ -106,7 +107,12 @@ impl TypeInference {
                 ty: pattern_ty,
                 name_span: cond_expr.span,
             }));
-            let store_variant_node = N::new(store_variant, Type::unit(), cond_expr.span);
+            let store_variant_node = N::new(
+                store_variant,
+                Type::unit(),
+                cond_eff.clone(),
+                cond_expr.span,
+            );
             env.locals.push(Local::new(
                 ustr("@match_condition"),
                 MutType::constant(),
@@ -120,11 +126,13 @@ impl TypeInference {
                     index: initial_env_size,
                 })),
                 pattern_ty,
+                no_effects(),
                 cond_expr.span,
             );
             let extract_tag = N::new(
                 K::ExtractTag(B::new(load_variant.clone())),
                 int_type(),
+                no_effects(),
                 cond_expr.span,
             );
 
@@ -160,8 +168,9 @@ impl TypeInference {
                                 MutType::constant(),
                                 return_ty_span,
                             )?
+                            .0
                         } else {
-                            let (node, expr_return_ty, _) = self.infer_expr(env, expr)?;
+                            let (node, expr_return_ty, _, _) = self.infer_expr(env, expr)?;
                             return_ty = Some(expr_return_ty);
                             return_ty_span = expr.span;
                             node
@@ -174,6 +183,7 @@ impl TypeInference {
                                 let project_variant_inner = N::new(
                                     K::Project(B::new((load_variant.clone(), 0))),
                                     *variant_inner_ty,
+                                    no_effects(),
                                     expr.span,
                                 );
                                 let inner_ty = inner_tys[i];
@@ -181,6 +191,7 @@ impl TypeInference {
                                     N::new(
                                         K::Project(B::new((project_variant_inner, i))),
                                         inner_ty,
+                                        no_effects(),
                                         expr.span,
                                     )
                                 } else {
@@ -193,6 +204,7 @@ impl TypeInference {
                                         name_span: bind_var_names[i].1,
                                     })),
                                     Type::unit(),
+                                    no_effects(),
                                     expr.span,
                                 );
                                 project_nodes.push(store_projected_inner);
@@ -207,9 +219,13 @@ impl TypeInference {
                                 }
                             }
                             project_nodes.push(node);
+                            let proj_effects = self.make_dependent_effect(
+                                project_nodes.iter().map(|n| &n.effects).collect::<Vec<_>>(),
+                            );
                             node = N::new(
                                 K::Block(B::new(SVec2::from_vec(project_nodes))),
                                 return_ty.unwrap(),
+                                proj_effects,
                                 expr.span,
                             );
                         }
@@ -219,6 +235,12 @@ impl TypeInference {
                 )
                 .collect::<Result<Vec<_>, _>>()?;
             let return_ty = return_ty.unwrap();
+            let alt_eff = self.make_dependent_effect(
+                alternatives
+                    .iter()
+                    .map(|(_, n)| &n.effects)
+                    .collect::<Vec<_>>(),
+            );
 
             // Do we have a default?
             let default = if let Some(default) = default {
@@ -234,6 +256,7 @@ impl TypeInference {
 
                 // Generate the default code node
                 self.check_expr(env, default, return_ty, MutType::constant(), return_ty_span)?
+                    .0
             } else {
                 // No default, compute a full variant type.
                 let variant_inner_tys = types.into_iter().map(|(tag, _, ty)| (tag, ty)).collect();
@@ -250,21 +273,24 @@ impl TypeInference {
             env.locals.truncate(initial_env_size);
 
             // Generate the final code node
+            let case_eff = self.make_dependent_effect([&alt_eff, &default.effects]);
             let case = K::Case(B::new(ir::Case {
                 value: extract_tag,
                 alternatives,
                 default,
             }));
-            let case_node = N::new(case, return_ty, expr.span);
+            let case_node = N::new(case, return_ty, case_eff, expr.span);
+            let effects =
+                self.make_dependent_effect([&store_variant_node.effects, &case_node.effects]);
             let node = K::Block(B::new(SVec2::from_vec(vec![store_variant_node, case_node])));
-            (node, return_ty, MutType::constant())
+            (node, return_ty, MutType::constant(), effects)
         } else {
             // Literal patterns, convert optional default to mandatory one
             let return_ty = self.fresh_type_var_ty();
-            let (node, return_ty) = if let Some(default) = default {
-                let default =
+            let (node, return_ty, effects) = if let Some(default) = default {
+                let (default, default_eff) =
                     self.check_expr(env, default, return_ty, MutType::constant(), expr.span)?;
-                let alternatives = self.check_literal_patterns(
+                let (alternatives, alt_eff) = self.check_literal_patterns(
                     env,
                     alternatives,
                     first_alternative_span,
@@ -273,6 +299,7 @@ impl TypeInference {
                     return_ty,
                     expr.span,
                 )?;
+                let effects = self.make_dependent_effect([cond_eff, alt_eff, default_eff]);
                 (
                     K::Case(B::new(ir::Case {
                         value: condition_node,
@@ -280,9 +307,10 @@ impl TypeInference {
                         default,
                     })),
                     return_ty,
+                    effects,
                 )
             } else {
-                let mut alternatives: Vec<_> = self.check_literal_patterns(
+                let (mut alternatives, alt_eff) = self.check_literal_patterns(
                     env,
                     alternatives,
                     first_alternative_span,
@@ -291,6 +319,7 @@ impl TypeInference {
                     return_ty,
                     expr.span,
                 )?;
+                let effects = self.make_dependent_effect([cond_eff, alt_eff]);
                 let default = alternatives.pop().unwrap().1;
                 (
                     K::Case(B::new(ir::Case {
@@ -299,14 +328,15 @@ impl TypeInference {
                         default,
                     })),
                     return_ty,
+                    effects,
                 )
             };
-            (node, return_ty, MutType::constant())
+            (node, return_ty, MutType::constant(), effects)
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn check_literal_patterns<U: std::iter::FromIterator<(Value, ir::Node)>>(
+    fn check_literal_patterns(
         &mut self,
         env: &mut TypingEnv,
         pairs: &[(Pattern, Expr)],
@@ -315,8 +345,8 @@ impl TypeInference {
         expected_pattern_span: Span,
         expected_return_type: Type,
         expected_return_span: Span,
-    ) -> Result<U, InternalCompilationError> {
-        pairs
+    ) -> Result<(Vec<(Value, ir::Node)>, EffType), InternalCompilationError> {
+        let (pairs, effects): (Vec<_>, Vec<_>) = pairs
             .iter()
             .map(|(pattern, expr)| {
                 if let PatternKind::Literal(literal, ty) = &pattern.kind {
@@ -326,14 +356,14 @@ impl TypeInference {
                         expected_pattern_type,
                         expected_pattern_span,
                     );
-                    let node = self.check_expr(
+                    let (node, effects) = self.check_expr(
                         env,
                         expr,
                         expected_return_type,
                         MutType::constant(),
                         expected_return_span,
                     )?;
-                    Ok((literal.clone(), node))
+                    Ok(((literal.clone(), node), effects))
                 } else {
                     Err(InternalCompilationError::InconsistentPattern {
                         a_type: PatternType::Literal,
@@ -343,6 +373,8 @@ impl TypeInference {
                     })
                 }
             })
-            .collect::<Result<U, InternalCompilationError>>()
+            .process_results(|iter| multiunzip(iter))?;
+        let effects = self.make_dependent_effect(&effects);
+        Ok((pairs, effects))
     }
 }

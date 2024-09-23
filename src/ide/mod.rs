@@ -4,12 +4,11 @@ use crate::{
     compile,
     eval::{EvalCtx, ValOrMut},
     module::{FmtWithModuleEnv, ModuleFunction, Uses},
-    r#type::{FnType, Type},
-    std::{new_module_with_prelude, new_std_module_env, string::String as Str},
+    r#type::{FnArgType, Type},
+    std::{new_module_with_prelude, new_std_module_env},
     value::{NativeValue, Value},
     CompilationError, DisplayStyle, Module, ModuleAndExpr, ModuleEnv, Modules, Span,
 };
-use ustr::ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -251,6 +250,17 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
                 format!("Undefined variable {var_text} used in string formatting: {string_text}"),
             )]
         }
+        InvalidEffectDependency {
+            source,
+            source_span,
+            target,
+            ..
+        } => {
+            vec![ErrorData::from_span(
+                source_span,
+                format!("Effect {source} cannot depend on {target}"),
+            )]
+        }
         Internal(msg) => vec![ErrorData::from_span(
             &Span::new(0, 0),
             format!("ICE: {msg}"),
@@ -258,7 +268,7 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
     }
 }
 
-/// An annotation data structer to be used in IDEs
+/// An annotation data struct to be used in IDEs
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 pub struct AnnotationData {
     pub pos: usize,
@@ -314,11 +324,7 @@ impl Compiler {
     }
 
     pub fn fn_signature(&self, name: &str) -> Option<String> {
-        if let Some(func) = self
-            .user_module
-            .module
-            .get_function(ustr(name), &self.modules)
-        {
+        if let Some(func) = self.user_module.module.get_function(name, &self.modules) {
             let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
             Some(format!(
                 "{}",
@@ -398,11 +404,7 @@ impl Compiler {
         name: &str,
         f: impl FnOnce(&ModuleFunction, &ModuleEnv<'_>) -> Result<R, String>,
     ) -> Result<R, String> {
-        if let Some(func) = self
-            .user_module
-            .module
-            .get_function(ustr(name), &self.modules)
-        {
+        if let Some(func) = self.user_module.module.get_function(name, &self.modules) {
             let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
             f(func, &module_env)
         } else {
@@ -412,8 +414,9 @@ impl Compiler {
 
     pub fn run_fn_unit_unit(&self, name: &str) -> Result<(), String> {
         self.run_fn(name, |func, module_env| {
-            if !func.ty_scheme.is_just_type()
-                || func.ty_scheme.ty != FnType::new_by_val(&[], Type::unit())
+            if !func.ty_scheme.is_just_type_and_effects()
+                || !func.ty_scheme.ty.args.is_empty()
+                || func.ty_scheme.ty.ret != Type::unit()
             {
                 Err(format!(
                     "Function {name} does not have type \"() -> ()\", it has \"{}\" instead",
@@ -435,7 +438,9 @@ impl Compiler {
         self.run_fn(name, |func, module_env| {
             let o_ty = Type::primitive::<O>();
             let o_ty_fmt = o_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type() || func.ty_scheme.ty != FnType::new_by_val(&[], o_ty)
+            if !func.ty_scheme.is_just_type_and_effects()
+                || !func.ty_scheme.ty.args.is_empty()
+                || func.ty_scheme.ty.ret != o_ty
             {
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
@@ -463,7 +468,9 @@ impl Compiler {
             let ob_ty = Type::primitive::<OB>();
             let o_ty = Type::tuple(vec![oa_ty, ob_ty]);
             let o_ty_fmt = o_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type() || func.ty_scheme.ty != FnType::new_by_val(&[], o_ty)
+            if !func.ty_scheme.is_just_type_and_effects()
+                || !func.ty_scheme.ty.args.is_empty()
+                || func.ty_scheme.ty.ret != o_ty
             {
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
@@ -502,8 +509,9 @@ impl Compiler {
             let ob_ty = Type::primitive::<OB>();
             let o_ty = Type::tuple(vec![oa_ty, ob_ty]);
             let o_ty_fmt = o_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type()
-                || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], o_ty)
+            if !func.ty_scheme.is_just_type_and_effects()
+                || func.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
+                || func.ty_scheme.ty.ret != o_ty
             {
                 Err(format!(
                     "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
@@ -535,8 +543,9 @@ impl Compiler {
         self.run_fn(name, |func, module_env| {
             let i_ty = Type::primitive::<I>();
             let i_ty_fmt = i_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type()
-                || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], Type::unit())
+            if !func.ty_scheme.is_just_type_and_effects()
+                || func.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
+                || func.ty_scheme.ty.ret != Type::unit()
             {
                 Err(format!(
                     "Function {name} does not have type \"({}) -> ()\", it has \"{}\" instead",
@@ -565,8 +574,9 @@ impl Compiler {
             let i_ty_fmt = i_ty.format_with(module_env);
             let o_ty = Type::primitive::<O>();
             let o_ty_fmt = o_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type()
-                || func.ty_scheme.ty != FnType::new_by_val(&[i_ty], o_ty)
+            if !func.ty_scheme.is_just_type_and_effects()
+                || func.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
+                || func.ty_scheme.ty.ret != o_ty
             {
                 Err(format!(
                     "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
@@ -589,6 +599,7 @@ impl Compiler {
 
 #[cfg(test)]
 mod tests {
+    use crate::std::string::String as Str;
     use std::str::FromStr;
 
     use crate::containers::iterable_to_string;
