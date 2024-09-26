@@ -865,8 +865,8 @@ impl TypeInference {
 
     /// Make the two effects equal and fuse their dependencies
     pub fn unify_effects(&mut self, eff1: &EffType, eff2: &EffType) -> EffType {
-        let var1 = eff1.is_single_variable();
-        let var2 = eff2.is_single_variable();
+        let var1 = eff1.to_single_variable();
+        let var2 = eff2.to_single_variable();
         match (var1, var2) {
             (None, None) => eff1.union(eff2),
             (None, Some(var)) => {

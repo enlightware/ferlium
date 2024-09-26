@@ -72,7 +72,7 @@ impl EffType {
         Self::default()
     }
     pub fn single(effect: Effect) -> Self {
-        Self([effect].into_iter().collect())
+        Self(vec![effect])
     }
     pub fn single_primitive(effect: PrimitiveEffect) -> Self {
         Self::single(Effect::Primitive(effect))
@@ -84,13 +84,12 @@ impl EffType {
         Self::from_vec(effects.to_vec())
     }
     pub fn multiple_primitive(effects: &[PrimitiveEffect]) -> Self {
-        Self::from_vec(
-            effects
-                .iter()
-                .map(|effect| Effect::Primitive(*effect))
-                .collect(),
-        )
+        Self::from_vec(effects.iter().copied().map(Effect::Primitive).collect())
     }
+    pub fn multiple_variable(vars: &[EffectVar]) -> Self {
+        Self::from_vec(vars.iter().copied().map(Effect::Variable).collect())
+    }
+
     pub fn from_vec(effects: Vec<Effect>) -> Self {
         let mut effects = effects;
         effects.sort();
@@ -118,7 +117,7 @@ impl EffType {
         new
     }
 
-    pub fn is_single_variable(&self) -> Option<EffectVar> {
+    pub fn to_single_variable(&self) -> Option<EffectVar> {
         if self.0.len() == 1 {
             match self.0.first().unwrap() {
                 Effect::Variable(var) => Some(*var),
@@ -190,10 +189,7 @@ impl IntoIterator for EffType {
 
 impl FromIterator<Effect> for EffType {
     fn from_iter<T: IntoIterator<Item = Effect>>(iter: T) -> Self {
-        let mut effects = iter.into_iter().collect::<Vec<_>>();
-        effects.sort();
-        effects.dedup();
-        Self(effects)
+        Self::from_vec(iter.into_iter().collect::<Vec<_>>())
     }
 }
 
@@ -216,3 +212,35 @@ pub fn effects(effects: &[PrimitiveEffect]) -> EffType {
 }
 
 pub type EffectsSubstitution = HashMap<EffectVar, EffType>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructions_and_destructions() {
+        use PrimitiveEffect::*;
+        type ET = EffType;
+        type EV = EffectVar;
+
+        assert_eq!(ET::empty(), ET::from_vec(vec![]));
+
+        assert_eq!(
+            ET::multiple_primitive(&[Read, Write]),
+            ET::multiple_primitive(&[Write, Read])
+        );
+        assert_eq!(
+            format!("{}", ET::multiple_primitive(&[Read, Write])),
+            "read, write"
+        );
+
+        assert_eq!(
+            ET::multiple_variable(&[EV::new(0), EV::new(1)]),
+            ET::multiple_variable(&[EV::new(1), EV::new(0)])
+        );
+        assert_eq!(
+            format!("{}", ET::multiple_variable(&[EV::new(0), EV::new(1)])),
+            "e₀, e₁"
+        );
+    }
+}
