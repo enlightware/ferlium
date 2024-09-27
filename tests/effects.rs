@@ -124,3 +124,21 @@ fn effects_from_fn_value() {
         effect(Write),
     );
 }
+
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_in_recursive_fns() {
+    test_mod(
+        "fn a(f) { b(f); f() } fn b(f) { a(f) }",
+        "b",
+        effect_var(0),
+    );
+
+    test_mod(
+        "fn a(f, g) { b(f, g); f() } fn b(f, g) { a(f, g); g() }",
+        "a",
+        effect_vars(&[0, 1]),
+    );
+
+}

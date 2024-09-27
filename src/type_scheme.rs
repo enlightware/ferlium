@@ -531,7 +531,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             quantifier.format_math_style(f)?;
             i += 1;
         }
-        for quantifier in &self.eff_quantifiers {
+        for quantifier in self.eff_quantifiers.iter().sorted() {
             if i > 0 {
                 write!(f, ", ")?;
             }
@@ -703,7 +703,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             quantifier.format_rust_style(f)?;
             i += 1;
         }
-        for quantifier in &self.eff_quantifiers {
+        for quantifier in self.eff_quantifiers.iter().sorted() {
             if i > 0 {
                 write!(f, ", ")?;
             }

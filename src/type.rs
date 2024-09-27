@@ -1046,7 +1046,7 @@ impl FmtWithModuleEnv for TypeKind {
                 ty.fmt_with_module_env(f, env)?;
                 write!(f, ")")
             }
-            Never => write!(f, "!"),
+            Never => write!(f, "never"),
         }
     }
 }

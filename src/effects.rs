@@ -174,7 +174,7 @@ impl EffType {
                 .into_iter()
             })
             .collect();
-        Self(effects)
+        Self::from_vec(effects)
     }
 }
 
@@ -209,6 +209,14 @@ pub fn effect(effect: PrimitiveEffect) -> EffType {
 
 pub fn effects(effects: &[PrimitiveEffect]) -> EffType {
     EffType::multiple_primitive(effects)
+}
+
+pub fn effect_var(i: u32) -> EffType {
+    EffType::single_variable(EffectVar::new(i))
+}
+
+pub fn effect_vars(vars: &[u32]) -> EffType {
+    EffType::multiple_variable(&vars.iter().copied().map(EffectVar::new).collect::<Vec<_>>())
 }
 
 pub type EffectsSubstitution = HashMap<EffectVar, EffType>;
