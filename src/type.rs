@@ -416,7 +416,7 @@ impl FmtWithModuleEnv for FnType {
         if self.effects.is_empty() {
             Ok(())
         } else {
-            write!(f, " ⇒ {}", self.effects)
+            write!(f, " ! {}", self.effects)
         }
     }
 }

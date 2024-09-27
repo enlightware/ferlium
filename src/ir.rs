@@ -345,7 +345,7 @@ impl Node {
         };
         write!(f, "{indent_str}↳ {}", self.ty.format_with(env))?;
         if !self.effects.is_empty() {
-            write!(f, " ⇒ {}", self.effects)?;
+            write!(f, " ! {}", self.effects)?;
         }
         writeln!(f)
     }

@@ -81,7 +81,7 @@ impl ModuleAndExpr {
         // Function signatures.
         for function in self.module.functions.values() {
             if let Some(spans) = &function.spans {
-                if !function.ty_scheme.is_just_type_and_effects() {
+                if !function.ty_scheme.is_just_type() {
                     match style {
                         Mathematical => {
                             annotations.push((
@@ -105,10 +105,16 @@ impl ModuleAndExpr {
                 for (span, arg_ty) in spans.args.iter().zip(&function.ty_scheme.ty.args) {
                     annotations.push((span.end(), format!(": {}", arg_ty.format_with(&env))));
                 }
-                annotations.push((
-                    spans.args_span.end(),
-                    format!(" → {}", function.ty_scheme.ty.ret.format_with(&env)),
-                ));
+                let ret_ty_and_eff = if function.ty_scheme.ty.effects.is_empty() {
+                    format!(" → {}", function.ty_scheme.ty.ret.format_with(&env))
+                } else {
+                    format!(
+                        " → {} ! {}",
+                        function.ty_scheme.ty.ret.format_with(&env),
+                        function.ty_scheme.ty.effects
+                    )
+                };
+                annotations.push((spans.args_span.end(), ret_ty_and_eff));
                 if style == Rust && !function.ty_scheme.is_just_type_and_effects() {
                     annotations.push((
                         spans.args_span.end(),

@@ -410,6 +410,11 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         Self::list_ty_vars(&self.ty, self.constraints.iter())
     }
 
+    /// Returns whether there are no quantifiers nor constraints nor effects.
+    pub fn is_just_type(&self) -> bool {
+        self.is_just_type_and_effects() && self.eff_quantifiers.is_empty()
+    }
+
     /// Returns whether there are no quantifiers nor constraints.
     pub fn is_just_type_and_effects(&self) -> bool {
         self.ty_quantifiers.is_empty() && self.constraints.is_empty()
@@ -517,12 +522,21 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         &self,
         f: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
-        for (i, quantifier) in self.ty_quantifiers.iter().enumerate() {
+        let mut i = 0;
+        for quantifier in &self.ty_quantifiers {
             if i > 0 {
                 write!(f, ", ")?;
             }
             write!(f, "∀")?;
             quantifier.format_math_style(f)?;
+            i += 1;
+        }
+        for quantifier in &self.eff_quantifiers {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "∀{quantifier}")?;
+            i += 1;
         }
         Ok(())
     }
@@ -657,7 +671,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
         self.format_quantifiers_math_style(f)?;
-        if !self.ty_quantifiers.is_empty() {
+        if !self.ty_quantifiers.is_empty() || !self.eff_quantifiers.is_empty() {
             write!(f, ".")?;
         }
         if !self.constraints.is_empty() {
@@ -681,11 +695,20 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         f: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
         write!(f, "<")?;
-        for (i, quantifier) in self.ty_quantifiers.iter().enumerate() {
+        let mut i = 0;
+        for quantifier in &self.ty_quantifiers {
             if i > 0 {
                 write!(f, ", ")?;
             }
             quantifier.format_rust_style(f)?;
+            i += 1;
+        }
+        for quantifier in &self.eff_quantifiers {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{quantifier}")?;
+            i += 1;
         }
         write!(f, ">")
     }
