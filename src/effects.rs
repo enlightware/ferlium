@@ -211,6 +211,18 @@ pub fn effects(effects: &[PrimitiveEffect]) -> EffType {
     EffType::multiple_primitive(effects)
 }
 
+pub fn effect_read() -> EffType {
+    effect(PrimitiveEffect::Read)
+}
+
+pub fn effect_write() -> EffType {
+    effect(PrimitiveEffect::Write)
+}
+
+pub fn effects_read_write() -> EffType {
+    effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write])
+}
+
 pub fn effect_var(i: u32) -> EffType {
     EffType::single_variable(EffectVar::new(i))
 }
