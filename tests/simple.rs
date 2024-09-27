@@ -223,6 +223,7 @@ fn if_expr() {
         run("var a = 0; if false { a = 1 } else if true { a = 2 }; a"),
         int!(2)
     );
+    fail_compilation("fn a() { if true { 1 } }").expect_is_not_subtype("int", "()");
 }
 
 #[test]

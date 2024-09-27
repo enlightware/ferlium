@@ -205,7 +205,6 @@ pub(crate) fn make_if_without_else(cond: Expr, if_true: Expr, span: Span) -> Exp
     let cond_span = cond.span;
     let if_true_span = if_true.span;
     let unit_val = Expr::new(Literal(Value::native(()), Type::unit()), if_true_span);
-    let if_true = make_block(if_true, unit_val.clone(), if_true_span);
     Expr::new(
         Match(
             B::new(cond),
