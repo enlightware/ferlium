@@ -335,6 +335,13 @@ impl Compiler {
         }
     }
 
+    pub fn fn_signature_without_effects(&self, name: &str) -> Option<String> {
+        self.fn_signature(name)
+            .as_deref()
+            .map(remove_effects)
+            .map(str::to_string)
+    }
+
     pub fn run_expr_to_html(&self) -> String {
         if let Some(expr) = &self.user_module.expr {
             match expr.expr.eval() {
@@ -594,6 +601,15 @@ impl Compiler {
                 Ok(ret.into_primitive_ty::<O>().unwrap())
             }
         })
+    }
+}
+
+fn remove_effects(signature: &str) -> &str {
+    match signature.rsplit_once("!") {
+        // If "!" is found, return the part before it (removing the effects)
+        Some((before_effects, _)) => before_effects.trim(),
+        // If "!" is not found, return the original string (no effects to remove)
+        None => signature.trim(),
     }
 }
 
