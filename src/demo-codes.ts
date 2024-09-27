@@ -60,6 +60,20 @@ fn s_def(x) {
 
 (s_full(Some(1)), s_full(None), s_def(Some(1)), s_def(Other))
 `],
+['Effects', `fn a(i, f, g) {
+	if i > 0 {
+	    b(i - 1, f, g); ()
+	};
+	f()
+}
+
+fn b(i, f, g) {
+    a(i, f, g);
+    g()
+}
+
+a(3, ||log("hi"), ||log("world"))
+`],
 ['Quicksort', `fn quicksort(a, lo, hi) {
 	if lo >= 0 and lo < hi {
 		let p = partition(a, lo, hi);
