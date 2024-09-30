@@ -384,7 +384,7 @@ pub struct TypeScheme<Ty: TypeLike> {
 
 impl<Ty: TypeLike> TypeScheme<Ty> {
     /// Create a new type scheme with no quantifier nor constraints.
-    pub(crate) fn new_just_type(ty: Ty) -> Self {
+    pub fn new_just_type(ty: Ty) -> Self {
         Self {
             ty_quantifiers: vec![],
             eff_quantifiers: HashSet::new(),
@@ -394,7 +394,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Create a new type scheme by inferring quantifiers from the type, and no constraints.
-    pub(crate) fn new_infer_quantifiers(ty: Ty) -> Self {
+    pub fn new_infer_quantifiers(ty: Ty) -> Self {
         let ty_quantifiers = ty.inner_ty_vars();
         let eff_quantifiers = ty.input_effect_vars();
         Self {
