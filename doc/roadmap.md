@@ -2,8 +2,8 @@
 
 ### Language features
 
-- Recursive modules
 - Split compilation of modules by analysing the dependency graph
+- Recursive modules
 - Type classes
 - Recursive types inference
 - Co-routine/async
@@ -20,12 +20,12 @@
 ### Compiler features
 
 - Better parsing error messages
-- Optimisations
+- Basic optimisations
 - Just in time compilation
+- Partial evaluation
 
 ### IDE features
 
-- Add patterns to the IDE grammar
 - Show location of execution error
 
 ### Next tasks
