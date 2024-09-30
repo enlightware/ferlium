@@ -39,8 +39,15 @@ use crate::typing_env::Local;
 #[macro_export]
 macro_rules! cached_primitive_ty {
     ($ty:ty) => {{
+        $crate::cached_ty!(Type::primitive::<$ty>)
+    }};
+}
+
+#[macro_export]
+macro_rules! cached_ty {
+    ($ty:expr) => {{
         static TY: std::sync::OnceLock<Type> = std::sync::OnceLock::new();
-        *TY.get_or_init(Type::primitive::<$ty>)
+        *TY.get_or_init($ty)
     }};
 }
 
