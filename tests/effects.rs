@@ -118,11 +118,13 @@ fn fn_variance() {
 fn effects_from_fn_value() {
     use PrimitiveEffect::*;
 
-    test_mod(
-        "fn a(f) { f() } fn b() { a(|| effects::write()) }",
-        "b",
-        effect(Write),
-    );
+    let code1 = "fn a(f) { f() } fn b() { a(|| effects::write()) }";
+    test_mod(code1, "a", effect(Write).union(&effect_var(0)));
+    test_mod(code1, "b", effect(Write));
+
+    let code2 = "fn a(f, g) { b(f); f(); g(); () } fn b(f) { a(f, || effects::write()) }";
+    test_mod(code2, "a", effect(Write).union(&effect_vars(&[0, 1])));
+    test_mod(code2, "b", effect(Write).union(&effect_var(0)));
 }
 
 #[test]

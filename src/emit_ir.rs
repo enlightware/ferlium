@@ -263,11 +263,11 @@ pub fn emit_expr(
     ty_inf.log_debug_substitution_tables(module_env);
 
     // Substitute the result of the unification.
-    ty_inf.substitute_in_node(&mut node, &[]);
-    ty = ty_inf.substitute_in_type(ty, &[]);
+    ty_inf.substitute_in_node(&mut node);
+    ty = ty_inf.substitute_in_type(ty);
     effects = ty_inf.substitute_effect_type(&effects);
     for local in locals.iter_mut().skip(initial_local_count) {
-        local.ty = ty_inf.substitute_in_type(local.ty, &[]);
+        local.ty = ty_inf.substitute_in_type(local.ty);
     }
 
     // Get the remaining constraints and collect the free variables.

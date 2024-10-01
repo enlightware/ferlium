@@ -23,7 +23,10 @@ use crate::{
     ir::{self, EnvStore, FnInstData, Immediate, Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
     mutability::{MutType, MutVal, MutVar, MutVarKey},
-    r#type::{FnArgType, FnType, NativeType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
+    r#type::{
+        FnArgType, FnType, NativeType, TyVarKey, Type, TypeKind, TypeLike, TypeSubstitution,
+        TypeVar,
+    },
     std::{array::array_type, math::int_type, range::range_iterator_type},
     type_scheme::PubTypeConstraint,
     typing_env::{Local, TypingEnv},
@@ -1649,73 +1652,74 @@ impl UnifiedTypeInference {
                 }
             }
         } else {
-            self.effect_constraints.union_value(target, Some(current));
+            self.effect_constraints.union_value(
+                target,
+                Some(current.union(&EffType::single_variable(target))),
+            );
         }
     }
 
     pub(crate) fn substitute_in_module_function(&mut self, descr: &mut ModuleFunction) {
-        descr.ty_scheme.ty = self.substitute_in_fn_type(&descr.ty_scheme.ty, &[]);
+        descr.ty_scheme.ty = self.substitute_in_fn_type(&descr.ty_scheme.ty);
         assert!(descr.ty_scheme.constraints.is_empty());
         let mut code = descr.code.borrow_mut();
         if let Some(script_fn) = code.as_script_mut() {
-            self.substitute_in_node(&mut script_fn.code, &[]);
+            self.substitute_in_node(&mut script_fn.code);
         }
     }
 
-    pub fn substitute_in_type(&mut self, ty: Type, ignore: &[TypeVar]) -> Type {
+    pub fn substitute_in_type(&mut self, ty: Type) -> Type {
         let type_data: TypeKind = { ty.data().clone() };
         use TypeKind::*;
         match type_data {
             Variable(var) => {
-                if ignore.contains(&var) {
-                    return Type::variable(var);
-                }
+                // if ignore.contains(&var) {
+                //     return Type::variable(var);
+                // }
                 let root = self.ty_unification_table.find(var);
                 match self.ty_unification_table.probe_value(root) {
-                    Some(ty) => self.substitute_in_type(ty, ignore),
+                    Some(ty) => self.substitute_in_type(ty),
                     _ => Type::variable(root),
                 }
             }
             Native(ty) => Type::native_type(NativeType::new(
                 ty.bare_ty.clone(),
-                self.substitute_in_types(&ty.arguments, ignore),
+                self.substitute_in_types(&ty.arguments),
             )),
             Variant(tys) => Type::variant(
                 tys.into_iter()
-                    .map(|(name, ty)| (name, self.substitute_in_type(ty, ignore)))
+                    .map(|(name, ty)| (name, self.substitute_in_type(ty)))
                     .collect(),
             ),
-            Tuple(tys) => Type::tuple(self.substitute_in_types(&tys, ignore)),
+            Tuple(tys) => Type::tuple(self.substitute_in_types(&tys)),
             Record(fields) => Type::record(
                 fields
                     .into_iter()
-                    .map(|(name, ty)| (name, self.substitute_in_type(ty, ignore)))
+                    .map(|(name, ty)| (name, self.substitute_in_type(ty)))
                     .collect(),
             ),
-            Function(fn_ty) => Type::function_type(self.substitute_in_fn_type(&fn_ty, ignore)),
-            Newtype(name, ty) => Type::new_type(name, self.substitute_in_type(ty, ignore)),
+            Function(fn_ty) => Type::function_type(self.substitute_in_fn_type(&fn_ty)),
+            Newtype(name, ty) => Type::new_type(name, self.substitute_in_type(ty)),
             Never => ty,
         }
     }
 
-    fn substitute_in_types(&mut self, tys: &[Type], ignore: &[TypeVar]) -> Vec<Type> {
-        tys.iter()
-            .map(|ty| self.substitute_in_type(*ty, ignore))
-            .collect()
+    fn substitute_in_types(&mut self, tys: &[Type]) -> Vec<Type> {
+        tys.iter().map(|ty| self.substitute_in_type(*ty)).collect()
     }
 
-    pub fn substitute_in_fn_type(&mut self, fn_ty: &FnType, ignore: &[TypeVar]) -> FnType {
+    pub fn substitute_in_fn_type(&mut self, fn_ty: &FnType) -> FnType {
         let args = fn_ty
             .args
             .iter()
             .map(|arg| {
                 FnArgType::new(
-                    self.substitute_in_type(arg.ty, ignore),
+                    self.substitute_in_type(arg.ty),
                     self.substitute_mut_type(arg.inout),
                 )
             })
             .collect::<Vec<_>>();
-        let ret = self.substitute_in_type(fn_ty.ret, ignore);
+        let ret = self.substitute_in_type(fn_ty.ret);
         let effects = self.substitute_effect_type(&fn_ty.effects);
         FnType::new(args, ret, effects)
     }
@@ -1760,10 +1764,13 @@ impl UnifiedTypeInference {
                         return EffType::empty().into_iter();
                     }
 
-                    let effects = match self.effect_constraints.probe_value(*var) {
+                    let mut effects = match self.effect_constraints.probe_value(*var) {
                         Some(effects) => self.substitute_effect_type(&effects),
                         None => EffType::single_variable(*var),
                     };
+
+                    // add back the variable itself
+                    effects = effects.union(&EffType::single_variable(*var));
 
                     VAR_VISITED.with(|visited| {
                         visited.borrow_mut().remove(var);
@@ -1776,81 +1783,81 @@ impl UnifiedTypeInference {
         res
     }
 
-    pub fn substitute_in_node(&mut self, node: &mut ir::Node, ignore: &[TypeVar]) {
+    pub fn substitute_in_node(&mut self, node: &mut ir::Node) {
         use ir::NodeKind::*;
-        node.ty = self.substitute_in_type(node.ty, ignore);
+        node.ty = self.substitute_in_type(node.ty);
         node.effects = self.substitute_effect_type(&node.effects);
         match &mut node.kind {
             Immediate(immediate) => {
-                self.substitute_in_value(&mut immediate.value, ignore);
-                self.substitute_in_fn_inst_data(&mut immediate.inst_data, ignore);
+                self.substitute_in_value(&mut immediate.value);
+                self.substitute_in_fn_inst_data(&mut immediate.inst_data);
             }
             BuildClosure(_) => panic!("BuildClosure should not be present at this stage"),
             Apply(app) => {
-                self.substitute_in_node(&mut app.function, ignore);
-                self.substitute_in_nodes(&mut app.arguments, ignore);
+                self.substitute_in_node(&mut app.function);
+                self.substitute_in_nodes(&mut app.arguments);
             }
             StaticApply(app) => {
-                app.ty = self.substitute_in_fn_type(&app.ty, ignore);
-                self.substitute_in_nodes(&mut app.arguments, ignore);
-                self.substitute_in_fn_inst_data(&mut app.inst_data, ignore);
+                app.ty = self.substitute_in_fn_type(&app.ty);
+                self.substitute_in_nodes(&mut app.arguments);
+                self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
             EnvStore(node) => {
-                self.substitute_in_node(&mut node.node, ignore);
-                node.ty = self.substitute_in_type(node.ty, ignore);
+                self.substitute_in_node(&mut node.node);
+                node.ty = self.substitute_in_type(node.ty);
             }
             EnvLoad(_) => {}
-            Block(nodes) => self.substitute_in_nodes(nodes, ignore),
+            Block(nodes) => self.substitute_in_nodes(nodes),
             Assign(assignment) => {
-                self.substitute_in_node(&mut assignment.place, ignore);
-                self.substitute_in_node(&mut assignment.value, ignore);
+                self.substitute_in_node(&mut assignment.place);
+                self.substitute_in_node(&mut assignment.value);
             }
-            Tuple(nodes) => self.substitute_in_nodes(nodes, ignore),
-            Project(projection) => self.substitute_in_node(&mut projection.0, ignore),
-            Record(nodes) => self.substitute_in_nodes(nodes, ignore),
-            FieldAccess(node_and_field) => self.substitute_in_node(&mut node_and_field.0, ignore),
-            ProjectAt(projection) => self.substitute_in_node(&mut projection.0, ignore),
-            Variant(variant) => self.substitute_in_node(&mut variant.1, ignore),
-            ExtractTag(node) => self.substitute_in_node(node, ignore),
-            Array(nodes) => self.substitute_in_nodes(nodes, ignore),
+            Tuple(nodes) => self.substitute_in_nodes(nodes),
+            Project(projection) => self.substitute_in_node(&mut projection.0),
+            Record(nodes) => self.substitute_in_nodes(nodes),
+            FieldAccess(node_and_field) => self.substitute_in_node(&mut node_and_field.0),
+            ProjectAt(projection) => self.substitute_in_node(&mut projection.0),
+            Variant(variant) => self.substitute_in_node(&mut variant.1),
+            ExtractTag(node) => self.substitute_in_node(node),
+            Array(nodes) => self.substitute_in_nodes(nodes),
             Index(array, index) => {
-                self.substitute_in_node(array, ignore);
-                self.substitute_in_node(index, ignore);
+                self.substitute_in_node(array);
+                self.substitute_in_node(index);
             }
             Case(case) => {
-                self.substitute_in_node(&mut case.value, ignore);
+                self.substitute_in_node(&mut case.value);
                 for alternative in case.alternatives.iter_mut() {
-                    self.substitute_in_value(&mut alternative.0, ignore);
-                    self.substitute_in_node(&mut alternative.1, ignore);
+                    self.substitute_in_value(&mut alternative.0);
+                    self.substitute_in_node(&mut alternative.1);
                 }
-                self.substitute_in_node(&mut case.default, ignore);
+                self.substitute_in_node(&mut case.default);
             }
             Iterate(iteration) => {
-                self.substitute_in_node(&mut iteration.iterator, ignore);
-                self.substitute_in_node(&mut iteration.body, ignore);
+                self.substitute_in_node(&mut iteration.iterator);
+                self.substitute_in_node(&mut iteration.body);
             }
         }
     }
 
-    fn substitute_in_nodes(&mut self, nodes: &mut [ir::Node], ignore: &[TypeVar]) {
+    fn substitute_in_nodes(&mut self, nodes: &mut [ir::Node]) {
         for node in nodes {
-            self.substitute_in_node(node, ignore);
+            self.substitute_in_node(node);
         }
     }
 
-    fn substitute_in_fn_inst_data(&mut self, inst_data: &mut FnInstData, ignore: &[TypeVar]) {
+    fn substitute_in_fn_inst_data(&mut self, inst_data: &mut FnInstData) {
         inst_data.dicts_req = inst_data
             .dicts_req
             .iter()
-            .map(|dict| DictionaryReq::new(self.substitute_in_type(dict.ty, ignore), dict.kind))
+            .map(|dict| DictionaryReq::new(self.substitute_in_type(dict.ty), dict.kind))
             .collect();
     }
 
-    fn substitute_in_value(&mut self, value: &mut Value, ignore: &[TypeVar]) {
+    fn substitute_in_value(&mut self, value: &mut Value) {
         match value {
             Value::Tuple(tuple) => {
                 for value in tuple.iter_mut() {
-                    self.substitute_in_value(value, ignore);
+                    self.substitute_in_value(value);
                 }
             }
             Value::Function(function) => {
@@ -1859,7 +1866,7 @@ impl UnifiedTypeInference {
                 let function = function.try_borrow_mut();
                 if let Ok(mut function) = function {
                     if let Some(script_fn) = function.as_script_mut() {
-                        self.substitute_in_node(&mut script_fn.code, ignore);
+                        self.substitute_in_node(&mut script_fn.code);
                     }
                 }
             }
@@ -1868,11 +1875,7 @@ impl UnifiedTypeInference {
     }
 
     #[allow(dead_code)]
-    fn substitute_in_constraint(
-        &mut self,
-        constraint: &PubTypeConstraint,
-        ignore: &[TypeVar],
-    ) -> PubTypeConstraint {
+    fn substitute_in_constraint(&mut self, constraint: &PubTypeConstraint) -> PubTypeConstraint {
         use PubTypeConstraint::*;
         match constraint {
             TupleAtIndexIs {
@@ -1882,8 +1885,8 @@ impl UnifiedTypeInference {
                 index_span,
                 element_ty,
             } => {
-                let tuple_ty = self.substitute_in_type(*tuple_ty, ignore);
-                let element_ty = self.substitute_in_type(*element_ty, ignore);
+                let tuple_ty = self.substitute_in_type(*tuple_ty);
+                let element_ty = self.substitute_in_type(*element_ty);
                 PubTypeConstraint::new_tuple_at_index_is(
                     tuple_ty,
                     *tuple_span,
@@ -1899,8 +1902,8 @@ impl UnifiedTypeInference {
                 field_span,
                 element_ty,
             } => {
-                let record_ty = self.substitute_in_type(*record_ty, ignore);
-                let element_ty = self.substitute_in_type(*element_ty, ignore);
+                let record_ty = self.substitute_in_type(*record_ty);
+                let element_ty = self.substitute_in_type(*element_ty);
                 PubTypeConstraint::new_record_field_is(
                     record_ty,
                     *record_span,
@@ -1915,8 +1918,8 @@ impl UnifiedTypeInference {
                 payload_ty: variant_ty,
                 span: variant_span,
             } => {
-                let ty = self.substitute_in_type(*ty, ignore);
-                let variant_ty = self.substitute_in_type(*variant_ty, ignore);
+                let ty = self.substitute_in_type(*ty);
+                let variant_ty = self.substitute_in_type(*variant_ty);
                 PubTypeConstraint::new_type_has_variant(ty, *tag, variant_ty, *variant_span)
             }
         }
