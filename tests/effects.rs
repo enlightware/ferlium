@@ -119,7 +119,7 @@ fn effects_from_fn_value() {
     use PrimitiveEffect::*;
 
     test_mod(
-        "fn a(f) { f() } fn b() { a(|| effects::write()) } ",
+        "fn a(f) { f() } fn b() { a(|| effects::write()) }",
         "b",
         effect(Write),
     );
