@@ -90,7 +90,7 @@ pub fn emit_module(
             module_env,
         );
         let expected_span = descr.spans.as_ref().unwrap().args_span;
-        let (fn_node, effects) = ty_inf.check_expr(
+        let fn_node = ty_inf.check_expr(
             &mut ty_env,
             &function.body,
             descr.ty_scheme.ty.ret,
@@ -98,8 +98,9 @@ pub fn emit_module(
             expected_span,
         )?;
         let descr = output.functions.get_mut(&name).unwrap();
+        descr.ty_scheme.ty.effects =
+            ty_inf.unify_effects(&fn_node.effects, &descr.ty_scheme.ty.effects);
         *descr.code.borrow_mut() = B::new(ScriptFunction::new(fn_node));
-        descr.ty_scheme.ty.effects = ty_inf.unify_effects(&effects, &descr.ty_scheme.ty.effects);
     }
     let module_env = ModuleEnv::new(&output, others);
     ty_inf.log_debug_constraints(module_env);
@@ -238,7 +239,6 @@ fn check_unbounds(
 pub struct CompiledExpr {
     pub expr: ir::Node,
     pub ty: TypeScheme<Type>,
-    pub effects: EffType,
     pub locals: Vec<Local>,
 }
 
@@ -254,7 +254,7 @@ pub fn emit_expr(
     let initial_local_count = locals.len();
     let mut ty_env = TypingEnv::new(locals, module_env);
     let mut ty_inf = TypeInference::new();
-    let (mut node, mut ty, _, mut effects) = ty_inf.infer_expr(&mut ty_env, source)?;
+    let (mut node, _) = ty_inf.infer_expr(&mut ty_env, source)?;
     let mut locals = ty_env.get_locals_and_drop();
     ty_inf.log_debug_constraints(module_env);
 
@@ -264,8 +264,6 @@ pub fn emit_expr(
 
     // Substitute the result of the unification.
     ty_inf.substitute_in_node(&mut node);
-    ty = ty_inf.substitute_in_type(ty);
-    effects = ty_inf.substitute_effect_type(&effects);
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = ty_inf.substitute_in_type(local.ty);
     }
@@ -280,22 +278,22 @@ pub fn emit_expr(
         retained_constraints,
         constraint_subst,
         ..
-    } = validate_and_cleanup_constraints(&ty, &constraints, &node)?;
+    } = validate_and_cleanup_constraints(&node.ty, &constraints, &node)?;
     log_dropped_constraints_expr(&constraints, &retained_constraints, module_env);
     constraints.retain(|c| retained_constraints.contains(&constraint_ptr(c)));
     assert_eq!(constraints.len(), retained_constraints.len());
 
     // Normalize the type scheme
     let mut ty_scheme = TypeScheme {
-        ty,
-        eff_quantifiers: ty.inner_effect_vars(),
+        ty: node.ty,
+        eff_quantifiers: node.ty.inner_effect_vars(),
         ty_quantifiers: quantifiers,
         constraints,
     };
     let mut subst = ty_scheme.normalize();
 
     // Remove output effects of the expression (i.e. not in the type of the expression).
-    for effect in effects.iter() {
+    for effect in node.effects.iter() {
         if let Some(var) = effect.as_variable() {
             if !subst.1.contains_key(var) {
                 subst.1.insert(*var, EffType::empty());
@@ -306,7 +304,6 @@ pub fn emit_expr(
     // Substitute the normalized and constraint-originating types in the node, effects and locals.
     subst.0.extend(constraint_subst);
     node.instantiate(&subst);
-    let effects = effects.instantiate(&subst.1);
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);
     }
@@ -319,7 +316,6 @@ pub fn emit_expr(
     Ok(CompiledExpr {
         expr: node,
         ty: ty_scheme,
-        effects,
         locals,
     })
 }

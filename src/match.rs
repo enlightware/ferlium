@@ -34,8 +34,8 @@ impl TypeInference {
         // Do we have a degenerate match with no alternative?
         if alternatives.is_empty() {
             if let Some(default) = default {
-                let (node, ty, mut_ty, effects) = self.infer_expr(env, default)?;
-                return Ok((node.kind, ty, mut_ty, effects));
+                let (node, mut_ty) = self.infer_expr(env, default)?;
+                return Ok((node.kind, node.ty, mut_ty, node.effects));
             } else {
                 panic!("empty match without default");
             }
@@ -43,7 +43,9 @@ impl TypeInference {
 
         // Infer the condition expression and get the pattern type.
         // Currently the type must be the same for all alternatives.
-        let (condition_node, pattern_ty, _, cond_eff) = self.infer_expr(env, cond_expr)?;
+        let (condition_node, _) = self.infer_expr(env, cond_expr)?;
+        let pattern_ty = condition_node.ty;
+        let cond_eff = condition_node.effects.clone();
         let first_alternative = alternatives.first().unwrap();
         let first_alternative_span = first_alternative.0.span;
         let is_variant = first_alternative.0.kind.is_variant();
@@ -104,7 +106,6 @@ impl TypeInference {
             // Code to store the variant value in the environment.
             let store_variant = K::EnvStore(B::new(EnvStore {
                 node: condition_node,
-                ty: pattern_ty,
                 name_span: cond_expr.span,
             }));
             let store_variant_node = N::new(
@@ -168,10 +169,9 @@ impl TypeInference {
                                 MutType::constant(),
                                 return_ty_span,
                             )?
-                            .0
                         } else {
-                            let (node, expr_return_ty, _, _) = self.infer_expr(env, expr)?;
-                            return_ty = Some(expr_return_ty);
+                            let (node, _) = self.infer_expr(env, expr)?;
+                            return_ty = Some(node.ty);
                             return_ty_span = expr.span;
                             node
                         };
@@ -200,7 +200,6 @@ impl TypeInference {
                                 let store_projected_inner = N::new(
                                     K::EnvStore(B::new(EnvStore {
                                         node: project_tuple_inner,
-                                        ty: inner_ty,
                                         name_span: bind_var_names[i].1,
                                     })),
                                     Type::unit(),
@@ -256,7 +255,6 @@ impl TypeInference {
 
                 // Generate the default code node
                 self.check_expr(env, default, return_ty, MutType::constant(), return_ty_span)?
-                    .0
             } else {
                 // No default, compute a full variant type.
                 let variant_inner_tys = types.into_iter().map(|(tag, _, ty)| (tag, ty)).collect();
@@ -288,7 +286,7 @@ impl TypeInference {
             // Literal patterns, convert optional default to mandatory one
             let return_ty = self.fresh_type_var_ty();
             let (node, return_ty, effects) = if let Some(default) = default {
-                let (default, default_eff) =
+                let default =
                     self.check_expr(env, default, return_ty, MutType::constant(), expr.span)?;
                 let (alternatives, alt_eff) = self.check_literal_patterns(
                     env,
@@ -299,7 +297,7 @@ impl TypeInference {
                     return_ty,
                     expr.span,
                 )?;
-                let effects = self.make_dependent_effect([cond_eff, alt_eff, default_eff]);
+                let effects = self.make_dependent_effect([&cond_eff, &alt_eff, &default.effects]);
                 (
                     K::Case(B::new(ir::Case {
                         value: condition_node,
@@ -356,13 +354,14 @@ impl TypeInference {
                         expected_pattern_type,
                         expected_pattern_span,
                     );
-                    let (node, effects) = self.check_expr(
+                    let node = self.check_expr(
                         env,
                         expr,
                         expected_return_type,
                         MutType::constant(),
                         expected_return_span,
                     )?;
+                    let effects = node.effects.clone();
                     Ok(((literal.clone(), node), effects))
                 } else {
                     Err(InternalCompilationError::InconsistentPattern {

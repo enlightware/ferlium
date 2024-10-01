@@ -24,7 +24,7 @@ fn test_mod(src: &str, f: &str, exp_eff: EffType) {
 
 fn test_expr(src: &str, exp_eff: EffType) {
     let (module, others) = compile(src);
-    let effects = module.expr.unwrap().effects.clone();
+    let effects = module.expr.unwrap().expr.effects.clone();
     assert_eq!(effects, exp_eff);
     drop(others);
 }

@@ -108,13 +108,11 @@ pub struct StaticApplication {
 #[derive(Debug, Clone)]
 pub struct EnvStore {
     pub node: Node,
-    pub ty: Type,
     pub name_span: Span,
 }
 impl EnvStore {
     pub fn instantiate(&mut self, subst: &InstSubstitution) {
         self.node.instantiate(subst);
-        self.ty = self.ty.instantiate(subst);
     }
 }
 
@@ -511,7 +509,7 @@ impl Node {
                 if node.name_span.end() != node.name_span.start() {
                     result.push((
                         node.name_span.end(),
-                        format!(": {}", node.ty.format_with(env)),
+                        format!(": {}", node.node.ty.format_with(env)),
                     ));
                 }
                 node.node.variable_type_annotations(result, env);
