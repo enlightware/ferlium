@@ -2004,7 +2004,7 @@ pub fn property_to_fn_name(
     let path = scope_parts
         .next()
         .map_or("".into(), |path| format!("{path}::"));
-    let fn_name = format!("{}@{}_{}_{}", path, access.as_prefix(), scope, variable);
+    let fn_name = format!("{}@{} {}.{}", path, access.as_prefix(), scope, variable);
     if env.get_function(&fn_name).is_none() {
         Err(InternalCompilationError::UnknownProperty {
             scope: ustr(scope),

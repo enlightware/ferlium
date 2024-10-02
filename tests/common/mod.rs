@@ -66,14 +66,14 @@ fn test_property_module() -> Module {
     use std::sync::atomic::Ordering;
     let mut module: Module = Default::default();
     module.functions.insert(
-        "@get_my_scope_my_var".into(),
+        "@get my_scope.my_var".into(),
         NullaryNativeFnI::description_with_default_ty(
             || PROPERTY_VALUE.load(Ordering::Relaxed),
             effect(PrimitiveEffect::Read),
         ),
     );
     module.functions.insert(
-        "@set_my_scope_my_var".into(),
+        "@set my_scope.my_var".into(),
         UnaryNativeFnNI::description_with_default_ty(
             |value: isize| PROPERTY_VALUE.store(value, Ordering::Relaxed),
             effect(PrimitiveEffect::Write),

@@ -1,4 +1,8 @@
-use std::fmt::{self, Display};
+use std::{
+    collections::HashSet,
+    fmt::{self, Display},
+    sync::LazyLock,
+};
 
 use crate::{
     compile,
@@ -9,6 +13,7 @@ use crate::{
     value::{NativeValue, Value},
     CompilationError, DisplayStyle, Module, ModuleAndExpr, ModuleEnv, Modules, Span,
 };
+use regex::Regex;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -405,6 +410,36 @@ impl Compiler {
             }
         }
         names
+    }
+
+    pub fn list_module_props(&self) -> Vec<String> {
+        static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@(get|set) (.*)$").unwrap());
+        let mut getters = HashSet::new();
+        let mut setters = HashSet::new();
+        for module in &self.modules {
+            let mod_name = *module.0;
+            for f in &module.1.functions {
+                let sym_name = *f.0;
+                let captures = if let Some(captures) = RE.captures(&sym_name) {
+                    captures
+                } else {
+                    continue; // not a property
+                };
+                let action = captures.get(1).unwrap().as_str();
+                let name = captures.get(2).unwrap().as_str();
+                let bin = match action {
+                    "get" => &mut getters,
+                    "set" => &mut setters,
+                    _ => continue,
+                };
+                if self.user_module.module.uses(mod_name, sym_name) {
+                    bin.insert(format!("@{name}"));
+                } else {
+                    bin.insert(format!("@{mod_name}::{name}"));
+                }
+            }
+        }
+        getters.intersection(&setters).cloned().collect()
     }
 }
 
