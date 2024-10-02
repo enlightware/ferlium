@@ -61,6 +61,7 @@ Expr {
     | ApplyExpression
     | IndexExpression
     | Expr !semicolon ';' Expr
+    | PropertyPath
 }
 
 ArithExpression {
@@ -197,6 +198,10 @@ Pattern {
 
 LiteralPattern {
     Literal
+}
+
+PropertyPath {
+	'@' Path '.' Identifier
 }
 
 Path {
