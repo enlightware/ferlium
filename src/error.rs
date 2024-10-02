@@ -1,10 +1,11 @@
 use std::fmt::{self, Display};
 
+use enum_as_inner::EnumAsInner;
 use lrpar::Span;
 use ustr::Ustr;
 
 use crate::{
-    ast::PatternType,
+    ast::{PatternType, PropertyAccess},
     effects::EffType,
     format::FormatWith,
     module::{FmtWithModuleEnv, ModuleEnv},
@@ -122,6 +123,12 @@ pub enum InternalCompilationError {
         source_span: Span,
         target: EffType,
         target_span: Span,
+    },
+    UnknownProperty {
+        scope: Ustr,
+        variable: Ustr,
+        cause: PropertyAccess,
+        span: Span,
     },
     Internal(String),
 }
@@ -346,13 +353,18 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     &source[target_span.start()..target_span.end()],
                 )
             }
+            UnknownProperty {
+                scope, variable, ..
+            } => {
+                write!(f, "Unknown property: {}.{}", scope, variable,)
+            }
             Internal(msg) => write!(f, "ICE: {}", msg),
         }
     }
 }
 
 /// Compilation error, for external use
-#[derive(Debug)]
+#[derive(Debug, EnumAsInner)]
 pub enum CompilationError {
     ParsingFailed(Vec<LocatedError>),
     VariableNotFound(String, Span),
@@ -439,6 +451,12 @@ pub enum CompilationError {
         source_span: Span,
         target: EffType,
         target_span: Span,
+    },
+    UnknownProperty {
+        scope: Ustr,
+        variable: Ustr,
+        cause: PropertyAccess,
+        span: Span,
     },
     Internal(String),
 }
@@ -608,6 +626,17 @@ impl CompilationError {
                 target,
                 target_span,
             },
+            UnknownProperty {
+                scope,
+                variable,
+                cause,
+                span,
+            } => Self::UnknownProperty {
+                scope,
+                variable,
+                cause,
+                span,
+            },
             Internal(msg) => Self::Internal(msg),
         }
     }
@@ -632,10 +661,9 @@ impl CompilationError {
     }
 
     pub fn expect_must_be_mutable(&self) {
-        match self {
-            Self::MustBeMutable(_, _) => (),
-            _ => panic!("expect_must_be_mutable called on non-MustBeMutable error {self:?}"),
-        }
+        self.as_must_be_mutable().unwrap_or_else(|| {
+            panic!("expect_must_be_mutable called on non-MustBeMutable error {self:?}")
+        });
     }
 
     pub fn expect_is_not_subtype(&self, cur_ty: &str, exp_ty: &str) {

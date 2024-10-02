@@ -78,12 +78,12 @@ impl<'m> TypingEnv<'m> {
             .map(|index| (index, self.locals[index].ty, self.locals[index].mutable))
     }
 
-    pub fn get_function(&'m self, name: Ustr) -> Option<&'m ModuleFunction> {
+    pub fn get_function(&'m self, name: &str) -> Option<&'m ModuleFunction> {
         self.module_env
             .current
-            .get_function(&name, self.module_env.others)
+            .get_function(name, self.module_env.others)
             .or_else(|| {
-                let path = name.as_str().split("::").next_tuple();
+                let path = name.split("::").next_tuple();
                 if let Some(path) = path {
                     let (module_name, function_name) = path;
                     self.module_env

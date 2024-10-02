@@ -10,10 +10,10 @@ use std::{
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
 use lrpar::Span;
-use ustr::Ustr;
+use ustr::{ustr, Ustr};
 
 use crate::{
-    ast::{Expr, ExprKind},
+    ast::{Expr, ExprKind, PropertyAccess},
     containers::{SVec2, B},
     dictionary_passing::DictionaryReq,
     effects::{no_effects, EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution},
@@ -244,7 +244,7 @@ impl TypeInference {
                     (node, ty, mut_ty, no_effects())
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some(function) = env.get_function(*name) {
+                else if let Some(function) = env.get_function(name) {
                     let (fn_ty, inst_data) = function.ty_scheme.instantiate(self);
                     let value = Value::Function(FunctionRef::new_weak(&function.code));
                     let node = K::Immediate(B::new(ir::Immediate {
@@ -329,7 +329,7 @@ impl TypeInference {
                 if let Identifier(name) = func.kind {
                     if !env.has_variable_name(name) {
                         let (node, ty, mut_ty, effects) =
-                            self.infer_static_apply(env, name, func.span, args)?;
+                            self.infer_static_apply(env, &name, func.span, args)?;
                         return Ok((N::new(node, ty, effects, expr.span), mut_ty));
                     }
                 }
@@ -357,7 +357,7 @@ impl TypeInference {
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
             }
-            StaticApply(name, span, args) => self.infer_static_apply(env, *name, *span, args)?,
+            StaticApply(name, span, args) => self.infer_static_apply(env, name, *span, args)?,
             Block(exprs) => {
                 let env_size = env.locals.len();
                 let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
@@ -367,6 +367,13 @@ impl TypeInference {
                 (node, ty, MutType::constant(), effects)
             }
             Assign(place, sign_span, value) => {
+                if let Some((scope, variable)) = place.kind.as_property_path() {
+                    let fn_name =
+                        property_to_fn_name(scope, variable, PropertyAccess::Set, expr.span, env)?;
+                    let (node, ty, mut_ty, effects) =
+                        self.infer_static_apply(env, &fn_name, expr.span, &[value.as_ref()])?;
+                    return Ok((N::new(node, ty, effects, expr.span), mut_ty));
+                }
                 let value = self.infer_expr_drop_mut(env, value)?;
                 let (place, place_mut) = self.infer_expr(env, place)?;
                 self.add_mut_be_at_least_constraint(
@@ -540,6 +547,11 @@ impl TypeInference {
                 }));
                 (node, Type::unit(), MutType::constant(), combined_effects)
             }
+            PropertyPath(scope, variable) => {
+                let fn_name =
+                    property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
+                self.infer_static_apply(env, &fn_name, expr.span, &[] as &[Expr])?
+            }
             Error(msg) => {
                 panic!("attempted to infer type for error node: {msg}");
             }
@@ -558,7 +570,7 @@ impl TypeInference {
     fn infer_static_apply(
         &mut self,
         env: &mut TypingEnv,
-        name: Ustr,
+        name: &str,
         span: Span,
         args: &[impl Borrow<Expr>],
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
@@ -591,7 +603,7 @@ impl TypeInference {
             let combined_effects = self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
             let node = K::StaticApply(B::new(ir::StaticApplication {
                 function: FunctionRef::new_weak(&function.code),
-                function_name: name,
+                function_name: ustr(name),
                 function_span: span,
                 arguments: args_nodes,
                 ty: inst_fn_ty,
@@ -631,6 +643,7 @@ impl TypeInference {
                     )
                 }
             };
+            let name = ustr(name);
             self.ty_constraints.push(TypeConstraint::Pub(
                 PubTypeConstraint::new_type_has_variant(variant_ty, name, payload_ty, span),
             ));
@@ -1976,5 +1989,30 @@ impl UnifiedTypeInference {
                 log::debug!("  {} → {var}", eff);
             }
         }
+    }
+}
+
+pub fn property_to_fn_name(
+    scope: &str,
+    variable: &str,
+    access: PropertyAccess,
+    span: Span,
+    env: &TypingEnv,
+) -> Result<String, InternalCompilationError> {
+    let mut scope_parts = scope.rsplitn(2, "::");
+    let scope = scope_parts.next().unwrap(); // safe to unwrap, as we have at least one part
+    let path = scope_parts
+        .next()
+        .map_or("".into(), |path| format!("{path}::"));
+    let fn_name = format!("{}@{}_{}_{}", path, access.as_prefix(), scope, variable);
+    if env.get_function(&fn_name).is_none() {
+        Err(InternalCompilationError::UnknownProperty {
+            scope: ustr(scope),
+            variable: ustr(variable),
+            cause: access,
+            span,
+        })
+    } else {
+        Ok(fn_name)
     }
 }

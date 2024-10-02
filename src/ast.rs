@@ -115,7 +115,7 @@ impl FmtWithModuleEnv for Module {
 // and pass the source code in the type inference phase.
 
 /// The kind-specific part of an expression as an Abstract Syntax Tree
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EnumAsInner)]
 pub enum ExprKind {
     Literal(Value, Type),
     FormattedString(String),
@@ -128,6 +128,7 @@ pub enum ExprKind {
     StaticApply(Ustr, Span, Vec<Expr>),
     Block(Vec<Expr>),
     Assign(B<Expr>, Span, B<Expr>),
+    PropertyPath(Ustr, Ustr),
     Tuple(Vec<Expr>),
     Project(B<Expr>, usize, Span),
     Record(Vec<(Ustr, Span, Expr)>),
@@ -263,6 +264,7 @@ impl Expr {
                 writeln!(f, "{indent_str}do")?;
                 body.format_ind(f, indent + 1)
             }
+            PropertyPath(scope, name) => writeln!(f, "{indent_str}@{}.{}", scope, name),
             Error(msg) => writeln!(f, "{indent_str}Error: {msg}"),
         }
     }
@@ -394,6 +396,21 @@ impl Pattern {
                 }
             }
             Error(s) => writeln!(f, "{indent_str}Pattern error: {s}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyAccess {
+    Get,
+    Set,
+}
+impl PropertyAccess {
+    pub fn as_prefix(&self) -> &'static str {
+        use PropertyAccess::*;
+        match self {
+            Get => "get",
+            Set => "set",
         }
     }
 }

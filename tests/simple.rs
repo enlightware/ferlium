@@ -2,7 +2,9 @@ mod common;
 
 use test_log::test;
 
-use common::{compile, fail_compilation, fail_run, run, unit};
+use common::{
+    compile, fail_compilation, fail_run, get_property_value, run, set_property_value, unit,
+};
 use painturscript::{
     effects::PrimitiveEffect, error::RuntimeError, std::array::Array, value::Value, ModuleAndExpr,
 };
@@ -853,4 +855,23 @@ fn recursive_functions() {
         bool!(true)
     );
     assert_eq!(run("fn f(a) { let p = g(a) } fn g(a) { 0 }"), unit());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn properties() {
+    set_property_value(0);
+    assert_eq!(run("@props::my_scope.my_var"), int!(0));
+    set_property_value(1);
+    assert_eq!(run("@props::my_scope.my_var"), int!(1));
+    run("@props::my_scope.my_var = 2");
+    assert_eq!(get_property_value(), 2);
+    run("@props::my_scope.my_var = @props::my_scope.my_var * 2 + 3");
+    assert_eq!(get_property_value(), 7);
+    run("fn f(x) { x * 2 } @props::my_scope.my_var = f(@props::my_scope.my_var)");
+    assert_eq!(get_property_value(), 14);
+    fail_compilation("@props::my_scope.my_var.a")
+        .into_invalid_record_field_access()
+        .unwrap();
+    fail_compilation("@props::my_scope.my_var.a = 2").expect_must_be_mutable();
 }

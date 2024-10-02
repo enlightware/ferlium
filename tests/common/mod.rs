@@ -1,8 +1,10 @@
+use std::sync::atomic::AtomicIsize;
+
 use painturscript::{
     effects::{effect, effects, PrimitiveEffect},
     error::{CompilationError, RuntimeError},
     eval::EvalResult,
-    function::{NullaryNativeFnI, UnaryNativeFnVI},
+    function::{NullaryNativeFnI, UnaryNativeFnNI, UnaryNativeFnVI},
     module::{Module, Modules},
     r#type::{FnType, Type},
     std::new_std_module_env,
@@ -50,10 +52,41 @@ fn test_effect_module() -> Module {
     module
 }
 
+static PROPERTY_VALUE: AtomicIsize = AtomicIsize::new(0);
+
+pub fn set_property_value(value: isize) {
+    PROPERTY_VALUE.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn get_property_value() -> isize {
+    PROPERTY_VALUE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn test_property_module() -> Module {
+    use std::sync::atomic::Ordering;
+    let mut module: Module = Default::default();
+    module.functions.insert(
+        "@get_my_scope_my_var".into(),
+        NullaryNativeFnI::description_with_default_ty(
+            || PROPERTY_VALUE.load(Ordering::Relaxed),
+            effect(PrimitiveEffect::Read),
+        ),
+    );
+    module.functions.insert(
+        "@set_my_scope_my_var".into(),
+        UnaryNativeFnNI::description_with_default_ty(
+            |value: isize| PROPERTY_VALUE.store(value, Ordering::Relaxed),
+            effect(PrimitiveEffect::Write),
+        ),
+    );
+    module
+}
+
 /// Compile and run the src and return its module and expression
 pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationError> {
     let mut other_modules = new_std_module_env();
     other_modules.insert("effects".into(), test_effect_module());
+    other_modules.insert("props".into(), test_property_module());
     Ok((
         painturscript::compile(src, &other_modules, &[])?,
         other_modules,

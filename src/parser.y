@@ -138,6 +138,8 @@ Expr -> Expr
         { Expr::new(Record($2), $span) }
     | Expr ';' Expr
         { make_block($1, $3, $span) }
+    | PropertyPath
+        { Expr::new(PropertyPath($1.0, $1.1), $span) }
     ;
 
 // TODO: add enum, add more notations for float
@@ -149,6 +151,16 @@ IfExpr -> Expr
         { make_if_else($2, $4, $8, $span) }
     | 'if' Expr '{' Expr '}' %prec NO_ELSE
         { make_if_without_else($2, $4, $span) }
+    ;
+
+PropertyPath -> (Ustr, Ustr)
+    : '@' PathWithContent '.' 'IDENT'
+        { ($2, us($4, $lexer)) }
+    ;
+
+PathWithContent -> Ustr
+    : Path
+        { ustr($lexer.span_str($span)) }
     ;
 
 Path -> ()

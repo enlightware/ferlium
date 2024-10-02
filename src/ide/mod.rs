@@ -261,6 +261,17 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
                 format!("Effect {source} cannot depend on {target}"),
             )]
         }
+        UnknownProperty {
+            scope,
+            variable,
+            span,
+            ..
+        } => {
+            vec![ErrorData::from_span(
+                span,
+                format!("Unknown property {scope}.{variable}"),
+            )]
+        }
         Internal(msg) => vec![ErrorData::from_span(
             &Span::new(0, 0),
             format!("ICE: {msg}"),
