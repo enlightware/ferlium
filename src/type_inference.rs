@@ -276,6 +276,10 @@ impl TypeInference {
                         no_effects(),
                         expr.span,
                     );
+                    // FIXME: this is not enabled due to a bug in constraints dropping
+                    // // Build the variant value.
+                    // let node = K::Immediate(Immediate::new(Value::variant(*name, Value::unit())));
+                    // (node, variant_ty, MutType::constant(), no_effects())
                     let node = K::Variant(B::new((*name, payload_node)));
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
@@ -389,8 +393,12 @@ impl TypeInference {
             }
             Tuple(exprs) => {
                 let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
-                let node = K::Tuple(B::new(SVec2::from_vec(nodes)));
                 let ty = Type::tuple(types);
+                let node = if let Some(values) = nodes_as_bare_immediate(&nodes) {
+                    K::Immediate(Immediate::new(Value::tuple(values)))
+                } else {
+                    K::Tuple(B::new(SVec2::from_vec(nodes)))
+                };
                 (node, ty, MutType::constant(), effects)
             }
             Project(tuple_expr, index, index_span) => {
@@ -441,8 +449,12 @@ impl TypeInference {
                     .unzip();
                 // Build the record node and return it.
                 // Note: we assume that while building the record, if the names are sorted, they won't be shuffled.
-                let node = K::Record(B::new(SVec2::from_vec(nodes)));
                 let ty = Type::record(names.into_iter().zip(types).collect());
+                let node = if let Some(values) = nodes_as_bare_immediate(&nodes) {
+                    K::Immediate(Immediate::new(Value::tuple(values)))
+                } else {
+                    K::Record(B::new(SVec2::from_vec(nodes)))
+                };
                 (node, ty, MutType::constant(), effects)
             }
             FieldAccess(record_expr, field, field_span) => {
@@ -462,11 +474,12 @@ impl TypeInference {
                 (node, element_ty, record_mut, effects)
             }
             Array(exprs) => {
+                use crate::std::array::Array;
                 if exprs.is_empty() {
                     // The element type is a fresh type variable
                     let element_ty = self.fresh_type_var_ty();
                     // Build an empty array node and return it
-                    let node = K::Array(B::new(SVec2::new()));
+                    let node = K::Immediate(Immediate::new(Value::native(Array::new())));
                     (
                         node,
                         array_type(element_ty),
@@ -488,14 +501,16 @@ impl TypeInference {
                     let combined_effects =
                         self.make_dependent_effect([&first_node.effects, &other_effects]);
                     // Build the array node and return it
-                    let element_nodes = once(first_node).chain(other_nodes).collect();
-                    let node = K::Array(B::new(element_nodes));
-                    (
-                        node,
-                        array_type(element_ty),
-                        MutType::constant(),
-                        combined_effects,
-                    )
+                    let element_nodes: SVec2<_> = once(first_node).chain(other_nodes).collect();
+                    let ty = array_type(element_ty);
+                    // Can we build it as an immediate?
+                    let node = if let Some(values) = nodes_as_bare_immediate(&element_nodes) {
+                        let value = Value::native(Array::from_vec(values));
+                        K::Immediate(Immediate::new(value))
+                    } else {
+                        K::Array(B::new(element_nodes))
+                    };
+                    (node, ty, MutType::constant(), combined_effects)
                 }
             }
             Index(array, index) => {
@@ -632,15 +647,13 @@ impl TypeInference {
                 }
                 _ => {
                     let payload_ty = Type::tuple(payload_types);
-                    (
-                        payload_ty,
-                        N::new(
-                            K::Tuple(B::new(SVec2::from_vec(payload_nodes))),
-                            payload_ty,
-                            effects.clone(),
-                            span,
-                        ),
-                    )
+                    let node = if let Some(values) = nodes_as_bare_immediate(&payload_nodes) {
+                        K::Immediate(Immediate::new(Value::tuple(values)))
+                    } else {
+                        K::Tuple(B::new(SVec2::from_vec(payload_nodes)))
+                    };
+                    let payload_node = N::new(node, payload_ty, effects.clone(), span);
+                    (payload_ty, payload_node)
                 }
             };
             let name = ustr(name);
@@ -648,7 +661,12 @@ impl TypeInference {
                 PubTypeConstraint::new_type_has_variant(variant_ty, name, payload_ty, span),
             ));
             // Build the variant construction node.
-            let node = K::Variant(B::new((name, payload_node)));
+            let node = if let Some(values) = nodes_as_bare_immediate(&[&payload_node]) {
+                let value = values.first().unwrap().clone();
+                K::Immediate(Immediate::new(Value::variant(name, value)))
+            } else {
+                K::Variant(B::new((name, payload_node)))
+            };
             (node, variant_ty, MutType::constant(), effects)
         })
     }
@@ -1992,7 +2010,7 @@ impl UnifiedTypeInference {
     }
 }
 
-pub fn property_to_fn_name(
+fn property_to_fn_name(
     scope: &str,
     variable: &str,
     access: PropertyAccess,
@@ -2015,4 +2033,30 @@ pub fn property_to_fn_name(
     } else {
         Ok(fn_name)
     }
+}
+
+/// Return a list of cloned values if all nodes are immediate values and have no effects.
+fn nodes_as_bare_immediate(nodes: &[impl Borrow<Node>]) -> Option<Vec<Value>> {
+    let nodes = nodes
+        .iter()
+        .map(|node| {
+            let node = node.borrow();
+            match &node.kind {
+                NodeKind::Immediate(immediate) => {
+                    // For now, do not support function values for transformation into composed immediates.
+                    // The reason is that different functions might hav different instantiation requirements.
+                    if node.effects.any()
+                        || immediate.inst_data.any()
+                        || node.ty.data().is_function()
+                    {
+                        None
+                    } else {
+                        Some(&immediate.value)
+                    }
+                }
+                _ => None,
+            }
+        })
+        .collect::<Option<Vec<&Value>>>()?;
+    Some(nodes.into_iter().cloned().collect())
 }

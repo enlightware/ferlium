@@ -128,6 +128,10 @@ impl EffType {
         }
     }
 
+    pub fn any(&self) -> bool {
+        !self.0.is_empty()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

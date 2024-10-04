@@ -3,9 +3,7 @@ use test_log::test;
 use super::common::{
     fail_compilation, fail_run, get_property_value, run, set_property_value, unit,
 };
-use painturscript::{
-    error::RuntimeError, std::array::Array, value::Value,
-};
+use painturscript::{error::RuntimeError, std::array::Array, value::Value};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -507,6 +505,12 @@ fn variants() {
         string!("hi 1")
     );
     assert_eq!(
+        run(&format!(
+            "{match_exhaustive} fn f() {{ let a = 1; s(Some(a)) }} f()"
+        )),
+        string!("hi 1")
+    );
+    assert_eq!(
         run(&format!("{match_exhaustive} fn f() {{ s(None) }} f()")),
         string!("no")
     );
@@ -518,6 +522,12 @@ fn variants() {
         string!("hi 1")
     );
     assert_eq!(
+        run(&format!(
+            "{match_open} fn f() {{ let a = 1; s(Some(a)) }} f()"
+        )),
+        string!("hi 1")
+    );
+    assert_eq!(
         run(&format!("{match_open} fn f() {{ s(None) }} f()")),
         string!("no")
     );
@@ -525,10 +535,34 @@ fn variants() {
     let match_exhaustive = r#"fn a(x) { match x { Square(r) => r * r, Rect(w, h) => w * h } }"#;
     assert_eq!(run(&format!("{match_exhaustive} a(Square(3))")), int!(9));
     assert_eq!(run(&format!("{match_exhaustive} a(Rect(3, 2))")), int!(6));
+    assert_eq!(
+        run(&format!("{match_exhaustive} let y = 2; a(Rect(3, y))")),
+        int!(6)
+    );
+    assert_eq!(
+        run(&format!(
+            "{match_exhaustive} let x = 3; let y = 2; a(Rect(x, y))"
+        )),
+        int!(6)
+    );
     let match_open = r#"fn a(x) { match x { Square(r) => r * r, Rect(w, h) => w * h, _ => 0 } }"#;
     assert_eq!(run(&format!("{match_open} a(Square(3))")), int!(9));
     assert_eq!(run(&format!("{match_open} a(Rect(3, 2))")), int!(6));
+    assert_eq!(
+        run(&format!("{match_open} let y = 2; a(Rect(3, y))")),
+        int!(6)
+    );
+    assert_eq!(
+        run(&format!("{match_open} let x = 3; let y = 2; a(Rect(x, y))")),
+        int!(6)
+    );
     assert_eq!(run(&format!("{match_open} a(Triangle(3, 3, 5))")), int!(0));
+    assert_eq!(
+        run(&format!(
+            "{match_open} let x = 3; let y = 3; let z = 5; a(Triangle(x, y, z))"
+        )),
+        int!(0)
+    );
 }
 
 #[test]
