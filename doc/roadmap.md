@@ -3,8 +3,9 @@
 ### Language features
 
 - Split compilation of modules by analysing the dependency graph
-- Recursive modules
 - Type classes
+- Tuple deconstruction on assignation
+- Recursive modules
 - Recursive types inference
 - Co-routine/async
 - Recursive types
@@ -20,9 +21,9 @@
 ### Compiler features
 
 - Better parsing error messages
-- Basic optimisations
+- Basic optimisations: replace constructors of literals with constructed literals
+- Advanced optimisations: generic partial evaluation (constant propagation)
 - Just in time compilation
-- Partial evaluation
 
 ### IDE features
 

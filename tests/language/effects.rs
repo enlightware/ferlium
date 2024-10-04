@@ -1,8 +1,6 @@
-mod common;
-
 use test_log::test;
 
-use common::{compile, fail_compilation};
+use super::common::{compile, fail_compilation};
 use painturscript::effects::*;
 
 #[cfg(target_arch = "wasm32")]

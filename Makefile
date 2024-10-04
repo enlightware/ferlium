@@ -5,7 +5,7 @@ test-local:
 	RUST_LOG=painturscript=debug cargo nextest run
 
 test-wasm:
-	wasm-pack test --node --test simple --test complex --test algorithm --lib
+	wasm-pack test --node --test language --lib
 
 test: test-local test-wasm
 

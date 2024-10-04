@@ -1,12 +1,10 @@
-mod common;
-
 use test_log::test;
 
-use common::{
-    compile, fail_compilation, fail_run, get_property_value, run, set_property_value, unit,
+use super::common::{
+    fail_compilation, fail_run, get_property_value, run, set_property_value, unit,
 };
 use painturscript::{
-    effects::PrimitiveEffect, error::RuntimeError, std::array::Array, value::Value, ModuleAndExpr,
+    error::RuntimeError, std::array::Array, value::Value,
 };
 
 #[cfg(target_arch = "wasm32")]
