@@ -404,6 +404,8 @@ n_ary_native_fn!(UnaryNativeFn, A);
 // The arguments are by native value
 pub type UnaryNativeFnNI<A, O, F> = UnaryNativeFn<NatVal<A>, Plain<O>, F>;
 pub type UnaryNativeFnVI<O, F> = UnaryNativeFn<Value, Plain<O>, F>;
+pub type UnaryNativeFnNF<A, O, F> = UnaryNativeFn<NatVal<A>, Fallible<O>, F>;
+pub type UnaryNativeFnVF<O, F> = UnaryNativeFn<Value, Fallible<O>, F>;
 
 // Binary
 
