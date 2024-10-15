@@ -29,7 +29,8 @@
 		"slotmap",
 		"smallvec",
 		"subtyping",
-		"unbounds"
+		"unbounds",
+		"unioned"
 	],
 	"rust-analyzer.linkedProjects": [
 		"./Cargo.toml"

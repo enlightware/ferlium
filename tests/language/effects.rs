@@ -136,3 +136,10 @@ fn effects_in_recursive_fns() {
         effect_vars(&[0, 1]),
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_of_fn_callled_multiple_times() {
+    test_mod("fn a(f) { f(); f(); f(); () }", "a", effect_var(0));
+    test_mod("fn a(f, g) { f(); g(); g(); f(); f(); g(); () }", "a", effect_vars(&[0, 1]));
+}

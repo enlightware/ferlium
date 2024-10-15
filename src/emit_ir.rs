@@ -114,6 +114,21 @@ pub fn emit_module(
     for ModuleFunction { name, .. } in &source.functions {
         let descr = output.functions.get_mut(&name.0).unwrap();
         ty_inf.substitute_in_module_function(descr);
+
+        // Union duplicated effects from function arguments, and build a substitution for the
+        // fully unioned effects, to removed duplications.
+        ty_inf.unify_fn_arg_effects(&descr.ty_scheme.ty);
+        let effect_subst = descr.ty_scheme.ty.inner_effect_vars()
+            .iter()
+            .filter_map(|var|
+                ty_inf.effect_unioned(*var).map(|target| (*var, EffType::single_variable(target)))
+            )
+            .collect();
+        let mut code = descr.code.borrow_mut();
+        let node = &mut code.as_script_mut().unwrap().code;
+        let subst = (HashMap::new(), effect_subst);
+        node.instantiate(&subst);
+        descr.ty_scheme.ty = descr.ty_scheme.ty.instantiate(&subst);
     }
 
     // Fifth pass, get the remaining constraints and collect the free type variables.

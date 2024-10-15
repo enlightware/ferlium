@@ -128,6 +128,21 @@ impl EffType {
         }
     }
 
+    pub fn is_only_vars(&self) -> bool {
+        self.0.iter().all(|effect| matches!(effect, Effect::Variable(_)))
+    }
+
+    pub fn to_multiple_vars(&self) -> Option<Vec<EffectVar>> {
+        if self.is_only_vars() {
+            Some(self.0.iter().map(|effect| match effect {
+                Effect::Variable(var) => *var,
+                _ => unreachable!(),
+            }).collect())
+        } else {
+            None
+        }
+    }
+
     pub fn any(&self) -> bool {
         !self.0.is_empty()
     }

@@ -1278,6 +1278,32 @@ impl UnifiedTypeInference {
         }
     }
 
+    pub fn unify_fn_arg_effects(&mut self, fn_type: &FnType) {
+        for arg in &fn_type.args {
+            if let Some(fn_arg) = arg.ty.data().as_function() {
+                let mut first_var = None;
+                fn_arg.effects.iter().for_each(|eff| {
+                    if let Some(var) = eff.as_variable() {
+                        if let Some(first_var) = first_var {
+                            self.effect_constraints.union(first_var, *var);
+                        } else {
+                            first_var = Some(*var);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    pub fn effect_unioned(&mut self, var: EffectVar) -> Option<EffectVar> {
+        let root = self.effect_constraints.find(var);
+        if root != var {
+            Some(root)
+        } else {
+            None
+        }
+    }
+
     fn unify_sub_type(
         &mut self,
         current: Type,
@@ -1763,6 +1789,13 @@ impl UnifiedTypeInference {
         }
     }
 
+    pub fn resolve_effect_var(&mut self, var: EffectVar) -> EffType {
+        match self.effect_constraints.probe_value(var) {
+            Some(effects) => self.substitute_effect_type(&effects),
+            None => EffType::single_variable(self.effect_constraints.find(var)),
+        }
+    }
+
     /// Substitute the effect type by flattening the effect variables.
     pub fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
         use Effect::*;
@@ -1790,13 +1823,12 @@ impl UnifiedTypeInference {
                         return EffType::empty().into_iter();
                     }
 
-                    let mut effects = match self.effect_constraints.probe_value(*var) {
-                        Some(effects) => self.substitute_effect_type(&effects),
-                        None => EffType::single_variable(*var),
-                    };
+                    let mut effects = self.resolve_effect_var(*var);
 
-                    // add back the variable itself
-                    effects = effects.union(&EffType::single_variable(*var));
+                    // add back the variable itself if not only variables
+                    if !effects.is_only_vars() {
+                        effects = effects.union(&EffType::single_variable(*var));
+                    }
 
                     VAR_VISITED.with(|visited| {
                         visited.borrow_mut().remove(var);
