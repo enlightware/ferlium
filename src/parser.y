@@ -7,7 +7,7 @@
 // inspired by Rust: https://doc.rust-lang.org/reference/expressions.html#expression-precedence
 %left ';'
 %nonassoc NO_ELSE
-%nonassoc 'return' 'if' 'then' 'else' 'match' 'with' 'let' 'var' '=>'
+%nonassoc 'return' 'if' 'then' 'else' 'match' 'with' 'let' '=>'
 %nonassoc '='
 %nonassoc '|'
 %left 'or'
