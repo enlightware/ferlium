@@ -84,7 +84,7 @@ a(3, ||log("hi"), ||log("world"))
 
 fn partition(a, lo, hi) {
 	let pivot = a[hi];
-	var i = lo;
+	let mut i = lo;
 
 	for j in lo..hi {
 		if a[j] < pivot {
@@ -104,13 +104,13 @@ fn swap(a, i, j) {
 	a[j] = temp
 }
 
-var a = [5, 4, 11, 3, 2, 1, 0, 7];
+let mut a = [5, 4, 11, 3, 2, 1, 0, 7];
 quicksort(a, 0, array_len(a) - 1);
 a
 `],
 ['String', `let a = "hello";
 let count = 3;
-var text = f"{a} {count} worlds!";
+let mut text = f"{a} {count} worlds!";
 string_push_str(text, " ...and more");
 string_concat("He said: ", text)
 `]

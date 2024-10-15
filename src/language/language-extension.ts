@@ -6,7 +6,7 @@ import { styleTags, tags as t } from "@lezer/highlight";
 
 // list if tags: https://lezer.codemirror.net/docs/ref/#highlight.tags
 const highlight = styleTags({
-	"fn let var": t.definitionKeyword,
+	"fn let mut var": t.definitionKeyword,
 	"if else match for return": t.controlKeyword,
 	"in": t.operatorKeyword,
 	Identifier: t.variableName,

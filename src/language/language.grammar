@@ -99,8 +99,7 @@ ForExpression {
 }
 
 VarDefExpression {
-    !command kw<'let'> Identifier '=' Expr
-    | !command kw<'var'> Identifier '=' Expr
+    !command kw<'let'> kw<'mut'>? Identifier '=' Expr
 }
 
 AbstractExpression {
