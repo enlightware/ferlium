@@ -284,7 +284,7 @@ impl TypeInference {
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
-            LetVar((name, name_span), mutable, let_expr) => {
+            Let((name, name_span), mutable, let_expr) => {
                 let node = self.infer_expr_drop_mut(env, let_expr)?;
                 env.locals.push(Local::new(
                     *name,

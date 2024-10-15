@@ -111,9 +111,9 @@ Expr -> Expr
     | LiteralExpr
         { $1 }
     | 'let' 'IDENT' '=' Expr
-        { Expr::new(LetVar((us($2, $lexer), lex_span($2)), MutVal::constant(), B::new($4)), $span) }
-    | 'var' 'IDENT' '=' Expr
-        { Expr::new(LetVar((us($2, $lexer), lex_span($2)), MutVal::mutable(), B::new($4)), $span) }
+        { Expr::new(Let((us($2, $lexer), lex_span($2)), MutVal::constant(), B::new($4)), $span) }
+    | 'let' 'mut' 'IDENT' '=' Expr
+        { Expr::new(Let((us($3, $lexer), lex_span($3)), MutVal::mutable(), B::new($5)), $span) }
     | '|' StringArgsOptComma '|' Expr
         { Expr::new(Abstract($2, B::new($4)), $span) }
     | '(' ')'

@@ -82,9 +82,9 @@ fn exprs_in_match() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn stuff_in_single_if() {
-    assert_eq!(run("var a = 0; if true { a = a + 1}; a"), int!(1));
+    assert_eq!(run("let mut a = 0; if true { a = a + 1}; a"), int!(1));
     assert_eq!(
-        run("var a = [1]; if true { a[-1] = a[0] + 1 }; a"),
+        run("let mut a = [1]; if true { a[-1] = a[0] + 1 }; a"),
         int_a![2]
     );
 }
@@ -93,15 +93,15 @@ fn stuff_in_single_if() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_and_let_polymorphism() {
     assert_eq!(
-        run("let f = || []; var a = f(); array_append(a, 1); a[0]"),
+        run("let f = || []; let mut a = f(); array_append(a, 1); a[0]"),
         int!(1)
     );
     fail_compilation("let f = || []; let a = f(); ()").expect_unbound_ty_var();
-    fail_compilation("let f = || []; var a = f(); ()").expect_unbound_ty_var();
+    fail_compilation("let f = || []; let mut a = f(); ()").expect_unbound_ty_var();
     fail_compilation("let f = || []; let a = f(); array_append(a, 1); a[0]")
         .expect_must_be_mutable();
     assert_eq!(
-        run("let f = || []; var a = f(); array_append(a, 1); a[0]"),
+        run("let f = || []; let mut a = f(); array_append(a, 1); a[0]"),
         int!(1)
     );
 }
@@ -110,7 +110,7 @@ fn array_and_let_polymorphism() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_and_lambda() {
     assert_eq!(
-        run("var a = [1,2]; (|x| array_append(x, 3))(a); a"),
+        run("let mut a = [1,2]; (|x| array_append(x, 3))(a); a"),
         int_a![1, 2, 3]
     );
 }
@@ -127,11 +127,11 @@ fn array_access_in_module_functions() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_mutable_references() {
     assert_eq!(
-        run("fn set_1(a) { a = 1 } fn call_set_1(a) { set_1(a) } var a = 0; call_set_1(a); a"),
+        run("fn set_1(a) { a = 1 } fn call_set_1(a) { set_1(a) } let mut a = 0; call_set_1(a); a"),
         int!(1)
     );
     assert_eq!(
-        run("fn set_1(a) { a = 1 } fn call_set_1(a) { a = 2; set_1(a) } var a = 0; call_set_1(a); a"),
+        run("fn set_1(a) { a = 1 } fn call_set_1(a) { a = 2; set_1(a) } let mut a = 0; call_set_1(a); a"),
         int!(1)
     );
 }

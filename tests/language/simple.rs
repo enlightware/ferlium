@@ -68,15 +68,15 @@ fn equalities() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn local_variables() {
     assert_eq!(run("let a = 1 ; a"), int!(1));
-    assert_eq!(run("var a = 1 ; a"), int!(1));
-    assert_eq!(run("var a = 1 ; a = 2; a"), int!(2));
+    assert_eq!(run("let mut a = 1 ; a"), int!(1));
+    assert_eq!(run("let mut a = 1 ; a = 2; a"), int!(2));
     assert_eq!(run("let a = true ; a"), bool!(true));
-    assert_eq!(run("var a = true ; a"), bool!(true));
-    assert_eq!(run("var a = true ; a = false; a"), bool!(false));
-    assert_eq!(run("var a = [1, 2]; a = [3, 4, 5]; a"), int_a![3, 4, 5]);
-    assert_eq!(run("var a = [1, 2]; a = [3]; a == [3]"), bool!(true));
+    assert_eq!(run("let mut a = true ; a"), bool!(true));
+    assert_eq!(run("let mut a = true ; a = false; a"), bool!(false));
+    assert_eq!(run("let mut a = [1, 2]; a = [3, 4, 5]; a"), int_a![3, 4, 5]);
+    assert_eq!(run("let mut a = [1, 2]; a = [3]; a == [3]"), bool!(true));
     assert_eq!(
-        run("var a = (1, true); a = (2, false); a == (2, false)"),
+        run("let mut a = (1, true); a = (2, false); a == (2, false)"),
         bool!(true)
     );
     assert_eq!(run("let f = || 1; let a = f(); a"), int!(1));
@@ -85,13 +85,13 @@ fn local_variables() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutability() {
-    assert_eq!(run("var a = 1 ; a = 2; a"), int!(2));
+    assert_eq!(run("let mut a = 1 ; a = 2; a"), int!(2));
     fail_compilation("let a = 1 ; a = 2; a").expect_must_be_mutable();
-    assert_eq!(run("var a = (1,) ; a.0 = 2; a.0"), int!(2));
+    assert_eq!(run("let mut a = (1,) ; a.0 = 2; a.0"), int!(2));
     fail_compilation("let a = (1,) ; a.0 = 2; a.0").expect_must_be_mutable();
-    assert_eq!(run("var a = [1] ; a[0] = 2; a[0]"), int!(2));
+    assert_eq!(run("let mut a = [1] ; a[0] = 2; a[0]"), int!(2));
     fail_compilation("let a = [1] ; a[0] = 2; a[0]").expect_must_be_mutable();
-    assert_eq!(run("var a = ([1], 1) ; a.0[0] = 2; a.0[0]"), int!(2));
+    assert_eq!(run("let mut a = ([1], 1) ; a.0[0] = 2; a.0[0]"), int!(2));
     fail_compilation("let a = ([1], 1) ; a.0[0] = 2; a.0[0]").expect_must_be_mutable();
 }
 
@@ -210,15 +210,15 @@ fn if_expr() {
         int!(4)
     );
     assert_eq!(
-        run("var a = 0; if false { a = 1 } else if false { a = 2 }; a"),
+        run("let mut a = 0; if false { a = 1 } else if false { a = 2 }; a"),
         int!(0)
     );
     assert_eq!(
-        run("var a = 0; if true { a = 1 } else if true { a = 2 }; a"),
+        run("let mut a = 0; if true { a = 1 } else if true { a = 2 }; a"),
         int!(1)
     );
     assert_eq!(
-        run("var a = 0; if false { a = 1 } else if true { a = 2 }; a"),
+        run("let mut a = 0; if false { a = 1 } else if true { a = 2 }; a"),
         int!(2)
     );
     fail_compilation("fn a() { if true { 1 } }").expect_is_not_subtype("int", "()");
@@ -346,16 +346,16 @@ fn lambda() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn assignment() {
     assert_eq!(run("let a = 1; a"), int!(1));
-    assert_eq!(run("var a = 1; a = 2"), unit());
-    assert_eq!(run("var a = 1; a = 2; a"), int!(2));
-    assert_eq!(run("var a = 1; let b = 2; a = b; a"), int!(2));
-    assert_eq!(run("var a = 1; let b = 2; a = b; b"), int!(2));
-    assert_eq!(run("var a = 1; var b = 2; a = b; b = a; b"), int!(2));
-    assert_eq!(run("var a = (1, 2); a.0 = 3; a"), int_tuple!(3, 2));
-    assert_eq!(run("var a = ((1, 2), 3); a.0.1 = 5; a.0"), int_tuple!(1, 5));
-    assert_eq!(run("var a = [1, 2]; a[0] = 3; a"), int_a![3, 2]);
+    assert_eq!(run("let mut a = 1; a = 2"), unit());
+    assert_eq!(run("let mut a = 1; a = 2; a"), int!(2));
+    assert_eq!(run("let mut a = 1; let b = 2; a = b; a"), int!(2));
+    assert_eq!(run("let mut a = 1; let b = 2; a = b; b"), int!(2));
+    assert_eq!(run("let mut a = 1; let mut b = 2; a = b; b = a; b"), int!(2));
+    assert_eq!(run("let mut a = (1, 2); a.0 = 3; a"), int_tuple!(3, 2));
+    assert_eq!(run("let mut a = ((1, 2), 3); a.0.1 = 5; a.0"), int_tuple!(1, 5));
+    assert_eq!(run("let mut a = [1, 2]; a[0] = 3; a"), int_a![3, 2]);
     assert_eq!(
-        run("var a = [[1, 2], [3, 4]]; a[0][1] = 5; a[0]"),
+        run("let mut a = [[1, 2], [3, 4]]; a[0][1] = 5; a[0]"),
         int_a![1, 5]
     );
 }
@@ -364,14 +364,14 @@ fn assignment() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn for_loops() {
     assert_eq!(run("for i in 0..3 { () }"), unit());
-    assert_eq!(run("var s = 0; for i in 1..4 { s = s + i }; s"), int!(6));
-    assert_eq!(run("var s = 0; for i in -1..-4 { s = s + i }; s"), int!(-6));
+    assert_eq!(run("let mut s = 0; for i in 1..4 { s = s + i }; s"), int!(6));
+    assert_eq!(run("let mut s = 0; for i in -1..-4 { s = s + i }; s"), int!(-6));
     assert_eq!(
-        run("var a = []; for i in 2..5 { array_append(a, i) }; a"),
+        run("let mut a = []; for i in 2..5 { array_append(a, i) }; a"),
         int_a![2, 3, 4]
     );
     assert_eq!(
-        run("var a = []; for i in 5..2 { array_append(a, i) }; a"),
+        run("let mut a = []; for i in 5..2 { array_append(a, i) }; a"),
         int_a![5, 4, 3]
     );
 }
@@ -394,7 +394,7 @@ fn first_class_functions() {
         fn sub(x, y) {
             x - y
         }
-        var x = add;
+        let mut x = add;
         x = sub;
         x(1, 2)"#),
         int!(-1)
@@ -485,7 +485,7 @@ fn records() {
         int_tuple!(1, 2)
     );
     fail_compilation(
-        "fn swap(a,b) { var temp = a; a = b; b = temp } var v = { x:1, y:2 }; swap(v.x, v.x)",
+        "fn swap(a,b) { let mut temp = a; a = b; b = temp } let mut v = { x:1, y:2 }; swap(v.x, v.x)",
     )
     .expect_mutable_paths_overlap();
 }
@@ -582,46 +582,46 @@ fn mutability_soundness() {
 fn borrow_checker() {
     let swap_fn = "fn swap(a, b) { let temp = b; b = a; a = temp }";
     assert_eq!(
-        run(&format!("{swap_fn} var a = [0, 1]; swap(a[0], a[1]); a")),
+        run(&format!("{swap_fn} let mut a = [0, 1]; swap(a[0], a[1]); a")),
         int_a![1, 0]
     );
-    fail_compilation(&format!("{swap_fn} var a = [0, 1]; swap(a[0], a[0]); a"))
+    fail_compilation(&format!("{swap_fn} let mut a = [0, 1]; swap(a[0], a[0]); a"))
         .expect_mutable_paths_overlap();
     fail_compilation(&format!(
-        "{swap_fn} var a = [0, 1]; let i = 0; swap(a[0], a[i]); a"
+        "{swap_fn} let mut a = [0, 1]; let i = 0; swap(a[0], a[i]); a"
     ))
     .expect_mutable_paths_overlap();
     assert_eq!(
         run(&format!(
-            "{swap_fn} var a = [0]; var b = [1]; swap(a[0], b[0]); a"
+            "{swap_fn} let mut a = [0]; let mut b = [1]; swap(a[0], b[0]); a"
         )),
         int_a![1]
     );
     assert_eq!(
         run(&format!(
-            "{swap_fn} var a = [0]; var b = [1]; swap(a[a[0]], b[0]); a"
+            "{swap_fn} let mut a = [0]; let mut b = [1]; swap(a[a[0]], b[0]); a"
         )),
         int_a![1]
     );
     assert_eq!(
         run(&format!(
-            "{swap_fn} var a = [0]; var b = [1]; swap(a[a[0]], b[a[0]]); a"
+            "{swap_fn} let mut a = [0]; let mut b = [1]; swap(a[a[0]], b[a[0]]); a"
         )),
         int_a![1]
     );
     assert_eq!(
         run(&format!(
-            "{swap_fn} var a = ((0,1),2); swap(a.0.1, a.1); a.0"
+            "{swap_fn} let mut a = ((0,1),2); swap(a.0.1, a.1); a.0"
         )),
         int_tuple!(0, 2)
     );
     assert_eq!(
         run(&format!(
-            "{swap_fn} var a = ((0,1),2); swap(a.0.1, a.0.0); a.0"
+            "{swap_fn} let mut a = ((0,1),2); swap(a.0.1, a.0.0); a.0"
         )),
         int_tuple!(1, 0)
     );
-    fail_compilation(&format!("{swap_fn} var a = ((0,1),2); swap(a.0, a.0); a.0"))
+    fail_compilation(&format!("{swap_fn} let mut a = ((0,1),2); swap(a.0, a.0); a.0"))
         .expect_mutable_paths_overlap();
 }
 
@@ -647,11 +647,11 @@ fn execution_errors() {
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
     assert_eq!(
-        fail_run("var a = [1, 2]; a[3] = 0"),
+        fail_run("let mut a = [1, 2]; a[3] = 0"),
         ArrayAccessOutOfBounds { index: 3, len: 2 }
     );
     assert_eq!(
-        fail_run("var a = [1, 2]; a[-3] = 0"),
+        fail_run("let mut a = [1, 2]; a[-3] = 0"),
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
     assert_eq!(
@@ -663,11 +663,11 @@ fn execution_errors() {
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
     assert_eq!(
-        fail_run("let i = || 3; var a = [1, 2]; a[i()] = 0"),
+        fail_run("let i = || 3; let mut a = [1, 2]; a[i()] = 0"),
         ArrayAccessOutOfBounds { index: 3, len: 2 }
     );
     assert_eq!(
-        fail_run("let i = || -3; var a = [1, 2]; a[i()] = 0"),
+        fail_run("let i = || -3; let mut a = [1, 2]; a[i()] = 0"),
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
     assert_eq!(
@@ -726,17 +726,17 @@ fn array_index() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_append() {
-    assert_eq!(run("var a = []; array_append(a, 1); a"), int_a![1]);
-    assert_eq!(run("var a = [1]; array_append(a, 1); a"), int_a![1, 1]);
-    assert_eq!(run("var a = [2]; array_append(a, 1); a"), int_a![2, 1]);
+    assert_eq!(run("let mut a = []; array_append(a, 1); a"), int_a![1]);
+    assert_eq!(run("let mut a = [1]; array_append(a, 1); a"), int_a![1, 1]);
+    assert_eq!(run("let mut a = [2]; array_append(a, 1); a"), int_a![2, 1]);
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_prepend() {
-    assert_eq!(run("var a = []; array_prepend(a, 1); a"), int_a![1]);
-    assert_eq!(run("var a = [1]; array_prepend(a, 1); a"), int_a![1, 1]);
-    assert_eq!(run("var a = [2]; array_prepend(a, 1); a"), int_a![1, 2]);
+    assert_eq!(run("let mut a = []; array_prepend(a, 1); a"), int_a![1]);
+    assert_eq!(run("let mut a = [1]; array_prepend(a, 1); a"), int_a![1, 1]);
+    assert_eq!(run("let mut a = [2]; array_prepend(a, 1); a"), int_a![1, 2]);
 }
 
 #[test]
@@ -802,17 +802,17 @@ fn string_concat() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_push_str() {
-    assert_eq!(run(r#"var s = ""; string_push_str(s, ""); s"#), string!(""));
+    assert_eq!(run(r#"let mut s = ""; string_push_str(s, ""); s"#), string!(""));
     assert_eq!(
-        run(r#"var s = ""; string_push_str(s, "hello"); s"#),
+        run(r#"let mut s = ""; string_push_str(s, "hello"); s"#),
         string!("hello")
     );
     assert_eq!(
-        run(r#"var s = "hello"; string_push_str(s, " world"); s"#),
+        run(r#"let mut s = "hello"; string_push_str(s, " world"); s"#),
         string!("hello world")
     );
     assert_eq!(
-        run(r#"var s = "hello"; string_push_str(s, " world!"); s"#),
+        run(r#"let mut s = "hello"; string_push_str(s, " world!"); s"#),
         string!("hello world!")
     );
 }

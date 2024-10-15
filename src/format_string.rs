@@ -53,7 +53,7 @@ pub fn emit_format_string_ast(
     // Start with an empty mutable string.
     let start_span = Span::new(span.start(), span.start());
     let mut exprs = vec![Expr::new(
-        ExprKind::LetVar(
+        ExprKind::Let(
             (ustr("@s"), start_span),
             MutVal::mutable(),
             B::new(Expr::new(

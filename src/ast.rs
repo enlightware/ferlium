@@ -121,7 +121,7 @@ pub enum ExprKind {
     FormattedString(String),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Ustr),
-    LetVar((Ustr, Span), MutVal, B<Expr>),
+    Let((Ustr, Span), MutVal, B<Expr>),
     Abstract(Vec<(Ustr, Span)>, B<Expr>),
     Apply(B<Expr>, Vec<Expr>),
     /// A function from the module environment, or a variant constructor
@@ -158,7 +158,7 @@ impl Expr {
             Literal(value, _) => writeln!(f, "{indent_str}{value}"),
             FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
             Identifier(name) => writeln!(f, "{indent_str}{name} (local)"),
-            LetVar((name, _), mutable, expr) => {
+            Let((name, _), mutable, expr) => {
                 let kw = mutable.var_def_string();
                 writeln!(f, "{indent_str}{kw} {name} =")?;
                 expr.format_ind(f, indent + 1)
@@ -288,7 +288,7 @@ impl Expr {
         }
         use ExprKind::*;
         match &self.kind {
-            LetVar(_, _, expr) => expr.acc_errors_rec(errors),
+            Let(_, _, expr) => expr.acc_errors_rec(errors),
             Abstract(_, expr) => expr.acc_errors_rec(errors),
             Apply(expr, args) => {
                 expr.acc_errors_rec(errors);

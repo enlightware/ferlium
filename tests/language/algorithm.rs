@@ -30,7 +30,7 @@ fn quicksort() {
 
         fn partition(a, lo, hi) {
             let pivot = a[hi];
-            var i = lo;
+            let mut i = lo;
 
             for j in lo..hi {
                 if a[j] < pivot {
@@ -44,7 +44,7 @@ fn quicksort() {
             i
         }
 
-        var a = [5, 4, 11, 3, 2, 1, 0, 7];
+        let mut a = [5, 4, 11, 3, 2, 1, 0, 7];
         quicksort(a, 0, array_len(a) - 1);
         a"#),
         int_a![0, 1, 2, 3, 4, 5, 7, 11],

@@ -14,7 +14,7 @@ in                      "in"
 return                  "return"
 
 let                     "let"
-var						"var"
+mut						"mut"
 
 fn                      "fn"
 
