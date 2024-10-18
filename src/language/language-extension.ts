@@ -6,12 +6,12 @@ import { styleTags, tags as t } from "@lezer/highlight";
 
 // list if tags: https://lezer.codemirror.net/docs/ref/#highlight.tags
 const highlight = styleTags({
-	"fn let mut var": t.definitionKeyword,
+	"fn let mut": t.definitionKeyword,
 	"if else match for return": t.controlKeyword,
 	"in": t.operatorKeyword,
 	Identifier: t.variableName,
 	Integer: t.integer,
-	BoolLiteral: t.bool,
+	Boolean: t.bool,
 	String: t.string,
 	LineComment: t.lineComment,
 	BlockComment: t.blockComment,
@@ -34,8 +34,8 @@ export function languageExtension() {
 			props: [
 				highlight,
 				indentNodeProp.add({
-					Expr: flatIndent,
-					"Function IfExpression": continuedIndent()
+					expr: flatIndent,
+					Block: continuedIndent()
 				}),
 			]
 		}),

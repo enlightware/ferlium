@@ -2,7 +2,7 @@
     Identifier { $[a-zA-Z_]$[a-zA-Z0-9_]* }
     Integer { $[0-9]$[0-9]* }
     String { 'f'? '"' (!["\\] | "\\" _)* '"' }
-    BoolLiteral { "true" | "false" }
+    Boolean { "true" | "false" }
     LineComment[isolate] { "//" ![\n]* }
     BlockComment[isolate] { "/*" blockCommentRest }
     blockCommentRest { ![*] blockCommentRest | "*" blockCommentAfterStar }
@@ -15,222 +15,219 @@
     "=" "=>" ".."
 
     @precedence { LineComment, BlockComment, "/" }
-    @precedence { BoolLiteral, String, Identifier }
+    @precedence { Boolean, String, Identifier }
 }
 
 kw<term> { @specialize[@name={term}]<Identifier, term> }
 
 @skip { whitespace | LineComment | BlockComment }
 
-@top module {
-    FunctionsOrTypes Expr
-    | FunctionsOrTypes
-    | Expr
+@top ModuleAndExpr {
+    Module extraExpr?
 }
 
-FunctionsOrTypes {
-    FunctionOrTypes { FunctionOrType+ }
+Module {
+    functionOrType*
 }
 
-FunctionOrType {
+functionOrType {
     Function
 }
 
 Function {
-    kw<'fn'> Identifier '(' StringArgsOptComma ')' '{' Expr '}'
+    kw<'fn'> Identifier '(' identifiersOptComma ')' Block
 }
 
-Expr {
-    ArithExpression
-    | LogicExpression
-    | CompareExpression
+extraExpr {
+    stmt* expr
+}
+
+expr {
+    logicOrExpr
     | Assignment
-    | IfExpression
-    | MatchExpression
-    | ForExpression
-    | !return kw<'return'> Expr
-    | !parentheses '(' Expr ')'
-    | Path
-    | Literal
-    | VarDefExpression
-    | AbstractExpression
-    | TupleExpression
-    | RecordExpression
-    | ProjectExpression
-    | ArrayExpression
-    | ApplyExpression
-    | IndexExpression
-    | Expr !semicolon ';' Expr
-    | PropertyPath
-}
-
-ArithExpression {
-    Expr !additive ArithOp { '+' | '-' } Expr
-    | Expr !multiplicative ArithOp { '*' | '/' | '%'} Expr
-    | !unaryMinus ArithOp { '-' } Expr
-}
-
-LogicExpression {
-    Expr !or LogicOp { kw<'or'> } Expr
-    | Expr !and LogicOp { kw<'and'>} Expr
-    | !not kw<'not'> Expr
-}
-
-CompareExpression {
-    Expr !compare CompareOp Expr
+    | Return
+    | Abstraction
 }
 
 Assignment {
-    Expr !equal '=' Expr
+    logicOrExpr '=' expr
 }
 
-IfExpression {
-	!command kw<'if'> Expr '{' Expr '}' kw<'else'> IfExpression
-    | !command kw<'if'> Expr '{' Expr '}' (!command kw<'else'> '{' Expr '}')?
+Return {
+    kw<'return'> expr
 }
 
-MatchExpression {
-    !command kw<'match'> Expr '{' MatchArgsOptComma '}'
-    | !command kw<'match'> Expr '{' MatchArgs ',' kw<'_'> '=>' ExprOptComma '}'
+Abstraction {
+    '|' identifiersOptComma '|' expr
+    | '||' expr
 }
 
-ForExpression {
-    !command kw<'for'> Identifier kw<'in'> Expr '..' Expr '{' Expr '}'
+logicOrExpr {
+    logicAndExpr
+    | logicOrExpr LogicOp { '||' } logicAndExpr
 }
 
-VarDefExpression {
-    !command kw<'let'> kw<'mut'>? Identifier '=' Expr
+logicAndExpr {
+    compExpr
+    | logicAndExpr LogicOp { '&&' } compExpr
 }
 
-AbstractExpression {
-    !vertical '|' StringArgsOptComma !vertical '|' Expr
+compExpr {
+    addExpr
+    | compExpr CompareOp addExpr
 }
 
-TupleExpression {
-    !parentheses '(' ')'
-    | !parentheses '(' TupleArgs ')'
+addExpr {
+    mulExpr
+    | addExpr ArithOp { '+' | '-' } mulExpr
 }
 
-RecordExpression {
-    !braces '{' RecordFieldsOptComma '}'
+mulExpr {
+    unaryExpr
+    | mulExpr ArithOp { '*' | '/' | '%'} unaryExpr
 }
 
-ProjectExpression {
-    Expr !dot '.' Integer
-    | Expr !dot '.' Identifier
+unaryExpr {
+    suffixExpr
+    | LogicOp { '!' } unaryExpr
+    | ArithOp { '-' } unaryExpr
 }
 
-ArrayExpression {
-    !bracket '[' ']'
-    | !bracket '[' ExprArgsOptComma ']'
+suffixExpr {
+    atomExpr
+    | Projection
+    | Indexing
+    | Application
 }
 
-ApplyExpression {
-    Expr !parentheses '(' ')'
-    | Expr '(' ExprArgsOptComma ')'
+Projection {
+    suffixExpr '.' Identifier
+    | suffixExpr '.' Integer
 }
 
-IndexExpression {
-    Expr !bracket '[' Expr ']'
+Indexing {
+    suffixExpr '[' expr ']'
 }
 
-ExprOptComma {
-    Expr ','
-    | Expr
+Application {
+    suffixExpr '(' exprArgsOptComma ')'
 }
 
-StringArgsOptComma {
-    StringArgs ','
-    | StringArgs
+atomExpr {
+    parExpr
+    | Path
+    | PropertyPath
+    | For
+    | If
+    | Match
+    | Literal
+    | Tuple
+    | Array
+    | Record
+    | Block
 }
 
-StringArgs {
-    StringArgs ',' Identifier
-    | Identifier
-    | ""
-}
-ExprArgsOptComma {
-    ExprArgs ','
-    | ExprArgs
+parExpr {
+    '(' expr ')'
 }
 
-ExprArgs{
-    ExprArgs ',' Expr
-    | Expr
+If {
+    kw<'if'> expr Block kw<'else'> If
+    | kw<'if'> expr Block (kw<'else'> Block)?
 }
 
-TupleArgs {
-    Expr ',' ExprArgs
-    | Expr ',' ExprArgs ','
-    | Expr ','
+Match {
+    kw<'match'> expr '{' matchArgsOptComma '}'
+    | kw<'match'> expr '{' matchArgs ',' kw<'_'> '=>' exprOptComma '}'
 }
 
-RecordFieldsOptComma {
-    RecordFields ','
-    | RecordFields
+For {
+    kw<'for'> Identifier kw<'in'> expr '..' expr Block
 }
 
-RecordFields {
-    RecordFields ',' 'Identifier' ':' Expr
-    | Identifier ':' Expr
+Tuple {
+    '(' ')'
+    | '(' tupleArgs ')'
 }
 
-MatchArgsOptComma {
-    MatchArgs ','
-    | MatchArgs
+tupleArgs {
+    expr ',' exprArgsOptComma
 }
 
-MatchArgs {
-    MatchArgs ',' MatchArg
-    | MatchArg
+Array {
+    '[' exprArgsOptComma ']'
 }
 
-MatchArg {
-    Pattern '=>' Expr
+Record {
+    '{' RecordField '}'
+    | '{' RecordField ',' (RecordField ',')* RecordField? '}'
+}
+
+RecordField {
+    Identifier ':' expr
+}
+
+exprOptComma {
+    expr ','
+    | expr
+}
+
+identifiersOptComma {
+    (Identifier ',')* Identifier?
+}
+
+exprArgsOptComma {
+    (expr ',')* expr?
+}
+
+matchArgsOptComma {
+    matchArgs ','
+    | matchArgs
+}
+
+matchArgs {
+    matchArgs ',' MatchBranch
+    | MatchBranch
+}
+
+MatchBranch {
+    Pattern '=>' expr
 }
 
 Pattern {
-    LiteralPattern
-    | Identifier
-    | Identifier '(' StringArgsOptComma ')'
-}
-
-LiteralPattern {
     Literal
+    | Identifier
+    | Identifier '(' identifiersOptComma ')'
 }
 
 PropertyPath {
-	'@' Path '.' Identifier
+    '@' Path '.' Identifier
 }
 
 Path {
-    Identifier
-    | Identifier '::' Path
+    (Identifier '::')* Identifier
 }
 
 Literal {
     Integer
     | String
-    | BoolLiteral
+    | Boolean
 }
 
+Block {
+    "{" stmt* expr "}"
+    | "{" stmt* "}"
+}
 
-@precedence {
-    parentheses,
-    dot @right,
-    unaryMinus @right,
-    multiplicative @left,
-    additive @left,
-    bracket,
-    compare @left,
-    not @right,
-    and @left,
-    or @left,
-    vertical,
-    equal @left,
-    braces,
-    logic @left,
-    command,
-    return,
-    semicolon @left
+stmt {
+    Let
+    | exprStmt
+}
+
+Let {
+    kw<'let'> kw<'mut'>? Identifier '=' expr ';'
+}
+
+exprStmt {
+    expr ';'
 }

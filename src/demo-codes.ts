@@ -75,7 +75,7 @@ fn b(i, f, g) {
 a(3, ||log("hi"), ||log("world"))
 `],
 ['Quicksort', `fn quicksort(a, lo, hi) {
-	if lo >= 0 and lo < hi {
+	if lo >= 0 && lo < hi {
 		let p = partition(a, lo, hi);
 		quicksort(a, lo, p - 1);
 		quicksort(a, p + 1, hi)
