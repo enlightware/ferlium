@@ -19,7 +19,7 @@ fn quicksort() {
         }
 
         fn quicksort(a, lo, hi) {
-            if lo >= hi or lo < 0 {
+            if lo >= hi || lo < 0 {
                 ()
             } else {
                 let p = partition(a, lo, hi);

@@ -68,6 +68,7 @@ ReturnExpr: ExprKind = {
 
 AbstractExpr: ExprKind = {
     "|" <args:StrArgs> "|" <body:Expr> => Abstract(args, B::new(body)),
+    "||" <body:Expr> => Abstract(vec![], B::new(body)),
 }
 
 LogicOrExpr = {
@@ -264,7 +265,7 @@ StrArgs = {
 
 UnaryOp: Ustr = {
     "-" => ustr("std::@u-"),
-    "not" => ustr("std::@not"),
+    "!" => ustr("std::@not"),
 }
 
 MultOp: Ustr = {
@@ -288,11 +289,11 @@ CompOp: Ustr = {
 }
 
 LogicalAndOp: Ustr = {
-    "and" => ustr("std::@and"),
+    "&&" => ustr("std::@and"),
 }
 
 LogicalOrOp: Ustr = {
-    "or" => ustr("std::@or"),
+    "||" => ustr("std::@or"),
 }
 
 UIdentifier: Ustr = {

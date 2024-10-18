@@ -112,6 +112,7 @@ where
     }
 }
 
+/// Create a projection, or a float literal if the lhs is a number
 pub(crate) fn proj_or_float<L, T>(
     lhs: Expr,
     rhs: (usize, Span),
@@ -166,6 +167,7 @@ pub(crate) fn cond_if(cond: Expr, if_true: Expr) -> ExprKind {
     )
 }
 
+/// Create a for loop
 pub(crate) fn for_loop(var: (Ustr, Span), start: Expr, end: Expr, body: Expr) -> ExprKind {
     use ExprKind::*;
     let iterator_span = Span::new(start.span.start(), end.span.end());
