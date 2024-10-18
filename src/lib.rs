@@ -6,7 +6,7 @@ use format::FormatWith;
 use itertools::Itertools;
 use lalrpop_util::lalrpop_mod;
 use module::{FmtWithModuleEnv, Module, ModuleEnv, Modules, Use};
-use parser_helpers::error_recovery_to_error;
+use parser_helpers::describe_parse_error;
 
 mod assert;
 mod ast;
@@ -180,9 +180,13 @@ pub fn parse_module_and_expr(
     let mut errors = Vec::new();
     let module_and_expr = parser::ModuleAndExprParser::new()
         .parse(&mut errors, src)
-        .unwrap();
+        .map_err(|error| vec![describe_parse_error(error)])?;
+    // TODO: change the last line to an unwrap once the grammar is fully error-tolerant.
     if !errors.is_empty() {
-        let errors = errors.into_iter().map(error_recovery_to_error).collect();
+        let errors = errors
+            .into_iter()
+            .map(|error| describe_parse_error(error.error))
+            .collect();
         Err(errors)
     } else {
         Ok(module_and_expr)

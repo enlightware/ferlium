@@ -221,11 +221,11 @@ fn resolve_token_names(names: Vec<String>) -> Vec<String> {
 }
 
 /// Extract the name and the span from an error recovery data structure
-pub(crate) fn error_recovery_to_error(
-    error: ErrorRecovery<usize, Token<'_>, LocatedError>,
+pub(crate) fn describe_parse_error(
+    error: ParseError<usize, Token<'_>, LocatedError>,
 ) -> LocatedError {
     use ParseError::*;
-    match error.error {
+    match error {
         InvalidToken { location } => ("invalid token".to_string(), span(location, location + 1)),
         UnrecognizedEof { location, expected } => (
             if expected.len() > 1 {
