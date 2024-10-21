@@ -29,6 +29,26 @@ fn literals() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn comments() {
+    assert_eq!(run("42 // comment"), int!(42));
+    assert_eq!(run("42 //comment"), int!(42));
+    assert_eq!(run("42 //comment // //"), int!(42));
+    assert_eq!(run("42 // comment\n"), int!(42));
+    assert_eq!(run("42 // comment\n // comment"), int!(42));
+    assert_eq!(run("// comment\n42"), int!(42));
+    assert_eq!(run("42 /* comment */"), int!(42));
+    assert_eq!(run("42 /**comment**/"), int!(42));
+    assert_eq!(run("/* comment */ 42"), int!(42));
+    assert_eq!(run("/*\ncomment\n*/ 42"), int!(42));
+    assert_eq!(run("/*\ncomment\n*/ 42 // comment"), int!(42));
+    assert_eq!(
+        run("/*\ncomment\n*/\n/* yeah */ 42 // comment\n/* sure */\n/////comment"),
+        int!(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn blocks() {
     assert_eq!(run("{}"), unit());
     assert_eq!(run("{ 1 }"), int!(1));

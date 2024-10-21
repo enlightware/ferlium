@@ -13,7 +13,6 @@ use crate::value::Value;
 use crate::Span;
 use core::str::FromStr;
 use lalrpop_util::lexer::Token;
-use lalrpop_util::ErrorRecovery;
 use lalrpop_util::ParseError;
 use num_traits::bounds::Bounded;
 use ordered_float::NotNan;
