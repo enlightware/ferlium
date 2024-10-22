@@ -17,7 +17,7 @@ $(RUST_WASM): $(RUST_SOURCES) $(RUST_CONFIG_FILES)
 install-dev-deps:
 	cargo install wasm-pack
 
-update-cargo-dev:
+update-deps:
 	cd script-api && CARGO_NET_GIT_FETCH_WITH_CLI=true cargo update
 
 lint:

@@ -64,11 +64,13 @@ Abstraction {
 
 logicOrExpr {
     logicAndExpr
+    | logicOrExpr LogicOp { kw<'or'> } logicAndExpr
     | logicOrExpr LogicOp { '||' } logicAndExpr
 }
 
 logicAndExpr {
     compExpr
+    | logicAndExpr LogicOp { kw<'and'> } compExpr
     | logicAndExpr LogicOp { '&&' } compExpr
 }
 
@@ -89,6 +91,7 @@ mulExpr {
 
 unaryExpr {
     suffixExpr
+    | LogicOp { kw<'not'> } unaryExpr
     | LogicOp { '!' } unaryExpr
     | ArithOp { '-' } unaryExpr
 }
