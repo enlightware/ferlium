@@ -132,17 +132,16 @@ fn mutability() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn logic_operators() {
-    assert_eq!(run("!true"), bool!(false));
-    assert_eq!(run("!false"), bool!(true));
-    assert_eq!(run("!!true"), bool!(true));
-    assert_eq!(run("!!false"), bool!(false));
-    assert_eq!(run("!!!true"), bool!(false));
-    assert_eq!(run("!!!false"), bool!(true));
-    assert_eq!(run("! ! ! false"), bool!(true));
-    assert_eq!(run("true || false"), bool!(true));
-    assert_eq!(run("true && false"), bool!(false));
-    assert_eq!(run("true || true && false"), bool!(true));
-    assert_eq!(run("(true || true) && false"), bool!(false));
+    assert_eq!(run("not true"), bool!(false));
+    assert_eq!(run("not false"), bool!(true));
+    assert_eq!(run("not not true"), bool!(true));
+    assert_eq!(run("not not false"), bool!(false));
+    assert_eq!(run("not not not true"), bool!(false));
+    assert_eq!(run("not not not false"), bool!(true));
+    assert_eq!(run("true or false"), bool!(true));
+    assert_eq!(run("true and false"), bool!(false));
+    assert_eq!(run("true or true and false"), bool!(true));
+    assert_eq!(run("(true or true) and false"), bool!(false));
 }
 
 #[test]

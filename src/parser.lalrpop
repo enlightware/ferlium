@@ -250,8 +250,8 @@ StrArgs = {
 
 UnaryOp: Ustr = {
     "-" => ustr("std::@u-"),
-    "!" => ustr("std::@not"),
-    <l:@L> "not" <r:@R> =>? error("\"not\" keyword is not supported in Rust syntax".into(), span(l, r)),
+    "not" => ustr("std::@not"),
+    <l:@L> "!" <r:@R> =>? error("for readability, use the \"not\" keyword instead of the C-style ! operator".into(), span(l, r)),
 }
 
 MultOp: Ustr = {
@@ -275,13 +275,13 @@ CompOp: Ustr = {
 }
 
 LogicalAndOp: Ustr = {
-    "&&" => ustr("std::@and"),
-    <l:@L> "and" <r:@R> =>? error("\"and\" keyword is not supported in Rust syntax".into(), span(l, r)),
+    "and" => ustr("std::@and"),
+    <l:@L> "&&" <r:@R> =>? error("for readability, use the \"and\" keyword instead of the C-style && operator".into(), span(l, r)),
 }
 
 LogicalOrOp: Ustr = {
-    "||" => ustr("std::@or"),
-    <l:@L> "or" <r:@R> =>? error("\"or\" keyword is not supported in Rust syntax".into(), span(l, r)),
+    "or" => ustr("std::@or"),
+    <l:@L> "||" <r:@R> =>? error("for readability, use the \"or\" keyword instead of the C-style || operator".into(), span(l, r)),
 }
 
 UIdentifier: Ustr = {
