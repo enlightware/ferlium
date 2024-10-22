@@ -71,30 +71,15 @@ AbstractExpr: ExprKind = {
     "||" <body:Expr> => Abstract(vec![], B::new(body)),
 }
 
-LogicOrExpr = {
-    LogicAndExpr,
-    <l:Es<LogicOrExpr>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr>> => StaticApply(o, vec![l, r]),
-}
+LogicOrExpr = BinOpLeftAssoc<LogicalOrOp, LogicAndExpr>;
 
-LogicAndExpr = {
-    CompExpr,
-    <l:Es<LogicAndExpr>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr>> => StaticApply(o, vec![l, r]),
-}
+LogicAndExpr = BinOpLeftAssoc<LogicalAndOp, CompExpr>;
 
-CompExpr = {
-    AddExpr,
-    <l:Es<CompExpr>> <o:Sp<CompOp>> <r:Es<AddExpr>> => StaticApply(o, vec![l, r]),
-}
+CompExpr = BinOpLeftAssoc<CompOp, AddExpr>;
 
-AddExpr = {
-    MultExpr,
-    <l:Es<AddExpr>> <o:Sp<AddOp>> <r:Es<MultExpr>> => StaticApply(o, vec![l, r]),
-}
+AddExpr = BinOpLeftAssoc<AddOp, MulExpr>;
 
-MultExpr = {
-    UnaryExpr,
-    <l:Es<MultExpr>> <o:Sp<MultOp>> <r:Es<UnaryExpr>> => StaticApply(o, vec![l, r]),
-}
+MulExpr = BinOpLeftAssoc<MultOp, UnaryExpr>;
 
 UnaryExpr = {
     SuffixExpr,
@@ -266,6 +251,7 @@ StrArgs = {
 UnaryOp: Ustr = {
     "-" => ustr("std::@u-"),
     "!" => ustr("std::@not"),
+    <l:@L> "not" <r:@R> =>? error("\"not\" keyword is not supported in Rust syntax".into(), span(l, r)),
 }
 
 MultOp: Ustr = {
@@ -290,10 +276,12 @@ CompOp: Ustr = {
 
 LogicalAndOp: Ustr = {
     "&&" => ustr("std::@and"),
+    <l:@L> "and" <r:@R> =>? error("\"and\" keyword is not supported in Rust syntax".into(), span(l, r)),
 }
 
 LogicalOrOp: Ustr = {
     "||" => ustr("std::@or"),
+    <l:@L> "or" <r:@R> =>? error("\"or\" keyword is not supported in Rust syntax".into(), span(l, r)),
 }
 
 UIdentifier: Ustr = {
@@ -358,6 +346,12 @@ Sep<T, S>: Vec<T> = {
             v
         }
     }
+};
+
+// A tier of expression, for a binary operation, left-associative
+BinOpLeftAssoc<Op, NextTier>: ExprKind = {
+    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => StaticApply(o, vec![l, r]),
+    NextTier
 };
 
 // Skip whitespaces and comments in the lexer
