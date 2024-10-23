@@ -2,7 +2,6 @@
 
 ### Language features
 
-- Short circuiting logical operators
 - Split compilation of modules by analysing the dependency graph
 - Type classes
 - Tuple deconstruction on assignation
@@ -14,6 +13,8 @@
 - User-defined closures
 - Object-oriented style function calls
 - Early return and breaks
+- Short circuiting logical operators
+- Unit testing with mock function generation through annotations
 
 ### Library and test features
 
