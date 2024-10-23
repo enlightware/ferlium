@@ -13,7 +13,7 @@ use crate::{
     module::{Module, ModuleFunction},
     r#type::{bare_native_type, FnType, Type},
     type_scheme::TypeScheme,
-    value::{NativeDisplay, Value},
+    value::{NativeDisplay, NativeValue, Value},
 };
 
 use super::{iterator::iterator_type, math::int_type};
@@ -35,7 +35,7 @@ impl Array {
     }
 
     // Manual implementation of a conversion from an iterator function to a new list
-    fn from_iterator(mut iter: Value) -> Self {
+    fn from_value_iterator(mut iter: Value) -> Self {
         let mut vec = VecDeque::new();
         loop {
             let iter_fn_key = iter.as_function().unwrap();
@@ -61,7 +61,7 @@ impl Array {
             array_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnVN::description_with_ty_scheme(Array::from_iterator, ty_scheme)
+        UnaryNativeFnVN::description_with_ty_scheme(Array::from_value_iterator, ty_scheme)
     }
 
     pub fn get(&self, index: usize) -> Option<&Value> {
@@ -209,6 +209,12 @@ impl NativeDisplay for Array {
         write!(f, "[")?;
         write_with_separator(self.0.iter(), ", ", f)?;
         write!(f, "]")
+    }
+}
+
+impl<V: NativeValue + 'static> FromIterator<V> for Array {
+    fn from_iter<T: IntoIterator<Item = V>>(iter: T) -> Self {
+        Self::from_vec(iter.into_iter().map(Value::native).collect())
     }
 }
 
