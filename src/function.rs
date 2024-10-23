@@ -2,6 +2,8 @@ use std::{
     cell::RefCell, fmt::{self, Debug}, marker::PhantomData, rc::{Rc, Weak}
 };
 
+use painturscript_macros::declare_native_fn_aliases;
+
 use crate::{
     effects::EffType,
     error::RuntimeError,
@@ -308,17 +310,6 @@ impl OutputBuilder for Fallible<Value> {
     }
 }
 
-// Shorthand names for native functions type aliases:
-// arguments:
-// - N: Val<T> (native value)
-// - M: Mut<T> (native mutable reference)
-// - V: Value (generic value)
-// - W: &mut Value (mutable reference to generic value)
-// outputs:
-// - I: native
-// - V: value
-// - +F: fallible result
-
 // Native functions of various arities
 
 macro_rules! n_ary_native_fn {
@@ -403,9 +394,24 @@ macro_rules! n_ary_native_fn {
     };
 }
 
-// Nullary
+// Declare aliases for native functions of various arities
+
+// Shorthand names for native functions type aliases:
+// arguments:
+// - N: Val<T> (native value)
+// - M: Mut<T> (native mutable reference)
+// - V: Value (generic value)
+// - W: &mut Value (mutable reference to generic value)
+// outputs:
+// - I: native
+// - V: value
+// - +F: fallible result
+
+// Note: the proc macro declare_native_fn_aliases defined in painturscript_macros generates
+// typedefs with the combinations of aliases.
 
 n_ary_native_fn!(NullaryNativeFn);
+declare_native_fn_aliases!(0);
 
 impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<O, F> {
     pub fn description(f: F, effects: EffType) -> ModuleFunction {
@@ -413,55 +419,11 @@ impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<
     }
 }
 
-pub type NullaryNativeFnN<O, F> = NullaryNativeFn<NatVal<O>, F>;
-pub type NullaryNativeFnFN<O, F> = NullaryNativeFn<Fallible<NatVal<O>>, F>;
-pub type NullaryNativeFnV<F> = NullaryNativeFn<Value, F>;
-pub type NullaryNativeFnFV<F> = NullaryNativeFn<Fallible<Value>, F>;
+n_ary_native_fn!(UnaryNativeFn, A0);
+declare_native_fn_aliases!(1);
 
-// Unary
+n_ary_native_fn!(BinaryNativeFn, A0, A1);
+declare_native_fn_aliases!(2);
 
-n_ary_native_fn!(UnaryNativeFn, A);
-
-// The arguments are by native value
-pub type UnaryNativeFnNN<A, O, F> = UnaryNativeFn<NatVal<A>, NatVal<O>, F>;
-pub type UnaryNativeFnVN<O, F> = UnaryNativeFn<Value, NatVal<O>, F>;
-pub type UnaryNativeFnNFN<A, O, F> = UnaryNativeFn<NatVal<A>, Fallible<NatVal<O>>, F>;
-pub type UnaryNativeFnVFN<O, F> = UnaryNativeFn<Value, Fallible<NatVal<O>>, F>;
-pub type UnaryNativeFnNV<A, F> = UnaryNativeFn<NatVal<A>, Value, F>;
-pub type UnaryNativeFnVV<F> = UnaryNativeFn<Value, Value, F>;
-pub type UnaryNativeFnNFV<A, F> = UnaryNativeFn<NatVal<A>, Fallible<Value>, F>;
-pub type UnaryNativeFnVFV<F> = UnaryNativeFn<Value, Fallible<Value>, F>;
-
-// Binary
-
-n_ary_native_fn!(BinaryNativeFn, A, B);
-
-// See above for shorthand names
-pub type BinaryNativeFnNNN<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, NatVal<O>, F>;
-pub type BinaryNativeFnNNFN<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Fallible<NatVal<O>>, F>;
-pub type BinaryNativeFnNVN<A, O, F> = BinaryNativeFn<NatVal<A>, Value, NatVal<O>, F>;
-pub type BinaryNativeFnMVN<A, O, F> = BinaryNativeFn<NatMut<A>, Value, NatVal<O>, F>;
-pub type BinaryNativeFnMNN<A, B, O, F> = BinaryNativeFn<NatMut<A>, NatVal<B>, NatVal<O>, F>;
-pub type BinaryNativeFnVVN<O, F> = BinaryNativeFn<Value, Value, NatVal<O>, F>;
-// Note: this is not exhaustive
-
-// Ternary
-
-n_ary_native_fn!(TernaryNativeFn, A, B, C);
-
-// See above for shorthand names
-pub type TernaryNativeFnNNNN<A, B, C, O, F> =
-    TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, NatVal<O>, F>;
-pub type TernaryNativeFnNNNFN<A, B, C, O, F> =
-    TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, Fallible<NatVal<O>>, F>;
-pub type TernaryNativeFnNNVN<A, B, O, F> =
-    TernaryNativeFn<NatVal<A>, NatVal<B>, Value, NatVal<O>, F>;
-pub type TernaryNativeFnVVNN<C, O, F> = TernaryNativeFn<Value, Value, NatVal<C>, NatVal<O>, F>;
-// Note: this is not exhaustive
-
-// Quaternary
-
-n_ary_native_fn!(QuaternaryNativeFn, A, B, C, D);
-pub type QuaternaryNativeFnNNNNN<A, B, C, D, O, F> =
-    QuaternaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, NatVal<D>, NatVal<O>, F>;
-// Note: this is not exhaustive
+n_ary_native_fn!(TernaryNativeFn, A0, A1, A2);
+declare_native_fn_aliases!(3);
