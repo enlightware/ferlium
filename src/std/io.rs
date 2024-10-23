@@ -25,7 +25,7 @@ fn log(value: Value) {
 pub fn add_to_module(to: &mut Module) {
     to.functions.insert(
         ustr("log"),
-        UnaryNativeFnVN::description_with_ty(
+        UnaryNativeFnVN::description_with_in_ty(
             log,
             Type::variable_id(0),
             effect(PrimitiveEffect::Write),

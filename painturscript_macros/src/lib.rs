@@ -11,7 +11,7 @@ pub fn declare_native_fn_aliases(input: TokenStream) -> TokenStream {
     let arg_codes = ["N", "M", "V", "W"];
     let output_codes = ["N", "V", "FN", "FV"];
 
-    let mut generated = quote! { };
+    let mut generated = quote! {};
 
     let arg_combinations = generate_combinations(&arg_codes, arity);
 
@@ -86,9 +86,12 @@ fn generate_fn_type(arity: usize, arg_codes: &[&str], output_code: &str) -> (syn
 
     let output_type = map_output_code(output_code);
 
-    (syn::parse_quote! {
-        #fn_type_name<#(#arg_types,)* #output_type, F>
-    }, need_lifetime)
+    (
+        syn::parse_quote! {
+            #fn_type_name<#(#arg_types,)* #output_type, F>
+        },
+        need_lifetime,
+    )
 }
 
 fn map_arg_code(code: &str, index: usize) -> (syn::Type, bool) {

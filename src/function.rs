@@ -1,5 +1,8 @@
 use std::{
-    cell::RefCell, fmt::{self, Debug}, marker::PhantomData, rc::{Rc, Weak}
+    cell::RefCell,
+    fmt::{self, Debug},
+    marker::PhantomData,
+    rc::{Rc, Weak},
 };
 
 use painturscript_macros::declare_native_fn_aliases;
@@ -341,8 +344,16 @@ macro_rules! n_ary_native_fn {
             }
 
             paste::paste! {
-            pub fn description_with_ty(f: F, $([<$arg:lower _ty>]: Type,)* effects: EffType) -> ModuleFunction {
+            #[allow(clippy::too_many_arguments)]
+            pub fn description_with_in_ty(f: F, $([<$arg:lower _ty>]: Type,)* effects: EffType) -> ModuleFunction {
                 let o_ty = O::default_ty();
+                Self::description_with_ty(f, $([<$arg:lower _ty>],)* o_ty, effects)
+            }
+            }
+
+            paste::paste! {
+            #[allow(clippy::too_many_arguments)]
+            pub fn description_with_ty(f: F, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
                     &[$(([<$arg:lower _ty>], $arg::MUTABLE)), *],
                     o_ty,
@@ -353,7 +364,7 @@ macro_rules! n_ary_native_fn {
             }
 
             pub fn description_with_default_ty(f: F, effects: EffType) -> ModuleFunction {
-                Self::description_with_ty(f, $($arg::default_ty(),)* effects)
+                Self::description_with_in_ty(f, $($arg::default_ty(),)* effects)
             }
         }
 
@@ -415,7 +426,7 @@ declare_native_fn_aliases!(0);
 
 impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<O, F> {
     pub fn description(f: F, effects: EffType) -> ModuleFunction {
-        Self::description_with_ty(f, effects)
+        Self::description_with_in_ty(f, effects)
     }
 }
 

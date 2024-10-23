@@ -39,7 +39,7 @@ fn test_effect_module() -> Module {
     );
     module.functions.insert(
         "take_read".into(),
-        UnaryNativeFnVN::description_with_ty(
+        UnaryNativeFnVN::description_with_in_ty(
             |_x: Value| 0,
             Type::function_type(FnType::new(
                 vec![],
