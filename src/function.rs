@@ -427,3 +427,11 @@ declare_native_fn_aliases!(2);
 
 n_ary_native_fn!(TernaryNativeFn, A0, A1, A2);
 declare_native_fn_aliases!(3);
+
+// Beyond size 3, we do not define aliases
+
+n_ary_native_fn!(QuaternaryNativeFn, A0, A1, A2, A3);
+n_ary_native_fn!(QuinaryNativeFn, A0, A1, A2, A3, A4);
+n_ary_native_fn!(SenaryNativeFn, A0, A1, A2, A3, A4, A5);
+n_ary_native_fn!(SeptenaryNativeFn, A0, A1, A2, A3, A4, A5, A6);
+n_ary_native_fn!(OctonaryNativeFn, A0, A1, A2, A3, A4, A5, A6, A7);
