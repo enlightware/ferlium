@@ -8,7 +8,7 @@ use crate::{
     eval::{EvalCtx, ValOrMut},
     format::write_with_separator,
     function::{
-        BinaryNativeFnMVI, BinaryNativeFnNNI, BinaryNativeFnNVI, UnaryNativeFnNI, UnaryNativeFnVI,
+        BinaryNativeFnMVN, BinaryNativeFnNNN, BinaryNativeFnNVN, UnaryNativeFnNN, UnaryNativeFnVN,
     },
     module::{Module, ModuleFunction},
     r#type::{bare_native_type, FnType, Type},
@@ -61,7 +61,7 @@ impl Array {
             array_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnVI::description_with_ty_scheme(Array::from_iterator, ty_scheme)
+        UnaryNativeFnVN::description_with_ty_scheme(Array::from_iterator, ty_scheme)
     }
 
     pub fn get(&self, index: usize) -> Option<&Value> {
@@ -101,7 +101,7 @@ impl Array {
             unit,
             no_effects(),
         ));
-        BinaryNativeFnMVI::description_with_ty_scheme(Array::append, ty_scheme)
+        BinaryNativeFnMVN::description_with_ty_scheme(Array::append, ty_scheme)
     }
 
     pub fn prepend(&mut self, value: Value) {
@@ -117,7 +117,7 @@ impl Array {
             unit,
             no_effects(),
         ));
-        BinaryNativeFnMVI::description_with_ty_scheme(Array::prepend, ty_scheme)
+        BinaryNativeFnMVN::description_with_ty_scheme(Array::prepend, ty_scheme)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -135,7 +135,7 @@ impl Array {
             int_type(),
             no_effects(),
         ));
-        UnaryNativeFnNI::description_with_ty_scheme(|a: Self| a.len() as isize, ty_scheme)
+        UnaryNativeFnNN::description_with_ty_scheme(|a: Self| a.len() as isize, ty_scheme)
     }
 
     fn concat(a: &Self, b: &Self) -> Self {
@@ -151,7 +151,7 @@ impl Array {
             array_ty,
             no_effects(),
         ));
-        BinaryNativeFnNNI::description_with_ty_scheme(
+        BinaryNativeFnNNN::description_with_ty_scheme(
             |a: Self, b: Self| Self::concat(&a, &b),
             ty_scheme,
         )
@@ -187,7 +187,7 @@ impl Array {
             array1,
             no_effects(),
         ));
-        BinaryNativeFnNVI::description_with_ty_scheme(Array::map, ty_scheme)
+        BinaryNativeFnNVN::description_with_ty_scheme(Array::map, ty_scheme)
     }
 
     pub fn iter(&self) -> ArrayIterator {

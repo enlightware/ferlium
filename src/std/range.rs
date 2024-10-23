@@ -3,7 +3,7 @@ use std::fmt;
 use ustr::ustr;
 
 use crate::{
-    effects::no_effects, function::BinaryNativeFnNNI, module::Module, r#type::Type,
+    effects::no_effects, function::BinaryNativeFnNNN, module::Module, r#type::Type,
     value::NativeDisplay,
 };
 
@@ -93,6 +93,6 @@ pub fn add_to_module(to: &mut Module) {
     // Functions
     to.functions.insert(
         ustr("range_iterator_new"),
-        BinaryNativeFnNNI::description_with_default_ty(RangeIterator::new, no_effects()),
+        BinaryNativeFnNNN::description_with_default_ty(RangeIterator::new, no_effects()),
     );
 }

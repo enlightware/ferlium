@@ -1,8 +1,5 @@
 use std::{
-    cell::RefCell,
-    fmt::{self, Debug},
-    marker::PhantomData,
-    rc::{Rc, Weak},
+    cell::RefCell, fmt::{self, Debug}, marker::PhantomData, rc::{Rc, Weak}
 };
 
 use crate::{
@@ -259,46 +256,68 @@ impl<T: Clone + 'static> ArgExtractor for NatMut<T> {
     }
 }
 
-/// Marker struct to declare the output of a native function as raw (the native type itself).
-pub struct Plain<T> {
-    _marker: PhantomData<T>,
-}
-
-/// Marker struct to declare the output of a native function as a fallible result.
+/// Marker struct to declare the output of a native function as a fallible value.
 pub struct Fallible<T> {
     _marker: PhantomData<T>,
 }
 
 /// A trait to dispatch over the fallibility of a native function
 pub trait OutputBuilder {
-    type NativeTy: Clone;
     type Input;
-    fn build_output(result: Self::Input) -> EvalResult;
+    fn build(result: Self::Input) -> EvalResult;
+    fn default_ty() -> Type;
 }
 
-impl<O: NativeOutput> OutputBuilder for Plain<O> {
-    type NativeTy = O;
+impl<O: NativeOutput> OutputBuilder for NatVal<O> {
     type Input = O;
-    fn build_output(result: Self::Input) -> EvalResult {
+    fn build(result: Self::Input) -> EvalResult {
         Ok(Value::Native(Box::new(result)))
+    }
+    fn default_ty() -> Type {
+        Type::primitive::<O>()
     }
 }
 
-impl<O: NativeOutput> OutputBuilder for Fallible<O> {
-    type NativeTy = O;
+impl<O: NativeOutput> OutputBuilder for Fallible<NatVal<O>> {
     type Input = Result<O, RuntimeError>;
-    fn build_output(result: Self::Input) -> EvalResult {
+    fn build(result: Self::Input) -> EvalResult {
         result.map(|o| Value::Native(Box::new(o)))
+    }
+    fn default_ty() -> Type {
+        Type::primitive::<O>()
+    }
+}
+
+impl OutputBuilder for Value {
+    type Input = Value;
+    fn build(result: Self::Input) -> EvalResult {
+        Ok(result)
+    }
+    fn default_ty() -> Type {
+        Type::variable_id(0)
+    }
+}
+
+impl OutputBuilder for Fallible<Value> {
+    type Input = Result<Value, RuntimeError>;
+    fn build(result: Self::Input) -> EvalResult {
+        result
+    }
+    fn default_ty() -> Type {
+        Type::variable_id(0)
     }
 }
 
 // Shorthand names for native functions type aliases:
+// arguments:
 // - N: Val<T> (native value)
 // - M: Mut<T> (native mutable reference)
 // - V: Value (generic value)
 // - W: &mut Value (mutable reference to generic value)
-// - I: infallible result
-// - F: fallible result
+// outputs:
+// - I: native
+// - V: value
+// - +F: fallible result
 
 // Native functions of various arities
 
@@ -332,7 +351,7 @@ macro_rules! n_ary_native_fn {
 
             paste::paste! {
             pub fn description_with_ty(f: F, $([<$arg:lower _ty>]: Type,)* effects: EffType) -> ModuleFunction {
-                let o_ty = Type::primitive::<O::NativeTy>();
+                let o_ty = O::default_ty();
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
                     &[$(([<$arg:lower _ty>], $arg::MUTABLE)), *],
                     o_ty,
@@ -367,7 +386,7 @@ macro_rules! n_ary_native_fn {
                 )*
 
                 // Call the function using the extracted arguments
-                O::build_output((self.0)($([<$arg:lower>]),*))
+                O::build((self.0)($([<$arg:lower>]),*))
             }
             }
 
@@ -394,46 +413,55 @@ impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<
     }
 }
 
-pub type NullaryNativeFnI<O, F> = NullaryNativeFn<Plain<O>, F>;
-pub type NullaryNativeFnF<O, F> = NullaryNativeFn<Fallible<O>, F>;
+pub type NullaryNativeFnN<O, F> = NullaryNativeFn<NatVal<O>, F>;
+pub type NullaryNativeFnFN<O, F> = NullaryNativeFn<Fallible<NatVal<O>>, F>;
+pub type NullaryNativeFnV<F> = NullaryNativeFn<Value, F>;
+pub type NullaryNativeFnFV<F> = NullaryNativeFn<Fallible<Value>, F>;
 
 // Unary
 
 n_ary_native_fn!(UnaryNativeFn, A);
 
 // The arguments are by native value
-pub type UnaryNativeFnNI<A, O, F> = UnaryNativeFn<NatVal<A>, Plain<O>, F>;
-pub type UnaryNativeFnVI<O, F> = UnaryNativeFn<Value, Plain<O>, F>;
-pub type UnaryNativeFnNF<A, O, F> = UnaryNativeFn<NatVal<A>, Fallible<O>, F>;
-pub type UnaryNativeFnVF<O, F> = UnaryNativeFn<Value, Fallible<O>, F>;
+pub type UnaryNativeFnNN<A, O, F> = UnaryNativeFn<NatVal<A>, NatVal<O>, F>;
+pub type UnaryNativeFnVN<O, F> = UnaryNativeFn<Value, NatVal<O>, F>;
+pub type UnaryNativeFnNFN<A, O, F> = UnaryNativeFn<NatVal<A>, Fallible<NatVal<O>>, F>;
+pub type UnaryNativeFnVFN<O, F> = UnaryNativeFn<Value, Fallible<NatVal<O>>, F>;
+pub type UnaryNativeFnNV<A, F> = UnaryNativeFn<NatVal<A>, Value, F>;
+pub type UnaryNativeFnVV<F> = UnaryNativeFn<Value, Value, F>;
+pub type UnaryNativeFnNFV<A, F> = UnaryNativeFn<NatVal<A>, Fallible<Value>, F>;
+pub type UnaryNativeFnVFV<F> = UnaryNativeFn<Value, Fallible<Value>, F>;
 
 // Binary
 
 n_ary_native_fn!(BinaryNativeFn, A, B);
 
 // See above for shorthand names
-pub type BinaryNativeFnNNI<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Plain<O>, F>;
-pub type BinaryNativeFnNNF<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Fallible<O>, F>;
-pub type BinaryNativeFnNVI<A, O, F> = BinaryNativeFn<NatVal<A>, Value, Plain<O>, F>;
-pub type BinaryNativeFnMVI<A, O, F> = BinaryNativeFn<NatMut<A>, Value, Plain<O>, F>;
-pub type BinaryNativeFnMNI<A, B, O, F> = BinaryNativeFn<NatMut<A>, NatVal<B>, Plain<O>, F>;
-pub type BinaryNativeFnVVI<O, F> = BinaryNativeFn<Value, Value, Plain<O>, F>;
+pub type BinaryNativeFnNNN<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, NatVal<O>, F>;
+pub type BinaryNativeFnNNFN<A, B, O, F> = BinaryNativeFn<NatVal<A>, NatVal<B>, Fallible<NatVal<O>>, F>;
+pub type BinaryNativeFnNVN<A, O, F> = BinaryNativeFn<NatVal<A>, Value, NatVal<O>, F>;
+pub type BinaryNativeFnMVN<A, O, F> = BinaryNativeFn<NatMut<A>, Value, NatVal<O>, F>;
+pub type BinaryNativeFnMNN<A, B, O, F> = BinaryNativeFn<NatMut<A>, NatVal<B>, NatVal<O>, F>;
+pub type BinaryNativeFnVVN<O, F> = BinaryNativeFn<Value, Value, NatVal<O>, F>;
+// Note: this is not exhaustive
 
 // Ternary
 
 n_ary_native_fn!(TernaryNativeFn, A, B, C);
 
 // See above for shorthand names
-pub type TernaryNativeFnNNNI<A, B, C, O, F> =
-    TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, Plain<O>, F>;
-pub type TernaryNativeFnNNNF<A, B, C, O, F> =
-    TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, Fallible<O>, F>;
-pub type TernaryNativeFnNNVI<A, B, O, F> =
-    TernaryNativeFn<NatVal<A>, NatVal<B>, Value, Plain<O>, F>;
-pub type TernaryNativeFnVVNI<C, O, F> = TernaryNativeFn<Value, Value, NatVal<C>, Plain<O>, F>;
+pub type TernaryNativeFnNNNN<A, B, C, O, F> =
+    TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, NatVal<O>, F>;
+pub type TernaryNativeFnNNNFN<A, B, C, O, F> =
+    TernaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, Fallible<NatVal<O>>, F>;
+pub type TernaryNativeFnNNVN<A, B, O, F> =
+    TernaryNativeFn<NatVal<A>, NatVal<B>, Value, NatVal<O>, F>;
+pub type TernaryNativeFnVVNN<C, O, F> = TernaryNativeFn<Value, Value, NatVal<C>, NatVal<O>, F>;
+// Note: this is not exhaustive
 
 // Quaternary
 
 n_ary_native_fn!(QuaternaryNativeFn, A, B, C, D);
-pub type QuaternaryNativeFnNNNNI<A, B, C, D, O, F> =
-    QuaternaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, NatVal<D>, Plain<O>, F>;
+pub type QuaternaryNativeFnNNNNN<A, B, C, D, O, F> =
+    QuaternaryNativeFn<NatVal<A>, NatVal<B>, NatVal<C>, NatVal<D>, NatVal<O>, F>;
+// Note: this is not exhaustive

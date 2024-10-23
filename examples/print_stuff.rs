@@ -2,7 +2,7 @@ use std::fmt;
 
 use painturscript::{
     effects::no_effects,
-    function::{BinaryNativeFnNNI, FunctionRef},
+    function::{BinaryNativeFnNNN, FunctionRef},
     module::{FmtWithModuleEnv, ModuleEnv, Modules},
     r#type::{bare_native_type, store_types, Type, TypeKind},
     std::{
@@ -88,11 +88,11 @@ fn main() {
 
     // functions
     let functions = [
-        BinaryNativeFnNNI::description_with_default_ty(
+        BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Add::add as fn(isize, isize) -> isize,
             no_effects(),
         ),
-        BinaryNativeFnNNI::description_with_default_ty(
+        BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Sub::sub as fn(isize, isize) -> isize,
             no_effects(),
         ),

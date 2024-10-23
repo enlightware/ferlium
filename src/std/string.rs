@@ -10,7 +10,7 @@ use ustr::ustr;
 use crate::{
     cached_primitive_ty,
     effects::no_effects,
-    function::{BinaryNativeFnMNI, BinaryNativeFnNNI, UnaryNativeFnNI, UnaryNativeFnVI},
+    function::{BinaryNativeFnMNN, BinaryNativeFnNNN, UnaryNativeFnNN, UnaryNativeFnVN},
     module::Module,
     r#type::Type,
     value::{NativeDisplay, Value},
@@ -110,26 +110,26 @@ pub fn add_to_module(to: &mut Module) {
 
     to.functions.insert(
         ustr("to_string"),
-        UnaryNativeFnVI::description_with_default_ty(String::any_to_string, no_effects()),
+        UnaryNativeFnVN::description_with_default_ty(String::any_to_string, no_effects()),
     );
     to.functions.insert(
         ustr("string_push_str"),
-        BinaryNativeFnMNI::description_with_default_ty(String::push_str, no_effects()),
+        BinaryNativeFnMNN::description_with_default_ty(String::push_str, no_effects()),
     );
     to.functions.insert(
         ustr("string_concat"),
-        BinaryNativeFnNNI::description_with_default_ty(
+        BinaryNativeFnNNN::description_with_default_ty(
             |a: String, b: String| String::concat(&a, &b),
             no_effects(),
         ),
     );
     to.functions.insert(
         ustr("string_len"),
-        UnaryNativeFnNI::description_with_default_ty(|a: String| a.len() as isize, no_effects()),
+        UnaryNativeFnNN::description_with_default_ty(|a: String| a.len() as isize, no_effects()),
     );
     to.functions.insert(
         ustr("string_is_empty"),
-        UnaryNativeFnNI::description_with_default_ty(
+        UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.is_empty() as isize,
             no_effects(),
         ),

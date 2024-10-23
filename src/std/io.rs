@@ -2,7 +2,7 @@ use std::sync::{LazyLock, RwLock};
 
 use crate::{
     effects::{effect, PrimitiveEffect},
-    function::UnaryNativeFnVI,
+    function::UnaryNativeFnVN,
     module::Module,
     r#type::Type,
     value::Value,
@@ -25,7 +25,7 @@ fn log(value: Value) {
 pub fn add_to_module(to: &mut Module) {
     to.functions.insert(
         ustr("log"),
-        UnaryNativeFnVI::description_with_ty(
+        UnaryNativeFnVN::description_with_ty(
             log,
             Type::variable_id(0),
             effect(PrimitiveEffect::Write),

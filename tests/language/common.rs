@@ -4,7 +4,7 @@ use painturscript::{
     effects::{effect, effects, PrimitiveEffect},
     error::{CompilationError, RuntimeError},
     eval::EvalResult,
-    function::{NullaryNativeFnI, UnaryNativeFnNI, UnaryNativeFnVI},
+    function::{NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnVN},
     module::{Module, Modules},
     r#type::{FnType, Type},
     std::new_std_module_env,
@@ -24,22 +24,22 @@ fn test_effect_module() -> Module {
     let mut module: Module = Default::default();
     module.functions.insert(
         "read".into(),
-        NullaryNativeFnI::description_with_default_ty(|| (), effect(PrimitiveEffect::Read)),
+        NullaryNativeFnN::description_with_default_ty(|| (), effect(PrimitiveEffect::Read)),
     );
     module.functions.insert(
         "write".into(),
-        NullaryNativeFnI::description_with_default_ty(|| (), effect(PrimitiveEffect::Write)),
+        NullaryNativeFnN::description_with_default_ty(|| (), effect(PrimitiveEffect::Write)),
     );
     module.functions.insert(
         "read_write".into(),
-        NullaryNativeFnI::description_with_default_ty(
+        NullaryNativeFnN::description_with_default_ty(
             || (),
             effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
         ),
     );
     module.functions.insert(
         "take_read".into(),
-        UnaryNativeFnVI::description_with_ty(
+        UnaryNativeFnVN::description_with_ty(
             |_x: Value| 0,
             Type::function_type(FnType::new(
                 vec![],
@@ -67,14 +67,14 @@ fn test_property_module() -> Module {
     let mut module: Module = Default::default();
     module.functions.insert(
         "@get my_scope.my_var".into(),
-        NullaryNativeFnI::description_with_default_ty(
+        NullaryNativeFnN::description_with_default_ty(
             || PROPERTY_VALUE.load(Ordering::Relaxed),
             effect(PrimitiveEffect::Read),
         ),
     );
     module.functions.insert(
         "@set my_scope.my_var".into(),
-        UnaryNativeFnNI::description_with_default_ty(
+        UnaryNativeFnNN::description_with_default_ty(
             |value: isize| PROPERTY_VALUE.store(value, Ordering::Relaxed),
             effect(PrimitiveEffect::Write),
         ),
