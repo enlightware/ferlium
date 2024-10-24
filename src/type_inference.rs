@@ -7,7 +7,7 @@ use std::{
     mem,
 };
 
-use crate::Span;
+use crate::span::Span;
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
 use ustr::{ustr, Ustr};
@@ -123,7 +123,7 @@ impl FmtWithModuleEnv for TypeConstraint {
                     expected.format_with(env)
                 )
             }
-            Pub(pub_constraint) => pub_constraint.fmt_with_module_env(f, env),
+            Pub(constraint) => constraint.fmt_with_module_env(f, env),
         }
     }
 }
@@ -244,8 +244,8 @@ impl TypeInference {
                     (node, ty, mut_ty, no_effects())
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some(function) = env.get_function(name) {
-                    let (fn_ty, inst_data) = function.ty_scheme.instantiate(self);
+                else if let Some((module_name, function)) = env.get_function(name) {
+                    let (fn_ty, inst_data) = function.ty_scheme.instantiate(self, module_name);
                     let value = Value::Function(FunctionRef::new_weak(&function.code));
                     let node = K::Immediate(B::new(ir::Immediate {
                         value,
@@ -591,83 +591,88 @@ impl TypeInference {
         use ir::Node as N;
         use ir::NodeKind as K;
         // Get the function and its type from the environment.
-        Ok(if let Some(function) = env.get_function(name) {
-            if function.ty_scheme.ty.args.len() != args.len() {
-                let got_span = args
-                    .iter()
-                    .map(|arg| arg.borrow().span)
-                    .reduce(|a, b| Span::new(a.start(), b.end()))
-                    .unwrap_or(span);
-                return Err(InternalCompilationError::WrongNumberOfArguments {
-                    expected: function.ty_scheme.ty.args.len(),
-                    expected_span: span,
-                    got: args.len(),
-                    got_span,
-                });
-            }
-            // Instantiate its type scheme
-            let (inst_fn_ty, inst_data) = function.ty_scheme.instantiate(self);
-            // Get the code and make sure the types of its arguments match the expected types
-            let (args_nodes, args_effects) = self.check_exprs(env, args, &inst_fn_ty.args, span)?;
-            // Build and return the function node, get back the function to avoid re-borrowing
-            let function = env
-                .get_function(name)
-                .expect("function not found any more after checking");
-            let ret_ty = inst_fn_ty.ret;
-            let combined_effects = self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-            let node = K::StaticApply(B::new(ir::StaticApplication {
-                function: FunctionRef::new_weak(&function.code),
-                function_name: ustr(name),
-                function_span: span,
-                arguments: args_nodes,
-                ty: inst_fn_ty,
-                inst_data,
-            }));
-            (node, ret_ty, MutType::constant(), combined_effects)
-        } else {
-            // If it is not a known function, assume it to be a variant constructor
-            // Create a fresh type and add a constraint for that type to include this variant.
-            let variant_ty = self.fresh_type_var_ty();
-            let (payload_nodes, payload_types, effects) = self.infer_exprs_drop_mut(env, args)?;
-            let (payload_ty, payload_node) = match payload_nodes.len() {
-                0 => (
-                    Type::unit(),
-                    N::new(
-                        K::Immediate(Immediate::new(Value::unit())),
-                        Type::unit(),
-                        no_effects(),
-                        span,
-                    ),
-                ),
-                1 => {
-                    let payload_ty = payload_types[0];
-                    let payload_node = payload_nodes.into_iter().next().unwrap();
-                    (payload_ty, payload_node)
+        Ok(
+            if let Some((module_name, function)) = env.get_function(name) {
+                if function.ty_scheme.ty.args.len() != args.len() {
+                    let got_span = args
+                        .iter()
+                        .map(|arg| arg.borrow().span)
+                        .reduce(|a, b| Span::new_local(a.start(), b.end()))
+                        .unwrap_or(span);
+                    return Err(InternalCompilationError::WrongNumberOfArguments {
+                        expected: function.ty_scheme.ty.args.len(),
+                        expected_span: span,
+                        got: args.len(),
+                        got_span,
+                    });
                 }
-                _ => {
-                    let payload_ty = Type::tuple(payload_types);
-                    let node = if let Some(values) = nodes_as_bare_immediate(&payload_nodes) {
-                        K::Immediate(Immediate::new(Value::tuple(values)))
-                    } else {
-                        K::Tuple(B::new(SVec2::from_vec(payload_nodes)))
-                    };
-                    let payload_node = N::new(node, payload_ty, effects.clone(), span);
-                    (payload_ty, payload_node)
-                }
-            };
-            let name = ustr(name);
-            self.ty_constraints.push(TypeConstraint::Pub(
-                PubTypeConstraint::new_type_has_variant(variant_ty, name, payload_ty, span),
-            ));
-            // Build the variant construction node.
-            let node = if let Some(values) = nodes_as_bare_immediate(&[&payload_node]) {
-                let value = values.first().unwrap().clone();
-                K::Immediate(Immediate::new(Value::variant(name, value)))
+                // Instantiate its type scheme
+                let (inst_fn_ty, inst_data) = function.ty_scheme.instantiate(self, module_name);
+                // Get the code and make sure the types of its arguments match the expected types
+                let (args_nodes, args_effects) =
+                    self.check_exprs(env, args, &inst_fn_ty.args, span)?;
+                // Build and return the function node, get back the function to avoid re-borrowing
+                let (_, function) = env
+                    .get_function(name)
+                    .expect("function not found any more after checking");
+                let ret_ty = inst_fn_ty.ret;
+                let combined_effects =
+                    self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
+                let node = K::StaticApply(B::new(ir::StaticApplication {
+                    function: FunctionRef::new_weak(&function.code),
+                    function_name: ustr(name),
+                    function_span: span,
+                    arguments: args_nodes,
+                    ty: inst_fn_ty,
+                    inst_data,
+                }));
+                (node, ret_ty, MutType::constant(), combined_effects)
             } else {
-                K::Variant(B::new((name, payload_node)))
-            };
-            (node, variant_ty, MutType::constant(), effects)
-        })
+                // If it is not a known function, assume it to be a variant constructor
+                // Create a fresh type and add a constraint for that type to include this variant.
+                let variant_ty = self.fresh_type_var_ty();
+                let (payload_nodes, payload_types, effects) =
+                    self.infer_exprs_drop_mut(env, args)?;
+                let (payload_ty, payload_node) = match payload_nodes.len() {
+                    0 => (
+                        Type::unit(),
+                        N::new(
+                            K::Immediate(Immediate::new(Value::unit())),
+                            Type::unit(),
+                            no_effects(),
+                            span,
+                        ),
+                    ),
+                    1 => {
+                        let payload_ty = payload_types[0];
+                        let payload_node = payload_nodes.into_iter().next().unwrap();
+                        (payload_ty, payload_node)
+                    }
+                    _ => {
+                        let payload_ty = Type::tuple(payload_types);
+                        let node = if let Some(values) = nodes_as_bare_immediate(&payload_nodes) {
+                            K::Immediate(Immediate::new(Value::tuple(values)))
+                        } else {
+                            K::Tuple(B::new(SVec2::from_vec(payload_nodes)))
+                        };
+                        let payload_node = N::new(node, payload_ty, effects.clone(), span);
+                        (payload_ty, payload_node)
+                    }
+                };
+                let name = ustr(name);
+                self.ty_constraints.push(TypeConstraint::Pub(
+                    PubTypeConstraint::new_type_has_variant(variant_ty, name, payload_ty, span),
+                ));
+                // Build the variant construction node.
+                let node = if let Some(values) = nodes_as_bare_immediate(&[&payload_node]) {
+                    let value = values.first().unwrap().clone();
+                    K::Immediate(Immediate::new(Value::variant(name, value)))
+                } else {
+                    K::Variant(B::new((name, payload_node)))
+                };
+                (node, variant_ty, MutType::constant(), effects)
+            },
+        )
     }
 
     fn infer_exprs_drop_mut(
@@ -1025,7 +1030,12 @@ impl UnifiedTypeInference {
                         } => {
                             let tuple_ty = unified_ty_inf.normalize_type(*tuple_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
-                            let span = Span::new(tuple_span.start(), index_span.end());
+                            assert_eq!(tuple_span.module(), index_span.module());
+                            let span = Span::new(
+                                tuple_span.start(),
+                                index_span.end(),
+                                tuple_span.module(),
+                            );
                             if let Some(variant) = variants_are.get(&tuple_ty) {
                                 let variant_span = variant.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1067,7 +1077,12 @@ impl UnifiedTypeInference {
                         } => {
                             let record_ty = unified_ty_inf.normalize_type(*record_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
-                            let span = Span::new(record_span.start(), field_span.end());
+                            assert_eq!(record_span.module(), field_span.module());
+                            let span = Span::new(
+                                record_span.start(),
+                                field_span.end(),
+                                record_span.module(),
+                            );
                             if let Some(variant) = variants_are.get(&record_ty) {
                                 let variant_span = variant.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1102,9 +1117,9 @@ impl UnifiedTypeInference {
                         }
                         TypeHasVariant {
                             variant_ty: ty,
-                            tag: variant,
+                            tag,
                             payload_ty,
-                            span: variant_span,
+                            span,
                         } => {
                             let ty = unified_ty_inf.normalize_type(*ty);
                             let payload_ty = unified_ty_inf.normalize_type(*payload_ty);
@@ -1114,7 +1129,7 @@ impl UnifiedTypeInference {
                                     ADTAccessType::TupleProject,
                                     index_span,
                                     ADTAccessType::Variant,
-                                    *variant_span,
+                                    *span,
                                 ));
                             } else if let Some(record) = records_field_is.get(&ty) {
                                 let field_span = record.iter().next().unwrap().1 .1;
@@ -1122,22 +1137,21 @@ impl UnifiedTypeInference {
                                     ADTAccessType::RecordAccess,
                                     field_span,
                                     ADTAccessType::Variant,
-                                    *variant_span,
+                                    *span,
                                 ));
                             } else if let Some(variants) = variants_are.get_mut(&ty) {
-                                if let Some((expected_ty, expected_span)) = variants.get(variant) {
+                                if let Some((expected_ty, expected_span)) = variants.get(tag) {
                                     unified_ty_inf.unify_sub_type(
                                         payload_ty,
-                                        *variant_span,
+                                        *span,
                                         *expected_ty,
                                         *expected_span,
                                     )?;
                                 } else {
-                                    variants.insert(*variant, (payload_ty, *variant_span));
+                                    variants.insert(*tag, (payload_ty, *span));
                                 }
                             } else {
-                                let variant =
-                                    HashMap::from([(*variant, (payload_ty, *variant_span))]);
+                                let variant = HashMap::from([(*tag, (payload_ty, *span))]);
                                 variants_are.insert(ty, variant);
                             }
                         }
@@ -1175,13 +1189,8 @@ impl UnifiedTypeInference {
                             variant_ty: ty,
                             tag,
                             payload_ty: variant_ty,
-                            span: variant_span,
-                        } => unified_ty_inf.unify_type_has_variant(
-                            ty,
-                            tag,
-                            variant_ty,
-                            variant_span,
-                        )?,
+                            span,
+                        } => unified_ty_inf.unify_type_has_variant(ty, tag, variant_ty, span)?,
                     };
                     match new_progress {
                         Some(new_constraint) => {

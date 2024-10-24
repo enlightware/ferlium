@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use ustr::Ustr;
+use ustr::{ustr, Ustr};
 
 use crate::{
     module::{ModuleEnv, ModuleFunction},
@@ -78,20 +78,22 @@ impl<'m> TypingEnv<'m> {
             .map(|index| (index, self.locals[index].ty, self.locals[index].mutable))
     }
 
-    pub fn get_function(&'m self, name: &str) -> Option<&'m ModuleFunction> {
+    /// Get a function from the current module, or other ones, return the name of the module if other.
+    pub fn get_function(&'m self, name: &str) -> Option<(Option<Ustr>, &'m ModuleFunction)> {
         self.module_env
             .current
             .get_function(name, self.module_env.others)
+            .map(|f| (None, f))
             .or_else(|| {
                 let path = name.split("::").next_tuple();
                 if let Some(path) = path {
                     let (module_name, function_name) = path;
-                    self.module_env
-                        .others
-                        .get(&Ustr::from(module_name))
-                        .and_then(|module| {
-                            module.get_function(function_name, self.module_env.others)
-                        })
+                    let module_name = ustr(module_name);
+                    self.module_env.others.get(&module_name).and_then(|module| {
+                        module
+                            .get_function(function_name, self.module_env.others)
+                            .map(|f| (Some(module_name), f))
+                    })
                 } else {
                     None
                 }

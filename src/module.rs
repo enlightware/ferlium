@@ -52,7 +52,8 @@ pub type Uses = Vec<Use>;
 pub struct Module {
     pub functions: FunctionsMap,
     pub types: TypeAliases,
-    pub(crate) uses: Uses,
+    pub uses: Uses,
+    pub source: Option<String>,
 }
 
 impl Module {

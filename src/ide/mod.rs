@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashSet,
     fmt::{self, Display},
     sync::LazyLock,
@@ -25,6 +26,7 @@ use char_index_lookup::CharIndexLookup;
 pub struct ErrorData {
     pub from: usize,
     pub to: usize,
+    pub module: Option<String>,
     pub text: String,
 }
 
@@ -32,12 +34,18 @@ pub struct ErrorData {
 impl ErrorData {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new(from: usize, to: usize, text: String) -> Self {
-        Self { from, to, text }
+        Self {
+            from,
+            to,
+            module: None,
+            text,
+        }
     }
     fn from_span(span: &Span, text: String) -> Self {
         Self {
             from: span.start(),
             to: span.end(),
+            module: span.module().as_ref().map(ToString::to_string),
             text,
         }
     }
@@ -45,6 +53,7 @@ impl ErrorData {
         Self {
             from: f(self.from),
             to: f(self.to),
+            module: self.module,
             text: self.text,
         }
     }
@@ -56,20 +65,46 @@ impl Display for ErrorData {
     }
 }
 
-fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorData> {
+fn compilation_error_to_data(
+    error: &CompilationError,
+    src: &str,
+    modules: &Modules,
+) -> Vec<ErrorData> {
+    let fmt_span = |span: &Span| {
+        let src = match span.module() {
+            None => src,
+            Some(module) => {
+                match modules
+                    .get(&module)
+                    .and_then(|module| module.source.as_deref())
+                {
+                    Some(src) => src,
+                    None => {
+                        return Cow::from(format!(
+                            "{}..{} in unknown module {}",
+                            span.start(),
+                            span.end(),
+                            module
+                        ))
+                    }
+                }
+            }
+        };
+        Cow::from(&src[span.start()..span.end()])
+    };
     use CompilationError::*;
     match error {
         ParsingFailed(errors) => errors
             .iter()
             .map(|(msg, span)| ErrorData::from_span(span, msg.clone()))
             .collect(),
-        VariableNotFound(name, span) => vec![ErrorData::from_span(
+        VariableNotFound(span) => vec![ErrorData::from_span(
             span,
-            format!("Variable {name} not found"),
+            format!("Variable {} not found", fmt_span(span)),
         )],
-        FunctionNotFound(name, span) => vec![ErrorData::from_span(
+        FunctionNotFound(span) => vec![ErrorData::from_span(
             span,
-            format!("Function {name} not found"),
+            format!("Function {} not found", fmt_span(span)),
         )],
         WrongNumberOfArguments {
             expected,
@@ -116,7 +151,7 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             expr_span,
             index_span,
         } => {
-            let index_name = &src[index_span.start()..index_span.end()];
+            let index_name = fmt_span(index_span);
             vec![ErrorData::from_span(
                 expr_span,
                 format!("Expected tuple because of .{index_name}, got {expr_ty}"),
@@ -126,7 +161,7 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             first_occurrence,
             second_occurrence,
         } => {
-            let name = &src[first_occurrence.start()..first_occurrence.end()];
+            let name = fmt_span(first_occurrence);
             vec![
                 ErrorData::from_span(first_occurrence, format!("Duplicated field {name}")),
                 ErrorData::from_span(second_occurrence, format!("Duplicated field {name}")),
@@ -137,7 +172,7 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             record_ty,
             ..
         } => {
-            let field_name = &src[field_span.start()..field_span.end()];
+            let field_name = fmt_span(field_span);
             vec![ErrorData::from_span(
                 field_span,
                 format!("Field {field_name} not found in record {record_ty}"),
@@ -148,21 +183,21 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             record_ty,
             ..
         } => {
-            let field_name = &src[field_span.start()..field_span.end()];
+            let field_name = fmt_span(field_span);
             vec![ErrorData::from_span(
                 field_span,
                 format!("Expected record because of .{field_name}, got {record_ty}"),
             )]
         }
         InvalidVariantName { name, ty, valids } => {
-            let name_text = &src[name.start()..name.end()];
+            let name_text = fmt_span(name);
             vec![ErrorData::from_span(
                 name,
                 format!("Variant name {name_text} does not exist for variant type {ty}, valid names are {}", valids.join(", ")),
             )]
         }
         InvalidVariantType { name, ty } => {
-            let name_text = &src[name.start()..name.end()];
+            let name_text = fmt_span(name);
             vec![ErrorData::from_span(
                 name,
                 format!(
@@ -212,7 +247,7 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             first_occurrence,
             second_occurrence,
         } => {
-            let name = &src[first_occurrence.start()..first_occurrence.end()];
+            let name = fmt_span(first_occurrence);
             let text = format!("Duplicated variant {name}");
             vec![
                 ErrorData::from_span(first_occurrence, text.clone()),
@@ -223,7 +258,7 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             first_occurrence,
             second_occurrence,
         } => {
-            let name_text = &src[first_occurrence.start()..first_occurrence.end()];
+            let name_text = fmt_span(first_occurrence);
             let text = format!("Identifier {name_text} bound more than once in a pattern");
             vec![
                 ErrorData::from_span(first_occurrence, text.clone()),
@@ -235,9 +270,9 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             b_span,
             fn_span,
         } => {
-            let a_name = &src[a_span.start()..a_span.end()];
-            let b_name = &src[b_span.start()..b_span.end()];
-            let fn_name = &src[fn_span.start()..fn_span.end()];
+            let a_name = fmt_span(a_span);
+            let b_name = fmt_span(b_span);
+            let fn_name = fmt_span(fn_span);
             vec![
                 ErrorData::from_span(a_span, format!("Mutable path {a_name} (here) overlaps with {b_name} when calling function {fn_name}")),
                 ErrorData::from_span(b_span, format!("Mutable path {a_name} overlaps with {b_name} (here) when calling function {fn_name}")),
@@ -248,8 +283,8 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             var_span,
             string_span,
         } => {
-            let var_text = &src[var_span.start()..var_span.end()];
-            let string_text = &src[string_span.start()..string_span.end()];
+            let var_text = fmt_span(var_span);
+            let string_text = fmt_span(string_span);
             vec![ErrorData::from_span(
                 var_span,
                 format!("Undefined variable {var_text} used in string formatting: {string_text}"),
@@ -278,7 +313,7 @@ fn compilation_error_to_data(error: &CompilationError, src: &str) -> Vec<ErrorDa
             )]
         }
         Internal(msg) => vec![ErrorData::from_span(
-            &Span::new(0, 0),
+            &Span::new_local(0, 0),
             format!("ICE: {msg}"),
         )],
     }
@@ -331,7 +366,7 @@ impl Compiler {
         match self.compile_internal(src) {
             Ok(()) => None,
             Err(err) => Some(
-                compilation_error_to_data(&err, src)
+                compilation_error_to_data(&err, src, &self.modules)
                     .into_iter()
                     .map(|data| data.map(|pos| char_indices.byte_to_char_position(pos)))
                     .collect(),

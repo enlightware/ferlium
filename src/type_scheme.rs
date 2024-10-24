@@ -146,6 +146,31 @@ impl PubTypeConstraint {
             }
         }
     }
+
+    fn replace_span_modules(&mut self, module_name: Option<Ustr>) {
+        use PubTypeConstraint::*;
+        match self {
+            TupleAtIndexIs {
+                tuple_span,
+                index_span,
+                ..
+            } => {
+                tuple_span.set_module(module_name);
+                index_span.set_module(module_name);
+            }
+            RecordFieldIs {
+                record_span,
+                field_span,
+                ..
+            } => {
+                record_span.set_module(module_name);
+                field_span.set_module(module_name);
+            }
+            TypeHasVariant { span, .. } => {
+                span.set_module(module_name);
+            }
+        }
+    }
 }
 
 impl TypeLike for PubTypeConstraint {
@@ -426,12 +451,18 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Instantiate this type scheme with fresh type variables in ty_inf.
-    pub(crate) fn instantiate(&self, ty_inf: &mut TypeInference) -> (Ty, FnInstData) {
+    pub(crate) fn instantiate(
+        &self,
+        ty_inf: &mut TypeInference,
+        src_module_name: Option<Ustr>,
+    ) -> (Ty, FnInstData) {
         let ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
         let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
         let subst = (ty_subst, eff_subst);
         for constraint in &self.constraints {
-            ty_inf.add_pub_constraint(constraint.instantiate(&subst));
+            let mut constraint = constraint.instantiate(&subst);
+            constraint.replace_span_modules(src_module_name);
+            ty_inf.add_pub_constraint(constraint);
         }
         let ty = self.ty.instantiate(&subst);
         let dict_req = instantiate_dictionaries_req(&self.extra_parameters(), &subst);

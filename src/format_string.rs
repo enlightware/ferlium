@@ -51,7 +51,7 @@ pub fn emit_format_string_ast(
         LazyLock::new(|| Regex::new(r"\{([\p{L}_][\p{L}\p{N}_]*)\}").unwrap());
 
     // Start with an empty mutable string.
-    let start_span = Span::new(span.start(), span.start());
+    let start_span = Span::new_local(span.start(), span.start());
     let mut exprs = vec![Expr::new(
         ExprKind::Let(
             (ustr("@s"), start_span),
@@ -88,14 +88,14 @@ pub fn emit_format_string_ast(
         // Push the literal text before the match.
         if match_start > last_end {
             // Push the literal text before the match.
-            let string_span = Span::new(start_pos + last_end, start_pos + match_start);
+            let string_span = Span::new_local(start_pos + last_end, start_pos + match_start);
             let string = &input[last_end..match_start];
             let expr = string_literal(string, string_span);
             extend_exprs_with(expr);
         }
 
         // Push the variable name found within the braces.
-        let var_span = Span::new(start_pos + match_start + 1, start_pos + match_end - 1);
+        let var_span = Span::new_local(start_pos + match_start + 1, start_pos + match_end - 1);
         let var_name = &input[match_start + 1..match_end - 1];
         let expr = variable_to_string(var_name, var_span, span, env)?;
         extend_exprs_with(expr);
@@ -104,14 +104,14 @@ pub fn emit_format_string_ast(
     }
     // Append remaining literal text after the last match.
     if last_end < input.len() {
-        let string_span = Span::new(start_pos + last_end, start_pos + input.len());
+        let string_span = Span::new_local(start_pos + last_end, start_pos + input.len());
         let string = &input[last_end..];
         let expr = string_literal(string, string_span);
         extend_exprs_with(expr);
     }
 
     // Evaluate the mutable string and return it.
-    let end_span = Span::new(span.end(), span.end());
+    let end_span = Span::new_local(span.end(), span.end());
     exprs.push(Expr::new(ExprKind::Identifier(ustr("@s")), end_span));
 
     Ok(Expr::new(ExprKind::Block(exprs), span))

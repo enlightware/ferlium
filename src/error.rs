@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
 
-use crate::Span;
+use crate::span::Span;
 use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
@@ -155,15 +155,17 @@ impl InternalCompilationError {
 impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &str)> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (env, source) = self.data;
+        let fmt_span = |span: &Span| match span.module() {
+            Some(module) => format!("{}..{} in module {}", span.start(), span.end(), module),
+            None => source[span.start()..span.end()].to_string(),
+        };
         use InternalCompilationError::*;
         match self.value {
             SymbolNotFound(span) => {
-                let name = &source[span.start()..span.end()];
-                write!(f, "Variable or function not found: {}", name)
+                write!(f, "Variable or function not found: {}", fmt_span(span))
             }
             FunctionNotFound(span) => {
-                let name = &source[span.start()..span.end()];
-                write!(f, "Function not found: {}", name)
+                write!(f, "Function not found: {}", fmt_span(span))
             }
             WrongNumberOfArguments { expected, got, .. } => {
                 write!(
@@ -175,8 +177,8 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
             MustBeMutable(current_span, reason_span, ctx) => {
                 let (current_span, reason_span) =
                     resolve_must_be_mutable_ctx(*current_span, *reason_span, *ctx, source);
-                let current_name = &source[current_span.start()..current_span.end()];
-                let reason_name = &source[reason_span.start()..reason_span.end()];
+                let current_name = fmt_span(&current_span);
+                let reason_name = fmt_span(&reason_span);
                 write!(
                     f,
                     "Expression \"{current_name}\" must be mutable due to \"{reason_name}\""
@@ -221,7 +223,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 write!(
                     f,
                     "Duplicated record field: {}",
-                    &source[first_occurrence_span.start()..first_occurrence_span.end()]
+                    fmt_span(first_occurrence_span),
                 )
             }
             InvalidRecordField {
@@ -232,7 +234,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 write!(
                     f,
                     "Field {} not found in record {}",
-                    &source[field_span.start()..field_span.end()],
+                    fmt_span(field_span),
                     record_ty.format_with(env)
                 )
             }
@@ -244,7 +246,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 write!(
                     f,
                     "Expected record due to {}, got \"{}\"",
-                    &source[field_span.start()..field_span.end()],
+                    fmt_span(field_span),
                     record_ty.format_with(env)
                 )
             }
@@ -252,7 +254,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 write!(
                     f,
                     "Variant name {} does not exist for variant type {}",
-                    &source[name.start()..name.end()],
+                    fmt_span(name),
                     ty.format_with(env)
                 )
             }
@@ -261,7 +263,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     f,
                     "Type {} is not a variant, but variant constructor {} requires it",
                     ty.format_with(env),
-                    &source[name.start()..name.end()]
+                    fmt_span(name),
                 )
             }
             InconsistentADT {
@@ -274,9 +276,9 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     f,
                     "Inconsistent data types: {} due to .{} is incompatible with {} due to .{}",
                     a_type.adt_kind(),
-                    &source[a_span.start()..a_span.end()],
+                    fmt_span(a_span),
                     b_type.adt_kind(),
-                    &source[b_span.start()..b_span.end()],
+                    fmt_span(b_span),
                 )
             }
             InconsistentPattern {
@@ -289,20 +291,16 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     f,
                     "Inconsistent pattern types: {} due to {} is incompatible with {} due to {}",
                     a_type.name(),
-                    &source[a_span.start()..a_span.end()],
+                    fmt_span(a_span),
                     b_type.name(),
-                    &source[b_span.start()..b_span.end()],
+                    fmt_span(b_span),
                 )
             }
             DuplicatedVariant {
                 first_occurrence: first_occurrence_span,
                 ..
             } => {
-                write!(
-                    f,
-                    "Duplicated variant: {}",
-                    &source[first_occurrence_span.start()..first_occurrence_span.end()]
-                )
+                write!(f, "Duplicated variant: {}", fmt_span(first_occurrence_span),)
             }
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence: first_occurrence_span,
@@ -311,7 +309,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 write!(
                     f,
                     "Identifier {} bound more than once in a pattern",
-                    &source[first_occurrence_span.start()..first_occurrence_span.end()]
+                    fmt_span(first_occurrence_span),
                 )
             }
             MutablePathsOverlap {
@@ -322,20 +320,20 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 write!(
                     f,
                     "Mutable paths overlap: {} and {} when calling {}",
-                    &source[a_span.start()..a_span.end()],
-                    &source[b_span.start()..b_span.end()],
-                    &source[fn_span.start()..fn_span.end()],
+                    fmt_span(a_span),
+                    fmt_span(b_span),
+                    fmt_span(fn_span),
                 )
             }
             UndefinedVarInStringFormatting {
                 var_span,
                 string_span,
             } => {
-                let var_name = &source[var_span.start()..var_span.end()];
-                let string_text = &source[string_span.start()..string_span.end()];
                 write!(
                     f,
-                    "Undefined variable {var_name} used in string formatting {string_text}"
+                    "Undefined variable {} used in string formatting {}",
+                    fmt_span(var_span),
+                    fmt_span(string_span),
                 )
             }
             InvalidEffectDependency {
@@ -348,9 +346,9 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     f,
                     "Invalid effect dependency: {} due to {} is incompatible with {} due to {}",
                     cur,
-                    &source[source_span.start()..source_span.end()],
+                    fmt_span(source_span),
                     target,
-                    &source[target_span.start()..target_span.end()],
+                    fmt_span(target_span),
                 )
             }
             UnknownProperty {
@@ -367,8 +365,8 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
 #[derive(Debug, EnumAsInner)]
 pub enum CompilationError {
     ParsingFailed(Vec<LocatedError>),
-    VariableNotFound(String, Span),
-    FunctionNotFound(String, Span),
+    VariableNotFound(Span),
+    FunctionNotFound(Span),
     WrongNumberOfArguments {
         expected: usize,
         expected_span: Span,
@@ -462,17 +460,15 @@ pub enum CompilationError {
 }
 
 impl CompilationError {
-    pub fn from_internal(error: InternalCompilationError, env: &ModuleEnv<'_>, src: &str) -> Self {
+    pub fn from_internal(
+        error: InternalCompilationError,
+        env: &ModuleEnv<'_>,
+        source: &str,
+    ) -> Self {
         use InternalCompilationError::*;
         match error {
-            SymbolNotFound(span) => {
-                let name = &src[span.start()..span.end()];
-                Self::VariableNotFound(name.to_string(), span)
-            }
-            FunctionNotFound(span) => {
-                let name = &src[span.start()..span.end()];
-                Self::FunctionNotFound(name.to_string(), span)
-            }
+            SymbolNotFound(span) => Self::VariableNotFound(span),
+            FunctionNotFound(span) => Self::FunctionNotFound(span),
             WrongNumberOfArguments {
                 expected,
                 expected_span,
@@ -486,7 +482,7 @@ impl CompilationError {
             },
             MustBeMutable(current_span, reason_span, ctx) => {
                 let (current_span, reason_span) =
-                    resolve_must_be_mutable_ctx(current_span, reason_span, ctx, src);
+                    resolve_must_be_mutable_ctx(current_span, reason_span, ctx, source);
                 Self::MustBeMutable(current_span, reason_span)
             }
             IsNotSubtype(cur, cur_span, exp, exp_span) => Self::IsNotSubtype(
@@ -826,8 +822,13 @@ pub fn resolve_must_be_mutable_ctx(
     match ctx {
         MustBeMutableContext::Value => (current_span, reason_span),
         MustBeMutableContext::FnTypeArg(index) => {
-            let arg_span = extract_ith_fn_arg(src, reason_span, index);
-            (arg_span, current_span)
+            // FIXME: this should probably be done later on when the source is available anyway
+            if reason_span.module().is_none() {
+                let arg_span = extract_ith_fn_arg(src, reason_span, index);
+                (arg_span, current_span)
+            } else {
+                (current_span, reason_span)
+            }
         }
     }
 }
@@ -865,7 +866,7 @@ pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
             ')' => count -= 1,
             ',' if count == 0 => {
                 if arg_count == index {
-                    return Span::new(
+                    return Span::new_local(
                         span.start() + args_start + 1 + start,
                         span.start() + args_start + 1 + i,
                     );
@@ -879,7 +880,7 @@ pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
 
     // Handling the last argument
     if arg_count == index && start < args_section.len() {
-        return Span::new(
+        return Span::new_local(
             span.start() + args_start + 1 + start,
             span.start() + args_start + 1 + args_section.len(),
         );
@@ -895,7 +896,7 @@ mod tests {
     #[test]
     fn extract_ith_fn_arg_single() {
         let src = "(|x| x)((1+2))";
-        let span = Span::new(0, src.len());
+        let span = Span::new_local(0, src.len());
         let expected = ["(1+2)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
@@ -906,7 +907,7 @@ mod tests {
     #[test]
     fn extract_ith_fn_arg_multi() {
         let src = "(|x,y| x*y)(12, (1 + 3))";
-        let span = Span::new(0, src.len());
+        let span = Span::new_local(0, src.len());
         let expected = ["12", " (1 + 3)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);

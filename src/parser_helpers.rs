@@ -24,7 +24,7 @@ use ustr::{ustr, Ustr};
 
 /// Create a span from two numbers
 pub(crate) fn span(l: usize, r: usize) -> Span {
-    Span::new(l, r)
+    Span::new_local(l, r)
 }
 
 /// Make a custom parse error
@@ -169,7 +169,7 @@ pub(crate) fn cond_if(cond: Expr, if_true: Expr) -> ExprKind {
 /// Create a for loop
 pub(crate) fn for_loop(var: (Ustr, Span), start: Expr, end: Expr, body: Expr) -> ExprKind {
     use ExprKind::*;
-    let iterator_span = Span::new(start.span.start(), end.span.end());
+    let iterator_span = span(start.span.start(), end.span.end());
     let iterator = Expr::new(
         StaticApply(
             (ustr("range_iterator_new"), iterator_span),

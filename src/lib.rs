@@ -218,10 +218,11 @@ pub fn compile(
     }
 
     // Emit IR for the module.
-    let module = emit_module(&module_ast, other_modules, Some(&module)).map_err(|error| {
+    let mut module = emit_module(&module_ast, other_modules, Some(&module)).map_err(|error| {
         let env = ModuleEnv::new(&module, other_modules);
         CompilationError::from_internal(error, &env, src)
     })?;
+    module.source = Some(src.to_string());
     if !module.is_empty() {
         log::debug!("Module IR\n{}", FormatWith::new(&module, other_modules));
     }

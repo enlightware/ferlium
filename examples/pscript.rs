@@ -396,6 +396,7 @@ fn main() {
             };
             println!("Module IR:\n{}", FormatWith::new(&module, &other_modules));
         }
+        module.source = Some(src.clone());
 
         // Is there an expression?
         let expr_ast = match expr_ast {
