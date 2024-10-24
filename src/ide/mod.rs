@@ -70,27 +70,22 @@ fn compilation_error_to_data(
     src: &str,
     modules: &Modules,
 ) -> Vec<ErrorData> {
-    let fmt_span = |span: &Span| {
-        let src = match span.module() {
-            None => src,
-            Some(module) => {
-                match modules
-                    .get(&module)
-                    .and_then(|module| module.source.as_deref())
-                {
-                    Some(src) => src,
-                    None => {
-                        return Cow::from(format!(
-                            "{}..{} in unknown module {}",
-                            span.start(),
-                            span.end(),
-                            module
-                        ))
-                    }
-                }
-            }
-        };
-        Cow::from(&src[span.start()..span.end()])
+    let fmt_span = |span: &Span| match span.module() {
+        None => Cow::from(&src[span.start()..span.end()]),
+        Some(module) => Cow::from(
+            match modules
+                .get(&module)
+                .and_then(|module| module.source.as_deref())
+            {
+                Some(src) => format!("{} (in {})", &src[span.start()..span.end()], module),
+                None => format!(
+                    "{}..{} in unknown module {}",
+                    span.start(),
+                    span.end(),
+                    module
+                ),
+            },
+        ),
     };
     use CompilationError::*;
     match error {
