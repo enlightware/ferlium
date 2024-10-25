@@ -1,4 +1,4 @@
-use crate::Span;
+use crate::Location;
 use indexmap::IndexMap;
 use ustr::Ustr;
 
@@ -42,17 +42,17 @@ impl FnInstData {
 #[derive(Debug, Clone)]
 pub(crate) struct UnboundTyCtx {
     pub ty: Type,
-    pub span: Span,
+    pub span: Location,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct UnboundTyCtxs(Vec<UnboundTyCtx>);
 impl UnboundTyCtxs {
-    pub fn push(&mut self, ty: Type, span: Span) {
+    pub fn push(&mut self, ty: Type, span: Location) {
         self.0.push(UnboundTyCtx { ty, span });
     }
 
-    pub fn first(&self) -> (Type, Span) {
+    pub fn first(&self) -> (Type, Location) {
         let ctx = &self.0[0];
         (ctx.ty, ctx.span)
     }
@@ -99,7 +99,7 @@ pub struct Application {
 pub struct StaticApplication {
     pub function: FunctionRef,
     pub function_name: Ustr,
-    pub function_span: Span,
+    pub function_span: Location,
     pub arguments: Vec<Node>,
     pub ty: FnType,
     pub inst_data: FnInstData,
@@ -108,7 +108,7 @@ pub struct StaticApplication {
 #[derive(Debug, Clone)]
 pub struct EnvStore {
     pub node: Node,
-    pub name_span: Span,
+    pub name_span: Location,
 }
 impl EnvStore {
     pub fn instantiate(&mut self, subst: &InstSubstitution) {
@@ -138,7 +138,7 @@ pub struct Case {
 pub struct Iteration {
     pub iterator: Node,
     pub body: Node,
-    pub var_name_span: Span,
+    pub var_name_span: Location,
 }
 
 /// The kind-specific part of the expression-based execution tree
@@ -175,11 +175,11 @@ pub struct Node {
     pub kind: NodeKind,
     pub ty: Type,
     pub effects: EffType,
-    pub span: Span,
+    pub span: Location,
 }
 
 impl Node {
-    pub fn new(kind: NodeKind, ty: Type, effects: EffType, span: Span) -> Self {
+    pub fn new(kind: NodeKind, ty: Type, effects: EffType, span: Location) -> Self {
         Self {
             kind,
             ty,

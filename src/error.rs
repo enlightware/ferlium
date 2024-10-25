@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
 
-use crate::span::Span;
+use crate::location::Location;
 use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
@@ -12,7 +12,7 @@ use crate::{
     r#type::{Type, TypeVar},
 };
 
-pub type LocatedError = (String, Span);
+pub type LocatedError = (String, Location);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ADTAccessType {
@@ -40,104 +40,104 @@ pub enum MustBeMutableContext {
 /// Compilation error, for internal use
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InternalCompilationError {
-    SymbolNotFound(Span),
-    FunctionNotFound(Span),
+    SymbolNotFound(Location),
+    FunctionNotFound(Location),
     WrongNumberOfArguments {
         expected: usize,
-        expected_span: Span,
+        expected_span: Location,
         got: usize,
-        got_span: Span,
+        got_span: Location,
     },
-    MustBeMutable(Span, Span, MustBeMutableContext),
-    IsNotSubtype(Type, Span, Type, Span),
-    InfiniteType(TypeVar, Type, Span),
+    MustBeMutable(Location, Location, MustBeMutableContext),
+    IsNotSubtype(Type, Location, Type, Location),
+    InfiniteType(TypeVar, Type, Location),
     UnboundTypeVar {
         ty_var: TypeVar,
         ty: Type,
-        span: Span,
+        span: Location,
     },
     InvalidTupleIndex {
         index: usize,
-        index_span: Span,
+        index_span: Location,
         tuple_length: usize,
-        tuple_span: Span,
+        tuple_span: Location,
     },
     InvalidTupleProjection {
         tuple_ty: Type,
-        tuple_span: Span,
-        index_span: Span,
+        tuple_span: Location,
+        index_span: Location,
     },
     DuplicatedRecordField {
-        first_occurrence: Span,
-        second_occurrence: Span,
+        first_occurrence: Location,
+        second_occurrence: Location,
     },
     InvalidRecordField {
-        field_span: Span,
+        field_span: Location,
         record_ty: Type,
-        record_span: Span,
+        record_span: Location,
     },
     InvalidRecordFieldAccess {
-        field_span: Span,
+        field_span: Location,
         record_ty: Type,
-        record_span: Span,
+        record_span: Location,
     },
     InvalidVariantName {
-        name: Span,
+        name: Location,
         ty: Type,
     },
     InvalidVariantType {
-        name: Span,
+        name: Location,
         ty: Type,
     },
     InconsistentADT {
         a_type: ADTAccessType,
-        a_span: Span,
+        a_span: Location,
         b_type: ADTAccessType,
-        b_span: Span,
+        b_span: Location,
     },
     InconsistentPattern {
         a_type: PatternType,
-        a_span: Span,
+        a_span: Location,
         b_type: PatternType,
-        b_span: Span,
+        b_span: Location,
     },
     DuplicatedVariant {
-        first_occurrence: Span,
-        second_occurrence: Span,
+        first_occurrence: Location,
+        second_occurrence: Location,
     },
     IdentifierBoundMoreThanOnceInAPattern {
-        first_occurrence: Span,
-        second_occurrence: Span,
+        first_occurrence: Location,
+        second_occurrence: Location,
     },
     MutablePathsOverlap {
-        a_span: Span,
-        b_span: Span,
-        fn_span: Span,
+        a_span: Location,
+        b_span: Location,
+        fn_span: Location,
     },
     UndefinedVarInStringFormatting {
-        var_span: Span,
-        string_span: Span,
+        var_span: Location,
+        string_span: Location,
     },
     InvalidEffectDependency {
         source: EffType,
-        source_span: Span,
+        source_span: Location,
         target: EffType,
-        target_span: Span,
+        target_span: Location,
     },
     UnknownProperty {
         scope: Ustr,
         variable: Ustr,
         cause: PropertyAccess,
-        span: Span,
+        span: Location,
     },
     Internal(String),
 }
 impl InternalCompilationError {
     pub fn new_inconsistent_adt(
         mut a_type: ADTAccessType,
-        mut a_span: Span,
+        mut a_span: Location,
         mut b_type: ADTAccessType,
-        mut b_span: Span,
+        mut b_span: Location,
     ) -> Self {
         if a_span.start() > b_span.start() {
             std::mem::swap(&mut a_type, &mut b_type);
@@ -155,9 +155,14 @@ impl InternalCompilationError {
 impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &str)> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (env, source) = self.data;
-        let fmt_span = |span: &Span| match span.module() {
-            Some(module) => format!("{}..{} in module {}", span.start(), span.end(), module),
-            None => source[span.start()..span.end()].to_string(),
+        let fmt_span = |loc: &Location| match loc.module() {
+            Some(module) => format!(
+                "{}..{} in module {}",
+                module.span().start(),
+                module.span().end(),
+                module.module_name()
+            ),
+            None => source[loc.start()..loc.end()].to_string(),
         };
         use InternalCompilationError::*;
         match self.value {
@@ -365,96 +370,96 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
 #[derive(Debug, EnumAsInner)]
 pub enum CompilationError {
     ParsingFailed(Vec<LocatedError>),
-    VariableNotFound(Span),
-    FunctionNotFound(Span),
+    VariableNotFound(Location),
+    FunctionNotFound(Location),
     WrongNumberOfArguments {
         expected: usize,
-        expected_span: Span,
+        expected_span: Location,
         got: usize,
-        got_span: Span,
+        got_span: Location,
     },
-    MustBeMutable(Span, Span),
-    IsNotSubtype(String, Span, String, Span),
-    InfiniteType(String, String, Span),
+    MustBeMutable(Location, Location),
+    IsNotSubtype(String, Location, String, Location),
+    InfiniteType(String, String, Location),
     UnboundTypeVar {
         ty_var: String,
         ty: String,
-        span: Span,
+        span: Location,
     },
     InvalidTupleIndex {
         index: usize,
-        index_span: Span,
+        index_span: Location,
         tuple_length: usize,
-        tuple_span: Span,
+        tuple_span: Location,
     },
     InvalidTupleProjection {
         expr_ty: String,
-        expr_span: Span,
-        index_span: Span,
+        expr_span: Location,
+        index_span: Location,
     },
     DuplicatedRecordField {
-        first_occurrence: Span,
-        second_occurrence: Span,
+        first_occurrence: Location,
+        second_occurrence: Location,
     },
     InvalidRecordField {
-        field_span: Span,
+        field_span: Location,
         record_ty: String,
-        record_span: Span,
+        record_span: Location,
     },
     InvalidRecordFieldAccess {
-        field_span: Span,
+        field_span: Location,
         record_ty: String,
-        record_span: Span,
+        record_span: Location,
     },
     InvalidVariantName {
-        name: Span,
+        name: Location,
         ty: String,
         valids: Vec<String>,
     },
     InvalidVariantType {
-        name: Span,
+        name: Location,
         ty: String,
     },
     InconsistentADT {
         a_type: ADTAccessType,
-        a_span: Span,
+        a_span: Location,
         b_type: ADTAccessType,
-        b_span: Span,
+        b_span: Location,
     },
     InconsistentPattern {
         a_type: PatternType,
-        a_span: Span,
+        a_span: Location,
         b_type: PatternType,
-        b_span: Span,
+        b_span: Location,
     },
     DuplicatedVariant {
-        first_occurrence: Span,
-        second_occurrence: Span,
+        first_occurrence: Location,
+        second_occurrence: Location,
     },
     IdentifierBoundMoreThanOnceInAPattern {
-        first_occurrence: Span,
-        second_occurrence: Span,
+        first_occurrence: Location,
+        second_occurrence: Location,
     },
     MutablePathsOverlap {
-        a_span: Span,
-        b_span: Span,
-        fn_span: Span,
+        a_span: Location,
+        b_span: Location,
+        fn_span: Location,
     },
     UndefinedVarInStringFormatting {
-        var_span: Span,
-        string_span: Span,
+        var_span: Location,
+        string_span: Location,
     },
     InvalidEffectDependency {
         source: EffType,
-        source_span: Span,
+        source_span: Location,
         target: EffType,
-        target_span: Span,
+        target_span: Location,
     },
     UnknownProperty {
         scope: Ustr,
         variable: Ustr,
         cause: PropertyAccess,
-        span: Span,
+        span: Location,
     },
     Internal(String),
 }
@@ -814,11 +819,11 @@ impl Display for RuntimeError {
 }
 
 pub fn resolve_must_be_mutable_ctx(
-    current_span: Span,
-    reason_span: Span,
+    current_span: Location,
+    reason_span: Location,
     ctx: MustBeMutableContext,
     src: &str,
-) -> (Span, Span) {
+) -> (Location, Location) {
     match ctx {
         MustBeMutableContext::Value => (current_span, reason_span),
         MustBeMutableContext::FnTypeArg(index) => {
@@ -833,7 +838,7 @@ pub fn resolve_must_be_mutable_ctx(
     }
 }
 
-pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
+pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
     let fn_text = &src[span.start()..span.end()];
     let bytes = fn_text.as_bytes();
     let mut count = 0;
@@ -866,7 +871,7 @@ pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
             ')' => count -= 1,
             ',' if count == 0 => {
                 if arg_count == index {
-                    return Span::new_local(
+                    return Location::new_local(
                         span.start() + args_start + 1 + start,
                         span.start() + args_start + 1 + i,
                     );
@@ -880,7 +885,7 @@ pub fn extract_ith_fn_arg(src: &str, span: Span, index: usize) -> Span {
 
     // Handling the last argument
     if arg_count == index && start < args_section.len() {
-        return Span::new_local(
+        return Location::new_local(
             span.start() + args_start + 1 + start,
             span.start() + args_start + 1 + args_section.len(),
         );
@@ -896,7 +901,7 @@ mod tests {
     #[test]
     fn extract_ith_fn_arg_single() {
         let src = "(|x| x)((1+2))";
-        let span = Span::new_local(0, src.len());
+        let span = Location::new_local(0, src.len());
         let expected = ["(1+2)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
@@ -907,7 +912,7 @@ mod tests {
     #[test]
     fn extract_ith_fn_arg_multi() {
         let src = "(|x,y| x*y)(12, (1 + 3))";
-        let span = Span::new_local(0, src.len());
+        let span = Location::new_local(0, src.len());
         let expected = ["12", " (1 + 3)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);

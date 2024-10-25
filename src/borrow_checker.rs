@@ -4,7 +4,7 @@ use crate::{
     error::InternalCompilationError,
     ir::{Node, NodeKind},
     r#type::FnArgType,
-    Span,
+    Location,
 };
 
 enum PathPart {
@@ -92,7 +92,7 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
 fn check_arguments(
     arg_types: &[FnArgType],
     arguments: &[Node],
-    fn_span: Span,
+    fn_span: Location,
 ) -> Result<(), InternalCompilationError> {
     // Collect all mutable arguments indices and their paths.
     let in_out_args: Vec<_> = arg_types

@@ -6,27 +6,27 @@ use ustr::Ustr;
 
 use crate::{
     containers::B, error::LocatedError, format::write_with_separator, module::FmtWithModuleEnv,
-    mutability::MutVal, r#type::Type, value::Value, Span,
+    mutability::MutVal, r#type::Type, value::Value, Location,
 };
 
 /// A spanned Ustr
-pub type UstrSpan = (Ustr, Span);
+pub type UstrSpan = (Ustr, Location);
 
 #[derive(Debug, Clone)]
 pub struct ModuleFunction {
     pub name: UstrSpan,
     pub args: Vec<UstrSpan>,
-    pub args_span: Span,
+    pub args_span: Location,
     pub body: B<Expr>,
-    pub span: Span,
+    pub span: Location,
 }
 impl ModuleFunction {
     pub fn new(
         name: UstrSpan,
         args: Vec<UstrSpan>,
-        args_span: Span,
+        args_span: Location,
         body: B<Expr>,
-        span: Span,
+        span: Location,
     ) -> Self {
         Self {
             name,
@@ -48,9 +48,9 @@ impl Module {
     pub fn new_with_function(
         name: UstrSpan,
         args: Vec<UstrSpan>,
-        args_span: Span,
+        args_span: Location,
         body: Expr,
-        span: Span,
+        span: Location,
     ) -> Self {
         Self {
             functions: vec![ModuleFunction::new(
@@ -134,10 +134,10 @@ pub enum ExprKind {
     /// A function from the module environment, or a variant constructor
     StaticApply(UstrSpan, Vec<Expr>),
     Block(Vec<Expr>),
-    Assign(B<Expr>, Span, B<Expr>),
+    Assign(B<Expr>, Location, B<Expr>),
     PropertyPath(Ustr, Ustr),
     Tuple(Vec<Expr>),
-    Project(B<Expr>, (usize, Span)),
+    Project(B<Expr>, (usize, Location)),
     Record(Vec<(UstrSpan, Expr)>),
     FieldAccess(B<Expr>, UstrSpan),
     Array(Vec<Expr>),
@@ -151,10 +151,10 @@ pub enum ExprKind {
 #[derive(Debug, Clone)]
 pub struct Expr {
     pub kind: ExprKind,
-    pub span: Span,
+    pub span: Location,
 }
 impl Expr {
-    pub fn new(kind: ExprKind, span: Span) -> Self {
+    pub fn new(kind: ExprKind, span: Location) -> Self {
         Self { kind, span }
     }
 
@@ -375,11 +375,11 @@ impl PatternType {
 #[derive(Debug, Clone)]
 pub struct Pattern {
     pub kind: PatternKind,
-    pub span: Span,
+    pub span: Location,
 }
 
 impl Pattern {
-    pub fn new(kind: PatternKind, span: Span) -> Self {
+    pub fn new(kind: PatternKind, span: Location) -> Self {
         Self { kind, span }
     }
 

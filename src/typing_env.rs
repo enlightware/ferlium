@@ -5,7 +5,7 @@ use crate::{
     module::{ModuleEnv, ModuleFunction},
     mutability::MutType,
     r#type::{FnArgType, Type},
-    Span,
+    Location,
 };
 
 /// A local variable within a typing environment.
@@ -14,11 +14,11 @@ pub struct Local {
     pub name: Ustr,
     pub mutable: MutType,
     pub ty: Type,
-    pub span: Span,
+    pub span: Location,
 }
 
 impl Local {
-    pub fn new(name: Ustr, mutable: MutType, ty: Type, span: Span) -> Self {
+    pub fn new(name: Ustr, mutable: MutType, ty: Type, span: Location) -> Self {
         Self {
             name,
             mutable,
@@ -27,7 +27,7 @@ impl Local {
         }
     }
 
-    pub fn new_var(name: Ustr, ty: Type, span: Span) -> Self {
+    pub fn new_var(name: Ustr, ty: Type, span: Location) -> Self {
         Self {
             name,
             mutable: MutType::mutable(),
@@ -36,7 +36,7 @@ impl Local {
         }
     }
 
-    pub fn new_let(name: Ustr, ty: Type, span: Span) -> Self {
+    pub fn new_let(name: Ustr, ty: Type, span: Location) -> Self {
         Self {
             name,
             mutable: MutType::constant(),

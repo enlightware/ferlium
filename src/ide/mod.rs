@@ -12,21 +12,20 @@ use crate::{
     r#type::{FnArgType, Type},
     std::{new_module_with_prelude, new_std_module_env},
     value::{NativeValue, Value},
-    CompilationError, DisplayStyle, Module, ModuleAndExpr, ModuleEnv, Modules, Span,
+    CompilationError, DisplayStyle, Location, Module, ModuleAndExpr, ModuleEnv, Modules,
 };
 use regex::Regex;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 mod char_index_lookup;
-use char_index_lookup::CharIndexLookup;
+use char_index_lookup::{get_line_column, CharIndexLookup};
 
 /// An error-data structure to be used in IDEs
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 pub struct ErrorData {
     pub from: usize,
     pub to: usize,
-    pub module: Option<String>,
     pub text: String,
 }
 
@@ -34,18 +33,12 @@ pub struct ErrorData {
 impl ErrorData {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new(from: usize, to: usize, text: String) -> Self {
-        Self {
-            from,
-            to,
-            module: None,
-            text,
-        }
+        Self { from, to, text }
     }
-    fn from_span(span: &Span, text: String) -> Self {
+    fn from_location(loc: &Location, text: String) -> Self {
         Self {
-            from: span.start(),
-            to: span.end(),
-            module: span.module().as_ref().map(ToString::to_string),
+            from: loc.start(),
+            to: loc.end(),
             text,
         }
     }
@@ -53,7 +46,6 @@ impl ErrorData {
         Self {
             from: f(self.from),
             to: f(self.to),
-            module: self.module,
             text: self.text,
         }
     }
@@ -70,19 +62,28 @@ fn compilation_error_to_data(
     src: &str,
     modules: &Modules,
 ) -> Vec<ErrorData> {
-    let fmt_span = |span: &Span| match span.module() {
+    let fmt_span = |span: &Location| match span.module() {
         None => Cow::from(&src[span.start()..span.end()]),
         Some(module) => Cow::from(
             match modules
-                .get(&module)
+                .get(&module.module_name())
                 .and_then(|module| module.source.as_deref())
             {
-                Some(src) => format!("{} (in {})", &src[span.start()..span.end()], module),
+                Some(src) => {
+                    let position = get_line_column(src, module.span().start());
+                    format!(
+                        "{} (in {}:{}:{})",
+                        &src[module.span().start()..module.span().end()],
+                        module.module_name(),
+                        position.0,
+                        position.1,
+                    )
+                }
                 None => format!(
                     "{}..{} in unknown module {}",
-                    span.start(),
-                    span.end(),
-                    module
+                    module.span().start(),
+                    module.span().end(),
+                    module.module_name(),
                 ),
             },
         ),
@@ -91,13 +92,13 @@ fn compilation_error_to_data(
     match error {
         ParsingFailed(errors) => errors
             .iter()
-            .map(|(msg, span)| ErrorData::from_span(span, msg.clone()))
+            .map(|(msg, span)| ErrorData::from_location(span, msg.clone()))
             .collect(),
-        VariableNotFound(span) => vec![ErrorData::from_span(
+        VariableNotFound(span) => vec![ErrorData::from_location(
             span,
             format!("Variable {} not found", fmt_span(span)),
         )],
-        FunctionNotFound(span) => vec![ErrorData::from_span(
+        FunctionNotFound(span) => vec![ErrorData::from_location(
             span,
             format!("Function {} not found", fmt_span(span)),
         )],
@@ -107,28 +108,28 @@ fn compilation_error_to_data(
             got,
             got_span,
         } => vec![
-            ErrorData::from_span(
+            ErrorData::from_location(
                 expected_span,
                 format!("Expected {expected} arguments here, got {got}"),
             ),
-            ErrorData::from_span(
+            ErrorData::from_location(
                 got_span,
                 format!("Expected {expected} arguments, got {got} here"),
             ),
         ],
-        MustBeMutable(cur_span, _reason_span) => vec![ErrorData::from_span(
+        MustBeMutable(cur_span, _reason_span) => vec![ErrorData::from_location(
             cur_span,
             "Expression must be mutable".to_string(),
         )],
-        IsNotSubtype(cur, cur_span, exp, _exp_span) => vec![ErrorData::from_span(
+        IsNotSubtype(cur, cur_span, exp, _exp_span) => vec![ErrorData::from_location(
             cur_span,
             format!("Type {cur} is incompatible with type {exp}"),
         )],
-        InfiniteType(ty_var, ty, span) => vec![ErrorData::from_span(
+        InfiniteType(ty_var, ty, span) => vec![ErrorData::from_location(
             span,
             format!("Infinite type: {ty_var} = {ty}"),
         )],
-        UnboundTypeVar { ty_var, ty, span } => vec![ErrorData::from_span(
+        UnboundTypeVar { ty_var, ty, span } => vec![ErrorData::from_location(
             span,
             format!("Unbound type variable {ty_var} in {ty}"),
         )],
@@ -137,7 +138,7 @@ fn compilation_error_to_data(
             index_span,
             tuple_length,
             ..
-        } => vec![ErrorData::from_span(
+        } => vec![ErrorData::from_location(
             index_span,
             format!("Invalid index {index} of a tuple of length {tuple_length}"),
         )],
@@ -147,7 +148,7 @@ fn compilation_error_to_data(
             index_span,
         } => {
             let index_name = fmt_span(index_span);
-            vec![ErrorData::from_span(
+            vec![ErrorData::from_location(
                 expr_span,
                 format!("Expected tuple because of .{index_name}, got {expr_ty}"),
             )]
@@ -158,8 +159,8 @@ fn compilation_error_to_data(
         } => {
             let name = fmt_span(first_occurrence);
             vec![
-                ErrorData::from_span(first_occurrence, format!("Duplicated field {name}")),
-                ErrorData::from_span(second_occurrence, format!("Duplicated field {name}")),
+                ErrorData::from_location(first_occurrence, format!("Duplicated field {name}")),
+                ErrorData::from_location(second_occurrence, format!("Duplicated field {name}")),
             ]
         }
         InvalidRecordField {
@@ -168,7 +169,7 @@ fn compilation_error_to_data(
             ..
         } => {
             let field_name = fmt_span(field_span);
-            vec![ErrorData::from_span(
+            vec![ErrorData::from_location(
                 field_span,
                 format!("Field {field_name} not found in record {record_ty}"),
             )]
@@ -179,21 +180,21 @@ fn compilation_error_to_data(
             ..
         } => {
             let field_name = fmt_span(field_span);
-            vec![ErrorData::from_span(
+            vec![ErrorData::from_location(
                 field_span,
                 format!("Expected record because of .{field_name}, got {record_ty}"),
             )]
         }
         InvalidVariantName { name, ty, valids } => {
             let name_text = fmt_span(name);
-            vec![ErrorData::from_span(
+            vec![ErrorData::from_location(
                 name,
                 format!("Variant name {name_text} does not exist for variant type {ty}, valid names are {}", valids.join(", ")),
             )]
         }
         InvalidVariantType { name, ty } => {
             let name_text = fmt_span(name);
-            vec![ErrorData::from_span(
+            vec![ErrorData::from_location(
                 name,
                 format!(
                     "Type {ty} is not a variant, but variant constructor {name_text} requires it"
@@ -209,11 +210,11 @@ fn compilation_error_to_data(
             let a_name = a_type.adt_kind();
             let b_name = b_type.adt_kind();
             vec![
-                ErrorData::from_span(
+                ErrorData::from_location(
                     a_span,
                     format!("Data type {a_name} here is different than data type {b_name}"),
                 ),
-                ErrorData::from_span(
+                ErrorData::from_location(
                     b_span,
                     format!("Data type {b_name} here is different than data type {a_name}"),
                 ),
@@ -228,11 +229,11 @@ fn compilation_error_to_data(
             let a_name = a_type.name();
             let b_name = b_type.name();
             vec![
-                ErrorData::from_span(
+                ErrorData::from_location(
                     a_span,
                     format!("Pattern expects {a_name}, but got {b_name}"),
                 ),
-                ErrorData::from_span(
+                ErrorData::from_location(
                     b_span,
                     format!("Pattern expects {b_name}, but got {a_name}"),
                 ),
@@ -245,8 +246,8 @@ fn compilation_error_to_data(
             let name = fmt_span(first_occurrence);
             let text = format!("Duplicated variant {name}");
             vec![
-                ErrorData::from_span(first_occurrence, text.clone()),
-                ErrorData::from_span(second_occurrence, text),
+                ErrorData::from_location(first_occurrence, text.clone()),
+                ErrorData::from_location(second_occurrence, text),
             ]
         }
         IdentifierBoundMoreThanOnceInAPattern {
@@ -256,8 +257,8 @@ fn compilation_error_to_data(
             let name_text = fmt_span(first_occurrence);
             let text = format!("Identifier {name_text} bound more than once in a pattern");
             vec![
-                ErrorData::from_span(first_occurrence, text.clone()),
-                ErrorData::from_span(second_occurrence, text),
+                ErrorData::from_location(first_occurrence, text.clone()),
+                ErrorData::from_location(second_occurrence, text),
             ]
         }
         MutablePathsOverlap {
@@ -269,9 +270,9 @@ fn compilation_error_to_data(
             let b_name = fmt_span(b_span);
             let fn_name = fmt_span(fn_span);
             vec![
-                ErrorData::from_span(a_span, format!("Mutable path {a_name} (here) overlaps with {b_name} when calling function {fn_name}")),
-                ErrorData::from_span(b_span, format!("Mutable path {a_name} overlaps with {b_name} (here) when calling function {fn_name}")),
-                ErrorData::from_span(fn_span, format!("When calling function {fn_name}: mutable path {a_name} overlaps with {b_name}")),
+                ErrorData::from_location(a_span, format!("Mutable path {a_name} (here) overlaps with {b_name} when calling function {fn_name}")),
+                ErrorData::from_location(b_span, format!("Mutable path {a_name} overlaps with {b_name} (here) when calling function {fn_name}")),
+                ErrorData::from_location(fn_span, format!("When calling function {fn_name}: mutable path {a_name} overlaps with {b_name}")),
             ]
         }
         UndefinedVarInStringFormatting {
@@ -280,7 +281,7 @@ fn compilation_error_to_data(
         } => {
             let var_text = fmt_span(var_span);
             let string_text = fmt_span(string_span);
-            vec![ErrorData::from_span(
+            vec![ErrorData::from_location(
                 var_span,
                 format!("Undefined variable {var_text} used in string formatting: {string_text}"),
             )]
@@ -291,7 +292,7 @@ fn compilation_error_to_data(
             target,
             ..
         } => {
-            vec![ErrorData::from_span(
+            vec![ErrorData::from_location(
                 source_span,
                 format!("Effect {source} cannot depend on {target}"),
             )]
@@ -302,13 +303,13 @@ fn compilation_error_to_data(
             span,
             ..
         } => {
-            vec![ErrorData::from_span(
+            vec![ErrorData::from_location(
                 span,
                 format!("Unknown property {scope}.{variable}"),
             )]
         }
-        Internal(msg) => vec![ErrorData::from_span(
-            &Span::new_local(0, 0),
+        Internal(msg) => vec![ErrorData::from_location(
+            &Location::new_local(0, 0),
             format!("ICE: {msg}"),
         )],
     }

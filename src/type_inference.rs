@@ -7,7 +7,7 @@ use std::{
     mem,
 };
 
-use crate::span::Span;
+use crate::location::Location;
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
 use ustr::{ustr, Ustr};
@@ -98,9 +98,9 @@ impl UnifyValue for EffType {
 pub enum TypeConstraint {
     SubType {
         current: Type,
-        current_span: Span,
+        current_span: Location,
         expected: Type,
-        expected_span: Span,
+        expected_span: Location,
     },
     Pub(PubTypeConstraint),
 }
@@ -133,9 +133,9 @@ impl FmtWithModuleEnv for TypeConstraint {
 pub enum MutConstraint {
     MutBeAtLeast {
         current: MutType,
-        current_span: Span,
+        current_span: Location,
         target: MutType,
-        reason_span: Span,
+        reason_span: Location,
     },
 }
 
@@ -245,7 +245,10 @@ impl TypeInference {
                 }
                 // Retrieve the function from the environment, if it exists
                 else if let Some((module_name, function)) = env.get_function(name) {
-                    let (fn_ty, inst_data) = function.ty_scheme.instantiate(self, module_name);
+                    let (fn_ty, inst_data) =
+                        function
+                            .ty_scheme
+                            .instantiate(self, module_name, expr.span.span());
                     let value = Value::Function(FunctionRef::new_weak(&function.code));
                     let node = K::Immediate(B::new(ir::Immediate {
                         value,
@@ -585,7 +588,7 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         name: &str,
-        span: Span,
+        span: Location,
         args: &[impl Borrow<Expr>],
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
@@ -597,7 +600,7 @@ impl TypeInference {
                     let got_span = args
                         .iter()
                         .map(|arg| arg.borrow().span)
-                        .reduce(|a, b| Span::new_local(a.start(), b.end()))
+                        .reduce(|a, b| Location::new_local(a.start(), b.end()))
                         .unwrap_or(span);
                     return Err(InternalCompilationError::WrongNumberOfArguments {
                         expected: function.ty_scheme.ty.args.len(),
@@ -607,7 +610,10 @@ impl TypeInference {
                     });
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data) = function.ty_scheme.instantiate(self, module_name);
+                let (inst_fn_ty, inst_data) =
+                    function
+                        .ty_scheme
+                        .instantiate(self, module_name, span.span());
                 // Get the code and make sure the types of its arguments match the expected types
                 let (args_nodes, args_effects) =
                     self.check_exprs(env, args, &inst_fn_ty.args, span)?;
@@ -721,7 +727,7 @@ impl TypeInference {
         env: &mut TypingEnv,
         exprs: &[impl Borrow<Expr>],
         expected_tys: &[FnArgType],
-        expected_span: Span,
+        expected_span: Location,
     ) -> Result<(Vec<ir::Node>, EffType), InternalCompilationError> {
         let (nodes, effects): (_, Vec<_>) = exprs
             .iter()
@@ -743,7 +749,7 @@ impl TypeInference {
         expr: &Expr,
         expected_ty: Type,
         expected_mut: MutType,
-        expected_span: Span,
+        expected_span: Location,
     ) -> Result<Node, InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
@@ -824,9 +830,9 @@ impl TypeInference {
     pub(crate) fn add_sub_type_constraint(
         &mut self,
         current: Type,
-        current_span: Span,
+        current_span: Location,
         expected: Type,
-        expected_span: Span,
+        expected_span: Location,
     ) {
         if current == expected {
             return;
@@ -842,9 +848,9 @@ impl TypeInference {
     fn add_mut_be_at_least_constraint(
         &mut self,
         current: MutType,
-        current_span: Span,
+        current_span: Location,
         target: MutType,
-        reason_span: Span,
+        reason_span: Location,
     ) {
         if target == MutType::constant() {
             // everything has at least constant mutability
@@ -1013,11 +1019,12 @@ impl UnifiedTypeInference {
 
                 // Perform simplification for tuple and record constraints.
                 // Check for incompatible constraints as well.
-                let mut tuples_at_index_is: HashMap<Type, HashMap<usize, (Type, Span)>> =
+                let mut tuples_at_index_is: HashMap<Type, HashMap<usize, (Type, Location)>> =
                     HashMap::new();
-                let mut records_field_is: HashMap<Type, HashMap<Ustr, (Type, Span)>> =
+                let mut records_field_is: HashMap<Type, HashMap<Ustr, (Type, Location)>> =
                     HashMap::new();
-                let mut variants_are: HashMap<Type, HashMap<Ustr, (Type, Span)>> = HashMap::new();
+                let mut variants_are: HashMap<Type, HashMap<Ustr, (Type, Location)>> =
+                    HashMap::new();
                 for constraint in &remaining_constraints {
                     use PubTypeConstraint::*;
                     match constraint {
@@ -1030,8 +1037,18 @@ impl UnifiedTypeInference {
                         } => {
                             let tuple_ty = unified_ty_inf.normalize_type(*tuple_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
-                            assert_eq!(tuple_span.module(), index_span.module());
-                            let span = Span::new(
+                            // tuple_span and index_span *must* originate from the same module
+                            assert_eq!(
+                                tuple_span.module().is_some(),
+                                index_span.module().is_some()
+                            );
+                            if tuple_span.module().is_some() {
+                                assert_eq!(
+                                    tuple_span.module().unwrap().module_name(),
+                                    index_span.module().unwrap().module_name()
+                                );
+                            }
+                            let span = Location::new(
                                 tuple_span.start(),
                                 index_span.end(),
                                 tuple_span.module(),
@@ -1077,8 +1094,18 @@ impl UnifiedTypeInference {
                         } => {
                             let record_ty = unified_ty_inf.normalize_type(*record_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
-                            assert_eq!(record_span.module(), field_span.module());
-                            let span = Span::new(
+                            // record_span and field_span *must* originate from the same module
+                            assert_eq!(
+                                record_span.module().is_some(),
+                                field_span.module().is_some()
+                            );
+                            if record_span.module().is_some() {
+                                assert_eq!(
+                                    record_span.module().unwrap().module_name(),
+                                    field_span.module().unwrap().module_name()
+                                );
+                            }
+                            let span = Location::new(
                                 record_span.start(),
                                 field_span.end(),
                                 record_span.module(),
@@ -1315,9 +1342,9 @@ impl UnifiedTypeInference {
     fn unify_sub_type(
         &mut self,
         current: Type,
-        current_span: Span,
+        current_span: Location,
         expected: Type,
-        expected_span: Span,
+        expected_span: Location,
     ) -> Result<(), InternalCompilationError> {
         let cur_ty = self.normalize_type(current);
         let exp_ty = self.normalize_type(expected);
@@ -1459,9 +1486,9 @@ impl UnifiedTypeInference {
     fn unify_type_variable(
         &mut self,
         var: TypeVar,
-        var_span: Span,
+        var_span: Location,
         ty: Type,
-        ty_span: Span,
+        ty_span: Location,
     ) -> Result<(), InternalCompilationError> {
         if ty.data().contains_any_type_var(var) {
             Err(InternalCompilationError::InfiniteType(var, ty, ty_span))
@@ -1475,9 +1502,9 @@ impl UnifiedTypeInference {
     fn unify_tuple_project(
         &mut self,
         tuple_ty: Type,
-        tuple_span: Span,
+        tuple_span: Location,
         index: usize,
-        index_span: Span,
+        index_span: Location,
         element_ty: Type,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let tuple_ty = self.normalize_type(tuple_ty);
@@ -1514,9 +1541,9 @@ impl UnifiedTypeInference {
     fn unify_record_field_access(
         &mut self,
         record_ty: Type,
-        record_span: Span,
+        record_span: Location,
         field: Ustr,
-        field_span: Span,
+        field_span: Location,
         element_ty: Type,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let record_ty = self.normalize_type(record_ty);
@@ -1561,7 +1588,7 @@ impl UnifiedTypeInference {
         ty: Type,
         tag: Ustr,
         variant_ty: Type,
-        variant_span: Span,
+        variant_span: Location,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let ty = self.normalize_type(ty);
         let variant_ty = self.normalize_type(variant_ty);
@@ -1601,9 +1628,9 @@ impl UnifiedTypeInference {
     fn unify_mut_must_be_at_least(
         &mut self,
         current: MutType,
-        current_span: Span,
+        current_span: Location,
         target: MutType,
-        reason_span: Span,
+        reason_span: Location,
         error_ctx: MustBeMutableContext,
     ) -> Result<(), InternalCompilationError> {
         let current_mut = self.normalize_mut_type(current);
@@ -1653,9 +1680,9 @@ impl UnifiedTypeInference {
     pub fn unify_mut_variable(
         &mut self,
         var: MutVar,
-        current_span: Span,
+        current_span: Location,
         target: MutType,
-        reason_span: Span,
+        reason_span: Location,
         error_ctx: MustBeMutableContext,
     ) -> Result<(), InternalCompilationError> {
         // Target is resolved, if it is constant, we are done as anything can be used as constant.
@@ -1674,9 +1701,9 @@ impl UnifiedTypeInference {
     pub fn add_effect_dep(
         &mut self,
         current: &EffType,
-        current_span: Span,
+        current_span: Location,
         target: &EffType,
-        target_span: Span,
+        target_span: Location,
     ) -> Result<(), InternalCompilationError> {
         if current.is_empty() || current == target {
             return Ok(());
@@ -2054,7 +2081,7 @@ fn property_to_fn_name(
     scope: &str,
     variable: &str,
     access: PropertyAccess,
-    span: Span,
+    span: Location,
     env: &TypingEnv,
 ) -> Result<String, InternalCompilationError> {
     let mut scope_parts = scope.rsplitn(2, "::");

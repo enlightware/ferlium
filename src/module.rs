@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, rc::Rc};
 
-use crate::Span;
+use crate::Location;
 use ustr::Ustr;
 
 use crate::{
@@ -14,10 +14,10 @@ use crate::{
 /// If the module function is from code, this struct contains the spans of the function.
 #[derive(Debug, Clone)]
 pub struct ModuleFunctionSpans {
-    pub name: Span,
-    pub args: Vec<Span>,
-    pub args_span: Span,
-    pub span: Span,
+    pub name: Location,
+    pub args: Vec<Location>,
+    pub args_span: Location,
+    pub span: Location,
 }
 
 /// A function inside a module.

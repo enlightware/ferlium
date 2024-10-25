@@ -6,7 +6,7 @@ use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
 use painturscript::parse_module_and_expr;
 use painturscript::std::{new_module_with_prelude, new_std_module_env};
 use painturscript::typing_env::Local;
-use painturscript::Span;
+use painturscript::Location;
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 
@@ -20,7 +20,7 @@ fn start_of_line_of(src: &str, pos: usize) -> usize {
     src[..pos].rfind('\n').map_or(0, |i| i + 1)
 }
 
-fn span_range(span: Span) -> std::ops::Range<usize> {
+fn span_range(span: Location) -> std::ops::Range<usize> {
     span.start()..span.end()
 }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::Span;
+use crate::Location;
 use itertools::{multiunzip, Itertools};
 use ustr::ustr;
 
@@ -49,7 +49,7 @@ impl TypeInference {
         let first_alternative = alternatives.first().unwrap();
         let first_alternative_span = first_alternative.0.span;
         let is_variant = first_alternative.0.kind.is_variant();
-        let variants_span = Span::new_local(
+        let variants_span = Location::new_local(
             alternatives.first().unwrap().0.span.start(),
             alternatives.last().unwrap().0.span.end(),
         );
@@ -139,7 +139,7 @@ impl TypeInference {
 
             // Generate code for each alternative
             let mut return_ty = None;
-            let mut return_ty_span = Span::new_local(0, 0); // placeholder
+            let mut return_ty_span = Location::new_local(0, 0); // placeholder
             let mut alternatives = types
                 .iter()
                 .zip(exprs)
@@ -338,11 +338,11 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         pairs: &[(Pattern, Expr)],
-        first_pattern_span: Span,
+        first_pattern_span: Location,
         expected_pattern_type: Type,
-        expected_pattern_span: Span,
+        expected_pattern_span: Location,
         expected_return_type: Type,
-        expected_return_span: Span,
+        expected_return_span: Location,
     ) -> Result<(Vec<(Value, ir::Node)>, EffType), InternalCompilationError> {
         let (pairs, effects): (Vec<_>, Vec<_>) = pairs
             .iter()

@@ -10,7 +10,7 @@ use crate::r#type::Type;
 use crate::std::string::String as MyString;
 use crate::value::NativeDisplay;
 use crate::value::Value;
-use crate::Span;
+use crate::Location;
 use core::str::FromStr;
 use lalrpop_util::lexer::Token;
 use lalrpop_util::ParseError;
@@ -23,17 +23,20 @@ use std::sync::LazyLock;
 use ustr::{ustr, Ustr};
 
 /// Create a span from two numbers
-pub(crate) fn span(l: usize, r: usize) -> Span {
-    Span::new_local(l, r)
+pub(crate) fn span(l: usize, r: usize) -> Location {
+    Location::new_local(l, r)
 }
 
 /// Make a custom parse error
-pub(crate) fn parse_error<L, T>(msg: String, span: Span) -> ParseError<L, T, LocatedError> {
+pub(crate) fn parse_error<L, T>(msg: String, span: Location) -> ParseError<L, T, LocatedError> {
     ParseError::User { error: (msg, span) }
 }
 
 /// Make a custom parse error as part of a parsing result
-pub(crate) fn error<R, L, T>(msg: String, span: Span) -> Result<R, ParseError<L, T, LocatedError>> {
+pub(crate) fn error<R, L, T>(
+    msg: String,
+    span: Location,
+) -> Result<R, ParseError<L, T, LocatedError>> {
     Err(parse_error(msg, span))
 }
 
@@ -46,12 +49,12 @@ where
 }
 
 /// Make a unit literal
-pub(crate) fn unit_literal_expr(span: Span) -> Expr {
+pub(crate) fn unit_literal_expr(span: Location) -> Expr {
     Expr::new(ExprKind::Literal(Value::native(()), Type::unit()), span)
 }
 
 /// Make a literal
-pub(crate) fn literal_pattern<T>(value: T, span: Span) -> Pattern
+pub(crate) fn literal_pattern<T>(value: T, span: Location) -> Pattern
 where
     T: Any + Clone + Debug + Eq + NativeDisplay + 'static,
 {
@@ -99,7 +102,7 @@ where
 /// Parse a number, if it is too big, return an error
 pub(crate) fn parse_num_literal<F, L, T>(
     s: &str,
-    span: Span,
+    span: Location,
 ) -> Result<ExprKind, ParseError<L, T, LocatedError>>
 where
     F: FromStr + Bounded + Display + Clone + Debug + Eq + NativeDisplay + 'static,
@@ -114,7 +117,7 @@ where
 /// Create a projection, or a float literal if the lhs is a number
 pub(crate) fn proj_or_float<L, T>(
     lhs: Expr,
-    rhs: (usize, Span),
+    rhs: (usize, Location),
 ) -> Result<ExprKind, ParseError<L, T, LocatedError>> {
     use ExprKind::*;
     if let Literal(literal, _ty) = &lhs.kind {
@@ -167,7 +170,7 @@ pub(crate) fn cond_if(cond: Expr, if_true: Expr) -> ExprKind {
 }
 
 /// Create a for loop
-pub(crate) fn for_loop(var: (Ustr, Span), start: Expr, end: Expr, body: Expr) -> ExprKind {
+pub(crate) fn for_loop(var: (Ustr, Location), start: Expr, end: Expr, body: Expr) -> ExprKind {
     use ExprKind::*;
     let iterator_span = span(start.span.start(), end.span.end());
     let iterator = Expr::new(

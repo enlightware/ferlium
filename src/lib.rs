@@ -24,11 +24,11 @@ pub mod function;
 mod graph;
 pub mod ide;
 pub mod ir;
+mod location;
 mod r#match;
 pub mod module;
 pub mod mutability;
 mod parser_helpers;
-mod span;
 pub mod std;
 mod sync;
 pub mod r#type;
@@ -38,7 +38,7 @@ pub mod typing_env;
 pub mod value;
 
 pub use ide::Compiler;
-pub use span::Span;
+pub use location::Location;
 
 use type_scheme::DisplayStyle;
 pub use ustr::{ustr, Ustr};

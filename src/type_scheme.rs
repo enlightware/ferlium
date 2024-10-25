@@ -4,7 +4,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use crate::Span;
+use crate::{location::Span, Location};
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
@@ -35,17 +35,17 @@ pub enum PubTypeConstraint {
     /// Tuple projection constraint: tuple_ty.index = element_ty
     TupleAtIndexIs {
         tuple_ty: Type,
-        tuple_span: Span,
+        tuple_span: Location,
         index: usize,
-        index_span: Span,
+        index_span: Location,
         element_ty: Type,
     },
     /// Record field access constraint: record_ty.field = element_ty
     RecordFieldIs {
         record_ty: Type,
-        record_span: Span,
+        record_span: Location,
         field: Ustr,
-        field_span: Span,
+        field_span: Location,
         element_ty: Type,
     },
     /// Variant for type: variant_ty ⊇ tag(payload_ty)
@@ -53,16 +53,16 @@ pub enum PubTypeConstraint {
         variant_ty: Type,
         tag: Ustr,
         payload_ty: Type,
-        span: Span,
+        span: Location,
     },
 }
 
 impl PubTypeConstraint {
     pub fn new_tuple_at_index_is(
         tuple_ty: Type,
-        tuple_span: Span,
+        tuple_span: Location,
         index: usize,
-        index_span: Span,
+        index_span: Location,
         element_ty: Type,
     ) -> Self {
         Self::TupleAtIndexIs {
@@ -76,9 +76,9 @@ impl PubTypeConstraint {
 
     pub fn new_record_field_is(
         record_ty: Type,
-        record_span: Span,
+        record_span: Location,
         field: Ustr,
-        field_span: Span,
+        field_span: Location,
         element_ty: Type,
     ) -> Self {
         Self::RecordFieldIs {
@@ -90,7 +90,7 @@ impl PubTypeConstraint {
         }
     }
 
-    pub fn new_type_has_variant(ty: Type, tag: Ustr, payload_ty: Type, span: Span) -> Self {
+    pub fn new_type_has_variant(ty: Type, tag: Ustr, payload_ty: Type, span: Location) -> Self {
         Self::TypeHasVariant {
             variant_ty: ty,
             tag,
@@ -147,7 +147,7 @@ impl PubTypeConstraint {
         }
     }
 
-    fn replace_span_modules(&mut self, module_name: Option<Ustr>) {
+    fn instantiate_module(&mut self, module_name: Option<Ustr>, inst_span: Span) {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs {
@@ -155,19 +155,19 @@ impl PubTypeConstraint {
                 index_span,
                 ..
             } => {
-                tuple_span.set_module(module_name);
-                index_span.set_module(module_name);
+                tuple_span.instantiate(module_name, inst_span);
+                index_span.instantiate(module_name, inst_span);
             }
             RecordFieldIs {
                 record_span,
                 field_span,
                 ..
             } => {
-                record_span.set_module(module_name);
-                field_span.set_module(module_name);
+                record_span.instantiate(module_name, inst_span);
+                field_span.instantiate(module_name, inst_span);
             }
             TypeHasVariant { span, .. } => {
-                span.set_module(module_name);
+                span.instantiate(module_name, inst_span);
             }
         }
     }
@@ -455,13 +455,14 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         &self,
         ty_inf: &mut TypeInference,
         src_module_name: Option<Ustr>,
+        inst_span: Span,
     ) -> (Ty, FnInstData) {
         let ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
         let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
         let subst = (ty_subst, eff_subst);
         for constraint in &self.constraints {
             let mut constraint = constraint.instantiate(&subst);
-            constraint.replace_span_modules(src_module_name);
+            constraint.instantiate_module(src_module_name, inst_span);
             ty_inf.add_pub_constraint(constraint);
         }
         let ty = self.ty.instantiate(&subst);

@@ -1,4 +1,4 @@
-use crate::{Span, LocatedError};
+use crate::{Location, LocatedError};
 use crate::ast::{UstrSpan, Expr, ExprKind, ExprKind::*, Pattern, PatternKind as PatK, Module};
 use crate::value::Value;
 use crate::r#type::Type;
@@ -328,12 +328,12 @@ Ps<T>: Pattern = {
 };
 
 // Return T along with its location
-Sp<T>: (T, Span) = {
+Sp<T>: (T, Location) = {
     <l:@L> <t: T> <r:@R> => (t, span(l, r)),
 };
 
 // Return the location of T, ignoring its content
-Loc<T>: Span = {
+Loc<T>: Location = {
     <l:@L> T <r:@R> => span(l, r),
 };
 

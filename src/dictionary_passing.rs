@@ -1,6 +1,6 @@
 use std::{collections::HashMap, mem};
 
-use crate::Span;
+use crate::Location;
 use ustr::Ustr;
 
 use crate::{
@@ -122,7 +122,7 @@ pub fn instantiate_dictionaries_req(
 
 fn extra_args_from_inst_data(
     inst_data: &ir::FnInstData,
-    span: Span,
+    span: Location,
     dicts: &DictionariesVarReq,
 ) -> (Vec<Node>, Vec<FnArgType>) {
     inst_data
@@ -166,7 +166,7 @@ fn extra_args_from_inst_data(
 
 fn extra_args_for_module_function(
     inst_data: &DictionariesVarReq,
-    span: Span,
+    span: Location,
     dicts: &DictionariesVarReq,
 ) -> (Vec<Node>, Vec<FnArgType>) {
     inst_data

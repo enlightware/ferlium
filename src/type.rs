@@ -11,7 +11,7 @@ use std::iter;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
-use crate::Span;
+use crate::Location;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
@@ -325,7 +325,7 @@ impl FnType {
         }
     }
 
-    pub fn as_locals_no_bound(&self, arg_names: &[(Ustr, Span)]) -> Vec<Local> {
+    pub fn as_locals_no_bound(&self, arg_names: &[(Ustr, Location)]) -> Vec<Local> {
         arg_names
             .iter()
             .zip(self.args.iter())
