@@ -10,7 +10,9 @@ use ustr::ustr;
 use crate::{
     cached_primitive_ty,
     effects::no_effects,
-    function::{BinaryNativeFnMNN, BinaryNativeFnNNN, UnaryNativeFnNN, UnaryNativeFnVN},
+    function::{
+        BinaryNativeFnMNN, BinaryNativeFnNNN, TernaryNativeFnNNNN, UnaryNativeFnNN, UnaryNativeFnVN,
+    },
     module::Module,
     r#type::Type,
     value::{NativeDisplay, Value},
@@ -131,6 +133,17 @@ pub fn add_to_module(to: &mut Module) {
         ustr("string_is_empty"),
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.is_empty() as isize,
+            no_effects(),
+        ),
+    );
+    to.functions.insert(
+        ustr("string_replace"),
+        TernaryNativeFnNNNN::description_with_default_ty(
+            |s: String, from: String, to: String| {
+                let mut new = s.clone();
+                new.0 = Rc::new(new.0.replace(from.as_ref(), to.as_ref()));
+                new
+            },
             no_effects(),
         ),
     );
