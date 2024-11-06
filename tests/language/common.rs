@@ -1,16 +1,16 @@
-use std::sync::atomic::AtomicIsize;
-
 use painturscript::{
-    effects::{effect, effects, PrimitiveEffect},
+    effects::{effect, effects, no_effects, PrimitiveEffect},
     error::{CompilationError, RuntimeError},
     eval::EvalResult,
-    function::{NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnVN},
+    function::{NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN},
     module::{Module, Modules},
     r#type::{FnType, Type},
-    std::new_std_module_env,
+    std::{math::int_type, new_std_module_env, option::option_type},
     value::Value,
     ModuleAndExpr,
 };
+use std::sync::atomic::AtomicIsize;
+use ustr::ustr;
 
 #[derive(Debug)]
 pub enum Error {
@@ -19,6 +19,20 @@ pub enum Error {
 }
 
 pub type CompileRunResult = Result<Value, Error>;
+
+fn testing_module() -> Module {
+    let mut module: Module = Default::default();
+    module.functions.insert(
+        "some_int".into(),
+        UnaryNativeFnNV::description_with_ty(
+            |v: isize| Value::variant(ustr("Some"), Value::native(v)),
+            int_type(),
+            option_type(int_type()),
+            no_effects(),
+        ),
+    );
+    module
+}
 
 fn test_effect_module() -> Module {
     let mut module: Module = Default::default();
@@ -85,6 +99,7 @@ fn test_property_module() -> Module {
 /// Compile and run the src and return its module and expression
 pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationError> {
     let mut other_modules = new_std_module_env();
+    other_modules.insert("testing".into(), testing_module());
     other_modules.insert("effects".into(), test_effect_module());
     other_modules.insert("props".into(), test_property_module());
     Ok((

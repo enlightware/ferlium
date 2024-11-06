@@ -282,6 +282,15 @@ fn match_expr() {
         run("let a = 5; match a { 0 => 1, 1 => 2, _ => 3 }"),
         int!(3)
     );
+    assert_eq!(run("match testing::some_int(0) { _ => 0 }"), int!(0));
+    assert_eq!(
+        run("match testing::some_int(0) { Some(x) => 1, None => 0 }"),
+        int!(1)
+    );
+    fail_compilation("match testing::some_int(0) { None => 0 }")
+        .expect_is_not_subtype("None | Some (int)", "None");
+    fail_compilation("match testing::some_int(0) { Some(x) => 0 }")
+        .expect_is_not_subtype("None | Some (int)", "Some (A)");
     // TODO: add more complex literals (tuples, array) once optimisation is in place
 }
 
