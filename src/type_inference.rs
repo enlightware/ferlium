@@ -533,7 +533,7 @@ impl TypeInference {
             }
             Match(cond_expr, alternatives, default) => {
                 let (node, ty, mut_ty, effects) =
-                    self.infer_match(env, expr, cond_expr, alternatives, default)?;
+                    self.infer_match(env, expr.span, cond_expr, alternatives, default)?;
                 (node, ty, mut_ty, effects)
             }
             ForLoop(var_name, iterator, body) => {

@@ -261,6 +261,22 @@ fn compilation_error_to_data(
                 ErrorData::from_location(second_occurrence, text),
             ]
         }
+        EmptyMatchBody { span } => vec![ErrorData::from_location(
+            span,
+            "Match body cannot be empty".to_string(),
+        )],
+        ExhaustiveMatchForValue {
+            cond_span,
+            pattern_span,
+            match_span,
+        } => {
+            let cond_text = fmt_span(cond_span);
+            let pattern_text = fmt_span(pattern_span);
+            vec![ErrorData::from_location(
+                match_span,
+                format!("Match condition {cond_text} is matched towards value {pattern_text}, but the match is exhaustive, which is not supported when matching towards values."),
+            )]
+        }
         MutablePathsOverlap {
             a_span,
             b_span,

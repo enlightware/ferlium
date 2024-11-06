@@ -23,7 +23,7 @@ impl TypeInference {
     pub(crate) fn infer_match(
         &mut self,
         env: &mut TypingEnv,
-        expr: &Expr,
+        match_span: Location,
         cond_expr: &Expr,
         alternatives: &[(Pattern, Expr)],
         default: &Option<Box<Expr>>,
@@ -37,7 +37,7 @@ impl TypeInference {
                 let (node, mut_ty) = self.infer_expr(env, default)?;
                 return Ok((node.kind, node.ty, mut_ty, node.effects));
             } else {
-                panic!("empty match without default");
+                return Err(InternalCompilationError::EmptyMatchBody { span: match_span });
             }
         }
 
@@ -277,7 +277,7 @@ impl TypeInference {
                 alternatives,
                 default,
             }));
-            let case_node = N::new(case, return_ty, case_eff, expr.span);
+            let case_node = N::new(case, return_ty, case_eff, match_span);
             let effects =
                 self.make_dependent_effect([&store_variant_node.effects, &case_node.effects]);
             let node = K::Block(B::new(SVec2::from_vec(vec![store_variant_node, case_node])));
@@ -287,7 +287,7 @@ impl TypeInference {
             let return_ty = self.fresh_type_var_ty();
             let (node, return_ty, effects) = if let Some(default) = default {
                 let default =
-                    self.check_expr(env, default, return_ty, MutType::constant(), expr.span)?;
+                    self.check_expr(env, default, return_ty, MutType::constant(), match_span)?;
                 let (alternatives, alt_eff) = self.check_literal_patterns(
                     env,
                     alternatives,
@@ -295,7 +295,7 @@ impl TypeInference {
                     pattern_ty,
                     cond_expr.span,
                     return_ty,
-                    expr.span,
+                    match_span,
                 )?;
                 let effects = self.make_dependent_effect([&cond_eff, &alt_eff, &default.effects]);
                 (
@@ -308,26 +308,31 @@ impl TypeInference {
                     effects,
                 )
             } else {
-                let (mut alternatives, alt_eff) = self.check_literal_patterns(
-                    env,
-                    alternatives,
-                    first_alternative_span,
-                    pattern_ty,
-                    cond_expr.span,
-                    return_ty,
-                    expr.span,
-                )?;
-                let effects = self.make_dependent_effect([cond_eff, alt_eff]);
-                let default = alternatives.pop().unwrap().1;
-                (
-                    K::Case(B::new(ir::Case {
-                        value: condition_node,
-                        alternatives,
-                        default,
-                    })),
-                    return_ty,
-                    effects,
-                )
+                return Err(InternalCompilationError::ExhaustiveMatchForValue {
+                    cond_span: cond_expr.span,
+                    pattern_span: first_alternative_span,
+                    match_span,
+                });
+                // let (mut alternatives, alt_eff) = self.check_literal_patterns(
+                //     env,
+                //     alternatives,
+                //     first_alternative_span,
+                //     pattern_ty,
+                //     cond_expr.span,
+                //     return_ty,
+                //     expr.span,
+                // )?;
+                // let effects = self.make_dependent_effect([cond_eff, alt_eff]);
+                // let default = alternatives.pop().unwrap().1;
+                // (
+                //     K::Case(B::new(ir::Case {
+                //         value: condition_node,
+                //         alternatives,
+                //         default,
+                //     })),
+                //     return_ty,
+                //     effects,
+                // )
             };
             (node, return_ty, MutType::constant(), effects)
         })

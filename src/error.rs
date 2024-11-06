@@ -109,6 +109,14 @@ pub enum InternalCompilationError {
         first_occurrence: Location,
         second_occurrence: Location,
     },
+    EmptyMatchBody {
+        span: Location,
+    },
+    ExhaustiveMatchForValue {
+        cond_span: Location,
+        pattern_span: Location,
+        match_span: Location,
+    },
     MutablePathsOverlap {
         a_span: Location,
         b_span: Location,
@@ -317,6 +325,16 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     fmt_span(first_occurrence_span),
                 )
             }
+            EmptyMatchBody { .. } => {
+                write!(f, "Match body cannot be empty")
+            }
+            ExhaustiveMatchForValue { cond_span, .. } => {
+                write!(
+                    f,
+                    "Exhaustive match for condition {} which is matched against a value",
+                    fmt_span(cond_span)
+                )
+            }
             MutablePathsOverlap {
                 a_span,
                 b_span,
@@ -439,6 +457,14 @@ pub enum CompilationError {
     IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Location,
         second_occurrence: Location,
+    },
+    EmptyMatchBody {
+        span: Location,
+    },
+    ExhaustiveMatchForValue {
+        cond_span: Location,
+        pattern_span: Location,
+        match_span: Location,
     },
     MutablePathsOverlap {
         a_span: Location,
@@ -599,6 +625,16 @@ impl CompilationError {
             } => Self::IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,
+            },
+            EmptyMatchBody { span: cond_span } => Self::EmptyMatchBody { span: cond_span },
+            ExhaustiveMatchForValue {
+                cond_span,
+                pattern_span,
+                match_span,
+            } => Self::ExhaustiveMatchForValue {
+                cond_span,
+                pattern_span,
+                match_span,
             },
             MutablePathsOverlap {
                 a_span,
