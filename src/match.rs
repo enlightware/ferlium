@@ -308,31 +308,31 @@ impl TypeInference {
                     effects,
                 )
             } else {
-                return Err(InternalCompilationError::ExhaustiveMatchForValue {
-                    cond_span: cond_expr.span,
-                    pattern_span: first_alternative_span,
+                let (mut alternatives, alt_eff) = self.check_literal_patterns(
+                    env,
+                    alternatives,
+                    first_alternative_span,
+                    pattern_ty,
+                    cond_expr.span,
+                    return_ty,
                     match_span,
-                });
-                // let (mut alternatives, alt_eff) = self.check_literal_patterns(
-                //     env,
-                //     alternatives,
-                //     first_alternative_span,
-                //     pattern_ty,
-                //     cond_expr.span,
-                //     return_ty,
-                //     expr.span,
-                // )?;
-                // let effects = self.make_dependent_effect([cond_eff, alt_eff]);
-                // let default = alternatives.pop().unwrap().1;
-                // (
-                //     K::Case(B::new(ir::Case {
-                //         value: condition_node,
-                //         alternatives,
-                //         default,
-                //     })),
-                //     return_ty,
-                //     effects,
-                // )
+                )?;
+                self.add_ty_coverage_constraint(
+                    match_span,
+                    pattern_ty,
+                    alternatives.iter().map(|(v, _)| v.clone()).collect(),
+                );
+                let effects = self.make_dependent_effect([cond_eff, alt_eff]);
+                let default = alternatives.pop().unwrap().1;
+                (
+                    K::Case(B::new(ir::Case {
+                        value: condition_node,
+                        alternatives,
+                        default,
+                    })),
+                    return_ty,
+                    effects,
+                )
             };
             (node, return_ty, MutType::constant(), effects)
         })
@@ -349,10 +349,18 @@ impl TypeInference {
         expected_return_type: Type,
         expected_return_span: Location,
     ) -> Result<(Vec<(Value, ir::Node)>, EffType), InternalCompilationError> {
+        let mut seen_values = HashMap::new();
         let (pairs, effects): (Vec<_>, Vec<_>) = pairs
             .iter()
             .map(|(pattern, expr)| {
                 if let PatternKind::Literal(literal, ty) = &pattern.kind {
+                    if let Some(previous_span) = seen_values.get(literal) {
+                        return Err(InternalCompilationError::DuplicatedLiteralPattern {
+                            first_occurrence: *previous_span,
+                            second_occurrence: pattern.span,
+                        });
+                    }
+                    seen_values.insert(literal.clone(), pattern.span);
                     self.add_sub_type_constraint(
                         *ty,
                         pattern.span,
@@ -367,7 +375,7 @@ impl TypeInference {
                         expected_return_span,
                     )?;
                     let effects = node.effects.clone();
-                    Ok(((literal.clone(), node), effects))
+                    Ok(((literal.clone().into_value(), node), effects))
                 } else {
                     Err(InternalCompilationError::InconsistentPattern {
                         a_type: PatternType::Literal,

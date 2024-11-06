@@ -8,6 +8,7 @@ use crate::error::LocatedError;
 use crate::escapes::apply_string_escapes;
 use crate::r#type::Type;
 use crate::std::string::String as MyString;
+use crate::value::LiteralValue;
 use crate::value::NativeDisplay;
 use crate::value::Value;
 use crate::Location;
@@ -19,6 +20,7 @@ use ordered_float::NotNan;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
+use std::hash::Hash;
 use std::sync::LazyLock;
 use ustr::{ustr, Ustr};
 
@@ -41,11 +43,11 @@ pub(crate) fn error<R, L, T>(
 }
 
 /// Make a literal
-pub(crate) fn literal_value<T>(value: T) -> (Value, Type)
+pub(crate) fn literal_value<T>(value: T) -> (LiteralValue, Type)
 where
-    T: Any + Clone + Debug + Eq + NativeDisplay + 'static,
+    T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
-    (Value::native(value), Type::primitive::<T>())
+    (LiteralValue::new(value), Type::primitive::<T>())
 }
 
 /// Make a unit literal
@@ -56,18 +58,18 @@ pub(crate) fn unit_literal_expr(span: Location) -> Expr {
 /// Make a literal
 pub(crate) fn literal_pattern<T>(value: T, span: Location) -> Pattern
 where
-    T: Any + Clone + Debug + Eq + NativeDisplay + 'static,
+    T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
     Pattern::new(
-        PatternKind::Literal(Value::native(value), Type::primitive::<T>()),
+        PatternKind::Literal(LiteralValue::new(value), Type::primitive::<T>()),
         span,
     )
 }
 
 /// Make a string literal
-pub(crate) fn string_literal(s: &str) -> Value {
+pub(crate) fn string_literal(s: &str) -> LiteralValue {
     let s = apply_string_escapes(&s[1..s.len() - 1]);
-    Value::native(MyString::from_str(&s).unwrap())
+    LiteralValue::new(MyString::from_str(&s).unwrap())
 }
 
 /// Make formatted string
@@ -92,24 +94,24 @@ where
 }
 
 /// Parse a number, if it is too big, return an error
-pub(crate) fn parse_num_value<F>(s: &str) -> Result<(Value, Type), String>
+fn parse_num_value<F>(s: &str) -> Result<(LiteralValue, Type), String>
 where
-    F: FromStr + Bounded + Display + Clone + Debug + Eq + NativeDisplay + 'static,
+    F: FromStr + Bounded + Display + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
     parse_num::<F>(s).map(|value| literal_value(value))
 }
 
 /// Parse a number, if it is too big, return an error
-pub(crate) fn parse_num_literal<F, L, T>(
+fn parse_num_literal<F, L, T>(
     s: &str,
     span: Location,
 ) -> Result<ExprKind, ParseError<L, T, LocatedError>>
 where
-    F: FromStr + Bounded + Display + Clone + Debug + Eq + NativeDisplay + 'static,
+    F: FromStr + Bounded + Display + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
     use ExprKind::*;
     match parse_num_value::<F>(s) {
-        Ok((value, ty)) => Ok(Literal(value, ty)),
+        Ok((value, ty)) => Ok(Literal(value.into_value(), ty)),
         Err(msg) => error(msg, span),
     }
 }

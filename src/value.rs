@@ -1,11 +1,13 @@
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
+use dyn_hash::DynHash;
 use enum_as_inner::EnumAsInner;
 use std::{
     any::Any,
     cell::RefCell,
     collections::HashSet,
     fmt::{self, Display},
+    hash::Hash,
     rc::Rc,
 };
 use ustr::Ustr;
@@ -59,6 +61,22 @@ impl<T: Any + fmt::Debug + std::cmp::Eq + Clone + NativeDisplay> NativeValue for
     }
 }
 
+pub trait HashableNativeValue:
+    Any + fmt::Debug + DynClone + DynEq + DynHash + NativeDisplay + 'static
+{
+    fn into_native_value(self: B<Self>) -> B<dyn NativeValue>;
+}
+
+impl<T: NativeValue + Hash> HashableNativeValue for T {
+    fn into_native_value(self: B<Self>) -> B<dyn NativeValue> {
+        self
+    }
+}
+
+dyn_clone::clone_trait_object!(HashableNativeValue);
+dyn_eq::eq_trait_object!(HashableNativeValue);
+dyn_hash::hash_trait_object!(HashableNativeValue);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompoundValueType {
     Tuple,
@@ -91,19 +109,19 @@ impl Value {
     }
 
     pub fn native<T: NativeValue + 'static>(value: T) -> Self {
-        Value::Native(B::new(value))
+        Self::Native(B::new(value))
     }
 
     pub fn variant(tag: Ustr, value: Value) -> Self {
-        Value::Variant(B::new(VariantValue { tag, value }))
+        Self::Variant(B::new(VariantValue { tag, value }))
     }
 
     pub fn tuple(values: impl Into<SVec2<Value>>) -> Self {
-        Value::Tuple(B::new(values.into()))
+        Self::Tuple(B::new(values.into()))
     }
 
     pub fn function(function: Function) -> Self {
-        Value::Function(FunctionRef::new_strong(&Rc::new(RefCell::new(function))))
+        Self::Function(FunctionRef::new_strong(&Rc::new(RefCell::new(function))))
     }
 
     pub fn into_primitive_ty<T: 'static>(self) -> Option<T> {
@@ -116,14 +134,14 @@ impl Value {
 
     pub fn as_primitive_ty<T: 'static>(&self) -> Option<&T> {
         match self {
-            Value::Native(value) => NativeValue::as_any(value.as_ref()).downcast_ref::<T>(),
+            Self::Native(value) => NativeValue::as_any(value.as_ref()).downcast_ref::<T>(),
             _ => None,
         }
     }
 
     pub fn as_primitive_ty_mut<T: 'static>(&mut self) -> Option<&mut T> {
         match self {
-            Value::Native(value) => value.as_mut().as_mut_any().downcast_mut::<T>(),
+            Self::Native(value) => value.as_mut().as_mut_any().downcast_mut::<T>(),
             _ => None,
         }
     }
@@ -175,7 +193,7 @@ impl Value {
                 writeln!(f)
             }
             Variant(variant) => {
-                if variant.value == Value::unit() {
+                if variant.value == Self::unit() {
                     writeln!(f, "{indent_str}{}", variant.tag)
                 } else {
                     writeln!(f, "{indent_str}{} ", variant.tag)?;
@@ -266,6 +284,26 @@ impl Display for Value {
                 write!(f, "{:?}", function)
             }
         }
+    }
+}
+
+/// A literal value is a native value that can be hashed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LiteralValue(B<dyn HashableNativeValue>);
+
+impl LiteralValue {
+    pub fn new<T: HashableNativeValue + 'static>(value: T) -> Self {
+        Self(B::new(value))
+    }
+
+    pub fn into_value(self) -> Value {
+        Value::Native(self.0.into_native_value())
+    }
+}
+
+impl Display for LiteralValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_as_literal(f)
     }
 }
 

@@ -18,7 +18,7 @@ use crate::{
     value::{NativeDisplay, Value},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct String(Rc<std::string::String>);
 
 impl String {

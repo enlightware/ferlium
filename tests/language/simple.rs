@@ -262,13 +262,22 @@ fn if_expr() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_expr() {
+    fail_compilation("match true {}")
+        .into_empty_match_body()
+        .unwrap();
     assert_eq!(run("match true { _ => 0 }"), int!(0));
     assert_eq!(run("match true { true => 0, _ => 1 }"), int!(0));
     assert_eq!(run("match false { true => 0, _ => 1 }"), int!(1));
     assert_eq!(run("match true { true => 0, _ => 1, }"), int!(0));
     assert_eq!(run("match true { false => 1, true => 0 }"), int!(0));
     assert_eq!(run("match false { false => 1, true => 0, }"), int!(1));
+    fail_compilation("match false { false => 1, true => 0, false => 2 }")
+        .into_duplicated_literal_pattern()
+        .unwrap();
     assert_eq!(run("let a = 0; match a { 0 => 1, _ => 3 }"), int!(1));
+    fail_compilation("let a = 0; match a { 0 => 1 }")
+        .into_non_exhaustive_pattern()
+        .unwrap();
     assert_eq!(run("let a = 1; match a { 0 => 1, _ => 3 }"), int!(3));
     assert_eq!(
         run("let a = 0; match a { 0 => 1, 1 => 2, _ => 3 }"),

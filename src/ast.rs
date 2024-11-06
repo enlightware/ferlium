@@ -5,8 +5,14 @@ use std::fmt::Debug;
 use ustr::Ustr;
 
 use crate::{
-    containers::B, error::LocatedError, format::write_with_separator, module::FmtWithModuleEnv,
-    mutability::MutVal, r#type::Type, value::Value, Location,
+    containers::B,
+    error::LocatedError,
+    format::write_with_separator,
+    module::FmtWithModuleEnv,
+    mutability::MutVal,
+    r#type::Type,
+    value::{LiteralValue, Value},
+    Location,
 };
 
 /// A spanned Ustr
@@ -339,7 +345,7 @@ impl std::fmt::Display for Expr {
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum PatternKind {
-    Literal(Value, Type),
+    Literal(LiteralValue, Type),
     Variant { tag: UstrSpan, vars: Vec<UstrSpan> },
     Error(String),
 }

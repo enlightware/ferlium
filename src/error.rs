@@ -95,6 +95,9 @@ pub enum InternalCompilationError {
         b_type: ADTAccessType,
         b_span: Location,
     },
+    EmptyMatchBody {
+        span: Location,
+    },
     InconsistentPattern {
         a_type: PatternType,
         a_span: Location,
@@ -109,13 +112,14 @@ pub enum InternalCompilationError {
         first_occurrence: Location,
         second_occurrence: Location,
     },
-    EmptyMatchBody {
-        span: Location,
+    DuplicatedLiteralPattern {
+        first_occurrence: Location,
+        second_occurrence: Location,
     },
-    ExhaustiveMatchForValue {
-        cond_span: Location,
-        pattern_span: Location,
-        match_span: Location,
+    NonExhaustivePattern {
+        span: Location,
+        ty: Type,
+        // TODO: have a generic way to talk about the non-covered values
     },
     MutablePathsOverlap {
         a_span: Location,
@@ -325,14 +329,23 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     fmt_span(first_occurrence_span),
                 )
             }
+            DuplicatedLiteralPattern {
+                first_occurrence, ..
+            } => {
+                write!(
+                    f,
+                    "Duplicated literal pattern: {}",
+                    fmt_span(first_occurrence),
+                )
+            }
             EmptyMatchBody { .. } => {
                 write!(f, "Match body cannot be empty")
             }
-            ExhaustiveMatchForValue { cond_span, .. } => {
+            NonExhaustivePattern { ty, .. } => {
                 write!(
                     f,
-                    "Exhaustive match for condition {} which is matched against a value",
-                    fmt_span(cond_span)
+                    "Non-exhaustive patterns for type {}, all possible values must be covered.",
+                    ty.format_with(env)
                 )
             }
             MutablePathsOverlap {
@@ -458,13 +471,16 @@ pub enum CompilationError {
         first_occurrence: Location,
         second_occurrence: Location,
     },
+    DuplicatedLiteralPattern {
+        first_occurrence: Location,
+        second_occurrence: Location,
+    },
     EmptyMatchBody {
         span: Location,
     },
-    ExhaustiveMatchForValue {
-        cond_span: Location,
-        pattern_span: Location,
-        match_span: Location,
+    NonExhaustivePattern {
+        span: Location,
+        ty: String,
     },
     MutablePathsOverlap {
         a_span: Location,
@@ -626,15 +642,17 @@ impl CompilationError {
                 first_occurrence,
                 second_occurrence,
             },
+            DuplicatedLiteralPattern {
+                first_occurrence,
+                second_occurrence,
+            } => Self::DuplicatedLiteralPattern {
+                first_occurrence,
+                second_occurrence,
+            },
             EmptyMatchBody { span: cond_span } => Self::EmptyMatchBody { span: cond_span },
-            ExhaustiveMatchForValue {
-                cond_span,
-                pattern_span,
-                match_span,
-            } => Self::ExhaustiveMatchForValue {
-                cond_span,
-                pattern_span,
-                match_span,
+            NonExhaustivePattern { span, ty } => Self::NonExhaustivePattern {
+                span,
+                ty: ty.format_with(env).to_string(),
             },
             MutablePathsOverlap {
                 a_span,

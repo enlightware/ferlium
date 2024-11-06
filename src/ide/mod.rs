@@ -261,20 +261,27 @@ fn compilation_error_to_data(
                 ErrorData::from_location(second_occurrence, text),
             ]
         }
+        DuplicatedLiteralPattern {
+            first_occurrence,
+            second_occurrence,
+        } => {
+            let name_text = fmt_span(first_occurrence);
+            let text = format!("Duplicated literal pattern {name_text}");
+            vec![
+                ErrorData::from_location(first_occurrence, text.clone()),
+                ErrorData::from_location(second_occurrence, text),
+            ]
+        }
         EmptyMatchBody { span } => vec![ErrorData::from_location(
             span,
             "Match body cannot be empty".to_string(),
         )],
-        ExhaustiveMatchForValue {
-            cond_span,
-            pattern_span,
-            match_span,
-        } => {
-            let cond_text = fmt_span(cond_span);
-            let pattern_text = fmt_span(pattern_span);
+        NonExhaustivePattern { span, ty } => {
             vec![ErrorData::from_location(
-                match_span,
-                format!("Match condition {cond_text} is matched towards value {pattern_text}, but the match is exhaustive, which is not supported when matching towards values."),
+                span,
+                format!(
+                    "Non-exhaustive patterns for type {ty}, all possible values must be covered."
+                ),
             )]
         }
         MutablePathsOverlap {

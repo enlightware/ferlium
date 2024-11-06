@@ -1,6 +1,6 @@
 use crate::{Location, LocatedError};
 use crate::ast::{UstrSpan, Expr, ExprKind, ExprKind::*, Pattern, PatternKind as PatK, Module};
-use crate::value::Value;
+use crate::value::{Value, LiteralValue};
 use crate::r#type::Type;
 use crate::parser_helpers::*;
 use crate::std::string::string_type;
@@ -168,7 +168,7 @@ NAryVariantPattern: PatK = {
 }
 
 LiteralExpr: ExprKind = {
-    LiteralValue => Literal(<>.0, <>.1),
+    LiteralValue => Literal(<>.0.into_value(), <>.1),
 }
 
 LiteralValue = {
@@ -290,12 +290,12 @@ UIdentifier: Ustr = {
 
 Identifier: &'input str = r"[\p{L}_][\p{L}\p{N}_]*" => <>;
 
-BoolLiteral: (Value, Type) = {
+BoolLiteral: (LiteralValue, Type) = {
     "true" => literal_value(true),
     "false" => literal_value(false),
 };
 
-IntLiteral: (Value, Type) = {
+IntLiteral: (LiteralValue, Type) = {
     IntValue => literal_value(<>),
 };
 
@@ -309,7 +309,7 @@ UIntValue: usize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<usiz
     Err(msg) => error(msg, span(l, r)),
 };
 
-StringLiteral: (Value, Type) = r#"\"([^\\\"]|\\.)*\""# => (string_literal(<>), string_type());
+StringLiteral: (LiteralValue, Type) = r#"\"([^\\\"]|\\.)*\""# => (string_literal(<>), string_type());
 
 FormattedString: ExprKind = r#"f\"([^\\\"]|\\.)*\""# => formatted_string(<>);
 

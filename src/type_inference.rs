@@ -7,7 +7,7 @@ use std::{
     mem,
 };
 
-use crate::location::Location;
+use crate::{location::Location, std::logic::bool_type};
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
 use ustr::{ustr, Ustr};
@@ -156,6 +156,7 @@ pub struct TypeInference {
     ty_constraints: Vec<TypeConstraint>,
     mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     mut_constraints: Vec<MutConstraint>,
+    ty_coverage_constraints: Vec<(Location, Type, Vec<Value>)>,
     effect_constraints: InPlaceUnificationTable<EffectVarKey>,
 }
 
@@ -216,6 +217,10 @@ impl TypeInference {
     pub fn add_pub_constraint(&mut self, pub_constraint: PubTypeConstraint) {
         self.ty_constraints
             .push(TypeConstraint::Pub(pub_constraint));
+    }
+
+    pub fn add_ty_coverage_constraint(&mut self, span: Location, ty: Type, values: Vec<Value>) {
+        self.ty_coverage_constraints.push((span, ty, values));
     }
 
     pub fn infer_expr(
@@ -946,6 +951,7 @@ impl UnifiedTypeInference {
             ty_constraints,
             mut_unification_table,
             mut_constraints,
+            ty_coverage_constraints,
             effect_constraints,
         } = ty_inf;
         let mut unified_ty_inf = UnifiedTypeInference {
@@ -1009,6 +1015,21 @@ impl UnifiedTypeInference {
                     remaining_constraints.insert(cst);
                 }
             }
+        }
+
+        // Then, solve type coverage constraints
+        for (span, ty, values) in ty_coverage_constraints {
+            let ty = unified_ty_inf.normalize_type(ty);
+            if ty == Type::unit() {
+                continue;
+            }
+            if ty == bool_type()
+                && values.contains(&Value::native(true))
+                && values.contains(&Value::native(false))
+            {
+                continue;
+            }
+            return Err(InternalCompilationError::NonExhaustivePattern { span, ty });
         }
 
         // Then, solve other constraints.

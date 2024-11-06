@@ -27,6 +27,7 @@ wasm-bindgen-test = "0.3.43"
 [dependencies]
 dyn-clone = "1.0.17"
 dyn-eq = "0.1.3"
+dyn-hash = "0.2.0"
 enum-as-inner = "0.6.0"
 itertools = "0.13.0"
 ustr = { git = "https://github.com/enlightware/ustr.git", branch = "script" }
