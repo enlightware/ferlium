@@ -414,9 +414,10 @@ macro_rules! n_ary_native_fn {
 // - V: Value (generic value)
 // - W: &mut Value (mutable reference to generic value)
 // outputs:
-// - I: native
+// - N: native
 // - V: value
-// - +F: fallible result
+// - FN: native, fallible
+// - FV: value, fallible
 
 // Note: the proc macro declare_native_fn_aliases defined in painturscript_macros generates
 // typedefs with the combinations of aliases.
