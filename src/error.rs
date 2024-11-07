@@ -1,4 +1,7 @@
-use std::fmt::{self, Display};
+use std::{
+    fmt::{self, Display},
+    ops::Deref,
+};
 
 use crate::location::Location;
 use enum_as_inner::EnumAsInner;
@@ -39,7 +42,7 @@ pub enum MustBeMutableContext {
 
 /// Compilation error, for internal use
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InternalCompilationError {
+pub enum InternalCompilationErrorImpl {
     SymbolNotFound(Location),
     FunctionNotFound(Location),
     WrongNumberOfArguments {
@@ -144,6 +147,37 @@ pub enum InternalCompilationError {
     },
     Internal(String),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalCompilationError(Box<InternalCompilationErrorImpl>);
+
+impl InternalCompilationError {
+    pub fn new(error: InternalCompilationErrorImpl) -> Self {
+        Self(Box::new(error))
+    }
+
+    pub fn into_inner(self) -> InternalCompilationErrorImpl {
+        *self.0
+    }
+}
+
+impl Deref for InternalCompilationError {
+    type Target = InternalCompilationErrorImpl;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[macro_export]
+macro_rules! internal_compilation_error {
+    ($($ctor:tt)*) => {
+        InternalCompilationError::new(
+            $crate::error::InternalCompilationErrorImpl::$($ctor)*
+        )
+    };
+}
+
 impl InternalCompilationError {
     pub fn new_inconsistent_adt(
         mut a_type: ADTAccessType,
@@ -155,12 +189,12 @@ impl InternalCompilationError {
             std::mem::swap(&mut a_type, &mut b_type);
             std::mem::swap(&mut a_span, &mut b_span);
         }
-        Self::InconsistentADT {
+        internal_compilation_error!(InconsistentADT {
             a_type,
             a_span,
             b_type,
             b_span,
-        }
+        })
     }
 }
 
@@ -176,8 +210,8 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
             ),
             None => source[loc.start()..loc.end()].to_string(),
         };
-        use InternalCompilationError::*;
-        match self.value {
+        use InternalCompilationErrorImpl::*;
+        match self.value.deref() {
             SymbolNotFound(span) => {
                 write!(f, "Variable or function not found: {}", fmt_span(span))
             }
@@ -399,7 +433,7 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
 
 /// Compilation error, for external use
 #[derive(Debug, EnumAsInner)]
-pub enum CompilationError {
+pub enum CompilationErrorImpl {
     ParsingFailed(Vec<LocatedError>),
     VariableNotFound(Location),
     FunctionNotFound(Location),
@@ -506,92 +540,126 @@ pub enum CompilationError {
     Internal(String),
 }
 
+#[derive(Debug)]
+pub struct CompilationError(Box<CompilationErrorImpl>);
+
+impl CompilationError {
+    pub fn new(error: CompilationErrorImpl) -> Self {
+        Self(Box::new(error))
+    }
+
+    pub fn into_inner(self) -> CompilationErrorImpl {
+        *self.0
+    }
+}
+
+impl Deref for CompilationError {
+    type Target = CompilationErrorImpl;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[macro_export]
+macro_rules! compilation_error {
+    ($($ctor:tt)*) => {
+        CompilationError::new(
+            $crate::error::CompilationErrorImpl::$($ctor)*
+        )
+    };
+}
+
 impl CompilationError {
     pub fn from_internal(
         error: InternalCompilationError,
         env: &ModuleEnv<'_>,
         source: &str,
     ) -> Self {
-        use InternalCompilationError::*;
-        match error {
-            SymbolNotFound(span) => Self::VariableNotFound(span),
-            FunctionNotFound(span) => Self::FunctionNotFound(span),
+        use InternalCompilationErrorImpl::*;
+        match error.into_inner() {
+            SymbolNotFound(span) => compilation_error!(VariableNotFound(span)),
+            FunctionNotFound(span) => compilation_error!(FunctionNotFound(span)),
             WrongNumberOfArguments {
                 expected,
                 expected_span,
                 got,
                 got_span,
-            } => Self::WrongNumberOfArguments {
+            } => compilation_error!(WrongNumberOfArguments {
                 expected,
                 expected_span,
                 got,
                 got_span,
-            },
+            }),
             MustBeMutable(current_span, reason_span, ctx) => {
                 let (current_span, reason_span) =
                     resolve_must_be_mutable_ctx(current_span, reason_span, ctx, source);
-                Self::MustBeMutable(current_span, reason_span)
+                compilation_error!(MustBeMutable(current_span, reason_span))
             }
-            IsNotSubtype(cur, cur_span, exp, exp_span) => Self::IsNotSubtype(
+            IsNotSubtype(cur, cur_span, exp, exp_span) => compilation_error!(IsNotSubtype(
                 cur.format_with(env).to_string(),
                 cur_span,
                 exp.format_with(env).to_string(),
                 exp_span,
-            ),
+            )),
             InfiniteType(ty_var, ty, span) => {
-                Self::InfiniteType(ty_var.to_string(), ty.format_with(env).to_string(), span)
+                compilation_error!(InfiniteType(
+                    ty_var.to_string(),
+                    ty.format_with(env).to_string(),
+                    span
+                ))
             }
-            UnboundTypeVar { ty_var, ty, span } => Self::UnboundTypeVar {
+            UnboundTypeVar { ty_var, ty, span } => compilation_error!(UnboundTypeVar {
                 ty_var: ty_var.to_string(),
                 ty: ty.format_with(env).to_string(),
                 span,
-            },
+            }),
             InvalidTupleIndex {
                 index,
                 index_span,
                 tuple_length,
                 tuple_span,
-            } => Self::InvalidTupleIndex {
+            } => compilation_error!(InvalidTupleIndex {
                 index,
                 index_span,
                 tuple_length,
                 tuple_span,
-            },
+            }),
             InvalidTupleProjection {
                 tuple_ty: expr_ty,
                 tuple_span: expr_span,
                 index_span,
-            } => Self::InvalidTupleProjection {
+            } => compilation_error!(InvalidTupleProjection {
                 expr_ty: expr_ty.format_with(env).to_string(),
                 expr_span,
                 index_span,
-            },
+            }),
             DuplicatedRecordField {
                 first_occurrence,
                 second_occurrence,
-            } => Self::DuplicatedRecordField {
+            } => compilation_error!(DuplicatedRecordField {
                 first_occurrence,
                 second_occurrence,
-            },
+            }),
             InvalidRecordField {
                 field_span,
                 record_ty,
                 record_span,
-            } => Self::InvalidRecordField {
+            } => compilation_error!(InvalidRecordField {
                 field_span,
                 record_ty: record_ty.format_with(env).to_string(),
                 record_span,
-            },
+            }),
             InvalidRecordFieldAccess {
                 field_span,
                 record_ty,
                 record_span,
-            } => Self::InvalidRecordFieldAccess {
+            } => compilation_error!(InvalidRecordFieldAccess {
                 field_span,
                 record_ty: record_ty.format_with(env).to_string(),
                 record_span,
-            },
-            InvalidVariantName { name, ty } => Self::InvalidVariantName {
+            }),
+            InvalidVariantName { name, ty } => compilation_error!(InvalidVariantName {
                 name,
                 ty: ty.format_with(env).to_string(),
                 valids: ty
@@ -601,104 +669,107 @@ impl CompilationError {
                     .iter()
                     .map(|(name, _)| name.to_string())
                     .collect(),
-            },
-            InvalidVariantType { name, ty } => Self::InvalidVariantType {
+            }),
+            InvalidVariantType { name, ty } => compilation_error!(InvalidVariantType {
                 name,
                 ty: ty.format_with(env).to_string(),
-            },
+            }),
             InconsistentADT {
                 a_type,
                 a_span,
                 b_type,
                 b_span,
-            } => Self::InconsistentADT {
+            } => compilation_error!(InconsistentADT {
                 a_type,
                 a_span,
                 b_type,
                 b_span,
-            },
+            }),
             InconsistentPattern {
                 a_type,
                 a_span,
                 b_type,
                 b_span,
-            } => Self::InconsistentPattern {
+            } => compilation_error!(InconsistentPattern {
                 a_type,
                 a_span,
                 b_type,
                 b_span,
-            },
+            }),
             DuplicatedVariant {
                 first_occurrence,
                 second_occurrence,
-            } => Self::DuplicatedVariant {
+            } => compilation_error!(DuplicatedVariant {
                 first_occurrence,
                 second_occurrence,
-            },
+            }),
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,
-            } => Self::IdentifierBoundMoreThanOnceInAPattern {
+            } => compilation_error!(IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,
-            },
+            }),
             DuplicatedLiteralPattern {
                 first_occurrence,
                 second_occurrence,
-            } => Self::DuplicatedLiteralPattern {
+            } => compilation_error!(DuplicatedLiteralPattern {
                 first_occurrence,
                 second_occurrence,
-            },
-            EmptyMatchBody { span: cond_span } => Self::EmptyMatchBody { span: cond_span },
-            NonExhaustivePattern { span, ty } => Self::NonExhaustivePattern {
+            }),
+            EmptyMatchBody { span: cond_span } => {
+                compilation_error!(EmptyMatchBody { span: cond_span })
+            }
+            NonExhaustivePattern { span, ty } => compilation_error!(NonExhaustivePattern {
                 span,
                 ty: ty.format_with(env).to_string(),
-            },
+            }),
             MutablePathsOverlap {
                 a_span,
                 b_span,
                 fn_span,
-            } => Self::MutablePathsOverlap {
+            } => compilation_error!(MutablePathsOverlap {
                 a_span,
                 b_span,
                 fn_span,
-            },
+            }),
             UndefinedVarInStringFormatting {
                 var_span,
                 string_span,
-            } => Self::UndefinedVarInStringFormatting {
+            } => compilation_error!(UndefinedVarInStringFormatting {
                 var_span,
                 string_span,
-            },
+            }),
             InvalidEffectDependency {
                 source,
                 source_span,
                 target,
                 target_span,
-            } => Self::InvalidEffectDependency {
+            } => compilation_error!(InvalidEffectDependency {
                 source,
                 source_span,
                 target,
                 target_span,
-            },
+            }),
             UnknownProperty {
                 scope,
                 variable,
                 cause,
                 span,
-            } => Self::UnknownProperty {
+            } => compilation_error!(UnknownProperty {
                 scope,
                 variable,
                 cause,
                 span,
-            },
-            Internal(msg) => Self::Internal(msg),
+            }),
+            Internal(msg) => compilation_error!(Internal(msg)),
         }
     }
 
     pub fn expect_wrong_number_of_arguments(&self, expected: usize, got: usize) {
-        match self {
-            Self::WrongNumberOfArguments {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            WrongNumberOfArguments {
                 expected: exp,
                 got: g,
                 ..
@@ -722,8 +793,9 @@ impl CompilationError {
     }
 
     pub fn expect_is_not_subtype(&self, cur_ty: &str, exp_ty: &str) {
-        match self {
-            Self::IsNotSubtype(cur, _, exp, _) => {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            IsNotSubtype(cur, _, exp, _) => {
                 if cur == cur_ty && exp == exp_ty {
                     return;
                 }
@@ -737,16 +809,18 @@ impl CompilationError {
     }
 
     pub fn expect_unbound_ty_var(&self) {
+        use CompilationErrorImpl::*;
         // TODO: once ty_var normalization is implemented, pass the ty_var as parameter
-        match self {
-            Self::UnboundTypeVar { .. } => (),
+        match self.deref() {
+            UnboundTypeVar { .. } => (),
             _ => panic!("expect_unbound_ty_val called on non-UnboundTypeVar error {self:?}"),
         }
     }
 
     pub fn expect_duplicate_record_field(&self, src: &str, exp_name: &str) {
-        match self {
-            Self::DuplicatedRecordField {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            DuplicatedRecordField {
                 first_occurrence: first_occurrence_span,
                 ..
             } => {
@@ -767,15 +841,17 @@ impl CompilationError {
     }
 
     pub fn expect_inconsistent_adt(&self) {
-        match self {
-            Self::InconsistentADT { .. } => (),
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            InconsistentADT { .. } => (),
             _ => panic!("expect_inconsistent_adt called on non-InconsistentADT error {self:?}"),
         }
     }
 
     pub fn expect_duplicated_variant(&self, src: &str, exp_name: &str) {
-        match self {
-            Self::DuplicatedVariant {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            DuplicatedVariant {
                 first_occurrence: first_occurrence_span,
                 ..
             } => {
@@ -793,8 +869,9 @@ impl CompilationError {
     }
 
     pub fn expect_mutable_paths_overlap(&self) {
-        match self {
-            Self::MutablePathsOverlap { .. } => (),
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            MutablePathsOverlap { .. } => (),
             _ => panic!(
                 "expect_mutable_paths_overlap called on non-MutablePathsOverlap error {self:?}"
             ),
@@ -802,8 +879,9 @@ impl CompilationError {
     }
 
     pub fn expect_undefined_var_in_string_formatting(&self, src: &str, exp_name: &str) {
-        match self {
-            Self::UndefinedVarInStringFormatting { var_span, .. } => {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            UndefinedVarInStringFormatting { var_span, .. } => {
                 let var_name = &src[var_span.start()..var_span.end()];
                 if var_name == exp_name {
                 } else {
@@ -820,8 +898,9 @@ impl CompilationError {
     }
 
     pub fn expect_invalid_effect_dependency(&self, cur_eff: EffType, target_eff: EffType) {
-        match self {
-            Self::InvalidEffectDependency { source, target, .. } => {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            InvalidEffectDependency { source, target, .. } => {
                 if source == &cur_eff && target == &target_eff {
                     return;
                 }

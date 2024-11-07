@@ -2,6 +2,7 @@ use ustr::Ustr;
 
 use crate::{
     error::InternalCompilationError,
+    internal_compilation_error,
     ir::{Node, NodeKind},
     r#type::FnArgType,
     Location,
@@ -110,11 +111,11 @@ fn check_arguments(
     for (i, arg_i) in in_out_args.iter().enumerate() {
         for arg_j in in_out_args.iter().skip(i + 1) {
             if do_paths_overlap(&arg_i.1, &arg_j.1) {
-                return Err(InternalCompilationError::MutablePathsOverlap {
+                return Err(internal_compilation_error!(MutablePathsOverlap {
                     a_span: arguments[arg_i.0].span,
                     b_span: arguments[arg_j.0].span,
                     fn_span,
-                });
+                }));
             }
         }
     }

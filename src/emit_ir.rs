@@ -15,6 +15,7 @@ use crate::{
     effects::EffType,
     error::InternalCompilationError,
     function::ScriptFunction,
+    internal_compilation_error,
     ir::{self, Immediate, Node},
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
     mutability::MutType,
@@ -196,10 +197,10 @@ pub fn emit_module(
             .iter()
             .map(|c| c.format_with(&module_env))
             .join(" ∧ ");
-        return Err(InternalCompilationError::Internal(format!(
+        return Err(internal_compilation_error!(Internal(format!(
             "Unused constraints in module compilation: {}",
             constraints
-        )));
+        ))));
     }
 
     // Sixth pass, run the borrow checker and elaborate dictionaries.
@@ -247,7 +248,11 @@ fn check_unbounds(
                 uninstantiated_unbound.insert(ty_var);
             } else {
                 let (ty, span) = ctxs.first();
-                return Err(InternalCompilationError::UnboundTypeVar { ty_var, ty, span });
+                return Err(internal_compilation_error!(UnboundTypeVar {
+                    ty_var,
+                    ty,
+                    span
+                }));
             }
         }
     }
@@ -491,9 +496,9 @@ fn validate_and_cleanup_constraints(
     // Partition the orphan constraints into variant constraint substitutions and the others.
     let (subst, other_orphans) = partition_variant_constraints(orphan_constraints.into_iter());
     if !other_orphans.is_empty() {
-        return Err(InternalCompilationError::Internal(format!(
+        return Err(internal_compilation_error!(Internal(format!(
             "Orphan constraints found: {other_orphans:?}"
-        )));
+        ))));
     }
 
     // Compute the quantifiers based on the function type and its constraints.

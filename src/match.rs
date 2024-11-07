@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::Location;
+use crate::{internal_compilation_error, Location};
 use itertools::{multiunzip, Itertools};
 use ustr::ustr;
 
@@ -37,7 +37,9 @@ impl TypeInference {
                 let (node, mut_ty) = self.infer_expr(env, default)?;
                 return Ok((node.kind, node.ty, mut_ty, node.effects));
             } else {
-                return Err(InternalCompilationError::EmptyMatchBody { span: match_span });
+                return Err(internal_compilation_error!(EmptyMatchBody {
+                    span: match_span
+                }));
             }
         }
 
@@ -65,18 +67,20 @@ impl TypeInference {
                 .map(|(pattern, expr)| {
                     if let Some(((tag, tag_span), vars)) = pattern.kind.as_variant() {
                         if let Some(old_tag_span) = seen_tags.insert(tag, tag_span) {
-                            return Err(InternalCompilationError::DuplicatedVariant {
+                            return Err(internal_compilation_error!(DuplicatedVariant {
                                 first_occurrence: *old_tag_span,
                                 second_occurrence: *tag_span,
-                            });
+                            }));
                         }
                         let mut seen_identifier = HashMap::new();
                         for (var, span) in vars {
                             if let Some(old_span) = seen_identifier.insert(*var, *span) {
-                                return Err(InternalCompilationError::IdentifierBoundMoreThanOnceInAPattern {
-                                    first_occurrence: old_span,
-                                    second_occurrence: *span,
-                                });
+                                return Err(internal_compilation_error!(
+                                    IdentifierBoundMoreThanOnceInAPattern {
+                                        first_occurrence: old_span,
+                                        second_occurrence: *span,
+                                    }
+                                ));
                             }
                         }
                         let (inner_tys, variant_inner_ty) = match vars.len() {
@@ -93,12 +97,12 @@ impl TypeInference {
                         };
                         Ok(((*tag, inner_tys, variant_inner_ty), (expr, vars)))
                     } else {
-                        Err(InternalCompilationError::InconsistentPattern {
+                        Err(internal_compilation_error!(InconsistentPattern {
                             a_type: PatternType::Variant,
                             a_span: first_alternative_span,
                             b_type: pattern.kind.r#type(),
                             b_span: pattern.span,
-                        })
+                        }))
                     }
                 })
                 .process_results(|iter| iter.unzip())?;
@@ -355,10 +359,10 @@ impl TypeInference {
             .map(|(pattern, expr)| {
                 if let PatternKind::Literal(literal, ty) = &pattern.kind {
                     if let Some(previous_span) = seen_values.get(literal) {
-                        return Err(InternalCompilationError::DuplicatedLiteralPattern {
+                        return Err(internal_compilation_error!(DuplicatedLiteralPattern {
                             first_occurrence: *previous_span,
                             second_occurrence: pattern.span,
-                        });
+                        }));
                     }
                     seen_values.insert(literal.clone(), pattern.span);
                     self.add_sub_type_constraint(
@@ -377,12 +381,12 @@ impl TypeInference {
                     let effects = node.effects.clone();
                     Ok(((literal.clone().into_value(), node), effects))
                 } else {
-                    Err(InternalCompilationError::InconsistentPattern {
+                    Err(internal_compilation_error!(InconsistentPattern {
                         a_type: PatternType::Literal,
                         a_span: first_pattern_span,
                         b_type: pattern.kind.r#type(),
                         b_span: expr.span,
-                    })
+                    }))
                 }
             })
             .process_results(|iter| multiunzip(iter))?;

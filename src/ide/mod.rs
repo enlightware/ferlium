@@ -2,11 +2,13 @@ use std::{
     borrow::Cow,
     collections::HashSet,
     fmt::{self, Display},
+    ops::Deref,
     sync::LazyLock,
 };
 
 use crate::{
     compile,
+    error::CompilationErrorImpl,
     eval::{EvalCtx, ValOrMut},
     module::{FmtWithModuleEnv, ModuleFunction, Uses},
     r#type::{FnArgType, Type},
@@ -88,8 +90,8 @@ fn compilation_error_to_data(
             },
         ),
     };
-    use CompilationError::*;
-    match error {
+    use CompilationErrorImpl::*;
+    match error.deref() {
         ParsingFailed(errors) => errors
             .iter()
             .map(|(msg, span)| ErrorData::from_location(span, msg.clone()))

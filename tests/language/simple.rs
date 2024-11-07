@@ -263,6 +263,7 @@ fn if_expr() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_expr() {
     fail_compilation("match true {}")
+        .into_inner()
         .into_empty_match_body()
         .unwrap();
     assert_eq!(run("match true { _ => 0 }"), int!(0));
@@ -272,10 +273,12 @@ fn match_expr() {
     assert_eq!(run("match true { false => 1, true => 0 }"), int!(0));
     assert_eq!(run("match false { false => 1, true => 0, }"), int!(1));
     fail_compilation("match false { false => 1, true => 0, false => 2 }")
+        .into_inner()
         .into_duplicated_literal_pattern()
         .unwrap();
     assert_eq!(run("let a = 0; match a { 0 => 1, _ => 3 }"), int!(1));
     fail_compilation("let a = 0; match a { 0 => 1 }")
+        .into_inner()
         .into_non_exhaustive_pattern()
         .unwrap();
     assert_eq!(run("let a = 1; match a { 0 => 1, _ => 3 }"), int!(3));
@@ -892,6 +895,7 @@ fn properties() {
     run("fn f(x) { x * 2 } @props::my_scope.my_var = f(@props::my_scope.my_var)");
     assert_eq!(get_property_value(), 14);
     fail_compilation("@props::my_scope.my_var.a")
+        .into_inner()
         .into_invalid_record_field_access()
         .unwrap();
     fail_compilation("@props::my_scope.my_var.a = 2").expect_must_be_mutable();

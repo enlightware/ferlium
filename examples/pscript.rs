@@ -1,6 +1,11 @@
+use std::ops::Deref;
+
 use ariadne::Label;
 use painturscript::emit_ir::{emit_expr, emit_module};
-use painturscript::error::{resolve_must_be_mutable_ctx, InternalCompilationError, LocatedError};
+use painturscript::error::{
+    resolve_must_be_mutable_ctx, InternalCompilationError, InternalCompilationErrorImpl,
+    LocatedError,
+};
 use painturscript::format::FormatWith;
 use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
 use painturscript::parse_module_and_expr;
@@ -39,10 +44,10 @@ fn pretty_print_parse_errors(src: &str, errors: &[LocatedError]) {
 
 fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleEnv<'_>, &str)) {
     use ariadne::{Color, Fmt, Report, ReportKind, Source};
-    use InternalCompilationError::*;
+    use InternalCompilationErrorImpl::*;
     let env = &data.0;
     let src = data.1;
-    match error {
+    match error.deref() {
         SymbolNotFound(span) => {
             let offset = start_of_line_of(src, span.start());
             let name = &data.1[span_range(*span)];

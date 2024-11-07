@@ -7,7 +7,7 @@ use std::{
     mem,
 };
 
-use crate::{location::Location, std::logic::bool_type};
+use crate::{internal_compilation_error, location::Location, std::logic::bool_type};
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
 use ustr::{ustr, Ustr};
@@ -433,10 +433,10 @@ impl TypeInference {
                 let mut names_seen = HashMap::new();
                 for (name, span) in names.iter().copied() {
                     if let Some(prev_span) = names_seen.insert(name, span) {
-                        return Err(InternalCompilationError::DuplicatedRecordField {
+                        return Err(internal_compilation_error!(DuplicatedRecordField {
                             first_occurrence: prev_span,
                             second_occurrence: span,
-                        });
+                        }));
                     }
                 }
                 // Infer the types of the nodes.
@@ -607,12 +607,12 @@ impl TypeInference {
                         .map(|arg| arg.borrow().span)
                         .reduce(|a, b| Location::new_local(a.start(), b.end()))
                         .unwrap_or(span);
-                    return Err(InternalCompilationError::WrongNumberOfArguments {
+                    return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: function.ty_scheme.ty.args.len(),
                         expected_span: span,
                         got: args.len(),
                         got_span,
-                    });
+                    }));
                 }
                 // Instantiate its type scheme
                 let (inst_fn_ty, inst_data) =
@@ -1029,7 +1029,10 @@ impl UnifiedTypeInference {
             {
                 continue;
             }
-            return Err(InternalCompilationError::NonExhaustivePattern { span, ty });
+            return Err(internal_compilation_error!(NonExhaustivePattern {
+                span,
+                ty
+            }));
         }
 
         // Then, solve other constraints.
@@ -1379,12 +1382,12 @@ impl UnifiedTypeInference {
                 .ty_unification_table
                 .unify_var_var(cur, exp)
                 .map_err(|_| {
-                    InternalCompilationError::IsNotSubtype(
+                    internal_compilation_error!(IsNotSubtype(
                         cur_ty,
                         current_span,
                         exp_ty,
                         expected_span,
-                    )
+                    ))
                 }),
             (Variable(var), _) => {
                 self.unify_type_variable(var, current_span, exp_ty, expected_span)
@@ -1394,12 +1397,12 @@ impl UnifiedTypeInference {
             }
             (Native(cur), Native(exp)) => {
                 if cur.bare_ty != exp.bare_ty {
-                    return Err(InternalCompilationError::IsNotSubtype(
+                    return Err(internal_compilation_error!(IsNotSubtype(
                         cur_ty,
                         current_span,
                         exp_ty,
                         expected_span,
-                    ));
+                    )));
                 }
                 for (cur_arg_ty, exp_arg_ty) in
                     cur.arguments.into_iter().zip(exp.arguments.into_iter())
@@ -1410,21 +1413,21 @@ impl UnifiedTypeInference {
             }
             (Variant(cur), Variant(exp)) => {
                 if cur.len() != exp.len() {
-                    return Err(InternalCompilationError::IsNotSubtype(
+                    return Err(internal_compilation_error!(IsNotSubtype(
                         cur_ty,
                         current_span,
                         exp_ty,
                         expected_span,
-                    ));
+                    )));
                 }
                 for (cur_variant, exp_variant) in cur.into_iter().zip(exp.into_iter()) {
                     if cur_variant.0 != exp_variant.0 {
-                        return Err(InternalCompilationError::IsNotSubtype(
+                        return Err(internal_compilation_error!(IsNotSubtype(
                             cur_ty,
                             current_span,
                             exp_ty,
                             expected_span,
-                        ));
+                        )));
                     }
                     self.unify_sub_type(cur_variant.1, current_span, exp_variant.1, expected_span)?;
                 }
@@ -1432,12 +1435,12 @@ impl UnifiedTypeInference {
             }
             (Tuple(cur), Tuple(exp)) => {
                 if cur.len() != exp.len() {
-                    return Err(InternalCompilationError::IsNotSubtype(
+                    return Err(internal_compilation_error!(IsNotSubtype(
                         cur_ty,
                         current_span,
                         exp_ty,
                         expected_span,
-                    ));
+                    )));
                 }
                 for (cur_el_ty, exp_el_ty) in cur.into_iter().zip(exp.into_iter()) {
                     self.unify_sub_type(cur_el_ty, current_span, exp_el_ty, expected_span)?;
@@ -1447,12 +1450,12 @@ impl UnifiedTypeInference {
             (Record(cur), Record(exp)) => {
                 for (cur_field, exp_field) in cur.into_iter().zip(exp) {
                     if cur_field.0 != exp_field.0 {
-                        return Err(InternalCompilationError::IsNotSubtype(
+                        return Err(internal_compilation_error!(IsNotSubtype(
                             cur_ty,
                             current_span,
                             exp_ty,
                             expected_span,
-                        ));
+                        )));
                     }
                     self.unify_sub_type(cur_field.1, current_span, exp_field.1, expected_span)?;
                 }
@@ -1460,12 +1463,12 @@ impl UnifiedTypeInference {
             }
             (Function(cur), Function(exp)) => {
                 if cur.args.len() != exp.args.len() {
-                    return Err(InternalCompilationError::IsNotSubtype(
+                    return Err(internal_compilation_error!(IsNotSubtype(
                         cur_ty,
                         current_span,
                         exp_ty,
                         expected_span,
-                    ));
+                    )));
                 }
                 for ((index, cur_arg), exp_arg) in cur.args.iter().enumerate().zip(exp.args.iter())
                 {
@@ -1486,21 +1489,21 @@ impl UnifiedTypeInference {
             }
             (Newtype(cur_name, cur_ty), Newtype(exp_name, exp_ty)) => {
                 if cur_name != exp_name {
-                    return Err(InternalCompilationError::IsNotSubtype(
+                    return Err(internal_compilation_error!(IsNotSubtype(
                         cur_ty,
                         current_span,
                         exp_ty,
                         expected_span,
-                    ));
+                    )));
                 }
                 self.unify_sub_type(cur_ty, current_span, exp_ty, expected_span)
             }
-            _ => Err(InternalCompilationError::IsNotSubtype(
+            _ => Err(internal_compilation_error!(IsNotSubtype(
                 cur_ty,
                 current_span,
                 exp_ty,
                 expected_span,
-            )),
+            ))),
         }
     }
 
@@ -1512,11 +1515,13 @@ impl UnifiedTypeInference {
         ty_span: Location,
     ) -> Result<(), InternalCompilationError> {
         if ty.data().contains_any_type_var(var) {
-            Err(InternalCompilationError::InfiniteType(var, ty, ty_span))
+            Err(internal_compilation_error!(InfiniteType(var, ty, ty_span)))
         } else {
             self.ty_unification_table
                 .unify_var_value(var, Some(ty))
-                .map_err(|(l, r)| InternalCompilationError::IsNotSubtype(l, var_span, r, ty_span))
+                .map_err(|(l, r)| {
+                    internal_compilation_error!(IsNotSubtype(l, var_span, r, ty_span))
+                })
         }
     }
 
@@ -1542,20 +1547,20 @@ impl UnifiedTypeInference {
                     self.unify_sub_type(*ty, tuple_span, element_ty, index_span)?;
                     Ok(None)
                 } else {
-                    Err(InternalCompilationError::InvalidTupleIndex {
+                    Err(internal_compilation_error!(InvalidTupleIndex {
                         index,
                         index_span,
                         tuple_length: tys.len(),
                         tuple_span,
-                    })
+                    }))
                 }
             }
             // Not a tuple, error
-            _ => Err(InternalCompilationError::InvalidTupleProjection {
+            _ => Err(internal_compilation_error!(InvalidTupleProjection {
                 tuple_ty,
                 tuple_span,
                 index_span,
-            }),
+            })),
         }
     }
 
@@ -1588,19 +1593,19 @@ impl UnifiedTypeInference {
                     self.unify_sub_type(ty, record_span, element_ty, field_span)?;
                     Ok(None)
                 } else {
-                    Err(InternalCompilationError::InvalidRecordField {
+                    Err(internal_compilation_error!(InvalidRecordField {
                         field_span,
                         record_ty,
                         record_span,
-                    })
+                    }))
                 }
             }
             // Not a record, error
-            _ => Err(InternalCompilationError::InvalidRecordFieldAccess {
+            _ => Err(internal_compilation_error!(InvalidRecordFieldAccess {
                 record_ty,
                 record_span,
                 field_span,
-            }),
+            })),
         }
     }
 
@@ -1632,17 +1637,17 @@ impl UnifiedTypeInference {
                     self.unify_sub_type(*ty, variant_span, variant_ty, variant_span)?;
                     Ok(None)
                 } else {
-                    Err(InternalCompilationError::InvalidVariantName {
+                    Err(internal_compilation_error!(InvalidVariantName {
                         name: variant_span,
                         ty,
-                    })
+                    }))
                 }
             }
             // Not a variant, error
-            _ => Err(InternalCompilationError::InvalidVariantType {
+            _ => Err(internal_compilation_error!(InvalidVariantType {
                 name: variant_span,
                 ty,
-            }),
+            })),
         }
     }
 
@@ -1670,11 +1675,11 @@ impl UnifiedTypeInference {
                 self.mut_unification_table
                     .unify_var_var(current, target)
                     .map_err(|_| {
-                        InternalCompilationError::MustBeMutable(
+                        internal_compilation_error!(MustBeMutable(
                             current_span,
                             reason_span,
                             error_ctx,
-                        )
+                        ))
                     })
             }
             (Variable(current), Resolved(_)) => {
@@ -1686,11 +1691,11 @@ impl UnifiedTypeInference {
             (Resolved(current), Resolved(target)) => {
                 // Both resolved, check mutability value coercion.
                 if current < target {
-                    Err(InternalCompilationError::MustBeMutable(
+                    Err(internal_compilation_error!(MustBeMutable(
                         current_span,
                         reason_span,
                         error_ctx,
-                    ))
+                    )))
                 } else {
                     Ok(())
                 }
@@ -1714,7 +1719,7 @@ impl UnifiedTypeInference {
             self.mut_unification_table
                 .unify_var_value(var, Some(MutVal::mutable()))
                 .map_err(|_| {
-                    InternalCompilationError::MustBeMutable(current_span, reason_span, error_ctx)
+                    internal_compilation_error!(MustBeMutable(current_span, reason_span, error_ctx))
                 })
         }
     }
@@ -1742,12 +1747,12 @@ impl UnifiedTypeInference {
             // to be resolved later.
             self.effect_constraints_inv.insert(current.clone(), var);
         } else {
-            return Err(InternalCompilationError::InvalidEffectDependency {
+            return Err(internal_compilation_error!(InvalidEffectDependency {
                 source: current.clone(),
                 source_span: current_span,
                 target: target.clone(),
                 target_span,
-            });
+            }));
         }
         Ok(())
     }
@@ -2112,12 +2117,12 @@ fn property_to_fn_name(
         .map_or("".into(), |path| format!("{path}::"));
     let fn_name = format!("{}@{} {}.{}", path, access.as_prefix(), scope, variable);
     if env.get_function(&fn_name).is_none() {
-        Err(InternalCompilationError::UnknownProperty {
+        Err(internal_compilation_error!(UnknownProperty {
             scope: ustr(scope),
             variable: ustr(variable),
             cause: access,
             span,
-        })
+        }))
     } else {
         Ok(fn_name)
     }

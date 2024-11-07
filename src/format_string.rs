@@ -1,6 +1,6 @@
 use std::{str::FromStr, sync::LazyLock};
 
-use crate::Location;
+use crate::{internal_compilation_error, Location};
 use regex::Regex;
 use ustr::ustr;
 
@@ -30,10 +30,12 @@ fn variable_to_string(
     env: &TypingEnv,
 ) -> Result<Expr, InternalCompilationError> {
     if env.get_variable_index_and_type_scheme(var_name).is_none() {
-        return Err(InternalCompilationError::UndefinedVarInStringFormatting {
-            var_span,
-            string_span,
-        });
+        return Err(internal_compilation_error!(
+            UndefinedVarInStringFormatting {
+                var_span,
+                string_span,
+            }
+        ));
     };
     let var_expr = Expr::new(ExprKind::Identifier(ustr(var_name)), var_span);
     Ok(Expr::new(

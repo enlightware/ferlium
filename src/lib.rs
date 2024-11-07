@@ -207,7 +207,7 @@ pub fn compile(
     log::debug!("Using other modules: {}", other_modules.keys().join(", "));
     log::debug!("Input: {src}");
     let (module_ast, expr_ast) =
-        parse_module_and_expr(src).map_err(CompilationError::ParsingFailed)?;
+        parse_module_and_expr(src).map_err(|error| compilation_error!(ParsingFailed(error)))?;
     {
         let env = ModuleEnv::new(&module, other_modules);
         log::debug!("Module AST\n{}", module_ast.format_with(&env));
