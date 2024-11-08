@@ -124,9 +124,6 @@ impl FmtWithModuleEnv for Module {
     }
 }
 
-// FIXME: think whether it would be better to only use span here
-// and pass the source code in the type inference phase.
-
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum ExprKind {
