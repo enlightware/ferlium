@@ -132,6 +132,11 @@ pub(crate) fn proj_or_float<L, T>(
     Ok(Project(B::new(lhs), rhs))
 }
 
+pub(crate) fn static_apply(identifier: (Ustr, Location), args: Vec<Expr>) -> ExprKind {
+    let identifier = Expr::new(ExprKind::Identifier(identifier.0), identifier.1);
+    ExprKind::Apply(B::new(identifier), args)
+}
+
 /// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor
 pub(crate) fn tuple(args: Vec<Expr>) -> ExprKind {
     use ExprKind::*;
@@ -176,7 +181,7 @@ pub(crate) fn for_loop(var: (Ustr, Location), start: Expr, end: Expr, body: Expr
     use ExprKind::*;
     let iterator_span = span(start.span.start(), end.span.end());
     let iterator = Expr::new(
-        StaticApply(
+        static_apply(
             (ustr("range_iterator_new"), iterator_span),
             vec![start, end],
         ),

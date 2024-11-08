@@ -1,5 +1,6 @@
 use std::{str::FromStr, sync::LazyLock};
 
+use crate::parser_helpers::static_apply;
 use crate::{internal_compilation_error, Location};
 use regex::Regex;
 use ustr::ustr;
@@ -39,7 +40,7 @@ fn variable_to_string(
     };
     let var_expr = Expr::new(ExprKind::Identifier(ustr(var_name)), var_span);
     Ok(Expr::new(
-        ExprKind::StaticApply((ustr("std::to_string"), var_span), vec![var_expr]),
+        static_apply((ustr("std::to_string"), var_span), vec![var_expr]),
         var_span,
     ))
 }
@@ -71,7 +72,7 @@ pub fn emit_format_string_ast(
     let mut extend_exprs_with = |expr: Expr| {
         let span = expr.span;
         let extend_expr = Expr::new(
-            ExprKind::StaticApply(
+            static_apply(
                 (ustr("std::string_push_str"), span),
                 vec![Expr::new(ExprKind::Identifier(ustr("@s")), span), expr],
             ),

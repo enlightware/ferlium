@@ -369,7 +369,6 @@ impl TypeInference {
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
             }
-            StaticApply((name, span), args) => self.infer_static_apply(env, name, *span, args)?,
             Block(exprs) => {
                 assert!(!exprs.is_empty());
                 let env_size = env.locals.len();

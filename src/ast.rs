@@ -134,8 +134,6 @@ pub enum ExprKind {
     Let(UstrSpan, MutVal, B<Expr>),
     Abstract(Vec<UstrSpan>, B<Expr>),
     Apply(B<Expr>, Vec<Expr>),
-    /// A function from the module environment, or a variant constructor
-    StaticApply(UstrSpan, Vec<Expr>),
     Block(Vec<Expr>),
     Assign(B<Expr>, Location, B<Expr>),
     PropertyPath(Ustr, Ustr),
@@ -193,13 +191,6 @@ impl Expr {
                     }
                     writeln!(f, "{indent_str})")
                 }
-            }
-            StaticApply((func, _), args) => {
-                writeln!(f, "{indent_str}apply {func} to (")?;
-                for arg in args {
-                    arg.format_ind(f, indent + 1)?;
-                }
-                writeln!(f, "{indent_str})")
             }
             Block(exprs) => {
                 for expr in exprs.iter() {
@@ -304,7 +295,6 @@ impl Expr {
                 expr.acc_errors_rec(errors);
                 acc_errors(errors, args.iter());
             }
-            StaticApply(_, args) => acc_errors(errors, args.iter()),
             Block(exprs) => acc_errors(errors, exprs.iter()),
             Assign(place, _, value) => {
                 place.acc_errors_rec(errors);

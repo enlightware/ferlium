@@ -83,7 +83,7 @@ MulExpr = BinOpLeftAssoc<MultOp, UnaryExpr>;
 
 UnaryExpr = {
     SuffixExpr,
-    <o:Sp<UnaryOp>> <e:Es<UnaryExpr>> => StaticApply(o, vec![e]),
+    <o:Sp<UnaryOp>> <e:Es<UnaryExpr>> => static_apply(o, vec![e]),
 }
 
 SuffixExpr = {
@@ -350,7 +350,7 @@ Sep<T, S>: Vec<T> = {
 
 // A tier of expression, for a binary operation, left-associative
 BinOpLeftAssoc<Op, NextTier>: ExprKind = {
-    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => StaticApply(o, vec![l, r]),
+    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => static_apply(o, vec![l, r]),
     NextTier
 };
 
