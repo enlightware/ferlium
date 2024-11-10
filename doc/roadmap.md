@@ -2,7 +2,6 @@
 
 ### Language features
 
-- Split compilation of modules by analysing the dependency graph
 - Type classes
 - Private module members
 - Tuple deconstruction on assignation

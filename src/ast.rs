@@ -1,6 +1,9 @@
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
-use std::fmt::Debug;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+};
 
 use ustr::Ustr;
 
@@ -41,6 +44,16 @@ impl ModuleFunction {
             body,
             span,
         }
+    }
+}
+
+/// A node of a function dependency graph
+#[derive(Debug)]
+pub struct FnDepGraphNode(Vec<usize>);
+impl crate::graph::Node for FnDepGraphNode {
+    type Index = usize;
+    fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
+        self.0.iter().copied()
     }
 }
 
@@ -90,6 +103,22 @@ impl Module {
 
     pub fn is_empty(&self) -> bool {
         self.functions.is_empty() && self.types.is_empty()
+    }
+
+    pub fn get_function_dependencies(&self) -> Vec<FnDepGraphNode> {
+        let fn_map = self
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(index, func)| (func.name.0, index))
+            .collect::<HashMap<_, _>>();
+        self.functions
+            .iter()
+            .map(|func| {
+                let dependencies = func.body.get_function_dependencies(&fn_map);
+                FnDepGraphNode(dependencies.into_iter().collect())
+            })
+            .collect()
     }
 }
 
@@ -272,6 +301,71 @@ impl Expr {
 
     pub fn format(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         self.format_ind(f, 0)
+    }
+
+    fn get_function_dependencies(&self, fn_map: &HashMap<Ustr, usize>) -> HashSet<usize> {
+        struct DependencyCollector<'a> {
+            fn_map: &'a HashMap<Ustr, usize>,
+            dependencies: HashSet<usize>,
+            locals: Vec<Ustr>,
+            local_sizes: Vec<usize>,
+            local_bases: Vec<usize>,
+        }
+        use ExprKind::*;
+        impl ExprVisitor for DependencyCollector<'_> {
+            fn visit_start(&mut self, expr: &Expr) {
+                match &expr.kind {
+                    Identifier(name) => {
+                        let skip = self.local_bases.last().copied().unwrap_or(0);
+                        if self
+                            .locals
+                            .iter()
+                            .skip(skip)
+                            .rev()
+                            .any(|local| local == name)
+                        {
+                            // this is a local variable shadowing function definition
+                        } else if let Some(index) = self.fn_map.get(name) {
+                            self.dependencies.insert(*index);
+                        }
+                    }
+                    Abstract(args, _) => {
+                        self.local_bases.push(self.locals.len());
+                        self.locals.extend(args.iter().map(|(name, _)| *name));
+                    }
+                    Block(_) => {
+                        self.local_sizes.push(self.locals.len());
+                    }
+                    _ => {}
+                }
+            }
+            fn visit_end(&mut self, expr: &Expr) {
+                match &expr.kind {
+                    Let((name, _), _, expr) => {
+                        expr.visit(self);
+                        self.locals.push(*name);
+                    }
+                    Abstract(args, _) => {
+                        self.local_bases.pop().unwrap();
+                        self.locals.truncate(self.locals.len() - args.len());
+                    }
+                    Block(_) => {
+                        let size = self.local_sizes.pop().unwrap();
+                        self.locals.truncate(size);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut collector = DependencyCollector {
+            fn_map,
+            dependencies: HashSet::new(),
+            locals: Vec::new(),
+            local_sizes: Vec::new(),
+            local_bases: Vec::new(),
+        };
+        self.visit(&mut collector);
+        collector.dependencies
     }
 
     /// Visit all nodes of the expression tree

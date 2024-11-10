@@ -126,7 +126,7 @@ where
     sccs
 }
 
-pub(crate) fn topological_sort_sccs<N: Node>(graph: &[N], sccs: Vec<Vec<usize>>) -> Vec<Vec<usize>>
+pub(crate) fn topological_sort_sccs<N: Node>(graph: &[N], sccs: &[Vec<usize>]) -> Vec<Vec<usize>>
 where
     <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,
 {
@@ -257,7 +257,7 @@ mod tests {
         assert!(sccs.contains(&vec![0]));
         assert!(sccs.contains(&vec![1]));
         assert!(sccs.contains(&vec![2]));
-        let sorted_sccs = topological_sort_sccs(&graph, sccs);
+        let sorted_sccs = topological_sort_sccs(&graph, &sccs);
         assert_eq!(sorted_sccs.len(), 3);
         assert!(sorted_sccs.contains(&vec![0]));
         assert!(sorted_sccs.contains(&vec![1]));
@@ -277,7 +277,7 @@ mod tests {
         assert!(sccs.contains(&vec![1]));
         assert!(sccs.contains(&vec![2]));
 
-        let sorted_sccs = topological_sort_sccs(&graph, sccs);
+        let sorted_sccs = topological_sort_sccs(&graph, &sccs);
         assert_eq!(sorted_sccs.len(), 3);
         assert_eq!(sorted_sccs, vec![vec![0], vec![1], vec![2]]);
     }
@@ -293,7 +293,7 @@ mod tests {
         let expected = vec![BTreeSet::from([0, 1, 2])];
         assert_eq!(to_sorted_sets(sccs.clone()), expected);
 
-        let sorted_sccs = topological_sort_sccs(&graph, sccs);
+        let sorted_sccs = topological_sort_sccs(&graph, &sccs);
         assert_eq!(sorted_sccs.len(), 1);
         assert_eq!(to_sorted_sets(sorted_sccs), vec![BTreeSet::from([0, 1, 2])]);
     }
@@ -310,7 +310,7 @@ mod tests {
         let expected = vec![BTreeSet::from([0, 1]), BTreeSet::from([2, 3])];
         assert_eq!(to_sorted_sets(sccs.clone()), expected);
 
-        let sorted_sccs = topological_sort_sccs(&graph, sccs);
+        let sorted_sccs = topological_sort_sccs(&graph, &sccs);
         let sorted_sccs = to_sorted_sets(sorted_sccs);
         assert_eq!(sorted_sccs.len(), 2);
         assert!(sorted_sccs.contains(&BTreeSet::from([0, 1])));
@@ -344,7 +344,7 @@ mod tests {
         .collect::<BTreeSet<_>>();
         assert_eq!(to_set_of_sets(sccs.clone()), expected);
 
-        let sorted_sccs = topological_sort_sccs(&graph, sccs);
+        let sorted_sccs = topological_sort_sccs(&graph, &sccs);
         let sorted_sccs = to_sorted_sets(sorted_sccs);
 
         // Expected sorted order: SCC containing {0, 1, 2} first, followed by {3, 4, 5}, then {6}.

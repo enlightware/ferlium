@@ -7,6 +7,7 @@ use std::{
 
 use indexmap::IndexMap;
 use itertools::Itertools;
+use log::log_enabled;
 use ustr::Ustr;
 
 use crate::{
@@ -15,6 +16,7 @@ use crate::{
     effects::EffType,
     error::InternalCompilationError,
     function::ScriptFunction,
+    graph::{find_strongly_connected_components, topological_sort_sccs},
     internal_compilation_error,
     ir::{self, Immediate, Node},
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
@@ -35,201 +37,221 @@ pub fn emit_module(
     use ir::Node as N;
     use ir::NodeKind as K;
 
-    // First pass, populate the function table and allocate fresh mono type variables.
+    // Prelude: get the function dependency graph, topologically sort it, and process
+    // the functions starting from the leaves.
+    let dependency_graph = source.get_function_dependencies();
+    let sccs = find_strongly_connected_components(&dependency_graph);
+    let sorted_sccs = topological_sort_sccs(&dependency_graph, &sccs);
+
+    // Prepare target module.
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
-    let mut ty_inf = TypeInference::default();
-    for ModuleFunction {
-        name,
-        args,
-        args_span,
-        span,
-        ..
-    } in &source.functions
-    {
-        // Create type and mutability variables for the arguments.
-        // Note: the type quantifiers and constraints are left empty.
-        // They will be filled in the second pass.
-        // The effect quantifiers are filled with the output effect variable.
-        let args_ty = ty_inf.fresh_fn_args(args.len());
-        let effect_var = ty_inf.fresh_effect_var();
-        // log::debug!("Fresh effect variable for {}: {effect_var}", name.0);
-        let effects = EffType::single_variable(effect_var);
-        let ty_scheme = TypeScheme::new_just_type(FnType::new(
-            args_ty,
-            ty_inf.fresh_type_var_ty(),
-            effects.clone(),
-        ));
-        // Create dummy code.
-        let dummy_code = B::new(ScriptFunction::new(N::new(
-            K::Immediate(Immediate::new(Value::unit())),
-            Type::unit(),
-            effects,
-            *span,
-        )));
-        // Assemble the spans and the description
-        let spans = module::ModuleFunctionSpans {
-            name: name.1,
-            args: args.iter().map(|(_, s)| *s).collect(),
-            args_span: *args_span,
-            span: *span,
-        };
-        let descr = module::ModuleFunction {
-            ty_scheme,
-            code: Rc::new(RefCell::new(dummy_code)),
-            spans: Some(spans),
-        };
-        output.functions.insert(name.0, descr);
-    }
+    for mut scc in sorted_sccs.into_iter().rev() {
+        scc.sort(); // for compatibility due to bug in effect tracking
+                    // Process each SCC one by one.
+        let functions = || scc.iter().map(|&idx| &source.functions[idx]);
+        if log_enabled!(log::Level::Debug) {
+            let names = functions().map(|f| f.name.0).collect::<Vec<_>>();
+            log::debug!(
+                "Processing recursive functions: {}",
+                iterable_to_string(names, ", ")
+            );
+        }
 
-    // Second pass, infer types and emit function bodies.
-    for function in &source.functions {
-        let name = function.name.0;
-        let descr = output.functions.get(&name).unwrap();
+        // First pass, populate the function table and allocate fresh mono type variables.
+        let mut ty_inf = TypeInference::default();
+        for ModuleFunction {
+            name,
+            args,
+            args_span,
+            span,
+            ..
+        } in functions()
+        {
+            // Create type and mutability variables for the arguments.
+            // Note: the type quantifiers and constraints are left empty.
+            // They will be filled in the second pass.
+            // The effect quantifiers are filled with the output effect variable.
+            let args_ty = ty_inf.fresh_fn_args(args.len());
+            let effect_var = ty_inf.fresh_effect_var();
+            // log::debug!("Fresh effect variable for {}: {effect_var}", name.0);
+            let effects = EffType::single_variable(effect_var);
+            let ty_scheme = TypeScheme::new_just_type(FnType::new(
+                args_ty,
+                ty_inf.fresh_type_var_ty(),
+                effects.clone(),
+            ));
+            // Create dummy code.
+            let dummy_code = B::new(ScriptFunction::new(N::new(
+                K::Immediate(Immediate::new(Value::unit())),
+                Type::unit(),
+                effects,
+                *span,
+            )));
+            // Assemble the spans and the description
+            let spans = module::ModuleFunctionSpans {
+                name: name.1,
+                args: args.iter().map(|(_, s)| *s).collect(),
+                args_span: *args_span,
+                span: *span,
+            };
+            let descr = module::ModuleFunction {
+                ty_scheme,
+                code: Rc::new(RefCell::new(dummy_code)),
+                spans: Some(spans),
+            };
+            output.functions.insert(name.0, descr);
+        }
+
+        // Second pass, infer types and emit function bodies.
+        for function in functions() {
+            let name = function.name.0;
+            let descr = output.functions.get(&name).unwrap();
+            let module_env = ModuleEnv::new(&output, others);
+            let mut ty_env = TypingEnv::new(
+                descr.ty_scheme.ty.as_locals_no_bound(&function.args),
+                module_env,
+            );
+            let expected_span = descr.spans.as_ref().unwrap().args_span;
+            let fn_node = ty_inf.check_expr(
+                &mut ty_env,
+                &function.body,
+                descr.ty_scheme.ty.ret,
+                MutType::constant(),
+                expected_span,
+            )?;
+            let descr = output.functions.get_mut(&name).unwrap();
+            descr.ty_scheme.ty.effects =
+                ty_inf.unify_effects(&fn_node.effects, &descr.ty_scheme.ty.effects);
+            *descr.code.borrow_mut() = B::new(ScriptFunction::new(fn_node));
+        }
         let module_env = ModuleEnv::new(&output, others);
-        let mut ty_env = TypingEnv::new(
-            descr.ty_scheme.ty.as_locals_no_bound(&function.args),
-            module_env,
-        );
-        let expected_span = descr.spans.as_ref().unwrap().args_span;
-        let fn_node = ty_inf.check_expr(
-            &mut ty_env,
-            &function.body,
-            descr.ty_scheme.ty.ret,
-            MutType::constant(),
-            expected_span,
-        )?;
-        let descr = output.functions.get_mut(&name).unwrap();
-        descr.ty_scheme.ty.effects =
-            ty_inf.unify_effects(&fn_node.effects, &descr.ty_scheme.ty.effects);
-        *descr.code.borrow_mut() = B::new(ScriptFunction::new(fn_node));
-    }
-    let module_env = ModuleEnv::new(&output, others);
-    ty_inf.log_debug_constraints(module_env);
+        ty_inf.log_debug_constraints(module_env);
 
-    // Third pass, perform the unification.
-    let mut ty_inf = ty_inf.unify()?;
-    ty_inf.log_debug_substitution_tables(module_env);
-    ty_inf.log_debug_constraints(module_env);
+        // Third pass, perform the unification.
+        let mut ty_inf = ty_inf.unify()?;
+        ty_inf.log_debug_substitution_tables(module_env);
+        ty_inf.log_debug_constraints(module_env);
 
-    // Fourth pass, substitute the mono type variables with the inferred types.
-    for ModuleFunction { name, .. } in &source.functions {
-        let descr = output.functions.get_mut(&name.0).unwrap();
-        ty_inf.substitute_in_module_function(descr);
+        // Fourth pass, substitute the mono type variables with the inferred types.
+        for ModuleFunction { name, .. } in functions() {
+            let descr = output.functions.get_mut(&name.0).unwrap();
+            ty_inf.substitute_in_module_function(descr);
 
-        // Union duplicated effects from function arguments, and build a substitution for the
-        // fully unioned effects, to removed duplications.
-        ty_inf.unify_fn_arg_effects(&descr.ty_scheme.ty);
-        let effect_subst = descr
-            .ty_scheme
-            .ty
-            .inner_effect_vars()
+            // Union duplicated effects from function arguments, and build a substitution for the
+            // fully unioned effects, to removed duplications.
+            ty_inf.unify_fn_arg_effects(&descr.ty_scheme.ty);
+            let effect_subst = descr
+                .ty_scheme
+                .ty
+                .inner_effect_vars()
+                .iter()
+                .filter_map(|var| {
+                    ty_inf
+                        .effect_unioned(*var)
+                        .map(|target| (*var, EffType::single_variable(target)))
+                })
+                .collect();
+            let mut code = descr.code.borrow_mut();
+            let node = &mut code.as_script_mut().unwrap().code;
+            let subst = (HashMap::new(), effect_subst);
+            node.instantiate(&subst);
+            descr.ty_scheme.ty = descr.ty_scheme.ty.instantiate(&subst);
+        }
+
+        // Fifth pass, get the remaining constraints and collect the free type variables.
+        let all_constraints = ty_inf.constraints();
+        let mut used_constraints: HashSet<&PubTypeConstraint> = HashSet::new();
+        for ModuleFunction { name, .. } in functions() {
+            let descr = output.functions.get_mut(&name.0).unwrap();
+            let mut code = descr.code.borrow_mut();
+            let node = &mut code.as_script_mut().unwrap().code;
+
+            // Clean-up constraints and validate them.
+            let ConstraintValidationOutput {
+                quantifiers,
+                related_constraints,
+                retained_constraints,
+                constraint_subst,
+            } = validate_and_cleanup_constraints(&descr.ty_scheme.ty, &all_constraints, node)?;
+            let constraints: Vec<_> = all_constraints
+                .iter()
+                .filter(|c| {
+                    let ptr = constraint_ptr(c);
+                    if related_constraints.contains(&ptr) {
+                        used_constraints.insert(c);
+                    }
+                    retained_constraints.contains(&ptr)
+                })
+                .cloned()
+                .collect();
+            assert_eq!(constraints.len(), retained_constraints.len());
+
+            // Substitute the constraint-originating types in the node.
+            node.instantiate(&(constraint_subst, HashMap::new()));
+
+            // Write the final type scheme.
+            descr.ty_scheme.ty_quantifiers = quantifiers.clone();
+            descr.ty_scheme.eff_quantifiers = descr.ty_scheme.ty.input_effect_vars();
+            descr.ty_scheme.constraints = constraints;
+            assert_eq!(descr.ty_scheme.ty_quantifiers_from_signature(), quantifiers);
+
+            // Log the dropped constraints.
+            drop(code);
+            let module_env = ModuleEnv::new(&output, others);
+            log_dropped_constraints_module(
+                name.0,
+                &all_constraints,
+                &related_constraints,
+                &retained_constraints,
+                module_env,
+            );
+        }
+
+        // Safety check: make sure that there are no unused constraints.
+        let unused_constraints = all_constraints
             .iter()
-            .filter_map(|var| {
-                ty_inf
-                    .effect_unioned(*var)
-                    .map(|target| (*var, EffType::single_variable(target)))
-            })
-            .collect();
-        let mut code = descr.code.borrow_mut();
-        let node = &mut code.as_script_mut().unwrap().code;
-        let subst = (HashMap::new(), effect_subst);
-        node.instantiate(&subst);
-        descr.ty_scheme.ty = descr.ty_scheme.ty.instantiate(&subst);
-    }
+            .filter(|c| !used_constraints.contains(c) && !c.is_type_has_variant())
+            .collect::<Vec<_>>();
+        if !unused_constraints.is_empty() {
+            let module_env = ModuleEnv::new(&output, others);
+            let constraints = unused_constraints
+                .iter()
+                .map(|c| c.format_with(&module_env))
+                .join(" ∧ ");
+            return Err(internal_compilation_error!(Internal(format!(
+                "Unused constraints in module compilation: {}",
+                constraints
+            ))));
+        }
 
-    // Fifth pass, get the remaining constraints and collect the free type variables.
-    let all_constraints = ty_inf.constraints();
-    let mut used_constraints: HashSet<&PubTypeConstraint> = HashSet::new();
-    for ModuleFunction { name, .. } in &source.functions {
-        let descr = output.functions.get_mut(&name.0).unwrap();
-        let mut code = descr.code.borrow_mut();
-        let node = &mut code.as_script_mut().unwrap().code;
+        // Sixth pass, run the borrow checker and elaborate dictionaries.
+        let mut module_inst_data = HashMap::new();
+        for ModuleFunction { name, .. } in functions() {
+            let descr = output.functions.get_mut(&name.0).unwrap();
+            let fn_ptr = descr.code.as_ptr();
+            let dicts = descr.ty_scheme.extra_parameters();
+            module_inst_data.insert(fn_ptr, dicts);
+        }
+        for ModuleFunction { name, .. } in functions() {
+            let descr = output.functions.get_mut(&name.0).unwrap();
+            let mut code = descr.code.borrow_mut();
+            let fn_ptr = descr.code.as_ptr();
+            let dicts = module_inst_data.get(&fn_ptr).unwrap();
+            let node = &mut code.as_script_mut().unwrap().code;
+            node.check_borrows()?;
+            node.elaborate_dictionaries(dicts, Some(&module_inst_data));
+        }
 
-        // Clean-up constraints and validate them.
-        let ConstraintValidationOutput {
-            quantifiers,
-            related_constraints,
-            retained_constraints,
-            constraint_subst,
-        } = validate_and_cleanup_constraints(&descr.ty_scheme.ty, &all_constraints, node)?;
-        let constraints: Vec<_> = all_constraints
-            .iter()
-            .filter(|c| {
-                let ptr = constraint_ptr(c);
-                if related_constraints.contains(&ptr) {
-                    used_constraints.insert(c);
-                }
-                retained_constraints.contains(&ptr)
-            })
-            .cloned()
-            .collect();
-        assert_eq!(constraints.len(), retained_constraints.len());
-
-        // Substitute the constraint-originating types in the node.
-        node.instantiate(&(constraint_subst, HashMap::new()));
-
-        // Write the final type scheme.
-        descr.ty_scheme.ty_quantifiers = quantifiers.clone();
-        descr.ty_scheme.eff_quantifiers = descr.ty_scheme.ty.input_effect_vars();
-        descr.ty_scheme.constraints = constraints;
-        assert_eq!(descr.ty_scheme.ty_quantifiers_from_signature(), quantifiers);
-
-        // Log the dropped constraints.
-        drop(code);
-        let module_env = ModuleEnv::new(&output, others);
-        log_dropped_constraints_module(
-            name.0,
-            &all_constraints,
-            &related_constraints,
-            &retained_constraints,
-            module_env,
-        );
-    }
-
-    // Safety check: make sure that there are no unused constraints.
-    let unused_constraints = all_constraints
-        .iter()
-        .filter(|c| !used_constraints.contains(c) && !c.is_type_has_variant())
-        .collect::<Vec<_>>();
-    if !unused_constraints.is_empty() {
-        let module_env = ModuleEnv::new(&output, others);
-        let constraints = unused_constraints
-            .iter()
-            .map(|c| c.format_with(&module_env))
-            .join(" ∧ ");
-        return Err(internal_compilation_error!(Internal(format!(
-            "Unused constraints in module compilation: {}",
-            constraints
-        ))));
-    }
-
-    // Sixth pass, run the borrow checker and elaborate dictionaries.
-    let mut module_inst_data = HashMap::new();
-    for ModuleFunction { name, .. } in &source.functions {
-        let descr = output.functions.get_mut(&name.0).unwrap();
-        let fn_ptr = descr.code.as_ptr();
-        let dicts = descr.ty_scheme.extra_parameters();
-        module_inst_data.insert(fn_ptr, dicts);
-    }
-    for ModuleFunction { name, .. } in &source.functions {
-        let descr = output.functions.get_mut(&name.0).unwrap();
-        let mut code = descr.code.borrow_mut();
-        let fn_ptr = descr.code.as_ptr();
-        let dicts = module_inst_data.get(&fn_ptr).unwrap();
-        let node = &mut code.as_script_mut().unwrap().code;
-        node.check_borrows()?;
-        node.elaborate_dictionaries(dicts, Some(&module_inst_data));
-    }
-
-    // Seventh pass, normalize the type schemes, substitute the types in the functions.
-    for ModuleFunction { name, .. } in &source.functions {
-        let descr = output.functions.get_mut(&name.0).unwrap();
-        // Note: after that normalization, the functions do not share the same
-        // type variables anymore.
-        let subst = descr.ty_scheme.normalize();
-        let mut code = descr.code.borrow_mut();
-        let node = &mut code.as_script_mut().unwrap().code;
-        node.instantiate(&subst);
+        // Seventh pass, normalize the type schemes, substitute the types in the functions.
+        for ModuleFunction { name, .. } in functions() {
+            let descr = output.functions.get_mut(&name.0).unwrap();
+            // Note: after that normalization, the functions do not share the same
+            // type variables anymore.
+            let subst = descr.ty_scheme.normalize();
+            let mut code = descr.code.borrow_mut();
+            let node = &mut code.as_script_mut().unwrap().code;
+            node.instantiate(&subst);
+        }
     }
 
     Ok(output)
