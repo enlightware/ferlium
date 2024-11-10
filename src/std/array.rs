@@ -5,10 +5,11 @@ use ustr::ustr;
 
 use crate::{
     effects::no_effects,
+    error::RuntimeError,
     eval::{EvalCtx, ValOrMut},
     format::write_with_separator,
     function::{
-        BinaryNativeFnMVN, BinaryNativeFnNNN, BinaryNativeFnNVN, UnaryNativeFnNN, UnaryNativeFnVN,
+        BinaryNativeFnMVN, BinaryNativeFnNNN, BinaryNativeFnNVFN, UnaryNativeFnNN, UnaryNativeFnVFN,
     },
     module::{Module, ModuleFunction},
     r#type::{bare_native_type, FnType, Type},
@@ -35,14 +36,13 @@ impl Array {
     }
 
     // Manual implementation of a conversion from an iterator function to a new list
-    fn from_value_iterator(mut iter: Value) -> Self {
+    fn from_value_iterator(mut iter: Value) -> Result<Self, RuntimeError> {
         let mut vec = VecDeque::new();
         loop {
             let iter_fn_key = iter.as_function().unwrap();
             let iter_fn = iter_fn_key.get();
             let mut ctx = EvalCtx::new();
-            // FIXME: address runtime error by returning a Result
-            let ret = iter_fn.borrow().call(vec![], &mut ctx).unwrap();
+            let ret = iter_fn.borrow().call(vec![], &mut ctx)?;
             let ret_tuple = *ret.into_tuple().unwrap();
             let (in_value, next_iter) = ret_tuple.into_iter().collect_tuple().unwrap();
             let option = *in_value.into_variant().unwrap();
@@ -52,7 +52,7 @@ impl Array {
             vec.push_back(option.value);
             iter = next_iter;
         }
-        Array(Rc::new(vec))
+        Ok(Array(Rc::new(vec)))
     }
 
     fn from_iterator_descr() -> ModuleFunction {
@@ -61,7 +61,7 @@ impl Array {
             array_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnVN::description_with_ty_scheme(Array::from_value_iterator, ty_scheme)
+        UnaryNativeFnVFN::description_with_ty_scheme(Array::from_value_iterator, ty_scheme)
     }
 
     pub fn get(&self, index: usize) -> Option<&Value> {
@@ -159,21 +159,19 @@ impl Array {
 
     // TODO: how to make this into an iterator
 
-    pub fn map(self, f: Value) -> Self {
+    pub fn map(self, f: Value) -> Result<Self, RuntimeError> {
         let function = f.as_function().unwrap().get();
         let mut ctx = EvalCtx::new();
-        Self(Rc::new(
+        Ok(Self(Rc::new(
             self.0
                 .iter()
-                // FIXME: address runtime error by returning a Result<...>
                 .map(|v| {
                     function
                         .borrow()
                         .call(vec![ValOrMut::Val(v.clone())], &mut ctx)
-                        .unwrap()
                 })
-                .collect(),
-        ))
+                .collect::<Result<_, _>>()?,
+        )))
     }
 
     fn map_descr() -> ModuleFunction {
@@ -187,7 +185,7 @@ impl Array {
             array1,
             no_effects(),
         ));
-        BinaryNativeFnNVN::description_with_ty_scheme(Array::map, ty_scheme)
+        BinaryNativeFnNVFN::description_with_ty_scheme(Array::map, ty_scheme)
     }
 
     pub fn iter(&self) -> ArrayIterator {
