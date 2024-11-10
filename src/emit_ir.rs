@@ -52,7 +52,7 @@ pub fn emit_module(
         if log_enabled!(log::Level::Debug) {
             let names = functions().map(|f| f.name.0).collect::<Vec<_>>();
             log::debug!(
-                "Processing recursive functions: {}",
+                "Processing circularly dependent functions: {}",
                 iterable_to_string(names, ", ")
             );
         }
