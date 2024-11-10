@@ -81,11 +81,11 @@ impl Module {
     }
 
     pub fn errors(&self) -> Vec<LocatedError> {
-        let mut errors = vec![];
+        let mut collector = ErrorCollector::default();
         for ModuleFunction { body, .. } in self.functions.iter() {
-            body.acc_errors_rec(&mut errors);
+            body.visit(&mut collector);
         }
-        errors
+        collector.0
     }
 
     pub fn is_empty(&self) -> bool {
@@ -269,59 +269,53 @@ impl Expr {
             Error => writeln!(f, "{indent_str}Error"),
         }
     }
+
     pub fn format(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         self.format_ind(f, 0)
     }
 
-    pub fn errors(&self) -> Vec<LocatedError> {
-        let mut errors = vec![];
-        self.acc_errors_rec(&mut errors);
-        errors
-    }
-    fn acc_errors_rec(&self, errors: &mut Vec<LocatedError>) {
-        fn acc_errors<'a, I>(errors: &mut Vec<LocatedError>, exprs: I)
-        where
-            I: Iterator<Item = &'a Expr>,
-        {
-            for expr in exprs {
-                expr.acc_errors_rec(errors);
-            }
-        }
+    /// Visit all nodes of the expression tree
+    fn visit(&self, visitor: &mut impl ExprVisitor) {
+        visitor.visit_start(self);
         use ExprKind::*;
         match &self.kind {
-            Let(_, _, expr) => expr.acc_errors_rec(errors),
-            Abstract(_, expr) => expr.acc_errors_rec(errors),
+            Let(_, _, expr) => expr.visit(visitor),
+            Abstract(_, expr) => expr.visit(visitor),
             Apply(expr, args) => {
-                expr.acc_errors_rec(errors);
-                acc_errors(errors, args.iter());
+                expr.visit(visitor);
+                visitor.visit_exprs(args.iter());
             }
-            Block(exprs) => acc_errors(errors, exprs.iter()),
+            Block(exprs) => visitor.visit_exprs(exprs.iter()),
             Assign(place, _, value) => {
-                place.acc_errors_rec(errors);
-                value.acc_errors_rec(errors);
+                place.visit(visitor);
+                value.visit(visitor);
             }
-            Tuple(args) => acc_errors(errors, args.iter()),
-            Project(expr, _) => expr.acc_errors_rec(errors),
-            Array(args) => acc_errors(errors, args.iter()),
+            Tuple(args) => visitor.visit_exprs(args.iter()),
+            Project(expr, _) => expr.visit(visitor),
+            Record(fields) => visitor.visit_exprs(fields.iter().map(|(_, expr)| expr)),
+            FieldAccess(expr, _) => expr.visit(visitor),
+            Array(args) => visitor.visit_exprs(args.iter()),
             Index(expr, index) => {
-                expr.acc_errors_rec(errors);
-                index.acc_errors_rec(errors);
+                expr.visit(visitor);
+                index.visit(visitor);
             }
             Match(expr, cases, default) => {
-                expr.acc_errors_rec(errors);
-                acc_errors(errors, cases.iter().map(|(_, expr)| expr));
+                expr.visit(visitor);
+                visitor.visit_exprs(cases.iter().map(|(_, expr)| expr));
                 if let Some(default) = default {
-                    default.acc_errors_rec(errors);
+                    default.visit(visitor);
                 }
             }
             ForLoop(_, iterator, body) => {
-                iterator.acc_errors_rec(errors);
-                body.acc_errors_rec(errors);
+                iterator.visit(visitor);
+                body.visit(visitor);
             }
-            Error => errors.push(("parse error".into(), self.span)),
             _ => {}
         }
+        visitor.visit_end(self);
     }
+
+    // TODO: use the visitor to collect the dependency graph
 }
 
 impl std::fmt::Display for Expr {
@@ -329,6 +323,32 @@ impl std::fmt::Display for Expr {
         self.format(f)
     }
 }
+
+/// A visitor pattern for expressions
+pub trait ExprVisitor {
+    fn visit_start(&mut self, _expr: &Expr) {}
+    fn visit_end(&mut self, _expr: &Expr) {}
+
+    fn visit_exprs<'e>(&mut self, exprs: impl Iterator<Item = &'e Expr>)
+    where
+        Self: Sized,
+    {
+        for expr in exprs {
+            expr.visit(self);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ErrorCollector(Vec<LocatedError>);
+impl ExprVisitor for ErrorCollector {
+    fn visit_start(&mut self, expr: &Expr) {
+        if let ExprKind::Error = expr.kind {
+            self.0.push(("parse error".into(), expr.span));
+        }
+    }
+}
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum PatternKind {
