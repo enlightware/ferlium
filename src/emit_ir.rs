@@ -47,7 +47,8 @@ pub fn emit_module(
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
     for mut scc in sorted_sccs.into_iter().rev() {
         scc.sort(); // for compatibility due to bug in effect tracking
-                    // Process each SCC one by one.
+
+        // Process each SCC one by one.
         let functions = || scc.iter().map(|&idx| &source.functions[idx]);
         if log_enabled!(log::Level::Debug) {
             let names = functions().map(|f| f.name.0).collect::<Vec<_>>();
@@ -524,7 +525,7 @@ fn validate_and_cleanup_constraints(
     }
 
     // Compute the quantifiers based on the function type and its constraints.
-    let quantifiers = TypeScheme::list_ty_vars(ty, constraints.iter().cloned());
+    let quantifiers = TypeScheme::list_ty_vars(ty, constraints.iter().map(Borrow::borrow));
 
     // Detect unbound type variables in the code and return error if not in unused variants only.
     // These are neither part of the function signature nor of the constraints.
