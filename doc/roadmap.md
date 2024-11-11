@@ -22,7 +22,6 @@
 
 ### Compiler features
 
-- Basic optimisations: replace constructors of literals with constructed literals
 - Add context to IsNotSubtype error and write some more useful error messages when match exhaustiveness fails
 - Advanced optimisations: generic partial evaluation (constant propagation)
 - Just in time compilation

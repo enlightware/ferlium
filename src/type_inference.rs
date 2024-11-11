@@ -277,18 +277,8 @@ impl TypeInference {
                             variant_ty, *name, payload_ty, expr.span,
                         ),
                     ));
-                    // Build the variant construction node.
-                    let payload_node = N::new(
-                        K::Immediate(Immediate::new(Value::unit())),
-                        payload_ty,
-                        no_effects(),
-                        expr.span,
-                    );
-                    // FIXME: this is not enabled due to a bug in constraints dropping
-                    // // Build the variant value.
-                    // let node = K::Immediate(Immediate::new(Value::variant(*name, Value::unit())));
-                    // (node, variant_ty, MutType::constant(), no_effects())
-                    let node = K::Variant(B::new((*name, payload_node)));
+                    // Build the variant value.
+                    let node = K::Immediate(Immediate::new(Value::variant(*name, Value::unit())));
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
