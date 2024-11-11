@@ -76,3 +76,9 @@ pub fn vec_difference<T: Clone + PartialEq>(this: &[T], that: &[T]) -> Vec<T> {
         .cloned()
         .collect()
 }
+
+/// Sort v and return it.
+pub fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> {
+    v.sort();
+    v
+}

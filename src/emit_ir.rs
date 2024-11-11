@@ -12,7 +12,7 @@ use ustr::Ustr;
 
 use crate::{
     ast::{self, *},
-    containers::{iterable_to_string, B},
+    containers::{iterable_to_string, sorted, B},
     effects::EffType,
     error::InternalCompilationError,
     function::ScriptFunction,
@@ -194,7 +194,10 @@ pub fn emit_module(
             descr.ty_scheme.ty_quantifiers = quantifiers.clone();
             descr.ty_scheme.eff_quantifiers = descr.ty_scheme.ty.input_effect_vars();
             descr.ty_scheme.constraints = constraints;
-            assert_eq!(descr.ty_scheme.ty_quantifiers_from_signature(), quantifiers);
+            assert_eq!(
+                sorted(descr.ty_scheme.ty_quantifiers_from_signature()),
+                sorted(quantifiers)
+            );
 
             // Log the dropped constraints.
             drop(code);

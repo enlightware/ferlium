@@ -479,7 +479,6 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             .into_iter()
             .chain(constraints.flat_map(|constraint| constraint.borrow().inner_ty_vars()))
             .unique()
-            .sorted()
             .collect()
     }
 
