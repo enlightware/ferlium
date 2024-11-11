@@ -5,7 +5,7 @@ use itertools::{multiunzip, Itertools};
 use ustr::ustr;
 
 use crate::{
-    ast::{Expr, Pattern, PatternKind, PatternType},
+    ast::{DExpr, Pattern, PatternKind, PatternType},
     containers::{SVec2, B},
     effects::{no_effects, EffType},
     error::InternalCompilationError,
@@ -24,9 +24,9 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         match_span: Location,
-        cond_expr: &Expr,
-        alternatives: &[(Pattern, Expr)],
-        default: &Option<Box<Expr>>,
+        cond_expr: &DExpr,
+        alternatives: &[(Pattern, DExpr)],
+        default: &Option<Box<DExpr>>,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
@@ -348,7 +348,7 @@ impl TypeInference {
     fn check_literal_patterns(
         &mut self,
         env: &mut TypingEnv,
-        pairs: &[(Pattern, Expr)],
+        pairs: &[(Pattern, DExpr)],
         first_pattern_span: Location,
         expected_pattern_type: Type,
         expected_pattern_span: Location,

@@ -1,7 +1,10 @@
 use crate::ast::Expr;
 use crate::ast::ExprKind;
+use crate::ast::PExpr;
+use crate::ast::PExprKind;
 use crate::ast::Pattern;
 use crate::ast::PatternKind;
+use crate::ast::Phase;
 use crate::containers::SVec2;
 use crate::containers::B;
 use crate::error::LocatedError;
@@ -51,8 +54,8 @@ where
 }
 
 /// Make a unit literal
-pub(crate) fn unit_literal_expr(span: Location) -> Expr {
-    Expr::new(ExprKind::Literal(Value::native(()), Type::unit()), span)
+pub(crate) fn unit_literal_expr(span: Location) -> PExpr {
+    PExpr::new(PExprKind::Literal(Value::native(()), Type::unit()), span)
 }
 
 /// Make a literal
@@ -73,9 +76,9 @@ pub(crate) fn string_literal(s: &str) -> LiteralValue {
 }
 
 /// Make formatted string
-pub(crate) fn formatted_string(s: &str) -> ExprKind {
+pub(crate) fn formatted_string(s: &str) -> PExprKind {
     let s = apply_string_escapes(&s[2..s.len() - 1]);
-    ExprKind::FormattedString(s.to_string())
+    PExprKind::FormattedString(s.to_string())
 }
 
 /// Parse a number, if it is too big, return an error
@@ -105,7 +108,7 @@ where
 fn parse_num_literal<F, L, T>(
     s: &str,
     span: Location,
-) -> Result<ExprKind, ParseError<L, T, LocatedError>>
+) -> Result<PExprKind, ParseError<L, T, LocatedError>>
 where
     F: FromStr + Bounded + Display + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
@@ -118,9 +121,9 @@ where
 
 /// Create a projection, or a float literal if the lhs is a number
 pub(crate) fn proj_or_float<L, T>(
-    lhs: Expr,
+    lhs: PExpr,
     rhs: (usize, Location),
-) -> Result<ExprKind, ParseError<L, T, LocatedError>> {
+) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
     use ExprKind::*;
     if let Literal(literal, _ty) = &lhs.kind {
         if let Some(value) = literal.clone().into_primitive_ty::<isize>() {
@@ -132,13 +135,16 @@ pub(crate) fn proj_or_float<L, T>(
     Ok(Project(B::new(lhs), rhs))
 }
 
-pub(crate) fn static_apply(identifier: (Ustr, Location), args: Vec<Expr>) -> ExprKind {
-    let identifier = Expr::new(ExprKind::Identifier(identifier.0), identifier.1);
+pub(crate) fn static_apply<P: Phase>(
+    identifier: (Ustr, Location),
+    args: Vec<Expr<P>>,
+) -> ExprKind<P> {
+    let identifier = Expr::<P>::new(ExprKind::Identifier(identifier.0), identifier.1);
     ExprKind::Apply(B::new(identifier), args, true)
 }
 
 /// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor
-pub(crate) fn tuple(args: Vec<Expr>) -> ExprKind {
+pub(crate) fn tuple(args: Vec<PExpr>) -> PExprKind {
     use ExprKind::*;
     let mut values_and_tys = Vec::new();
     for arg in &args {
@@ -153,7 +159,7 @@ pub(crate) fn tuple(args: Vec<Expr>) -> ExprKind {
 }
 
 /// Create an if else block.
-pub(crate) fn cond_if_else(cond: Expr, if_true: Expr, if_false: Expr) -> ExprKind {
+pub(crate) fn cond_if_else(cond: PExpr, if_true: PExpr, if_false: PExpr) -> PExprKind {
     use ExprKind::*;
     let cond_span = cond.span;
     Match(
@@ -164,7 +170,7 @@ pub(crate) fn cond_if_else(cond: Expr, if_true: Expr, if_false: Expr) -> ExprKin
 }
 
 /// Create an if block without an else, make it return ().
-pub(crate) fn cond_if(cond: Expr, if_true: Expr) -> ExprKind {
+pub(crate) fn cond_if(cond: PExpr, if_true: PExpr) -> PExprKind {
     use ExprKind::*;
     let cond_span = cond.span;
     let if_true_span = if_true.span;
@@ -177,10 +183,10 @@ pub(crate) fn cond_if(cond: Expr, if_true: Expr) -> ExprKind {
 }
 
 /// Create a for loop
-pub(crate) fn for_loop(var: (Ustr, Location), start: Expr, end: Expr, body: Expr) -> ExprKind {
+pub(crate) fn for_loop(var: (Ustr, Location), start: PExpr, end: PExpr, body: PExpr) -> PExprKind {
     use ExprKind::*;
     let iterator_span = span(start.span.start(), end.span.end());
-    let iterator = Expr::new(
+    let iterator = PExpr::new(
         static_apply(
             (ustr("range_iterator_new"), iterator_span),
             vec![start, end],

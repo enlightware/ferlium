@@ -9,6 +9,7 @@
 		"chumsky",
 		"deque",
 		"descr",
+		"Desugared",
 		"foldl",
 		"indexmap",
 		"inout",
@@ -31,6 +32,7 @@
 		"slotmap",
 		"smallvec",
 		"Stmts",
+		"Struct",
 		"subtyping",
 		"unbounds",
 		"unioned"

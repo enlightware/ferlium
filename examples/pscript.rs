@@ -391,7 +391,7 @@ fn main() {
 
         // Compile module
         if !module_ast.is_empty() {
-            module = match emit_module(&module_ast, &other_modules, Some(&module)) {
+            module = match emit_module(module_ast, &other_modules, Some(&module)) {
                 Ok(module) => module,
                 Err(e) => {
                     let env = ModuleEnv::new(&module, &other_modules);
@@ -414,7 +414,7 @@ fn main() {
 
         // Compile and evaluate expression
         let module_env = ModuleEnv::new(&module, &other_modules);
-        let expr_ir = emit_expr(&expr_ast, module_env, locals.clone());
+        let expr_ir = emit_expr(expr_ast, module_env, locals.clone());
         let compiled_expr = match expr_ir {
             Ok(res) => res,
             Err(e) => {

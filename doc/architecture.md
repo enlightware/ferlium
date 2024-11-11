@@ -11,8 +11,11 @@ The following phases happen in the compiler:
 - Source code parsing
   - Lexing
   - Parsing and AST generation
-- AST to typed IR conversion
+- AST desugaring
+  - Minimalist symbol resolution
   - String formatting desugaring
+  - Module call graph extraction
+- AST to typed IR conversion
   - Symbol resolution
   - Type and passing strategy inference
   - ADT desugaring

@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    internal_compilation_error, location::Location, parser_helpers::EMPTY_USTR,
+    ast::DExpr, internal_compilation_error, location::Location, parser_helpers::EMPTY_USTR,
     std::logic::bool_type,
 };
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
@@ -16,12 +16,11 @@ use itertools::{multiunzip, Itertools};
 use ustr::{ustr, Ustr};
 
 use crate::{
-    ast::{Expr, ExprKind, PropertyAccess},
+    ast::{ExprKind, PropertyAccess},
     containers::{SVec2, B},
     dictionary_passing::DictionaryReq,
     effects::{no_effects, EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution},
     error::{ADTAccessType, InternalCompilationError, MustBeMutableContext},
-    format_string::emit_format_string_ast,
     function::{FunctionRef, ScriptFunction},
     ir::{self, EnvStore, FnInstData, Immediate, Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
@@ -229,7 +228,7 @@ impl TypeInference {
     pub fn infer_expr(
         &mut self,
         env: &mut TypingEnv,
-        expr: &Expr,
+        expr: &DExpr,
     ) -> Result<(Node, MutType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
@@ -241,9 +240,8 @@ impl TypeInference {
                 MutType::constant(),
                 no_effects(),
             ),
-            FormattedString(s) => {
-                let expr = emit_format_string_ast(s, expr.span, env)?;
-                return self.infer_expr(env, &expr);
+            FormattedString(_s) => {
+                unreachable!("this cannot happen as payload is never")
             }
             Identifier(name) => {
                 // Retrieve the index and the type of the variable from the environment, if it exists
@@ -585,7 +583,7 @@ impl TypeInference {
             PropertyPath(scope, variable) => {
                 let fn_name =
                     property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
-                self.infer_static_apply(env, &fn_name, expr.span, &[] as &[Expr], expr.span, true)?
+                self.infer_static_apply(env, &fn_name, expr.span, &[] as &[DExpr], expr.span, true)?
             }
             Error => {
                 panic!("attempted to infer type for error node");
@@ -597,7 +595,7 @@ impl TypeInference {
     fn infer_expr_drop_mut(
         &mut self,
         env: &mut TypingEnv,
-        expr: &Expr,
+        expr: &DExpr,
     ) -> Result<Node, InternalCompilationError> {
         Ok(self.infer_expr(env, expr)?.0)
     }
@@ -607,7 +605,7 @@ impl TypeInference {
         env: &mut TypingEnv,
         name: &str,
         name_span: Location,
-        args: &[impl Borrow<Expr>],
+        args: &[impl Borrow<DExpr>],
         expr_span: Location,
         synthesized: bool,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
@@ -712,7 +710,7 @@ impl TypeInference {
     fn infer_exprs_drop_mut(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[impl Borrow<Expr>],
+        exprs: &[impl Borrow<DExpr>],
     ) -> Result<(Vec<ir::Node>, Vec<Type>, EffType), InternalCompilationError> {
         let (nodes, tys, effects): (_, _, Vec<_>) = exprs
             .iter()
@@ -731,7 +729,7 @@ impl TypeInference {
     fn infer_exprs_ret_arg_ty(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[impl Borrow<Expr>],
+        exprs: &[impl Borrow<DExpr>],
     ) -> Result<(Vec<ir::Node>, Vec<FnArgType>, EffType), InternalCompilationError> {
         let (nodes, tys, effects): (_, _, Vec<_>) = exprs
             .iter()
@@ -753,7 +751,7 @@ impl TypeInference {
     fn check_exprs(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[impl Borrow<Expr>],
+        exprs: &[impl Borrow<DExpr>],
         expected_tys: &[FnArgType],
         expected_span: Location,
     ) -> Result<(Vec<ir::Node>, EffType), InternalCompilationError> {
@@ -774,7 +772,7 @@ impl TypeInference {
     pub fn check_expr(
         &mut self,
         env: &mut TypingEnv,
-        expr: &Expr,
+        expr: &DExpr,
         expected_ty: Type,
         expected_mut: MutType,
         expected_span: Location,

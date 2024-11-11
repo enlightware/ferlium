@@ -1,9 +1,6 @@
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-};
+use std::fmt::{Debug, Display};
 
 use ustr::Ustr;
 
@@ -13,6 +10,7 @@ use crate::{
     format::write_with_separator,
     module::FmtWithModuleEnv,
     mutability::MutVal,
+    never::Never,
     r#type::Type,
     value::{LiteralValue, Value},
     Location,
@@ -21,21 +19,42 @@ use crate::{
 /// A spanned Ustr
 pub type UstrSpan = (Ustr, Location);
 
+/// A phase in the AST processing pipeline
+pub trait Phase {
+    type FormattedString: Debug + Clone + Display;
+}
+
+/// The AST after parsing
+#[derive(Default)]
+pub struct Parsed;
+
+/// The AST after desugaring
+#[derive(Default)]
+pub struct Desugared;
+
+impl Phase for Parsed {
+    type FormattedString = String;
+}
+
+impl Phase for Desugared {
+    type FormattedString = Never;
+}
+
 #[derive(Debug, Clone)]
-pub struct ModuleFunction {
+pub struct ModuleFunction<P: Phase> {
     pub name: UstrSpan,
     pub args: Vec<UstrSpan>,
     pub args_span: Location,
-    pub body: B<Expr>,
+    pub body: B<Expr<P>>,
     pub span: Location,
     pub doc: Option<String>,
 }
-impl ModuleFunction {
+impl<P: Phase> ModuleFunction<P> {
     pub fn new(
         name: UstrSpan,
         args: Vec<UstrSpan>,
         args_span: Location,
-        body: B<Expr>,
+        body: B<Expr<P>>,
         span: Location,
         doc: Option<String>,
     ) -> Self {
@@ -50,9 +69,16 @@ impl ModuleFunction {
     }
 }
 
+/// An AST module function just after parsing
+pub type PModuleFunction = ModuleFunction<Parsed>;
+
+/// An AST module function after desugaring
+pub type DModuleFunction = ModuleFunction<Desugared>;
+
 /// A node of a function dependency graph
 #[derive(Debug)]
-pub struct FnDepGraphNode(Vec<usize>);
+pub struct FnDepGraphNode(pub Vec<usize>);
+
 impl crate::graph::Node for FnDepGraphNode {
     type Index = usize;
     fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
@@ -62,16 +88,16 @@ impl crate::graph::Node for FnDepGraphNode {
 
 // A module is a collection of functions and types, and is the top-level structure of the AST
 #[derive(Debug, Clone, Default)]
-pub struct Module {
-    pub functions: Vec<ModuleFunction>,
+pub struct Module<P: Phase> {
+    pub functions: Vec<ModuleFunction<P>>,
     pub types: Vec<(Ustr, Type)>,
 }
-impl Module {
+impl<P: Phase> Module<P> {
     pub fn new_with_function(
         name: UstrSpan,
         args: Vec<UstrSpan>,
         args_span: Location,
-        body: Expr,
+        body: Expr<P>,
         span: Location,
         doc: Option<String>,
     ) -> Self {
@@ -84,7 +110,7 @@ impl Module {
                 span,
                 doc,
             )],
-            ..Default::default()
+            types: Vec::new(),
         }
     }
 
@@ -109,25 +135,9 @@ impl Module {
     pub fn is_empty(&self) -> bool {
         self.functions.is_empty() && self.types.is_empty()
     }
-
-    pub fn get_function_dependencies(&self) -> Vec<FnDepGraphNode> {
-        let fn_map = self
-            .functions
-            .iter()
-            .enumerate()
-            .map(|(index, func)| (func.name.0, index))
-            .collect::<HashMap<_, _>>();
-        self.functions
-            .iter()
-            .map(|func| {
-                let dependencies = func.body.get_function_dependencies(&fn_map);
-                FnDepGraphNode(dependencies.into_iter().collect())
-            })
-            .collect()
-    }
 }
 
-impl FmtWithModuleEnv for Module {
+impl<P: Phase> FmtWithModuleEnv for Module<P> {
     fn fmt_with_module_env(
         &self,
         f: &mut std::fmt::Formatter,
@@ -165,38 +175,44 @@ impl FmtWithModuleEnv for Module {
     }
 }
 
+/// An AST module just after parsing
+pub type PModule = Module<Parsed>;
+
+/// An AST module after desugaring
+pub type DModule = Module<Desugared>;
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
-pub enum ExprKind {
+pub enum ExprKind<P: Phase> {
     Literal(Value, Type),
-    FormattedString(String),
+    FormattedString(P::FormattedString),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Ustr),
-    Let(UstrSpan, MutVal, B<Expr>),
-    Abstract(Vec<UstrSpan>, B<Expr>),
-    Apply(B<Expr>, Vec<Expr>, bool),
-    Block(Vec<Expr>),
-    Assign(B<Expr>, Location, B<Expr>),
+    Let(UstrSpan, MutVal, B<Expr<P>>),
+    Abstract(Vec<UstrSpan>, B<Expr<P>>),
+    Apply(B<Expr<P>>, Vec<Expr<P>>, bool),
+    Block(Vec<Expr<P>>),
+    Assign(B<Expr<P>>, Location, B<Expr<P>>),
     PropertyPath(Ustr, Ustr),
-    Tuple(Vec<Expr>),
-    Project(B<Expr>, (usize, Location)),
-    Record(Vec<(UstrSpan, Expr)>),
-    FieldAccess(B<Expr>, UstrSpan),
-    Array(Vec<Expr>),
-    Index(B<Expr>, B<Expr>),
-    Match(B<Expr>, Vec<(Pattern, Expr)>, Option<B<Expr>>),
-    ForLoop(UstrSpan, B<Expr>, B<Expr>),
+    Tuple(Vec<Expr<P>>),
+    Project(B<Expr<P>>, (usize, Location)),
+    Record(Vec<(UstrSpan, Expr<P>)>),
+    FieldAccess(B<Expr<P>>, UstrSpan),
+    Array(Vec<Expr<P>>),
+    Index(B<Expr<P>>, B<Expr<P>>),
+    Match(B<Expr<P>>, Vec<(Pattern, Expr<P>)>, Option<B<Expr<P>>>),
+    ForLoop(UstrSpan, B<Expr<P>>, B<Expr<P>>),
     Error,
 }
 
 /// An expression as an Abstract Syntax Tree
 #[derive(Debug, Clone)]
-pub struct Expr {
-    pub kind: ExprKind,
+pub struct Expr<P: Phase> {
+    pub kind: ExprKind<P>,
     pub span: Location,
 }
-impl Expr {
-    pub fn new(kind: ExprKind, span: Location) -> Self {
+impl<P: Phase> Expr<P> {
+    pub fn new(kind: ExprKind<P>, span: Location) -> Self {
         Self { kind, span }
     }
 
@@ -315,73 +331,8 @@ impl Expr {
         self.format_ind(f, 0)
     }
 
-    fn get_function_dependencies(&self, fn_map: &HashMap<Ustr, usize>) -> HashSet<usize> {
-        struct DependencyCollector<'a> {
-            fn_map: &'a HashMap<Ustr, usize>,
-            dependencies: HashSet<usize>,
-            locals: Vec<Ustr>,
-            local_sizes: Vec<usize>,
-            local_bases: Vec<usize>,
-        }
-        use ExprKind::*;
-        impl ExprVisitor for DependencyCollector<'_> {
-            fn visit_start(&mut self, expr: &Expr) {
-                match &expr.kind {
-                    Identifier(name) => {
-                        let skip = self.local_bases.last().copied().unwrap_or(0);
-                        if self
-                            .locals
-                            .iter()
-                            .skip(skip)
-                            .rev()
-                            .any(|local| local == name)
-                        {
-                            // this is a local variable shadowing function definition
-                        } else if let Some(index) = self.fn_map.get(name) {
-                            self.dependencies.insert(*index);
-                        }
-                    }
-                    Abstract(args, _) => {
-                        self.local_bases.push(self.locals.len());
-                        self.locals.extend(args.iter().map(|(name, _)| *name));
-                    }
-                    Block(_) => {
-                        self.local_sizes.push(self.locals.len());
-                    }
-                    _ => {}
-                }
-            }
-            fn visit_end(&mut self, expr: &Expr) {
-                match &expr.kind {
-                    Let((name, _), _, expr) => {
-                        expr.visit(self);
-                        self.locals.push(*name);
-                    }
-                    Abstract(args, _) => {
-                        self.local_bases.pop().unwrap();
-                        self.locals.truncate(self.locals.len() - args.len());
-                    }
-                    Block(_) => {
-                        let size = self.local_sizes.pop().unwrap();
-                        self.locals.truncate(size);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut collector = DependencyCollector {
-            fn_map,
-            dependencies: HashSet::new(),
-            locals: Vec::new(),
-            local_sizes: Vec::new(),
-            local_bases: Vec::new(),
-        };
-        self.visit(&mut collector);
-        collector.dependencies
-    }
-
     /// Visit all nodes of the expression tree
-    fn visit(&self, visitor: &mut impl ExprVisitor) {
+    fn visit(&self, visitor: &mut impl ExprVisitor<P>) {
         visitor.visit_start(self);
         use ExprKind::*;
         match &self.kind {
@@ -424,20 +375,33 @@ impl Expr {
     // TODO: use the visitor to collect the dependency graph
 }
 
-impl std::fmt::Display for Expr {
+impl<P: Phase> std::fmt::Display for Expr<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         self.format(f)
     }
 }
 
-/// A visitor pattern for expressions
-pub trait ExprVisitor {
-    fn visit_start(&mut self, _expr: &Expr) {}
-    fn visit_end(&mut self, _expr: &Expr) {}
+/// An AST expression kind just after parsing
+pub type PExprKind = ExprKind<Parsed>;
 
-    fn visit_exprs<'e>(&mut self, exprs: impl Iterator<Item = &'e Expr>)
+/// An AST expression just after parsing
+pub type PExpr = Expr<Parsed>;
+
+/// An AST expression kind after desugaring
+pub type DExprKind = ExprKind<Desugared>;
+
+/// An AST expression after desugaring
+pub type DExpr = Expr<Desugared>;
+
+/// A visitor pattern for expressions
+pub trait ExprVisitor<P: Phase> {
+    fn visit_start(&mut self, _expr: &Expr<P>) {}
+    fn visit_end(&mut self, _expr: &Expr<P>) {}
+
+    fn visit_exprs<'e>(&mut self, exprs: impl Iterator<Item = &'e Expr<P>>)
     where
         Self: Sized,
+        P: 'e,
     {
         for expr in exprs {
             expr.visit(self);
@@ -447,8 +411,8 @@ pub trait ExprVisitor {
 
 #[derive(Default)]
 struct ErrorCollector(Vec<LocatedError>);
-impl ExprVisitor for ErrorCollector {
-    fn visit_start(&mut self, expr: &Expr) {
+impl<P: Phase> ExprVisitor<P> for ErrorCollector {
+    fn visit_start(&mut self, expr: &Expr<P>) {
         if let ExprKind::Error = expr.kind {
             self.0.push(("parse error".into(), expr.span));
         }

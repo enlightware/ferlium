@@ -2,6 +2,7 @@
 
 ### Language features
 
+- As casting
 - Type classes
 - Private module members
 - Tuple deconstruction on assignation

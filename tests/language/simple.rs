@@ -821,6 +821,7 @@ fn string_formatting() {
         run(r#"let a = [1, 2]; let b = (0, true, "hi"); f"hello {a} world {b}""#),
         string!("hello [1, 2] world (0, true, hi)")
     );
+    assert_eq!(run(r#"fn nbr(x) { f" #{x}" } nbr(3)"#), string!(" #3"));
     let s = r#"f"hello {a} world""#;
     fail_compilation(s).expect_undefined_var_in_string_formatting(s, "a");
     let s = r#"let a = 1; f"{a} is {b}""#;

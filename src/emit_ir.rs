@@ -16,7 +16,6 @@ use crate::{
     effects::EffType,
     error::InternalCompilationError,
     function::ScriptFunction,
-    graph::{find_strongly_connected_components, topological_sort_sccs},
     internal_compilation_error,
     ir::{self, Immediate, Node},
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
@@ -30,18 +29,15 @@ use crate::{
 
 /// Emit IR for the given module
 pub fn emit_module(
-    source: &ast::Module,
+    source: ast::PModule,
     others: &Modules,
     merge_with: Option<&Module>,
 ) -> Result<Module, InternalCompilationError> {
     use ir::Node as N;
     use ir::NodeKind as K;
 
-    // Prelude: get the function dependency graph, topologically sort it, and process
-    // the functions starting from the leaves.
-    let dependency_graph = source.get_function_dependencies();
-    let sccs = find_strongly_connected_components(&dependency_graph);
-    let sorted_sccs = topological_sort_sccs(&dependency_graph, &sccs);
+    // First desugar the module.
+    let (source, sorted_sccs) = source.desugar()?;
 
     // Prepare target module.
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
@@ -300,15 +296,18 @@ pub struct CompiledExpr {
 /// Return the compiled expression and any remaining external constraints
 /// referring to lower-generation type variables.
 pub fn emit_expr(
-    source: &ast::Expr,
+    source: ast::PExpr,
     module_env: ModuleEnv,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
+    // First desugar the expression.
+    let source = source.desugar_with_empty_ctx()?;
+
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
     let mut ty_env = TypingEnv::new(locals, module_env);
     let mut ty_inf = TypeInference::new();
-    let (mut node, _) = ty_inf.infer_expr(&mut ty_env, source)?;
+    let (mut node, _) = ty_inf.infer_expr(&mut ty_env, &source)?;
     let mut locals = ty_env.get_locals_and_drop();
     ty_inf.log_debug_constraints(module_env);
 

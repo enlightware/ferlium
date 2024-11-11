@@ -12,6 +12,7 @@ mod assert;
 mod ast;
 mod borrow_checker;
 mod containers;
+mod desugar;
 mod dictionary_passing;
 pub mod effects;
 pub mod emit_ir;
@@ -28,6 +29,7 @@ mod location;
 mod r#match;
 pub mod module;
 pub mod mutability;
+mod never;
 mod parser_helpers;
 pub mod std;
 mod sync;
@@ -64,7 +66,7 @@ impl ModuleAndExpr {
 /// Parse a module and an expression (if any) from a source code and return the corresponding ASTs.
 pub fn parse_module_and_expr(
     src: &str,
-) -> Result<(ast::Module, Option<ast::Expr>), Vec<LocatedError>> {
+) -> Result<(ast::PModule, Option<ast::PExpr>), Vec<LocatedError>> {
     let mut errors = Vec::new();
     let module_and_expr = parser::ModuleAndExprParser::new()
         .parse(&mut errors, src)
@@ -106,7 +108,7 @@ pub fn compile(
     }
 
     // Emit IR for the module.
-    let mut module = emit_module(&module_ast, other_modules, Some(&module)).map_err(|error| {
+    let mut module = emit_module(module_ast, other_modules, Some(&module)).map_err(|error| {
         let env = ModuleEnv::new(&module, other_modules);
         CompilationError::from_internal(error, &env, src)
     })?;
@@ -118,7 +120,7 @@ pub fn compile(
     // Emit IR for the expression, if any.
     let expr = if let Some(expr_ast) = expr_ast {
         let env = ModuleEnv::new(&module, other_modules);
-        let compiled_expr = emit_expr(&expr_ast, env, vec![])
+        let compiled_expr = emit_expr(expr_ast, env, vec![])
             .map_err(|error| CompilationError::from_internal(error, &env, src))?;
         log::debug!("Expr IR\n{}", compiled_expr.expr.format_with(&env));
         Some(compiled_expr)

@@ -3,16 +3,15 @@ use std::{str::FromStr, sync::LazyLock};
 use crate::parser_helpers::static_apply;
 use crate::{internal_compilation_error, Location};
 use regex::Regex;
-use ustr::ustr;
+use ustr::{ustr, Ustr};
 
 use crate::containers::B;
 use crate::mutability::MutVal;
 use crate::std::string::String;
 use crate::{
-    ast::{Expr, ExprKind},
+    ast::{DExpr as Expr, DExprKind as ExprKind},
     error::InternalCompilationError,
     std::string::string_type,
-    typing_env::TypingEnv,
     value::Value,
 };
 
@@ -28,9 +27,9 @@ fn variable_to_string(
     var_name: &str,
     var_span: Location,
     string_span: Location,
-    env: &TypingEnv,
+    locals: &[Ustr],
 ) -> Result<Expr, InternalCompilationError> {
-    if env.get_variable_index_and_type_scheme(var_name).is_none() {
+    if !locals.iter().rev().any(|&name| name == var_name) {
         return Err(internal_compilation_error!(
             UndefinedVarInStringFormatting {
                 var_span,
@@ -48,8 +47,8 @@ fn variable_to_string(
 pub fn emit_format_string_ast(
     input: &str,
     span: Location,
-    env: &TypingEnv,
-) -> Result<Expr, InternalCompilationError> {
+    locals: &[Ustr],
+) -> Result<ExprKind, InternalCompilationError> {
     static REGEX: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\{([\p{L}_][\p{L}\p{N}_]*)\}").unwrap());
 
@@ -100,7 +99,7 @@ pub fn emit_format_string_ast(
         // Push the variable name found within the braces.
         let var_span = Location::new_local(start_pos + match_start + 1, start_pos + match_end - 1);
         let var_name = &input[match_start + 1..match_end - 1];
-        let expr = variable_to_string(var_name, var_span, span, env)?;
+        let expr = variable_to_string(var_name, var_span, span, locals)?;
         extend_exprs_with(expr);
 
         last_end = match_end;
@@ -117,5 +116,5 @@ pub fn emit_format_string_ast(
     let end_span = Location::new_local(span.end(), span.end());
     exprs.push(Expr::new(ExprKind::Identifier(ustr("@s")), end_span));
 
-    Ok(Expr::new(ExprKind::Block(exprs), span))
+    Ok(ExprKind::Block(exprs))
 }

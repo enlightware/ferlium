@@ -1,5 +1,5 @@
 use crate::{Location, LocatedError};
-use crate::ast::{UstrSpan, Expr, ExprKind, ExprKind::*, Pattern, PatternKind as PatK, Module};
+use crate::ast::{UstrSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module};
 use crate::value::{Value, LiteralValue};
 use crate::r#type::Type;
 use crate::parser_helpers::*;
