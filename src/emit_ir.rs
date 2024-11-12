@@ -65,6 +65,7 @@ pub fn emit_module(
             args,
             args_span,
             span,
+            doc,
             ..
         } in functions()
         {
@@ -99,6 +100,7 @@ pub fn emit_module(
                 ty_scheme,
                 code: Rc::new(RefCell::new(dummy_code)),
                 spans: Some(spans),
+                doc: doc.clone(),
             };
             output.functions.insert(name.0, descr);
         }

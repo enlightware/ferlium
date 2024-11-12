@@ -204,6 +204,13 @@ pub(crate) fn ext_f<T>(e: T, v: Vec<T>) -> Vec<T> {
     result
 }
 
+/// Parse a single-line, Rust-style doc comment
+pub(crate) fn parse_doc_comments(comment: Option<&str>) -> Option<String> {
+    comment.map(|comment| {
+        comment .trim_start_matches("///").trim().to_string()
+    })
+}
+
 /// Resolve token names using a static map
 /// TODO: Go through intermediate data structure to allow for translation
 fn resolve_token_names(names: Vec<String>) -> Vec<String> {

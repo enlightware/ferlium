@@ -42,7 +42,7 @@ fn comments() {
     assert_eq!(run("/*\ncomment\n*/ 42"), int!(42));
     assert_eq!(run("/*\ncomment\n*/ 42 // comment"), int!(42));
     assert_eq!(
-        run("/*\ncomment\n*/\n/* yeah */ 42 // comment\n/* sure */\n/////comment"),
+        run("/*\ncomment\n*/\n/* yeah */ 42 // comment\n/* sure */\n// ///comment"),
         int!(42)
     );
 }

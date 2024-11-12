@@ -340,6 +340,7 @@ macro_rules! n_ary_native_fn {
                     ty_scheme,
                     code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
                     spans: None,
+                    doc: None,
                 }
             }
 

@@ -36,8 +36,8 @@ FunctionOrType = {
 }
 
 Function: Module = {
-    <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrArgs> ")" <ar:@R> <body:Es<Block>> <r:@R> =>
-        Module::new_with_function(name, args, span(al, ar), body, span(l, r)),
+    <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrArgs> ")" <ar:@R> <body:Es<Block>> <r:@R> =>
+        Module::new_with_function(name, args, span(al, ar), body, span(l, r), parse_doc_comments(doc)),
 }
 
 // Expressions inspired from Rust: https://doc.rust-lang.org/reference/expressions.html
@@ -356,6 +356,8 @@ BinOpLeftAssoc<Op, NextTier>: ExprKind = {
 
 // Skip whitespaces and comments in the lexer
 match {
+    r"///[^\n\r]*[\n\r]*" => DOC_COMMENT,
+} else {
     r"\s*" => { }, // The default whitespace skipping is disabled if an `ignore pattern` is specified
     r"//[^\n\r]*[\n\r]*" => { }, // Skip `// comments`
     r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/" => { },  // Skip `/* comments */`

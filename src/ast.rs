@@ -28,6 +28,7 @@ pub struct ModuleFunction {
     pub args_span: Location,
     pub body: B<Expr>,
     pub span: Location,
+    pub doc: Option<String>,
 }
 impl ModuleFunction {
     pub fn new(
@@ -36,6 +37,7 @@ impl ModuleFunction {
         args_span: Location,
         body: B<Expr>,
         span: Location,
+        doc: Option<String>,
     ) -> Self {
         Self {
             name,
@@ -43,6 +45,7 @@ impl ModuleFunction {
             args_span,
             body,
             span,
+            doc,
         }
     }
 }
@@ -70,6 +73,7 @@ impl Module {
         args_span: Location,
         body: Expr,
         span: Location,
+        doc: Option<String>,
     ) -> Self {
         Self {
             functions: vec![ModuleFunction::new(
@@ -78,6 +82,7 @@ impl Module {
                 args_span,
                 B::new(body),
                 span,
+                doc,
             )],
             ..Default::default()
         }
@@ -137,9 +142,12 @@ impl FmtWithModuleEnv for Module {
         if !self.functions.is_empty() {
             writeln!(f, "Functions:")?;
             for ModuleFunction {
-                name, args, body, ..
+                name, args, body, doc, ..
             } in self.functions.iter()
             {
+                if let Some(doc) = doc {
+                    writeln!(f, "  /// {}", doc)?;
+                }
                 writeln!(
                     f,
                     "  fn {}({}):",

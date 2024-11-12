@@ -26,6 +26,7 @@ pub struct ModuleFunction {
     pub code: FunctionRc,
     pub ty_scheme: TypeScheme<FnType>,
     pub spans: Option<ModuleFunctionSpans>,
+    pub doc: Option<String>,
 }
 
 pub type FunctionsMap = HashMap<Ustr, ModuleFunction>;
@@ -129,6 +130,9 @@ impl Module {
             writeln!(f, "Functions:")?;
             for (name, function) in self.functions.iter() {
                 // function.ty_scheme.format_quantifiers(f)?; write!(f, ". ")?;
+                if let Some(doc) = &function.doc {
+                    writeln!(f, "/// {}", doc)?;
+                }
                 if function.ty_scheme.is_just_type_and_effects() {
                     writeln!(f, "fn {name} {}", function.ty_scheme.ty.format_with(&env))?;
                 } else {
