@@ -112,27 +112,41 @@ pub fn add_to_module(to: &mut Module) {
 
     to.functions.insert(
         ustr("to_string"),
-        UnaryNativeFnVN::description_with_default_ty(String::any_to_string, no_effects()),
+        UnaryNativeFnVN::description_with_default_ty(
+            String::any_to_string,
+            ["value"],
+            no_effects(),
+        ),
     );
     to.functions.insert(
         ustr("string_push_str"),
-        BinaryNativeFnMNN::description_with_default_ty(String::push_str, no_effects()),
+        BinaryNativeFnMNN::description_with_default_ty(
+            String::push_str,
+            ["target", "suffix"],
+            no_effects(),
+        ),
     );
     to.functions.insert(
         ustr("string_concat"),
         BinaryNativeFnNNN::description_with_default_ty(
             |a: String, b: String| String::concat(&a, &b),
+            ["left", "right"],
             no_effects(),
         ),
     );
     to.functions.insert(
         ustr("string_len"),
-        UnaryNativeFnNN::description_with_default_ty(|a: String| a.len() as isize, no_effects()),
+        UnaryNativeFnNN::description_with_default_ty(
+            |a: String| a.len() as isize,
+            ["string"],
+            no_effects(),
+        ),
     );
     to.functions.insert(
         ustr("string_is_empty"),
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.is_empty() as isize,
+            ["string"],
             no_effects(),
         ),
     );
@@ -144,6 +158,7 @@ pub fn add_to_module(to: &mut Module) {
                 new.0 = Rc::new(new.0.replace(from.as_ref(), to.as_ref()));
                 new
             },
+            ["string", "from", "to"],
             no_effects(),
         ),
     );

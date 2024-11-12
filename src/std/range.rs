@@ -93,6 +93,10 @@ pub fn add_to_module(to: &mut Module) {
     // Functions
     to.functions.insert(
         ustr("range_iterator_new"),
-        BinaryNativeFnNNN::description_with_default_ty(RangeIterator::new, no_effects()),
+        BinaryNativeFnNNN::description_with_default_ty(
+            RangeIterator::new,
+            ["start", "end"],
+            no_effects(),
+        ),
     );
 }

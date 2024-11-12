@@ -27,6 +27,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("log"),
         UnaryNativeFnVN::description_with_in_ty(
             log,
+            ["message"],
             Type::variable_id(0),
             effect(PrimitiveEffect::Write),
         ),

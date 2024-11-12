@@ -142,7 +142,11 @@ impl FmtWithModuleEnv for Module {
         if !self.functions.is_empty() {
             writeln!(f, "Functions:")?;
             for ModuleFunction {
-                name, args, body, doc, ..
+                name,
+                args,
+                body,
+                doc,
+                ..
             } in self.functions.iter()
             {
                 if let Some(doc) = doc {

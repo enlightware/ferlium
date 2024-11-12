@@ -26,6 +26,7 @@ fn testing_module() -> Module {
         "some_int".into(),
         UnaryNativeFnNV::description_with_ty(
             |v: isize| Value::variant(ustr("Some"), Value::native(v)),
+            ["option"],
             int_type(),
             option_type(int_type()),
             no_effects(),
@@ -38,23 +39,25 @@ fn test_effect_module() -> Module {
     let mut module: Module = Default::default();
     module.functions.insert(
         "read".into(),
-        NullaryNativeFnN::description_with_default_ty(|| (), effect(PrimitiveEffect::Read)),
+        NullaryNativeFnN::description_with_default_ty(|| (), [], effect(PrimitiveEffect::Read)),
     );
     module.functions.insert(
         "write".into(),
-        NullaryNativeFnN::description_with_default_ty(|| (), effect(PrimitiveEffect::Write)),
+        NullaryNativeFnN::description_with_default_ty(|| (), [], effect(PrimitiveEffect::Write)),
     );
     module.functions.insert(
         "read_write".into(),
         NullaryNativeFnN::description_with_default_ty(
             || (),
+            [],
             effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
         ),
     );
     module.functions.insert(
         "take_read".into(),
         UnaryNativeFnVN::description_with_in_ty(
-            |_x: Value| 0,
+            |_value: Value| 0,
+            ["value"],
             Type::function_type(FnType::new(
                 vec![],
                 Type::unit(),
@@ -83,6 +86,7 @@ fn test_property_module() -> Module {
         "@get my_scope.my_var".into(),
         NullaryNativeFnN::description_with_default_ty(
             || PROPERTY_VALUE.load(Ordering::Relaxed),
+            [],
             effect(PrimitiveEffect::Read),
         ),
     );
@@ -90,6 +94,7 @@ fn test_property_module() -> Module {
         "@set my_scope.my_var".into(),
         UnaryNativeFnNN::description_with_default_ty(
             |value: isize| PROPERTY_VALUE.store(value, Ordering::Relaxed),
+            ["value"],
             effect(PrimitiveEffect::Write),
         ),
     );

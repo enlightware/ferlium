@@ -206,9 +206,7 @@ pub(crate) fn ext_f<T>(e: T, v: Vec<T>) -> Vec<T> {
 
 /// Parse a single-line, Rust-style doc comment
 pub(crate) fn parse_doc_comments(comment: Option<&str>) -> Option<String> {
-    comment.map(|comment| {
-        comment .trim_start_matches("///").trim().to_string()
-    })
+    comment.map(|comment| comment.trim_start_matches("///").trim().to_string())
 }
 
 /// Resolve token names using a static map

@@ -46,6 +46,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@b+"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Add::add as fn(isize, isize) -> isize,
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -53,6 +54,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@b-"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Sub::sub as fn(isize, isize) -> isize,
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -60,6 +62,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@b*"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Mul::mul as fn(isize, isize) -> isize,
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -73,6 +76,7 @@ pub fn add_to_module(to: &mut Module) {
                     Ok(lhs / rhs)
                 }
             },
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -86,6 +90,7 @@ pub fn add_to_module(to: &mut Module) {
                     Ok(lhs % rhs)
                 }
             },
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -93,6 +98,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@u-"),
         UnaryNativeFnNN::description_with_default_ty(
             std::ops::Neg::neg as fn(isize) -> isize,
+            ["value"],
             no_effects(),
         ),
     );
@@ -100,6 +106,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("min"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::cmp::min as fn(isize, isize) -> isize,
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -107,6 +114,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("max"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::cmp::max as fn(isize, isize) -> isize,
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -122,6 +130,7 @@ pub fn add_to_module(to: &mut Module) {
                     Ok(value.min(max).max(min))
                 }
             },
+            ["value", "min", "max"],
             no_effects(),
         ),
     );
@@ -131,6 +140,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@<"),
         BinaryNativeFnNNN::description_with_default_ty(
             |lhs: isize, rhs: isize| std::cmp::PartialOrd::lt(&lhs, &rhs),
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -138,6 +148,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@<="),
         BinaryNativeFnNNN::description_with_default_ty(
             |lhs: isize, rhs: isize| std::cmp::PartialOrd::le(&lhs, &rhs),
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -145,6 +156,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@>"),
         BinaryNativeFnNNN::description_with_default_ty(
             |lhs: isize, rhs: isize| std::cmp::PartialOrd::gt(&lhs, &rhs),
+            ["left", "right"],
             no_effects(),
         ),
     );
@@ -152,6 +164,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("@>="),
         BinaryNativeFnNNN::description_with_default_ty(
             |lhs: isize, rhs: isize| std::cmp::PartialOrd::ge(&lhs, &rhs),
+            ["left", "right"],
             no_effects(),
         ),
     );

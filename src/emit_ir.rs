@@ -100,6 +100,7 @@ pub fn emit_module(
                 ty_scheme,
                 code: Rc::new(RefCell::new(dummy_code)),
                 spans: Some(spans),
+                arg_names: args.iter().map(|(name, _)| *name).collect(),
                 doc: doc.clone(),
             };
             output.functions.insert(name.0, descr);

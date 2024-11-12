@@ -26,6 +26,7 @@ pub struct ModuleFunction {
     pub code: FunctionRc,
     pub ty_scheme: TypeScheme<FnType>,
     pub spans: Option<ModuleFunctionSpans>,
+    pub arg_names: Vec<Ustr>,
     pub doc: Option<String>,
 }
 

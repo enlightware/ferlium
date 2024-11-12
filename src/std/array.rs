@@ -61,7 +61,11 @@ impl Array {
             array_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnVFN::description_with_ty_scheme(Array::from_value_iterator, ty_scheme)
+        UnaryNativeFnVFN::description_with_ty_scheme(
+            Array::from_value_iterator,
+            ["iterator"],
+            ty_scheme,
+        )
     }
 
     pub fn get(&self, index: usize) -> Option<&Value> {
@@ -101,7 +105,7 @@ impl Array {
             unit,
             no_effects(),
         ));
-        BinaryNativeFnMVN::description_with_ty_scheme(Array::append, ty_scheme)
+        BinaryNativeFnMVN::description_with_ty_scheme(Array::append, ["array", "value"], ty_scheme)
     }
 
     pub fn prepend(&mut self, value: Value) {
@@ -117,7 +121,7 @@ impl Array {
             unit,
             no_effects(),
         ));
-        BinaryNativeFnMVN::description_with_ty_scheme(Array::prepend, ty_scheme)
+        BinaryNativeFnMVN::description_with_ty_scheme(Array::prepend, ["array", "value"], ty_scheme)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -135,7 +139,11 @@ impl Array {
             int_type(),
             no_effects(),
         ));
-        UnaryNativeFnNN::description_with_ty_scheme(|a: Self| a.len() as isize, ty_scheme)
+        UnaryNativeFnNN::description_with_ty_scheme(
+            |a: Self| a.len() as isize,
+            ["array"],
+            ty_scheme,
+        )
     }
 
     fn concat(a: &Self, b: &Self) -> Self {
@@ -153,6 +161,7 @@ impl Array {
         ));
         BinaryNativeFnNNN::description_with_ty_scheme(
             |a: Self, b: Self| Self::concat(&a, &b),
+            ["left", "right"],
             ty_scheme,
         )
     }
@@ -185,7 +194,7 @@ impl Array {
             array1,
             no_effects(),
         ));
-        BinaryNativeFnNVFN::description_with_ty_scheme(Array::map, ty_scheme)
+        BinaryNativeFnNVFN::description_with_ty_scheme(Array::map, ["array", "function"], ty_scheme)
     }
 
     pub fn iter(&self) -> ArrayIterator {

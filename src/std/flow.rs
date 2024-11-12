@@ -20,6 +20,7 @@ pub fn add_to_module(to: &mut Module) {
         ustr("abort"),
         NullaryNativeFnFN::description_with_ty_scheme(
             abort,
+            [],
             TypeScheme::new_just_type(FnType::new_by_val(&[], Type::never(), no_effects())),
         ),
     );

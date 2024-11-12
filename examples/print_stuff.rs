@@ -90,10 +90,12 @@ fn main() {
     let functions = [
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Add::add as fn(isize, isize) -> isize,
+            ["left", "right"],
             no_effects(),
         ),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Sub::sub as fn(isize, isize) -> isize,
+            ["left", "right"],
             no_effects(),
         ),
     ];
