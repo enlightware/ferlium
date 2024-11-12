@@ -91,7 +91,7 @@ SuffixExpr = {
     <e:Es<SuffixExpr>> "." <f:Sp<UIdentifier>> => FieldAccess(B::new(e), f),
     <e:Es<SuffixExpr>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
     <e:Es<SuffixExpr>> "[" <i:Expr> "]" => Index(B::new(e), B::new(i)),
-    <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(B::new(e), a),
+    <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(B::new(e), a, false),
 }
 
 AtomExpr = {

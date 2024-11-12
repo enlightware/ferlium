@@ -134,7 +134,7 @@ pub(crate) fn proj_or_float<L, T>(
 
 pub(crate) fn static_apply(identifier: (Ustr, Location), args: Vec<Expr>) -> ExprKind {
     let identifier = Expr::new(ExprKind::Identifier(identifier.0), identifier.1);
-    ExprKind::Apply(B::new(identifier), args)
+    ExprKind::Apply(B::new(identifier), args, true)
 }
 
 /// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor
@@ -278,3 +278,5 @@ pub(crate) fn describe_parse_error(
         User { error } => error,
     }
 }
+
+pub(crate) static EMPTY_USTR: LazyLock<Ustr> = LazyLock::new(|| ustr(""));

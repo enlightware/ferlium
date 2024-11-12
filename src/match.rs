@@ -118,8 +118,9 @@ impl TypeInference {
                 cond_eff.clone(),
                 cond_expr.span,
             );
+            let match_condition_name = ustr("@match_condition");
             env.locals.push(Local::new(
-                ustr("@match_condition"),
+                match_condition_name,
                 MutType::constant(),
                 pattern_ty,
                 cond_expr.span,
@@ -129,6 +130,7 @@ impl TypeInference {
             let load_variant = N::new(
                 K::EnvLoad(B::new(EnvLoad {
                     index: initial_env_size,
+                    name: Some(match_condition_name),
                 })),
                 pattern_ty,
                 no_effects(),

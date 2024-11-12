@@ -174,7 +174,7 @@ pub enum ExprKind {
     Identifier(Ustr),
     Let(UstrSpan, MutVal, B<Expr>),
     Abstract(Vec<UstrSpan>, B<Expr>),
-    Apply(B<Expr>, Vec<Expr>),
+    Apply(B<Expr>, Vec<Expr>, bool),
     Block(Vec<Expr>),
     Assign(B<Expr>, Location, B<Expr>),
     PropertyPath(Ustr, Ustr),
@@ -220,7 +220,7 @@ impl Expr {
                 writeln!(f, "|")?;
                 body.format_ind(f, indent + 1)
             }
-            Apply(func, args) => {
+            Apply(func, args, _) => {
                 writeln!(f, "{indent_str}eval")?;
                 func.format_ind(f, indent + 1)?;
                 if args.is_empty() {
@@ -387,7 +387,7 @@ impl Expr {
         match &self.kind {
             Let(_, _, expr) => expr.visit(visitor),
             Abstract(_, expr) => expr.visit(visitor),
-            Apply(expr, args) => {
+            Apply(expr, args, _) => {
                 expr.visit(visitor);
                 visitor.visit_exprs(args.iter());
             }

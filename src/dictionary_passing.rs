@@ -1,6 +1,6 @@
 use std::{collections::HashMap, mem};
 
-use crate::Location;
+use crate::{parser_helpers::EMPTY_USTR, Location};
 use ustr::Ustr;
 
 use crate::{
@@ -140,7 +140,7 @@ fn extra_args_from_inst_data(
                             let index = find_field_dict_index(dicts, var, name).expect(
                                 "Dictionary for field not found, type inference should have failed",
                             );
-                            K::EnvLoad(B::new(ir::EnvLoad { index }))
+                            K::EnvLoad(B::new(ir::EnvLoad { index, name: None }))
                         }
                         Record(rec) => {
                             // Known type, get the index from the type and create an immediate with it.
@@ -181,7 +181,7 @@ fn extra_args_for_module_function(
                 .expect("Target dictionary not found in ours");
             (
                 Node::new(
-                    NodeKind::EnvLoad(B::new(ir::EnvLoad { index })),
+                    NodeKind::EnvLoad(B::new(ir::EnvLoad { index, name: None })),
                     int_type(),
                     no_effects(),
                     span,
@@ -239,9 +239,9 @@ impl Node {
                                 // Build closure to capture the dictionaries of this function, if any.
                                 if !dicts.is_empty() {
                                     let captures = (0..dicts.len())
-                                        .map(|i| {
+                                        .map(|index| {
                                             Node::new(
-                                                EnvLoad(B::new(ir::EnvLoad { index: i })),
+                                                EnvLoad(B::new(ir::EnvLoad { index, name: None })),
                                                 int_type(),
                                                 no_effects(),
                                                 self.span,
@@ -286,6 +286,8 @@ impl Node {
                     let (extra_args, extra_args_ty) =
                         extra_args_from_inst_data(&app.inst_data, span, dicts);
                     // First add the extra parameters, then the original arguments.
+                    app.argument_names
+                        .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
                     app.arguments.splice(0..0, extra_args);
                     // Adapt real function type as well
                     app.ty.args.splice(0..0, extra_args_ty);
@@ -298,6 +300,8 @@ impl Node {
                         // Yes, build the dictionary requirements for the function.
                         let (extra_args, extra_args_ty) =
                             extra_args_for_module_function(inst_data, self.span, dicts);
+                        app.argument_names
+                            .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
                         app.arguments.splice(0..0, extra_args);
                         app.ty.args.splice(0..0, extra_args_ty);
 

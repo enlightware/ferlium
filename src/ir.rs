@@ -9,7 +9,6 @@ use crate::{
     function::FunctionRef,
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{CastableToType, FnType, Type, TypeLike, TypeVar},
-    std::math::int_type,
     type_inference::InstSubstitution,
     value::Value,
 };
@@ -101,6 +100,7 @@ pub struct StaticApplication {
     pub function_name: Ustr,
     pub function_span: Location,
     pub arguments: Vec<Node>,
+    pub argument_names: Vec<Ustr>,
     pub ty: FnType,
     pub inst_data: FnInstData,
 }
@@ -119,6 +119,7 @@ impl EnvStore {
 #[derive(Debug, Clone)]
 pub struct EnvLoad {
     pub index: usize,
+    pub name: Option<Ustr>,
 }
 
 #[derive(Debug, Clone)]
@@ -481,82 +482,6 @@ impl Node {
 
         // No children has this position, return our type.
         Some(self.ty)
-    }
-
-    pub fn variable_type_annotations(&self, result: &mut Vec<(usize, String)>, env: &ModuleEnv) {
-        use NodeKind::*;
-        match &self.kind {
-            Immediate(_) => {}
-            BuildClosure(build_closure) => {
-                build_closure
-                    .function
-                    .variable_type_annotations(result, env);
-                // We do not look into captures as they are generated code.
-            }
-            Apply(app) => {
-                app.function.variable_type_annotations(result, env);
-                for arg in &app.arguments {
-                    arg.variable_type_annotations(result, env);
-                }
-            }
-            StaticApply(app) => {
-                for arg in &app.arguments {
-                    arg.variable_type_annotations(result, env);
-                }
-            }
-            EnvStore(node) => {
-                // Note: synthesized let nodes have empty name span, so we ignore these.
-                if node.name_span.end() != node.name_span.start() {
-                    result.push((
-                        node.name_span.end(),
-                        format!(": {}", node.node.ty.format_with(env)),
-                    ));
-                }
-                node.node.variable_type_annotations(result, env);
-            }
-            EnvLoad(_) => {}
-            Block(nodes) => nodes
-                .iter()
-                .for_each(|node| node.variable_type_annotations(result, env)),
-            Assign(assignment) => {
-                assignment.place.variable_type_annotations(result, env);
-                assignment.value.variable_type_annotations(result, env);
-            }
-            Tuple(nodes) => nodes
-                .iter()
-                .for_each(|node| node.variable_type_annotations(result, env)),
-            Project(projection) => projection.0.variable_type_annotations(result, env),
-            Record(nodes) => nodes
-                .iter()
-                .for_each(|node| node.variable_type_annotations(result, env)),
-            FieldAccess(access) => access.0.variable_type_annotations(result, env),
-            ProjectAt(access) => access.0.variable_type_annotations(result, env),
-            Variant(variant) => variant.1.variable_type_annotations(result, env),
-            ExtractTag(node) => node.variable_type_annotations(result, env),
-            Array(nodes) => nodes
-                .iter()
-                .for_each(|node| node.variable_type_annotations(result, env)),
-            Index(array, index) => {
-                array.variable_type_annotations(result, env);
-                index.variable_type_annotations(result, env);
-            }
-            Case(case) => {
-                case.value.variable_type_annotations(result, env);
-                for (_, node) in &case.alternatives {
-                    node.variable_type_annotations(result, env);
-                }
-                case.default.variable_type_annotations(result, env);
-            }
-            Iterate(iteration) => {
-                // TODO: once the iterator is generalized, get the type from it!
-                result.push((
-                    iteration.var_name_span.end(),
-                    format!(": {}", int_type().format_with(env)),
-                ));
-                iteration.iterator.variable_type_annotations(result, env);
-                iteration.body.variable_type_annotations(result, env);
-            }
-        }
     }
 
     pub(crate) fn all_unbound_ty_vars(&self) -> UnboundTyVars {

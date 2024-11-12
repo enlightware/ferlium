@@ -7,7 +7,10 @@ use std::{
     mem,
 };
 
-use crate::{internal_compilation_error, location::Location, std::logic::bool_type};
+use crate::{
+    internal_compilation_error, location::Location, parser_helpers::EMPTY_USTR,
+    std::logic::bool_type,
+};
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
 use ustr::{ustr, Ustr};
@@ -245,7 +248,10 @@ impl TypeInference {
             Identifier(name) => {
                 // Retrieve the index and the type of the variable from the environment, if it exists
                 if let Some((index, ty, mut_ty)) = env.get_variable_index_and_type_scheme(name) {
-                    let node = K::EnvLoad(B::new(ir::EnvLoad { index }));
+                    let node = K::EnvLoad(B::new(ir::EnvLoad {
+                        index,
+                        name: Some(*name),
+                    }));
                     (node, ty, mut_ty, no_effects())
                 }
                 // Retrieve the function from the environment, if it exists
@@ -326,12 +332,18 @@ impl TypeInference {
                     no_effects(),
                 )
             }
-            Apply(func, args) => {
+            Apply(func, args, synthesized) => {
                 // Do we have a global function or variant?
                 if let Identifier(name) = func.kind {
                     if !env.has_variable_name(name) {
-                        let (node, ty, mut_ty, effects) =
-                            self.infer_static_apply(env, &name, func.span, args, expr.span)?;
+                        let (node, ty, mut_ty, effects) = self.infer_static_apply(
+                            env,
+                            &name,
+                            func.span,
+                            args,
+                            expr.span,
+                            *synthesized,
+                        )?;
                         return Ok((N::new(node, ty, effects, expr.span), mut_ty));
                     }
                 }
@@ -378,6 +390,7 @@ impl TypeInference {
                         place.span,
                         &[value.as_ref()],
                         expr.span,
+                        true,
                     )?;
                     return Ok((N::new(node, ty, effects, expr.span), mut_ty));
                 }
@@ -566,7 +579,7 @@ impl TypeInference {
             PropertyPath(scope, variable) => {
                 let fn_name =
                     property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
-                self.infer_static_apply(env, &fn_name, expr.span, &[] as &[Expr], expr.span)?
+                self.infer_static_apply(env, &fn_name, expr.span, &[] as &[Expr], expr.span, true)?
             }
             Error => {
                 panic!("attempted to infer type for error node");
@@ -590,6 +603,7 @@ impl TypeInference {
         name_span: Location,
         args: &[impl Borrow<Expr>],
         expr_span: Location,
+        synthesized: bool,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
@@ -624,11 +638,17 @@ impl TypeInference {
                 let ret_ty = inst_fn_ty.ret;
                 let combined_effects =
                     self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
+                let argument_names = if synthesized {
+                    function.arg_names.iter().map(|_| *EMPTY_USTR).collect()
+                } else {
+                    function.arg_names.clone()
+                };
                 let node = K::StaticApply(B::new(ir::StaticApplication {
                     function: FunctionRef::new_weak(&function.code),
                     function_name: ustr(name),
                     function_span: name_span,
                     arguments: args_nodes,
+                    argument_names,
                     ty: inst_fn_ty,
                     inst_data,
                 }));

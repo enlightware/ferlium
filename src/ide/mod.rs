@@ -20,6 +20,7 @@ use regex::Regex;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+mod annotations;
 mod char_index_lookup;
 use char_index_lookup::{get_line_column, CharIndexLookup};
 
