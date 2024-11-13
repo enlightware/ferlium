@@ -217,7 +217,7 @@ impl Node {
             BuildClosure(build_closure) => {
                 let captured = eval_nodes(&build_closure.captures, ctx)?;
                 let function_value = build_closure.function.eval_with_ctx(ctx)?;
-                let function = function_value.into_function().unwrap();
+                let function = function_value.into_function().unwrap().0;
                 Ok(Value::function(B::new(Closure::new(function, captured))))
             }
             Apply(app) => {
@@ -231,7 +231,7 @@ impl Node {
                         .clone()
                 };
                 let function_value = app.function.eval_with_ctx(ctx)?;
-                let function = function_value.as_function().unwrap().get();
+                let function = function_value.as_function().unwrap().0.get();
                 let function = function.borrow();
                 let arguments = eval_args(&app.arguments, &args_ty, ctx)?;
                 function.call(arguments, ctx)

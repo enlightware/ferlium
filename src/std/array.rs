@@ -40,7 +40,7 @@ impl Array {
         let mut vec = VecDeque::new();
         loop {
             let iter_fn_key = iter.as_function().unwrap();
-            let iter_fn = iter_fn_key.get();
+            let iter_fn = iter_fn_key.0.get();
             let mut ctx = EvalCtx::new();
             let ret = iter_fn.borrow().call(vec![], &mut ctx)?;
             let ret_tuple = *ret.into_tuple().unwrap();
@@ -169,7 +169,7 @@ impl Array {
     // TODO: how to make this into an iterator
 
     pub fn map(self, f: Value) -> Result<Self, RuntimeError> {
-        let function = f.as_function().unwrap().get();
+        let function = f.as_function().unwrap().0.get();
         let mut ctx = EvalCtx::new();
         Ok(Self(Rc::new(
             self.0

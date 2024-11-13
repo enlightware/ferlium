@@ -210,7 +210,7 @@ impl Node {
                 if let Some(function) = immediate.value.as_function_mut() {
                     // Is this a function to instantiate?
                     if immediate.inst_data.dicts_req.is_empty() {
-                        let function = function.get();
+                        let function = function.0.get();
                         // No instantiation, check if it is a module function
                         let fn_ptr = function.as_ptr();
                         if let Some(inst_data) =

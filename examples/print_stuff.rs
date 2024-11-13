@@ -103,7 +103,7 @@ fn main() {
     println!("{}", add_fn_ty.display_rust_style(&module_env));
     let add_fn = FunctionRef::new_strong(&functions[0].code);
     let _sub_fn = FunctionRef::new_strong(&functions[1].code);
-    let add_value = Value::Function(add_fn.clone());
+    let add_value = Value::Function((add_fn.clone(), None));
 
     // some interesting functions and types
     let option = Type::variant(vec![(ustr("None"), empty_tuple), (ustr("Some"), gen0)]);

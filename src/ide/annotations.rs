@@ -241,10 +241,15 @@ fn is_arg_name_suffix_of_unary_fn_name(function_name: &str, arity: usize, arg_na
 }
 
 fn is_argument_similar_to_arg_name(argument: &Node, arg_name: &str) -> bool {
+    use NodeKind::*;
     let argument = match argument.kind {
-        NodeKind::EnvLoad(ref load) => match load.name {
+        EnvLoad(ref load) => match load.name {
             Some(name) => name,
             None => return false,
+        },
+        Immediate(ref value) => match value.value.as_function() {
+            Some((_, Some(name))) => *name,
+            _ => return false,
         },
         _ => return false,
     };

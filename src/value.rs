@@ -97,10 +97,14 @@ impl VariantValue {
 /// A value in the system
 #[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
 pub enum Value {
+    /// A native value, a pointer to the underlying Rust value
     Native(B<dyn NativeValue>),
+    /// A variant with its tag and payload
     Variant(B<VariantValue>),
+    /// A tuple of values, or the data of a record
     Tuple(B<SVec2<Value>>),
-    Function(FunctionRef),
+    /// A function, with an optional name (if part of an immediate pointing to a named function)
+    Function((FunctionRef, Option<Ustr>)),
 }
 
 impl Value {
@@ -121,7 +125,10 @@ impl Value {
     }
 
     pub fn function(function: Function) -> Self {
-        Self::Function(FunctionRef::new_strong(&Rc::new(RefCell::new(function))))
+        Self::Function((
+            FunctionRef::new_strong(&Rc::new(RefCell::new(function))),
+            None,
+        ))
     }
 
     pub fn into_primitive_ty<T: 'static>(self) -> Option<T> {
@@ -165,7 +172,7 @@ impl Value {
                 write_with_separator_and_format_fn(tuple.iter(), ", ", Value::format_as_string, f)?;
                 write!(f, ")")
             }
-            Function(function) => {
+            Function((function, _)) => {
                 let function = function.get();
                 let function = function.borrow();
                 write!(f, "{:?}", function)
@@ -207,11 +214,15 @@ impl Value {
                 }
                 writeln!(f, "{indent_str})")
             }
-            Function(function) => {
+            Function((function, name)) => {
                 let function = function.get();
                 let fn_ptr = function.as_ptr();
                 let function = function.borrow();
-                writeln!(f, "{indent_str}function @ {:p}", *function,)?;
+                if let Some(name) = name {
+                    writeln!(f, "{indent_str}function {name}")?;
+                } else {
+                    writeln!(f, "{indent_str}function @ {:p}", *function)?;
+                }
                 let cycle_detected = FN_VISITED.with(|visited| {
                     let mut visited = visited.borrow_mut();
                     if visited.contains(&fn_ptr) {
@@ -247,7 +258,7 @@ impl Value {
                     element.instantiate(subst);
                 }
             }
-            Function(function) => {
+            Function((function, _)) => {
                 let function = function.get();
                 // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
                 let function = function.try_borrow_mut();
@@ -278,7 +289,7 @@ impl Display for Value {
                 write_with_separator(tuple.iter(), ", ", f)?;
                 write!(f, ")")
             }
-            Function(function) => {
+            Function((function, _)) => {
                 let function = function.get();
                 let function = function.borrow();
                 write!(f, "{:?}", function)

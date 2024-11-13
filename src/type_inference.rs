@@ -260,7 +260,8 @@ impl TypeInference {
                         function
                             .ty_scheme
                             .instantiate(self, module_name, expr.span.span());
-                    let value = Value::Function(FunctionRef::new_weak(&function.code));
+                    let value =
+                        Value::Function((FunctionRef::new_weak(&function.code), Some(*name)));
                     let node = K::Immediate(B::new(ir::Immediate {
                         value,
                         inst_data,
@@ -1995,7 +1996,7 @@ impl UnifiedTypeInference {
                     self.substitute_in_value(value);
                 }
             }
-            Value::Function(function) => {
+            Value::Function((function, _)) => {
                 let function = function.get();
                 // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
                 let function = function.try_borrow_mut();
