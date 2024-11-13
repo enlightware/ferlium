@@ -244,11 +244,11 @@ fn is_argument_similar_to_arg_name(argument: &Node, arg_name: &str) -> bool {
     use NodeKind::*;
     let argument = match argument.kind {
         EnvLoad(ref load) => match load.name {
-            Some(name) => name,
+            Some(name) => name.as_str(),
             None => return false,
         },
         Immediate(ref value) => match value.value.as_function() {
-            Some((_, Some(name))) => *name,
+            Some((_, Some(name))) => name.split("::").last().unwrap_or(name),
             _ => return false,
         },
         _ => return false,
