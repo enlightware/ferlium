@@ -60,6 +60,14 @@ impl Display for ErrorData {
     }
 }
 
+/// A function signature data struct to be used in IDEs
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+pub struct FunctionSignature {
+    pub name: String,
+    pub args: Vec<String>,
+    pub doc: Option<String>,
+}
+
 fn compilation_error_to_data(
     error: &CompilationError,
     src: &str,
@@ -450,23 +458,34 @@ impl Compiler {
         annotations
     }
 
-    pub fn list_module_fns(&self) -> Vec<String> {
-        let mut names = Vec::new();
+    pub fn list_module_fn_names(&self) -> Vec<String> {
+        self.list_module_fns()
+            .into_iter()
+            .map(|sig| sig.name)
+            .collect()
+    }
+
+    pub fn list_module_fns(&self) -> Vec<FunctionSignature> {
+        let mut sigs = Vec::new();
         for module in &self.modules {
             let mod_name = *module.0;
-            for f in &module.1.functions {
-                let sym_name = *f.0;
+            for (sym_name, func) in &module.1.functions {
                 if sym_name.starts_with('@') {
                     continue; // skip hidden functions
                 }
-                if self.user_module.module.uses(mod_name, sym_name) {
-                    names.push(f.0.to_string());
+                let name = if self.user_module.module.uses(mod_name, *sym_name) {
+                    sym_name.to_string()
                 } else {
-                    names.push(format!("{mod_name}::{sym_name}"));
-                }
+                    format!("{mod_name}::{sym_name}")
+                };
+                sigs.push(FunctionSignature {
+                    name,
+                    args: func.arg_names.iter().map(ToString::to_string).collect(),
+                    doc: func.doc.clone(),
+                });
             }
         }
-        names
+        sigs
     }
 
     pub fn list_module_props(&self) -> Vec<String> {
@@ -737,7 +756,7 @@ mod tests {
     #[test]
     fn compiler_has_some_std_fns() {
         let compiler = Compiler::new();
-        let names = compiler.list_module_fns();
+        let names = compiler.list_module_fn_names();
         assert!(names.contains(&"string_len".to_string()));
     }
 
