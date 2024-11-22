@@ -521,6 +521,18 @@ impl Compiler {
 
 /// The compiler to be used in the web IDE, non-wasm-available part
 impl Compiler {
+    pub fn new_with_modules(modules: Modules, extra_uses: Uses) -> Self {
+        let user_src = String::new();
+        let mut user_module = ModuleAndExpr::new_just_module(new_module_with_prelude());
+        user_module.module.uses.extend(extra_uses.iter().cloned());
+        Self {
+            modules,
+            extra_uses,
+            user_src,
+            user_module,
+        }
+    }
+
     pub fn with_module(mut self, name: &str, module: Module, extra_uses: Uses) -> Self {
         self.modules.insert(name.into(), module);
         self.extra_uses.extend(extra_uses.iter().cloned());
