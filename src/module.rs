@@ -173,7 +173,7 @@ impl fmt::Display for FormatWith<'_, Module, Modules> {
     }
 }
 
-pub type Modules = HashMap<Ustr, Module>;
+pub type Modules = HashMap<Ustr, Rc<Module>>;
 
 #[derive(Clone, Copy)]
 pub struct ModuleEnv<'m> {

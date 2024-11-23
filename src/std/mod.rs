@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::{
     module::{Module, Modules, Use},
     r#type::Type,
@@ -33,7 +35,7 @@ pub fn std_module() -> Module {
 
 pub fn new_std_module_env() -> Modules {
     let mut modules: Modules = Default::default();
-    modules.insert(ustr("std"), std_module());
+    modules.insert(ustr("std"), Rc::new(std_module()));
     modules
 }
 

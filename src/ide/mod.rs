@@ -3,6 +3,7 @@ use std::{
     collections::HashSet,
     fmt::{self, Display},
     ops::Deref,
+    rc::Rc,
     sync::LazyLock,
 };
 
@@ -534,7 +535,7 @@ impl Compiler {
     }
 
     pub fn with_module(mut self, name: &str, module: Module, extra_uses: Uses) -> Self {
-        self.modules.insert(name.into(), module);
+        self.modules.insert(name.into(), Rc::new(module));
         self.extra_uses.extend(extra_uses.iter().cloned());
         self.user_module.module.uses.extend(extra_uses);
         self

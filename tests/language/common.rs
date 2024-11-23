@@ -9,7 +9,7 @@ use painturscript::{
     value::Value,
     ModuleAndExpr,
 };
-use std::sync::atomic::AtomicIsize;
+use std::{rc::Rc, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -104,9 +104,9 @@ fn test_property_module() -> Module {
 /// Compile and run the src and return its module and expression
 pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationError> {
     let mut other_modules = new_std_module_env();
-    other_modules.insert("testing".into(), testing_module());
-    other_modules.insert("effects".into(), test_effect_module());
-    other_modules.insert("props".into(), test_property_module());
+    other_modules.insert("testing".into(), Rc::new(testing_module()));
+    other_modules.insert("effects".into(), Rc::new(test_effect_module()));
+    other_modules.insert("props".into(), Rc::new(test_property_module()));
     Ok((
         painturscript::compile(src, &other_modules, &[])?,
         other_modules,
