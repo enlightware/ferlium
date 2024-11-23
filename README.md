@@ -41,3 +41,7 @@ Why this name? Several reasons:
 1. `painturscript` is not used on the web so far,
 2. It sounds like "paint your script", which invites to arty action.
 3. And, by design, it "covers the Rust".
+
+## Limitations
+
+Currently the compiler can only be used from a single thread to avoid deadlocks when accessing the internized type universe. Currently the compiler will panic if the corresponding lock is held when being accessed in write.
