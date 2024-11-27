@@ -182,6 +182,19 @@ macro_rules! bool {
     };
 }
 
+/// An array of boolean values
+#[macro_export]
+macro_rules! bool_a {
+    [] => {
+        Value::native(Array::new())
+    };
+    [$($elem:expr),+ $(,)?] => {
+        Value::native(painturscript::std::array::Array::from_vec(vec![
+            $(Value::native::<bool>($elem)),+
+        ]))
+    };
+}
+
 /// A primitive integer value
 #[macro_export]
 macro_rules! int {
