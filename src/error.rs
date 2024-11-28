@@ -1,9 +1,10 @@
+use core::panic;
 use std::{
     fmt::{self, Display},
     ops::Deref,
 };
 
-use crate::location::Location;
+use crate::{location::Location, r#trait::TraitRef, type_inference::SubOrSameType};
 use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
@@ -35,7 +36,14 @@ impl ADTAccessType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MustBeMutableContext {
+pub enum MutabilityMustBeWhat {
+    Mutable,
+    Constant,
+    Equal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutabilityMustBeContext {
     Value,
     FnTypeArg(usize),
 }
@@ -51,8 +59,19 @@ pub enum InternalCompilationErrorImpl {
         got: usize,
         got_span: Location,
     },
-    MustBeMutable(Location, Location, MustBeMutableContext),
-    IsNotSubtype(Type, Location, Type, Location),
+    MutabilityMustBe {
+        source_span: Location,
+        reason_span: Location,
+        what: MutabilityMustBeWhat,
+        ctx: MutabilityMustBeContext,
+    },
+    TypeMismatch {
+        current_ty: Type,
+        current_span: Location,
+        expected_ty: Type,
+        expected_span: Location,
+        sub_or_same: SubOrSameType,
+    },
     InfiniteType(TypeVar, Type, Location),
     UnboundTypeVar {
         ty_var: TypeVar,
@@ -111,6 +130,11 @@ pub enum InternalCompilationErrorImpl {
         first_occurrence: Location,
         second_occurrence: Location,
     },
+    TraitImplNotFound {
+        trait_ref: TraitRef,
+        input_tys: Vec<Type>,
+        fn_span: Location,
+    },
     IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Location,
         second_occurrence: Location,
@@ -144,6 +168,10 @@ pub enum InternalCompilationErrorImpl {
         variable: Ustr,
         cause: PropertyAccess,
         span: Location,
+    },
+    Unsupported {
+        span: Location,
+        reason: String,
     },
     Internal(String),
 }
@@ -225,21 +253,41 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     expected, got
                 )
             }
-            MustBeMutable(current_span, reason_span, ctx) => {
-                let (current_span, reason_span) =
-                    resolve_must_be_mutable_ctx(*current_span, *reason_span, *ctx, source);
-                let current_name = fmt_span(&current_span);
+            MutabilityMustBe {
+                source_span,
+                reason_span,
+                what,
+                ctx,
+            } => {
+                let (source_span, reason_span) =
+                    resolve_must_be_mutable_ctx(*source_span, *reason_span, *ctx, source);
+                let source_name = fmt_span(&source_span);
                 let reason_name = fmt_span(&reason_span);
+                use MutabilityMustBeWhat::*;
+                let what = match what {
+                    Mutable => "mutable due to",
+                    Constant => "constant due to",
+                    Equal => "of same mutability to",
+                };
                 write!(
                     f,
-                    "Expression \"{current_name}\" must be mutable due to \"{reason_name}\""
+                    "Expression \"{source_name}\" must be {what} \"{reason_name}\""
                 )
             }
-            IsNotSubtype(cur, _cur_span, exp, _exp_span) => write!(
+            TypeMismatch {
+                current_ty,
+                expected_ty,
+                sub_or_same,
+                ..
+            } => write!(
                 f,
-                "Type \"{}\" is not a sub-type of \"{}\"",
-                cur.format_with(env),
-                exp.format_with(env)
+                "Type \"{}\" is not {} \"{}\"",
+                current_ty.format_with(env),
+                match sub_or_same {
+                    SubOrSameType::SubType => "a sub-type of",
+                    SubOrSameType::SameType => "the same type as",
+                },
+                expected_ty.format_with(env)
             ),
             InfiniteType(ty_var, ty, _span) => {
                 write!(f, "Infinite type: {} = \"{}\"", ty_var, ty.format_with(env))
@@ -353,6 +401,23 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
             } => {
                 write!(f, "Duplicated variant: {}", fmt_span(first_occurrence_span),)
             }
+            TraitImplNotFound {
+                trait_ref,
+                input_tys,
+                fn_span,
+            } => {
+                write!(
+                    f,
+                    "Implementation of trait {} over types {} not found (when calling {})",
+                    trait_ref.name,
+                    input_tys
+                        .iter()
+                        .map(|ty| ty.format_with(env).to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    fmt_span(fn_span),
+                )
+            }
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence: first_occurrence_span,
                 ..
@@ -426,6 +491,9 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
             } => {
                 write!(f, "Unknown property: {}.{}", scope, variable,)
             }
+            Unsupported { span, reason } => {
+                write!(f, "Unsupported: {} at {}", reason, fmt_span(span))
+            }
             Internal(msg) => write!(f, "ICE: {}", msg),
         }
     }
@@ -443,8 +511,18 @@ pub enum CompilationErrorImpl {
         got: usize,
         got_span: Location,
     },
-    MustBeMutable(Location, Location),
-    IsNotSubtype(String, Location, String, Location),
+    MutabilityMustBe {
+        source_span: Location,
+        reason_span: Location,
+        what: MutabilityMustBeWhat,
+    },
+    TypeMismatch {
+        current_ty: String,
+        current_span: Location,
+        expected_ty: String,
+        expected_span: Location,
+        sub_or_same: SubOrSameType,
+    },
     InfiniteType(String, String, Location),
     UnboundTypeVar {
         ty_var: String,
@@ -501,6 +579,11 @@ pub enum CompilationErrorImpl {
         first_occurrence: Location,
         second_occurrence: Location,
     },
+    TraitImplNotFound {
+        trait_name: String,
+        input_tys: Vec<String>,
+        fn_span: Location,
+    },
     IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Location,
         second_occurrence: Location,
@@ -536,6 +619,10 @@ pub enum CompilationErrorImpl {
         variable: Ustr,
         cause: PropertyAccess,
         span: Location,
+    },
+    Unsupported {
+        span: Location,
+        reason: String,
     },
     Internal(String),
 }
@@ -591,17 +678,33 @@ impl CompilationError {
                 got,
                 got_span,
             }),
-            MustBeMutable(current_span, reason_span, ctx) => {
-                let (current_span, reason_span) =
-                    resolve_must_be_mutable_ctx(current_span, reason_span, ctx, source);
-                compilation_error!(MustBeMutable(current_span, reason_span))
+            MutabilityMustBe {
+                source_span,
+                reason_span,
+                what,
+                ctx,
+            } => {
+                let (source_span, reason_span) =
+                    resolve_must_be_mutable_ctx(source_span, reason_span, ctx, source);
+                compilation_error!(MutabilityMustBe {
+                    source_span,
+                    reason_span,
+                    what
+                })
             }
-            IsNotSubtype(cur, cur_span, exp, exp_span) => compilation_error!(IsNotSubtype(
-                cur.format_with(env).to_string(),
-                cur_span,
-                exp.format_with(env).to_string(),
-                exp_span,
-            )),
+            TypeMismatch {
+                current_ty,
+                current_span,
+                expected_ty,
+                expected_span,
+                sub_or_same,
+            } => compilation_error!(TypeMismatch {
+                current_ty: current_ty.format_with(env).to_string(),
+                current_span,
+                expected_ty: expected_ty.format_with(env).to_string(),
+                expected_span,
+                sub_or_same,
+            }),
             InfiniteType(ty_var, ty, span) => {
                 compilation_error!(InfiniteType(
                     ty_var.to_string(),
@@ -703,6 +806,18 @@ impl CompilationError {
                 first_occurrence,
                 second_occurrence,
             }),
+            TraitImplNotFound {
+                trait_ref,
+                input_tys,
+                fn_span,
+            } => compilation_error!(TraitImplNotFound {
+                trait_name: trait_ref.name.to_string(),
+                input_tys: input_tys
+                    .iter()
+                    .map(|ty| ty.format_with(env).to_string())
+                    .collect(),
+                fn_span,
+            }),
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,
@@ -762,6 +877,7 @@ impl CompilationError {
                 cause,
                 span,
             }),
+            Unsupported { span, reason } => compilation_error!(Unsupported { span, reason }),
             Internal(msg) => compilation_error!(Internal(msg)),
         }
     }
@@ -786,25 +902,38 @@ impl CompilationError {
         }
     }
 
-    pub fn expect_must_be_mutable(&self) {
-        self.as_must_be_mutable().unwrap_or_else(|| {
-            panic!("expect_must_be_mutable called on non-MustBeMutable error {self:?}")
-        });
+    pub fn expect_mutability_must_be(&self, should_be: MutabilityMustBeWhat) {
+        let is_what = self
+            .as_mutability_must_be()
+            .unwrap_or_else(|| {
+                panic!("expect_mutability_must_be called on non-MutabilityMustBe error {self:?}")
+            })
+            .2;
+        if *is_what != should_be {
+            panic!(
+                "expect_mutability_must_be failed: expected {:?}, got {:?}",
+                should_be, is_what
+            );
+        }
     }
 
-    pub fn expect_is_not_subtype(&self, cur_ty: &str, exp_ty: &str) {
+    pub fn expect_type_mismatch(&self, cur_ty: &str, exp_ty: &str) {
         use CompilationErrorImpl::*;
         match self.deref() {
-            IsNotSubtype(cur, _, exp, _) => {
-                if cur == cur_ty && exp == exp_ty {
+            TypeMismatch {
+                current_ty,
+                expected_ty,
+                ..
+            } => {
+                if current_ty == cur_ty && expected_ty == exp_ty {
                     return;
                 }
                 panic!(
-                    "expect_is_not_subtype failed: expected \"{}\" ≰ \"{}\", got \"{}\" ≰ \"{}\"",
-                    cur_ty, exp_ty, cur, exp
+                    "expect_type_mismatch failed: expected \"{}\" ≰ \"{}\", got \"{}\" ≰ \"{}\"",
+                    cur_ty, exp_ty, current_ty, expected_ty
                 );
             }
-            _ => panic!("expect_is_not_subtype called on non-IsNotSubtype error {self:?}"),
+            _ => panic!("expect_type_mismatch called on non-TypeMismatch error {self:?}"),
         }
     }
 
@@ -954,12 +1083,12 @@ impl Display for RuntimeError {
 pub fn resolve_must_be_mutable_ctx(
     current_span: Location,
     reason_span: Location,
-    ctx: MustBeMutableContext,
+    ctx: MutabilityMustBeContext,
     src: &str,
 ) -> (Location, Location) {
     match ctx {
-        MustBeMutableContext::Value => (current_span, reason_span),
-        MustBeMutableContext::FnTypeArg(index) => {
+        MutabilityMustBeContext::Value => (current_span, reason_span),
+        MutabilityMustBeContext::FnTypeArg(index) => {
             // FIXME: this should probably be done later on when the source is available anyway
             if reason_span.module().is_none() {
                 let arg_span = extract_ith_fn_arg(src, reason_span, index);

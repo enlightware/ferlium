@@ -4,7 +4,9 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use crate::{location::Span, Location};
+use crate::{
+    format::write_with_separator_and_format_fn, location::Span, r#trait::TraitRef, Location,
+};
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
@@ -15,7 +17,7 @@ use crate::{
     format::FormatWith,
     ir::FnInstData,
     module::{FmtWithModuleEnv, FormatWithModuleEnv, ModuleEnv},
-    r#type::{Type, TypeKind, TypeLike, TypeSubstitution, TypeVar},
+    r#type::{Type, TypeLike, TypeSubstitution, TypeVar},
     type_inference::{InstSubstitution, TypeInference},
 };
 
@@ -53,6 +55,13 @@ pub enum PubTypeConstraint {
         variant_ty: Type,
         tag: Ustr,
         payload_ty: Type,
+        span: Location,
+    },
+    /// Types have trait
+    HaveTrait {
+        trait_ref: TraitRef,
+        input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
         span: Location,
     },
 }
@@ -95,6 +104,20 @@ impl PubTypeConstraint {
             variant_ty: ty,
             tag,
             payload_ty,
+            span,
+        }
+    }
+
+    pub fn new_have_trait(
+        trait_ref: TraitRef,
+        input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
+        span: Location,
+    ) -> Self {
+        Self::HaveTrait {
+            trait_ref,
+            input_tys,
+            output_tys,
             span,
         }
     }
@@ -144,6 +167,18 @@ impl PubTypeConstraint {
                 f(variant_ty, v);
                 f(payload_ty, v);
             }
+            HaveTrait {
+                input_tys,
+                output_tys,
+                ..
+            } => {
+                for ty in input_tys {
+                    f(ty, v);
+                }
+                for ty in output_tys {
+                    f(ty, v);
+                }
+            }
         }
     }
 
@@ -167,6 +202,9 @@ impl PubTypeConstraint {
                 field_span.instantiate(module_name, inst_span);
             }
             TypeHasVariant { span, .. } => {
+                span.instantiate(module_name, inst_span);
+            }
+            HaveTrait { span, .. } => {
                 span.instantiate(module_name, inst_span);
             }
         }
@@ -212,6 +250,17 @@ impl TypeLike for PubTypeConstraint {
                 variant_ty.instantiate(subst),
                 *variant,
                 payload_ty.instantiate(subst),
+                *span,
+            ),
+            HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                span,
+            } => Self::new_have_trait(
+                trait_ref.clone(),
+                input_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
+                output_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
                 *span,
             ),
         }
@@ -282,6 +331,20 @@ impl PartialEq for PubTypeConstraint {
                     ..
                 },
             ) => v_ty1 == v_ty2 && v1 == v2 && p_ty1 == p_ty2,
+            (
+                HaveTrait {
+                    trait_ref: t1,
+                    input_tys: i1,
+                    output_tys: o1,
+                    ..
+                },
+                HaveTrait {
+                    trait_ref: t2,
+                    input_tys: i2,
+                    output_tys: o2,
+                    ..
+                },
+            ) => t1 == t2 && i1 == i2 && o1 == o2,
             _ => false,
         }
     }
@@ -320,6 +383,20 @@ impl Hash for PubTypeConstraint {
                 variant_ty.hash(state);
                 variant.hash(state);
                 payload_ty.hash(state);
+            }
+            HaveTrait {
+                trait_ref: r#trait,
+                input_tys,
+                output_tys,
+                ..
+            } => {
+                r#trait.hash(state);
+                for ty in input_tys {
+                    ty.hash(state);
+                }
+                for ty in output_tys {
+                    ty.hash(state);
+                }
             }
         }
     }
@@ -379,6 +456,12 @@ impl FmtWithModuleEnv for PubTypeConstraint {
                     )
                 }
             }
+            HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                ..
+            } => format_have_trait(trait_ref, input_tys, output_tys, f, env),
         }
     }
 }
@@ -408,7 +491,7 @@ pub struct TypeScheme<Ty: TypeLike> {
 }
 
 impl<Ty: TypeLike> TypeScheme<Ty> {
-    /// Create a new type scheme with no quantifier nor constraints.
+    /// Creates a new type scheme with no quantifier nor constraints.
     pub fn new_just_type(ty: Ty) -> Self {
         Self {
             ty_quantifiers: vec![],
@@ -418,7 +501,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         }
     }
 
-    /// Create a new type scheme by inferring quantifiers from the type, and no constraints.
+    /// Creates a new type scheme by inferring quantifiers from the type, and no constraints.
     pub fn new_infer_quantifiers(ty: Ty) -> Self {
         let ty_quantifiers = ty.inner_ty_vars();
         let eff_quantifiers = ty.input_effect_vars();
@@ -430,7 +513,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         }
     }
 
-    /// Return the type quantifiers of this type scheme.
+    /// Returns the type quantifiers of this type scheme.
     pub(crate) fn ty_quantifiers_from_signature(&self) -> Vec<TypeVar> {
         Self::list_ty_vars(&self.ty, self.constraints.iter())
     }
@@ -445,12 +528,17 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         self.ty_quantifiers.is_empty() && self.constraints.is_empty()
     }
 
-    /// Return the type of this type scheme.
+    /// Returns the type of this type scheme.
     pub fn ty(&self) -> &Ty {
         &self.ty
     }
 
-    /// Instantiate this type scheme with fresh type variables in ty_inf.
+    /// Returns the constraints of this type scheme.
+    pub fn constraints(&self) -> &[PubTypeConstraint] {
+        &self.constraints
+    }
+
+    /// Instantiates this type scheme with fresh type variables in ty_inf.
     pub(crate) fn instantiate(
         &self,
         ty_inf: &mut TypeInference,
@@ -529,22 +617,26 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Extra functions parameters that must be passed to resolve polymorphism.
-    pub(crate) fn extra_parameters(&self) -> Vec<DictionaryReq<TypeVar>> {
+    pub(crate) fn extra_parameters(&self) -> Vec<DictionaryReq> {
+        use PubTypeConstraint::*;
         self.constraints
             .iter()
-            .filter_map(|constraint| {
-                if let PubTypeConstraint::RecordFieldIs {
+            .filter_map(|constraint| match constraint {
+                RecordFieldIs {
                     record_ty, field, ..
-                } = constraint
-                {
-                    if let TypeKind::Variable(var) = *record_ty.data() {
-                        Some(DictionaryReq::new_field_index(var, *field))
-                    } else {
-                        None
+                } => {
+                    if !record_ty.data().is_variable() {
+                        panic!("Type scheme with non-variable record type in constraints")
                     }
-                } else {
-                    None
+                    Some(DictionaryReq::new_field_index(*record_ty, *field))
                 }
+                HaveTrait { trait_ref, input_tys, .. } => {
+                    if input_tys.iter().all(Type::is_constant) {
+                        panic!("Type scheme with trait having only non-variable input types in constraints")
+                    }
+                    Some(DictionaryReq::new_trait_impl(input_tys.clone(), trait_ref.clone()))
+                }
+                _ => None,
             })
             .collect()
     }
@@ -602,7 +694,8 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
-        // Build aggregated constraints.
+        let mut first_ty = true;
+        // Build aggregated constraints, except for HaveTrait.
         let mut aggregated = BTreeMap::new();
         for constraint in &self.constraints {
             use PubTypeConstraint::*;
@@ -646,10 +739,22 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
                         .unwrap()
                         .insert(*tag, *payload_ty);
                 }
+                HaveTrait {
+                    trait_ref,
+                    input_tys,
+                    output_tys,
+                    ..
+                } => {
+                    if first_ty {
+                        first_ty = false;
+                    } else {
+                        f.write_str(", ")?;
+                    }
+                    format_have_trait(trait_ref, input_tys, output_tys, f, env)?;
+                }
             }
         }
         // Format aggregated constraints.
-        let mut first_ty = true;
         for (ty, constraint) in aggregated {
             use AggregatedConstraint::*;
             if first_ty {
@@ -820,10 +925,37 @@ impl<Ty: TypeLike + FmtWithModuleEnv> TypeScheme<Ty> {
     }
 }
 
+fn format_have_trait(
+    trait_ref: &TraitRef,
+    input_tys: &[Type],
+    output_tys: &[Type],
+    f: &mut std::fmt::Formatter,
+    env: &ModuleEnv<'_>,
+) -> std::fmt::Result {
+    let trait_name = trait_ref.name;
+    write!(f, "{} (", trait_name)?;
+    write_with_separator_and_format_fn(
+        input_tys.iter(),
+        ", ",
+        |ty, f| write!(f, "{}", ty.format_with(env)),
+        f,
+    )?;
+    if !output_tys.is_empty() {
+        write!(f, "; ")?;
+        write_with_separator_and_format_fn(
+            output_tys.iter(),
+            ", ",
+            |ty, f| write!(f, "{}", ty.format_with(env)),
+            f,
+        )?;
+    }
+    write!(f, ")")
+}
+
 pub(crate) struct FormatQuantifiersAndConstraintsMathStyle<'a, T>(FormatWithModuleEnv<'a, T>);
 
-impl<'m, Ty: TypeLike> std::fmt::Display
-    for FormatQuantifiersAndConstraintsMathStyle<'m, TypeScheme<Ty>>
+impl<Ty: TypeLike> std::fmt::Display
+    for FormatQuantifiersAndConstraintsMathStyle<'_, TypeScheme<Ty>>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0
@@ -834,9 +966,7 @@ impl<'m, Ty: TypeLike> std::fmt::Display
 
 pub struct FormatMathStyle<'a, T>(FormatWithModuleEnv<'a, T>);
 
-impl<'m, Ty: TypeLike + FmtWithModuleEnv> std::fmt::Display
-    for FormatMathStyle<'m, TypeScheme<Ty>>
-{
+impl<Ty: TypeLike + FmtWithModuleEnv> std::fmt::Display for FormatMathStyle<'_, TypeScheme<Ty>> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.value.format_math_style(f, self.0.data)
     }
@@ -844,7 +974,7 @@ impl<'m, Ty: TypeLike + FmtWithModuleEnv> std::fmt::Display
 
 pub(crate) struct FormatQuantifiersRustStyle<'a, T>(FormatWith<'a, T, ()>);
 
-impl<'m, Ty: TypeLike> std::fmt::Display for FormatQuantifiersRustStyle<'m, TypeScheme<Ty>> {
+impl<Ty: TypeLike> std::fmt::Display for FormatQuantifiersRustStyle<'_, TypeScheme<Ty>> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.value.format_quantifiers_rust_style(f)
     }
@@ -852,7 +982,7 @@ impl<'m, Ty: TypeLike> std::fmt::Display for FormatQuantifiersRustStyle<'m, Type
 
 pub(crate) struct FormatConstraintsRustStyle<'a, T>(FormatWithModuleEnv<'a, T>);
 
-impl<'m, Ty: TypeLike> std::fmt::Display for FormatConstraintsRustStyle<'m, TypeScheme<Ty>> {
+impl<Ty: TypeLike> std::fmt::Display for FormatConstraintsRustStyle<'_, TypeScheme<Ty>> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.value.format_constraints_rust_style(f, self.0.data)
     }
@@ -860,9 +990,7 @@ impl<'m, Ty: TypeLike> std::fmt::Display for FormatConstraintsRustStyle<'m, Type
 
 pub struct FormatRustStyle<'a, T>(FormatWithModuleEnv<'a, T>);
 
-impl<'m, Ty: TypeLike + FmtWithModuleEnv> std::fmt::Display
-    for FormatRustStyle<'m, TypeScheme<Ty>>
-{
+impl<Ty: TypeLike + FmtWithModuleEnv> std::fmt::Display for FormatRustStyle<'_, TypeScheme<Ty>> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.value.format_rust_style(f, self.0.data)
     }

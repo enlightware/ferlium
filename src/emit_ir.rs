@@ -12,15 +12,17 @@ use ustr::Ustr;
 
 use crate::{
     ast::{self, *},
-    containers::{iterable_to_string, sorted, B},
+    containers::{b, iterable_to_string, sorted},
+    dictionary_passing::DictElaborationCtx,
     effects::EffType,
     error::InternalCompilationError,
-    function::ScriptFunction,
+    function::{FunctionDefinition, ScriptFunction},
     internal_compilation_error,
     ir::{self, Immediate, Node},
-    module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules},
+    module::{self, FmtWithModuleEnv, Impls, Module, ModuleEnv, Modules},
     mutability::MutType,
     r#type::{FnType, Type, TypeLike, TypeSubstitution, TypeVar},
+    std::math::int_type,
     type_inference::TypeInference,
     type_scheme::{PubTypeConstraint, TypeScheme, VariantConstraint},
     typing_env::{Local, TypingEnv},
@@ -35,6 +37,9 @@ pub fn emit_module(
 ) -> Result<Module, InternalCompilationError> {
     use ir::Node as N;
     use ir::NodeKind as K;
+
+    // Create a list of all available trait implementations.
+    let trait_impls = collect_trait_impls(others);
 
     // First desugar the module.
     let (source, sorted_sccs) = source.desugar()?;
@@ -79,7 +84,7 @@ pub fn emit_module(
                 effects.clone(),
             ));
             // Create dummy code.
-            let dummy_code = B::new(ScriptFunction::new(N::new(
+            let dummy_code = b(ScriptFunction::new(N::new(
                 K::Immediate(Immediate::new(Value::unit())),
                 Type::unit(),
                 effects,
@@ -92,12 +97,11 @@ pub fn emit_module(
                 args_span: *args_span,
                 span: *span,
             };
+            let arg_names = args.iter().map(|(name, _)| *name).collect();
             let descr = module::ModuleFunction {
-                ty_scheme,
+                definition: FunctionDefinition::new(ty_scheme, arg_names, doc.clone()),
                 code: Rc::new(RefCell::new(dummy_code)),
                 spans: Some(spans),
-                arg_names: args.iter().map(|(name, _)| *name).collect(),
-                doc: doc.clone(),
             };
             output.functions.insert(name.0, descr);
         }
@@ -108,27 +112,31 @@ pub fn emit_module(
             let descr = output.functions.get(&name).unwrap();
             let module_env = ModuleEnv::new(&output, others);
             let mut ty_env = TypingEnv::new(
-                descr.ty_scheme.ty.as_locals_no_bound(&function.args),
+                descr
+                    .definition
+                    .ty_scheme
+                    .ty
+                    .as_locals_no_bound(&function.args),
                 module_env,
             );
             let expected_span = descr.spans.as_ref().unwrap().args_span;
             let fn_node = ty_inf.check_expr(
                 &mut ty_env,
                 &function.body,
-                descr.ty_scheme.ty.ret,
+                descr.definition.ty_scheme.ty.ret,
                 MutType::constant(),
                 expected_span,
             )?;
             let descr = output.functions.get_mut(&name).unwrap();
-            descr.ty_scheme.ty.effects =
-                ty_inf.unify_effects(&fn_node.effects, &descr.ty_scheme.ty.effects);
-            *descr.code.borrow_mut() = B::new(ScriptFunction::new(fn_node));
+            descr.definition.ty_scheme.ty.effects =
+                ty_inf.unify_effects(&fn_node.effects, &descr.definition.ty_scheme.ty.effects);
+            *descr.code.borrow_mut() = b(ScriptFunction::new(fn_node));
         }
         let module_env = ModuleEnv::new(&output, others);
         ty_inf.log_debug_constraints(module_env);
 
         // Third pass, perform the unification.
-        let mut ty_inf = ty_inf.unify()?;
+        let mut ty_inf = ty_inf.unify(&trait_impls)?;
         ty_inf.log_debug_substitution_tables(module_env);
         ty_inf.log_debug_constraints(module_env);
 
@@ -139,8 +147,9 @@ pub fn emit_module(
 
             // Union duplicated effects from function arguments, and build a substitution for the
             // fully unioned effects, to removed duplications.
-            ty_inf.unify_fn_arg_effects(&descr.ty_scheme.ty);
+            ty_inf.unify_fn_arg_effects(&descr.definition.ty_scheme.ty);
             let effect_subst = descr
+                .definition
                 .ty_scheme
                 .ty
                 .inner_effect_vars()
@@ -155,7 +164,7 @@ pub fn emit_module(
             let node = &mut code.as_script_mut().unwrap().code;
             let subst = (HashMap::new(), effect_subst);
             node.instantiate(&subst);
-            descr.ty_scheme.ty = descr.ty_scheme.ty.instantiate(&subst);
+            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
         }
 
         // Fifth pass, get the remaining constraints and collect the free type variables.
@@ -166,13 +175,18 @@ pub fn emit_module(
             let mut code = descr.code.borrow_mut();
             let node = &mut code.as_script_mut().unwrap().code;
 
-            // Clean-up constraints and validate them.
+            // Clean up constraints and validate them.
             let ConstraintValidationOutput {
                 quantifiers,
                 related_constraints,
                 retained_constraints,
                 constraint_subst,
-            } = validate_and_cleanup_constraints(&descr.ty_scheme.ty, &all_constraints, node)?;
+            } = validate_and_cleanup_constraints(
+                &descr.definition.ty_scheme.ty,
+                &all_constraints,
+                node,
+                false,
+            )?;
             let constraints: Vec<_> = all_constraints
                 .iter()
                 .filter(|c| {
@@ -190,11 +204,12 @@ pub fn emit_module(
             node.instantiate(&(constraint_subst, HashMap::new()));
 
             // Write the final type scheme.
-            descr.ty_scheme.ty_quantifiers = quantifiers.clone();
-            descr.ty_scheme.eff_quantifiers = descr.ty_scheme.ty.input_effect_vars();
-            descr.ty_scheme.constraints = constraints;
+            descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
+            descr.definition.ty_scheme.eff_quantifiers =
+                descr.definition.ty_scheme.ty.input_effect_vars();
+            descr.definition.ty_scheme.constraints = constraints;
             assert_eq!(
-                sorted(descr.ty_scheme.ty_quantifiers_from_signature()),
+                sorted(descr.definition.ty_scheme.ty_quantifiers_from_signature()),
                 sorted(quantifiers)
             );
 
@@ -232,7 +247,7 @@ pub fn emit_module(
         for ModuleFunction { name, .. } in functions() {
             let descr = output.functions.get_mut(&name.0).unwrap();
             let fn_ptr = descr.code.as_ptr();
-            let dicts = descr.ty_scheme.extra_parameters();
+            let dicts = descr.definition.ty_scheme.extra_parameters();
             module_inst_data.insert(fn_ptr, dicts);
         }
         for ModuleFunction { name, .. } in functions() {
@@ -242,7 +257,8 @@ pub fn emit_module(
             let dicts = module_inst_data.get(&fn_ptr).unwrap();
             let node = &mut code.as_script_mut().unwrap().code;
             node.check_borrows()?;
-            node.elaborate_dictionaries(dicts, Some(&module_inst_data));
+            let ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), &trait_impls);
+            node.elaborate_dictionaries(ctx)?;
         }
 
         // Seventh pass, normalize the type schemes, substitute the types in the functions.
@@ -250,7 +266,7 @@ pub fn emit_module(
             let descr = output.functions.get_mut(&name.0).unwrap();
             // Note: after that normalization, the functions do not share the same
             // type variables anymore.
-            let subst = descr.ty_scheme.normalize();
+            let subst = descr.definition.ty_scheme.normalize();
             let mut code = descr.code.borrow_mut();
             let node = &mut code.as_script_mut().unwrap().code;
             node.instantiate(&subst);
@@ -300,6 +316,9 @@ pub fn emit_expr(
     module_env: ModuleEnv,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
+    // Create a list of all available trait implementations.
+    let trait_impls = collect_trait_impls(module_env.others);
+
     // First desugar the expression.
     let source = source.desugar_with_empty_ctx()?;
 
@@ -312,7 +331,7 @@ pub fn emit_expr(
     ty_inf.log_debug_constraints(module_env);
 
     // Perform the unification.
-    let mut ty_inf = ty_inf.unify()?;
+    let mut ty_inf = ty_inf.unify(&trait_impls)?;
     ty_inf.log_debug_substitution_tables(module_env);
 
     // Substitute the result of the unification.
@@ -331,7 +350,7 @@ pub fn emit_expr(
         retained_constraints,
         constraint_subst,
         ..
-    } = validate_and_cleanup_constraints(&node.ty, &constraints, &node)?;
+    } = validate_and_cleanup_constraints(&node.ty, &constraints, &node, true)?;
     log_dropped_constraints_expr(&constraints, &retained_constraints, module_env);
     constraints.retain(|c| retained_constraints.contains(&constraint_ptr(c)));
     assert_eq!(constraints.len(), retained_constraints.len());
@@ -357,6 +376,7 @@ pub fn emit_expr(
     // Substitute the normalized and constraint-originating types in the node, effects and locals.
     subst.0.extend(constraint_subst);
     node.instantiate(&subst);
+    ty_scheme.ty = ty_scheme.ty.instantiate(&subst);
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);
     }
@@ -364,13 +384,26 @@ pub fn emit_expr(
     // Do borrow checking and dictionary elaboration.
     node.check_borrows()?;
     let dicts = ty_scheme.extra_parameters();
-    node.elaborate_dictionaries(&dicts, None);
+    let ctx = DictElaborationCtx::new(&dicts, None, &trait_impls);
+    node.elaborate_dictionaries(ctx)?;
 
     Ok(CompiledExpr {
         expr: node,
         ty: ty_scheme,
         locals,
     })
+}
+
+fn collect_trait_impls(modules: &Modules) -> Impls {
+    modules
+        .iter()
+        .flat_map(|(_, module)| {
+            module
+                .impls
+                .iter()
+                .map(|(key, trait_impl)| ((key.0.clone(), key.1.clone()), trait_impl.clone()))
+        })
+        .collect()
 }
 
 /// Filter constraints that contain at least of the type variables listed in ty_vars
@@ -509,6 +542,7 @@ fn validate_and_cleanup_constraints(
     ty: &impl TypeLike,
     constraints: &[PubTypeConstraint],
     node: &Node,
+    default_num: bool,
 ) -> Result<ConstraintValidationOutput, InternalCompilationError> {
     // Filter out constraints that have types not found in our code.
     let unbound = node.all_unbound_ty_vars();
@@ -530,13 +564,13 @@ fn validate_and_cleanup_constraints(
     }
 
     // Compute the quantifiers based on the function type and its constraints.
-    let quantifiers = TypeScheme::list_ty_vars(ty, constraints.iter().map(Borrow::borrow));
+    let mut quantifiers = TypeScheme::list_ty_vars(ty, constraints.iter().map(Borrow::borrow));
 
     // Detect unbound type variables in the code and return error if not in unused variants only.
     // These are neither part of the function signature nor of the constraints.
     let bounds: Vec<_> = quantifiers.iter().chain(subst.keys()).cloned().collect();
     let uninstantiated_unbound = check_unbounds(unbound, &bounds)?;
-    let constraint_subst = subst
+    let mut constraint_subst: HashMap<_, _> = subst
         .into_iter()
         .chain(
             uninstantiated_unbound
@@ -544,7 +578,27 @@ fn validate_and_cleanup_constraints(
                 .map(|ty_var| (ty_var, Type::never())),
         )
         .collect();
-    let retained_constraints = constraints.iter().map(|c| constraint_ptr(c)).collect();
+    let mut retained_constraints: HashSet<_> =
+        constraints.iter().map(|c| constraint_ptr(c)).collect();
+
+    // Default Num types to Int if not specified.
+    if default_num {
+        for constraint in constraints.iter() {
+            if let Some(have_trait) = constraint.as_have_trait() {
+                if have_trait.0.name == "Num" {
+                    assert_eq!(have_trait.0.input_type_count.get(), 1);
+                    assert_eq!(have_trait.0.output_type_count, 0);
+                    assert_eq!(have_trait.1.len(), 1);
+                    let ty_var = *have_trait.1[0].data().as_variable().unwrap();
+                    constraint_subst.entry(ty_var).or_insert_with(int_type);
+                    retained_constraints.remove(&constraint_ptr(constraint));
+                }
+            }
+        }
+    }
+
+    // Simplify quantifiers with substitution
+    quantifiers.retain(|ty_var| !constraint_subst.contains_key(ty_var));
 
     Ok(ConstraintValidationOutput {
         quantifiers,

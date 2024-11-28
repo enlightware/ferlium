@@ -15,11 +15,60 @@ use crate::{
     eval::{EvalCtx, EvalResult, ValOrMut},
     format::FormatWith,
     ir::{self},
-    module::{ModuleEnv, ModuleFunction},
+    module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
     value::{NativeDisplay, Value},
 };
+
+/// The definition of a function, to be used in modules, traits and IDEs.
+#[derive(Debug, Clone)]
+pub struct FunctionDefinition {
+    pub ty_scheme: TypeScheme<FnType>,
+    pub arg_names: Vec<Ustr>,
+    pub doc: Option<String>,
+}
+
+impl FunctionDefinition {
+    pub fn new(ty_scheme: TypeScheme<FnType>, arg_names: Vec<Ustr>, doc: Option<String>) -> Self {
+        FunctionDefinition {
+            ty_scheme,
+            arg_names,
+            doc,
+        }
+    }
+
+    pub fn new_infer_quantifiers(fn_ty: FnType, arg_names: &[&str], doc: &str) -> Self {
+        let arg_names = arg_names.iter().copied().map(Ustr::from).collect();
+        FunctionDefinition {
+            ty_scheme: TypeScheme::new_infer_quantifiers(fn_ty),
+            arg_names,
+            doc: Some(String::from(doc)),
+        }
+    }
+
+    pub fn fmt_with_name_and_module_env(
+        &self,
+        f: &mut fmt::Formatter,
+        name: &str,
+        env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
+        // function.ty_scheme.format_quantifiers(f)?; write!(f, ". ")?;
+        if let Some(doc) = &self.doc {
+            writeln!(f, "/// {}", doc)?;
+        }
+        if self.ty_scheme.is_just_type_and_effects() {
+            writeln!(f, "fn {name} {}", self.ty_scheme.ty.format_with(env))
+        } else {
+            writeln!(
+                f,
+                "fn {name} {} {}",
+                self.ty_scheme.ty.format_with(env),
+                self.ty_scheme.display_constraints_rust_style(env),
+            )
+        }
+    }
+}
 
 type CallCtx = EvalCtx;
 
@@ -60,6 +109,8 @@ pub enum FunctionRef {
     Strong(FunctionRc),
     /// Weak references are used to avoid cycles in recursive functions
     Weak(FunctionWeak),
+    // TODO: for trait
+    // Trait(TraitRef, Ustr),
 }
 
 impl FunctionRef {
@@ -344,11 +395,13 @@ macro_rules! n_ary_native_fn {
 
             pub fn description_with_ty_scheme(f: F, arg_names: [&'static str; count!($($arg)*)], ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
                 ModuleFunction {
-                    ty_scheme,
+                    definition: FunctionDefinition::new(
+                        ty_scheme,
+                        arg_names.into_iter().map(Ustr::from).collect(),
+                        None
+                    ),
                     code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
                     spans: None,
-                    arg_names: arg_names.into_iter().map(Ustr::from).collect(),
-                    doc: None,
                 }
             }
 

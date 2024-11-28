@@ -22,7 +22,7 @@ use ustr::Ustr;
 
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
-use crate::containers::B;
+use crate::containers::{b, B};
 use crate::effects::EffType;
 use crate::effects::EffectVar;
 use crate::format::type_variable_index_to_string_greek;
@@ -53,7 +53,6 @@ macro_rules! cached_ty {
 
 /// Something that is a type or part of it, and that can
 /// be instantiated and queried for its free type variables.
-
 pub trait TypeLike {
     /// Instantiate the type variables within this type with the given substitutions
     fn instantiate(&self, subst: &InstSubstitution) -> Self;
@@ -94,6 +93,11 @@ pub trait TypeLike {
         let mut vars = HashSet::new();
         self.fill_with_inner_effect_vars(&mut vars);
         vars
+    }
+
+    /// Return true if the type does not contain any type or effect variables
+    fn is_constant(&self) -> bool {
+        self.inner_ty_vars().is_empty() && self.inner_effect_vars().is_empty()
     }
 }
 
@@ -152,7 +156,7 @@ impl FmtWithModuleEnv for B<dyn BareNativeType> {
 }
 
 pub fn bare_native_type<T: 'static>() -> B<dyn BareNativeType> {
-    B::new(BareNativeTypeImpl::<T>::new())
+    b(BareNativeTypeImpl::<T>::new())
 }
 
 dyn_clone::clone_trait_object!(BareNativeType);
@@ -448,11 +452,11 @@ impl Type {
 
     pub fn native<T: Clone + 'static>(arguments: Vec<Type>) -> Self {
         let bare_ty = bare_native_type::<T>();
-        TypeKind::Native(B::new(NativeType { arguments, bare_ty })).store()
+        TypeKind::Native(b(NativeType { arguments, bare_ty })).store()
     }
 
     pub fn native_type(native_type: NativeType) -> Self {
-        TypeKind::Native(B::new(native_type)).store()
+        TypeKind::Native(b(native_type)).store()
     }
 
     pub fn variable_id(id: u32) -> Self {
@@ -480,7 +484,7 @@ impl Type {
     }
 
     pub fn function_type(ty: FnType) -> Self {
-        TypeKind::Function(B::new(ty)).store()
+        TypeKind::Function(b(ty)).store()
     }
 
     pub fn function_by_val_with_effects(args: &[Self], ret: Self, effects: EffType) -> Self {
@@ -850,7 +854,7 @@ impl TypeKind {
             f: &'a F,
             v: &'a mut V,
         }
-        impl<'a, V, F: Fn(&TypeKind, &mut V)> TypeKindVisitor for Visitor<'a, V, F> {
+        impl<V, F: Fn(&TypeKind, &mut V)> TypeKindVisitor for Visitor<'_, V, F> {
             fn visit_end(&mut self, ty: &TypeKind) {
                 (self.f)(ty, self.v);
             }
@@ -926,40 +930,36 @@ impl TypeKind {
     pub fn inner_types(&self) -> B<dyn Iterator<Item = Type> + '_> {
         use TypeKind::*;
         match self {
-            Native(g) => B::new(g.arguments.iter().copied()),
-            Variable(_) => B::new(iter::empty()),
-            Variant(types) => B::new(types.iter().map(|(_, ty)| *ty)),
-            Tuple(types) => B::new(types.iter().copied()),
-            Record(fields) => B::new(fields.iter().map(|(_, ty)| *ty)),
-            Function(function) => B::new(
-                function
-                    .args
-                    .iter()
-                    .map(|arg| arg.ty)
-                    .chain(iter::once(function.ret)),
-            ),
-            Newtype(_, ty) => B::new(iter::once(*ty)),
-            Never => B::new(iter::empty()),
+            Native(g) => b(g.arguments.iter().copied()),
+            Variable(_) => b(iter::empty()),
+            Variant(types) => b(types.iter().map(|(_, ty)| *ty)),
+            Tuple(types) => b(types.iter().copied()),
+            Record(fields) => b(fields.iter().map(|(_, ty)| *ty)),
+            Function(function) => b(function
+                .args
+                .iter()
+                .map(|arg| arg.ty)
+                .chain(iter::once(function.ret))),
+            Newtype(_, ty) => b(iter::once(*ty)),
+            Never => b(iter::empty()),
         }
     }
 
     pub fn inner_types_mut(&mut self) -> B<dyn Iterator<Item = &mut Type> + '_> {
         use TypeKind::*;
         match self {
-            Native(g) => B::new(g.arguments.iter_mut()),
-            Variable(_) => B::new(iter::empty()),
-            Variant(types) => B::new(types.iter_mut().map(|(_, ty)| ty)),
-            Tuple(types) => B::new(types.iter_mut()),
-            Record(fields) => B::new(fields.iter_mut().map(|(_, ty)| ty)),
-            Function(function) => B::new(
-                function
-                    .args
-                    .iter_mut()
-                    .map(|arg| &mut arg.ty)
-                    .chain(iter::once(&mut function.ret)),
-            ),
-            Newtype(_, ty) => B::new(iter::once(ty)),
-            Never => B::new(iter::empty()),
+            Native(g) => b(g.arguments.iter_mut()),
+            Variable(_) => b(iter::empty()),
+            Variant(types) => b(types.iter_mut().map(|(_, ty)| ty)),
+            Tuple(types) => b(types.iter_mut()),
+            Record(fields) => b(fields.iter_mut().map(|(_, ty)| ty)),
+            Function(function) => b(function
+                .args
+                .iter_mut()
+                .map(|arg| &mut arg.ty)
+                .chain(iter::once(&mut function.ret))),
+            Newtype(_, ty) => b(iter::once(ty)),
+            Never => b(iter::empty()),
         }
     }
 
@@ -1159,7 +1159,7 @@ impl TypeUniverse {
                             first_world.insert_full(td.clone()).0
                         };
                         let ty = Type::new_global(0, index as u32);
-                        return B::new(iter::once((input_index, ty))) as B<dyn Iterator<Item = _>>;
+                        return b(iter::once((input_index, ty))) as B<dyn Iterator<Item = _>>;
                     }
                 }
 
@@ -1193,11 +1193,11 @@ impl TypeUniverse {
                 let global_world_indices = |worlds: &Vec<TypeWorld>, world_index| {
                     let global_world: &TypeWorld = &worlds[world_index];
                     let global_world_size = global_world.len() as u32;
-                    B::new((0..global_world_size).zip(input_indices).map(
-                        move |(index, ty_index)| {
+                    b((0..global_world_size)
+                        .zip(input_indices)
+                        .map(move |(index, ty_index)| {
                             (ty_index, Type::new_global(world_index as u32, index))
-                        },
-                    ))
+                        }))
                 };
                 if let Some(&index) = self.local_to_world.get(&local_world) {
                     return global_world_indices(&self.worlds, index);
@@ -1269,7 +1269,7 @@ pub struct TypeDataRef<'a> {
     ty: Type,
     guard: std::sync::RwLockReadGuard<'a, TypeUniverse>,
 }
-impl<'a> std::ops::Deref for TypeDataRef<'a> {
+impl std::ops::Deref for TypeDataRef<'_> {
     type Target = TypeKind;
     fn deref(&self) -> &Self::Target {
         self.guard.get_type_data(self.ty)

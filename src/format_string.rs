@@ -5,7 +5,7 @@ use crate::{internal_compilation_error, Location};
 use regex::Regex;
 use ustr::{ustr, Ustr};
 
-use crate::containers::B;
+use crate::containers::b;
 use crate::mutability::MutVal;
 use crate::std::string::String;
 use crate::{
@@ -58,7 +58,7 @@ pub fn emit_format_string_ast(
         ExprKind::Let(
             (ustr("@s"), start_span),
             MutVal::mutable(),
-            B::new(Expr::new(
+            b(Expr::new(
                 ExprKind::Literal(Value::native(String::new()), string_type()),
                 start_span,
             )),

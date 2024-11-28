@@ -1,10 +1,10 @@
-use crate::Location;
+use crate::{r#trait::TraitRef, Location};
 use indexmap::IndexMap;
 use ustr::Ustr;
 
 use crate::{
-    containers::{SVec2, B},
-    dictionary_passing::DictionariesTyReq,
+    containers::{b, SVec2, B},
+    dictionary_passing::DictionariesReq,
     effects::EffType,
     function::FunctionRef,
     module::{FmtWithModuleEnv, ModuleEnv},
@@ -16,10 +16,10 @@ use crate::{
 /// Function instantiation data that are needed to fill dictionaries
 #[derive(Debug, Clone)]
 pub struct FnInstData {
-    pub dicts_req: DictionariesTyReq,
+    pub dicts_req: DictionariesReq,
 }
 impl FnInstData {
-    pub fn new(dicts_req: DictionariesTyReq) -> Self {
+    pub fn new(dicts_req: DictionariesReq) -> Self {
         Self { dicts_req }
     }
     pub fn none() -> Self {
@@ -74,13 +74,15 @@ pub struct Immediate {
 }
 impl Immediate {
     pub fn new(value: Value) -> B<Self> {
-        B::new(Self {
+        b(Self {
             value,
             inst_data: FnInstData::none(),
             substitute_in_value_fn: true,
         })
     }
 }
+
+// TODO: add TraitFnImmediate for trait functions
 
 #[derive(Debug, Clone)]
 pub struct BuildClosure {
@@ -103,6 +105,25 @@ pub struct StaticApplication {
     pub argument_names: Vec<Ustr>,
     pub ty: FnType,
     pub inst_data: FnInstData,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitFnApplication {
+    pub trait_ref: TraitRef,
+    pub function_index: usize,
+    pub function_span: Location,
+    pub arguments: Vec<Node>,
+    pub ty: FnType,
+    pub inst_data: FnInstData,
+}
+impl TraitFnApplication {
+    pub fn argument_names(&self) -> &[Ustr] {
+        &self.trait_ref.functions[self.function_index].1.arg_names
+    }
+
+    pub fn argument_types(&self) -> impl Iterator<Item = Type> + '_ {
+        self.arguments.iter().map(|node| node.ty)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +170,8 @@ pub enum NodeKind {
     BuildClosure(B<BuildClosure>),
     Apply(B<Application>),
     StaticApply(B<StaticApplication>),
+    /// Note: this should only exist transiently in the IR and never be executed
+    TraitFnApply(B<TraitFnApplication>),
     EnvStore(B<EnvStore>),
     EnvLoad(B<EnvLoad>),
     Block(B<SVec2<Node>>),
@@ -173,9 +196,13 @@ pub enum NodeKind {
 /// A node of the expression-based execution tree
 #[derive(Debug, Clone)]
 pub struct Node {
+    /// The actual content of this node
     pub kind: NodeKind,
+    /// The type of the returned value when this node is evaluated
     pub ty: Type,
+    /// The effects of evaluating this node
     pub effects: EffType,
+    /// The span of the source code that generated this node
     pub span: Location,
 }
 
@@ -234,12 +261,29 @@ impl Node {
                         match name {
                             Some(name) => writeln!(f, "{indent_str}⎸ {name}: {ty}")?,
                             None => {
-                                writeln!(f, "{indent_str}⎸ unknown fn at {:p}: {ty}", *function)?
+                                writeln!(f, "{indent_str}⎸ unnammed fn at {:p}: {ty}", *function)?
                             }
                         }
                     }
                     Err(_) => writeln!(f, "{indent_str}⎸ self")?,
                 }
+                if app.arguments.is_empty() {
+                    writeln!(f, "{indent_str}to ()")?;
+                } else {
+                    writeln!(f, "{indent_str}to (")?;
+                    for arg in &app.arguments {
+                        arg.format_ind(f, env, indent + 1)?;
+                    }
+                    writeln!(f, "{indent_str})")?;
+                }
+            }
+            TraitFnApply(app) => {
+                let fn_name = app.trait_ref.functions[app.function_index].0;
+                let trait_name = app.trait_ref.name;
+                write!(
+                    f,
+                    "{indent_str}trait fn apply {fn_name} (from {trait_name})"
+                )?;
                 if app.arguments.is_empty() {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
@@ -382,6 +426,13 @@ impl Node {
                     }
                 }
             }
+            TraitFnApply(app) => {
+                for arg in &app.arguments {
+                    if let Some(ty) = arg.type_at(pos) {
+                        return Some(ty);
+                    }
+                }
+            }
             EnvStore(node) => {
                 if let Some(ty) = node.node.type_at(pos) {
                     return Some(ty);
@@ -512,6 +563,12 @@ impl Node {
                     arg.unbound_ty_vars(result, ignore);
                 }
             }
+            TraitFnApply(app) => {
+                self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
+                for arg in &app.arguments {
+                    arg.unbound_ty_vars(result, ignore);
+                }
+            }
             EnvStore(node) => node.node.unbound_ty_vars(result, ignore),
             EnvLoad(_) => {}
             Block(nodes) => nodes
@@ -591,6 +648,11 @@ impl Node {
                 instantiate_nodes(&mut app.arguments, subst);
             }
             StaticApply(app) => {
+                app.ty = app.ty.instantiate(subst);
+                app.inst_data.instantiate(subst);
+                instantiate_nodes(&mut app.arguments, subst);
+            }
+            TraitFnApply(app) => {
                 app.ty = app.ty.instantiate(subst);
                 app.inst_data.instantiate(subst);
                 instantiate_nodes(&mut app.arguments, subst);

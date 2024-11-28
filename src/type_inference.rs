@@ -8,7 +8,8 @@ use std::{
 };
 
 use crate::{
-    ast::DExpr, internal_compilation_error, location::Location, parser_helpers::EMPTY_USTR,
+    ast::DExpr, error::MutabilityMustBeWhat, internal_compilation_error, location::Location,
+    module::Impls, parser_helpers::EMPTY_USTR, r#trait::TraitRef, r#type::TypeLike,
     std::logic::bool_type,
 };
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
@@ -17,10 +18,10 @@ use ustr::{ustr, Ustr};
 
 use crate::{
     ast::{ExprKind, PropertyAccess},
-    containers::{SVec2, B},
+    containers::{b, SVec2},
     dictionary_passing::DictionaryReq,
     effects::{no_effects, EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution},
-    error::{ADTAccessType, InternalCompilationError, MustBeMutableContext},
+    error::{ADTAccessType, InternalCompilationError, MutabilityMustBeContext},
     function::{FunctionRef, ScriptFunction},
     ir::{self, EnvStore, FnInstData, Immediate, Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
@@ -151,6 +152,13 @@ impl Display for MutConstraint {
     }
 }
 
+/// Whether the unification should target a subtype or the same type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubOrSameType {
+    SubType,
+    SameType,
+}
+
 /// The type inference status, containing the unification table and the constraints
 #[derive(Default, Debug)]
 pub struct TypeInference {
@@ -246,21 +254,34 @@ impl TypeInference {
             Identifier(name) => {
                 // Retrieve the index and the type of the variable from the environment, if it exists
                 if let Some((index, ty, mut_ty)) = env.get_variable_index_and_type_scheme(name) {
-                    let node = K::EnvLoad(B::new(ir::EnvLoad {
+                    let node = K::EnvLoad(b(ir::EnvLoad {
                         index,
                         name: Some(*name),
                     }));
                     (node, ty, mut_ty, no_effects())
                 }
+                // Retrieve the trait method from the environment, if it exists
+                else if let Some((module_name, _trait_descr)) = env.get_trait_function(name) {
+                    // TODO: add TraitFnImmediate for trait functions
+                    let module_text = match module_name {
+                        Some(name) => format!(" in module {name}"),
+                        None => "current module".to_string(),
+                    };
+                    return Err(internal_compilation_error!(Unsupported {
+                        span: expr.span,
+                        reason: format!("First-class trait method is unsupported: method {name} in {module_text} cannot be used")
+                    }));
+                }
                 // Retrieve the function from the environment, if it exists
                 else if let Some((module_name, function)) = env.get_function(name) {
-                    let (fn_ty, inst_data) =
-                        function
-                            .ty_scheme
-                            .instantiate(self, module_name, expr.span.span());
+                    let (fn_ty, inst_data) = function.definition.ty_scheme.instantiate(
+                        self,
+                        module_name,
+                        expr.span.span(),
+                    );
                     let value =
                         Value::Function((FunctionRef::new_weak(&function.code), Some(*name)));
-                    let node = K::Immediate(B::new(ir::Immediate {
+                    let node = K::Immediate(b(ir::Immediate {
                         value,
                         inst_data,
                         substitute_in_value_fn: false,
@@ -296,7 +317,7 @@ impl TypeInference {
                     expr.span,
                 ));
                 let effects = node.effects.clone();
-                let node = K::EnvStore(B::new(EnvStore {
+                let node = K::EnvStore(b(EnvStore {
                     node,
                     name_span: *name_span,
                 }));
@@ -322,7 +343,7 @@ impl TypeInference {
                 let code = self.infer_expr_drop_mut(&mut env, body)?;
                 // Store and return the function's type
                 let fn_ty = FnType::new(args_ty, code.ty, code.effects.clone());
-                let value_fn = Value::function(B::new(ScriptFunction::new(code)));
+                let value_fn = Value::function(b(ScriptFunction::new(code)));
                 let node = K::Immediate(Immediate::new(value_fn));
                 (
                     node,
@@ -348,7 +369,6 @@ impl TypeInference {
                 }
                 // No, we emit code to evaluate function
                 // Infer the type and mutability of the arguments and collect their code and constraints
-                // TODO: check borrow rules
                 let (args_nodes, args_tys, args_effects) =
                     self.infer_exprs_ret_arg_ty(env, args)?;
                 // Allocate a fresh variable for the return type and effects of the function
@@ -364,7 +384,7 @@ impl TypeInference {
                 let combined_effects =
                     self.make_dependent_effect([&args_effects, &func_node.effects, &call_effects]);
                 // Store and return the result
-                let node = K::Apply(B::new(ir::Application {
+                let node = K::Apply(b(ir::Application {
                     function: func_node,
                     arguments: args_nodes,
                 }));
@@ -379,7 +399,7 @@ impl TypeInference {
                     let node = nodes.into_iter().next().unwrap();
                     (node.kind, node.ty, MutType::constant(), effects)
                 } else {
-                    let node = K::Block(B::new(SVec2::from_vec(nodes)));
+                    let node = K::Block(b(SVec2::from_vec(nodes)));
                     let ty = types.last().copied().unwrap_or(Type::unit());
                     (node, ty, MutType::constant(), effects)
                 }
@@ -408,7 +428,7 @@ impl TypeInference {
                 );
                 self.add_sub_type_constraint(value.ty, value.span, place.ty, place.span);
                 let combined_effects = self.make_dependent_effect([&value.effects, &place.effects]);
-                let node = K::Assign(B::new(ir::Assignment { place, value }));
+                let node = K::Assign(b(ir::Assignment { place, value }));
                 (node, Type::unit(), MutType::constant(), combined_effects)
             }
             Tuple(exprs) => {
@@ -417,7 +437,7 @@ impl TypeInference {
                 let node = if let Some(values) = nodes_as_bare_immediate(&nodes) {
                     K::Immediate(Immediate::new(Value::tuple(values)))
                 } else {
-                    K::Tuple(B::new(SVec2::from_vec(nodes)))
+                    K::Tuple(b(SVec2::from_vec(nodes)))
                 };
                 (node, ty, MutType::constant(), effects)
             }
@@ -434,7 +454,7 @@ impl TypeInference {
                     ),
                 ));
                 let effects = tuple_node.effects.clone();
-                let node = K::Project(B::new((tuple_node, *index)));
+                let node = K::Project(b((tuple_node, *index)));
                 (node, element_ty, tuple_mut, effects)
             }
             Record(fields) => {
@@ -471,7 +491,7 @@ impl TypeInference {
                 let node = if let Some(values) = nodes_as_bare_immediate(&nodes) {
                     K::Immediate(Immediate::new(Value::tuple(values)))
                 } else {
-                    K::Record(B::new(SVec2::from_vec(nodes)))
+                    K::Record(b(SVec2::from_vec(nodes)))
                 };
                 (node, ty, MutType::constant(), effects)
             }
@@ -488,7 +508,7 @@ impl TypeInference {
                     ),
                 ));
                 let effects = record_node.effects.clone();
-                let node = K::FieldAccess(B::new((record_node, *field)));
+                let node = K::FieldAccess(b((record_node, *field)));
                 (node, element_ty, record_mut, effects)
             }
             Array(exprs) => {
@@ -526,7 +546,7 @@ impl TypeInference {
                         let value = Value::native(Array::from_vec(values));
                         K::Immediate(Immediate::new(value))
                     } else {
-                        K::Array(B::new(element_nodes))
+                        K::Array(b(element_nodes))
                     };
                     (node, ty, MutType::constant(), combined_effects)
                 }
@@ -544,7 +564,7 @@ impl TypeInference {
                 // Build the index node and return it
                 let combined_effects =
                     self.make_dependent_effect([&array_node.effects, &index_node.effects]);
-                let node = K::Index(B::new(array_node), B::new(index_node));
+                let node = K::Index(b(array_node), b(index_node));
                 (node, element_ty, array_expr_mut, combined_effects)
             }
             Match(cond_expr, alternatives, default) => {
@@ -573,7 +593,7 @@ impl TypeInference {
                 let var_name_span = var_name.1;
                 let combined_effects =
                     self.make_dependent_effect([&iterator.effects, &body.effects]);
-                let node = K::Iterate(B::new(ir::Iteration {
+                let node = K::Iterate(b(ir::Iteration {
                     iterator,
                     body,
                     var_name_span,
@@ -613,15 +633,65 @@ impl TypeInference {
         use ir::NodeKind as K;
         // Get the function and its type from the environment.
         Ok(
-            if let Some((module_name, function)) = env.get_function(name) {
-                if function.ty_scheme.ty.args.len() != args.len() {
+            if let Some((module_name, trait_descr)) = env.get_trait_function(name) {
+                let (trait_ref, function_index, definition) = trait_descr;
+                if definition.ty_scheme.ty.args.len() != args.len() {
                     let got_span = args
                         .iter()
                         .map(|arg| arg.borrow().span)
                         .reduce(|a, b| Location::new_local(a.start(), b.end()))
                         .unwrap_or(name_span);
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
-                        expected: function.ty_scheme.ty.args.len(),
+                        expected: definition.ty_scheme.ty.args.len(),
+                        expected_span: name_span,
+                        got: args.len(),
+                        got_span,
+                    }));
+                }
+                // Instantiate its type scheme
+                let (inst_fn_ty, inst_data) =
+                    definition
+                        .ty_scheme
+                        .instantiate(self, module_name, name_span.span());
+                assert!(
+                    inst_data.dicts_req.is_empty(),
+                    "Instantiation data for trait function is not supported yet."
+                );
+                // Make sure the types of its arguments match the expected types
+                let (args_nodes, args_effects) =
+                    self.check_exprs(env, args, &inst_fn_ty.args, name_span)?;
+                // Add the trait constraint
+                let (input_tys, output_tys) =
+                    trait_ref.io_types_given_fn(function_index, &inst_fn_ty);
+                self.ty_constraints
+                    .push(TypeConstraint::Pub(PubTypeConstraint::new_have_trait(
+                        trait_ref.clone(),
+                        input_tys,
+                        output_tys,
+                        name_span,
+                    )));
+                // Build and return the trait function node
+                let ret_ty = inst_fn_ty.ret;
+                let combined_effects =
+                    self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
+                let node = K::TraitFnApply(b(ir::TraitFnApplication {
+                    trait_ref,
+                    function_index,
+                    function_span: name_span,
+                    arguments: args_nodes,
+                    ty: inst_fn_ty,
+                    inst_data,
+                }));
+                (node, ret_ty, MutType::constant(), combined_effects)
+            } else if let Some((module_name, function)) = env.get_function(name) {
+                if function.definition.ty_scheme.ty.args.len() != args.len() {
+                    let got_span = args
+                        .iter()
+                        .map(|arg| arg.borrow().span)
+                        .reduce(|a, b| Location::new_local(a.start(), b.end()))
+                        .unwrap_or(name_span);
+                    return Err(internal_compilation_error!(WrongNumberOfArguments {
+                        expected: function.definition.ty_scheme.ty.args.len(),
                         expected_span: name_span,
                         got: args.len(),
                         got_span,
@@ -630,6 +700,7 @@ impl TypeInference {
                 // Instantiate its type scheme
                 let (inst_fn_ty, inst_data) =
                     function
+                        .definition
                         .ty_scheme
                         .instantiate(self, module_name, name_span.span());
                 // Get the code and make sure the types of its arguments match the expected types
@@ -643,11 +714,16 @@ impl TypeInference {
                 let combined_effects =
                     self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
                 let argument_names = if synthesized {
-                    function.arg_names.iter().map(|_| *EMPTY_USTR).collect()
+                    function
+                        .definition
+                        .arg_names
+                        .iter()
+                        .map(|_| *EMPTY_USTR)
+                        .collect()
                 } else {
-                    function.arg_names.clone()
+                    function.definition.arg_names.clone()
                 };
-                let node = K::StaticApply(B::new(ir::StaticApplication {
+                let node = K::StaticApply(b(ir::StaticApplication {
                     function: FunctionRef::new_weak(&function.code),
                     function_name: ustr(name),
                     function_span: name_span,
@@ -683,7 +759,7 @@ impl TypeInference {
                         let node = if let Some(values) = nodes_as_bare_immediate(&payload_nodes) {
                             K::Immediate(Immediate::new(Value::tuple(values)))
                         } else {
-                            K::Tuple(B::new(SVec2::from_vec(payload_nodes)))
+                            K::Tuple(b(SVec2::from_vec(payload_nodes)))
                         };
                         let payload_node = N::new(node, payload_ty, effects.clone(), name_span);
                         (payload_ty, payload_node)
@@ -700,7 +776,7 @@ impl TypeInference {
                     let value = values.first().unwrap().clone();
                     K::Immediate(Immediate::new(Value::variant(name, value)))
                 } else {
-                    K::Variant(B::new((name, payload_node)))
+                    K::Variant(b((name, payload_node)))
                 };
                 (node, variant_ty, MutType::constant(), effects)
             },
@@ -806,7 +882,7 @@ impl TypeInference {
                     self.check_expr(&mut env, body, fn_ty.ret, MutType::constant(), body.span)?;
                 self.unify_effects(&code.effects, &fn_ty.effects);
                 // Store and return the function's type
-                let value_fn = Value::function(B::new(ScriptFunction::new(code)));
+                let value_fn = Value::function(b(ScriptFunction::new(code)));
                 let node = K::Immediate(Immediate::new(value_fn));
                 return Ok(N::new(node, expected_ty, no_effects(), expr.span));
             }
@@ -949,8 +1025,11 @@ impl TypeInference {
         }
     }
 
-    pub fn unify(self) -> Result<UnifiedTypeInference, InternalCompilationError> {
-        UnifiedTypeInference::unify_type_inference(self)
+    pub fn unify(
+        self,
+        trait_impls: &Impls,
+    ) -> Result<UnifiedTypeInference, InternalCompilationError> {
+        UnifiedTypeInference::unify_type_inference(self, trait_impls)
     }
 }
 
@@ -966,7 +1045,10 @@ pub struct UnifiedTypeInference {
 }
 
 impl UnifiedTypeInference {
-    pub fn unify_type_inference(ty_inf: TypeInference) -> Result<Self, InternalCompilationError> {
+    pub fn unify_type_inference(
+        ty_inf: TypeInference,
+        trait_impls: &Impls,
+    ) -> Result<Self, InternalCompilationError> {
         let TypeInference {
             ty_unification_table,
             ty_constraints,
@@ -994,12 +1076,13 @@ impl UnifiedTypeInference {
                     target,
                     reason_span,
                 } => {
-                    unified_ty_inf.unify_mut_must_be_at_least(
+                    unified_ty_inf.unify_mut_must_be_at_least_or_equal(
                         current,
                         current_span,
                         target,
                         reason_span,
-                        MustBeMutableContext::Value,
+                        MutabilityMustBeContext::Value,
+                        SubOrSameType::SubType,
                     )?;
                 }
             }
@@ -1227,6 +1310,9 @@ impl UnifiedTypeInference {
                                 variants_are.insert(ty, variant);
                             }
                         }
+                        HaveTrait { .. } => {
+                            // do not do anything with trait constraints in this pass
+                        }
                     }
                 }
 
@@ -1263,6 +1349,18 @@ impl UnifiedTypeInference {
                             payload_ty: variant_ty,
                             span,
                         } => unified_ty_inf.unify_type_has_variant(ty, tag, variant_ty, span)?,
+                        HaveTrait {
+                            trait_ref,
+                            input_tys,
+                            output_tys,
+                            span,
+                        } => unified_ty_inf.unify_have_trait(
+                            trait_ref,
+                            &input_tys,
+                            &output_tys,
+                            span,
+                            trait_impls,
+                        )?,
                     };
                     match new_progress {
                         Some(new_constraint) => {
@@ -1391,10 +1489,44 @@ impl UnifiedTypeInference {
         expected: Type,
         expected_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        let cur_ty = self.normalize_type(current);
-        let exp_ty = self.normalize_type(expected);
-        let cur_data = { cur_ty.data().clone() };
-        let exp_data = { exp_ty.data().clone() };
+        self.unify_sub_or_same_type(
+            current,
+            current_span,
+            expected,
+            expected_span,
+            SubOrSameType::SubType,
+        )
+    }
+
+    fn unify_same_type(
+        &mut self,
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        self.unify_sub_or_same_type(
+            current,
+            current_span,
+            expected,
+            expected_span,
+            SubOrSameType::SameType,
+        )
+    }
+
+    fn unify_sub_or_same_type(
+        &mut self,
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+        sub_or_same: SubOrSameType,
+    ) -> Result<(), InternalCompilationError> {
+        let current_ty = self.normalize_type(current);
+        let expected_ty = self.normalize_type(expected);
+        let cur_data = { current_ty.data().clone() };
+        let exp_data = { expected_ty.data().clone() };
+        use SubOrSameType::*;
         use TypeKind::*;
         match (cur_data, exp_data) {
             (Never, _) => Ok(()),
@@ -1403,128 +1535,180 @@ impl UnifiedTypeInference {
                 .ty_unification_table
                 .unify_var_var(cur, exp)
                 .map_err(|_| {
-                    internal_compilation_error!(IsNotSubtype(
-                        cur_ty,
+                    internal_compilation_error!(TypeMismatch {
+                        current_ty,
                         current_span,
-                        exp_ty,
+                        expected_ty,
                         expected_span,
-                    ))
+                        sub_or_same: SameType,
+                    })
                 }),
             (Variable(var), _) => {
-                self.unify_type_variable(var, current_span, exp_ty, expected_span)
+                self.unify_type_variable(var, current_span, expected_ty, expected_span)
             }
             (_, Variable(var)) => {
-                self.unify_type_variable(var, expected_span, cur_ty, current_span)
+                self.unify_type_variable(var, expected_span, current_ty, current_span)
             }
             (Native(cur), Native(exp)) => {
                 if cur.bare_ty != exp.bare_ty {
-                    return Err(internal_compilation_error!(IsNotSubtype(
-                        cur_ty,
+                    return Err(internal_compilation_error!(TypeMismatch {
+                        current_ty,
                         current_span,
-                        exp_ty,
+                        expected_ty,
                         expected_span,
-                    )));
+                        sub_or_same: SameType,
+                    }));
                 }
                 for (cur_arg_ty, exp_arg_ty) in
                     cur.arguments.into_iter().zip(exp.arguments.into_iter())
                 {
-                    self.unify_sub_type(cur_arg_ty, current_span, exp_arg_ty, expected_span)?;
+                    self.unify_sub_or_same_type(
+                        cur_arg_ty,
+                        current_span,
+                        exp_arg_ty,
+                        expected_span,
+                        sub_or_same,
+                    )?;
                 }
                 Ok(())
             }
             (Variant(cur), Variant(exp)) => {
                 if cur.len() != exp.len() {
-                    return Err(internal_compilation_error!(IsNotSubtype(
-                        cur_ty,
+                    return Err(internal_compilation_error!(TypeMismatch {
+                        current_ty,
                         current_span,
-                        exp_ty,
+                        expected_ty,
                         expected_span,
-                    )));
+                        sub_or_same,
+                    }));
                 }
                 for (cur_variant, exp_variant) in cur.into_iter().zip(exp.into_iter()) {
                     if cur_variant.0 != exp_variant.0 {
-                        return Err(internal_compilation_error!(IsNotSubtype(
-                            cur_ty,
+                        return Err(internal_compilation_error!(TypeMismatch {
+                            current_ty,
                             current_span,
-                            exp_ty,
+                            expected_ty,
                             expected_span,
-                        )));
+                            sub_or_same,
+                        }));
                     }
-                    self.unify_sub_type(cur_variant.1, current_span, exp_variant.1, expected_span)?;
+                    self.unify_sub_or_same_type(
+                        cur_variant.1,
+                        current_span,
+                        exp_variant.1,
+                        expected_span,
+                        sub_or_same,
+                    )?;
                 }
                 Ok(())
             }
             (Tuple(cur), Tuple(exp)) => {
                 if cur.len() != exp.len() {
-                    return Err(internal_compilation_error!(IsNotSubtype(
-                        cur_ty,
+                    return Err(internal_compilation_error!(TypeMismatch {
+                        current_ty,
                         current_span,
-                        exp_ty,
+                        expected_ty,
                         expected_span,
-                    )));
+                        sub_or_same,
+                    }));
                 }
                 for (cur_el_ty, exp_el_ty) in cur.into_iter().zip(exp.into_iter()) {
-                    self.unify_sub_type(cur_el_ty, current_span, exp_el_ty, expected_span)?;
+                    self.unify_sub_or_same_type(
+                        cur_el_ty,
+                        current_span,
+                        exp_el_ty,
+                        expected_span,
+                        sub_or_same,
+                    )?;
                 }
                 Ok(())
             }
             (Record(cur), Record(exp)) => {
                 for (cur_field, exp_field) in cur.into_iter().zip(exp) {
                     if cur_field.0 != exp_field.0 {
-                        return Err(internal_compilation_error!(IsNotSubtype(
-                            cur_ty,
+                        return Err(internal_compilation_error!(TypeMismatch {
+                            current_ty,
                             current_span,
-                            exp_ty,
+                            expected_ty,
                             expected_span,
-                        )));
+                            sub_or_same,
+                        }));
                     }
-                    self.unify_sub_type(cur_field.1, current_span, exp_field.1, expected_span)?;
+                    self.unify_sub_or_same_type(
+                        cur_field.1,
+                        current_span,
+                        exp_field.1,
+                        expected_span,
+                        sub_or_same,
+                    )?;
                 }
                 Ok(())
             }
             (Function(cur), Function(exp)) => {
                 if cur.args.len() != exp.args.len() {
-                    return Err(internal_compilation_error!(IsNotSubtype(
-                        cur_ty,
+                    return Err(internal_compilation_error!(TypeMismatch {
+                        current_ty,
                         current_span,
-                        exp_ty,
+                        expected_ty,
                         expected_span,
-                    )));
+                        sub_or_same,
+                    }));
                 }
                 for ((index, cur_arg), exp_arg) in cur.args.iter().enumerate().zip(exp.args.iter())
                 {
                     // Contravariance of argument types.
-                    self.unify_mut_must_be_at_least(
+                    self.unify_mut_must_be_at_least_or_equal(
                         exp_arg.inout,
                         current_span,
                         cur_arg.inout,
                         expected_span,
-                        MustBeMutableContext::FnTypeArg(index),
+                        MutabilityMustBeContext::FnTypeArg(index),
+                        sub_or_same,
                     )?;
-                    self.unify_sub_type(exp_arg.ty, current_span, cur_arg.ty, expected_span)?;
+                    self.unify_sub_or_same_type(
+                        exp_arg.ty,
+                        current_span,
+                        cur_arg.ty,
+                        expected_span,
+                        sub_or_same,
+                    )?;
                 }
                 // Covariant effects.
                 self.add_effect_dep(&cur.effects, current_span, &exp.effects, expected_span)?;
                 // Covariance of return type.
-                self.unify_sub_type(cur.ret, current_span, exp.ret, expected_span)
+                self.unify_sub_or_same_type(
+                    cur.ret,
+                    current_span,
+                    exp.ret,
+                    expected_span,
+                    sub_or_same,
+                )
             }
-            (Newtype(cur_name, cur_ty), Newtype(exp_name, exp_ty)) => {
+            (Newtype(cur_name, current_ty), Newtype(exp_name, expected_ty)) => {
                 if cur_name != exp_name {
-                    return Err(internal_compilation_error!(IsNotSubtype(
-                        cur_ty,
+                    return Err(internal_compilation_error!(TypeMismatch {
+                        current_ty,
                         current_span,
-                        exp_ty,
+                        expected_ty,
                         expected_span,
-                    )));
+                        sub_or_same,
+                    }));
                 }
-                self.unify_sub_type(cur_ty, current_span, exp_ty, expected_span)
+                self.unify_sub_or_same_type(
+                    current_ty,
+                    current_span,
+                    expected_ty,
+                    expected_span,
+                    sub_or_same,
+                )
             }
-            _ => Err(internal_compilation_error!(IsNotSubtype(
-                cur_ty,
+            _ => Err(internal_compilation_error!(TypeMismatch {
+                current_ty,
                 current_span,
-                exp_ty,
+                expected_ty,
                 expected_span,
-            ))),
+                sub_or_same: SameType,
+            })),
         }
     }
 
@@ -1541,7 +1725,13 @@ impl UnifiedTypeInference {
             self.ty_unification_table
                 .unify_var_value(var, Some(ty))
                 .map_err(|(l, r)| {
-                    internal_compilation_error!(IsNotSubtype(l, var_span, r, ty_span))
+                    internal_compilation_error!(TypeMismatch {
+                        current_ty: l,
+                        current_span: var_span,
+                        expected_ty: r,
+                        expected_span: ty_span,
+                        sub_or_same: SubOrSameType::SameType
+                    })
                 })
         }
     }
@@ -1634,18 +1824,18 @@ impl UnifiedTypeInference {
         &mut self,
         ty: Type,
         tag: Ustr,
-        variant_ty: Type,
+        payload_ty: Type,
         variant_span: Location,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let ty = self.normalize_type(ty);
-        let variant_ty = self.normalize_type(variant_ty);
+        let payload_ty = self.normalize_type(payload_ty);
         let data = { ty.data().clone() };
         match data {
             // A type variable may or may not be a variant, defer the unification
             TypeKind::Variable(_) => Ok(Some(PubTypeConstraint::new_type_has_variant(
                 ty,
                 tag,
-                variant_ty,
+                payload_ty,
                 variant_span,
             ))),
             // A variant, verify payload type
@@ -1655,7 +1845,7 @@ impl UnifiedTypeInference {
                         .iter()
                         .find_map(|(name, ty)| if *name == tag { Some(ty) } else { None })
                 {
-                    self.unify_sub_type(*ty, variant_span, variant_ty, variant_span)?;
+                    self.unify_sub_type(*ty, variant_span, payload_ty, variant_span)?;
                     Ok(None)
                 } else {
                     Err(internal_compilation_error!(InvalidVariantName {
@@ -1672,23 +1862,62 @@ impl UnifiedTypeInference {
         }
     }
 
-    fn unify_mut_must_be_at_least(
+    fn unify_have_trait(
+        &mut self,
+        trait_ref: TraitRef,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        span: Location,
+        trait_impls: &Impls,
+    ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
+        let input_tys = self.normalize_types(input_tys);
+        let output_tys = self.normalize_types(output_tys);
+        // Is the trait fully resolved?
+        let resolved = input_tys.iter().all(Type::is_constant);
+        Ok(if resolved {
+            // Fully resolved, validate the trait implementation.
+            let key = (trait_ref.clone(), input_tys.clone());
+            let trait_impl = trait_impls.get(&key).ok_or_else(|| {
+                internal_compilation_error!(TraitImplNotFound {
+                    trait_ref,
+                    input_tys,
+                    fn_span: span,
+                })
+            })?;
+            // Found, unify the output types.
+            assert!(output_tys.is_empty() || output_tys.len() == trait_impl.output_tys.len());
+            for (cur_ty, exp_ty) in output_tys.iter().zip(trait_impl.output_tys.iter()) {
+                self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
+            }
+            None
+        } else {
+            // Not fully resolved, defer the unification.
+            Some(PubTypeConstraint::new_have_trait(
+                trait_ref, input_tys, output_tys, span,
+            ))
+        })
+    }
+
+    fn unify_mut_must_be_at_least_or_equal(
         &mut self,
         current: MutType,
         current_span: Location,
         target: MutType,
-        reason_span: Location,
-        error_ctx: MustBeMutableContext,
+        target_span: Location,
+        ctx: MutabilityMustBeContext,
+        sub_or_same: SubOrSameType,
     ) -> Result<(), InternalCompilationError> {
         let current_mut = self.normalize_mut_type(current);
         let target_mut = self.normalize_mut_type(target);
-        // Note: here is the truth table of the constant/mutable relationship between current and target:
+        // Note: here is the truth table of the constant/mutable relationship between
+        // current and target, when sub_or_same is SubType:
         //            | cur cst | cur mut
         // -----------|---------|---------
         // target cst |   ok    |   ok
         // target mut |   err   |   ok
-        //
+        // When it is SameType, the table is a perfect diagonal.
         use MutType::*;
+        use MutabilityMustBeWhat::*;
         match (current_mut, target_mut) {
             (Variable(current), Variable(target)) => {
                 // Do unification. Fuse both variable as it is acceptable
@@ -1696,27 +1925,47 @@ impl UnifiedTypeInference {
                 self.mut_unification_table
                     .unify_var_var(current, target)
                     .map_err(|_| {
-                        internal_compilation_error!(MustBeMutable(
-                            current_span,
-                            reason_span,
-                            error_ctx,
-                        ))
+                        internal_compilation_error!(MutabilityMustBe {
+                            source_span: current_span,
+                            reason_span: target_span,
+                            what: Equal,
+                            ctx,
+                        })
                     })
             }
-            (Variable(current), Resolved(_)) => {
-                self.unify_mut_variable(current, current_span, target_mut, reason_span, error_ctx)
-            }
-            (Resolved(_), Variable(target)) => {
-                self.unify_mut_variable(target, reason_span, current_mut, current_span, error_ctx)
-            }
+            (Variable(current), Resolved(target)) => self.unify_mut_current_variable(
+                current,
+                current_span,
+                target,
+                target_span,
+                ctx,
+                sub_or_same,
+            ),
+            (Resolved(current), Variable(target)) => self.unify_mut_target_variable(
+                current,
+                current_span,
+                target,
+                target_span,
+                ctx,
+                sub_or_same,
+            ),
             (Resolved(current), Resolved(target)) => {
-                // Both resolved, check mutability value coercion.
-                if current < target {
-                    Err(internal_compilation_error!(MustBeMutable(
-                        current_span,
-                        reason_span,
-                        error_ctx,
-                    )))
+                use SubOrSameType::*;
+                if match sub_or_same {
+                    // Check mutability value coercion.
+                    SubType => current < target,
+                    // Must be exactly the same.
+                    SameType => current != target,
+                } {
+                    Err(internal_compilation_error!(MutabilityMustBe {
+                        source_span: current_span,
+                        reason_span: target_span,
+                        what: match sub_or_same {
+                            SubType => Mutable,
+                            SameType => Equal,
+                        },
+                        ctx,
+                    }))
                 } else {
                     Ok(())
                 }
@@ -1724,24 +1973,91 @@ impl UnifiedTypeInference {
         }
     }
 
-    pub fn unify_mut_variable(
+    pub fn unify_mut_current_variable(
         &mut self,
-        var: MutVar,
-        current_span: Location,
-        target: MutType,
+        current: MutVar,
+        source_span: Location,
+        target: MutVal,
         reason_span: Location,
-        error_ctx: MustBeMutableContext,
+        ctx: MutabilityMustBeContext,
+        sub_or_same: SubOrSameType,
     ) -> Result<(), InternalCompilationError> {
-        // Target is resolved, if it is constant, we are done as anything can be used as constant.
-        if target == MutType::constant() {
-            Ok(())
-        } else {
-            // If it is mutable, current must be mutable as well.
-            self.mut_unification_table
-                .unify_var_value(var, Some(MutVal::mutable()))
+        use MutabilityMustBeWhat::*;
+        use SubOrSameType::*;
+        match sub_or_same {
+            SubType => {
+                // Target is resolved, if it is constant, we are done as anything can be used as constant.
+                if target == MutVal::constant() {
+                    Ok(())
+                } else {
+                    // If it is mutable, current must be mutable as well.
+                    self.mut_unification_table
+                        .unify_var_value(current, Some(MutVal::mutable()))
+                        .map_err(|_| {
+                            internal_compilation_error!(MutabilityMustBe {
+                                source_span,
+                                reason_span,
+                                what: Mutable,
+                                ctx
+                            })
+                        })
+                }
+            }
+            SameType => self
+                .mut_unification_table
+                .unify_var_value(current, Some(target))
                 .map_err(|_| {
-                    internal_compilation_error!(MustBeMutable(current_span, reason_span, error_ctx))
-                })
+                    internal_compilation_error!(MutabilityMustBe {
+                        source_span,
+                        reason_span,
+                        what: Equal,
+                        ctx
+                    })
+                }),
+        }
+    }
+
+    pub fn unify_mut_target_variable(
+        &mut self,
+        current: MutVal,
+        reason_span: Location,
+        target: MutVar,
+        source_span: Location,
+        ctx: MutabilityMustBeContext,
+        sub_or_same: SubOrSameType,
+    ) -> Result<(), InternalCompilationError> {
+        use MutabilityMustBeWhat::*;
+        use SubOrSameType::*;
+        match sub_or_same {
+            SubType => {
+                // Current is resolved, if it is mutable, we are done as it can be used for anything.
+                if current == MutVal::mutable() {
+                    Ok(())
+                } else {
+                    // If it is constant, target must be constant as well.
+                    self.mut_unification_table
+                        .unify_var_value(target, Some(MutVal::constant()))
+                        .map_err(|_| {
+                            internal_compilation_error!(MutabilityMustBe {
+                                source_span,
+                                reason_span,
+                                what: Constant,
+                                ctx
+                            })
+                        })
+                }
+            }
+            SameType => self
+                .mut_unification_table
+                .unify_var_value(target, Some(current))
+                .map_err(|_| {
+                    internal_compilation_error!(MutabilityMustBe {
+                        source_span,
+                        reason_span,
+                        what: Equal,
+                        ctx
+                    })
+                }),
         }
     }
 
@@ -1794,8 +2110,8 @@ impl UnifiedTypeInference {
     }
 
     pub(crate) fn substitute_in_module_function(&mut self, descr: &mut ModuleFunction) {
-        descr.ty_scheme.ty = self.substitute_in_fn_type(&descr.ty_scheme.ty);
-        assert!(descr.ty_scheme.constraints.is_empty());
+        descr.definition.ty_scheme.ty = self.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
+        assert!(descr.definition.ty_scheme.constraints.is_empty());
         let mut code = descr.code.borrow_mut();
         if let Some(script_fn) = code.as_script_mut() {
             self.substitute_in_node(&mut script_fn.code);
@@ -1942,6 +2258,11 @@ impl UnifiedTypeInference {
                 self.substitute_in_nodes(&mut app.arguments);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
+            TraitFnApply(app) => {
+                app.ty = self.substitute_in_fn_type(&app.ty);
+                self.substitute_in_nodes(&mut app.arguments);
+                self.substitute_in_fn_inst_data(&mut app.inst_data);
+            }
             EnvStore(node) => {
                 self.substitute_in_node(&mut node.node);
             }
@@ -1985,10 +2306,17 @@ impl UnifiedTypeInference {
     }
 
     fn substitute_in_fn_inst_data(&mut self, inst_data: &mut FnInstData) {
+        use DictionaryReq::*;
         inst_data.dicts_req = inst_data
             .dicts_req
             .iter()
-            .map(|dict| DictionaryReq::new(self.substitute_in_type(dict.ty), dict.kind))
+            .map(|dict| match dict {
+                FieldIndex(ty, field) => FieldIndex(self.substitute_in_type(*ty), *field),
+                TraitImpl(tys, trait_ref) => TraitImpl(
+                    tys.iter().map(|ty| self.substitute_in_type(*ty)).collect(),
+                    trait_ref.clone(),
+                ),
+            })
             .collect();
     }
 
@@ -2060,6 +2388,16 @@ impl UnifiedTypeInference {
                 let ty = self.substitute_in_type(*ty);
                 let variant_ty = self.substitute_in_type(*variant_ty);
                 PubTypeConstraint::new_type_has_variant(ty, *tag, variant_ty, *variant_span)
+            }
+            HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                span,
+            } => {
+                let input_tys = self.substitute_in_types(input_tys);
+                let output_tys = self.substitute_in_types(output_tys);
+                PubTypeConstraint::new_have_trait(trait_ref.clone(), input_tys, output_tys, *span)
             }
         }
     }

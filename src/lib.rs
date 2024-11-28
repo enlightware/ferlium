@@ -33,6 +33,7 @@ mod never;
 mod parser_helpers;
 pub mod std;
 mod sync;
+pub mod r#trait;
 pub mod r#type;
 mod type_inference;
 pub mod type_scheme;
@@ -41,6 +42,7 @@ pub mod value;
 
 pub use ide::Compiler;
 pub use location::Location;
+pub use type_inference::SubOrSameType;
 
 use r#type::Type;
 use type_scheme::DisplayStyle;

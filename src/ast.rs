@@ -5,7 +5,7 @@ use std::fmt::{Debug, Display};
 use ustr::Ustr;
 
 use crate::{
-    containers::B,
+    containers::{b, B},
     error::LocatedError,
     format::write_with_separator,
     module::FmtWithModuleEnv,
@@ -106,7 +106,7 @@ impl<P: Phase> Module<P> {
                 name,
                 args,
                 args_span,
-                B::new(body),
+                b(body),
                 span,
                 doc,
             )],

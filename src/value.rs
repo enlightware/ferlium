@@ -13,7 +13,7 @@ use std::{
 use ustr::Ustr;
 
 use crate::{
-    containers::{SVec2, B},
+    containers::{b, SVec2, B},
     format::{write_with_separator, write_with_separator_and_format_fn},
     function::{Function, FunctionPtr, FunctionRef},
     module::ModuleEnv,
@@ -113,15 +113,15 @@ impl Value {
     }
 
     pub fn native<T: NativeValue + 'static>(value: T) -> Self {
-        Self::Native(B::new(value))
+        Self::Native(b(value))
     }
 
     pub fn variant(tag: Ustr, value: Value) -> Self {
-        Self::Variant(B::new(VariantValue { tag, value }))
+        Self::Variant(b(VariantValue { tag, value }))
     }
 
     pub fn tuple(values: impl Into<SVec2<Value>>) -> Self {
-        Self::Tuple(B::new(values.into()))
+        Self::Tuple(b(values.into()))
     }
 
     pub fn function(function: Function) -> Self {
@@ -304,7 +304,7 @@ pub struct LiteralValue(B<dyn HashableNativeValue>);
 
 impl LiteralValue {
     pub fn new<T: HashableNativeValue + 'static>(value: T) -> Self {
-        Self(B::new(value))
+        Self(b(value))
     }
 
     pub fn into_value(self) -> Value {

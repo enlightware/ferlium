@@ -10,7 +10,7 @@ use crate::{
         DExpr, DModule, DModuleFunction, ExprKind, FnDepGraphNode, Module, ModuleFunction, PExpr,
         PModule, PModuleFunction,
     },
-    containers::B,
+    containers::{b, B},
     error::InternalCompilationError,
     format_string::emit_format_string_ast,
     graph::{find_strongly_connected_components, topological_sort_sccs},
@@ -57,7 +57,7 @@ impl PModuleFunction {
             name: self.name,
             args: self.args,
             args_span: self.args_span,
-            body: B::new(body),
+            body: b(body),
             span: self.span,
             doc: self.doc,
         };
@@ -186,7 +186,7 @@ impl PExpr {
     }
 
     fn desugar_boxed(self, ctx: &mut DesugarCtx) -> Result<B<DExpr>, InternalCompilationError> {
-        self.desugar(ctx).map(B::new)
+        self.desugar(ctx).map(b)
     }
 }
 

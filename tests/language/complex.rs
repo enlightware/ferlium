@@ -1,7 +1,7 @@
 use test_log::test;
 
 use super::common::{fail_compilation, run, unit};
-use painturscript::value::Value;
+use painturscript::{error::MutabilityMustBeWhat, value::Value};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -99,7 +99,7 @@ fn array_and_let_polymorphism() {
     fail_compilation("let f = || []; let a = f(); ()").expect_unbound_ty_var();
     fail_compilation("let f = || []; let mut a = f(); ()").expect_unbound_ty_var();
     fail_compilation("let f = || []; let a = f(); array_append(a, 1); a[0]")
-        .expect_must_be_mutable();
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
     assert_eq!(
         run("let f = || []; let mut a = f(); array_append(a, 1); a[0]"),
         int!(1)

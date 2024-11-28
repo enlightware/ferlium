@@ -1,17 +1,18 @@
 use std::ops::Deref;
 
 use ariadne::Label;
+use itertools::Itertools;
 use painturscript::emit_ir::{emit_expr, emit_module};
 use painturscript::error::{
     resolve_must_be_mutable_ctx, InternalCompilationError, InternalCompilationErrorImpl,
-    LocatedError,
+    LocatedError, MutabilityMustBeWhat,
 };
 use painturscript::format::FormatWith;
 use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
-use painturscript::parse_module_and_expr;
 use painturscript::std::{new_module_with_prelude, new_std_module_env};
 use painturscript::typing_env::Local;
 use painturscript::Location;
+use painturscript::{parse_module_and_expr, SubOrSameType};
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 
@@ -84,41 +85,105 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
-        MustBeMutable(cur_span, reason_span, ctx) => {
-            let (cur_span, reason_span) =
-                resolve_must_be_mutable_ctx(*cur_span, *reason_span, *ctx, src);
-            let span = span_union_range(cur_span, reason_span);
-            let cur = &data.1[span_range(cur_span)];
-            Report::build(ReportKind::Error, ("input", span))
-                .with_message(format!(
-                    "Expression {} must be mutable.",
-                    cur.fg(Color::Blue),
-                ))
-                .with_label(
-                    Label::new(("input", span_range(cur_span)))
-                        .with_message("This expression is just a value.")
-                        .with_color(Color::Blue),
-                )
-                .with_label(
-                    Label::new(("input", span_range(reason_span)))
-                        .with_message("But it must be mutable due to this.")
-                        .with_color(Color::Green)
-                        .with_order(1),
-                )
-                .finish()
-                .print(("input", Source::from(src)))
-                .unwrap();
+        MutabilityMustBe {
+            source_span,
+            reason_span,
+            what,
+            ctx,
+        } => {
+            let (source_span, reason_span) =
+                resolve_must_be_mutable_ctx(*source_span, *reason_span, *ctx, src);
+            let span = span_union_range(source_span, reason_span);
+            let source = &data.1[span_range(source_span)];
+            let reason = &data.1[span_range(reason_span)];
+            use MutabilityMustBeWhat::*;
+            match what {
+                Mutable => Report::build(ReportKind::Error, ("input", span))
+                    .with_message(format!(
+                        "Expression {} must be mutable.",
+                        source.fg(Color::Blue),
+                    ))
+                    .with_label(
+                        Label::new(("input", span_range(source_span)))
+                            .with_message("This expression is just a value.")
+                            .with_color(Color::Blue),
+                    )
+                    .with_label(
+                        Label::new(("input", span_range(reason_span)))
+                            .with_message("But it must be mutable due to this.")
+                            .with_color(Color::Green)
+                            .with_order(1),
+                    )
+                    .finish()
+                    .print(("input", Source::from(src)))
+                    .unwrap(),
+                Constant => Report::build(ReportKind::Error, ("input", span))
+                    .with_message(format!(
+                        "Expression {} must be constant.",
+                        source.fg(Color::Blue),
+                    ))
+                    .with_label(
+                        Label::new(("input", span_range(source_span)))
+                            .with_message("This expression is mutable.")
+                            .with_color(Color::Blue),
+                    )
+                    .with_label(
+                        Label::new(("input", span_range(reason_span)))
+                            .with_message("But it must be constant due to this.")
+                            .with_color(Color::Green)
+                            .with_order(1),
+                    )
+                    .finish()
+                    .print(("input", Source::from(src)))
+                    .unwrap(),
+                Equal => Report::build(ReportKind::Error, ("input", span))
+                    .with_message(format!(
+                        "Expressions {} and {} must have the same mutability.",
+                        source.fg(Color::Blue),
+                        reason.fg(Color::Green),
+                    ))
+                    .with_label(
+                        Label::new(("input", span_range(source_span)))
+                            .with_message("There.")
+                            .with_color(Color::Blue),
+                    )
+                    .with_label(
+                        Label::new(("input", span_range(reason_span)))
+                            .with_message("And here.")
+                            .with_color(Color::Green)
+                            .with_order(1),
+                    )
+                    .finish()
+                    .print(("input", Source::from(src)))
+                    .unwrap(),
+            }
         }
-        IsNotSubtype(cur, cur_span, exp, exp_span) => {
-            let span = span_union_range(*cur_span, *exp_span);
+        TypeMismatch {
+            current_ty,
+            current_span,
+            expected_ty,
+            expected_span,
+            sub_or_same,
+        } => {
+            let span = span_union_range(*current_span, *expected_span);
+            use SubOrSameType::*;
+            let extra_reason = match sub_or_same {
+                SubType => "not a subtype",
+                SameType => "not the same type",
+            };
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
-                    "Type {} is incompatible with type {} (i.e. not a sub-type).",
-                    cur.format_with(env).fg(Color::Magenta),
-                    exp.format_with(env).fg(Color::Blue)
+                    "Type {} is incompatible with type {} (i.e. {}).",
+                    current_ty.format_with(env).fg(Color::Magenta),
+                    expected_ty.format_with(env).fg(Color::Blue),
+                    extra_reason
                 ))
-                .with_label(Label::new(("input", span_range(*cur_span))).with_color(Color::Magenta))
-                .with_label(Label::new(("input", span_range(*exp_span))).with_color(Color::Blue))
+                .with_label(
+                    Label::new(("input", span_range(*current_span))).with_color(Color::Magenta),
+                )
+                .with_label(
+                    Label::new(("input", span_range(*expected_span))).with_color(Color::Blue),
+                )
                 .finish()
                 .print(("input", Source::from(src)))
                 .unwrap();
@@ -205,12 +270,10 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                     name.fg(Color::Blue)
                 ))
                 .with_label(
-                    Label::new(("input", span_range(*first_occurrence)))
-                        .with_color(Color::Blue),
+                    Label::new(("input", span_range(*first_occurrence))).with_color(Color::Blue),
                 )
                 .with_label(
-                    Label::new(("input", span_range(*second_occurrence)))
-                        .with_color(Color::Blue),
+                    Label::new(("input", span_range(*second_occurrence))).with_color(Color::Blue),
                 )
                 .finish()
                 .print(("input", Source::from(src)))
@@ -282,6 +345,14 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 ))
                 .with_label(Label::new(("input", span_range(*var_span))).with_color(Color::Blue))
                 .with_label(Label::new(("input", span_range(*string_span))))
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
+        Unsupported { span, reason } => {
+            Report::build(ReportKind::Error, ("input", span_range(*span)))
+                .with_message(format!("Unsupported feature: {}.", reason))
+                .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
                 .unwrap();
@@ -411,6 +482,21 @@ fn main() {
         };
         locals = compiled_expr.locals;
         println!("Expr IR:\n{}", compiled_expr.expr.format_with(&module_env));
+
+        // Make sure the expression has no unbound type variables
+        if !compiled_expr.ty.constraints().is_empty() {
+            let constraints = compiled_expr
+                .ty
+                .constraints()
+                .iter()
+                .map(|c| c.format_with(&module_env))
+                .join(" ∧ ");
+            println!(
+                "Error: Unresolved constraints in expression: {}",
+                constraints
+            );
+            continue;
+        }
 
         // Evaluate and print result
         let old_size = eval_ctx.environment.len();

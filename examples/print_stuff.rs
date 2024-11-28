@@ -99,7 +99,7 @@ fn main() {
             no_effects(),
         ),
     ];
-    let add_fn_ty = functions[0].ty_scheme.clone();
+    let add_fn_ty = functions[0].definition.ty_scheme.clone();
     println!("{}", add_fn_ty.display_rust_style(&module_env));
     let add_fn = FunctionRef::new_strong(&functions[0].code);
     let _sub_fn = FunctionRef::new_strong(&functions[1].code);

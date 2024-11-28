@@ -6,7 +6,7 @@ use ustr::ustr;
 
 use crate::{
     ast::{DExpr, Pattern, PatternKind, PatternType},
-    containers::{SVec2, B},
+    containers::{b, SVec2},
     effects::{no_effects, EffType},
     error::InternalCompilationError,
     ir::{self, EnvLoad, EnvStore, NodeKind},
@@ -108,7 +108,7 @@ impl TypeInference {
                 .process_results(|iter| iter.unzip())?;
 
             // Code to store the variant value in the environment.
-            let store_variant = K::EnvStore(B::new(EnvStore {
+            let store_variant = K::EnvStore(b(EnvStore {
                 node: condition_node,
                 name_span: cond_expr.span,
             }));
@@ -128,7 +128,7 @@ impl TypeInference {
 
             // Code to load the variant and extract the tag
             let load_variant = N::new(
-                K::EnvLoad(B::new(EnvLoad {
+                K::EnvLoad(b(EnvLoad {
                     index: initial_env_size,
                     name: Some(match_condition_name),
                 })),
@@ -137,7 +137,7 @@ impl TypeInference {
                 cond_expr.span,
             );
             let extract_tag = N::new(
-                K::ExtractTag(B::new(load_variant.clone())),
+                K::ExtractTag(b(load_variant.clone())),
                 int_type(),
                 no_effects(),
                 cond_expr.span,
@@ -187,7 +187,7 @@ impl TypeInference {
                             let mut project_nodes = Vec::new();
                             let mut add_projection = |i, is_tuple| {
                                 let project_variant_inner = N::new(
-                                    K::Project(B::new((load_variant.clone(), 0))),
+                                    K::Project(b((load_variant.clone(), 0))),
                                     *variant_inner_ty,
                                     no_effects(),
                                     expr.span,
@@ -195,7 +195,7 @@ impl TypeInference {
                                 let inner_ty = inner_tys[i];
                                 let project_tuple_inner = if is_tuple {
                                     N::new(
-                                        K::Project(B::new((project_variant_inner, i))),
+                                        K::Project(b((project_variant_inner, i))),
                                         inner_ty,
                                         no_effects(),
                                         expr.span,
@@ -204,7 +204,7 @@ impl TypeInference {
                                     project_variant_inner
                                 };
                                 let store_projected_inner = N::new(
-                                    K::EnvStore(B::new(EnvStore {
+                                    K::EnvStore(b(EnvStore {
                                         node: project_tuple_inner,
                                         name_span: bind_var_names[i].1,
                                     })),
@@ -228,7 +228,7 @@ impl TypeInference {
                                 project_nodes.iter().map(|n| &n.effects).collect::<Vec<_>>(),
                             );
                             node = N::new(
-                                K::Block(B::new(SVec2::from_vec(project_nodes))),
+                                K::Block(b(SVec2::from_vec(project_nodes))),
                                 return_ty.unwrap(),
                                 proj_effects,
                                 expr.span,
@@ -278,7 +278,7 @@ impl TypeInference {
 
             // Generate the final code node
             let case_eff = self.make_dependent_effect([&alt_eff, &default.effects]);
-            let case = K::Case(B::new(ir::Case {
+            let case = K::Case(b(ir::Case {
                 value: extract_tag,
                 alternatives,
                 default,
@@ -286,7 +286,7 @@ impl TypeInference {
             let case_node = N::new(case, return_ty, case_eff, match_span);
             let effects =
                 self.make_dependent_effect([&store_variant_node.effects, &case_node.effects]);
-            let node = K::Block(B::new(SVec2::from_vec(vec![store_variant_node, case_node])));
+            let node = K::Block(b(SVec2::from_vec(vec![store_variant_node, case_node])));
             (node, return_ty, MutType::constant(), effects)
         } else {
             // Literal patterns, convert optional default to mandatory one
@@ -305,7 +305,7 @@ impl TypeInference {
                 )?;
                 let effects = self.make_dependent_effect([&cond_eff, &alt_eff, &default.effects]);
                 (
-                    K::Case(B::new(ir::Case {
+                    K::Case(b(ir::Case {
                         value: condition_node,
                         alternatives,
                         default,
@@ -331,7 +331,7 @@ impl TypeInference {
                 let effects = self.make_dependent_effect([cond_eff, alt_eff]);
                 let default = alternatives.pop().unwrap().1;
                 (
-                    K::Case(B::new(ir::Case {
+                    K::Case(b(ir::Case {
                         value: condition_node,
                         alternatives,
                         default,

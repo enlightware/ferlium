@@ -15,12 +15,14 @@ enum PathPart {
     IndexDynamic,
 }
 
+/// A path to a place in memory.
 struct Path {
     variable: usize,
     parts: Vec<PathPart>,
 }
 
 impl Path {
+    /// Builds a path for this node, assuming it is a place node, panicking otherwise.
     fn from_node(node: &Node) -> Self {
         use NodeKind::*;
         match &node.kind {
@@ -89,7 +91,7 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
     true
 }
 
-/// Implement borrow checking logic by comparing the paths of mutable arguments.
+/// Implements borrow checking logic by comparing the paths of mutable arguments.
 fn check_arguments(
     arg_types: &[FnArgType],
     arguments: &[Node],
@@ -138,6 +140,12 @@ impl Node {
                 check_arguments(&fn_type.args, &app.arguments, app.function.span)?;
             }
             StaticApply(app) => {
+                for arg in &app.arguments {
+                    arg.check_borrows()?;
+                }
+                check_arguments(&app.ty.args, &app.arguments, app.function_span)?;
+            }
+            TraitFnApply(app) => {
                 for arg in &app.arguments {
                     arg.check_borrows()?;
                 }

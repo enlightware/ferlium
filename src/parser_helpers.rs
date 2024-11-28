@@ -5,8 +5,8 @@ use crate::ast::PExprKind;
 use crate::ast::Pattern;
 use crate::ast::PatternKind;
 use crate::ast::Phase;
+use crate::containers::b;
 use crate::containers::SVec2;
-use crate::containers::B;
 use crate::error::LocatedError;
 use crate::escapes::apply_string_escapes;
 use crate::r#type::Type;
@@ -132,7 +132,7 @@ pub(crate) fn proj_or_float<L, T>(
             return parse_num_literal::<NotNan<f64>, L, T>(&float_value, rhs.1);
         }
     }
-    Ok(Project(B::new(lhs), rhs))
+    Ok(Project(b(lhs), rhs))
 }
 
 pub(crate) fn static_apply<P: Phase>(
@@ -140,7 +140,7 @@ pub(crate) fn static_apply<P: Phase>(
     args: Vec<Expr<P>>,
 ) -> ExprKind<P> {
     let identifier = Expr::<P>::new(ExprKind::Identifier(identifier.0), identifier.1);
-    ExprKind::Apply(B::new(identifier), args, true)
+    ExprKind::Apply(b(identifier), args, true)
 }
 
 /// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor
@@ -163,9 +163,9 @@ pub(crate) fn cond_if_else(cond: PExpr, if_true: PExpr, if_false: PExpr) -> PExp
     use ExprKind::*;
     let cond_span = cond.span;
     Match(
-        B::new(cond),
+        b(cond),
         vec![(literal_pattern(true, cond_span), if_true)],
-        Some(B::new(if_false)),
+        Some(b(if_false)),
     )
 }
 
@@ -176,9 +176,9 @@ pub(crate) fn cond_if(cond: PExpr, if_true: PExpr) -> PExprKind {
     let if_true_span = if_true.span;
     let unit_val = unit_literal_expr(if_true_span);
     Match(
-        B::new(cond),
+        b(cond),
         vec![(literal_pattern(true, cond_span), if_true)],
-        Some(B::new(unit_val)),
+        Some(b(unit_val)),
     )
 }
 
@@ -193,7 +193,7 @@ pub(crate) fn for_loop(var: (Ustr, Location), start: PExpr, end: PExpr, body: PE
         ),
         iterator_span,
     );
-    ForLoop(var, B::new(iterator), B::new(body))
+    ForLoop(var, b(iterator), b(body))
 }
 
 /// Extend v with a single element e at the end

@@ -1,15 +1,84 @@
-use std::{collections::HashMap, fmt, rc::Rc};
+use std::{collections::HashMap, fmt, ops::Deref, rc::Rc};
 
-use crate::Location;
-use ustr::Ustr;
+use crate::{
+    containers::SVec2,
+    function::{Function, FunctionDefinition},
+    r#trait::{TraitImpl, TraitRef},
+    value::Value,
+    Location,
+};
+use ustr::{ustr, Ustr};
 
 use crate::{
     containers::{find_key_for_value_property, B},
     format::FormatWith,
     function::FunctionRc,
-    r#type::{BareNativeType, FnType, Type, TypeAliases},
-    type_scheme::TypeScheme,
+    r#type::{BareNativeType, Type, TypeAliases},
 };
+
+pub type Traits = Vec<TraitRef>;
+
+/// A pair of a trait reference and a list of input types forming a key for trait implementations.
+pub type TraitImplKey = (TraitRef, Vec<Type>);
+
+/// All trait implementations in a module
+#[derive(Clone, Debug, Default)]
+pub struct Impls(HashMap<TraitImplKey, TraitImpl>);
+impl Impls {
+    /// Add a trait implementation to this module.
+    pub fn add(
+        &mut self,
+        trait_ref: TraitRef,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        let input_tys = input_tys.into();
+        let output_tys = output_tys.into();
+        let functions: SVec2<_> = functions.into().into_iter().map(Value::function).collect();
+        assert_eq!(
+            trait_ref.input_type_count.get(),
+            input_tys.len() as u32,
+            "Mismatched input type count with implementing trait {}.",
+            trait_ref.name,
+        );
+        assert_eq!(
+            trait_ref.output_type_count,
+            output_tys.len() as u32,
+            "Mismatched output type count with implementing trait {}.",
+            trait_ref.name,
+        );
+        assert_eq!(
+            trait_ref.functions.len(),
+            functions.len(),
+            "Mismatched function count with implementing trait {}.",
+            trait_ref.name,
+        );
+        let functions = Value::tuple(functions);
+        let impl_ = TraitImpl {
+            output_tys,
+            functions,
+        };
+        let key = (trait_ref, input_tys);
+        self.0.insert(key, impl_);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+impl FromIterator<(TraitImplKey, TraitImpl)> for Impls {
+    fn from_iter<I: IntoIterator<Item = (TraitImplKey, TraitImpl)>>(iter: I) -> Self {
+        Self(HashMap::from_iter(iter))
+    }
+}
+impl Deref for Impls {
+    type Target = HashMap<TraitImplKey, TraitImpl>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// If the module function is from code, this struct contains the spans of the function.
 #[derive(Debug, Clone)]
@@ -23,11 +92,9 @@ pub struct ModuleFunctionSpans {
 /// A function inside a module.
 #[derive(Debug, Clone)]
 pub struct ModuleFunction {
+    pub definition: FunctionDefinition,
     pub code: FunctionRc,
-    pub ty_scheme: TypeScheme<FnType>,
     pub spans: Option<ModuleFunctionSpans>,
-    pub arg_names: Vec<Ustr>,
-    pub doc: Option<String>,
 }
 
 pub type FunctionsMap = HashMap<Ustr, ModuleFunction>;
@@ -49,9 +116,11 @@ pub enum Use {
 
 pub type Uses = Vec<Use>;
 
-/// A module is a collection of functions, type aliases and use statements.
+/// A module is a collection of traits, functions, type aliases and use statements.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
+    pub traits: Traits,
+    pub impls: Impls,
     pub functions: FunctionsMap,
     pub types: TypeAliases,
     pub uses: Uses,
@@ -59,15 +128,25 @@ pub struct Module {
 }
 
 impl Module {
-    /// Extend this module with other, consuming it
+    /// Extend this module with other, consuming it.
     pub fn extend(&mut self, other: Self) {
         self.functions.extend(other.functions);
         self.types.extend(other.types);
         self.uses.extend(other.uses);
     }
 
+    /// Return whether this module has no compiled content.
     pub fn is_empty(&self) -> bool {
-        self.functions.is_empty() && self.types.is_empty() && self.uses.is_empty()
+        self.traits.is_empty()
+            && self.impls.is_empty()
+            && self.functions.is_empty()
+            && self.types.is_empty()
+            && self.uses.is_empty()
+    }
+
+    /// Return the trait implementations in this module.
+    pub fn impls(&self) -> &Impls {
+        &self.impls
     }
 
     /// Return the type for the source pos, if any.
@@ -84,7 +163,7 @@ impl Module {
         None
     }
 
-    /// Return whether this module uses sym_name from mod_name
+    /// Return whether this module uses sym_name from mod_name.
     pub fn uses(&self, mod_name: Ustr, sym_name: Ustr) -> bool {
         self.uses.iter().any(|u| match u {
             Use::All(module) => *module == mod_name,
@@ -95,16 +174,31 @@ impl Module {
     /// Look-up a function by name in this module or in any of the modules this module uses.
     pub fn get_function<'a>(
         &'a self,
-        name: &str,
+        name: &'a str,
         others: &'a Modules,
     ) -> Option<&'a ModuleFunction> {
-        let name = Ustr::from(name);
-        self.functions.get(&name).or_else(|| {
+        self.get_member(name, others, &|name, module| {
+            module.functions.get(&ustr(name))
+        })
+    }
+
+    /// Look-up a member by name in this module or in any of the modules this module uses.
+    pub fn get_member<'a, T>(
+        &'a self,
+        name: &'a str,
+        others: &'a Modules,
+        getter: &impl Fn(&'a str, &'a Module) -> Option<T>,
+    ) -> Option<T> {
+        getter(name, self).or_else(|| {
             self.uses.iter().find_map(|use_module| match use_module {
-                Use::All(module) => others.get(module)?.functions.get(&name),
+                Use::All(module) => {
+                    let module_ref = others.get(module)?;
+                    getter(name, module_ref)
+                }
                 Use::Some(use_some) => {
-                    if use_some.symbols.contains(&name) {
-                        others.get(&use_some.module)?.functions.get(&name)
+                    if use_some.symbols.contains(&ustr(name)) {
+                        let module_ref = others.get(&use_some.module)?;
+                        getter(name, module_ref)
                     } else {
                         None
                     }
@@ -115,7 +209,7 @@ impl Module {
 
     /// Look-up a function by name in this module only.
     pub fn get_local_function<'a>(&'a self, name: &str) -> Option<&'a ModuleFunction> {
-        self.functions.get(&Ustr::from(name))
+        self.functions.get(&ustr(name))
     }
 
     fn format_with_modules(&self, f: &mut fmt::Formatter, modules: &Modules) -> fmt::Result {
@@ -130,20 +224,9 @@ impl Module {
         if !self.functions.is_empty() {
             writeln!(f, "Functions:")?;
             for (name, function) in self.functions.iter() {
-                // function.ty_scheme.format_quantifiers(f)?; write!(f, ". ")?;
-                if let Some(doc) = &function.doc {
-                    writeln!(f, "/// {}", doc)?;
-                }
-                if function.ty_scheme.is_just_type_and_effects() {
-                    writeln!(f, "fn {name} {}", function.ty_scheme.ty.format_with(&env))?;
-                } else {
-                    writeln!(
-                        f,
-                        "fn {name} {} {}",
-                        function.ty_scheme.ty.format_with(&env),
-                        function.ty_scheme.display_constraints_rust_style(&env),
-                    )?;
-                }
+                function
+                    .definition
+                    .fmt_with_name_and_module_env(f, name, &env)?;
                 function.code.borrow().format_ind(f, &env, 1)?;
             }
             writeln!(f)?;

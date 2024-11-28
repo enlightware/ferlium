@@ -1,7 +1,7 @@
 use heck::ToSnakeCase;
 
 use crate::{
-    ir::{Node, NodeKind, StaticApplication},
+    ir::{Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, Modules},
     std::math::int_type,
     type_scheme::DisplayStyle,
@@ -37,7 +37,7 @@ impl ModuleAndExpr {
         // Function signatures.
         for function in self.module.functions.values() {
             if let Some(spans) = &function.spans {
-                if !function.ty_scheme.is_just_type() {
+                if !function.definition.ty_scheme.is_just_type() {
                     match style {
                         Mathematical => {
                             annotations.push((
@@ -45,6 +45,7 @@ impl ModuleAndExpr {
                                 format!(
                                     "{} ",
                                     function
+                                        .definition
                                         .ty_scheme
                                         .display_quantifiers_and_constraints_math_style(&env)
                                 ),
@@ -53,30 +54,46 @@ impl ModuleAndExpr {
                         Rust => {
                             annotations.push((
                                 spans.name.end(),
-                                format!("{}", function.ty_scheme.display_quantifiers_rust_style()),
+                                format!(
+                                    "{}",
+                                    function
+                                        .definition
+                                        .ty_scheme
+                                        .display_quantifiers_rust_style()
+                                ),
                             ));
                         }
                     }
                 }
-                for (span, arg_ty) in spans.args.iter().zip(&function.ty_scheme.ty.args) {
+                for (span, arg_ty) in spans
+                    .args
+                    .iter()
+                    .zip(&function.definition.ty_scheme.ty.args)
+                {
                     annotations.push((span.end(), format!(": {}", arg_ty.format_with(&env))));
                 }
-                let ret_ty_and_eff = if function.ty_scheme.ty.effects.is_empty() {
-                    format!(" → {}", function.ty_scheme.ty.ret.format_with(&env))
+                let ret_ty_and_eff = if function.definition.ty_scheme.ty.effects.is_empty() {
+                    format!(
+                        " → {}",
+                        function.definition.ty_scheme.ty.ret.format_with(&env)
+                    )
                 } else {
                     format!(
                         " → {} ! {}",
-                        function.ty_scheme.ty.ret.format_with(&env),
-                        function.ty_scheme.ty.effects
+                        function.definition.ty_scheme.ty.ret.format_with(&env),
+                        function.definition.ty_scheme.ty.effects
                     )
                 };
                 annotations.push((spans.args_span.end(), ret_ty_and_eff));
-                if style == Rust && !function.ty_scheme.is_just_type_and_effects() {
+                if style == Rust && !function.definition.ty_scheme.is_just_type_and_effects() {
                     annotations.push((
                         spans.args_span.end(),
                         format!(
                             " {}",
-                            function.ty_scheme.display_constraints_rust_style(&env)
+                            function
+                                .definition
+                                .ty_scheme
+                                .display_constraints_rust_style(&env)
                         ),
                     ));
                 }
@@ -141,7 +158,25 @@ impl Node {
             }
             StaticApply(app) => {
                 for (arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
-                    if !should_hide_arg_name_hint(app, arg_name, arg) {
+                    if !should_hide_arg_name_hint(
+                        &app.function_name,
+                        app.argument_names.len(),
+                        arg_name,
+                        arg,
+                    ) {
+                        result.push((arg.span.start(), format!("{}: ", arg_name)));
+                    }
+                    arg.variable_type_annotations(result, env);
+                }
+            }
+            TraitFnApply(app) => {
+                // TODO: is that really acceptable to have this entry here?
+                let function_data = &app.trait_ref.functions[app.function_index];
+                let function_name = function_data.0;
+                let argument_names = &function_data.1.arg_names;
+                let arity = argument_names.len();
+                for (arg, arg_name) in app.arguments.iter().zip(argument_names.iter()) {
+                    if !should_hide_arg_name_hint(&function_name, arity, arg_name, arg) {
                         result.push((arg.span.start(), format!("{}: ", arg_name)));
                     }
                     arg.variable_type_annotations(result, env);
@@ -204,9 +239,12 @@ impl Node {
 }
 
 // Essentially implement a similar logic as rust-analyzer's "should_hide_param_name_hint" fn
-fn should_hide_arg_name_hint(app: &StaticApplication, arg_name: &str, argument: &Node) -> bool {
-    let function_name = &app.function_name;
-    let arity = app.arguments.len();
+fn should_hide_arg_name_hint(
+    function_name: &str,
+    arity: usize,
+    arg_name: &str,
+    argument: &Node,
+) -> bool {
     if function_name.starts_with('@') {
         return true;
     }

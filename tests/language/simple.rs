@@ -3,7 +3,11 @@ use test_log::test;
 use super::common::{
     fail_compilation, fail_run, get_property_value, run, set_property_value, unit,
 };
-use painturscript::{error::RuntimeError, std::array::Array, value::Value};
+use painturscript::{
+    error::{MutabilityMustBeWhat, RuntimeError},
+    std::array::Array,
+    value::Value,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -23,6 +27,7 @@ fn whitespace() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn literals() {
     assert_eq!(run("42"), int!(42));
+    assert_eq!(run("from_int(42)"), int!(42));
     assert_eq!(run("true"), bool!(true));
     assert_eq!(run("false"), bool!(false));
 }
@@ -68,14 +73,14 @@ fn equalities() {
     assert_eq!(run("41 == 42"), bool!(false));
     assert_eq!(run("42 != 42"), bool!(false));
     assert_eq!(run("41 != 42"), bool!(true));
-    fail_compilation("1 == true").expect_is_not_subtype("bool", "int");
+    fail_compilation("1 == true").expect_type_mismatch("bool", "int");
     assert_eq!(run("true == true"), bool!(true));
     assert_eq!(run("true == false"), bool!(false));
     assert_eq!(run("true != true"), bool!(false));
     assert_eq!(run("true != false"), bool!(true));
     assert_eq!(run("() == ()"), bool!(true));
     assert_eq!(run("() != ()"), bool!(false));
-    fail_compilation("() == (1,)").expect_is_not_subtype("(int,)", "()");
+    fail_compilation("() == (1,)").expect_type_mismatch("(int,)", "()");
     assert_eq!(run("(1,) == (1,)"), bool!(true));
     assert_eq!(run("(1,) != (1,)"), bool!(false));
     assert_eq!(run("(1,) == (2,)"), bool!(false));
@@ -120,13 +125,17 @@ fn local_variables() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutability() {
     assert_eq!(run("let mut a = 1 ; a = 2; a"), int!(2));
-    fail_compilation("let a = 1 ; a = 2; a").expect_must_be_mutable();
+    fail_compilation("let a = 1 ; a = 2; a")
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
     assert_eq!(run("let mut a = (1,) ; a.0 = 2; a.0"), int!(2));
-    fail_compilation("let a = (1,) ; a.0 = 2; a.0").expect_must_be_mutable();
+    fail_compilation("let a = (1,) ; a.0 = 2; a.0")
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
     assert_eq!(run("let mut a = [1] ; a[0] = 2; a[0]"), int!(2));
-    fail_compilation("let a = [1] ; a[0] = 2; a[0]").expect_must_be_mutable();
+    fail_compilation("let a = [1] ; a[0] = 2; a[0]")
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
     assert_eq!(run("let mut a = ([1], 1) ; a.0[0] = 2; a.0[0]"), int!(2));
-    fail_compilation("let a = ([1], 1) ; a.0[0] = 2; a.0[0]").expect_must_be_mutable();
+    fail_compilation("let a = ([1], 1) ; a.0[0] = 2; a.0[0]")
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
 }
 
 #[test]
@@ -256,7 +265,7 @@ fn if_expr() {
         run("let mut a = 0; if false { a = 1 } else if true { a = 2 }; a"),
         int!(2)
     );
-    fail_compilation("fn a() { if true { 1 } }").expect_is_not_subtype("int", "()");
+    fail_compilation("fn a() { if true { 1 } }").expect_type_mismatch("int", "()");
 }
 
 #[test]
@@ -300,9 +309,9 @@ fn match_expr() {
         int!(1)
     );
     fail_compilation("match testing::some_int(0) { None => 0 }")
-        .expect_is_not_subtype("None | Some (int)", "None");
+        .expect_type_mismatch("None | Some (int)", "None");
     fail_compilation("match testing::some_int(0) { Some(x) => 0 }")
-        .expect_is_not_subtype("None | Some (int)", "Some (A)");
+        .expect_type_mismatch("None | Some (int)", "Some (A)");
     // TODO: add more complex literals (tuples, array) once optimisation is in place
 }
 
@@ -362,18 +371,18 @@ fn value_function_arity() {
     let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y }";
     assert_eq!(run(&format!("{text} (a,).0()")), int!(0));
     fail_compilation(&format!("{text} (b,).0()"))
-        .expect_is_not_subtype("(int) → int", "() → A ! e₀");
+        .expect_type_mismatch("(int) → int", "() → A ! e₀");
     fail_compilation(&format!("{text} (c,).0()"))
-        .expect_is_not_subtype("(int, int) → int", "() → A ! e₀");
+        .expect_type_mismatch("(int, int) → int", "() → A ! e₀");
     fail_compilation(&format!("{text} (a,).0(1)"))
-        .expect_is_not_subtype("() → int", "(int) → A ! e₀");
+        .expect_type_mismatch("() → int", "(int) → A ! e₀");
     assert_eq!(run(&format!("{text} (b,).0(1)")), int!(2));
     fail_compilation(&format!("{text} (c,).0(1)"))
-        .expect_is_not_subtype("(int, int) → int", "(int) → A ! e₀");
+        .expect_type_mismatch("(int, int) → int", "(int) → A ! e₀");
     fail_compilation(&format!("{text} (a,).0(1, 2)"))
-        .expect_is_not_subtype("() → int", "(int, int) → A ! e₀");
+        .expect_type_mismatch("() → int", "(int, int) → A ! e₀");
     fail_compilation(&format!("{text} (b,).0(1, 2)"))
-        .expect_is_not_subtype("(int) → int", "(int, int) → A ! e₀");
+        .expect_type_mismatch("(int) → int", "(int, int) → A ! e₀");
     assert_eq!(run(&format!("{text} (c,).0(1, 2)")), int!(3));
 }
 
@@ -393,9 +402,9 @@ fn lambda() {
         run("let sq = |x| x * x; let inc = |x| x + 1; sq(inc(inc(2)))"),
         int!(16)
     );
-    fail_compilation("let id = |x| x; id(1); id(true)").expect_is_not_subtype("bool", "int");
+    fail_compilation("let id = |x| x; id(1); id(true)").expect_type_mismatch("bool", "int");
     fail_compilation("let d = |x, y| (x, y + 1); d(true, 1); d(1, 2)")
-        .expect_is_not_subtype("int", "bool");
+        .expect_type_mismatch("int", "bool");
     assert_eq!(run("(||1)()"), int!(1));
     assert_eq!(run("(|x| x.1)((1,2))"), int!(2));
     assert_eq!(
@@ -454,22 +463,22 @@ fn for_loops() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn first_class_functions() {
     assert_eq!(
-        run(r#"fn add(x, y) {
+        run(r#"fn my_add(x, y) {
             x + y
         }
-        let x = add;
+        let x = my_add;
         x(1, 2)"#),
         int!(3)
     );
     assert_eq!(
-        run(r#"fn add(x, y) {
+        run(r#"fn my_add(x, y) {
             x + y
         }
-        fn sub(x, y) {
+        fn my_sub(x, y) {
             x - y
         }
-        let mut x = add;
-        x = sub;
+        let mut x = my_add;
+        x = my_sub;
         x(1, 2)"#),
         int!(-1)
     );
@@ -648,7 +657,8 @@ fn adt() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutability_soundness() {
-    fail_compilation("let f = |x| (x[0] = 1); let a = [1]; f(a)").expect_must_be_mutable();
+    fail_compilation("let f = |x| (x[0] = 1); let a = [1]; f(a)")
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
 }
 
 #[test]
@@ -899,5 +909,6 @@ fn properties() {
         .into_inner()
         .into_invalid_record_field_access()
         .unwrap();
-    fail_compilation("@props::my_scope.my_var.a = 2").expect_must_be_mutable();
+    fail_compilation("@props::my_scope.my_var.a = 2")
+        .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
 }

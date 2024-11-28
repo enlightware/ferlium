@@ -1,6 +1,6 @@
-# Contributing to Scriptli
+# Contributing to Ferlium
 
-Welcome! Thank you for your interest in Scriptli.
+Welcome! Thank you for your interest in Ferlium.
 Before contributing, please review the guidelines below.
 
 ## Contributor License Agreement (CLA)

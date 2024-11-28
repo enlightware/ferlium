@@ -4,6 +4,7 @@ use itertools::{process_results, Itertools};
 use ustr::ustr;
 
 use crate::{
+    cached_ty,
     effects::{no_effects, EffType},
     error::RuntimeError,
     eval::{EvalCtx, ValOrMut},
@@ -313,8 +314,12 @@ pub fn array_type(element_ty: Type) -> Type {
     Type::native::<Array>(vec![element_ty])
 }
 
+pub fn int_array_type() -> Type {
+    cached_ty!(|| array_type(int_type()))
+}
+
 fn array_type_generic() -> Type {
-    array_type(Type::variable_id(0))
+    cached_ty!(|| array_type(Type::variable_id(0)))
 }
 
 pub fn add_to_module(to: &mut Module) {

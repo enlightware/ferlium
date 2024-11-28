@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     compile,
-    error::CompilationErrorImpl,
+    error::{CompilationErrorImpl, MutabilityMustBeWhat},
     eval::{EvalCtx, ValOrMut},
     module::{FmtWithModuleEnv, ModuleFunction, Uses},
     r#type::{FnArgType, Type},
@@ -129,13 +129,36 @@ fn compilation_error_to_data(
                 format!("Expected {expected} arguments, got {got} here"),
             ),
         ],
-        MustBeMutable(cur_span, _reason_span) => vec![ErrorData::from_location(
-            cur_span,
-            "Expression must be mutable".to_string(),
-        )],
-        IsNotSubtype(cur, cur_span, exp, _exp_span) => vec![ErrorData::from_location(
-            cur_span,
-            format!("Type {cur} is incompatible with type {exp}"),
+        MutabilityMustBe {
+            source_span,
+            reason_span,
+            what,
+            ..
+        } => vec![ErrorData::from_location(source_span, {
+            use MutabilityMustBeWhat::*;
+            match what {
+                Mutable => format!(
+                    "Expression must be mutable due to {}",
+                    fmt_span(reason_span)
+                ),
+                Constant => format!(
+                    "Expression must be constant due to {}",
+                    fmt_span(reason_span)
+                ),
+                Equal => format!(
+                    "Expression must be of the same mutability as {}",
+                    fmt_span(reason_span)
+                ),
+            }
+        })],
+        TypeMismatch {
+            current_ty,
+            current_span,
+            expected_ty,
+            ..
+        } => vec![ErrorData::from_location(
+            current_span,
+            format!("Type {current_ty} is incompatible with type {expected_ty}"),
         )],
         InfiniteType(ty_var, ty, span) => vec![ErrorData::from_location(
             span,
@@ -262,6 +285,19 @@ fn compilation_error_to_data(
                 ErrorData::from_location(second_occurrence, text),
             ]
         }
+        TraitImplNotFound {
+            trait_name,
+            input_tys,
+            fn_span,
+        } => {
+            vec![ErrorData::from_location(
+                fn_span,
+                format!(
+                    "Implementation of trait {trait_name} over types {} not found",
+                    input_tys.join(", ")
+                ),
+            )]
+        }
         IdentifierBoundMoreThanOnceInAPattern {
             first_occurrence,
             second_occurrence,
@@ -343,6 +379,7 @@ fn compilation_error_to_data(
                 format!("Unknown property {scope}.{variable}"),
             )]
         }
+        Unsupported { span, reason } => vec![ErrorData::from_location(span, reason.to_string())],
         Internal(msg) => vec![ErrorData::from_location(
             &Location::new_local(0, 0),
             format!("ICE: {msg}"),
@@ -410,7 +447,7 @@ impl Compiler {
             let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
             Some(format!(
                 "{}",
-                func.ty_scheme.display_rust_style(&module_env)
+                func.definition.ty_scheme.display_rust_style(&module_env)
             ))
         } else {
             None
@@ -481,8 +518,13 @@ impl Compiler {
                 };
                 sigs.push(FunctionSignature {
                     name,
-                    args: func.arg_names.iter().map(ToString::to_string).collect(),
-                    doc: func.doc.clone(),
+                    args: func
+                        .definition
+                        .arg_names
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    doc: func.definition.doc.clone(),
                 });
             }
         }
@@ -556,13 +598,13 @@ impl Compiler {
 
     pub fn run_fn_unit_unit(&self, name: &str) -> Result<(), String> {
         self.run_fn(name, |func, module_env| {
-            if !func.ty_scheme.is_just_type_and_effects()
-                || !func.ty_scheme.ty.args.is_empty()
-                || func.ty_scheme.ty.ret != Type::unit()
+            if !func.definition.ty_scheme.is_just_type_and_effects()
+                || !func.definition.ty_scheme.ty.args.is_empty()
+                || func.definition.ty_scheme.ty.ret != Type::unit()
             {
                 Err(format!(
                     "Function {name} does not have type \"() -> ()\", it has \"{}\" instead",
-                    func.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(module_env)
                 ))
             } else {
                 let mut ctx = EvalCtx::new();
@@ -580,14 +622,14 @@ impl Compiler {
         self.run_fn(name, |func, module_env| {
             let o_ty = Type::primitive::<O>();
             let o_ty_fmt = o_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type_and_effects()
-                || !func.ty_scheme.ty.args.is_empty()
-                || func.ty_scheme.ty.ret != o_ty
+            if !func.definition.ty_scheme.is_just_type_and_effects()
+                || !func.definition.ty_scheme.ty.args.is_empty()
+                || func.definition.ty_scheme.ty.ret != o_ty
             {
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
                     o_ty_fmt,
-                    func.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(module_env)
                 ))
             } else {
                 let mut ctx = EvalCtx::new();
@@ -610,14 +652,14 @@ impl Compiler {
             let ob_ty = Type::primitive::<OB>();
             let o_ty = Type::tuple(vec![oa_ty, ob_ty]);
             let o_ty_fmt = o_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type_and_effects()
-                || !func.ty_scheme.ty.args.is_empty()
-                || func.ty_scheme.ty.ret != o_ty
+            if !func.definition.ty_scheme.is_just_type_and_effects()
+                || !func.definition.ty_scheme.ty.args.is_empty()
+                || func.definition.ty_scheme.ty.ret != o_ty
             {
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
                     o_ty_fmt,
-                    func.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(module_env)
                 ))
             } else {
                 let mut ctx = EvalCtx::new();
@@ -651,15 +693,15 @@ impl Compiler {
             let ob_ty = Type::primitive::<OB>();
             let o_ty = Type::tuple(vec![oa_ty, ob_ty]);
             let o_ty_fmt = o_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type_and_effects()
-                || func.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
-                || func.ty_scheme.ty.ret != o_ty
+            if !func.definition.ty_scheme.is_just_type_and_effects()
+                || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
+                || func.definition.ty_scheme.ty.ret != o_ty
             {
                 Err(format!(
                     "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
                     i_ty_fmt,
                     o_ty_fmt,
-                    func.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(module_env)
                 ))
             } else {
                 let mut ctx = EvalCtx::new();
@@ -685,14 +727,14 @@ impl Compiler {
         self.run_fn(name, |func, module_env| {
             let i_ty = Type::primitive::<I>();
             let i_ty_fmt = i_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type_and_effects()
-                || func.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
-                || func.ty_scheme.ty.ret != Type::unit()
+            if !func.definition.ty_scheme.is_just_type_and_effects()
+                || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
+                || func.definition.ty_scheme.ty.ret != Type::unit()
             {
                 Err(format!(
                     "Function {name} does not have type \"({}) -> ()\", it has \"{}\" instead",
                     i_ty_fmt,
-                    func.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(module_env)
                 ))
             } else {
                 let mut ctx = EvalCtx::new();
@@ -716,15 +758,15 @@ impl Compiler {
             let i_ty_fmt = i_ty.format_with(module_env);
             let o_ty = Type::primitive::<O>();
             let o_ty_fmt = o_ty.format_with(module_env);
-            if !func.ty_scheme.is_just_type_and_effects()
-                || func.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
-                || func.ty_scheme.ty.ret != o_ty
+            if !func.definition.ty_scheme.is_just_type_and_effects()
+                || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
+                || func.definition.ty_scheme.ty.ret != o_ty
             {
                 Err(format!(
                     "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
                     i_ty_fmt,
                     o_ty_fmt,
-                    func.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(module_env)
                 ))
             } else {
                 let mut ctx = EvalCtx::new();

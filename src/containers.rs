@@ -1,8 +1,13 @@
 use std::hash::Hash;
 use std::{cmp, collections::HashMap};
 
-/// Alias to keep code shorter
+/// Box alias to keep code shorter
 pub(crate) type B<T> = Box<T>;
+
+/// Box a value, keeping code shorter
+pub(crate) fn b<T>(t: T) -> B<T> {
+    Box::new(t)
+}
 
 /// Small vector having two elements inline
 pub type SVec2<T> = smallvec::SmallVec<[T; 2]>;

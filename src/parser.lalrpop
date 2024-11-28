@@ -4,7 +4,7 @@ use crate::value::{Value, LiteralValue};
 use crate::r#type::Type;
 use crate::parser_helpers::*;
 use crate::std::{logic::bool_type, math::{int_type, float_type}, array::array_type, string::string_type};
-use crate::containers::B;
+use crate::containers::{b as boxed};
 use crate::mutability::MutVal;
 
 use ustr::{Ustr, ustr};
@@ -111,7 +111,7 @@ TopExpr = {
 }
 
 AssignExpr: ExprKind = {
-    <le:Es<LogicOrExpr>> <ls:@L>"=" <rs:@R> <re:Expr> => Assign(B::new(le), span(ls, rs), B::new(re)),
+    <le:Es<LogicOrExpr>> <ls:@L>"=" <rs:@R> <re:Expr> => Assign(boxed(le), span(ls, rs), boxed(re)),
 }
 
 ReturnExpr: ExprKind = {
@@ -119,8 +119,8 @@ ReturnExpr: ExprKind = {
 }
 
 AbstractExpr: ExprKind = {
-    "|" <args:StrArgs> "|" <body:Expr> => Abstract(args, B::new(body)),
-    "||" <body:Expr> => Abstract(vec![], B::new(body)),
+    "|" <args:StrArgs> "|" <body:Expr> => Abstract(args, boxed(body)),
+    "||" <body:Expr> => Abstract(vec![], boxed(body)),
 }
 
 LogicOrExpr = BinOpLeftAssoc<LogicalOrOp, LogicAndExpr>;
@@ -140,10 +140,10 @@ UnaryExpr = {
 
 SuffixExpr = {
     AtomExpr,
-    <e:Es<SuffixExpr>> "." <f:Sp<UIdentifier>> => FieldAccess(B::new(e), f),
+    <e:Es<SuffixExpr>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
     <e:Es<SuffixExpr>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
-    <e:Es<SuffixExpr>> "[" <i:Expr> "]" => Index(B::new(e), B::new(i)),
-    <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(B::new(e), a, false),
+    <e:Es<SuffixExpr>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
+    <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), a, false),
 }
 
 AtomExpr = {
@@ -192,9 +192,9 @@ IfExpr: ExprKind = {
 
 MatchExpr: ExprKind = {
     "match" <e:Expr> "{" <m:Sep<MatchArg, ",">> "}" =>
-        Match(B::new(e), m, None),
+        Match(boxed(e), m, None),
     "match" <e:Expr> "{" <m:(<MatchArg> ",")*> "_" "=>" <d:Expr> ","? "}" =>
-        Match(B::new(e), m, Some(B::new(d))),
+        Match(boxed(e), m, Some(boxed(d))),
 }
 
 MatchArg: (Pattern, Expr) = {
@@ -277,8 +277,8 @@ Stmt = {
 }
 
 LetStmt: ExprKind = {
-    "let" <id:Sp<UIdentifier>> "=" <e:Expr> ";" => Let(id, MutVal::constant(), B::new(e)),
-    "let" "mut" <id:Sp<UIdentifier>> "=" <e:Expr> ";" => Let(id, MutVal::mutable(), B::new(e)),
+    "let" <id:Sp<UIdentifier>> "=" <e:Expr> ";" => Let(id, MutVal::constant(), boxed(e)),
+    "let" "mut" <id:Sp<UIdentifier>> "=" <e:Expr> ";" => Let(id, MutVal::mutable(), boxed(e)),
 }
 
 ExprStmt: Expr = {

@@ -3,7 +3,7 @@ use std::{collections::VecDeque, fmt::Display};
 use enum_as_inner::EnumAsInner;
 
 use crate::{
-    containers::{SVec2, B},
+    containers::{b, SVec2},
     error::RuntimeError,
     format::{write_with_separator, FormatWith},
     function::Closure,
@@ -218,7 +218,7 @@ impl Node {
                 let captured = eval_nodes(&build_closure.captures, ctx)?;
                 let function_value = build_closure.function.eval_with_ctx(ctx)?;
                 let function = function_value.into_function().unwrap().0;
-                Ok(Value::function(B::new(Closure::new(function, captured))))
+                Ok(Value::function(b(Closure::new(function, captured))))
             }
             Apply(app) => {
                 let args_ty = {
@@ -242,6 +242,9 @@ impl Node {
                 let function = function.borrow();
                 let arguments = eval_args(&app.arguments, args_ty, ctx)?;
                 function.call(arguments, ctx)
+            }
+            TraitFnApply(_) => {
+                panic!("Trait function application should not be executed, but transformed to StaticApply");
             }
             EnvStore(node) => {
                 let value = node.node.eval_with_ctx(ctx)?;
@@ -272,7 +275,7 @@ impl Node {
                     nodes.push(node.eval_with_ctx(ctx)?);
                     Ok(nodes)
                 })?;
-                Ok(Value::Tuple(B::new(values)))
+                Ok(Value::Tuple(b(values)))
             }
             Project(projection) => {
                 let value = projection.0.eval_with_ctx(ctx)?;
@@ -288,7 +291,7 @@ impl Node {
                     Ok(nodes)
                 })?;
                 // Note: record values are stored as tuples
-                Ok(Value::Tuple(B::new(values)))
+                Ok(Value::Tuple(b(values)))
             }
             FieldAccess(_) => {
                 panic!("String projection should not be executed, but transformed to ProjectLocal");

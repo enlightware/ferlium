@@ -12,6 +12,7 @@ pub fn test_mod(src: &str, f: &str, exp_eff: EffType) {
         .module
         .get_local_function(f)
         .unwrap()
+        .definition
         .ty_scheme
         .ty()
         .effects
