@@ -16,7 +16,7 @@ The following phases happen in the compiler:
   - String formatting desugaring
   - Module call graph extraction
 - AST to typed IR conversion
-  - Symbol resolution
+  - Complete symbol resolution
   - Type and passing strategy inference
   - ADT desugaring
   - IR generation

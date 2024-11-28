@@ -6,7 +6,6 @@
 - Type classes
 - Private module members
 - Tuple deconstruction on assignation
-- Recursive modules
 - Recursive types inference
 - Co-routine/async
 - Recursive types
@@ -17,6 +16,10 @@
 - Short circuiting logical operators
 - Unit testing with mock function generation through annotations
 
+### Optional language features
+
+- Recursive modules
+
 ### Library and test features
 
 - Array from iterator (note: functional iterators require closures or type classes)
@@ -25,6 +28,7 @@
 
 - Add context to IsNotSubtype error and write some more useful error messages when match exhaustiveness fails
 - Advanced optimisations: generic partial evaluation (constant propagation)
+- IR as control flow graph
 - Just in time compilation
 
 ### IDE features
