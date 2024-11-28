@@ -481,8 +481,12 @@ impl Type {
         TypeKind::Function(B::new(ty)).store()
     }
 
+    pub fn function_by_val_with_effects(args: &[Self], ret: Self, effects: EffType) -> Self {
+        Self::function_type(FnType::new_by_val(args, ret, effects))
+    }
+
     pub fn function_by_val(args: &[Self], ret: Self) -> Self {
-        Self::function_type(FnType::new_by_val(args, ret, EffType::empty()))
+        Self::function_by_val_with_effects(args, ret, EffType::empty())
     }
 
     pub fn nullary_function_by_val(ret: Self) -> Self {

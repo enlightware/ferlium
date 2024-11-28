@@ -1,10 +1,10 @@
 use std::{collections::VecDeque, fmt, rc::Rc};
 
-use itertools::Itertools;
+use itertools::{process_results, Itertools};
 use ustr::ustr;
 
 use crate::{
-    effects::no_effects,
+    effects::{no_effects, EffType},
     error::RuntimeError,
     eval::{EvalCtx, ValOrMut},
     format::write_with_separator,
@@ -17,7 +17,7 @@ use crate::{
     value::{NativeDisplay, NativeValue, Value},
 };
 
-use super::{iterator::iterator_type, math::int_type};
+use super::{iterator::iterator_type, logic::bool_type, math::int_type};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Array(Rc<VecDeque<Value>>);
@@ -186,15 +186,72 @@ impl Array {
     fn map_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
         let gen1 = Type::variable_id(1);
-        let map_fn = Type::function_by_val(&[gen0], gen1);
+        let effects = EffType::single_variable_id(0);
+        let map_fn = Type::function_by_val_with_effects(&[gen0], gen1, effects.clone());
         let array0 = Type::native::<Array>(vec![gen0]);
         let array1 = Type::native::<Array>(vec![gen1]);
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
             &[array0, map_fn],
             array1,
-            no_effects(),
+            effects,
         ));
         BinaryNativeFnNVFN::description_with_ty_scheme(Array::map, ["array", "function"], ty_scheme)
+    }
+
+    pub fn any(self, f: Value) -> Result<bool, RuntimeError> {
+        let function = f.as_function().unwrap().0.get();
+        let mut ctx = EvalCtx::new();
+        process_results(
+            self.0.iter().map(|v| {
+                Ok(function
+                    .borrow()
+                    .call(vec![ValOrMut::Val(v.clone())], &mut ctx)?
+                    .into_primitive_ty::<bool>()
+                    .unwrap())
+            }),
+            |mut iter| iter.any(|matches| matches),
+        )
+    }
+
+    fn any_descr() -> ModuleFunction {
+        let gen0 = Type::variable_id(0);
+        let effects = EffType::single_variable_id(0);
+        let any_fn = Type::function_by_val_with_effects(&[gen0], bool_type(), effects.clone());
+        let array = Type::native::<Array>(vec![gen0]);
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            &[array, any_fn],
+            bool_type(),
+            effects,
+        ));
+        BinaryNativeFnNVFN::description_with_ty_scheme(Array::any, ["array", "function"], ty_scheme)
+    }
+
+    pub fn all(self, f: Value) -> Result<bool, RuntimeError> {
+        let function = f.as_function().unwrap().0.get();
+        let mut ctx = EvalCtx::new();
+        process_results(
+            self.0.iter().map(|v| {
+                Ok(function
+                    .borrow()
+                    .call(vec![ValOrMut::Val(v.clone())], &mut ctx)?
+                    .into_primitive_ty::<bool>()
+                    .unwrap())
+            }),
+            |mut iter| iter.all(|matches| matches),
+        )
+    }
+
+    fn all_descr() -> ModuleFunction {
+        let gen0 = Type::variable_id(0);
+        let effects = EffType::single_variable_id(0);
+        let all_fn = Type::function_by_val_with_effects(&[gen0], bool_type(), effects.clone());
+        let array = Type::native::<Array>(vec![gen0]);
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            &[array, all_fn],
+            bool_type(),
+            effects,
+        ));
+        BinaryNativeFnNVFN::description_with_ty_scheme(Array::all, ["array", "function"], ty_scheme)
     }
 
     pub fn iter(&self) -> ArrayIterator {
@@ -268,4 +325,6 @@ pub fn add_to_module(to: &mut Module) {
     to.functions
         .insert(ustr("array_concat"), Array::concat_descr());
     to.functions.insert(ustr("array_map"), Array::map_descr());
+    to.functions.insert(ustr("array_any"), Array::any_descr());
+    to.functions.insert(ustr("array_all"), Array::all_descr());
 }

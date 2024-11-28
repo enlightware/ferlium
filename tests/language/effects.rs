@@ -6,7 +6,7 @@ use painturscript::effects::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
-fn test_mod(src: &str, f: &str, exp_eff: EffType) {
+pub fn test_mod(src: &str, f: &str, exp_eff: EffType) {
     let (module, others) = compile(src);
     let effects = module
         .module
@@ -144,7 +144,7 @@ fn effects_in_recursive_fns() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn effects_of_fn_callled_multiple_times() {
+fn effects_of_fn_called_multiple_times() {
     test_mod("fn a(f) { f(); f(); f(); () }", "a", effect_var(0));
     test_mod(
         "fn a(f, g) { f(); g(); g(); f(); f(); g(); () }",

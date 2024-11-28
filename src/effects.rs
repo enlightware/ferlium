@@ -80,6 +80,9 @@ impl EffType {
     pub fn single_variable(var: EffectVar) -> Self {
         Self::single(Effect::Variable(var))
     }
+    pub fn single_variable_id(id: u32) -> Self {
+        Self::single_variable(EffectVar::new(id))
+    }
     pub fn multiple(effects: &[Effect]) -> Self {
         Self::from_vec(effects.to_vec())
     }
