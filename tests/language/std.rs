@@ -3,7 +3,11 @@ use test_log::test;
 use crate::effects::test_mod as test_mod_for_effects;
 
 use super::common::{fail_compilation, run};
-use painturscript::{effects::{effect, no_effects, PrimitiveEffect}, std::array::Array, value::Value};
+use painturscript::{
+    effects::{effect, no_effects, PrimitiveEffect},
+    std::array::Array,
+    value::Value,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

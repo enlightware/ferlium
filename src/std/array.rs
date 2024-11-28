@@ -223,7 +223,11 @@ impl Array {
             bool_type(),
             effects,
         ));
-        BinaryNativeFnNVFN::description_with_ty_scheme(Array::any, ["array", "function"], ty_scheme)
+        BinaryNativeFnNVFN::description_with_ty_scheme(
+            Array::any,
+            ["array", "predicate"],
+            ty_scheme,
+        )
     }
 
     pub fn all(self, f: Value) -> Result<bool, RuntimeError> {
@@ -251,7 +255,11 @@ impl Array {
             bool_type(),
             effects,
         ));
-        BinaryNativeFnNVFN::description_with_ty_scheme(Array::all, ["array", "function"], ty_scheme)
+        BinaryNativeFnNVFN::description_with_ty_scheme(
+            Array::all,
+            ["array", "predicate"],
+            ty_scheme,
+        )
     }
 
     pub fn iter(&self) -> ArrayIterator {
