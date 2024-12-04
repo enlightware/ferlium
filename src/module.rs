@@ -244,7 +244,7 @@ impl<'m> ModuleEnv<'m> {
 
 /// Format a type with a module environment
 pub trait FmtWithModuleEnv {
-    fn format_with<'a>(&'a self, env: &'a ModuleEnv<'a>) -> FormatWithModuleEnv<'_, Self> {
+    fn format_with<'a>(&'a self, env: &'a ModuleEnv<'a>) -> FormatWithModuleEnv<'a, Self> {
         FormatWithModuleEnv {
             value: self,
             data: env,

@@ -3,7 +3,7 @@ use crate::ast::{UstrSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pa
 use crate::value::{Value, LiteralValue};
 use crate::r#type::Type;
 use crate::parser_helpers::*;
-use crate::std::string::string_type;
+use crate::std::{logic::bool_type, math::{int_type, float_type}, array::array_type, string::string_type};
 use crate::containers::B;
 use crate::mutability::MutVal;
 
@@ -39,6 +39,58 @@ Function: Module = {
     <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrArgs> ")" <ar:@R> <body:Es<Block>> <r:@R> =>
         Module::new_with_function(name, args, span(al, ar), body, span(l, r), parse_doc_comments(doc)),
 }
+
+
+// Type
+
+pub Type: Type = {
+    PrimitiveType,
+    TupleType,
+    ArrayType,
+    RecordType,
+    VariantType,
+    "(" <t:Type> ")" => t,
+}
+
+PrimitiveType: Type = {
+    "(" ")" => Type::unit(),
+    "bool" => bool_type(),
+    "int" => int_type(),
+    "float" => float_type(),
+    "string" => string_type(),
+}
+
+TupleType: Type = {
+    "(" <f:Type> "," <r:Sep<Type, ",">> ")" => Type::tuple(ext_f(f, r))
+}
+
+ArrayType: Type = {
+    "[" <t:Type> "]" => array_type(t)
+}
+
+RecordType: Type = {
+    "{" <f:RecordTypeField> "}" => Type::record(vec![f]),
+    "{" <f:RecordTypeField> "," <r:Sep<RecordTypeField, ",">> "}" => Type::record(ext_f(f, r)),
+}
+
+RecordTypeField: (Ustr, Type) = {
+    <n:UIdentifier> ":" <t:Type> => (n, t),
+}
+
+VariantType: Type = {
+    <f:VariantTypeAlternative> <r:("|" <VariantTypeAlternative>)*> => Type::variant(ext_f(f, r)),
+}
+
+VariantTypeAlternative: (Ustr, Type) = {
+    <tag:UIdentifier> => (tag, Type::unit()),
+    <tag:UIdentifier> "(" <args:Sep<Type, ",">> ")" => (tag, if args.len() == 1 {
+        args[0]
+    } else {
+        Type::tuple(args)
+    }),
+}
+
+// Expressions
 
 // Expressions inspired from Rust: https://doc.rust-lang.org/reference/expressions.html
 // Also: https://github.com/bleibig/rust-grammar/blob/master/parser-lalr.y

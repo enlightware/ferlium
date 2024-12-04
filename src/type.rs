@@ -472,8 +472,9 @@ impl Type {
         TypeKind::Tuple(elements).store()
     }
 
-    pub fn record(fields: Vec<(Ustr, Self)>) -> Self {
+    pub fn record(mut fields: Vec<(Ustr, Self)>) -> Self {
         assert_unique_strings(&fields);
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
         TypeKind::Record(fields).store()
     }
 
@@ -831,7 +832,7 @@ impl TypeKind {
             f: &'a F,
             v: V,
         }
-        impl<'a, V: Clone, F: Fn(&TypeKind, V) -> V> TypeKindVisitor for Visitor<'a, V, F> {
+        impl<V: Clone, F: Fn(&TypeKind, V) -> V> TypeKindVisitor for Visitor<'_, V, F> {
             fn visit_end(&mut self, ty: &TypeKind) {
                 self.v = (self.f)(ty, self.v.clone());
             }

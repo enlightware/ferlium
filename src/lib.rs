@@ -42,6 +42,7 @@ pub mod value;
 pub use ide::Compiler;
 pub use location::Location;
 
+use r#type::Type;
 use type_scheme::DisplayStyle;
 pub use ustr::{ustr, Ustr};
 
@@ -61,6 +62,14 @@ impl ModuleAndExpr {
     pub fn new_just_module(module: Module) -> Self {
         Self { module, expr: None }
     }
+}
+
+/// Parse a type from a source code and return the corresponding Type.
+pub fn parse_type(src: &str) -> Result<Type, LocatedError> {
+    let mut errors = Vec::new();
+    parser::TypeParser::new()
+        .parse(&mut errors, src)
+        .map_err(describe_parse_error)
 }
 
 /// Parse a module and an expression (if any) from a source code and return the corresponding ASTs.
