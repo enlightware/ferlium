@@ -53,6 +53,7 @@ macro_rules! cached_ty {
 
 /// Something that is a type or part of it, and that can
 /// be instantiated and queried for its free type variables.
+
 pub trait TypeLike {
     /// Instantiate the type variables within this type with the given substitutions
     fn instantiate(&self, subst: &InstSubstitution) -> Self;
@@ -1010,7 +1011,16 @@ impl FmtWithModuleEnv for TypeKind {
         use TypeKind::*;
         match self {
             Variable(var) => write!(f, "{var}"),
-            Native(native) => native.fmt_with_module_env(f, env),
+            Native(native) => {
+                use crate::std::array::Array;
+                if native.bare_ty == bare_native_type::<Array>() {
+                    write!(f, "[")?;
+                    native.arguments[0].fmt_with_module_env(f, env)?;
+                    write!(f, "]")
+                } else {
+                    native.fmt_with_module_env(f, env)
+                }
+            }
             Variant(types) => {
                 for (i, (name, ty)) in types.iter().enumerate() {
                     if i > 0 {
@@ -1038,6 +1048,9 @@ impl FmtWithModuleEnv for TypeKind {
                         write!(f, ", ")?;
                     }
                     ty.fmt_with_module_env(f, env)?;
+                    if elements.len() == 1 {
+                        write!(f, ",")?;
+                    }
                 }
                 write!(f, ")")
             }
@@ -1270,6 +1283,11 @@ pub struct TypeNames {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        parse_type,
+        std::{new_module_with_prelude, new_std_module_env},
+    };
+
     use super::*;
     use ustr::ustr;
 
@@ -1359,5 +1377,32 @@ mod tests {
         // new types
         let _int = Type::new_type(ustr("Int"), _i32);
         let _other_int = Type::new_type(ustr("OtherInt"), _i32);
+    }
+
+    #[test]
+    fn parse_and_format() {
+        let std_env = new_std_module_env();
+        let current_module = new_module_with_prelude();
+        let mod_env = ModuleEnv::new(&current_module, &std_env);
+        let check = |name: &str| {
+            let ty = parse_type(name).unwrap();
+            let formatted = format!("{}", ty.format_with(&mod_env));
+            assert_eq!(name, formatted);
+        };
+        check("()");
+        check("bool");
+        check("int");
+        check("float");
+        check("string");
+        check("[int]");
+        check("[float]");
+        check("(bool,)");
+        check("(bool, bool)");
+        check("(bool, (string, int))");
+        check("{ a: int, b: float }");
+        check("{ a: int, b: { c: bool, d: string } }");
+        check("None | Some (int)");
+        check("Color (string) | RGB (int, int, int)");
+        check("[[(string, { age: int, name: string, nick: None | Some (string) })]]");
     }
 }
