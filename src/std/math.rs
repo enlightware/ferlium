@@ -17,6 +17,8 @@ pub fn int_type() -> Type {
     cached_primitive_ty!(isize)
 }
 
+pub type Int = isize;
+
 impl NativeDisplay for isize {
     fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
@@ -26,6 +28,8 @@ impl NativeDisplay for isize {
 pub fn float_type() -> Type {
     cached_primitive_ty!(NotNan<f64>)
 }
+
+pub type Float = NotNan<f64>;
 
 impl NativeDisplay for NotNan<f64> {
     fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
