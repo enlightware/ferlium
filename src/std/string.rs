@@ -54,6 +54,25 @@ impl String {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub fn sub_string(&self, start: isize, end: isize) -> Self {
+        let start = self.to_unsigned_index(start).min(self.len());
+        let end = self.to_unsigned_index(end).min(self.len());
+        if end <= start {
+            Self::new()
+        } else {
+            let new = self.0[start..end].to_string();
+            Self(Rc::new(new))
+        }
+    }
+
+    fn to_unsigned_index(&self, index: isize) -> usize {
+        if index < 0 {
+            (self.len() as isize + index) as usize
+        } else {
+            index as usize
+        }
+    }
 }
 
 impl FromStr for String {
@@ -159,6 +178,14 @@ pub fn add_to_module(to: &mut Module) {
                 new
             },
             ["string", "from", "to"],
+            no_effects(),
+        ),
+    );
+    to.functions.insert(
+        ustr("string_sub_string"),
+        TernaryNativeFnNNNN::description_with_default_ty(
+            |s: String, start: isize, end: isize| s.sub_string(start, end),
+            ["string", "start", "end"],
             no_effects(),
         ),
     );

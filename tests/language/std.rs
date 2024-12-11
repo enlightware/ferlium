@@ -195,3 +195,24 @@ fn string_replace() {
         string!("hello home and other home are cool")
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_sub_string() {
+    assert_eq!(run(r#"string_sub_string("hello", 0, 0)"#), string!(""));
+    assert_eq!(run(r#"string_sub_string("hello", 3, 0)"#), string!(""));
+    assert_eq!(run(r#"string_sub_string("hello", 0, 5)"#), string!("hello"));
+    assert_eq!(
+        run(r#"string_sub_string("hello", 0, 15)"#),
+        string!("hello")
+    );
+    assert_eq!(
+        run(r#"string_sub_string("hello", -5, 5)"#),
+        string!("hello")
+    );
+    assert_eq!(run(r#"string_sub_string("hello", 0, 4)"#), string!("hell"));
+    assert_eq!(run(r#"string_sub_string("hello", 0, -1)"#), string!("hell"));
+    assert_eq!(run(r#"string_sub_string("hello", 1, 4)"#), string!("ell"));
+    assert_eq!(run(r#"string_sub_string("hello", 1, -1)"#), string!("ell"));
+    assert_eq!(run(r#"string_sub_string("hello", -4, -2)"#), string!("el"));
+}
