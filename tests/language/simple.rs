@@ -75,7 +75,7 @@ fn equalities() {
     assert_eq!(run("true != false"), bool!(true));
     assert_eq!(run("() == ()"), bool!(true));
     assert_eq!(run("() != ()"), bool!(false));
-    fail_compilation("() == (1,)").expect_is_not_subtype("(int)", "()");
+    fail_compilation("() == (1,)").expect_is_not_subtype("(int,)", "()");
     assert_eq!(run("(1,) == (1,)"), bool!(true));
     assert_eq!(run("(1,) != (1,)"), bool!(false));
     assert_eq!(run("(1,) == (2,)"), bool!(false));
