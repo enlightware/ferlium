@@ -17,23 +17,18 @@ use rustyline::{config::Configurer, error::ReadlineError};
 
 use painturscript::eval::EvalCtx;
 
-fn start_of_line_of(src: &str, pos: usize) -> usize {
-    if pos >= src.len() {
-        // FIXME: handle better cross-input error references
-        return src.len();
-    }
-    src[..pos].rfind('\n').map_or(0, |i| i + 1)
-}
-
 fn span_range(span: Location) -> std::ops::Range<usize> {
     span.start()..span.end()
+}
+
+fn span_union_range(span1: Location, span2: Location) -> std::ops::Range<usize> {
+    span1.start().min(span2.start())..span1.end().max(span2.end())
 }
 
 fn pretty_print_parse_errors(src: &str, errors: &[LocatedError]) {
     use ariadne::{Color, Report, ReportKind, Source};
     for (text, span) in errors {
-        let offset = start_of_line_of(src, span.start());
-        Report::build(ReportKind::Error, "input", offset)
+        Report::build(ReportKind::Error, ("input", span_range(*span)))
             .with_message(format!("Parse error: {text}.",))
             .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
             .finish()
@@ -49,9 +44,8 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
     let src = data.1;
     match error.deref() {
         SymbolNotFound(span) => {
-            let offset = start_of_line_of(src, span.start());
             let name = &data.1[span_range(*span)];
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span_range(*span)))
                 .with_message(format!(
                     "Variable or function {} not found.",
                     name.fg(Color::Blue)
@@ -62,9 +56,8 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         FunctionNotFound(span) => {
-            let offset = start_of_line_of(src, span.start());
             let name = &data.1[span_range(*span)];
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span_range(*span)))
                 .with_message(format!("Function {} not found.", name.fg(Color::Blue)))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
@@ -77,8 +70,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             got,
             got_span,
         } => {
-            let offset = start_of_line_of(src, expected_span.start());
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span_range(*expected_span)))
                 .with_message(format!(
                     "Wrong number of arguments: expected {} but found {}.",
                     expected.fg(Color::Blue),
@@ -95,10 +87,9 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
         MustBeMutable(cur_span, reason_span, ctx) => {
             let (cur_span, reason_span) =
                 resolve_must_be_mutable_ctx(*cur_span, *reason_span, *ctx, src);
-            let min_pos = cur_span.start().min(reason_span.start());
-            let offset = start_of_line_of(src, min_pos);
+            let span = span_union_range(cur_span, reason_span);
             let cur = &data.1[span_range(cur_span)];
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Expression {} must be mutable.",
                     cur.fg(Color::Blue),
@@ -119,9 +110,8 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         IsNotSubtype(cur, cur_span, exp, exp_span) => {
-            let min_pos = cur_span.start().min(exp_span.start());
-            let offset = start_of_line_of(src, min_pos);
-            Report::build(ReportKind::Error, "input", offset)
+            let span = span_union_range(*cur_span, *exp_span);
+            Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Type {} is incompatible with type {} (i.e. not a sub-type).",
                     cur.format_with(env).fg(Color::Magenta),
@@ -134,8 +124,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         UnboundTypeVar { ty_var, ty, span } => {
-            let offset = start_of_line_of(src, span.start());
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span_range(*span)))
                 .with_message(format!(
                     "Unbound type variable {} in type {}.",
                     ty_var.fg(Color::Blue),
@@ -152,9 +141,9 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             tuple_length,
             tuple_span,
         } => {
-            let offset = start_of_line_of(src, tuple_span.start());
+            let span = span_union_range(*index_span, *tuple_span);
             let colored_index = (*index).fg(Color::Blue);
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!("Tuple index {} is out of bounds.", colored_index))
                 .with_label(
                     Label::new(("input", span_range(*index_span)))
@@ -176,18 +165,18 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
         }
         InvalidTupleProjection {
             tuple_ty: expr_ty,
-            tuple_span: expr_span,
+            tuple_span,
             index_span,
         } => {
-            let offset = start_of_line_of(src, expr_span.start());
+            let span = span_union_range(*tuple_span, *index_span);
             let colored_ty = expr_ty.format_with(env).fg(Color::Blue);
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Type {} cannot be projected as a tuple.",
                     colored_ty
                 ))
                 .with_label(
-                    Label::new(("input", span_range(*expr_span)))
+                    Label::new(("input", span_range(*tuple_span)))
                         .with_message(format!("This expression has type {}.", colored_ty))
                         .with_color(Color::Blue),
                 )
@@ -205,22 +194,22 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         DuplicatedRecordField {
-            first_occurrence: first_occurrence_span,
-            second_occurrence: second_occurrence_span,
+            first_occurrence,
+            second_occurrence,
         } => {
-            let offset = start_of_line_of(src, first_occurrence_span.start());
-            let name = &data.1[span_range(*first_occurrence_span)];
-            Report::build(ReportKind::Error, "input", offset)
+            let span = span_union_range(*first_occurrence, *second_occurrence);
+            let name = &data.1[span_range(*first_occurrence)];
+            Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Duplicated field \"{}\" in record.",
                     name.fg(Color::Blue)
                 ))
                 .with_label(
-                    Label::new(("input", span_range(*first_occurrence_span)))
+                    Label::new(("input", span_range(*first_occurrence)))
                         .with_color(Color::Blue),
                 )
                 .with_label(
-                    Label::new(("input", span_range(*second_occurrence_span)))
+                    Label::new(("input", span_range(*second_occurrence)))
                         .with_color(Color::Blue),
                 )
                 .finish()
@@ -233,11 +222,10 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             b_type,
             b_span,
         } => {
-            let min_pos = a_span.start().min(b_span.start());
-            let offset = start_of_line_of(src, min_pos);
+            let span = span_union_range(*a_span, *b_span);
             let a_ty = a_type.adt_kind().fg(Color::Blue);
             let b_ty = b_type.adt_kind().fg(Color::Magenta);
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Data type {} is different than data type {}.",
                     a_ty, b_ty
@@ -261,12 +249,11 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             b_span,
             fn_span,
         } => {
-            let min_pos = a_span.start().min(b_span.start());
-            let offset = start_of_line_of(src, min_pos);
+            let span = span_union_range(*a_span, *b_span);
             let a_name = &data.1[span_range(*a_span)];
             let b_name = &data.1[span_range(*b_span)];
             let fn_name = &data.1[span_range(*fn_span)];
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Mutable paths {} and {} overlap when calling {}.",
                     a_name.fg(Color::Blue),
@@ -284,10 +271,10 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             var_span,
             string_span,
         } => {
-            let offset = start_of_line_of(src, string_span.start());
+            let span = span_union_range(*var_span, *string_span);
             let var_name = &data.1[span_range(*var_span)];
             let string = &data.1[span_range(*string_span)];
-            Report::build(ReportKind::Error, "input", offset)
+            Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Undefined variable {} used in string formatting {}.",
                     var_name.fg(Color::Blue),
