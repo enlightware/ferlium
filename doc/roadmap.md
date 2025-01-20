@@ -2,21 +2,22 @@
 
 ### Language features
 
+- Type classes / traits
 - As casting
-- Type classes
+- Tuple and record deconstruction on assignation
 - Private module members
-- Tuple deconstruction on assignation
-- Recursive types inference
+- Recursive types, with inference
 - Co-routine/async
-- Recursive types
 - Generalised match following Maranget 2008
+- Complex type instantiation
 - User-defined closures
 - Object-oriented style function calls
 - Early return and breaks
 - Short circuiting logical operators
 - Unit testing with mock function generation through annotations
+- Compiler plugin for compile-time code validation (somehow similar to Rust's procedural macro system)
 
-### Optional language features
+### Language features under consideration
 
 - Recursive modules
 
@@ -28,16 +29,9 @@
 
 - Add context to IsNotSubtype error and write some more useful error messages when match exhaustiveness fails
 - Advanced optimisations: generic partial evaluation (constant propagation)
-- IR as control flow graph
+- IR as control-flow graph
 - Just in time compilation
 
 ### IDE features
 
 - Show location of execution error
-
-### Next tasks
-
-
-### Open questions
-
-- Should integer overflow be caught?
