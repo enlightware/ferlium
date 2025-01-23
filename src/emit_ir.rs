@@ -160,7 +160,7 @@ pub fn emit_module(
 
         // Fifth pass, get the remaining constraints and collect the free type variables.
         let all_constraints = ty_inf.constraints();
-        let mut used_constraints: HashSet<&PubTypeConstraint> = HashSet::new();
+        let mut used_constraints: HashSet<PubTypeConstraintPtr> = HashSet::new();
         for ModuleFunction { name, .. } in functions() {
             let descr = output.functions.get_mut(&name.0).unwrap();
             let mut code = descr.code.borrow_mut();
@@ -178,7 +178,7 @@ pub fn emit_module(
                 .filter(|c| {
                     let ptr = constraint_ptr(c);
                     if related_constraints.contains(&ptr) {
-                        used_constraints.insert(c);
+                        used_constraints.insert(ptr);
                     }
                     retained_constraints.contains(&ptr)
                 })
@@ -213,7 +213,7 @@ pub fn emit_module(
         // Safety check: make sure that there are no unused constraints.
         let unused_constraints = all_constraints
             .iter()
-            .filter(|c| !used_constraints.contains(c) && !c.is_type_has_variant())
+            .filter(|c| !used_constraints.contains(&constraint_ptr(c)) && !c.is_type_has_variant())
             .collect::<Vec<_>>();
         if !unused_constraints.is_empty() {
             let module_env = ModuleEnv::new(&output, others);
