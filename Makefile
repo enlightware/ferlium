@@ -11,3 +11,6 @@ test: test-local test-wasm
 
 repl:
 	RUST_BACKTRACE=1 RUST_LOG=painturscript=debug cargo run --example pscript
+
+update-license-headers:
+	licensure --in-place `find . -name "*.rs"`
