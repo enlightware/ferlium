@@ -5,7 +5,7 @@ test-local:
 	RUST_LOG=ferlium=debug cargo nextest run
 
 test-wasm:
-	WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --headless --test language --lib
+	WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib
 
 test: test-local test-wasm
 

@@ -41,7 +41,7 @@ jobs:
         run: cargo install wasm-pack
 
       - name: Run WASM tests
-        run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --headless --test language --lib
+        run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib
 
   # web-build:
   #   name: Web IDE Build & Test
