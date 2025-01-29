@@ -11,6 +11,14 @@ Functions always return values.
 Ferlium aims at being lightweight and interfacing nicely with Rust.
 In particular, it tries hard not to duplicate existing Rust types and functions when not strictly necessary (e.g., it doesn't have a boolean type distinct of Rust's `bool`).
 
+
+## Getting started
+
+We provide a REPL to play with the language:
+```
+cargo run --example ferlium
+```
+
 ## Key features
 
 ### For users
