@@ -1,0 +1,53 @@
+excludes:
+  - \.gitignore
+  - .*lock
+  - \.git/.*
+  - \.licensure\.yml
+  - LICENSE
+  - .*\.(md|rst|txt)
+
+licenses:
+  - files: any
+    ident: Apache-2.0
+    authors:
+      - name: Enlightware GmbH
+    auto_template: true
+
+comments:
+  - extensions:
+      - js
+      - ts
+      - rs
+      - go
+    commenter:
+      type: line
+      comment_char: "//"
+      trailing_lines: 0
+  - extensions:
+      - css
+      - cpp
+      - c
+    commenter:
+      type: block
+      start_block_char: "/*\n"
+      end_block_char: "*/"
+      per_line_char: "*"
+      trailing_lines: 0
+  - extension: html
+    commenter:
+      type: block
+      start_block_char: "<!--\n"
+      end_block_char: "-->"
+  - extensions:
+      - el
+      - lisp
+    commenter:
+      type: line
+      comment_char: ";;;"
+      trailing_lines: 0
+  - extension: any
+    commenter:
+      type: line
+      comment_char: '#'
+      trailing_lines: 0
+
