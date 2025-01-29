@@ -9,7 +9,6 @@
 use std::ops::Deref;
 
 use ariadne::Label;
-use itertools::Itertools;
 use ferlium::emit_ir::{emit_expr, emit_module};
 use ferlium::error::{
     resolve_must_be_mutable_ctx, InternalCompilationError, InternalCompilationErrorImpl,
@@ -21,6 +20,7 @@ use ferlium::std::{new_module_with_prelude, new_std_module_env};
 use ferlium::typing_env::Local;
 use ferlium::Location;
 use ferlium::{parse_module_and_expr, SubOrSameType};
+use itertools::Itertools;
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 

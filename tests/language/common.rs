@@ -115,10 +115,7 @@ pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationErr
     other_modules.insert("testing".into(), Rc::new(testing_module()));
     other_modules.insert("effects".into(), Rc::new(test_effect_module()));
     other_modules.insert("props".into(), Rc::new(test_property_module()));
-    Ok((
-        ferlium::compile(src, &other_modules, &[])?,
-        other_modules,
-    ))
+    Ok((ferlium::compile(src, &other_modules, &[])?, other_modules))
 }
 
 /// Compile the src and return its module and expression
