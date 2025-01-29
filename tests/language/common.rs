@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use painturscript::{
+use ferlium::{
     effects::{effect, effects, no_effects, PrimitiveEffect},
     error::{CompilationError, RuntimeError},
     eval::EvalResult,
@@ -116,7 +116,7 @@ pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationErr
     other_modules.insert("effects".into(), Rc::new(test_effect_module()));
     other_modules.insert("props".into(), Rc::new(test_property_module()));
     Ok((
-        painturscript::compile(src, &other_modules, &[])?,
+        ferlium::compile(src, &other_modules, &[])?,
         other_modules,
     ))
 }
@@ -197,7 +197,7 @@ macro_rules! bool_a {
         Value::native(Array::new())
     };
     [$($elem:expr),+ $(,)?] => {
-        Value::native(painturscript::std::array::Array::from_vec(vec![
+        Value::native(ferlium::std::array::Array::from_vec(vec![
             $(Value::native::<bool>($elem)),+
         ]))
     };
@@ -218,7 +218,7 @@ macro_rules! int_a {
         Value::native(Array::new())
     };
     [$($elem:expr),+ $(,)?] => {
-        Value::native(painturscript::std::array::Array::from_vec(vec![
+        Value::native(ferlium::std::array::Array::from_vec(vec![
             $(Value::native::<isize>($elem)),+
         ]))
     };
@@ -242,6 +242,6 @@ macro_rules! int_tuple {
 macro_rules! string {
     ($s:expr) => {{
         use std::str::FromStr;
-        Value::native(painturscript::std::string::String::from_str($s).unwrap())
+        Value::native(ferlium::std::string::String::from_str($s).unwrap())
     }};
 }

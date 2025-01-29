@@ -8,7 +8,7 @@
 //
 use std::fmt;
 
-use painturscript::{
+use ferlium::{
     effects::no_effects,
     function::{BinaryNativeFnNNN, FunctionRef},
     module::{FmtWithModuleEnv, ModuleEnv, Modules},

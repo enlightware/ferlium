@@ -9,7 +9,7 @@
 use test_log::test;
 
 use super::common::{compile, fail_compilation};
-use painturscript::effects::*;
+use ferlium::effects::*;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

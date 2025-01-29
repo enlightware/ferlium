@@ -11,7 +11,7 @@ mod common;
 use test_log::test;
 
 use common::run;
-use painturscript::value::Value;
+use ferlium::value::Value;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

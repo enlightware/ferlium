@@ -2,7 +2,7 @@ install-deps:
 	cargo install cargo-nextest --locked
 
 test-local:
-	RUST_LOG=painturscript=debug cargo nextest run
+	RUST_LOG=ferlium=debug cargo nextest run
 
 test-wasm:
 	wasm-pack test --node --test language --lib
@@ -10,7 +10,7 @@ test-wasm:
 test: test-local test-wasm
 
 repl:
-	RUST_BACKTRACE=1 RUST_LOG=painturscript=debug cargo run --example pscript
+	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium
 
 update-license-headers:
 	licensure --in-place `find . -name "*.rs"`

@@ -9,7 +9,7 @@
 use test_log::test;
 
 use super::common::{fail_compilation, run, unit};
-use painturscript::{error::MutabilityMustBeWhat, value::Value};
+use ferlium::{error::MutabilityMustBeWhat, value::Value};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

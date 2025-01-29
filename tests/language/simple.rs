@@ -11,7 +11,7 @@ use test_log::test;
 use super::common::{
     fail_compilation, fail_run, get_property_value, run, set_property_value, unit,
 };
-use painturscript::{
+use ferlium::{
     error::{MutabilityMustBeWhat, RuntimeError},
     std::array::Array,
     value::Value,

@@ -11,7 +11,7 @@ use test_log::test;
 use crate::effects::test_mod as test_mod_for_effects;
 
 use super::common::{fail_compilation, run};
-use painturscript::{
+use ferlium::{
     effects::{effect, no_effects, PrimitiveEffect},
     std::array::Array,
     value::Value,

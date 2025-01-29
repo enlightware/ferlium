@@ -10,21 +10,21 @@ use std::ops::Deref;
 
 use ariadne::Label;
 use itertools::Itertools;
-use painturscript::emit_ir::{emit_expr, emit_module};
-use painturscript::error::{
+use ferlium::emit_ir::{emit_expr, emit_module};
+use ferlium::error::{
     resolve_must_be_mutable_ctx, InternalCompilationError, InternalCompilationErrorImpl,
     LocatedError, MutabilityMustBeWhat,
 };
-use painturscript::format::FormatWith;
-use painturscript::module::{FmtWithModuleEnv, ModuleEnv};
-use painturscript::std::{new_module_with_prelude, new_std_module_env};
-use painturscript::typing_env::Local;
-use painturscript::Location;
-use painturscript::{parse_module_and_expr, SubOrSameType};
+use ferlium::format::FormatWith;
+use ferlium::module::{FmtWithModuleEnv, ModuleEnv};
+use ferlium::std::{new_module_with_prelude, new_std_module_env};
+use ferlium::typing_env::Local;
+use ferlium::Location;
+use ferlium::{parse_module_and_expr, SubOrSameType};
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 
-use painturscript::eval::EvalCtx;
+use ferlium::eval::EvalCtx;
 
 fn span_range(span: Location) -> std::ops::Range<usize> {
     span.start()..span.end()
@@ -376,7 +376,7 @@ fn main() {
     // Logging
     env_logger::init();
 
-    // Painturscript emission and evaluation contexts
+    // ferlium emission and evaluation contexts
     let other_modules = new_std_module_env();
     let mut module = new_module_with_prelude();
     let mut locals: Vec<Local> = vec![];
@@ -385,7 +385,7 @@ fn main() {
     // REPL loop
     let mut rl = DefaultEditor::new().unwrap();
     rl.set_max_history_size(256).unwrap();
-    let history_filename = "pscript_history.txt";
+    let history_filename = "ferlium_history.txt";
     if rl.load_history(history_filename).is_err() {
         println!("No previous history.");
     }

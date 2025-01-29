@@ -15,7 +15,7 @@ use std::{
 
 use ustr::Ustr;
 
-use painturscript_macros::declare_native_fn_aliases;
+use ferlium_macros::declare_native_fn_aliases;
 
 use crate::{
     effects::EffType,
@@ -489,7 +489,7 @@ macro_rules! n_ary_native_fn {
 // - FN: native, fallible
 // - FV: value, fallible
 
-// Note: the proc macro declare_native_fn_aliases defined in painturscript_macros generates
+// Note: the proc macro declare_native_fn_aliases defined in ferlium_macros generates
 // typedefs with the combinations of aliases.
 
 n_ary_native_fn!(NullaryNativeFn);
