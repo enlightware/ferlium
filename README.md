@@ -1,6 +1,7 @@
 # Ferlium
 
 [![Build Status][ci-badge]][ci-url]
+
 [ci-badge]: https://github.com/enlightware/ferlium/actions/workflows/ci.yml/badge.svg
 [ci-url]: https://github.com/enlightware/ferlium/actions
 
