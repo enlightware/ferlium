@@ -1,5 +1,7 @@
 # Ferlium
 
+Created by [Enlightware GmbH](https://enlightware.ch)
+
 **Our mission: To bring the power of Haskell to the users of Python and Javascript**
 
 Ferlium is a small functional scripting language with generics and static typing (à la Standard ML).
@@ -43,7 +45,7 @@ cargo run --example ferlium
 
 ### Scope and non-scope
 
-The [issues](issues?q=is%3Aissue state%3Aopen label%3Aenhancement) list the planned features.
+The [issues](https://github.com/enlightware/ferlium/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement) list the planned features.
 
 The following features are out of scope:
 * Dynamic dispatch
