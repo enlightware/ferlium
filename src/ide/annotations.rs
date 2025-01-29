@@ -281,7 +281,7 @@ fn is_arg_name_suffix_of_unary_fn_name(function_name: &str, arity: usize, arg_na
                     .is_char_boundary(at)
                     .then(|| function_name.split_at(at))
             })
-            .map_or(false, |(prefix, suffix)| {
+            .is_some_and(|(prefix, suffix)| {
                 suffix.eq_ignore_ascii_case(arg_name) && prefix.ends_with('_')
             })
 }
