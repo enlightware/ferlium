@@ -19,6 +19,9 @@ jobs:
       - name: Set up Rust
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
 
+      - name: Set up cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -26,7 +29,7 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Build
-        run: cargo build --verbose
+        run: cargo build
 
       - name: Install cargo-nextest
         run: cargo install cargo-nextest
@@ -38,7 +41,7 @@ jobs:
         run: cargo install wasm-pack
 
       - name: Run WASM tests
-        run: wasm-pack test --node --test language --lib
+        run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --headless --test language --lib
 
   # web-build:
   #   name: Web IDE Build & Test
