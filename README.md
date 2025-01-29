@@ -1,5 +1,9 @@
 # Ferlium
 
+[![Build Status][ci-badge]][ci-url]
+[ci-badge]: https://github.com/enlightware/ferlium/actions/workflows/ci.yml/badge.svg
+[ci-url]: https://github.com/enlightware/ferlium/actions
+
 Created by [Enlightware GmbH](https://enlightware.ch)
 
 **Our mission: To bring the power of Haskell to the users of Python and Javascript**
