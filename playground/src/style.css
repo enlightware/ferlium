@@ -1,0 +1,29 @@
+@font-face {
+	font-family: 'Roboto';
+	font-style: normal;
+	font-weight: 400;
+	src: local('Roboto'), local('Roboto-Regular'), url('assets/roboto-regular.woff2') format('woff2');
+}
+@font-face {
+	font-family: JuliaMono;
+	src: url("assets/JuliaMono-Regular.woff2") format("woff2");
+	text-rendering: optimizeLegibility;
+}
+
+:root {
+	font-family: Roboto;
+	font-size: 16px;
+}
+
+body {
+	margin: 0;
+}
+
+#app {
+	margin: 0;
+	height: 100vh;
+	height: 100svh;
+	width: 100vw;
+	display: flex;
+	flex-direction: column;
+}

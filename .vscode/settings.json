@@ -42,5 +42,5 @@
 	"rust-analyzer.linkedProjects": [
 		"./Cargo.toml"
 	],
-	"makefile.configureOnOpen": false
+	"makefile.configureOnOpen": false,
 }

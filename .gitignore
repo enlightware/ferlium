@@ -2,3 +2,7 @@
 /scratch
 Cargo.lock
 ferlium_history.txt
+playground/node_modules/
+playground/pnpm-lock.yaml
+playground/.eslintcache
+playgrounddist/

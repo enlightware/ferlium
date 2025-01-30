@@ -1,0 +1,236 @@
+@tokens {
+    Identifier { $[a-zA-Z_]$[a-zA-Z0-9_]* }
+    Integer { $[0-9]$[0-9]* }
+    String { 'f'? '"' (!["\\] | "\\" _)* '"' }
+    Boolean { "true" | "false" }
+    LineComment[isolate] { "//" ![\n]* }
+    BlockComment[isolate] { "/*" blockCommentRest }
+    blockCommentRest { ![*] blockCommentRest | "*" blockCommentAfterStar }
+    blockCommentAfterStar { "/" | "*" blockCommentAfterStar | ![/*] blockCommentRest }
+    whitespace { @whitespace+ }
+    CompareOp { "==" | "!="| ">"| ">="| "<" | "<=" }
+
+    "[" "]" "{" "}" "(" ")"
+    ";" ":" "::" ","
+    "=" "=>" ".."
+
+    @precedence { LineComment, BlockComment, "/" }
+    @precedence { Boolean, String, Identifier }
+}
+
+kw<term> { @specialize[@name={term}]<Identifier, term> }
+
+@skip { whitespace | LineComment | BlockComment }
+
+@top ModuleAndExpr {
+    Module extraExpr?
+}
+
+Module {
+    functionOrType*
+}
+
+functionOrType {
+    Function
+}
+
+Function {
+    kw<'fn'> Identifier '(' identifiersOptComma ')' Block
+}
+
+extraExpr {
+    stmt* expr
+}
+
+expr {
+    logicOrExpr
+    | Assignment
+    | Return
+    | Abstraction
+}
+
+Assignment {
+    logicOrExpr '=' expr
+}
+
+Return {
+    kw<'return'> expr
+}
+
+Abstraction {
+    '|' identifiersOptComma '|' expr
+    | '||' expr
+}
+
+logicOrExpr {
+    logicAndExpr
+    | logicOrExpr LogicOp { kw<'or'> } logicAndExpr
+    | logicOrExpr LogicOp { '||' } logicAndExpr
+}
+
+logicAndExpr {
+    compExpr
+    | logicAndExpr LogicOp { kw<'and'> } compExpr
+    | logicAndExpr LogicOp { '&&' } compExpr
+}
+
+compExpr {
+    addExpr
+    | compExpr CompareOp addExpr
+}
+
+addExpr {
+    mulExpr
+    | addExpr ArithOp { '+' | '-' } mulExpr
+}
+
+mulExpr {
+    unaryExpr
+    | mulExpr ArithOp { '*' | '/' | '%'} unaryExpr
+}
+
+unaryExpr {
+    suffixExpr
+    | LogicOp { kw<'not'> } unaryExpr
+    | LogicOp { '!' } unaryExpr
+    | ArithOp { '-' } unaryExpr
+}
+
+suffixExpr {
+    atomExpr
+    | Projection
+    | Indexing
+    | Application
+}
+
+Projection {
+    suffixExpr '.' Identifier
+    | suffixExpr '.' Integer
+}
+
+Indexing {
+    suffixExpr '[' expr ']'
+}
+
+Application {
+    suffixExpr '(' exprArgsOptComma ')'
+}
+
+atomExpr {
+    parExpr
+    | Path
+    | PropertyPath
+    | For
+    | If
+    | Match
+    | Literal
+    | Tuple
+    | Array
+    | Record
+    | Block
+}
+
+parExpr {
+    '(' expr ')'
+}
+
+If {
+    kw<'if'> expr Block kw<'else'> If
+    | kw<'if'> expr Block (kw<'else'> Block)?
+}
+
+Match {
+    kw<'match'> expr '{' matchArgsOptComma '}'
+    | kw<'match'> expr '{' matchArgs ',' kw<'_'> '=>' exprOptComma '}'
+}
+
+For {
+    kw<'for'> Identifier kw<'in'> expr '..' expr Block
+}
+
+Tuple {
+    '(' ')'
+    | '(' tupleArgs ')'
+}
+
+tupleArgs {
+    expr ',' exprArgsOptComma
+}
+
+Array {
+    '[' exprArgsOptComma ']'
+}
+
+Record {
+    '{' RecordField '}'
+    | '{' RecordField ',' (RecordField ',')* RecordField? '}'
+}
+
+RecordField {
+    Identifier ':' expr
+}
+
+exprOptComma {
+    expr ','
+    | expr
+}
+
+identifiersOptComma {
+    (Identifier ',')* Identifier?
+}
+
+exprArgsOptComma {
+    (expr ',')* expr?
+}
+
+matchArgsOptComma {
+    matchArgs ','
+    | matchArgs
+}
+
+matchArgs {
+    matchArgs ',' MatchBranch
+    | MatchBranch
+}
+
+MatchBranch {
+    Pattern '=>' expr
+}
+
+Pattern {
+    Literal
+    | Identifier
+    | Identifier '(' identifiersOptComma ')'
+}
+
+PropertyPath {
+    '@' Path '.' Identifier
+}
+
+Path {
+    (Identifier '::')* Identifier
+}
+
+Literal {
+    Integer
+    | String
+    | Boolean
+}
+
+Block {
+    "{" stmt* expr "}"
+    | "{" stmt* "}"
+}
+
+stmt {
+    Let
+    | exprStmt
+}
+
+Let {
+    kw<'let'> kw<'mut'>? Identifier '=' expr ';'
+}
+
+exprStmt {
+    expr ';'
+}
