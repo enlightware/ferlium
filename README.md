@@ -26,8 +26,6 @@ We provide a REPL to play with the language:
 cargo run --example ferlium
 ```
 
-A high-level description of the compiler architecture can be found in the [architecture document](doc/architecture.md).
-
 ## Key features
 
 ### For users

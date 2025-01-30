@@ -3,6 +3,20 @@
 Welcome! Thank you for your interest in Ferlium.
 Before contributing, please review the guidelines below.
 
+## Understanding the project
+
+A high-level description of the compiler architecture can be found in the [architecture document](doc/architecture.md).
+
+## Tracking the progress
+
+The project is managed using GitHub projects.
+The tasks being worked or to be worked next are listed in the [Ferlium next project board](https://github.com/orgs/enlightware/projects/1).
+
+
+## Contributing
+
+Contribution is done through pull requests.
+
 ## Contributor License Agreement (CLA)
 
 Before we can accept your contributions, you need to sign a [Contributor License Agreement (CLA)](https://gist.github.com/stephanemagnenat/687894020a6df8d9e1ebda4514987abe).
