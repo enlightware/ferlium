@@ -4,5 +4,6 @@ Cargo.lock
 ferlium_history.txt
 playground/node_modules/
 playground/pnpm-lock.yaml
+playground/package-lock.json
 playground/.eslintcache
-playgrounddist/
+playground/dist/

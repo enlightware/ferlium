@@ -3,6 +3,11 @@ name = "ferlium_macros"
 version = "0.1.0"
 publish = false
 edition = "2021"
+license = "Apache-2.0"
+description = "Procmacro for ferlium."
+authors = ["Enlightware GmbH"]
+rust-version = "1.80"
+
 
 [lib]
 proc-macro = true

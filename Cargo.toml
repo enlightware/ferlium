@@ -1,11 +1,14 @@
 [workspace]
-members = [ ".", "ferlium_macros" ]
+members = [ ".", "ferlium_macros", "playground/script-api" ]
 
 [package]
 name = "ferlium"
 version = "0.1.0"
 publish = false
 edition = "2021"
+license = "Apache-2.0"
+description = "Our mission: To bring the power of Haskell to the users of Python and Javascript."
+authors = ["Enlightware GmbH"]
 rust-version = "1.80"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

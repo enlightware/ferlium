@@ -14,3 +14,4 @@ repl:
 
 update-license-headers:
 	licensure --in-place `find . -name "*.rs"`
+	licensure --in-place `find playground/src -name "*.ts"` playground/*.ts

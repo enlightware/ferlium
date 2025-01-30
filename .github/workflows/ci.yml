@@ -17,7 +17,7 @@ jobs:
       - name: Set up Rust
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
 
-      - name: Set up cache
+      - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
@@ -48,27 +48,27 @@ jobs:
         if: runner.os == 'macOS'
         run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --safari --headless --test language --lib
 
-  # web-build:
-  #   name: Web IDE Build & Test
-  #   runs-on: ubuntu-latest
-  #   defaults:
-  #     run:
-  #       working-directory: ide
+  build_playground:
+    name: Build and deploy playground
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playground
 
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  #     - name: Set up Node.js
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: 18
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
 
-  #     - name: Install dependencies
-  #       run: npm ci
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
 
-  #     - name: Build IDE
-  #       run: npm run build
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
 
-  #     - name: Run IDE tests
-  #       run: npm test
+      - name: Build Playground
+        run: make build

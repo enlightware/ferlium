@@ -7,6 +7,8 @@ Before contributing, please review the guidelines below.
 
 A high-level description of the compiler architecture can be found in the [architecture document](doc/architecture.md).
 
+We use `Makefile`s to store the commonly-used commands.
+
 ## Tracking the progress
 
 The project is managed using issues and GitHub projects.
