@@ -9,13 +9,16 @@ A high-level description of the compiler architecture can be found in the [archi
 
 ## Tracking the progress
 
-The project is managed using GitHub projects.
-The tasks being worked or to be worked next are listed in the [Ferlium next project board](https://github.com/orgs/enlightware/projects/1).
+The project is managed using issues and GitHub projects.
+The tasks being worked on or to be worked on next are listed in the [Ferlium next project board](https://github.com/orgs/enlightware/projects/1).
 
 
 ## Contributing
 
+Technical contributions are welcome.
 Contribution is done through pull requests.
+
+You can live discuss with us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com)
 
 ## Contributor License Agreement (CLA)
 

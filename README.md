@@ -26,6 +26,8 @@ We provide a REPL to play with the language:
 cargo run --example ferlium
 ```
 
+You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com)
+
 ## Key features
 
 ### For users
