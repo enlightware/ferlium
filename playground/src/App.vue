@@ -6,6 +6,7 @@ import SimpleButton from './components/SimpleButton.vue';
 import ConsoleOutput from './components/ConsoleOutput.vue';
 import { demoCodes } from './demo-codes';
 import { defined } from './types';
+import { onMounted } from 'vue';
 
 const demoTitles = demoCodes.map(([title, _]) => title);
 const editor = ref<typeof CodeEditor>();
@@ -29,6 +30,15 @@ function runCode() {
 function setRunAvailability(status: boolean) {
 	isRunDisabled.value = !status;
 }
+
+onMounted(() => {
+	const queryString = window.location.search;
+	const urlParams = new URLSearchParams(queryString);
+	const code = urlParams.get('code');
+	if (code !== null) {
+		editor.value.setText(code);
+	}
+});
 </script>
 
 <template>
