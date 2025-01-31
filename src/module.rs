@@ -188,31 +188,38 @@ impl Module {
         self.get_member(name, others, &|name, module| {
             module.functions.get(&ustr(name))
         })
+        .map(|(_, f)| f)
     }
 
     /// Look-up a member by name in this module or in any of the modules this module uses.
+    /// Returns the module name if the member is from another module.
+    /// The getter function is used to get the member from a module.
     pub fn get_member<'a, T>(
         &'a self,
         name: &'a str,
         others: &'a Modules,
         getter: &impl Fn(&'a str, &'a Module) -> Option<T>,
-    ) -> Option<T> {
-        getter(name, self).or_else(|| {
-            self.uses.iter().find_map(|use_module| match use_module {
-                Use::All(module) => {
-                    let module_ref = others.get(module)?;
-                    getter(name, module_ref)
-                }
-                Use::Some(use_some) => {
-                    if use_some.symbols.contains(&ustr(name)) {
-                        let module_ref = others.get(&use_some.module)?;
-                        getter(name, module_ref)
-                    } else {
-                        None
+    ) -> Option<(Option<Ustr>, T)> {
+        getter(name, self).map_or_else(
+            || {
+                self.uses.iter().find_map(|use_module| match use_module {
+                    Use::All(module) => {
+                        let module_ref = others.get(module)?;
+                        getter(name, module_ref).map(|t| (Some(*module), t))
                     }
-                }
-            })
-        })
+                    Use::Some(use_some) => {
+                        if use_some.symbols.contains(&ustr(name)) {
+                            let module = use_some.module;
+                            let module_ref = others.get(&module)?;
+                            getter(name, module_ref).map(|t| (Some(module), t))
+                        } else {
+                            None
+                        }
+                    }
+                })
+            },
+            |t| Some((None, t)),
+        )
     }
 
     /// Look-up a function by name in this module only.

@@ -259,17 +259,17 @@ impl TypeInference {
             FormattedString(_s) => {
                 unreachable!("this cannot happen as payload is never")
             }
-            Identifier(name) => {
+            Identifier(path) => {
                 // Retrieve the index and the type of the variable from the environment, if it exists
-                if let Some((index, ty, mut_ty)) = env.get_variable_index_and_type_scheme(name) {
+                if let Some((index, ty, mut_ty)) = env.get_variable_index_and_type_scheme(path) {
                     let node = K::EnvLoad(b(ir::EnvLoad {
                         index,
-                        name: Some(*name),
+                        name: Some(*path),
                     }));
                     (node, ty, mut_ty, no_effects())
                 }
                 // Retrieve the trait method from the environment, if it exists
-                else if let Some((module_name, _trait_descr)) = env.get_trait_function(name) {
+                else if let Some((module_name, _trait_descr)) = env.get_trait_function(path) {
                     // TODO: add TraitFnImmediate for trait functions
                     let module_text = match module_name {
                         Some(name) => format!(" in module {name}"),
@@ -277,18 +277,18 @@ impl TypeInference {
                     };
                     return Err(internal_compilation_error!(Unsupported {
                         span: expr.span,
-                        reason: format!("First-class trait method is unsupported: method {name} in {module_text} cannot be used")
+                        reason: format!("First-class trait method is unsupported: method {path} in {module_text} cannot be used")
                     }));
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((module_name, function)) = env.get_function(name) {
+                else if let Some((module_name, function)) = env.get_function(path) {
                     let (fn_ty, inst_data) = function.definition.ty_scheme.instantiate(
                         self,
                         module_name,
                         expr.span.span(),
                     );
                     let value =
-                        Value::Function((FunctionRef::new_weak(&function.code), Some(*name)));
+                        Value::Function((FunctionRef::new_weak(&function.code), Some(*path)));
                     let node = K::Immediate(b(ir::Immediate {
                         value,
                         inst_data,
@@ -308,11 +308,11 @@ impl TypeInference {
                     let payload_ty = Type::unit();
                     self.ty_constraints.push(TypeConstraint::Pub(
                         PubTypeConstraint::new_type_has_variant(
-                            variant_ty, *name, payload_ty, expr.span,
+                            variant_ty, *path, payload_ty, expr.span,
                         ),
                     ));
                     // Build the variant value.
-                    let node = K::Immediate(Immediate::new(Value::variant(*name, Value::unit())));
+                    let node = K::Immediate(Immediate::new(Value::variant(*path, Value::unit())));
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }

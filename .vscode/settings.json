@@ -15,6 +15,7 @@
 		"foldl",
 		"Impls",
 		"indexmap",
+		"indoc",
 		"inout",
 		"isize",
 		"itertools",

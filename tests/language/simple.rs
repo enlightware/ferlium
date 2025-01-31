@@ -376,7 +376,7 @@ fn static_function_arity() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn value_function_arity() {
-    let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y }";
+    let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y + 0 }";
     assert_eq!(run(&format!("{text} (a,).0()")), int!(0));
     fail_compilation(&format!("{text} (b,).0()"))
         .expect_type_mismatch("(int) → int", "() → A ! e₀");
@@ -727,7 +727,7 @@ fn borrow_checker() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn execution_errors() {
     use RuntimeError::*;
-    assert_eq!(fail_run("abort()"), Aborted);
+    assert_eq!(fail_run("abort()"), Aborted(None));
     assert_eq!(fail_run("1 / 0"), DivisionByZero);
     assert_eq!(fail_run("let v = || 0; 1 / v()"), DivisionByZero);
     assert_eq!(fail_run("1 % 0"), RemainderByZero);
@@ -779,12 +779,18 @@ fn execution_errors() {
 fn never_type() {
     use RuntimeError::*;
     assert_eq!(run("if true { 2 } else { abort() }"), int!(2));
-    assert_eq!(fail_run("if false { 2 } else { abort() }"), Aborted);
-    assert_eq!(fail_run("if true { abort() } else { 2 }"), Aborted);
+    assert_eq!(fail_run("if false { 2 } else { abort() }"), Aborted(None));
+    assert_eq!(fail_run("if true { abort() } else { 2 }"), Aborted(None));
     assert_eq!(run("if false { abort() } else { 2 }"), int!(2));
     assert_eq!(run("log(if true { 2 } else { abort() })"), Value::unit());
-    assert_eq!(fail_run("log(if false { 2 } else { abort() })"), Aborted);
-    assert_eq!(fail_run("log(if true { abort() } else { 2 })"), Aborted);
+    assert_eq!(
+        fail_run("log(if false { 2 } else { abort() })"),
+        Aborted(None)
+    );
+    assert_eq!(
+        fail_run("log(if true { abort() } else { 2 })"),
+        Aborted(None)
+    );
     assert_eq!(run("log(if false { abort() } else { 2 })"), Value::unit());
 }
 

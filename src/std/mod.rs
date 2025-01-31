@@ -26,6 +26,8 @@ pub mod logic;
 pub mod math;
 pub mod mem;
 pub mod option;
+pub mod ordering;
+mod prelude;
 pub mod range;
 pub mod string;
 
@@ -35,11 +37,13 @@ pub fn std_module() -> Module {
     flow::add_to_module(&mut module);
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);
+    ordering::add_to_module(&mut module);
     math::add_to_module(&mut module);
     range::add_to_module(&mut module);
     array::add_to_module(&mut module);
     io::add_to_module(&mut module);
     string::add_to_module(&mut module);
+    prelude::add_to_module(&mut module);
     // option::add_option_functions(&mut module);
     module
 }

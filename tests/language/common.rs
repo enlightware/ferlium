@@ -204,7 +204,7 @@ macro_rules! bool_a {
 #[macro_export]
 macro_rules! int {
     ($n:expr) => {
-        Value::native::<isize>($n)
+        Value::native::<ferlium::std::math::Int>($n)
     };
 }
 
@@ -216,7 +216,7 @@ macro_rules! int_a {
     };
     [$($elem:expr),+ $(,)?] => {
         Value::native(ferlium::std::array::Array::from_vec(vec![
-            $(Value::native::<isize>($elem)),+
+            $(Value::native::<ferlium::std::math::Int>($elem)),+
         ]))
     };
 }
@@ -229,8 +229,16 @@ macro_rules! int_tuple {
     };
     ($($elem:expr),+ $(,)?) => {
         Value::tuple(vec![
-            $(Value::native::<isize>($elem)),+
+            $(Value::native::<ferlium::std::math::Int>($elem)),+
         ])
+    };
+}
+
+/// A primitive integer value
+#[macro_export]
+macro_rules! float {
+    ($n:expr) => {
+        Value::native(ferlium::std::math::Float::new($n).unwrap())
     };
 }
 

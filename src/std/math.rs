@@ -18,13 +18,14 @@ use crate::{
     effects::{no_effects, EffType},
     error::RuntimeError,
     function::{
-        BinaryNativeFnNNFN, BinaryNativeFnNNN, Function, FunctionDefinition, TernaryNativeFnNNNFN,
+        BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, FunctionDefinition,
         UnaryNativeFnNN,
     },
     module::Module,
     r#trait::TraitRef,
     r#type::{FnType, Type},
-    value::NativeDisplay,
+    std::ordering::{ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS},
+    value::{NativeDisplay, Value},
 };
 
 pub fn int_type() -> Type {
@@ -54,6 +55,18 @@ impl NativeDisplay for NotNan<f64> {
 fn isize_to_not_nan(value: isize) -> NotNan<f64> {
     // Safe because an `isize` is always a valid `f64`
     NotNan::new(value as f64).expect("Conversion from isize to NotNan<f64> should not fail")
+}
+
+fn compare<T>(lhs: T, rhs: T) -> Value
+where
+    T: std::cmp::Ord,
+{
+    use std::cmp::Ordering::*;
+    match lhs.cmp(&rhs) {
+        Less => Value::unit_variant(ustr(ORDERING_LESS)),
+        Equal => Value::unit_variant(ustr(ORDERING_EQUAL)),
+        Greater => Value::unit_variant(ustr(ORDERING_GREATER)),
+    }
 }
 
 pub fn add_to_module(to: &mut Module) {
@@ -133,6 +146,8 @@ pub fn add_to_module(to: &mut Module) {
     use std::ops;
     use BinaryNativeFnNNN as BinaryFn;
     use UnaryNativeFnNN as UnaryFn;
+
+    // int
     to.impls.add(
         num_trait.clone(),
         [int_type()],
@@ -147,6 +162,15 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(identity::<Int>)) as Function,
         ],
     );
+    let ord_trait = to.traits.iter().find(|t| t.name == "Ord").unwrap();
+    to.impls.add(
+        ord_trait.clone(),
+        [int_type()],
+        [],
+        [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
+    );
+
+    // float
     to.impls.add(
         num_trait.clone(),
         [float_type()],
@@ -161,32 +185,14 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(isize_to_not_nan)) as Function,
         ],
     );
+    to.impls.add(
+        ord_trait.clone(),
+        [float_type()],
+        [],
+        [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
+    );
 
     // Computations
-    to.functions.insert(
-        ustr("@b+"),
-        BinaryNativeFnNNN::description_with_default_ty(
-            std::ops::Add::add as fn(isize, isize) -> isize,
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("@b-"),
-        BinaryNativeFnNNN::description_with_default_ty(
-            std::ops::Sub::sub as fn(isize, isize) -> isize,
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("@b*"),
-        BinaryNativeFnNNN::description_with_default_ty(
-            std::ops::Mul::mul as fn(isize, isize) -> isize,
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
     to.functions.insert(
         ustr("@b/"),
         BinaryNativeFnNNFN::description_with_default_ty(
@@ -211,80 +217,6 @@ pub fn add_to_module(to: &mut Module) {
                     Ok(lhs % rhs)
                 }
             },
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("@u-"),
-        UnaryNativeFnNN::description_with_default_ty(
-            std::ops::Neg::neg as fn(isize) -> isize,
-            ["value"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("min"),
-        BinaryNativeFnNNN::description_with_default_ty(
-            std::cmp::min as fn(isize, isize) -> isize,
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("max"),
-        BinaryNativeFnNNN::description_with_default_ty(
-            std::cmp::max as fn(isize, isize) -> isize,
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("clamp"),
-        TernaryNativeFnNNNFN::description_with_default_ty(
-            |value: isize, min: isize, max: isize| {
-                if min > max {
-                    Err(InvalidArgument(ustr(
-                        "min must be less than or equal to max",
-                    )))
-                } else {
-                    Ok(value.min(max).max(min))
-                }
-            },
-            ["value", "min", "max"],
-            no_effects(),
-        ),
-    );
-
-    // Comparisons
-    to.functions.insert(
-        ustr("@<"),
-        BinaryNativeFnNNN::description_with_default_ty(
-            |lhs: isize, rhs: isize| std::cmp::PartialOrd::lt(&lhs, &rhs),
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("@<="),
-        BinaryNativeFnNNN::description_with_default_ty(
-            |lhs: isize, rhs: isize| std::cmp::PartialOrd::le(&lhs, &rhs),
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("@>"),
-        BinaryNativeFnNNN::description_with_default_ty(
-            |lhs: isize, rhs: isize| std::cmp::PartialOrd::gt(&lhs, &rhs),
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("@>="),
-        BinaryNativeFnNNN::description_with_default_ty(
-            |lhs: isize, rhs: isize| std::cmp::PartialOrd::ge(&lhs, &rhs),
             ["left", "right"],
             no_effects(),
         ),

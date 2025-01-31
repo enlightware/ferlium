@@ -11,14 +11,21 @@ use ustr::ustr;
 use crate::{
     effects::no_effects,
     error::RuntimeError,
-    function::NullaryNativeFnFN,
+    function::{NullaryNativeFnFN, UnaryNativeFnNFN},
     module::Module,
     r#type::{FnType, Type},
+    std::string::String as Str,
     type_scheme::TypeScheme,
 };
 
+use super::string::string_type;
+
 fn abort() -> Result<(), RuntimeError> {
-    Err(RuntimeError::Aborted)
+    Err(RuntimeError::Aborted(None))
+}
+
+fn panic(msg: Str) -> Result<(), RuntimeError> {
+    Err(RuntimeError::Aborted(Some(msg.into())))
 }
 
 pub fn add_to_module(to: &mut Module) {
@@ -30,6 +37,18 @@ pub fn add_to_module(to: &mut Module) {
             abort,
             [],
             TypeScheme::new_just_type(FnType::new_by_val(&[], Type::never(), no_effects())),
+        ),
+    );
+    to.functions.insert(
+        ustr("panic"),
+        UnaryNativeFnNFN::description_with_ty_scheme(
+            panic,
+            ["msg"],
+            TypeScheme::new_just_type(FnType::new_by_val(
+                &[string_type()],
+                Type::never(),
+                no_effects(),
+            )),
         ),
     );
 }

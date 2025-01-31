@@ -35,7 +35,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // Operations on booleans
     to.functions.insert(
-        ustr("@or"),
+        ustr("or"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::BitOr::bitor as fn(bool, bool) -> bool,
             ["left", "right"],
@@ -43,7 +43,7 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.functions.insert(
-        ustr("@and"),
+        ustr("and"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::BitAnd::bitand as fn(bool, bool) -> bool,
             ["left", "right"],
@@ -51,7 +51,7 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.functions.insert(
-        ustr("@not"),
+        ustr("not"),
         UnaryNativeFnNN::description_with_default_ty(
             std::ops::Not::not as fn(bool) -> bool,
             ["value"],
@@ -59,9 +59,9 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
 
-    // Generic equalities and inequalities
+    // Generic equalities
     to.functions.insert(
-        ustr("@=="),
+        ustr("eq"),
         BinaryNativeFnVVN::description_with_default_ty(
             |a: Value, b: Value| a == b,
             ["left", "right"],
@@ -69,7 +69,7 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.functions.insert(
-        ustr("@!="),
+        ustr("ne"),
         BinaryNativeFnVVN::description_with_default_ty(
             |a: Value, b: Value| a != b,
             ["left", "right"],

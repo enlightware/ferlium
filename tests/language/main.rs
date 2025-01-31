@@ -10,6 +10,7 @@
 mod common;
 mod complex;
 mod effects;
+mod math;
 mod simple;
 mod std;
 mod r#type;

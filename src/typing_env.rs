@@ -100,9 +100,9 @@ impl<'m> TypingEnv<'m> {
     /// Get a trait function from the current module, or other ones, return the name of the module if other.
     pub fn get_trait_function(
         &'m self,
-        name: &'m str,
+        path: &'m str,
     ) -> Option<(Option<Ustr>, TraitFunctionDescription<'m>)> {
-        self.get_module_member(name, &|name, module| {
+        self.get_module_member(path, &|name, module| {
             module.traits.iter().find_map(|trait_ref| {
                 trait_ref
                     .functions
@@ -122,22 +122,19 @@ impl<'m> TypingEnv<'m> {
     /// Get a member of a module, by first looking in the current module, and then in others, considering the path.
     fn get_module_member<T>(
         &'m self,
-        name: &'m str,
+        path: &'m str,
         getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
     ) -> Option<(Option<Ustr>, T)> {
         self.module_env
             .current
-            .get_member(name, self.module_env.others, getter)
-            .map(|f| (None, f))
+            .get_member(path, self.module_env.others, getter)
             .or_else(|| {
-                let path = name.split("::").next_tuple();
+                let path = path.split("::").next_tuple();
                 if let Some(path) = path {
                     let (module_name, function_name) = path;
                     let module_name = ustr(module_name);
                     self.module_env.others.get(&module_name).and_then(|module| {
-                        module
-                            .get_member(function_name, self.module_env.others, getter)
-                            .map(|f| (Some(module_name), f))
+                        module.get_member(function_name, self.module_env.others, getter)
                     })
                 } else {
                     None

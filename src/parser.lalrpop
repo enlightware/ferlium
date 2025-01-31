@@ -175,8 +175,15 @@ PropertyPathExpr: ExprKind = {
 }
 
 Path: String = {
+    PathIdentifier<""> => <>.to_string(),
+    <l:Path> "::" <r:PathIdentifier<"E">> => l + "::" + &r,
+}
+
+PathIdentifier<E>: String = {
     Identifier => <>.to_string(),
-    <l:Path> "::" <r:Identifier> => l + "::" + r,
+    "and" if E != "" => "and".to_string(),
+    "or" if E != "" => "or".to_string(),
+    "not" if E != "" => "not".to_string(),
 }
 
 ForExpr: ExprKind = {
@@ -301,38 +308,38 @@ StrArgs = {
 // Terminals
 
 UnaryOp: Ustr = {
-    "-" => ustr("std::@u-"),
-    "not" => ustr("std::@not"),
+    "-" => ustr("std::neg"),
+    "not" => ustr("std::not"),
     <l:@L> "!" <r:@R> =>? error("for readability, use the \"not\" keyword instead of the C-style ! operator".into(), span(l, r)),
 }
 
 MultOp: Ustr = {
-    "*" => ustr("std::@b*"),
+    "*" => ustr("std::mul"),
     "/" => ustr("std::@b/"),
     "%" => ustr("std::@b%"),
 }
 
 AddOp: Ustr = {
-    "+" => ustr("std::@b+"),
-    "-" => ustr("std::@b-"),
+    "+" => ustr("std::add"),
+    "-" => ustr("std::sub"),
 }
 
 CompOp: Ustr = {
-    "==" => ustr("std::@=="),
-    "!=" => ustr("std::@!="),
-    "<=" => ustr("std::@<="),
-    "<" => ustr("std::@<"),
-    ">=" => ustr("std::@>="),
-    ">" => ustr("std::@>"),
+    "==" => ustr("std::eq"),
+    "!=" => ustr("std::ne"),
+    "<=" => ustr("std::le"),
+    "<" => ustr("std::lt"),
+    ">=" => ustr("std::ge"),
+    ">" => ustr("std::gt"),
 }
 
 LogicalAndOp: Ustr = {
-    "and" => ustr("std::@and"),
+    "and" => ustr("std::and"),
     <l:@L> "&&" <r:@R> =>? error("for readability, use the \"and\" keyword instead of the C-style && operator".into(), span(l, r)),
 }
 
 LogicalOrOp: Ustr = {
-    "or" => ustr("std::@or"),
+    "or" => ustr("std::or"),
     <l:@L> "||" <r:@R> =>? error("for readability, use the \"or\" keyword instead of the C-style || operator".into(), span(l, r)),
 }
 

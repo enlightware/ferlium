@@ -128,6 +128,13 @@ impl Value {
         Self::Variant(b(VariantValue { tag, value }))
     }
 
+    pub fn unit_variant(tag: Ustr) -> Self {
+        Self::Variant(b(VariantValue {
+            tag,
+            value: Self::unit(),
+        }))
+    }
+
     pub fn tuple(values: impl Into<SVec2<Value>>) -> Self {
         Self::Tuple(b(values.into()))
     }

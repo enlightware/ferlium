@@ -82,6 +82,24 @@ pub fn parse_type(src: &str) -> Result<Type, LocatedError> {
         .map_err(describe_parse_error)
 }
 
+/// Parse a module from a source code and return the corresponding ASTs.
+pub fn parse_module(src: &str) -> Result<ast::PModule, Vec<LocatedError>> {
+    let mut errors = Vec::new();
+    let module = parser::ModuleParser::new()
+        .parse(&mut errors, src)
+        .map_err(|error| vec![describe_parse_error(error)])?;
+    // TODO: change the last line to an unwrap once the grammar is fully error-tolerant.
+    if !errors.is_empty() {
+        let errors = errors
+            .into_iter()
+            .map(|error| describe_parse_error(error.error))
+            .collect();
+        Err(errors)
+    } else {
+        Ok(module)
+    }
+}
+
 /// Parse a module and an expression (if any) from a source code and return the corresponding ASTs.
 pub fn parse_module_and_expr(
     src: &str,
@@ -148,4 +166,26 @@ pub fn compile(
     };
 
     Ok(ModuleAndExpr { module, expr })
+}
+
+/// Compile a source code, given some other modules, and it to an existing module, or an error.
+pub fn add_code_to_module(
+    code: &str,
+    to: &mut Module,
+    other_modules: &Modules,
+) -> Result<(), CompilationError> {
+    // Parse the source code.
+    let module_ast =
+        parse_module(code).map_err(|error| compilation_error!(ParsingFailed(error)))?;
+    assert_eq!(module_ast.errors(), &[]);
+
+    // Emit IR for the module.
+    let module = emit_module(module_ast, other_modules, Some(to)).map_err(|error| {
+        let env = ModuleEnv::new(to, other_modules);
+        CompilationError::from_internal(error, &env, code)
+    })?;
+
+    // Swap the new module with the old one.
+    *to = module;
+    Ok(())
 }
