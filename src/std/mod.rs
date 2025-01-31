@@ -31,7 +31,7 @@ pub mod string;
 
 pub fn std_module() -> Module {
     let mut module = Module::default();
-    module.types.set(ustr("()"), Type::unit());
+    module.types.set("()", Type::unit());
     flow::add_to_module(&mut module);
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);

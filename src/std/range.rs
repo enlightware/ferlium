@@ -96,7 +96,7 @@ pub fn range_iterator_type() -> Type {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.types.set(ustr("range_iterator"), range_iterator_type());
+    to.types.set("range_iterator", range_iterator_type());
 
     // Functions
     to.functions.insert(

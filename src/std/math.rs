@@ -60,8 +60,8 @@ pub fn add_to_module(to: &mut Module) {
     use RuntimeError::*;
 
     // Types
-    to.types.set(ustr("int"), int_type());
-    to.types.set(ustr("float"), float_type());
+    to.types.set("int", int_type());
+    to.types.set("float", float_type());
 
     // Traits
     let var0_ty = Type::variable_id(0);

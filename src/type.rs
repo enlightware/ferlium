@@ -674,7 +674,8 @@ pub struct TypeAliases {
 }
 impl TypeAliases {
     // TODO: handle errors
-    pub fn set(&mut self, alias: Ustr, ty: Type) {
+    pub fn set(&mut self, alias: &str, ty: Type) {
+        let alias = ustr(alias);
         self.name_to_type.insert(alias, ty);
         self.type_to_name.insert(ty, alias);
     }
@@ -682,11 +683,13 @@ impl TypeAliases {
     pub fn get_name(&self, ty: Type) -> Option<Ustr> {
         self.type_to_name.get(&ty).copied()
     }
-    pub fn get_type(&self, name: Ustr) -> Option<Type> {
+    pub fn get_type(&self, name: &str) -> Option<Type> {
+        let name = ustr(name);
         self.name_to_type.get(&name).copied()
     }
 
-    pub fn set_bare_native(&mut self, alias: Ustr, bare: B<dyn BareNativeType>) {
+    pub fn set_bare_native(&mut self, alias: &str, bare: B<dyn BareNativeType>) {
+        let alias = ustr(alias);
         self.bare_native_to_name.insert(bare, alias);
     }
 

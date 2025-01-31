@@ -55,11 +55,11 @@ fn main() {
     // environment
     let other_modules = Modules::new();
     let mut current_module = std_module();
-    current_module.types.set(ustr("u32"), u32);
-    current_module.types.set(ustr("string"), string);
+    current_module.types.set("u32", u32);
+    current_module.types.set("string", string);
     current_module
         .types
-        .set_bare_native(ustr("list"), bare_native_type::<List>());
+        .set_bare_native("list", bare_native_type::<List>());
     let module_env = ModuleEnv::new(&current_module, &other_modules);
 
     // test type printing

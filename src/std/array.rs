@@ -333,7 +333,7 @@ fn array_type_generic() -> Type {
 pub fn add_to_module(to: &mut Module) {
     // Types
     to.types
-        .set_bare_native(ustr("array"), bare_native_type::<Array>());
+        .set_bare_native("array", bare_native_type::<Array>());
 
     // TODO: use type classes to get rid of the array prefix
     to.functions
