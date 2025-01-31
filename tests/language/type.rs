@@ -8,7 +8,7 @@
 //
 use ferlium::{
     parse_type,
-    r#type::{record_type, variant_type, Type},
+    r#type::{record_type, tuple_type, variant_type, Type},
     std::{
         array::array_type,
         logic::bool_type,
@@ -16,7 +16,6 @@ use ferlium::{
         string::string_type,
     },
 };
-use ustr::ustr;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -34,25 +33,22 @@ fn primitive() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn tuple() {
-    assert_eq!(parse_type("(int,)").unwrap(), Type::tuple(vec![int_type()]));
+    assert_eq!(parse_type("(int,)").unwrap(), tuple_type([int_type()]));
     assert_eq!(
         parse_type("(int, int)").unwrap(),
-        Type::tuple(vec![int_type(), int_type()])
+        tuple_type([int_type(), int_type()])
     );
     assert_eq!(
         parse_type("(int, int, int)").unwrap(),
-        Type::tuple(vec![int_type(), int_type(), int_type()])
+        tuple_type([int_type(), int_type(), int_type()])
     );
     assert_eq!(
         parse_type("(int, float)").unwrap(),
-        Type::tuple(vec![int_type(), float_type()])
+        tuple_type([int_type(), float_type()])
     );
     assert_eq!(
         parse_type("(int, (bool, string))").unwrap(),
-        Type::tuple(vec![
-            int_type(),
-            Type::tuple(vec![bool_type(), string_type()])
-        ])
+        tuple_type([int_type(), tuple_type([bool_type(), string_type()])])
     );
 }
 
@@ -98,7 +94,7 @@ fn variant() {
     assert_eq!(
         parse_type("RGB (int, int, int) | Color(string)").unwrap(),
         variant_type(&[
-            ("RGB", Type::tuple(vec![int_type(), int_type(), int_type()])),
+            ("RGB", tuple_type([int_type(), int_type(), int_type()])),
             ("Color", string_type()),
         ])
     );

@@ -99,7 +99,7 @@ mod tests {
     use ordered_float::NotNan;
 
     use crate::{
-        r#type::Type,
+        r#type::{tuple_type, Type},
         std::{
             array::{array_type, Array},
             logic::bool_type,
@@ -132,7 +132,7 @@ mod tests {
             Some(Value::native(Array::new()))
         );
         assert_eq!(
-            def_val(Type::tuple(vec![int_type(), bool_type()])),
+            def_val(tuple_type([int_type(), bool_type()])),
             Some(Value::tuple(vec![
                 Value::native(0_isize),
                 Value::native(false)

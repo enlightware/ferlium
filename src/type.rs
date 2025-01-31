@@ -1245,6 +1245,11 @@ impl TypeUniverse {
     }
 }
 
+/// An ergonomic constructor for a tuple type when constructing it from a list of types
+pub fn tuple_type(types: impl Into<Vec<Type>>) -> Type {
+    Type::tuple(types.into())
+}
+
 /// An ergonomic constructor for a variant type when constructing it from a list of strings and types
 pub fn variant_type(types: &[(&str, Type)]) -> Type {
     let types = types.iter().map(|(name, ty)| (ustr(name), *ty)).collect();

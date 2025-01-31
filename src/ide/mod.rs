@@ -20,7 +20,7 @@ use crate::{
     error::{CompilationErrorImpl, MutabilityMustBeWhat},
     eval::{EvalCtx, ValOrMut},
     module::{FmtWithModuleEnv, ModuleFunction, Uses},
-    r#type::{FnArgType, Type},
+    r#type::{tuple_type, FnArgType, Type},
     std::{new_module_with_prelude, new_std_module_env},
     value::{NativeValue, Value},
     CompilationError, DisplayStyle, Location, Module, ModuleAndExpr, ModuleEnv, Modules,
@@ -658,7 +658,7 @@ impl Compiler {
         self.run_fn(name, |func, module_env| {
             let oa_ty = Type::primitive::<OA>();
             let ob_ty = Type::primitive::<OB>();
-            let o_ty = Type::tuple(vec![oa_ty, ob_ty]);
+            let o_ty = tuple_type([oa_ty, ob_ty]);
             let o_ty_fmt = o_ty.format_with(module_env);
             if !func.definition.ty_scheme.is_just_type_and_effects()
                 || !func.definition.ty_scheme.ty.args.is_empty()
@@ -699,7 +699,7 @@ impl Compiler {
             let i_ty_fmt = i_ty.format_with(module_env);
             let oa_ty = Type::primitive::<OA>();
             let ob_ty = Type::primitive::<OB>();
-            let o_ty = Type::tuple(vec![oa_ty, ob_ty]);
+            let o_ty = tuple_type([oa_ty, ob_ty]);
             let o_ty_fmt = o_ty.format_with(module_env);
             if !func.definition.ty_scheme.is_just_type_and_effects()
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
