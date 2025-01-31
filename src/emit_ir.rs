@@ -324,6 +324,14 @@ pub fn emit_expr(
     module_env: ModuleEnv,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
+    // Make sure that the locals' types have no type variables in them
+    assert!(
+        locals
+            .iter()
+            .all(|local| local.ty.inner_ty_vars().is_empty()),
+        "Locals passed to expression compilation must not contain type variables"
+    );
+
     // Create a list of all available trait implementations.
     let trait_impls = collect_trait_impls(module_env.others);
 
