@@ -36,7 +36,7 @@ onMounted(() => {
 	const urlParams = new URLSearchParams(queryString);
 	const code = urlParams.get('code');
 	if (code !== null) {
-		editor.value.setText(code);
+		defined(editor.value).setText(code);
 	}
 });
 </script>
