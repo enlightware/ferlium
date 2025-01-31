@@ -21,7 +21,9 @@ In particular, it tries hard not to duplicate existing Rust types and functions 
 
 ## Getting started
 
-We provide a REPL to play with the language:
+We provide a playground [here](https://enlightware.github.io/ferlium/playground/).
+
+We also provide a REPL to play locally with the language:
 ```
 cargo run --example ferlium
 ```

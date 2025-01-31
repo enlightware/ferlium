@@ -7,7 +7,7 @@ dev: install-dev-deps build-rust-code
 	npx vite
 
 build: install-dev-deps build-rust-code
-	npx vite build --base='./'
+	npx vite build
 
 build-rust-code: $(RUST_WASM)
 

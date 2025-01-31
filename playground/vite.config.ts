@@ -18,6 +18,7 @@ const gitCommitHash = execSync('git rev-parse HEAD').toString().trimEnd();
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  base: "/ferlium/playground/",
   plugins: [vue(),
     eslintPlugin(),
     wasmPack(['./script-api']),

@@ -49,7 +49,7 @@ jobs:
         run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --safari --headless --test language --lib
 
   build_playground:
-    name: Build and deploy playground
+    name: Build and upload playground
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -72,3 +72,23 @@ jobs:
 
       - name: Build Playground
         run: make build
+
+      - name: Move Playground build output to its own subdirectory
+        run: mkdir -p ../site && mv dist ../site/playground
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy_pages:
+    name: Deploy playground
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build_playground
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
