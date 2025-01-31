@@ -12,7 +12,7 @@ use ferlium::{
     effects::no_effects,
     function::{BinaryNativeFnNNN, FunctionRef},
     module::{FmtWithModuleEnv, ModuleEnv, Modules},
-    r#type::{bare_native_type, store_types, Type, TypeKind},
+    r#type::{bare_native_type, store_types, variant_type, Type, TypeKind},
     std::{
         math::{float_type, int_type},
         std_module,
@@ -62,20 +62,12 @@ fn main() {
 
     // test type printing
     println!("Some types:\n");
-    let st = Type::record(vec![
-        (ustr("ty"), gen0),
-        (ustr("name"), string),
-        (ustr("age"), int),
-    ]);
+    let st = record_type([("ty", gen0), ("name", string), ("age", int)]);
     println(&st, &module_env);
 
-    let variant = Type::variant(vec![(ustr("i"), int), (ustr("s"), string)]);
+    let variant = variant_type(&[("i", int), ("s", string)]);
     println(&variant, &module_env);
-    let variant = Type::variant(vec![
-        (ustr("i"), int),
-        (ustr("f"), float),
-        (ustr("u32"), u32),
-    ]);
+    let variant = variant_type(&[("i", int), ("f", float), ("u32", u32)]);
     println(&variant, &module_env);
 
     // ADT recursive list
@@ -114,7 +106,7 @@ fn main() {
     let add_value = Value::Function((add_fn.clone(), None));
 
     // some interesting functions and types
-    let option = Type::variant(vec![(ustr("None"), empty_tuple), (ustr("Some"), gen0)]);
+    let option = variant_type(&[("None", empty_tuple), ("Some", gen0)]);
     print!("Option: ");
     println(&option, &module_env);
     let iterator_gen0 = Type::function_by_val(&[], Type::tuple(vec![option, Type::new_local(0)]));

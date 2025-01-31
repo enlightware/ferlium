@@ -26,7 +26,7 @@ use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
 use itertools::Itertools;
 use nonmax::NonMaxU32;
-use ustr::Ustr;
+use ustr::{ustr, Ustr};
 
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
@@ -1243,6 +1243,18 @@ impl TypeUniverse {
             .get_index(r.index as usize)
             .expect("Attempted to get type data for non-existent type")
     }
+}
+
+/// An ergonomic constructor for a variant type when constructing it from a list of strings and types
+pub fn variant_type(types: &[(&str, Type)]) -> Type {
+    let types = types.iter().map(|(name, ty)| (ustr(name), *ty)).collect();
+    Type::variant(types)
+}
+
+/// An ergonomic constructor for a record type when constructing it from a list of strings and types
+pub fn record_type(fields: &[(&str, Type)]) -> Type {
+    let fields = fields.iter().map(|(name, ty)| (ustr(name), *ty)).collect();
+    Type::record(fields)
 }
 
 fn types() -> &'static RwLock<TypeUniverse> {

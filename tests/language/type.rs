@@ -8,7 +8,7 @@
 //
 use ferlium::{
     parse_type,
-    r#type::Type,
+    r#type::{record_type, variant_type, Type},
     std::{
         array::array_type,
         logic::bool_type,
@@ -61,32 +61,29 @@ fn tuple() {
 fn record() {
     assert_eq!(
         parse_type("{a: int}").unwrap(),
-        Type::record(vec![(ustr("a"), int_type())])
+        record_type(&[("a", int_type())])
     );
     assert_eq!(
         parse_type("{a: int,}").unwrap(),
-        Type::record(vec![(ustr("a"), int_type())])
+        record_type(&[("a", int_type())])
     );
     assert_eq!(
         parse_type("{a: int, b: bool}").unwrap(),
-        Type::record(vec![(ustr("a"), int_type()), (ustr("b"), bool_type())])
+        record_type(&[("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
         parse_type("{a: int, b: bool, }").unwrap(),
-        Type::record(vec![(ustr("a"), int_type()), (ustr("b"), bool_type())])
+        record_type(&[("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
         parse_type("{b: bool, a: int}").unwrap(),
-        Type::record(vec![(ustr("a"), int_type()), (ustr("b"), bool_type())])
+        record_type(&[("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
         parse_type("{a: int, b: { c: bool, d: float } }").unwrap(),
-        Type::record(vec![
-            (ustr("a"), int_type()),
-            (
-                ustr("b"),
-                Type::record(vec![(ustr("c"), bool_type()), (ustr("d"), float_type())])
-            )
+        record_type(&[
+            ("a", int_type()),
+            ("b", record_type(&[("c", bool_type()), ("d", float_type())]))
         ])
     );
 }
@@ -96,19 +93,13 @@ fn record() {
 fn variant() {
     assert_eq!(
         parse_type("Some(int)|None").unwrap(),
-        Type::variant(vec![
-            (ustr("Some"), int_type()),
-            (ustr("None"), Type::unit()),
-        ])
+        variant_type(&[("Some", int_type()), ("None", Type::unit()),])
     );
     assert_eq!(
         parse_type("RGB (int, int, int) | Color(string)").unwrap(),
-        Type::variant(vec![
-            (
-                ustr("RGB"),
-                Type::tuple(vec![int_type(), int_type(), int_type()])
-            ),
-            (ustr("Color"), string_type()),
+        variant_type(&[
+            ("RGB", Type::tuple(vec![int_type(), int_type(), int_type()])),
+            ("Color", string_type()),
         ])
     );
 }
@@ -127,15 +118,12 @@ fn parentheses() {
 fn complex_type() {
     assert_eq!(
         parse_type("[{name: string, age: int, nick: Some(string) | None}]").unwrap(),
-        array_type(Type::record(vec![
-            (ustr("name"), string_type()),
-            (ustr("age"), int_type()),
+        array_type(record_type(&[
+            ("name", string_type()),
+            ("age", int_type()),
             (
-                ustr("nick"),
-                Type::variant(vec![
-                    (ustr("Some"), string_type()),
-                    (ustr("None"), Type::unit()),
-                ])
+                "nick",
+                variant_type(&[("Some", string_type()), ("None", Type::unit()),])
             )
         ]))
     );

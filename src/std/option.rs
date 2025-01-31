@@ -6,11 +6,14 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use crate::{r#type::Type, value::Value};
+use crate::{
+    r#type::{variant_type, Type},
+    value::Value,
+};
 use ustr::ustr;
 
 pub fn option_type(inner: Type) -> Type {
-    Type::variant(vec![(ustr("None"), Type::unit()), (ustr("Some"), inner)])
+    variant_type(&[("None", Type::unit()), ("Some", inner)])
 }
 
 pub fn gen_option_type() -> Type {
