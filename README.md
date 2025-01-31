@@ -5,7 +5,7 @@
 [ci-badge]: https://github.com/enlightware/ferlium/actions/workflows/ci.yml/badge.svg
 [ci-url]: https://github.com/enlightware/ferlium/actions
 
-Created by [Enlightware GmbH](https://enlightware.ch)
+Created by [Enlightware GmbH](https://enlightware.ch) for use in [Candli](https://cand.li).
 
 **Our mission: To bring the power of Haskell to the users of Python and Javascript**
 
