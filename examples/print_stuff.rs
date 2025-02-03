@@ -93,11 +93,13 @@ fn main() {
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Add::add as fn(isize, isize) -> isize,
             ["left", "right"],
+            None,
             no_effects(),
         ),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::Sub::sub as fn(isize, isize) -> isize,
             ["left", "right"],
+            None,
             no_effects(),
         ),
     ];

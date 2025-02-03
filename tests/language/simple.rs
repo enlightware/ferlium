@@ -167,7 +167,6 @@ fn arithmetic_operators() {
     assert_eq!(run("1+2"), int!(3));
     assert_eq!(run("  1  + 2 "), int!(3));
     assert_eq!(run("3*2"), int!(6));
-    assert_eq!(run("7/2"), int!(3));
     assert_eq!(run("1-4"), int!(-3));
     assert_eq!(run("-1"), int!(-1));
     assert_eq!(run("--1"), int!(1));
@@ -177,31 +176,18 @@ fn arithmetic_operators() {
     assert_eq!(run("0-2-2"), int!(-4));
     assert_eq!(run("0-(2-2)"), int!(0));
     assert_eq!(run("1+2*3"), int!(7));
-    assert_eq!(run("12/3/2"), int!(2));
-    assert_eq!(run("12/(3/2)"), int!(12));
-    assert_eq!(run("0%3"), int!(0));
-    assert_eq!(run("1%3"), int!(1));
-    assert_eq!(run("2%3"), int!(2));
-    assert_eq!(run("3%3"), int!(0));
-    assert_eq!(run("4%3"), int!(1));
-    assert_eq!(run("5%3"), int!(2));
-    assert_eq!(run("-1%3"), int!(-1));
-    assert_eq!(run("-2%3"), int!(-2));
-    assert_eq!(run("-3%3"), int!(-0));
-    assert_eq!(run("-4%3"), int!(-1));
-    assert_eq!(run("-5%3"), int!(-2));
-    assert_eq!(run("min(1,2)"), int!(1));
-    assert_eq!(run("min(2,1)"), int!(1));
-    assert_eq!(run("min(-2,-3)"), int!(-3));
-    assert_eq!(run("min(-3,-2)"), int!(-3));
-    assert_eq!(run("min(-3,2)"), int!(-3));
-    assert_eq!(run("min(2,-3)"), int!(-3));
-    assert_eq!(run("max(1,2)"), int!(2));
-    assert_eq!(run("max(2,1)"), int!(2));
-    assert_eq!(run("max(-2,-3)"), int!(-2));
-    assert_eq!(run("max(-3,-2)"), int!(-2));
-    assert_eq!(run("max(-3,2)"), int!(2));
-    assert_eq!(run("max(2,-3)"), int!(2));
+    assert_eq!(run("1.0+2.0"), float!(3.0));
+    assert_eq!(run("  1.0  + 2.0 "), float!(3.0));
+    assert_eq!(run("3.0*2.0"), float!(6.0));
+    assert_eq!(run("1.0-4.0"), float!(-3.0));
+    assert_eq!(run("-1.0"), float!(-1.0));
+    assert_eq!(run("--1.0"), float!(1.0));
+    assert_eq!(run("---1.0"), float!(-1.0));
+    assert_eq!(run("1.0---5.0"), float!(-4.0));
+    assert_eq!(run("1.0+--5.0"), float!(6.0));
+    assert_eq!(run("0.0-2.0-2.0"), float!(-4.0));
+    assert_eq!(run("0.0-(2.0-2.0)"), float!(0.0));
+    assert_eq!(run("1.0+2.0*3.0"), float!(7.0));
 }
 
 #[test]
@@ -219,6 +205,18 @@ fn comparison_operators() {
     assert_eq!(run("2 >= 2"), bool!(true));
     assert_eq!(run("2 != 2"), bool!(false));
     assert_eq!(run("2 == 2"), bool!(true));
+    assert_eq!(run("1.5 < 2.5"), bool!(true));
+    assert_eq!(run("1.5 <= 2.5"), bool!(true));
+    assert_eq!(run("1.5 > 2.5"), bool!(false));
+    assert_eq!(run("1.5 >= 2.5"), bool!(false));
+    assert_eq!(run("1.5 != 2.5"), bool!(true));
+    assert_eq!(run("1.5 == 2.5"), bool!(false));
+    assert_eq!(run("2.5 < 2.5"), bool!(false));
+    assert_eq!(run("2.5 <= 2.5"), bool!(true));
+    assert_eq!(run("2.5 > 2.5"), bool!(false));
+    assert_eq!(run("2.5 >= 2.5"), bool!(true));
+    assert_eq!(run("2.5 != 2.5"), bool!(false));
+    assert_eq!(run("2.5 == 2.5"), bool!(true));
 }
 
 #[test]
@@ -728,10 +726,15 @@ fn borrow_checker() {
 fn execution_errors() {
     use RuntimeError::*;
     assert_eq!(fail_run("abort()"), Aborted(None));
-    assert_eq!(fail_run("1 / 0"), DivisionByZero);
-    assert_eq!(fail_run("let v = || 0; 1 / v()"), DivisionByZero);
-    assert_eq!(fail_run("1 % 0"), RemainderByZero);
-    assert_eq!(fail_run("let v = || 0; 1 % v()"), RemainderByZero);
+    assert_eq!(fail_run("panic(\"oh no\")"), Aborted(Some("oh no".into())));
+    assert_eq!(fail_run("1.0 / 0.0"), DivisionByZero);
+    assert_eq!(fail_run("let v = || 0.0; 1.0 / v()"), DivisionByZero);
+    assert_eq!(fail_run("idiv(1, 0)"), DivisionByZero);
+    assert_eq!(fail_run("let v = || 0; idiv(1, v())"), DivisionByZero);
+    assert_eq!(fail_run("rem(1, 0)"), RemainderByZero);
+    assert_eq!(fail_run("mod(1, 0)"), RemainderByZero);
+    assert_eq!(fail_run("let v = || 0; rem(1, v())"), RemainderByZero);
+    assert_eq!(fail_run("let v = || 0; mod(1, v())"), RemainderByZero);
     assert_eq!(
         fail_run("[1][1]"),
         ArrayAccessOutOfBounds { index: 1, len: 1 }

@@ -104,6 +104,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             RangeIterator::new,
             ["start", "end"],
+            None,
             no_effects(),
         ),
     );

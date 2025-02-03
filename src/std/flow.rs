@@ -36,6 +36,7 @@ pub fn add_to_module(to: &mut Module) {
         NullaryNativeFnFN::description_with_ty_scheme(
             abort,
             [],
+            Some("Aborts the program."),
             TypeScheme::new_just_type(FnType::new_by_val(&[], Type::never(), no_effects())),
         ),
     );
@@ -44,6 +45,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNFN::description_with_ty_scheme(
             panic,
             ["msg"],
+            Some("Aborts the program with a message."),
             TypeScheme::new_just_type(FnType::new_by_val(
                 &[string_type()],
                 Type::never(),

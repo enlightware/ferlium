@@ -315,8 +315,7 @@ UnaryOp: Ustr = {
 
 MultOp: Ustr = {
     "*" => ustr("std::mul"),
-    "/" => ustr("std::@b/"),
-    "%" => ustr("std::@b%"),
+    "/" => ustr("std::div"),
 }
 
 AddOp: Ustr = {

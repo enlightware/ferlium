@@ -18,6 +18,36 @@ use wasm_bindgen_test::*;
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn int() {
+    assert_eq!(run("idiv(7, 2)"), int!(3));
+    assert_eq!(run("idiv(idiv(12, 3), 2)"), int!(2));
+    assert_eq!(run("idiv(12, idiv(3, 2))"), int!(12));
+    assert_eq!(run("rem(0, 3)"), int!(0));
+    assert_eq!(run("rem(1, 3)"), int!(1));
+    assert_eq!(run("rem(2, 3)"), int!(2));
+    assert_eq!(run("rem(3, 3)"), int!(0));
+    assert_eq!(run("rem(4, 3)"), int!(1));
+    assert_eq!(run("rem(5, 3)"), int!(2));
+    assert_eq!(run("rem(-1, 3)"), int!(-1));
+    assert_eq!(run("rem(-2, 3)"), int!(-2));
+    assert_eq!(run("rem(-3, 3)"), int!(-0));
+    assert_eq!(run("rem(-4, 3)"), int!(-1));
+    assert_eq!(run("rem(-5, 3)"), int!(-2));
+    assert_eq!(run("mod(0, 3)"), int!(0));
+    assert_eq!(run("mod(1, 3)"), int!(1));
+    assert_eq!(run("mod(2, 3)"), int!(2));
+    assert_eq!(run("mod(3, 3)"), int!(0));
+    assert_eq!(run("mod(4, 3)"), int!(1));
+    assert_eq!(run("mod(5, 3)"), int!(2));
+    assert_eq!(run("mod(-1, 3)"), int!(2));
+    assert_eq!(run("mod(-2, 3)"), int!(1));
+    assert_eq!(run("mod(-3, 3)"), int!(0));
+    assert_eq!(run("mod(-4, 3)"), int!(2));
+    assert_eq!(run("mod(-5, 3)"), int!(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn min() {
     assert_eq!(run("min(1, 1)"), int!(1));
     assert_eq!(run("min(1, 2)"), int!(1));

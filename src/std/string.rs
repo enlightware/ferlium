@@ -142,6 +142,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnVN::description_with_default_ty(
             String::any_to_string,
             ["value"],
+            None,
             no_effects(),
         ),
     );
@@ -150,6 +151,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnMNN::description_with_default_ty(
             String::push_str,
             ["target", "suffix"],
+            None,
             no_effects(),
         ),
     );
@@ -158,6 +160,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             |a: String, b: String| String::concat(&a, &b),
             ["left", "right"],
+            None,
             no_effects(),
         ),
     );
@@ -166,6 +169,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.len() as isize,
             ["string"],
+            None,
             no_effects(),
         ),
     );
@@ -174,6 +178,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.is_empty() as isize,
             ["string"],
+            None,
             no_effects(),
         ),
     );
@@ -186,6 +191,7 @@ pub fn add_to_module(to: &mut Module) {
                 new
             },
             ["string", "from", "to"],
+            None,
             no_effects(),
         ),
     );
@@ -194,6 +200,7 @@ pub fn add_to_module(to: &mut Module) {
         TernaryNativeFnNNNN::description_with_default_ty(
             |s: String, start: isize, end: isize| s.sub_string(start, end),
             ["string", "start", "end"],
+            None,
             no_effects(),
         ),
     );

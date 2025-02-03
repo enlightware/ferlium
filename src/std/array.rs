@@ -73,6 +73,7 @@ impl Array {
         UnaryNativeFnVFN::description_with_ty_scheme(
             Array::from_value_iterator,
             ["iterator"],
+            None,
             ty_scheme,
         )
     }
@@ -114,7 +115,12 @@ impl Array {
             unit,
             no_effects(),
         ));
-        BinaryNativeFnMVN::description_with_ty_scheme(Array::append, ["array", "value"], ty_scheme)
+        BinaryNativeFnMVN::description_with_ty_scheme(
+            Array::append,
+            ["array", "value"],
+            None,
+            ty_scheme,
+        )
     }
 
     pub fn prepend(&mut self, value: Value) {
@@ -130,7 +136,12 @@ impl Array {
             unit,
             no_effects(),
         ));
-        BinaryNativeFnMVN::description_with_ty_scheme(Array::prepend, ["array", "value"], ty_scheme)
+        BinaryNativeFnMVN::description_with_ty_scheme(
+            Array::prepend,
+            ["array", "value"],
+            None,
+            ty_scheme,
+        )
     }
 
     pub fn is_empty(&self) -> bool {
@@ -151,6 +162,7 @@ impl Array {
         UnaryNativeFnNN::description_with_ty_scheme(
             |a: Self| a.len() as isize,
             ["array"],
+            None,
             ty_scheme,
         )
     }
@@ -171,6 +183,7 @@ impl Array {
         BinaryNativeFnNNN::description_with_ty_scheme(
             |a: Self, b: Self| Self::concat(&a, &b),
             ["left", "right"],
+            None,
             ty_scheme,
         )
     }
@@ -204,7 +217,12 @@ impl Array {
             array1,
             effects,
         ));
-        BinaryNativeFnNVFN::description_with_ty_scheme(Array::map, ["array", "function"], ty_scheme)
+        BinaryNativeFnNVFN::description_with_ty_scheme(
+            Array::map,
+            ["array", "function"],
+            None,
+            ty_scheme,
+        )
     }
 
     pub fn any(self, f: Value) -> Result<bool, RuntimeError> {
@@ -235,6 +253,7 @@ impl Array {
         BinaryNativeFnNVFN::description_with_ty_scheme(
             Array::any,
             ["array", "predicate"],
+            None,
             ty_scheme,
         )
     }
@@ -267,6 +286,7 @@ impl Array {
         BinaryNativeFnNVFN::description_with_ty_scheme(
             Array::all,
             ["array", "predicate"],
+            None,
             ty_scheme,
         )
     }

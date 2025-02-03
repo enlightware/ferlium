@@ -105,7 +105,7 @@ pub fn add_to_module(to: &mut Module) {
             (
                 "mul",
                 Def::new_infer_quantifiers(
-                    binary_fn_ty,
+                    binary_fn_ty.clone(),
                     &["lhs", "rhs"],
                     "Multiplies two numbers.",
                 ),
@@ -141,6 +141,20 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.traits.push(num_trait.clone());
+    let fractional_trait = TraitRef::new(
+        "Fractional",
+        1,
+        0,
+        [(
+            "div",
+            Def::new_infer_quantifiers(
+                binary_fn_ty.clone(),
+                &["lhs", "rhs"],
+                "Divides `lhs` by `rhs`.",
+            ),
+        )],
+    );
+    to.traits.push(fractional_trait.clone());
 
     // Trait implementations
     use std::ops;
@@ -169,6 +183,51 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
     );
+    to.functions.insert(
+        ustr("idiv"),
+        BinaryNativeFnNNFN::description_with_default_ty(
+            |lhs: isize, rhs: isize| {
+                if rhs == 0 {
+                    Err(DivisionByZero)
+                } else {
+                    Ok(lhs / rhs)
+                }
+            },
+            ["lhs", "rhs"],
+            Some("Divides `lhs` by `rhs` and truncates the result."),
+            no_effects(),
+        ),
+    );
+    to.functions.insert(
+        ustr("rem"),
+        BinaryNativeFnNNFN::description_with_default_ty(
+            |lhs: isize, rhs: isize| {
+                if rhs == 0 {
+                    Err(RemainderByZero)
+                } else {
+                    Ok(ops::Rem::rem(lhs, rhs))
+                }
+            },
+            ["lhs", "rhs"],
+            Some("Calculates the remainder of the division of `lhs` by `rhs`."),
+            no_effects(),
+        ),
+    );
+    to.functions.insert(
+        ustr("mod"),
+        BinaryNativeFnNNFN::description_with_default_ty(
+            |lhs: isize, rhs: isize| {
+                if rhs == 0 {
+                    Err(RemainderByZero)
+                } else {
+                    Ok(lhs.rem_euclid(rhs))
+                }
+            },
+            ["lhs", "rhs"],
+            Some("Calculates the modulo of the division of `lhs` by `rhs`."),
+            no_effects(),
+        ),
+    );
 
     // float
     to.impls.add(
@@ -191,34 +250,16 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
     );
-
-    // Computations
-    to.functions.insert(
-        ustr("@b/"),
-        BinaryNativeFnNNFN::description_with_default_ty(
-            |lhs: isize, rhs: isize| {
-                if rhs == 0 {
-                    Err(DivisionByZero)
-                } else {
-                    Ok(lhs / rhs)
-                }
-            },
-            ["left", "right"],
-            no_effects(),
-        ),
-    );
-    to.functions.insert(
-        ustr("@b%"),
-        BinaryNativeFnNNFN::description_with_default_ty(
-            |lhs: isize, rhs: isize| {
-                if rhs == 0 {
-                    Err(RemainderByZero)
-                } else {
-                    Ok(lhs % rhs)
-                }
-            },
-            ["left", "right"],
-            no_effects(),
-        ),
+    to.impls.add(
+        fractional_trait.clone(),
+        [float_type()],
+        [],
+        [b(BinaryNativeFnNNFN::new(|lhs: Float, rhs: Float| {
+            if rhs == 0.0 {
+                Err(DivisionByZero)
+            } else {
+                Ok(lhs / rhs)
+            }
+        })) as Function],
     );
 }

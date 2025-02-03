@@ -35,6 +35,7 @@ fn testing_module() -> Module {
         UnaryNativeFnNV::description_with_ty(
             |v: isize| Value::variant(ustr("Some"), Value::native(v)),
             ["option"],
+            None,
             int_type(),
             option_type(int_type()),
             no_effects(),
@@ -47,17 +48,28 @@ fn test_effect_module() -> Module {
     let mut module: Module = Default::default();
     module.functions.insert(
         "read".into(),
-        NullaryNativeFnN::description_with_default_ty(|| (), [], effect(PrimitiveEffect::Read)),
+        NullaryNativeFnN::description_with_default_ty(
+            || (),
+            [],
+            None,
+            effect(PrimitiveEffect::Read),
+        ),
     );
     module.functions.insert(
         "write".into(),
-        NullaryNativeFnN::description_with_default_ty(|| (), [], effect(PrimitiveEffect::Write)),
+        NullaryNativeFnN::description_with_default_ty(
+            || (),
+            [],
+            None,
+            effect(PrimitiveEffect::Write),
+        ),
     );
     module.functions.insert(
         "read_write".into(),
         NullaryNativeFnN::description_with_default_ty(
             || (),
             [],
+            None,
             effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
         ),
     );
@@ -66,6 +78,7 @@ fn test_effect_module() -> Module {
         UnaryNativeFnVN::description_with_in_ty(
             |_value: Value| 0,
             ["value"],
+            None,
             Type::function_type(FnType::new(
                 vec![],
                 Type::unit(),
@@ -95,6 +108,7 @@ fn test_property_module() -> Module {
         NullaryNativeFnN::description_with_default_ty(
             || PROPERTY_VALUE.load(Ordering::Relaxed),
             [],
+            None,
             effect(PrimitiveEffect::Read),
         ),
     );
@@ -103,6 +117,7 @@ fn test_property_module() -> Module {
         UnaryNativeFnNN::description_with_default_ty(
             |value: isize| PROPERTY_VALUE.store(value, Ordering::Relaxed),
             ["value"],
+            None,
             effect(PrimitiveEffect::Write),
         ),
     );
