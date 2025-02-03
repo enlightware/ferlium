@@ -362,11 +362,11 @@ impl TypeInference {
             }
             Apply(func, args, synthesized) => {
                 // Do we have a global function or variant?
-                if let Identifier(name) = func.kind {
-                    if !env.has_variable_name(name) {
+                if let Identifier(path) = func.kind {
+                    if !env.has_variable_name(path) {
                         let (node, ty, mut_ty, effects) = self.infer_static_apply(
                             env,
-                            &name,
+                            &path,
                             func.span,
                             args,
                             expr.span,
@@ -631,8 +631,8 @@ impl TypeInference {
     fn infer_static_apply(
         &mut self,
         env: &mut TypingEnv,
-        name: &str,
-        name_span: Location,
+        path: &str,
+        path_span: Location,
         args: &[impl Borrow<DExpr>],
         expr_span: Location,
         synthesized: bool,
@@ -641,17 +641,17 @@ impl TypeInference {
         use ir::NodeKind as K;
         // Get the function and its type from the environment.
         Ok(
-            if let Some((module_name, trait_descr)) = env.get_trait_function(name) {
+            if let Some((module_name, trait_descr)) = env.get_trait_function(path) {
                 let (trait_ref, function_index, definition) = trait_descr;
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     let got_span = args
                         .iter()
                         .map(|arg| arg.borrow().span)
                         .reduce(|a, b| Location::new_local(a.start(), b.end()))
-                        .unwrap_or(name_span);
+                        .unwrap_or(path_span);
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: definition.ty_scheme.ty.args.len(),
-                        expected_span: name_span,
+                        expected_span: path_span,
                         got: args.len(),
                         got_span,
                     }));
@@ -660,14 +660,14 @@ impl TypeInference {
                 let (inst_fn_ty, inst_data) =
                     definition
                         .ty_scheme
-                        .instantiate(self, module_name, name_span.span());
+                        .instantiate(self, module_name, path_span.span());
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait function is not supported yet."
                 );
                 // Make sure the types of its arguments match the expected types
                 let (args_nodes, args_effects) =
-                    self.check_exprs(env, args, &inst_fn_ty.args, name_span)?;
+                    self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
                 // Add the trait constraint
                 let (input_tys, output_tys) =
                     trait_ref.io_types_given_fn(function_index, &inst_fn_ty);
@@ -676,7 +676,7 @@ impl TypeInference {
                         trait_ref.clone(),
                         input_tys,
                         output_tys,
-                        name_span,
+                        path_span,
                     )));
                 // Build and return the trait function node
                 let ret_ty = inst_fn_ty.ret;
@@ -685,22 +685,23 @@ impl TypeInference {
                 let node = K::TraitFnApply(b(ir::TraitFnApplication {
                     trait_ref,
                     function_index,
-                    function_span: name_span,
+                    function_path: ustr(path),
+                    function_span: path_span,
                     arguments: args_nodes,
                     ty: inst_fn_ty,
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
-            } else if let Some((module_name, function)) = env.get_function(name) {
+            } else if let Some((module_name, function)) = env.get_function(path) {
                 if function.definition.ty_scheme.ty.args.len() != args.len() {
                     let got_span = args
                         .iter()
                         .map(|arg| arg.borrow().span)
                         .reduce(|a, b| Location::new_local(a.start(), b.end()))
-                        .unwrap_or(name_span);
+                        .unwrap_or(path_span);
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: function.definition.ty_scheme.ty.args.len(),
-                        expected_span: name_span,
+                        expected_span: path_span,
                         got: args.len(),
                         got_span,
                     }));
@@ -710,13 +711,13 @@ impl TypeInference {
                     function
                         .definition
                         .ty_scheme
-                        .instantiate(self, module_name, name_span.span());
+                        .instantiate(self, module_name, path_span.span());
                 // Get the code and make sure the types of its arguments match the expected types
                 let (args_nodes, args_effects) =
-                    self.check_exprs(env, args, &inst_fn_ty.args, name_span)?;
+                    self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
                 // Build and return the function node, get back the function to avoid re-borrowing
                 let (_, function) = env
-                    .get_function(name)
+                    .get_function(path)
                     .expect("function not found any more after checking");
                 let ret_ty = inst_fn_ty.ret;
                 let combined_effects =
@@ -733,8 +734,8 @@ impl TypeInference {
                 };
                 let node = K::StaticApply(b(ir::StaticApplication {
                     function: FunctionRef::new_weak(&function.code),
-                    function_name: ustr(name),
-                    function_span: name_span,
+                    function_path: ustr(path),
+                    function_span: path_span,
                     arguments: args_nodes,
                     argument_names,
                     ty: inst_fn_ty,
@@ -754,7 +755,7 @@ impl TypeInference {
                             K::Immediate(Immediate::new(Value::unit())),
                             Type::unit(),
                             no_effects(),
-                            name_span,
+                            path_span,
                         ),
                     ),
                     1 => {
@@ -769,11 +770,11 @@ impl TypeInference {
                         } else {
                             K::Tuple(b(SVec2::from_vec(payload_nodes)))
                         };
-                        let payload_node = N::new(node, payload_ty, effects.clone(), name_span);
+                        let payload_node = N::new(node, payload_ty, effects.clone(), path_span);
                         (payload_ty, payload_node)
                     }
                 };
-                let name = ustr(name);
+                let name = ustr(path);
                 self.ty_constraints.push(TypeConstraint::Pub(
                     PubTypeConstraint::new_type_has_variant(
                         variant_ty, name, payload_ty, expr_span,

@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use crate::{r#trait::TraitRef, Location};
+use crate::{function::Callable, r#trait::TraitRef, Location};
 use indexmap::IndexMap;
 use ustr::Ustr;
 
@@ -107,7 +107,7 @@ pub struct Application {
 #[derive(Debug, Clone)]
 pub struct StaticApplication {
     pub function: FunctionRef,
-    pub function_name: Ustr,
+    pub function_path: Ustr,
     pub function_span: Location,
     pub arguments: Vec<Node>,
     pub argument_names: Vec<Ustr>,
@@ -119,6 +119,7 @@ pub struct StaticApplication {
 pub struct TraitFnApplication {
     pub trait_ref: TraitRef,
     pub function_index: usize,
+    pub function_path: Ustr,
     pub function_span: Location,
     pub arguments: Vec<Node>,
     pub ty: FnType,
@@ -263,13 +264,18 @@ impl Node {
                 writeln!(f, "{indent_str}static apply")?;
                 let function = app.function.get();
                 let name = env.function_name(&function);
-                match app.function.get().try_borrow() {
+                match function.try_borrow() {
                     Ok(function) => {
                         let ty = app.ty.format_with(env);
                         match name {
                             Some(name) => writeln!(f, "{indent_str}⎸ {name}: {ty}")?,
                             None => {
-                                writeln!(f, "{indent_str}⎸ unnammed fn at {:p}: {ty}", *function)?
+                                let ptr: *const Box<dyn Callable> = &*function;
+                                writeln!(
+                                    f,
+                                    "{indent_str}⎸ impl {} fn at {:p}: {ty}",
+                                    app.function_path, ptr
+                                )?
                             }
                         }
                     }

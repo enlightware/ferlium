@@ -405,7 +405,7 @@ impl Node {
                         .clone();
                     self.kind = StaticApply(b(ir::StaticApplication {
                         function,
-                        function_name: app.trait_ref.functions[app.function_index].0,
+                        function_path: app.function_path,
                         function_span: app.function_span,
                         arguments: mem::take(&mut app.arguments),
                         argument_names: app.trait_ref.functions[app.function_index]

@@ -1,3 +1,5 @@
+use std::{collections::HashSet, sync::LazyLock};
+
 // Copyright 2025 Enlightware GmbH
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
@@ -167,7 +169,7 @@ impl Node {
             StaticApply(app) => {
                 for (arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
                     if !should_hide_arg_name_hint(
-                        &app.function_name,
+                        &app.function_path,
                         app.argument_names.len(),
                         arg_name,
                         arg,
@@ -178,13 +180,11 @@ impl Node {
                 }
             }
             TraitFnApply(app) => {
-                // TODO: is that really acceptable to have this entry here?
                 let function_data = &app.trait_ref.functions[app.function_index];
-                let function_name = function_data.0;
                 let argument_names = &function_data.1.arg_names;
                 let arity = argument_names.len();
                 for (arg, arg_name) in app.arguments.iter().zip(argument_names.iter()) {
-                    if !should_hide_arg_name_hint(&function_name, arity, arg_name, arg) {
+                    if !should_hide_arg_name_hint(&app.function_path, arity, arg_name, arg) {
                         result.push((arg.span.start(), format!("{}: ", arg_name)));
                     }
                     arg.variable_type_annotations(result, env);
@@ -248,12 +248,12 @@ impl Node {
 
 // Essentially implement a similar logic as rust-analyzer's "should_hide_param_name_hint" fn
 fn should_hide_arg_name_hint(
-    function_name: &str,
+    function_path: &str,
     arity: usize,
     arg_name: &str,
     argument: &Node,
 ) -> bool {
-    if function_name.starts_with('@') {
+    if function_path.starts_with('@') {
         return true;
     }
 
@@ -262,7 +262,20 @@ fn should_hide_arg_name_hint(
         return true;
     }
 
-    is_arg_name_suffix_of_unary_fn_name(function_name, arity, arg_name)
+    static PATHS_TO_HIDE: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+        [
+            "std::eq", "std::ne", "std::le", "std::lt", "std::ge", "std::gt", "std::not",
+            "std::and", "std::or", "std::xor", "std::neg", "std::add", "std::sub", "std::mul",
+            "std::div", "std::rem",
+        ]
+        .into_iter()
+        .collect()
+    });
+    if PATHS_TO_HIDE.contains(&function_path) {
+        return true;
+    }
+
+    is_arg_name_suffix_of_unary_fn_name(function_path, arity, arg_name)
         || is_argument_similar_to_arg_name(argument, arg_name)
         || (arity <= 2 && is_obvious_param(arg_name))
         || is_adt_constructor_similar_to_arg_name(argument, arg_name)
