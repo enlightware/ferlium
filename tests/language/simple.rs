@@ -81,7 +81,7 @@ fn equalities() {
     assert_eq!(run("41 == 42"), bool!(false));
     assert_eq!(run("42 != 42"), bool!(false));
     assert_eq!(run("41 != 42"), bool!(true));
-    fail_compilation("1 == true").expect_type_mismatch("bool", "int");
+    fail_compilation("1 == true").expect_trait_impl_not_found("Num", &["bool"]);
     assert_eq!(run("true == true"), bool!(true));
     assert_eq!(run("true == false"), bool!(false));
     assert_eq!(run("true != true"), bool!(false));
@@ -271,7 +271,7 @@ fn if_expr() {
         run("let mut a = 0; if false { a = 1 } else if true { a = 2 }; a"),
         int!(2)
     );
-    fail_compilation("fn a() { if true { 1 } }").expect_type_mismatch("int", "()");
+    fail_compilation("fn a() { if true { 1 } }").expect_trait_impl_not_found("Num", &["()"]);
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn match_expr() {
     fail_compilation("match testing::some_int(0) { None => 0 }")
         .expect_type_mismatch("None | Some (int)", "None");
     fail_compilation("match testing::some_int(0) { Some(x) => 0 }")
-        .expect_type_mismatch("None | Some (int)", "Some (A)");
+        .expect_type_mismatch("None | Some (int)", "Some (B)");
     // TODO: add more complex literals (tuples, array) once optimisation is in place
 }
 
@@ -376,19 +376,16 @@ fn static_function_arity() {
 fn value_function_arity() {
     let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y + 0 }";
     assert_eq!(run(&format!("{text} (a,).0()")), int!(0));
-    fail_compilation(&format!("{text} (b,).0()"))
-        .expect_type_mismatch("(int) → int", "() → A ! e₀");
-    fail_compilation(&format!("{text} (c,).0()"))
-        .expect_type_mismatch("(int, int) → int", "() → A ! e₀");
-    fail_compilation(&format!("{text} (a,).0(1)"))
-        .expect_type_mismatch("() → int", "(int) → A ! e₀");
+    fail_compilation(&format!("{text} (b,).0()")).expect_type_mismatch("(B) → B", "() → A ! e₀");
+    fail_compilation(&format!("{text} (c,).0()")).expect_type_mismatch("(B, B) → B", "() → A ! e₀");
+    fail_compilation(&format!("{text} (a,).0(1)")).expect_type_mismatch("() → C", "(A) → B ! e₀");
     assert_eq!(run(&format!("{text} (b,).0(1)")), int!(2));
     fail_compilation(&format!("{text} (c,).0(1)"))
-        .expect_type_mismatch("(int, int) → int", "(int) → A ! e₀");
+        .expect_type_mismatch("(C, C) → C", "(A) → B ! e₀");
     fail_compilation(&format!("{text} (a,).0(1, 2)"))
-        .expect_type_mismatch("() → int", "(int, int) → A ! e₀");
+        .expect_type_mismatch("() → D", "(A, B) → C ! e₀");
     fail_compilation(&format!("{text} (b,).0(1, 2)"))
-        .expect_type_mismatch("(int) → int", "(int, int) → A ! e₀");
+        .expect_type_mismatch("(D) → D", "(A, B) → C ! e₀");
     assert_eq!(run(&format!("{text} (c,).0(1, 2)")), int!(3));
 }
 
@@ -408,9 +405,10 @@ fn lambda() {
         run("let sq = |x| x * x; let inc = |x| x + 1; sq(inc(inc(2)))"),
         int!(16)
     );
-    fail_compilation("let id = |x| x; id(1); id(true)").expect_type_mismatch("bool", "int");
+    fail_compilation("let id = |x| x; id(1); id(true)")
+        .expect_trait_impl_not_found("Num", &["bool"]);
     fail_compilation("let d = |x, y| (x, y + 1); d(true, 1); d(1, 2)")
-        .expect_type_mismatch("int", "bool");
+        .expect_trait_impl_not_found("Num", &["bool"]);
     assert_eq!(run("(||1)()"), int!(1));
     assert_eq!(run("(|x| x.1)((1,2))"), int!(2));
     assert_eq!(

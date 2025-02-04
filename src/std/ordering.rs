@@ -16,6 +16,8 @@ use crate::{
     r#type::{variant_type, FnType, Type},
 };
 
+pub const ORD_TRAIT_NAME: &str = "Ord";
+
 pub const ORDERING_LESS: &str = "Less";
 pub const ORDERING_EQUAL: &str = "Equal";
 pub const ORDERING_GREATER: &str = "Greater";
@@ -37,7 +39,7 @@ pub fn add_to_module(to: &mut Module) {
     let binary_fn_ty = FnType::new_by_val(&[var0_ty, var0_ty], ordering_type(), EffType::empty());
     use FunctionDefinition as Def;
     let ord_trait = TraitRef::new(
-        "Ord",
+        ORD_TRAIT_NAME,
         1,
         0,
         [(

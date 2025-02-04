@@ -1051,6 +1051,33 @@ impl CompilationError {
             ),
         }
     }
+
+    pub fn expect_trait_impl_not_found(&self, trait_name: &str, tys: &[&str]) {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            TraitImplNotFound {
+                trait_name: name,
+                input_tys,
+                ..
+            } => {
+                if name == trait_name
+                    && input_tys
+                        .iter()
+                        .map(|ty| ty.as_str())
+                        .eq(tys.iter().copied())
+                {
+                    return;
+                }
+                panic!(
+                    "expect_trait_impl_not_found failed: expected {} over {:?}, got {} over {:?}",
+                    trait_name, tys, name, input_tys
+                );
+            }
+            _ => {
+                panic!("expect_trait_impl_not_found called on non-TraitImplNotFound error {self:?}")
+            }
+        }
+    }
 }
 
 /// Runtime error

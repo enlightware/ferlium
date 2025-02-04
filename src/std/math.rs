@@ -28,6 +28,9 @@ use crate::{
     value::{NativeDisplay, Value},
 };
 
+pub const NUM_TRAIT_NAME: &str = "Num";
+pub const DIV_TRAIT_NAME: &str = "Div";
+
 pub fn int_type() -> Type {
     cached_primitive_ty!(isize)
 }
@@ -82,7 +85,7 @@ pub fn add_to_module(to: &mut Module) {
     let binary_fn_ty = FnType::new_by_val(&[var0_ty, var0_ty], var0_ty, EffType::empty());
     use FunctionDefinition as Def;
     let num_trait = TraitRef::new(
-        "Num",
+        NUM_TRAIT_NAME,
         1,
         0,
         [
@@ -141,8 +144,8 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.traits.push(num_trait.clone());
-    let fractional_trait = TraitRef::new(
-        "Fractional",
+    let div_trait = TraitRef::new(
+        DIV_TRAIT_NAME,
         1,
         0,
         [(
@@ -154,7 +157,7 @@ pub fn add_to_module(to: &mut Module) {
             ),
         )],
     );
-    to.traits.push(fractional_trait.clone());
+    to.traits.push(div_trait.clone());
 
     // Trait implementations
     use std::ops;
@@ -251,7 +254,7 @@ pub fn add_to_module(to: &mut Module) {
         [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
     );
     to.impls.add(
-        fractional_trait.clone(),
+        div_trait.clone(),
         [float_type()],
         [],
         [b(BinaryNativeFnNNFN::new(|lhs: Float, rhs: Float| {

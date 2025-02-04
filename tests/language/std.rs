@@ -100,12 +100,12 @@ fn array_any() {
     assert_eq!(run("array_any([1, 2, 3], |x| x >= 4)"), bool!(false));
     use PrimitiveEffect::*;
     test_mod_for_effects(
-        "fn f() { let a = [1]; array_any(a, |v| { v >= 1 }) }",
+        "fn f() { let a = [idiv(1, 1)]; array_any(a, |v| { v >= 1 }) }",
         "f",
         no_effects(),
     );
     test_mod_for_effects(
-        "fn f() { let a = [1]; array_any(a, |v| { effects::read(); v >= 1 }) }",
+        "fn f() { let a = [idiv(1, 1)]; array_any(a, |v| { effects::read(); v >= 1 }) }",
         "f",
         effect(Read),
     );
@@ -121,12 +121,12 @@ fn array_all() {
     assert_eq!(run("array_all([1, 2, 3], |x| x >= 2)"), bool!(false));
     use PrimitiveEffect::*;
     test_mod_for_effects(
-        "fn f() { let a = [1]; array_all(a, |v| { v >= 1 }) }",
+        "fn f() { let a = [idiv(1, 1)]; array_all(a, |v| { v >= 1 }) }",
         "f",
         no_effects(),
     );
     test_mod_for_effects(
-        "fn f() { let a = [1]; array_all(a, |v| { effects::read(); v >= 1 }) }",
+        "fn f() { let a = [idiv(1, 1)]; array_all(a, |v| { effects::read(); v >= 1 }) }",
         "f",
         effect(Read),
     );

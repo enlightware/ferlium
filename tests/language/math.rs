@@ -79,12 +79,24 @@ fn clamp() {
     assert_eq!(run("clamp(4, -1, 3)"), int!(3));
     assert_eq!(run("clamp(0, 3, 3)"), int!(3));
     assert!(fail_run("clamp(0, 3, 2)").is_aborted());
-    // assert_eq!(run("clamp(-2.5, -1.5, 3.0)"), float!(-1.5));
-    // assert_eq!(run("clamp(-1.5, -1.5, 3.0)"), float!(-1.5));
-    // assert_eq!(run("clamp(0.0, -1.5, 3.0)"), float!(0.0));
-    // assert_eq!(run("clamp(2.5, -1.5, 3.0)"), float!(2.5));
-    // assert_eq!(run("clamp(3.0, -1.5, 3.0)"), float!(3.0));
-    // assert_eq!(run("clamp(4.0, -1.5, 3.0)"), float!(3.0));
-    // assert_eq!(run("clamp(0.0, 3.0, 3.0)"), float!(3.0));
-    // assert!(fail_run("clamp(0.0, 3.0, 2.0)").is_aborted());
+    assert_eq!(run("clamp(-2.5, -1.5, 3.0)"), float!(-1.5));
+    assert_eq!(run("clamp(-1.5, -1.5, 3.0)"), float!(-1.5));
+    assert_eq!(run("clamp(0.0, -1.5, 3.0)"), float!(0.0));
+    assert_eq!(run("clamp(2.5, -1.5, 3.0)"), float!(2.5));
+    assert_eq!(run("clamp(3.0, -1.5, 3.0)"), float!(3.0));
+    assert_eq!(run("clamp(4.0, -1.5, 3.0)"), float!(3.0));
+    assert_eq!(run("clamp(0.0, 3.0, 3.0)"), float!(3.0));
+    assert!(fail_run("clamp(0.0, 3.0, 2.0)").is_aborted());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_defaulting() {
+    assert_eq!(run("0"), int!(0));
+    assert_eq!(run("1 + 1"), int!(2));
+    assert_eq!(run("1 + 1 < 1 + 2"), bool!(true));
+    assert_eq!(run("1 / 1"), float!(1.0));
+    assert_eq!(run("0.0"), float!(0.0));
+    assert_eq!(run("1 + 1.0"), float!(2.0));
+    assert_eq!(run("1 + 1 < 1 + 1.5"), bool!(true));
 }

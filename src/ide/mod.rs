@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn run_fn_unit_int() {
-        let compiler = build("fn main() { 42 }");
+        let compiler = build("fn main() { idiv(42, 1) }");
         let result = compiler
             .run_fn_unit_o::<isize>("main")
             .expect("Execution failed");
@@ -840,7 +840,7 @@ mod tests {
 
     #[test]
     fn run_fn_int_unit() {
-        let compiler = build("fn main(x) { let a = x + 0; () }");
+        let compiler = build("fn main(x) { let a = idiv(x, 1) + 0; () }");
         compiler
             .run_fn_i_unit("main", 42)
             .expect("Execution failed");
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn run_fn_int_int() {
-        let compiler = build("fn main(x) { x+1 }");
+        let compiler = build("fn main(x) { idiv(x+1, 1) }");
         let result = compiler
             .run_fn_i_o::<_, isize>("main", 1)
             .expect("Execution failed");
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn run_fn_int_tuple() {
-        let compiler = build("fn main(x) { (true, x+1) }");
+        let compiler = build("fn main(x) { (true, idiv(x+1, 1)) }");
         let result = compiler
             .run_fn_i_tuple::<isize, bool, isize>("main", 42)
             .expect("Execution failed");

@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     mem,
 };
-use ustr::Ustr;
+use ustr::{ustr, Ustr};
 
 use crate::{
     ast::{
@@ -22,6 +22,7 @@ use crate::{
     error::InternalCompilationError,
     format_string::emit_format_string_ast,
     graph::{find_strongly_connected_components, topological_sort_sccs},
+    std::math::int_type,
 };
 
 type FnMap = HashMap<Ustr, usize>;
@@ -113,7 +114,18 @@ impl PExpr {
     fn desugar(self, ctx: &mut DesugarCtx) -> Result<DExpr, InternalCompilationError> {
         use ExprKind::*;
         let kind = match self.kind {
-            Literal(value, ty) => Literal(value, ty),
+            Literal(value, ty) => {
+                if ty == int_type() {
+                    // convert integer literals to from_int(literal)
+                    Apply(
+                        b(DExpr::new(Identifier(ustr("from_int")), self.span)),
+                        vec![DExpr::new(Literal(value, ty), self.span)],
+                        false,
+                    )
+                } else {
+                    Literal(value, ty)
+                }
+            }
             FormattedString(s) => emit_format_string_ast(&s, self.span, &ctx.locals)?,
             Identifier(name) => {
                 if !ctx.locals.iter().rev().any(|&local| local == name) {
@@ -163,7 +175,13 @@ impl PExpr {
             ),
             FieldAccess(expr, name) => FieldAccess(expr.desugar_boxed(ctx)?, name),
             Array(elements) => Array(desugar(elements, ctx)?),
-            Index(array, index) => Index(array.desugar_boxed(ctx)?, index.desugar_boxed(ctx)?),
+            Index(array, index) => {
+                let index = match index.kind {
+                    Literal(value, ty) => b(DExpr::new(Literal(value, ty), index.span)),
+                    _ => index.desugar_boxed(ctx)?,
+                };
+                Index(array.desugar_boxed(ctx)?, index)
+            }
             Match(expr, alternatives, default) => Match(
                 expr.desugar_boxed(ctx)?,
                 alternatives

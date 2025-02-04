@@ -2505,7 +2505,7 @@ fn nodes_as_bare_immediate(nodes: &[impl Borrow<Node>]) -> Option<Vec<Value>> {
             match &node.kind {
                 NodeKind::Immediate(immediate) => {
                     // For now, do not support function values for transformation into composed immediates.
-                    // The reason is that different functions might hav different instantiation requirements.
+                    // The reason is that different functions might have different instantiation requirements.
                     if node.effects.any()
                         || immediate.inst_data.any()
                         || node.ty.data().is_function()
