@@ -188,6 +188,9 @@ fn arithmetic_operators() {
     assert_eq!(run("0.0-2.0-2.0"), float!(-4.0));
     assert_eq!(run("0.0-(2.0-2.0)"), float!(0.0));
     assert_eq!(run("1.0+2.0*3.0"), float!(7.0));
+    assert_eq!(run("7 / 2"), float!(3.5));
+    assert_eq!(run("12 / 3 / 2"), float!(2.0));
+    assert_eq!(run("12 / (3 / 2)"), float!(8.0));
 }
 
 #[test]

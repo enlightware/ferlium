@@ -656,11 +656,9 @@ fn compute_num_trait_default_types(
     let mut invalid_ty_vars = HashSet::<TypeVar>::new();
     const DEFAULTABLE_TRAITS: [&str; 3] = [NUM_TRAIT_NAME, ORD_TRAIT_NAME, DIV_TRAIT_NAME];
     for constraint in all_constraints.iter() {
-        dbg!(constraint);
         if !selected_constraints.contains(&constraint_ptr(constraint)) {
             continue;
         }
-        dbg!(constraint);
         if let Some(have_trait) = constraint.as_have_trait() {
             assert!(!have_trait.1.is_empty());
             if have_trait.1.len() > 1 || !DEFAULTABLE_TRAITS.contains(&have_trait.0.name.as_str()) {

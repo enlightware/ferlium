@@ -242,8 +242,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(<Float as ops::Sub>::sub)) as Function,
             b(BinaryFn::new(<Float as ops::Mul>::mul)) as Function,
             b(UnaryFn::new(<Float as ops::Neg>::neg)) as Function,
-            b(UnaryFn::new(Float::abs)) as Function,
-            b(UnaryFn::new(Float::signum)) as Function,
+            b(UnaryFn::new(|value: Float| Float::abs(&value))) as Function,
+            b(UnaryFn::new(|value: Float| Float::signum(&value))) as Function,
             b(UnaryFn::new(isize_to_not_nan)) as Function,
         ],
     );
