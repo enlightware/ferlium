@@ -287,6 +287,18 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
+        InvalidVariantConstructor { span } => {
+            let name = &data.1[span_range(*span)];
+            Report::build(ReportKind::Error, ("input", span_range(*span)))
+                .with_message(format!(
+                    "Variant constructor cannot be a path, but {} is.",
+                    name.fg(Color::Blue)
+                ))
+                .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
+                .finish()
+                .print(("input", Source::from(src)))
+                .unwrap();
+        }
         InconsistentADT {
             a_type,
             a_span,

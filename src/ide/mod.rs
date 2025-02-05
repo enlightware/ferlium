@@ -244,6 +244,12 @@ fn compilation_error_to_data(
                 ),
             )]
         }
+        InvalidVariantConstructor { span } => {
+            vec![ErrorData::from_location(
+                span,
+                "Variant constructor cannot be a path".to_string(),
+            )]
+        }
         InconsistentADT {
             a_type,
             a_span,

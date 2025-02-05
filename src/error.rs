@@ -119,6 +119,10 @@ pub enum InternalCompilationErrorImpl {
         name: Location,
         ty: Type,
     },
+    InvalidVariantConstructor {
+        span: Location,
+        // Only one error type for now: a path was used as a variant constructor
+    },
     InconsistentADT {
         a_type: ADTAccessType,
         a_span: Location,
@@ -373,6 +377,13 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     fmt_span(name),
                 )
             }
+            InvalidVariantConstructor { span } => {
+                write!(
+                    f,
+                    "Variant constructor cannot be paths, but {} is",
+                    fmt_span(span),
+                )
+            }
             InconsistentADT {
                 a_type,
                 b_type,
@@ -570,6 +581,9 @@ pub enum CompilationErrorImpl {
     InvalidVariantType {
         name: Location,
         ty: String,
+    },
+    InvalidVariantConstructor {
+        span: Location,
     },
     InconsistentADT {
         a_type: ADTAccessType,
@@ -785,6 +799,9 @@ impl CompilationError {
                 name,
                 ty: ty.format_with(env).to_string(),
             }),
+            InvalidVariantConstructor { span } => {
+                compilation_error!(InvalidVariantConstructor { span })
+            }
             InconsistentADT {
                 a_type,
                 a_span,

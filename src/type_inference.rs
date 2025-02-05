@@ -303,6 +303,12 @@ impl TypeInference {
                 }
                 // Otherwise, the name is neither a known variable or function, assume it to be a variant constructor
                 else {
+                    // Variants cannot be paths
+                    if path.contains("::") {
+                        return Err(internal_compilation_error!(InvalidVariantConstructor {
+                            span: expr.span,
+                        }));
+                    }
                     // Create a fresh type and add a constraint for that type to include this variant.
                     let variant_ty = self.fresh_type_var_ty();
                     let payload_ty = Type::unit();
