@@ -749,6 +749,12 @@ impl TypeInference {
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
             } else {
+                // Variants cannot be paths
+                if path.contains("::") {
+                    return Err(internal_compilation_error!(InvalidVariantConstructor {
+                        span: path_span,
+                    }));
+                }
                 // If it is not a known function, assume it to be a variant constructor
                 // Create a fresh type and add a constraint for that type to include this variant.
                 let variant_ty = self.fresh_type_var_ty();
