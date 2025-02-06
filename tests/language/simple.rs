@@ -582,6 +582,10 @@ fn records() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variants() {
+    // simple example
+    assert_eq!(run("MyVariant"), variant!("MyVariant", Value::unit()));
+    assert_eq!(run("MyVariant2(1.1)"), variant!("MyVariant2", float!(1.1)));
+    // TODO: add more variant constructor tests
     // option example
     let match_exhaustive = r#"fn s(x) { match x { None => "no", Some(x) => f"hi {x}" } }"#;
     assert_eq!(

@@ -727,14 +727,14 @@ fn compute_num_trait_default_types(
         }
     }
 
-    // Then, decicde which type variables can be default and whether to int or float.
+    // Then, decide which type variables can be default and whether to int or float.
     // The value of the default_tys map holds the index of the type to default to.
     // If the index is default_tys.len(), there is no default.
     let default_tys = [int_type(), float_type()];
     let mut defaulted_ty_vars = HashMap::<TypeVar, usize>::new();
     // Process extra type variables.
     for ty_var in extra_ty_vars {
-        if invalid_ty_vars.contains(ty_var) {
+        if invalid_ty_vars.contains(ty_var) || subst.contains_key(ty_var) {
             continue;
         }
         defaulted_ty_vars.insert(*ty_var, 0);
@@ -792,8 +792,8 @@ fn compute_num_trait_default_types(
         if let Some(default_ty) = default_ty {
             subst
                 .entry(ty_var)
-                .and_modify(|_| {
-                    panic!("Type variable {ty_var} already exists in type substitution")
+                .and_modify(|prev_ty| {
+                    panic!("Type variable {ty_var} already exists in type substitution with type {:?}, trying to use type {:?} instead", prev_ty, default_ty)
                 })
                 .or_insert(*default_ty);
         }
