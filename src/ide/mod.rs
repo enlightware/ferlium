@@ -176,6 +176,10 @@ fn compilation_error_to_data(
             span,
             format!("Unbound type variable {ty_var} in {ty}"),
         )],
+        UnresolvedConstraints { constraints, span } => vec![ErrorData::from_location(
+            span,
+            format!("Unresolved constraints: {}", constraints.join(" ∧ ")),
+        )],
         InvalidTupleIndex {
             index,
             index_span,

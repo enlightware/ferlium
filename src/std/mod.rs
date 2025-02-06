@@ -29,7 +29,9 @@ pub mod option;
 pub mod ordering;
 mod prelude;
 pub mod range;
+pub mod serde;
 pub mod string;
+pub mod variant;
 
 pub fn std_module() -> Module {
     let mut module = Module::default();
@@ -43,6 +45,8 @@ pub fn std_module() -> Module {
     array::add_to_module(&mut module);
     io::add_to_module(&mut module);
     string::add_to_module(&mut module);
+    variant::add_to_module(&mut module);
+    serde::add_to_module(&mut module);
     prelude::add_to_module(&mut module);
     // option::add_option_functions(&mut module);
     module

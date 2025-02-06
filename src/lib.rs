@@ -45,6 +45,7 @@ pub mod r#trait;
 pub mod r#type;
 mod type_inference;
 pub mod type_scheme;
+mod type_substitution;
 pub mod typing_env;
 pub mod value;
 

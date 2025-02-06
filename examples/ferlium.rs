@@ -20,7 +20,6 @@ use ferlium::std::{new_module_with_prelude, new_std_module_env};
 use ferlium::typing_env::Local;
 use ferlium::Location;
 use ferlium::{parse_module_and_expr, SubOrSameType};
-use itertools::Itertools;
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 
@@ -502,21 +501,6 @@ fn main() {
         };
         locals = compiled_expr.locals;
         println!("Expr IR:\n{}", compiled_expr.expr.format_with(&module_env));
-
-        // Make sure the expression has no unbound type variables
-        if !compiled_expr.ty.constraints().is_empty() {
-            let constraints = compiled_expr
-                .ty
-                .constraints()
-                .iter()
-                .map(|c| c.format_with(&module_env))
-                .join(" ∧ ");
-            println!(
-                "Error: Unresolved constraints in expression: {}",
-                constraints
-            );
-            continue;
-        }
 
         // Evaluate and print result
         let old_size = eval_ctx.environment.len();

@@ -12,8 +12,12 @@ use std::{
     ops::Deref,
 };
 
-use crate::{location::Location, r#trait::TraitRef, type_inference::SubOrSameType};
+use crate::{
+    location::Location, r#trait::TraitRef, type_inference::SubOrSameType,
+    type_scheme::PubTypeConstraint,
+};
 use enum_as_inner::EnumAsInner;
+use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
@@ -84,6 +88,10 @@ pub enum InternalCompilationErrorImpl {
     UnboundTypeVar {
         ty_var: TypeVar,
         ty: Type,
+        span: Location,
+    },
+    UnresolvedConstraints {
+        constraints: Vec<PubTypeConstraint>,
         span: Location,
     },
     InvalidTupleIndex {
@@ -310,6 +318,15 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                     "Unbound type variable {} in {}",
                     ty_var,
                     ty.format_with(env)
+                )
+            }
+            UnresolvedConstraints { constraints, span } => {
+                let constraints = constraints.iter().map(|c| c.format_with(env)).join(" ∧ ");
+                write!(
+                    f,
+                    "Unresolved constraints {} in expression {}",
+                    constraints,
+                    fmt_span(span)
                 )
             }
             InvalidTupleIndex {
@@ -548,6 +565,10 @@ pub enum CompilationErrorImpl {
         ty: String,
         span: Location,
     },
+    UnresolvedConstraints {
+        constraints: Vec<String>,
+        span: Location,
+    },
     InvalidTupleIndex {
         index: usize,
         index_span: Location,
@@ -739,6 +760,15 @@ impl CompilationError {
                 ty: ty.format_with(env).to_string(),
                 span,
             }),
+            UnresolvedConstraints { constraints, span } => {
+                compilation_error!(UnresolvedConstraints {
+                    constraints: constraints
+                        .iter()
+                        .map(|c| c.format_with(env).to_string())
+                        .collect(),
+                    span,
+                })
+            }
             InvalidTupleIndex {
                 index,
                 index_span,

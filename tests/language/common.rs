@@ -227,7 +227,7 @@ macro_rules! int {
 #[macro_export]
 macro_rules! int_a {
     [] => {
-        Value::native(Array::new())
+        Value::native(ferlium::std::array::Array::new())
     };
     [$($elem:expr),+ $(,)?] => {
         Value::native(ferlium::std::array::Array::from_vec(vec![
@@ -264,4 +264,12 @@ macro_rules! string {
         use std::str::FromStr;
         Value::native(ferlium::std::string::String::from_str($s).unwrap())
     }};
+}
+
+/// A variant value of given tag and value
+#[macro_export]
+macro_rules! variant {
+    ($tag:literal, $value:expr) => {
+        Value::variant(ustr::ustr($tag), $value)
+    };
 }

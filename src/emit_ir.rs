@@ -30,10 +30,7 @@ use crate::{
     module::{self, FmtWithModuleEnv, Impls, Module, ModuleEnv, Modules},
     mutability::MutType,
     r#type::{FnType, Type, TypeLike, TypeSubstitution, TypeVar},
-    std::{
-        math::{float_type, int_type, DIV_TRAIT_NAME, NUM_TRAIT_NAME},
-        ordering::ORD_TRAIT_NAME,
-    },
+    std::math::{float_type, int_type},
     type_inference::TypeInference,
     type_scheme::{PubTypeConstraint, TypeScheme, VariantConstraint},
     typing_env::{Local, TypingEnv},
@@ -49,18 +46,18 @@ pub fn emit_module(
     use ir::Node as N;
     use ir::NodeKind as K;
 
-    // Create a list of all available trait implementations.
-    let trait_impls = collect_trait_impls(others);
-
     // First desugar the module.
     let (source, sorted_sccs) = source.desugar()?;
 
-    // Prepare target module.
+    // Prepare target module and list of all available trait implementations.
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
+    let trait_impls = ModuleEnv::new(&output, others).collect_trait_impls();
+
+    // Process each SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
         scc.sort(); // for compatibility due to bug in effect tracking
 
-        // Process each SCC one by one.
+        // Extract functions from the SCC.
         let functions = || scc.iter().map(|&idx| &source.functions[idx]);
         if log_enabled!(log::Level::Debug) {
             let names = functions().map(|f| f.name.0).collect::<Vec<_>>();
@@ -182,9 +179,9 @@ pub fn emit_module(
         let all_constraints = ty_inf.constraints();
         let mut used_constraints: HashSet<PubTypeConstraintPtr> = HashSet::new();
         for ModuleFunction { name, .. } in functions() {
-            let descr = output.functions.get_mut(&name.0).unwrap();
-            let mut code = descr.code.borrow_mut();
-            let node = &mut code.as_script_mut().unwrap().code;
+            let descr = output.functions.get(&name.0).unwrap();
+            let code = RefCell::borrow(&descr.code);
+            let node = &code.as_script().unwrap().code;
 
             // Clean up constraints and validate them.
             let ConstraintValidationOutput {
@@ -197,6 +194,7 @@ pub fn emit_module(
                 &all_constraints,
                 node,
                 false,
+                &trait_impls,
             )?;
             let constraints: Vec<_> = all_constraints
                 .iter()
@@ -210,8 +208,12 @@ pub fn emit_module(
                 .cloned()
                 .collect();
             assert_eq!(constraints.len(), retained_constraints.len());
+            drop(code);
 
             // Substitute the constraint-originating types in the node.
+            let descr = output.functions.get_mut(&name.0).unwrap();
+            let mut code = descr.code.borrow_mut();
+            let node = &mut code.as_script_mut().unwrap().code;
             node.instantiate(&(constraint_subst, HashMap::new()));
 
             // Write the final type scheme.
@@ -322,7 +324,8 @@ pub struct CompiledExpr {
 /// Emit IR for an expression
 /// Return the compiled expression and any remaining external constraints
 /// referring to lower-generation type variables.
-pub fn emit_expr(
+/// Note: the expression might not be safe to use if it has unbound constraints or type variables.
+pub fn emit_expr_unsafe(
     source: ast::PExpr,
     module_env: ModuleEnv,
     locals: Vec<Local>,
@@ -336,7 +339,7 @@ pub fn emit_expr(
     );
 
     // Create a list of all available trait implementations.
-    let trait_impls = collect_trait_impls(module_env.others);
+    let trait_impls = module_env.collect_trait_impls();
 
     // First desugar the expression.
     let source = source.desugar_with_empty_ctx()?;
@@ -369,10 +372,17 @@ pub fn emit_expr(
         retained_constraints,
         constraint_subst,
         ..
-    } = validate_and_cleanup_constraints(&node.ty, &constraints, &node, true)?;
+    } = validate_and_cleanup_constraints(&node.ty, &constraints, &node, true, &trait_impls)?;
     log_dropped_constraints_expr(&constraints, &retained_constraints, module_env);
     constraints.retain(|c| retained_constraints.contains(&constraint_ptr(c)));
     assert_eq!(constraints.len(), retained_constraints.len());
+
+    // Apply the constraint-originating substitution.
+    let subst = (constraint_subst, HashMap::new());
+    node.instantiate(&subst);
+    for local in locals.iter_mut().skip(initial_local_count) {
+        local.ty = local.ty.instantiate(&subst);
+    }
 
     // Normalize the type scheme
     let mut ty_scheme = TypeScheme {
@@ -393,7 +403,6 @@ pub fn emit_expr(
     }
 
     // Substitute the normalized and constraint-originating types in the node, effects and locals.
-    subst.0.extend(constraint_subst);
     node.instantiate(&subst);
     ty_scheme.ty = ty_scheme.ty.instantiate(&subst);
     for local in locals.iter_mut().skip(initial_local_count) {
@@ -413,16 +422,29 @@ pub fn emit_expr(
     })
 }
 
-fn collect_trait_impls(modules: &Modules) -> Impls {
-    modules
-        .iter()
-        .flat_map(|(_, module)| {
-            module
-                .impls
-                .iter()
-                .map(|(key, trait_impl)| ((key.0.clone(), key.1.clone()), trait_impl.clone()))
-        })
-        .collect()
+/// Emit IR for an expression, and fails if there are any unbound type variables or constraints.
+pub fn emit_expr(
+    source: ast::PExpr,
+    module_env: ModuleEnv,
+    locals: Vec<Local>,
+) -> Result<CompiledExpr, InternalCompilationError> {
+    let span = source.span;
+    let CompiledExpr { ty, expr, locals } = emit_expr_unsafe(source, module_env, locals)?;
+    let ty_vars = ty.ty.inner_ty_vars();
+    if !ty_vars.is_empty() {
+        return Err(internal_compilation_error!(UnboundTypeVar {
+            ty_var: ty_vars[0],
+            ty: ty.ty,
+            span,
+        }));
+    }
+    if !ty.constraints.is_empty() {
+        return Err(internal_compilation_error!(UnresolvedConstraints {
+            constraints: ty.constraints.clone(),
+            span,
+        }));
+    }
+    Ok(CompiledExpr { ty, expr, locals })
 }
 
 /// Filter constraints that contain at least of the type variables listed in ty_vars
@@ -506,10 +528,21 @@ where
 
 /// Partition the orphan variant constraints and the others, and for the variant constraints,
 /// create a substitution into a minimalist variant type.
-fn partition_variant_constraints<'c>(
-    constraints: impl Iterator<Item = &'c PubTypeConstraint>,
+fn partition_variant_constraints(
+    constraints: &HashSet<&PubTypeConstraint>,
 ) -> (TypeSubstitution, HashSet<PubTypeConstraintPtr>) {
-    // Extract the variant constraints and partition them by type variable.
+    // First, collect the type variables that are invalid for variant simplification.
+    let mut invalid_ty_vars = HashSet::<TypeVar>::new();
+    for constraint in constraints {
+        if let Some(has_variant) = constraint.as_type_has_variant() {
+            invalid_ty_vars.extend(has_variant.2.inner_ty_vars())
+        } else {
+            invalid_ty_vars.extend(constraint.inner_ty_vars());
+        }
+    }
+
+    // Then, extract the variant constraints and partition them by type variable,
+    // if the type variable is not in invalid_ty_vars.
     let mut variants: HashMap<TypeVar, VariantConstraint> = HashMap::new();
     let mut others = HashSet::new();
     for constraint in constraints {
@@ -521,11 +554,15 @@ fn partition_variant_constraints<'c>(
                 ..
             } => {
                 if let Some(ty_var) = variant_ty.data().as_variable() {
-                    let existing = variants
-                        .entry(*ty_var)
-                        .or_default()
-                        .insert(*tag, *payload_ty);
-                    assert!(existing.is_none(), "Duplicate variant constraint for {tag}");
+                    if !invalid_ty_vars.contains(ty_var) {
+                        let existing = variants
+                            .entry(*ty_var)
+                            .or_default()
+                            .insert(*tag, *payload_ty);
+                        assert!(existing.is_none(), "Duplicate variant constraint for {tag}");
+                    } else {
+                        others.insert(constraint_ptr(constraint));
+                    }
                 } else {
                     others.insert(constraint_ptr(constraint));
                 }
@@ -535,7 +572,8 @@ fn partition_variant_constraints<'c>(
             }
         }
     }
-    // Create minimalist variant type for them.
+
+    // And create minimalist variant type for them.
     let subst = variants
         .into_iter()
         .map(|(ty_var, variant)| {
@@ -564,6 +602,7 @@ fn validate_and_cleanup_constraints(
     constraints: &[PubTypeConstraint],
     node: &Node,
     is_expr: bool,
+    trait_impls: &Impls,
 ) -> Result<ConstraintValidationOutput, InternalCompilationError> {
     // Filter out constraints that have types not found in our code.
     let unbound = node.all_unbound_ty_vars();
@@ -573,20 +612,31 @@ fn validate_and_cleanup_constraints(
 
     let (constraints, subst) = if is_expr {
         // An expression, keep all constraints
-        let constraints = constraints.into_iter().collect();
-        (constraints, HashMap::new())
+        let (subst, other_constraints) =
+            partition_variant_constraints(&constraints.iter().copied().collect());
+        let constraints = constraints
+            .iter()
+            .copied()
+            .filter(|c| other_constraints.contains(&constraint_ptr(c)))
+            .collect();
+        (constraints, subst)
     } else {
-        // A module function, find constraints that are not transitively accessible from the fn signature
+        // A module function, find constraints that are not transitively accessible from the fn signature.
         let sig_ty_vars = ty.inner_ty_vars();
         let (constraints, orphan_constraints) =
             select_constraints_accessible_from(&constraints, &sig_ty_vars);
 
         // Partition the orphan constraints into variant constraint substitutions and the others.
-        let (mut subst, mut other_orphans) =
-            partition_variant_constraints(orphan_constraints.iter().copied());
+        let (mut subst, mut other_orphans) = partition_variant_constraints(&orphan_constraints);
 
         // Default Num types to Int or Float in other orphan constraints.
-        compute_num_trait_default_types(&orphan_constraints, &mut other_orphans, &mut subst);
+        compute_num_trait_default_types(
+            &orphan_constraints,
+            &mut other_orphans,
+            &mut subst,
+            &[],
+            trait_impls,
+        );
         if !other_orphans.is_empty() {
             return Err(internal_compilation_error!(Internal(format!(
                 "Orphan constraints found: {other_orphans:?}"
@@ -619,6 +669,9 @@ fn validate_and_cleanup_constraints(
             &constraints,
             &mut retained_constraints,
             &mut constraint_subst,
+            // All type variables of an expression must be defaulted
+            &ty.inner_ty_vars(),
+            trait_impls,
         );
     }
 
@@ -639,6 +692,8 @@ fn compute_num_trait_default_types(
     all_constraints: &HashSet<&PubTypeConstraint>,
     selected_constraints: &mut HashSet<PubTypeConstraintPtr>,
     subst: &mut TypeSubstitution,
+    extra_ty_vars: &[TypeVar],
+    trait_impls: &Impls,
 ) {
     // In debug, check that all_constraints contains all selected_constraints.
     #[cfg(debug_assertions)]
@@ -652,52 +707,96 @@ fn compute_num_trait_default_types(
             assert!(all_constraints.contains(constraint));
         }
     }
+
     // First, collect the type variables that are invalid for defaulting.
+    // These include the ones that appear in non-trait constraints or in traits with
+    // more than one input types or having output types.
     let mut invalid_ty_vars = HashSet::<TypeVar>::new();
-    const DEFAULTABLE_TRAITS: [&str; 3] = [NUM_TRAIT_NAME, ORD_TRAIT_NAME, DIV_TRAIT_NAME];
-    for constraint in all_constraints.iter() {
+    for constraint in all_constraints {
         if !selected_constraints.contains(&constraint_ptr(constraint)) {
             continue;
         }
         if let Some(have_trait) = constraint.as_have_trait() {
             assert!(!have_trait.1.is_empty());
-            if have_trait.1.len() > 1 || !DEFAULTABLE_TRAITS.contains(&have_trait.0.name.as_str()) {
+            if have_trait.1.len() > 1 {
                 invalid_ty_vars.extend(have_trait.1.iter().flat_map(|ty| ty.inner_ty_vars()));
             }
+            invalid_ty_vars.extend(have_trait.2.iter().flat_map(|ty| ty.inner_ty_vars()));
+        } else {
+            invalid_ty_vars.extend(constraint.inner_ty_vars());
         }
     }
-    // Then, default the Num types to int or float.
-    // Note: currently all our Num types are also Ord, so we can drop the Ord
-    // constraints if their type variables are substituted by int or float.
-    // If the value of the map is true, the type variable can be defaulted to int,
-    // otherwise it must be defaulted to float.
-    let mut defaulted_ty_vars = HashMap::<TypeVar, bool>::new();
+
+    // Then, decicde which type variables can be default and whether to int or float.
+    // The value of the default_tys map holds the index of the type to default to.
+    // If the index is default_tys.len(), there is no default.
+    let default_tys = [int_type(), float_type()];
+    let mut defaulted_ty_vars = HashMap::<TypeVar, usize>::new();
+    // Process extra type variables.
+    for ty_var in extra_ty_vars {
+        if invalid_ty_vars.contains(ty_var) {
+            continue;
+        }
+        defaulted_ty_vars.insert(*ty_var, 0);
+    }
+    // Process trait constraint type variables.
     for constraint in all_constraints.iter() {
         if !selected_constraints.contains(&constraint_ptr(constraint)) {
             continue;
         }
         if let Some(have_trait) = constraint.as_have_trait() {
-            if !DEFAULTABLE_TRAITS.contains(&have_trait.0.name.as_str()) {
+            if have_trait.1.len() > 1 || !have_trait.2.is_empty() {
                 continue;
             }
-            assert_eq!(have_trait.0.input_type_count.get(), 1);
-            assert_eq!(have_trait.0.output_type_count, 0);
-            assert_eq!(have_trait.1.len(), 1);
             let maybe_ty_var = have_trait.1[0].data().as_variable().cloned();
             if let Some(ty_var) = maybe_ty_var {
                 if invalid_ty_vars.contains(&ty_var) {
                     continue;
                 }
-                let accept_int = have_trait.0.name != DIV_TRAIT_NAME;
-                *defaulted_ty_vars.entry(ty_var).or_insert(true) &= accept_int;
-                selected_constraints.remove(&constraint_ptr(constraint));
+                let mut default_index = defaulted_ty_vars.get(&ty_var).copied().unwrap_or(0);
+                while default_index < default_tys.len() && {
+                    let key = (have_trait.0.clone(), vec![default_tys[default_index]]);
+                    !trait_impls.contains_key(&key)
+                } {
+                    default_index += 1;
+                    if default_index >= default_tys.len() {
+                        break;
+                    }
+                }
+                defaulted_ty_vars.insert(ty_var, default_index);
             }
         }
     }
-    // Finally, update the substitution with the defaulting.
-    for (ty_var, accept_int) in defaulted_ty_vars {
-        let default_ty = if accept_int { int_type() } else { float_type() };
-        subst.entry(ty_var).or_insert(default_ty);
+
+    // Finally, remove the defaulted constraints and update the substitution with the valid default types.
+    for constraint in all_constraints.iter() {
+        if !selected_constraints.contains(&constraint_ptr(constraint)) {
+            continue;
+        }
+        if let Some(have_trait) = constraint.as_have_trait() {
+            if have_trait.1.len() > 1 || !have_trait.2.is_empty() {
+                continue;
+            }
+            let maybe_ty_var = have_trait.1[0].data().as_variable().cloned();
+            if let Some(ty_var) = maybe_ty_var {
+                if let Some(default_index) = defaulted_ty_vars.get(&ty_var) {
+                    if *default_index < default_tys.len() {
+                        selected_constraints.remove(&constraint_ptr(constraint));
+                    }
+                }
+            }
+        }
+    }
+    for (ty_var, default_ty_index) in defaulted_ty_vars {
+        let default_ty = default_tys.get(default_ty_index);
+        if let Some(default_ty) = default_ty {
+            subst
+                .entry(ty_var)
+                .and_modify(|_| {
+                    panic!("Type variable {ty_var} already exists in type substitution")
+                })
+                .or_insert(*default_ty);
+        }
     }
 }
 
@@ -717,7 +816,7 @@ fn log_dropped_constraints_expr(
         })
         .map(|c| c.format_with(&module_env));
     let dropped = iterable_to_string(dropped, " ∧ ");
-    log::debug!("Dropped constraints in expr: {dropped}");
+    log::debug!("Dropped/resolved constraints in expr: {dropped}");
 }
 
 fn log_dropped_constraints_module(
@@ -738,5 +837,5 @@ fn log_dropped_constraints_module(
         })
         .map(|c| c.format_with(&module_env));
     let dropped = iterable_to_string(dropped, " ∧ ");
-    log::debug!("Dropped constraints in {ctx}: {dropped}");
+    log::debug!("Dropped/resolved constraints in {ctx}: {dropped}");
 }

@@ -13,7 +13,6 @@ use crate::effects::test_mod as test_mod_for_effects;
 use super::common::{fail_compilation, run};
 use ferlium::{
     effects::{effect, no_effects, PrimitiveEffect},
-    std::array::Array,
     value::Value,
 };
 
@@ -223,4 +222,10 @@ fn string_sub_string() {
     assert_eq!(run(r#"string_sub_string("hello", 1, 4)"#), string!("ell"));
     assert_eq!(run(r#"string_sub_string("hello", 1, -1)"#), string!("ell"));
     assert_eq!(run(r#"string_sub_string("hello", -4, -2)"#), string!("el"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn serialize() {
+    assert_eq!(run(r#"serialize(1)"#), variant!("Int", int!(1)));
 }

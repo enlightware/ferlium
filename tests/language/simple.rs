@@ -13,7 +13,6 @@ use super::common::{
 };
 use ferlium::{
     error::{MutabilityMustBeWhat, RuntimeError},
-    std::array::Array,
     value::Value,
 };
 

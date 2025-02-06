@@ -338,6 +338,19 @@ impl<'m> ModuleEnv<'m> {
             |name| Some(name.to_string()),
         )
     }
+
+    pub fn collect_trait_impls(&self) -> Impls {
+        self.current
+            .impls
+            .iter()
+            .chain(
+                self.others
+                    .iter()
+                    .flat_map(|(_, module)| module.impls.iter()),
+            )
+            .map(|(key, trait_impl)| ((key.0.clone(), key.1.clone()), trait_impl.clone()))
+            .collect()
+    }
 }
 
 /// Format a type with a module environment

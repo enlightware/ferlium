@@ -16,9 +16,16 @@ use std::{
 };
 
 use crate::{
-    ast::DExpr, error::MutabilityMustBeWhat, internal_compilation_error, location::Location,
-    module::Impls, parser_helpers::EMPTY_USTR, r#trait::TraitRef, r#type::TypeLike,
+    ast::DExpr,
+    error::MutabilityMustBeWhat,
+    internal_compilation_error,
+    location::Location,
+    module::Impls,
+    parser_helpers::EMPTY_USTR,
+    r#trait::TraitRef,
+    r#type::TypeLike,
     std::logic::bool_type,
+    type_substitution::{substitute_fn_type, substitute_type, substitute_types, TypeSubstituer},
 };
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
@@ -2140,124 +2147,22 @@ impl UnifiedTypeInference {
     }
 
     pub fn substitute_in_type(&mut self, ty: Type) -> Type {
-        let type_data: TypeKind = { ty.data().clone() };
-        use TypeKind::*;
-        match type_data {
-            Variable(var) => {
-                // if ignore.contains(&var) {
-                //     return Type::variable(var);
-                // }
-                let root = self.ty_unification_table.find(var);
-                match self.ty_unification_table.probe_value(root) {
-                    Some(ty) => self.substitute_in_type(ty),
-                    _ => Type::variable(root),
-                }
-            }
-            Native(ty) => Type::native_type(NativeType::new(
-                ty.bare_ty.clone(),
-                self.substitute_in_types(&ty.arguments),
-            )),
-            Variant(tys) => Type::variant(
-                tys.into_iter()
-                    .map(|(name, ty)| (name, self.substitute_in_type(ty)))
-                    .collect(),
-            ),
-            Tuple(tys) => Type::tuple(self.substitute_in_types(&tys)),
-            Record(fields) => Type::record(
-                fields
-                    .into_iter()
-                    .map(|(name, ty)| (name, self.substitute_in_type(ty)))
-                    .collect(),
-            ),
-            Function(fn_ty) => Type::function_type(self.substitute_in_fn_type(&fn_ty)),
-            Newtype(name, ty) => Type::new_type(name, self.substitute_in_type(ty)),
-            Never => ty,
-        }
+        substitute_type(ty, self)
     }
 
     fn substitute_in_types(&mut self, tys: &[Type]) -> Vec<Type> {
-        tys.iter().map(|ty| self.substitute_in_type(*ty)).collect()
+        substitute_types(tys, self)
     }
 
     pub fn substitute_in_fn_type(&mut self, fn_ty: &FnType) -> FnType {
-        let args = fn_ty
-            .args
-            .iter()
-            .map(|arg| {
-                FnArgType::new(
-                    self.substitute_in_type(arg.ty),
-                    self.substitute_mut_type(arg.inout),
-                )
-            })
-            .collect::<Vec<_>>();
-        let ret = self.substitute_in_type(fn_ty.ret);
-        let effects = self.substitute_effect_type(&fn_ty.effects);
-        FnType::new(args, ret, effects)
+        substitute_fn_type(fn_ty, self)
     }
 
-    fn substitute_mut_type(&mut self, mut_ty: MutType) -> MutType {
-        match mut_ty {
-            MutType::Resolved(_) => mut_ty,
-            MutType::Variable(var) => {
-                let root = self.mut_unification_table.find(var);
-                match self.mut_unification_table.probe_value(root) {
-                    Some(val) => MutType::resolved(val),
-                    _ => panic!("Unresolved mutability variable"),
-                }
-            }
-        }
-    }
-
-    pub fn resolve_effect_var(&mut self, var: EffectVar) -> EffType {
+    fn resolve_effect_var(&mut self, var: EffectVar) -> EffType {
         match self.effect_constraints.probe_value(var) {
             Some(effects) => self.substitute_effect_type(&effects),
             None => EffType::single_variable(self.effect_constraints.find(var)),
         }
-    }
-
-    /// Substitute the effect type by flattening the effect variables.
-    pub fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
-        use Effect::*;
-
-        // Thread-local hash-map for cycle detection
-        thread_local! {
-            static VAR_VISITED: RefCell<HashSet<EffectVar>> = RefCell::new(HashSet::new());
-        }
-
-        let res = EffType::from_iter(eff_ty.iter().flat_map(|eff| {
-            EffType::into_iter(match eff {
-                Primitive(effect) => EffType::single_primitive(*effect),
-                Variable(var) => {
-                    let cycle_detected = VAR_VISITED.with(|visited| {
-                        let mut visited = visited.borrow_mut();
-                        if visited.contains(var) {
-                            true // Cycle detected
-                        } else {
-                            visited.insert(*var);
-                            false
-                        }
-                    });
-
-                    if cycle_detected {
-                        return EffType::empty().into_iter();
-                    }
-
-                    let mut effects = self.resolve_effect_var(*var);
-
-                    // add back the variable itself if not only variables
-                    if !effects.is_only_vars() {
-                        effects = effects.union(&EffType::single_variable(*var));
-                    }
-
-                    VAR_VISITED.with(|visited| {
-                        visited.borrow_mut().remove(var);
-                    });
-
-                    effects
-                }
-            } as EffType)
-        }));
-        res
     }
 
     pub fn substitute_in_node(&mut self, node: &mut ir::Node) {
@@ -2480,6 +2385,79 @@ impl UnifiedTypeInference {
                 log::debug!("  {} → {var}", eff);
             }
         }
+    }
+}
+
+impl TypeSubstituer for UnifiedTypeInference {
+    fn substitute_type(&mut self, ty: Type) -> Type {
+        let type_data: TypeKind = { ty.data().clone() };
+        let var = match type_data {
+            TypeKind::Variable(var) => var,
+            _ => return ty,
+        };
+        let root = self.ty_unification_table.find(var);
+        match self.ty_unification_table.probe_value(root) {
+            Some(ty) => ty,
+            _ => Type::variable(root),
+        }
+    }
+
+    fn substitute_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        match mut_ty {
+            MutType::Resolved(_) => mut_ty,
+            MutType::Variable(var) => {
+                let root = self.mut_unification_table.find(var);
+                match self.mut_unification_table.probe_value(root) {
+                    Some(val) => MutType::resolved(val),
+                    _ => panic!("Unresolved mutability variable"),
+                }
+            }
+        }
+    }
+
+    /// Substitute the effect type by flattening the effect variables.
+    fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
+        use Effect::*;
+
+        // Thread-local hash-map for cycle detection
+        thread_local! {
+            static VAR_VISITED: RefCell<HashSet<EffectVar>> = RefCell::new(HashSet::new());
+        }
+
+        let res = EffType::from_iter(eff_ty.iter().flat_map(|eff| {
+            EffType::into_iter(match eff {
+                Primitive(effect) => EffType::single_primitive(*effect),
+                Variable(var) => {
+                    let cycle_detected = VAR_VISITED.with(|visited| {
+                        let mut visited = visited.borrow_mut();
+                        if visited.contains(var) {
+                            true // Cycle detected
+                        } else {
+                            visited.insert(*var);
+                            false
+                        }
+                    });
+
+                    if cycle_detected {
+                        return EffType::empty().into_iter();
+                    }
+
+                    let mut effects = self.resolve_effect_var(*var);
+
+                    // add back the variable itself if not only variables
+                    if !effects.is_only_vars() {
+                        effects = effects.union(&EffType::single_variable(*var));
+                    }
+
+                    VAR_VISITED.with(|visited| {
+                        visited.borrow_mut().remove(var);
+                    });
+
+                    effects
+                }
+            } as EffType)
+        }));
+        res
     }
 }
 

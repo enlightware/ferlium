@@ -83,6 +83,9 @@ type CallCtx = EvalCtx;
 /// A function that can be called
 pub trait Callable {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult;
+    fn as_script(&self) -> Option<&ScriptFunction> {
+        None
+    }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
         None
     }
@@ -190,6 +193,9 @@ impl Callable for ScriptFunction {
         ctx.environment.truncate(ctx.frame_base);
         ctx.frame_base = old_frame_base;
         Ok(ret)
+    }
+    fn as_script(&self) -> Option<&ScriptFunction> {
+        Some(self)
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
         Some(self)

@@ -13,6 +13,7 @@ pub(crate) trait Node {
     fn neighbors(&self) -> impl Iterator<Item = Self::Index>;
 }
 
+#[allow(dead_code)]
 pub(crate) fn find_disjoint_subgraphs<N: Node>(graph: &[N]) -> Vec<Vec<usize>>
 where
     <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,

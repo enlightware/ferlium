@@ -19,6 +19,8 @@ use std::iter;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use crate::graph::find_strongly_connected_components;
+use crate::graph::topological_sort_sccs;
 use crate::Location;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
@@ -36,7 +38,6 @@ use crate::effects::EffectVar;
 use crate::format::type_variable_index_to_string_greek;
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
-use crate::graph::find_disjoint_subgraphs;
 use crate::module::FmtWithModuleEnv;
 use crate::module::ModuleEnv;
 use crate::mutability::MutType;
@@ -475,9 +476,7 @@ impl Type {
         TypeKind::Variable(var).store()
     }
 
-    pub fn variant(mut types: Vec<(Ustr, Self)>) -> Self {
-        assert_unique_strings(&types);
-        types.sort_by(|(a, _), (b, _)| a.cmp(b));
+    pub fn variant(types: Vec<(Ustr, Self)>) -> Self {
         TypeKind::Variant(types).store()
     }
 
@@ -485,9 +484,7 @@ impl Type {
         TypeKind::Tuple(elements).store()
     }
 
-    pub fn record(mut fields: Vec<(Ustr, Self)>) -> Self {
-        assert_unique_strings(&fields);
-        fields.sort_by(|a, b| a.0.cmp(&b.0));
+    pub fn record(fields: Vec<(Ustr, Self)>) -> Self {
         TypeKind::Record(fields).store()
     }
 
@@ -996,7 +993,12 @@ impl TypeKind {
     fn substitute_locals(&mut self, subst: &HashMap<u32, u32>) {
         self.inner_types_mut().for_each(|ty| {
             if ty.world().is_none() {
-                ty.index = *subst.get(&ty.index).unwrap();
+                ty.index = *subst.get(&ty.index).unwrap_or_else(|| {
+                    panic!(
+                        "Local type index {} not found in substitution {subst:?}",
+                        ty.index
+                    )
+                });
             }
         });
     }
@@ -1013,6 +1015,27 @@ impl TypeKind {
             Function(_) => 6,
             Newtype(_, _) => 7,
             Never => 8,
+        }
+    }
+
+    /// Make sure the type is consistent
+    fn validate(&self) {
+        use TypeKind::*;
+        match self {
+            Variant(items) => assert_unique_strings(items),
+            Record(fields) => assert_unique_strings(fields),
+            _ => (),
+        }
+    }
+
+    /// Normalize the types: sort variant and record fields
+    fn normalize(&mut self) {
+        self.validate();
+        use TypeKind::*;
+        match self {
+            Variant(items) => items.sort_by(|(a, _), (b, _)| a.cmp(b)),
+            Record(fields) => fields.sort_by(|a, b| a.0.cmp(&b.0)),
+            _ => (),
         }
     }
 }
@@ -1142,46 +1165,67 @@ impl TypeUniverse {
         }
     }
 
-    fn insert_type(&mut self, td: TypeKind) -> Type {
-        self.insert_types(&[td])[0]
+    fn insert_type(&mut self, tk: TypeKind) -> Type {
+        self.insert_types(&[tk])[0]
     }
 
-    fn insert_types<const N: usize>(&mut self, tds: &[TypeKind; N]) -> [Type; N] {
-        // 1. partition tds into sub-graphs of connected recursive types
-        let partitioned_indices = find_disjoint_subgraphs(tds);
+    fn insert_types(&mut self, kinds: impl Into<Vec<TypeKind>>) -> Vec<Type> {
+        let mut kinds: Vec<_> = kinds.into();
+        kinds.iter_mut().for_each(TypeKind::normalize);
+        // Partition tks into sub-graphs of strongly connected recursive types.
+        let sccs = find_strongly_connected_components(&kinds);
+        let mut sorted_sccs = topological_sort_sccs(&kinds, &sccs);
+        sorted_sccs.reverse();
 
-        // TODO: somewhere, renormalize generics to be in the same order
+        // TODO: somewhere, renormalize generics to be in the same order.
 
-        // for each sub-graph
-        let mut types = [Type::new_local(0); N];
-        partitioned_indices
+        // For each strongly connected component, starting from the leaves...
+        // Note: Using local types as placeholders to build the array without having to
+        // get a recursive lock on the universe.
+        let mut types = vec![Type::new_local(0); kinds.len()];
+        let mut resolved = HashMap::<usize, Type>::new();
+        sorted_sccs
             .into_iter()
             .flat_map(|mut input_indices| {
-                // 2. detect singletons and put them in the main world if they have no cycle
+                // Replace the already-processed local types with their true values in the type kind.
+                input_indices.iter().for_each(|input_index| {
+                    kinds[*input_index].inner_types_mut().for_each(|ty| {
+                        if ty.is_local() {
+                            if let Some(resolved_ty) = resolved.get(&(ty.index as usize)) {
+                                *ty = *resolved_ty;
+                            }
+                        }
+                    })
+                });
+
+                // Detect singletons and put them in the main world if they have no cycle.
                 if input_indices.len() == 1 {
                     let input_index = input_indices[0];
-                    let td = &tds[input_index];
-                    if td.inner_types().all(|ty| !ty.is_local()) {
+                    let kind = &kinds[input_index];
+                    let inner_all_global = kind.inner_types().all(|ty| !ty.is_local());
+                    if inner_all_global {
                         let first_world = &mut self.worlds[0];
-                        // is it already present?
-                        let index = if let Some((index, _)) = first_world.get_full(td) {
+                        // Is it already present?
+                        let index = if let Some((index, _)) = first_world.get_full(kind) {
                             index
                         } else {
-                            first_world.insert_full(td.clone()).0
+                            first_world.insert_full(kind.clone()).0
                         };
-                        let ty = Type::new_global(0, index as u32);
-                        return b(iter::once((input_index, ty))) as B<dyn Iterator<Item = _>>;
+                        let resolved_ty = Type::new_global(0, index as u32);
+                        resolved.insert(input_index, resolved_ty);
+                        assert!(!resolved_ty.is_local());
+                        return vec![(input_index, resolved_ty)];
                     }
                 }
 
-                // 3. sort each sub-graph
+                // Sort each sub-graph.
                 input_indices.sort_by(|&a, &b| {
-                    // ignore local types while sorting
-                    tds[a].local_cmp(&tds[b])
-                    // TODO: look at permutations for the secondary sorting
+                    // Note: ignore local types while sorting.
+                    kinds[a].local_cmp(&kinds[b])
+                    // TODO: look at permutations for the secondary sorting.
                 });
 
-                // 4. renormalize local indices and store into local world
+                // Renormalize local indices and store into local world.
                 let subst_to_local: HashMap<_, _> = input_indices
                     .iter()
                     .enumerate()
@@ -1190,34 +1234,50 @@ impl TypeUniverse {
                 let local_world: Vec<_> = input_indices
                     .iter()
                     .map(|&index| {
-                        let mut td = tds[index].clone();
-                        td.substitute_locals(&subst_to_local);
-                        td
+                        let mut kind = kinds[index].clone();
+                        kind.substitute_locals(&subst_to_local);
+                        kind
                     })
                     .collect();
-                assert!(local_world.iter().all(|td| td
+                assert!(local_world.iter().all(|kind| kind
                     .inner_types()
                     .filter(|ty| ty.is_local())
                     .all(|ty| (ty.index as usize) < local_world.len())));
 
-                // 5. local world is now a key
+                // Some helper functions to get the global indices from the local input indices.
                 let global_world_indices = |worlds: &Vec<TypeWorld>, world_index| {
                     let global_world: &TypeWorld = &worlds[world_index];
                     let global_world_size = global_world.len() as u32;
                     b((0..global_world_size)
                         .zip(input_indices)
-                        .map(move |(index, ty_index)| {
-                            (ty_index, Type::new_global(world_index as u32, index))
+                        .map(move |(index, input_index)| {
+                            (input_index, Type::new_global(world_index as u32, index))
                         }))
                 };
+                let mut mark_indices_as_resolved = |indices_and_tys: &[(usize, Type)]| {
+                    indices_and_tys
+                        .iter()
+                        .for_each(|(input_index, resolved_ty)| {
+                            assert!(!resolved_ty.is_local());
+                            let result = resolved.insert(*input_index, *resolved_ty);
+                            assert!(result.is_none());
+                        });
+                };
+
+                // Local world is now a key, is it a known global world?
                 if let Some(&index) = self.local_to_world.get(&local_world) {
-                    return global_world_indices(&self.worlds, index);
+                    // If so, store processed and return.
+                    let indices_and_tys: Vec<_> =
+                        global_world_indices(&self.worlds, index).collect();
+                    mark_indices_as_resolved(&indices_and_tys);
+                    return indices_and_tys;
                 }
+                // If not, create a new one.
                 let global_world_index = self.worlds.len() as u32;
                 self.local_to_world
                     .insert(local_world.clone(), global_world_index as usize);
 
-                // 6. renormalize local indices to global indices and store into global world
+                // Renormalize local indices to global indices and store into global world.
                 let global_world: IndexSet<_> = local_world
                     .into_iter()
                     .map(|mut td| {
@@ -1231,8 +1291,11 @@ impl TypeUniverse {
                     .collect();
                 self.worlds.push(global_world);
 
-                // 7. collect indices
-                global_world_indices(&self.worlds, global_world_index as usize)
+                // Collect indices, store processed and return.
+                let indices_and_tys: Vec<_> =
+                    global_world_indices(&self.worlds, global_world_index as usize).collect();
+                mark_indices_as_resolved(&indices_and_tys);
+                indices_and_tys
             })
             .for_each(|(ty_index, ty)| types[ty_index] = ty);
         types
@@ -1279,7 +1342,7 @@ pub fn store_type(type_data: TypeKind) -> Type {
 }
 
 /// Store a list of types in the type system and return a list of type identifiers
-pub fn store_types<const N: usize>(types_data: &[TypeKind; N]) -> [Type; N] {
+pub fn store_types(types_data: &[TypeKind]) -> Vec<Type> {
     types()
         .try_write()
         .expect("Cannot get a write lock to type universes")
@@ -1287,7 +1350,7 @@ pub fn store_types<const N: usize>(types_data: &[TypeKind; N]) -> [Type; N] {
 }
 
 pub fn dump_type_world(index: usize, env: &ModuleEnv<'_>) {
-    let world = &types().read().unwrap().worlds[index];
+    let world: &IndexSet<TypeKind> = &types().read().unwrap().worlds[index];
     for (i, ty) in world.iter().enumerate() {
         println!("{}: {}", i, ty.format_with(env));
     }
@@ -1313,7 +1376,11 @@ pub struct TypeNames {
 mod tests {
     use crate::{
         parse_type,
-        std::{new_module_with_prelude, new_std_module_env},
+        std::{
+            logic::bool_type,
+            math::{int_type, Int},
+            new_module_with_prelude, new_std_module_env,
+        },
     };
 
     use super::*;
@@ -1343,5 +1410,39 @@ mod tests {
         check("None | Some (int)");
         check("Color (string) | RGB (int, int, int)");
         check("[[(string, { age: int, name: string, nick: None | Some (string) })]]");
+    }
+
+    #[test]
+    fn interning() {
+        let var0 = Type::variable_id(0);
+        let empty_tuple = Type::unit();
+
+        // ADT recursive list
+        let adt_list_element = TypeKind::Tuple(vec![var0, Type::new_local(1)]);
+        let adt_list = TypeKind::Variant(vec![
+            (ustr("Nil"), empty_tuple),
+            (ustr("Cons"), Type::new_local(0)),
+        ]);
+        let stored = store_types(&[adt_list_element, adt_list]);
+        assert_eq!(stored.len(), 2);
+
+        // Tuple of two native types
+        let std_int = int_type();
+        let native_int = TypeKind::Native(b(NativeType {
+            bare_ty: bare_native_type::<Int>(),
+            arguments: vec![],
+        }));
+        let std_bool = bool_type();
+        let native_bool = TypeKind::Native(b(NativeType {
+            bare_ty: bare_native_type::<bool>(),
+            arguments: vec![],
+        }));
+        let tuple = TypeKind::Tuple(vec![Type::new_local(0), Type::new_local(1)]);
+        let stored = store_types(&[native_int, native_bool, tuple]);
+        assert_eq!(stored.len(), 3);
+        let ty_data = stored[2].data();
+        let tuple = ty_data.as_tuple().unwrap();
+        assert_eq!(tuple[0], std_int);
+        assert_eq!(tuple[1], std_bool);
     }
 }
