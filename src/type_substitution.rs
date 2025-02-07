@@ -17,13 +17,14 @@ use crate::{
 };
 
 /// A struct that can substitute types, possibly mutating itself in the process.
+/// The substitution is non-recursive and should not look into inner types.
 pub trait TypeSubstituer {
     fn substitute_type(&mut self, ty: Type) -> Type;
     fn substitute_mut_type(&mut self, mut_ty: MutType) -> MutType;
     fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType;
 }
 
-/// Recursively substitute all types in a type, using the given substituer.
+/// Recursively substitute all inner types in a type, using the given substituer.
 pub fn substitute_type(ty: Type, substituer: &mut impl TypeSubstituer) -> Type {
     let mut kinds = Vec::new();
     let mut seen = HashMap::new();
@@ -31,7 +32,7 @@ pub fn substitute_type(ty: Type, substituer: &mut impl TypeSubstituer) -> Type {
     store_types(&kinds)[0]
 }
 
-/// Recursively substitute all types in a list of types, using the given substituer.
+/// Recursively substitute all inner types in a list of types, using the given substituer.
 pub fn substitute_types(tys: &[Type], substituer: &mut impl TypeSubstituer) -> Vec<Type> {
     let mut kinds = Vec::new();
     let mut seen = HashMap::new();
@@ -46,7 +47,7 @@ pub fn substitute_types(tys: &[Type], substituer: &mut impl TypeSubstituer) -> V
         .collect()
 }
 
-/// Recursively substitute all types in a function type, using the given substituer.
+/// Recursively substitute all inner types in a function type, using the given substituer.
 pub fn substitute_fn_type(fn_ty: &FnType, substituer: &mut impl TypeSubstituer) -> FnType {
     let mut kinds = Vec::new();
     let mut seen = HashMap::new();
