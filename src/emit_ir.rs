@@ -196,7 +196,7 @@ pub fn emit_module(
                 false,
                 &trait_impls,
             )?;
-            let constraints: Vec<_> = all_constraints
+            let mut constraints: Vec<_> = all_constraints
                 .iter()
                 .filter(|c| {
                     let ptr = constraint_ptr(c);
@@ -211,10 +211,15 @@ pub fn emit_module(
             drop(code);
 
             // Substitute the constraint-originating types in the node.
+            let subst = (constraint_subst, HashMap::new());
+            constraints = constraints
+                .iter()
+                .map(|constraint| constraint.instantiate(&subst))
+                .collect();
             let descr = output.functions.get_mut(&name.0).unwrap();
             let mut code = descr.code.borrow_mut();
             let node = &mut code.as_script_mut().unwrap().code;
-            node.instantiate(&(constraint_subst, HashMap::new()));
+            node.instantiate(&subst);
 
             // Write the final type scheme.
             descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
@@ -380,6 +385,10 @@ pub fn emit_expr_unsafe(
     // Apply the constraint-originating substitution.
     let subst = (constraint_subst, HashMap::new());
     node.instantiate(&subst);
+    constraints = constraints
+        .iter()
+        .map(|constraint| constraint.instantiate(&subst))
+        .collect();
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);
     }

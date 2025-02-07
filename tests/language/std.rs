@@ -228,4 +228,8 @@ fn string_sub_string() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn serialize() {
     assert_eq!(run(r#"serialize(1)"#), variant!("Int", int!(1)));
+    assert_eq!(run(r#"serialize(1.0)"#), variant!("Float", float!(1.0)));
+    assert_eq!(run(r#"deserialize(serialize(1))"#), int!(1));
+    // TODO: add type annotations instead of relying to the operator type unification
+    assert_eq!(run(r#"deserialize(serialize(1.0)) + 0.0"#), float!(1.0));
 }
