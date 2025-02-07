@@ -232,4 +232,8 @@ fn serialize() {
     assert_eq!(run(r#"deserialize(serialize(1))"#), int!(1));
     // TODO: add type annotations instead of relying to the operator type unification
     assert_eq!(run(r#"deserialize(serialize(1.0)) + 0.0"#), float!(1.0));
+    fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
+        "Num",
+        &["Bool (bool) | Float (float) | Int (int) | None | Seq ([variant]) | String (string)"],
+    );
 }
