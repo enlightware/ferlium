@@ -47,9 +47,10 @@ fn serialize_float(value: Float) -> Value {
 fn deserialize_float(variant: Value) -> Result<Float, RuntimeError> {
     let variant = variant.into_variant().unwrap();
     match &*variant.tag {
+        "Int" => Ok(Float::new(variant.value.into_primitive_ty::<Int>().unwrap() as f64).unwrap()),
         "Float" => Ok(variant.value.into_primitive_ty::<Float>().unwrap()),
         _ => Err(RuntimeError::InvalidArgument(
-            "Expected Float variant".into(),
+            "Expected Float or Int variants".into(),
         )),
     }
 }
