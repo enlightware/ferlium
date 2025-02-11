@@ -1227,7 +1227,7 @@ impl UnifiedTypeInference {
                                 ));
                             } else if let Some(tuple) = tuples_at_index_is.get_mut(&tuple_ty) {
                                 if let Some((expected_ty, expected_span)) = tuple.get(index) {
-                                    unified_ty_inf.unify_sub_type(
+                                    unified_ty_inf.unify_same_type(
                                         element_ty,
                                         span,
                                         *expected_ty,
@@ -1284,7 +1284,7 @@ impl UnifiedTypeInference {
                                 ));
                             } else if let Some(record) = records_field_is.get_mut(&record_ty) {
                                 if let Some((expected_ty, expected_span)) = record.get(field) {
-                                    unified_ty_inf.unify_sub_type(
+                                    unified_ty_inf.unify_same_type(
                                         element_ty,
                                         span,
                                         *expected_ty,
@@ -1324,7 +1324,7 @@ impl UnifiedTypeInference {
                                 ));
                             } else if let Some(variants) = variants_are.get_mut(&ty) {
                                 if let Some((expected_ty, expected_span)) = variants.get(tag) {
-                                    unified_ty_inf.unify_sub_type(
+                                    unified_ty_inf.unify_same_type(
                                         payload_ty,
                                         *span,
                                         *expected_ty,
@@ -1732,7 +1732,7 @@ impl UnifiedTypeInference {
             // A tuple, verify length and element type
             TypeKind::Tuple(tys) => {
                 if let Some(ty) = tys.get(index) {
-                    self.unify_sub_type(*ty, tuple_span, element_ty, index_span)?;
+                    self.unify_same_type(*ty, tuple_span, element_ty, index_span)?;
                     Ok(None)
                 } else {
                     Err(internal_compilation_error!(InvalidTupleIndex {
@@ -1778,7 +1778,7 @@ impl UnifiedTypeInference {
                     .iter()
                     .find_map(|(name, ty)| if *name == field { Some(*ty) } else { None })
                 {
-                    self.unify_sub_type(ty, record_span, element_ty, field_span)?;
+                    self.unify_same_type(ty, record_span, element_ty, field_span)?;
                     Ok(None)
                 } else {
                     Err(internal_compilation_error!(InvalidRecordField {
@@ -1822,7 +1822,7 @@ impl UnifiedTypeInference {
                         .iter()
                         .find_map(|(name, ty)| if *name == tag { Some(ty) } else { None })
                 {
-                    self.unify_sub_type(*ty, variant_span, payload_ty, variant_span)?;
+                    self.unify_same_type(*ty, variant_span, payload_ty, variant_span)?;
                     Ok(None)
                 } else {
                     Err(internal_compilation_error!(InvalidVariantName {
