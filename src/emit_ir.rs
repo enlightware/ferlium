@@ -214,7 +214,7 @@ pub fn emit_module(
             let subst = (constraint_subst, HashMap::new());
             constraints = constraints
                 .iter()
-                .map(|constraint| constraint.instantiate(&subst))
+                .filter_map(|constraint| constraint.instantiate_and_drop_if_known_trait(&subst))
                 .collect();
             let descr = output.functions.get_mut(&name.0).unwrap();
             let mut code = descr.code.borrow_mut();
@@ -387,7 +387,7 @@ pub fn emit_expr_unsafe(
     node.instantiate(&subst);
     constraints = constraints
         .iter()
-        .map(|constraint| constraint.instantiate(&subst))
+        .filter_map(|constraint| constraint.instantiate_and_drop_if_known_trait(&subst))
         .collect();
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);

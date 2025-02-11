@@ -217,6 +217,15 @@ impl PubTypeConstraint {
             }
         }
     }
+
+    pub fn instantiate_and_drop_if_known_trait(&self, subst: &InstSubstitution) -> Option<Self> {
+        let constraint = self.instantiate(subst);
+        if constraint.is_have_trait() && constraint.inner_ty_vars().is_empty() {
+            None
+        } else {
+            Some(constraint)
+        }
+    }
 }
 
 impl TypeLike for PubTypeConstraint {
