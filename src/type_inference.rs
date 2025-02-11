@@ -1411,11 +1411,11 @@ impl UnifiedTypeInference {
     }
 
     fn normalize_type(&mut self, ty: Type) -> Type {
-        NormalizeTypes(self).substitute_type(ty)
+        substitute_type(ty, &mut NormalizeTypes(self))
     }
 
     fn normalize_types(&mut self, tys: &[Type]) -> Vec<Type> {
-        tys.iter().map(|ty| self.normalize_type(*ty)).collect()
+        substitute_types(tys, &mut NormalizeTypes(self))
     }
 
     fn normalize_mut_type(&mut self, mut_ty: MutType) -> MutType {
