@@ -227,11 +227,22 @@ fn string_sub_string() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn serialize() {
+    assert_eq!(run(r#"serialize(())"#), variant!("None", Value::unit()));
+    assert_eq!(run(r#"serialize(true)"#), variant!("Bool", bool!(true)));
     assert_eq!(run(r#"serialize(1)"#), variant!("Int", int!(1)));
     assert_eq!(run(r#"serialize(1.0)"#), variant!("Float", float!(1.0)));
+    assert_eq!(
+        run(r#"serialize("hello")"#),
+        variant!("String", string!("hello"))
+    );
     // TODO: add type annotations instead of relying to the operator type unification
+    assert_eq!(run(r#"deserialize(serialize(true)) or false"#), bool!(true));
     assert_eq!(run(r#"deserialize(serialize(1)) + 0"#), int!(1));
     assert_eq!(run(r#"deserialize(serialize(1.0)) + 0.0"#), float!(1.0));
+    assert_eq!(
+        run(r#"string_concat(deserialize(serialize("hello")), "")"#),
+        string!("hello")
+    );
     fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
         "Num",
         &["Bool (bool) | Float (float) | Int (int) | None | Seq ([variant]) | String (string)"],

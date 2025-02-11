@@ -15,18 +15,62 @@ use crate::{
     module::Module,
     r#trait::TraitRef,
     r#type::{FnType, Type},
-    std::math::{float_type, int_type},
+    std::{
+        logic::bool_type,
+        math::{float_type, int_type},
+        string::string_type,
+    },
     value::Value,
 };
 use ustr::ustr;
 
 use super::{
+    array::Array,
     math::{Float, Int},
+    string::String as Str,
     variant::script_variant_type,
 };
 
 pub const SERIALIZE_TRAIT_NAME: &str = "Serialize";
 pub const DESERIALIZE_TRAIT_NAME: &str = "Deserialize";
+
+fn serialize_unit(_u: ()) -> Value {
+    Value::variant(ustr("None"), Value::unit())
+}
+
+fn deserialize_unit(variant: Value) -> Result<(), RuntimeError> {
+    let variant = variant.into_variant().unwrap();
+    match &*variant.tag {
+        "None" => Ok(()),
+        "Seq" => {
+            let seq = variant.value.into_primitive_ty::<Array>().unwrap();
+            if seq.is_empty() {
+                Ok(())
+            } else {
+                Err(RuntimeError::InvalidArgument(
+                    "Expected array of size 0".into(),
+                ))
+            }
+        }
+        _ => Err(RuntimeError::InvalidArgument(
+            "Expected None variant or Seq variant of size 0".into(),
+        )),
+    }
+}
+
+fn serialize_bool(value: bool) -> Value {
+    Value::variant(ustr("Bool"), Value::native(value))
+}
+
+fn deserialize_bool(variant: Value) -> Result<bool, RuntimeError> {
+    let variant = variant.into_variant().unwrap();
+    match &*variant.tag {
+        "Bool" => Ok(variant.value.into_primitive_ty::<bool>().unwrap()),
+        _ => Err(RuntimeError::InvalidArgument(
+            "Expected Bool variant".into(),
+        )),
+    }
+}
 
 fn serialize_int(value: Int) -> Value {
     Value::variant(ustr("Int"), Value::native(value))
@@ -51,6 +95,20 @@ fn deserialize_float(variant: Value) -> Result<Float, RuntimeError> {
         "Float" => Ok(variant.value.into_primitive_ty::<Float>().unwrap()),
         _ => Err(RuntimeError::InvalidArgument(
             "Expected Float or Int variants".into(),
+        )),
+    }
+}
+
+fn serialize_string(value: Str) -> Value {
+    Value::variant(ustr("String"), Value::native(value))
+}
+
+fn deserialize_string(variant: Value) -> Result<Str, RuntimeError> {
+    let variant = variant.into_variant().unwrap();
+    match &*variant.tag {
+        "String" => Ok(variant.value.into_primitive_ty::<Str>().unwrap()),
+        _ => Err(RuntimeError::InvalidArgument(
+            "Expected String variant".into(),
         )),
     }
 }
@@ -91,6 +149,30 @@ pub fn add_to_module(to: &mut Module) {
     // Trait implementations
     to.impls.add(
         serialize_trait.clone(),
+        [Type::unit()],
+        [],
+        [b(UnaryNativeFnNV::new(serialize_unit)) as Function],
+    );
+    to.impls.add(
+        deserialize_trait.clone(),
+        [script_variant_type()],
+        [],
+        [b(UnaryNativeFnVFN::new(deserialize_unit)) as Function],
+    );
+    to.impls.add(
+        serialize_trait.clone(),
+        [bool_type()],
+        [],
+        [b(UnaryNativeFnNV::new(serialize_bool)) as Function],
+    );
+    to.impls.add(
+        deserialize_trait.clone(),
+        [bool_type()],
+        [],
+        [b(UnaryNativeFnVFN::new(deserialize_bool)) as Function],
+    );
+    to.impls.add(
+        serialize_trait.clone(),
         [int_type()],
         [],
         [b(UnaryNativeFnNV::new(serialize_int)) as Function],
@@ -112,5 +194,17 @@ pub fn add_to_module(to: &mut Module) {
         [float_type()],
         [],
         [b(UnaryNativeFnVFN::new(deserialize_float)) as Function],
+    );
+    to.impls.add(
+        serialize_trait.clone(),
+        [string_type()],
+        [],
+        [b(UnaryNativeFnNV::new(serialize_string)) as Function],
+    );
+    to.impls.add(
+        deserialize_trait.clone(),
+        [string_type()],
+        [],
+        [b(UnaryNativeFnVFN::new(deserialize_string)) as Function],
     );
 }
