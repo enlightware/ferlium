@@ -776,7 +776,7 @@ fn execution_errors() {
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
     assert_eq!(
-        fail_run("fn rf() { rf() } rf()"),
+        fail_run("fn rf() { rf() } rf() + 0"),
         RecursionLimitExceeded { limit: 100 }
     );
 }
@@ -804,7 +804,7 @@ fn never_type() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_creation() {
-    assert_eq!(run("[]"), int_a![]);
+    fail_compilation("[]").expect_unbound_ty_var();
     assert_eq!(run("[1]"), int_a![1]);
     assert_eq!(run("[1,]"), int_a![1]);
     assert_eq!(run("[1, 2]"), int_a![1, 2]);

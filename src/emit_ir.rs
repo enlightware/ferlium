@@ -643,7 +643,6 @@ fn validate_and_cleanup_constraints(
             &orphan_constraints,
             &mut other_orphans,
             &mut subst,
-            &[],
             trait_impls,
         );
         if !other_orphans.is_empty() {
@@ -678,8 +677,6 @@ fn validate_and_cleanup_constraints(
             &constraints,
             &mut retained_constraints,
             &mut constraint_subst,
-            // All type variables of an expression must be defaulted
-            &ty.inner_ty_vars(),
             trait_impls,
         );
     }
@@ -701,7 +698,6 @@ fn compute_num_trait_default_types(
     all_constraints: &HashSet<&PubTypeConstraint>,
     selected_constraints: &mut HashSet<PubTypeConstraintPtr>,
     subst: &mut TypeSubstitution,
-    extra_ty_vars: &[TypeVar],
     trait_impls: &Impls,
 ) {
     // In debug, check that all_constraints contains all selected_constraints.
@@ -721,6 +717,7 @@ fn compute_num_trait_default_types(
     // These include the ones that appear in non-trait constraints or in traits with
     // more than one input types or having output types.
     let mut invalid_ty_vars = HashSet::<TypeVar>::new();
+    let mut num_ty_vars = HashSet::<TypeVar>::new();
     for constraint in all_constraints {
         if !selected_constraints.contains(&constraint_ptr(constraint)) {
             continue;
@@ -729,6 +726,12 @@ fn compute_num_trait_default_types(
             assert!(!have_trait.1.is_empty());
             if have_trait.1.len() > 1 {
                 invalid_ty_vars.extend(have_trait.1.iter().flat_map(|ty| ty.inner_ty_vars()));
+            } else if have_trait.0.name == "Num" {
+                // FIXME: Use proper trait ref extracted from std rather than string for the test above.
+                let maybe_ty_var = have_trait.1[0].data().as_variable().cloned();
+                if let Some(ty_var) = maybe_ty_var {
+                    num_ty_vars.insert(ty_var);
+                }
             }
             invalid_ty_vars.extend(have_trait.2.iter().flat_map(|ty| ty.inner_ty_vars()));
         } else {
@@ -741,13 +744,6 @@ fn compute_num_trait_default_types(
     // If the index is default_tys.len(), there is no default.
     let default_tys = [int_type(), float_type()];
     let mut defaulted_ty_vars = HashMap::<TypeVar, usize>::new();
-    // Process extra type variables.
-    for ty_var in extra_ty_vars {
-        if invalid_ty_vars.contains(ty_var) || subst.contains_key(ty_var) {
-            continue;
-        }
-        defaulted_ty_vars.insert(*ty_var, 0);
-    }
     // Process trait constraint type variables.
     for constraint in all_constraints.iter() {
         if !selected_constraints.contains(&constraint_ptr(constraint)) {
@@ -760,6 +756,9 @@ fn compute_num_trait_default_types(
             let maybe_ty_var = have_trait.1[0].data().as_variable().cloned();
             if let Some(ty_var) = maybe_ty_var {
                 if invalid_ty_vars.contains(&ty_var) {
+                    continue;
+                }
+                if !num_ty_vars.contains(&ty_var) {
                     continue;
                 }
                 let mut default_index = defaulted_ty_vars.get(&ty_var).copied().unwrap_or(0);

@@ -50,7 +50,7 @@ fn array_len() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_concat() {
-    assert_eq!(run("array_concat([], [])"), int_a![]);
+    fail_compilation("array_concat([], [])").expect_unbound_ty_var();
     assert_eq!(run("array_concat([1], [])"), int_a![1]);
     assert_eq!(run("array_concat([], [1])"), int_a![1]);
     assert_eq!(run("array_concat([1], [2])"), int_a![1, 2]);
@@ -229,8 +229,8 @@ fn string_sub_string() {
 fn serialize() {
     assert_eq!(run(r#"serialize(1)"#), variant!("Int", int!(1)));
     assert_eq!(run(r#"serialize(1.0)"#), variant!("Float", float!(1.0)));
-    assert_eq!(run(r#"deserialize(serialize(1))"#), int!(1));
     // TODO: add type annotations instead of relying to the operator type unification
+    assert_eq!(run(r#"deserialize(serialize(1)) + 0"#), int!(1));
     assert_eq!(run(r#"deserialize(serialize(1.0)) + 0.0"#), float!(1.0));
     fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
         "Num",
