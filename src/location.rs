@@ -79,6 +79,26 @@ impl Location {
         Self::new(start, end, None)
     }
 
+    /// Create a new location by fusing the spans of multiple locations.
+    /// Panics if `others` is empty or are from different modules.
+    pub fn fuse_range(others: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut module = None;
+        let mut start = usize::MAX;
+        let mut end = 0;
+        for other in others {
+            if let Some(module) = module {
+                if module != other.module {
+                    panic!("Cannot fuse locations from different modules");
+                }
+            } else {
+                module = Some(other.module);
+            }
+            start = start.min(other.start());
+            end = end.max(other.end());
+        }
+        module.map(|module| Self::new(start, end, module))
+    }
+
     /// Byte offset of the start of the span.
     pub fn start(&self) -> usize {
         self.span.start

@@ -544,7 +544,7 @@ fn partition_variant_constraints(
     let mut invalid_ty_vars = HashSet::<TypeVar>::new();
     for constraint in constraints {
         if let Some(has_variant) = constraint.as_type_has_variant() {
-            invalid_ty_vars.extend(has_variant.2.inner_ty_vars())
+            invalid_ty_vars.extend(has_variant.3.inner_ty_vars())
         } else {
             invalid_ty_vars.extend(constraint.inner_ty_vars());
         }

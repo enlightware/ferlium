@@ -321,7 +321,7 @@ impl TypeInference {
                     let payload_ty = Type::unit();
                     self.ty_constraints.push(TypeConstraint::Pub(
                         PubTypeConstraint::new_type_has_variant(
-                            variant_ty, *path, payload_ty, expr.span,
+                            variant_ty, expr.span, *path, payload_ty, expr.span,
                         ),
                     ));
                     // Build the variant value.
@@ -784,19 +784,25 @@ impl TypeInference {
                     }
                     _ => {
                         let payload_ty = Type::tuple(payload_types);
+                        let payload_span =
+                            Location::fuse_range(payload_nodes.iter().map(|n| n.span)).unwrap();
                         let node = if let Some(values) = nodes_as_bare_immediate(&payload_nodes) {
                             K::Immediate(Immediate::new(Value::tuple(values)))
                         } else {
                             K::Tuple(b(SVec2::from_vec(payload_nodes)))
                         };
-                        let payload_node = N::new(node, payload_ty, effects.clone(), path_span);
+                        let payload_node = N::new(node, payload_ty, effects.clone(), payload_span);
                         (payload_ty, payload_node)
                     }
                 };
                 let name = ustr(path);
                 self.ty_constraints.push(TypeConstraint::Pub(
                     PubTypeConstraint::new_type_has_variant(
-                        variant_ty, name, payload_ty, expr_span,
+                        variant_ty,
+                        expr_span,
+                        name,
+                        payload_ty,
+                        payload_node.span,
                     ),
                 ));
                 // Build the variant construction node.
@@ -1173,7 +1179,7 @@ impl UnifiedTypeInference {
                 // Loop as long as we make progress.
                 let mut progress = false;
 
-                // Perform simplification for tuple and record constraints.
+                // Perform simplification for algebraic data type constraints.
                 // Check for incompatible constraints as well.
                 let mut tuples_at_index_is: HashMap<Type, HashMap<usize, (Type, Location)>> =
                     HashMap::new();
@@ -1194,21 +1200,7 @@ impl UnifiedTypeInference {
                             let tuple_ty = unified_ty_inf.normalize_type(*tuple_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
                             // tuple_span and index_span *must* originate from the same module
-                            assert_eq!(
-                                tuple_span.module().is_some(),
-                                index_span.module().is_some()
-                            );
-                            if tuple_span.module().is_some() {
-                                assert_eq!(
-                                    tuple_span.module().unwrap().module_name(),
-                                    index_span.module().unwrap().module_name()
-                                );
-                            }
-                            let span = Location::new(
-                                tuple_span.start(),
-                                index_span.end(),
-                                tuple_span.module(),
-                            );
+                            let span = Location::fuse_range([*tuple_span, *index_span]).unwrap();
                             if let Some(variant) = variants_are.get(&tuple_ty) {
                                 let variant_span = variant.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1218,10 +1210,10 @@ impl UnifiedTypeInference {
                                     span,
                                 ));
                             } else if let Some(record) = records_field_is.get(&tuple_ty) {
-                                let field_span = record.iter().next().unwrap().1 .1;
+                                let record_span = record.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::RecordAccess,
-                                    field_span,
+                                    record_span,
                                     ADTAccessType::TupleProject,
                                     span,
                                 ));
@@ -1243,29 +1235,15 @@ impl UnifiedTypeInference {
                         }
                         RecordFieldIs {
                             record_ty,
+                            record_span,
                             field,
                             field_span,
                             element_ty,
-                            record_span,
                         } => {
                             let record_ty = unified_ty_inf.normalize_type(*record_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
                             // record_span and field_span *must* originate from the same module
-                            assert_eq!(
-                                record_span.module().is_some(),
-                                field_span.module().is_some()
-                            );
-                            if record_span.module().is_some() {
-                                assert_eq!(
-                                    record_span.module().unwrap().module_name(),
-                                    field_span.module().unwrap().module_name()
-                                );
-                            }
-                            let span = Location::new(
-                                record_span.start(),
-                                field_span.end(),
-                                record_span.module(),
-                            );
+                            let span = Location::fuse_range([*record_span, *field_span]).unwrap();
                             if let Some(variant) = variants_are.get(&record_ty) {
                                 let variant_span = variant.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1275,10 +1253,10 @@ impl UnifiedTypeInference {
                                     span,
                                 ));
                             } else if let Some(tuple) = tuples_at_index_is.get(&record_ty) {
-                                let index_span = tuple.iter().next().unwrap().1 .1;
+                                let tuple_span = tuple.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::TupleProject,
-                                    index_span,
+                                    tuple_span,
                                     ADTAccessType::RecordAccess,
                                     span,
                                 ));
@@ -1299,43 +1277,47 @@ impl UnifiedTypeInference {
                             }
                         }
                         TypeHasVariant {
-                            variant_ty: ty,
+                            variant_ty,
+                            variant_span,
                             tag,
                             payload_ty,
-                            span,
+                            payload_span,
                         } => {
-                            let ty = unified_ty_inf.normalize_type(*ty);
+                            let variant_ty = unified_ty_inf.normalize_type(*variant_ty);
                             let payload_ty = unified_ty_inf.normalize_type(*payload_ty);
-                            if let Some(tuple) = tuples_at_index_is.get(&ty) {
+                            // record_span and field_span *must* originate from the same module
+                            let span =
+                                Location::fuse_range([*variant_span, *payload_span]).unwrap();
+                            if let Some(tuple) = tuples_at_index_is.get(&variant_ty) {
                                 let index_span = tuple.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::TupleProject,
                                     index_span,
                                     ADTAccessType::Variant,
-                                    *span,
+                                    span,
                                 ));
-                            } else if let Some(record) = records_field_is.get(&ty) {
-                                let field_span = record.iter().next().unwrap().1 .1;
+                            } else if let Some(record) = records_field_is.get(&variant_ty) {
+                                let record_span = record.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::RecordAccess,
-                                    field_span,
+                                    record_span,
                                     ADTAccessType::Variant,
-                                    *span,
+                                    span,
                                 ));
-                            } else if let Some(variants) = variants_are.get_mut(&ty) {
+                            } else if let Some(variants) = variants_are.get_mut(&variant_ty) {
                                 if let Some((expected_ty, expected_span)) = variants.get(tag) {
                                     unified_ty_inf.unify_same_type(
                                         payload_ty,
-                                        *span,
+                                        *payload_span,
                                         *expected_ty,
                                         *expected_span,
                                     )?;
                                 } else {
-                                    variants.insert(*tag, (payload_ty, *span));
+                                    variants.insert(*tag, (payload_ty, span));
                                 }
                             } else {
-                                let variant = HashMap::from([(*tag, (payload_ty, *span))]);
-                                variants_are.insert(ty, variant);
+                                let variant = HashMap::from([(*tag, (payload_ty, *payload_span))]);
+                                variants_are.insert(variant_ty, variant);
                             }
                         }
                         HaveTrait { .. } => {
@@ -1372,11 +1354,18 @@ impl UnifiedTypeInference {
                             element_ty,
                         )?,
                         TypeHasVariant {
-                            variant_ty: ty,
+                            variant_ty,
+                            variant_span,
                             tag,
-                            payload_ty: variant_ty,
-                            span,
-                        } => unified_ty_inf.unify_type_has_variant(ty, tag, variant_ty, span)?,
+                            payload_ty,
+                            payload_span,
+                        } => unified_ty_inf.unify_type_has_variant(
+                            variant_ty,
+                            variant_span,
+                            tag,
+                            payload_ty,
+                            payload_span,
+                        )?,
                         HaveTrait {
                             trait_ref,
                             input_tys,
@@ -1800,9 +1789,10 @@ impl UnifiedTypeInference {
     fn unify_type_has_variant(
         &mut self,
         ty: Type,
+        variant_span: Location,
         tag: Ustr,
         payload_ty: Type,
-        variant_span: Location,
+        payload_span: Location,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let ty = self.normalize_type(ty);
         let payload_ty = self.normalize_type(payload_ty);
@@ -1811,9 +1801,10 @@ impl UnifiedTypeInference {
             // A type variable may or may not be a variant, defer the unification
             TypeKind::Variable(_) => Ok(Some(PubTypeConstraint::new_type_has_variant(
                 ty,
+                variant_span,
                 tag,
                 payload_ty,
-                variant_span,
+                payload_span,
             ))),
             // A variant, verify payload type
             TypeKind::Variant(variants) => {
@@ -1822,18 +1813,18 @@ impl UnifiedTypeInference {
                         .iter()
                         .find_map(|(name, ty)| if *name == tag { Some(ty) } else { None })
                 {
-                    self.unify_same_type(*ty, variant_span, payload_ty, variant_span)?;
+                    self.unify_same_type(*ty, payload_span, payload_ty, payload_span)?;
                     Ok(None)
                 } else {
                     Err(internal_compilation_error!(InvalidVariantName {
-                        name: variant_span,
+                        name: payload_span,
                         ty,
                     }))
                 }
             }
             // Not a variant, error
             _ => Err(internal_compilation_error!(InvalidVariantType {
-                name: variant_span,
+                name: payload_span,
                 ty,
             })),
         }
@@ -2286,14 +2277,21 @@ impl UnifiedTypeInference {
                 )
             }
             TypeHasVariant {
-                variant_ty: ty,
+                variant_ty,
+                variant_span,
                 tag,
-                payload_ty: variant_ty,
-                span: variant_span,
+                payload_ty,
+                payload_span,
             } => {
-                let ty = self.substitute_in_type(*ty);
                 let variant_ty = self.substitute_in_type(*variant_ty);
-                PubTypeConstraint::new_type_has_variant(ty, *tag, variant_ty, *variant_span)
+                let payload_ty = self.substitute_in_type(*payload_ty);
+                PubTypeConstraint::new_type_has_variant(
+                    variant_ty,
+                    *variant_span,
+                    *tag,
+                    payload_ty,
+                    *payload_span,
+                )
             }
             HaveTrait {
                 trait_ref,

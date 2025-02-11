@@ -261,6 +261,7 @@ impl TypeInference {
                 for (tag, _, variant_inner_ty) in types {
                     self.add_pub_constraint(PubTypeConstraint::new_type_has_variant(
                         pattern_ty,
+                        cond_expr.span,
                         tag,
                         variant_inner_ty,
                         variants_span,

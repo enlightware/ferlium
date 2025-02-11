@@ -61,9 +61,10 @@ pub enum PubTypeConstraint {
     /// Variant for type: variant_ty ⊇ tag(payload_ty)
     TypeHasVariant {
         variant_ty: Type,
+        variant_span: Location,
         tag: Ustr,
         payload_ty: Type,
-        span: Location,
+        payload_span: Location,
     },
     /// Types have trait
     HaveTrait {
@@ -107,12 +108,19 @@ impl PubTypeConstraint {
         }
     }
 
-    pub fn new_type_has_variant(ty: Type, tag: Ustr, payload_ty: Type, span: Location) -> Self {
+    pub fn new_type_has_variant(
+        variant_ty: Type,
+        variant_span: Location,
+        tag: Ustr,
+        payload_ty: Type,
+        payload_span: Location,
+    ) -> Self {
         Self::TypeHasVariant {
-            variant_ty: ty,
+            variant_ty,
+            variant_span,
             tag,
             payload_ty,
-            span,
+            payload_span,
         }
     }
 
@@ -209,7 +217,9 @@ impl PubTypeConstraint {
                 record_span.instantiate(module_name, inst_span);
                 field_span.instantiate(module_name, inst_span);
             }
-            TypeHasVariant { span, .. } => {
+            TypeHasVariant {
+                payload_span: span, ..
+            } => {
                 span.instantiate(module_name, inst_span);
             }
             HaveTrait { span, .. } => {
@@ -260,14 +270,16 @@ impl TypeLike for PubTypeConstraint {
             ),
             TypeHasVariant {
                 variant_ty,
-                tag: variant,
+                variant_span,
+                tag,
                 payload_ty,
-                span,
+                payload_span,
             } => Self::new_type_has_variant(
                 variant_ty.instantiate(subst),
-                *variant,
+                *variant_span,
+                *tag,
                 payload_ty.instantiate(subst),
-                *span,
+                *payload_span,
             ),
             HaveTrait {
                 trait_ref,

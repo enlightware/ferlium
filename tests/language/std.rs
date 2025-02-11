@@ -243,10 +243,7 @@ fn serialize() {
         run(r#"string_concat(deserialize(serialize("hello")), "")"#),
         string!("hello")
     );
-    fail_compilation(r#"serialize([1])"#).expect_trait_impl_not_found(
-        "Serialize",
-        &["[int]"],
-    );
+    fail_compilation(r#"serialize([1])"#).expect_trait_impl_not_found("Serialize", &["[int]"]);
     fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
         "Num",
         &["Bool (bool) | Float (float) | Int (int) | None | Seq ([variant]) | String (string)"],
