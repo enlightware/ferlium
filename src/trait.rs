@@ -17,6 +17,7 @@ use ustr::ustr;
 use ustr::Ustr;
 
 use crate::{
+    containers::iterable_to_string,
     function::FunctionDefinition,
     r#type::{FnType, Type},
     value::Value,
@@ -40,11 +41,13 @@ impl Trait {
     pub fn validate(&self) {
         let trait_type_count = self.input_type_count.get() + self.output_type_count;
         for (name, function) in &self.functions {
-            #[allow(clippy::never_loop)]
             for quantifier in &function.ty_scheme.ty_quantifiers {
                 if quantifier.name() >= trait_type_count {
                     panic!("Generic trait functions are not supported yet, but function {} of trait {} has a quantifier {}", name, self.name, quantifier);
                 }
+            }
+            if !function.ty_scheme.eff_quantifiers.is_empty() {
+                panic!("Generic effects are not supported in trait functions yet, but function {} of trait {} has generic effects {}", name, self.name, iterable_to_string(&function.ty_scheme.eff_quantifiers, ", "));
             }
         }
     }
