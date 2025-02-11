@@ -1330,7 +1330,7 @@ impl UnifiedTypeInference {
                 let mut new_remaining_constraints = HashSet::new();
                 for constraint in remaining_constraints {
                     use PubTypeConstraint::*;
-                    let new_progress = match constraint {
+                    let unified_constraint = match constraint {
                         TupleAtIndexIs {
                             tuple_ty,
                             tuple_span,
@@ -1379,7 +1379,7 @@ impl UnifiedTypeInference {
                             trait_impls,
                         )?,
                     };
-                    match new_progress {
+                    match unified_constraint {
                         Some(new_constraint) => {
                             new_remaining_constraints.insert(new_constraint);
                         }
