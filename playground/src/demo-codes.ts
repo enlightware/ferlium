@@ -49,7 +49,7 @@ fn id(x) {
 	x
 }
 
-(id(1), id(true), id(|x, y| (y, x)), l2({x:1, y:2}))
+(id(1), id(true), id(|x, y| (y, x))(1, 1.3), l2({x:1, y:2}))
 `],
 ['Sum types', `fn s_full(x) {
 	match x {
