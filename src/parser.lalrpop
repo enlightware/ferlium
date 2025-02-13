@@ -216,6 +216,8 @@ Pattern: Pattern = {
 
 LiteralPattern: PatK = {
     Sp<LiteralValue> => PatK::Literal(<>.0.0, <>.0.1),
+    // This is necessary as our IntLiteral parses only unsigned
+    "-" <v:Sp<IntValue>> => PatK::Literal(literal_value(-v.0).0, int_type()),
 }
 
 NullaryVariantPattern: PatK = {

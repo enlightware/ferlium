@@ -294,6 +294,10 @@ fn match_expr() {
         .into_duplicated_literal_pattern()
         .unwrap();
     assert_eq!(run("let a = 0; match a { 0 => 1, _ => 3 }"), int!(1));
+    assert_eq!(
+        run("let a = -1; match a { -1 => true, 0 => false, -3 => false, 7 => false, _ => false }"),
+        bool!(true)
+    );
     fail_compilation("let a = 0; match a { 0 => 1 }")
         .into_inner()
         .into_non_exhaustive_pattern()

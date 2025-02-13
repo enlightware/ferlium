@@ -38,16 +38,20 @@ pub struct Trait {
 }
 
 impl Trait {
+    /// Validate the trait, ensuring that its function signatures adhere to the limitations of the current implementation.
     pub fn validate(&self) {
         let trait_type_count = self.input_type_count.get() + self.output_type_count;
         for (name, function) in &self.functions {
             for quantifier in &function.ty_scheme.ty_quantifiers {
                 if quantifier.name() >= trait_type_count {
-                    panic!("Generic trait functions are not supported yet, but function {} of trait {} has a quantifier {}", name, self.name, quantifier);
+                    panic!("Generic trait functions are not supported yet, but function {} of trait {} has a quantifier {}.", name, self.name, quantifier);
                 }
             }
             if !function.ty_scheme.eff_quantifiers.is_empty() {
-                panic!("Generic effects are not supported in trait functions yet, but function {} of trait {} has generic effects {}", name, self.name, iterable_to_string(&function.ty_scheme.eff_quantifiers, ", "));
+                panic!("Generic effects are not supported in trait functions yet, but function {} of trait {} has generic effects {}.", name, self.name, iterable_to_string(&function.ty_scheme.eff_quantifiers, ", "));
+            }
+            if !function.ty_scheme.constraints.is_empty() {
+                panic!("Generic constraints are not supported in trait functions yet, but function {} of trait {} has {} generic constraints.", name, self.name, function.ty_scheme.constraints.len());
             }
         }
     }
