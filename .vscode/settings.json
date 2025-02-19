@@ -16,7 +16,6 @@
 		"Impls",
 		"indexmap",
 		"indoc",
-		"inout",
 		"isize",
 		"itertools",
 		"lalrpop",
@@ -38,7 +37,8 @@
 		"Struct",
 		"subtyping",
 		"unbounds",
-		"unioned"
+		"unioned",
+		"usize"
 	],
 	"rust-analyzer.linkedProjects": [
 		"./Cargo.toml"

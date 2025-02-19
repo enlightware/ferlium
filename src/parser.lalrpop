@@ -1,5 +1,5 @@
 use crate::{Location, LocatedError};
-use crate::ast::{UstrSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module};
+use crate::ast::{UstrSpan, TypeSpan, MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module};
 use crate::value::{Value, LiteralValue};
 use crate::r#type::{Type, FnType, FnArgType};
 use crate::effects::EffType;
@@ -37,8 +37,8 @@ FunctionOrType = {
 }
 
 Function: Module = {
-    <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrArgs> ")" <ar:@R> <body:Es<Block>> <r:@R> =>
-        Module::new_with_function(name, args, span(al, ar), body, span(l, r), parse_doc_comments(doc)),
+    <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrWithOptTypeArgs> ")" <ret:FnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
+        Module::new_with_function(name, args, span(al, ar), ret, body, span(l, r), parse_doc_comments(doc)),
 }
 
 
@@ -63,12 +63,12 @@ Type<P>: Type = {
 
 TupleOrFnType<P>: Type = {
     "(" ")" => Type::unit(),
-    "(" ")" <ret:FnRet<P>> => Type::function_type(FnType::new(vec![], ret, EffType::empty())),
+    "(" ")" <ret:FnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, EffType::empty())),
     "(" <l:@L> <arg:ArgType<P>> <r:@R> ")" <ret:FnRet<P>?> =>?
         Ok(if let Some(ret) = ret {
-            Type::function_type(FnType::new(vec![arg], ret, EffType::empty()))
-        } else if arg.inout != MutType::constant() {
-            return error("types outside function arguments cannot be inout".into(), span(l, r));
+            Type::function_type(FnType::new(vec![arg], ret.0, EffType::empty()))
+        } else if arg.mut_ty != MutType::constant() {
+            return error("types outside function arguments cannot be &mut".into(), span(l, r));
         } else {
             arg.ty
         }),
@@ -76,9 +76,9 @@ TupleOrFnType<P>: Type = {
     {
         let args = ext_f(arg0, args);
         Ok(if let Some(ret) = ret {
-            Type::function_type(FnType::new(args, ret, EffType::empty()))
-        } else if args.iter().any(|a| a.inout != MutType::constant()) {
-            return error("types outside function arguments cannot be inout".into(), span(l, r));
+            Type::function_type(FnType::new(args, ret.0, EffType::empty()))
+        } else if args.iter().any(|a| a.mut_ty != MutType::constant()) {
+            return error("types outside function arguments cannot be &mut".into(), span(l, r));
         } else {
             Type::tuple(args.into_iter().map(|a| a.ty).collect())
         })
@@ -86,12 +86,12 @@ TupleOrFnType<P>: Type = {
 }
 
 #[inline]
-FnRet<P>: Type = {
-    "->" <ret:Type<P>> => ret,
+FnRet<P>: TypeSpan = {
+    "->" <ret:Sp<Type<P>>> => ret,
 }
 
 ArgType<P>: FnArgType = {
-    "inout" <t:Type<P>> => FnArgType::new(t, MutType::mutable()),
+    "&" "mut" <t:Type<P>> => FnArgType::new(t, MutType::mutable()),
     <t:Type<P>> => FnArgType::new(t, MutType::constant()),
 }
 
@@ -133,8 +133,21 @@ VariantTypeAlternative<P>: (Ustr, Type) = {
     }),
 }
 
-TypeAnnotation: (Type, Location) = {
+TypeAscription: TypeSpan = {
     ":" <ty:Sp<Type<"P">>> => ty,
+}
+
+RefMutTypeAscription: MutTypeTypeSpan = {
+    ":" <l:@L> <ref_mut:("&" MutTyOrInfer)?> <ty:Type<"P">> <r:@R> => if let Some(mut_ty) = ref_mut {
+        (mut_ty.1, ty, span(l, r))
+    } else {
+        (MutType::constant(), ty, span(l, r))
+    },
+}
+
+MutTyOrInfer: MutType = {
+    "mut" => MutType::mutable(),
+    "?" => MutType::variable_id(0),
 }
 
 // Expressions
@@ -178,7 +191,7 @@ CompExpr = BinOpLeftAssoc<CompOp, AddExpr>;
 
 AddExpr = BinOpLeftAssoc<AddOp, MulExpr>;
 
-MulExpr = BinOpLeftAssoc<MultOp, UnaryExpr>;
+MulExpr = BinOpLeftAssoc<MulOp, UnaryExpr>;
 
 UnaryExpr = {
     SuffixExpr,
@@ -333,19 +346,20 @@ Stmt = {
 }
 
 LetStmt: ExprKind = {
-    "let" <mut_flag:"mut"?> <id:Sp<UIdentifier>> <ty:TypeAnnotation?> "=" <e:Expr> ";" => {
+    "let" <mut_flag:"mut"?> <id:Sp<UIdentifier>> <ty:TypeAscription?> "=" <e:Expr> ";" => {
         let mut_val = if mut_flag.is_some() {
             MutVal::mutable()
         } else {
             MutVal::constant()
         };
-        let (e, ty_annot) = if let Some((ty, ty_span)) = ty {
+        let e = if let Some((ty, ty_span)) = ty {
             let span = e.span;
-            (Expr::new(TypeAnnotation(boxed(e), ty, ty_span), span), true)
+            Expr::new(TypeAscription(boxed(e), ty, ty_span), span)
         } else {
-            (e, false)
+            e
         };
-        Let(id, mut_val, boxed(e), ty_annot)
+        let ty_span = ty.map(|(_, span)| span);
+        Let(id, mut_val, boxed(e), ty_span)
     }
 }
 
@@ -366,6 +380,14 @@ StrArgs = {
     Sep<Sp<UIdentifier>, ",">
 }
 
+StrWithOptTypeArgs = {
+    Sep<StrWithOptType, ",">
+}
+
+StrWithOptType: (UstrSpan, Option<MutTypeTypeSpan>) = {
+    <id:Sp<UIdentifier>> <ty:RefMutTypeAscription?> => (id, ty),
+}
+
 // Terminals
 
 UnaryOp: Ustr = {
@@ -374,7 +396,7 @@ UnaryOp: Ustr = {
     <l:@L> "!" <r:@R> =>? error("for readability, use the \"not\" keyword instead of the C-style ! operator".into(), span(l, r)),
 }
 
-MultOp: Ustr = {
+MulOp: Ustr = {
     "*" => ustr("std::mul"),
     "/" => ustr("std::div"),
 }

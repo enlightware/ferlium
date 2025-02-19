@@ -61,7 +61,7 @@ pub fn substitute_fn_type(fn_ty: &FnType, substituer: &mut impl TypeSubstituer) 
     fn_ty.args = fn_ty
         .args
         .into_iter()
-        .map(|arg| FnArgType::new(map_ty(arg.ty), arg.inout))
+        .map(|arg| FnArgType::new(map_ty(arg.ty), arg.mut_ty))
         .collect();
     fn_ty.ret = map_ty(fn_ty.ret);
     fn_ty
@@ -143,7 +143,7 @@ fn substitute_fn_type_rec(
         .map(|arg| {
             FnArgType::new(
                 substitute_type_rec(arg.ty, substituer, output, seen),
-                substituer.substitute_mut_type(arg.inout),
+                substituer.substitute_mut_type(arg.mut_ty),
             )
         })
         .collect::<Vec<_>>();

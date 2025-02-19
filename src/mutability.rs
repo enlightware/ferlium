@@ -96,6 +96,9 @@ impl MutType {
     pub fn variable(var: MutVar) -> Self {
         MutType::Variable(var)
     }
+    pub fn variable_id(id: u32) -> Self {
+        MutType::Variable(MutVar::new(id))
+    }
 
     pub fn is_mutable(&self) -> bool {
         match self {
@@ -106,10 +109,10 @@ impl MutType {
 
     pub fn format_in_fn_arg(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            MutType::Variable(var) => write!(f, "inout?:{} ", var),
+            MutType::Variable(var) => write!(f, "&mut?:{} ", var),
             MutType::Resolved(val) => {
                 if val.is_mutable() {
-                    write!(f, "inout ")
+                    write!(f, "&mut ")
                 } else {
                     Ok(())
                 }

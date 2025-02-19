@@ -29,9 +29,9 @@ use crate::{
     ir::{self, Immediate, Node},
     module::{self, FmtWithModuleEnv, Impls, Module, ModuleEnv, Modules},
     mutability::MutType,
-    r#type::{FnType, Type, TypeLike, TypeSubstitution, TypeVar},
+    r#type::{FnArgType, FnType, Type, TypeLike, TypeMapper, TypeSubstitution, TypeVar},
     std::math::{float_type, int_type},
-    type_inference::TypeInference,
+    type_inference::{FreshVariableTypeMapper, TypeInference},
     type_scheme::{PubTypeConstraint, TypeScheme, VariantConstraint},
     typing_env::{Local, TypingEnv},
     value::Value,
@@ -73,6 +73,7 @@ pub fn emit_module(
             name,
             args,
             args_span,
+            ret_ty,
             span,
             doc,
             ..
@@ -82,15 +83,27 @@ pub fn emit_module(
             // Note: the type quantifiers and constraints are left empty.
             // They will be filled in the second pass.
             // The effect quantifiers are filled with the output effect variable.
-            let args_ty = ty_inf.fresh_fn_args(args.len());
-            let effect_var = ty_inf.fresh_effect_var();
-            // log::debug!("Fresh effect variable for {}: {effect_var}", name.0);
-            let effects = EffType::single_variable(effect_var);
-            let ty_scheme = TypeScheme::new_just_type(FnType::new(
-                args_ty,
-                ty_inf.fresh_type_var_ty(),
-                effects.clone(),
-            ));
+            let args_ty = args
+                .iter()
+                .map(|arg| {
+                    if let Some((mut_ty, ty, _)) = arg.1 {
+                        let mut mapper = FreshVariableTypeMapper::new(&mut ty_inf);
+                        let mut_ty = mapper.map_mut_type(mut_ty);
+                        let ty = ty.map(&mut mapper);
+                        FnArgType::new(ty, mut_ty)
+                    } else {
+                        ty_inf.fresh_fn_arg()
+                    }
+                })
+                .collect();
+            let ret_ty_ty = if let Some((ret_ty, _)) = ret_ty {
+                ret_ty.map(&mut FreshVariableTypeMapper::new(&mut ty_inf))
+            } else {
+                ty_inf.fresh_type_var_ty()
+            };
+            let effects = ty_inf.fresh_effect_var_ty();
+            let ty_scheme =
+                TypeScheme::new_just_type(FnType::new(args_ty, ret_ty_ty, effects.clone()));
             // Create dummy code.
             let dummy_code = b(ScriptFunction::new(N::new(
                 K::Immediate(Immediate::new(Value::unit())),
@@ -101,11 +114,15 @@ pub fn emit_module(
             // Assemble the spans and the description
             let spans = module::ModuleFunctionSpans {
                 name: name.1,
-                args: args.iter().map(|(_, s)| *s).collect(),
+                args: args
+                    .iter()
+                    .map(|((_, span), ty)| (*span, ty.map(|ty| ty.2)))
+                    .collect(),
                 args_span: *args_span,
+                ret_ty: ret_ty.map(|ret_ty| ret_ty.1),
                 span: *span,
             };
-            let arg_names = args.iter().map(|(name, _)| *name).collect();
+            let arg_names = args.iter().map(|arg| arg.0 .0).collect();
             let descr = module::ModuleFunction {
                 definition: FunctionDefinition::new(ty_scheme, arg_names, doc.clone()),
                 code: Rc::new(RefCell::new(dummy_code)),
@@ -119,12 +136,9 @@ pub fn emit_module(
             let name = function.name.0;
             let descr = output.functions.get(&name).unwrap();
             let module_env = ModuleEnv::new(&output, others);
+            let arg_names: Vec<_> = function.args.iter().map(|arg| arg.0).collect();
             let mut ty_env = TypingEnv::new(
-                descr
-                    .definition
-                    .ty_scheme
-                    .ty
-                    .as_locals_no_bound(&function.args),
+                descr.definition.ty_scheme.ty.as_locals_no_bound(&arg_names),
                 module_env,
             );
             let expected_span = descr.spans.as_ref().unwrap().args_span;

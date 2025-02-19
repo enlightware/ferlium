@@ -235,10 +235,8 @@ impl TypeInference {
         EffType::single_variable(self.fresh_effect_var())
     }
 
-    pub fn fresh_fn_args(&mut self, count: usize) -> Vec<FnArgType> {
-        (0..count)
-            .map(|_| FnArgType::new(self.fresh_type_var_ty(), self.fresh_mut_var_ty()))
-            .collect()
+    pub fn fresh_fn_arg(&mut self) -> FnArgType {
+        FnArgType::new(self.fresh_type_var_ty(), self.fresh_mut_var_ty())
     }
 
     pub fn fresh_type_var_subst(&mut self, source: &[TypeVar]) -> TypeSubstitution {
@@ -345,7 +343,7 @@ impl TypeInference {
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
-            Let((name, name_span), mutable, let_expr, ty_annot) => {
+            Let((name, name_span), mutable, let_expr, ty_span) => {
                 let node = self.infer_expr_drop_mut(env, let_expr)?;
                 env.locals.push(Local::new(
                     *name,
@@ -357,7 +355,7 @@ impl TypeInference {
                 let node = K::EnvStore(b(EnvStore {
                     node,
                     name_span: *name_span,
-                    ty_annot: *ty_annot,
+                    ty_span: *ty_span,
                 }));
                 (node, Type::unit(), MutType::constant(), effects)
             }
@@ -643,9 +641,9 @@ impl TypeInference {
                     property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
                 self.infer_static_apply(env, &fn_name, expr.span, &[] as &[DExpr], expr.span, true)?
             }
-            TypeAnnotation(expr, ty, span) => {
+            TypeAscription(expr, ty, span) => {
                 let (node, mut_type) = self.infer_expr(env, expr)?;
-                let ty = ty.map(&mut FreshTypeVariableTypeMapper::new(self));
+                let ty = ty.map(&mut FreshVariableTypeMapper::new(self));
                 self.add_same_type_constraint(node.ty, expr.span, ty, *span);
                 return Ok((node, mut_type));
             }
@@ -893,7 +891,7 @@ impl TypeInference {
             .zip(expected_tys)
             .map(|(arg, arg_ty)| {
                 let node =
-                    self.check_expr(env, arg.borrow(), arg_ty.ty, arg_ty.inout, expected_span)?;
+                    self.check_expr(env, arg.borrow(), arg_ty.ty, arg_ty.mut_ty, expected_span)?;
                 let effects = node.effects.clone();
                 Ok((node, effects))
             })
@@ -930,7 +928,9 @@ impl TypeInference {
                 let locals = args
                     .iter()
                     .zip(&fn_ty.args)
-                    .map(|((name, span), arg_ty)| Local::new(*name, arg_ty.inout, arg_ty.ty, *span))
+                    .map(|((name, span), arg_ty)| {
+                        Local::new(*name, arg_ty.mut_ty, arg_ty.ty, *span)
+                    })
                     .collect::<Vec<_>>();
                 // Build environment for typing the function's body
                 let mut env = TypingEnv::new(locals, env.module_env);
@@ -1108,15 +1108,15 @@ impl TypeInference {
     }
 }
 
-struct FreshTypeVariableTypeMapper<'a> {
+pub struct FreshVariableTypeMapper<'a> {
     ty_inf: &'a mut TypeInference,
 }
-impl<'a> FreshTypeVariableTypeMapper<'a> {
-    fn new(ty_inf: &'a mut TypeInference) -> Self {
+impl<'a> FreshVariableTypeMapper<'a> {
+    pub fn new(ty_inf: &'a mut TypeInference) -> Self {
         Self { ty_inf }
     }
 }
-impl TypeMapper for FreshTypeVariableTypeMapper<'_> {
+impl TypeMapper for FreshVariableTypeMapper<'_> {
     fn map_type(&mut self, ty: Type) -> Type {
         if ty.data().is_variable() {
             self.ty_inf.fresh_type_var_ty()
@@ -1125,8 +1125,27 @@ impl TypeMapper for FreshTypeVariableTypeMapper<'_> {
         }
     }
 
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        if mut_ty.is_variable() {
+            self.ty_inf.fresh_mut_var_ty()
+        } else {
+            mut_ty
+        }
+    }
+
     fn map_effect(&mut self, effects: &EffType) -> EffType {
-        effects.clone()
+        EffType::from_vec(
+            effects
+                .iter()
+                .map(|effect| {
+                    if effect.is_variable() {
+                        Effect::Variable(self.ty_inf.fresh_effect_var())
+                    } else {
+                        *effect
+                    }
+                })
+                .collect(),
+        )
     }
 }
 
@@ -1698,9 +1717,9 @@ impl UnifiedTypeInference {
                 {
                     // Contravariance of argument types.
                     self.unify_mut_must_be_at_least_or_equal(
-                        exp_arg.inout,
+                        exp_arg.mut_ty,
                         current_span,
-                        cur_arg.inout,
+                        cur_arg.mut_ty,
                         expected_span,
                         MutabilityMustBeContext::FnTypeArg(index),
                         sub_or_same,

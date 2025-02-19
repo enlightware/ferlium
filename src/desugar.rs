@@ -59,13 +59,14 @@ impl PModuleFunction {
         self,
         fn_map: &FnMap,
     ) -> Result<(DModuleFunction, FnDepGraphNode), InternalCompilationError> {
-        let locals = self.args.iter().map(|(name, _)| *name).collect();
+        let locals = self.args.iter().map(|arg| arg.0 .0).collect();
         let mut ctx = DesugarCtx::new_with_locals(fn_map, locals);
         let body = self.body.desugar(&mut ctx)?;
         let function = ModuleFunction {
             name: self.name,
             args: self.args,
             args_span: self.args_span,
+            ret_ty: self.ret_ty,
             body: b(body),
             span: self.span,
             doc: self.doc,
@@ -137,8 +138,8 @@ impl PExpr {
                 }
                 Identifier(name)
             }
-            Let(name, mut_val, expr, ty_annot) => {
-                let expr = Let(name, mut_val, expr.desugar_boxed(ctx)?, ty_annot);
+            Let(name, mut_val, expr, ty_ascription) => {
+                let expr = Let(name, mut_val, expr.desugar_boxed(ctx)?, ty_ascription);
                 ctx.locals.push(name.0);
                 expr
             }
@@ -203,7 +204,7 @@ impl PExpr {
             ForLoop(var, iterator, body) => {
                 ForLoop(var, iterator.desugar_boxed(ctx)?, body.desugar_boxed(ctx)?)
             }
-            TypeAnnotation(expr, ty, span) => TypeAnnotation(expr.desugar_boxed(ctx)?, ty, span),
+            TypeAscription(expr, ty, span) => TypeAscription(expr.desugar_boxed(ctx)?, ty, span),
             Error => Error,
         };
         Ok(DExpr {

@@ -8,18 +8,20 @@
 //
 use test_log::test;
 
-use crate::common::compile;
-
 use super::common::{
-    fail_compilation, fail_run, get_property_value, run, set_property_value, unit,
+    compile_and_get_fn_def, fail_compilation, fail_run, get_property_value, run,
+    set_property_value, unit,
 };
 use ferlium::{
     error::{MutabilityMustBeWhat, RuntimeError},
-    r#type::Type,
-    std::array::array_type,
+    mutability::MutType,
+    r#type::{tuple_type, Type},
+    std::{
+        array::array_type_generic,
+        math::{float_type, int_type},
+    },
     value::Value,
 };
-use ustr::ustr;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -135,25 +137,69 @@ fn local_variables() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn type_annotations() {
+fn type_annotation_in_let() {
     assert_eq!(run("let a: int = 1 ; a"), int!(1));
     assert_eq!(run("let a: float = 1 ; a"), float!(1.0));
     assert_eq!(run("let a: [int] = [] ; a"), int_a![]);
-    let result = compile("fn id(x) { let a: [_] = x; a }");
-    let fn_ty = result
-        .0
-        .module
-        .functions
-        .get(&ustr("id"))
-        .unwrap()
-        .definition
-        .ty_scheme
-        .ty();
+    let fn_def = compile_and_get_fn_def("fn id(x) { let a: [_] = x; a }", "id");
+    let fn_ty = fn_def.ty_scheme.ty();
     assert_eq!(fn_ty.args.len(), 1);
-    let gen0 = Type::variable_id(0);
-    let gen_array_type = array_type(gen0);
+    let gen_array_type = array_type_generic();
     assert_eq!(fn_ty.args[0].ty, gen_array_type);
     assert_eq!(fn_ty.ret, gen_array_type);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_annotation_in_fn() {
+    assert_eq!(run("fn id(x: int) { x } id(0)"), int!(0));
+    assert_eq!(run("fn id(x: float) { x } id(0)"), float!(0.0));
+    assert_eq!(run("fn id(x: [int]) { x } id([])"), int_a![]);
+    assert_eq!(run("fn id(x) -> int { x } id(0)"), int!(0));
+    assert_eq!(run("fn id(x) -> float { x } id(0)"), float!(0.0));
+    assert_eq!(run("fn id(x) -> [int] { x } id([])"), int_a![]);
+    let gen_array_type = array_type_generic();
+    let fn_def = compile_and_get_fn_def("fn id(x: [_]) { x }", "id");
+    let fn_ty = fn_def.ty_scheme.ty();
+    assert_eq!(fn_ty.args[0].mut_ty, MutType::constant());
+    assert_eq!(fn_ty.args[0].ty, gen_array_type);
+    assert_eq!(fn_ty.ret, gen_array_type);
+    let fn_def = compile_and_get_fn_def("fn id(x: &mut [_]) { x }", "id");
+    let fn_ty = fn_def.ty_scheme.ty();
+    assert_eq!(fn_ty.args[0].mut_ty, MutType::mutable());
+    assert_eq!(fn_ty.args[0].ty, gen_array_type);
+    assert_eq!(fn_ty.ret, gen_array_type);
+    let fn_def = compile_and_get_fn_def("fn id(x) -> [_] { x }", "id");
+    let fn_ty = fn_def.ty_scheme.ty();
+    assert_eq!(fn_ty.args[0].ty, gen_array_type);
+    assert_eq!(fn_ty.ret, gen_array_type);
+    let fn_def = compile_and_get_fn_def("fn mkt(a: int, b: float) { (a, b) }", "mkt");
+    let fn_ty = fn_def.ty_scheme.ty();
+    assert_eq!(fn_ty.args[0].ty, int_type());
+    assert_eq!(fn_ty.args[1].ty, float_type());
+    assert_eq!(fn_ty.ret, tuple_type([int_type(), float_type()]));
+    let fn_def = compile_and_get_fn_def("fn mkt(a, b) -> (int, float) { (a, b) }", "mkt");
+    let fn_ty = fn_def.ty_scheme.ty();
+    assert_eq!(fn_ty.args[0].ty, int_type());
+    assert_eq!(fn_ty.args[1].ty, float_type());
+    assert_eq!(fn_ty.ret, tuple_type([int_type(), float_type()]));
+    let fn_def = compile_and_get_fn_def("fn ist2(v) -> (_, _) { v }", "ist2");
+    let fn_ty = fn_def.ty_scheme.ty();
+    let gen0 = Type::variable_id(0);
+    let gen1 = Type::variable_id(1);
+    let gen_tuple2 = tuple_type([gen0, gen1]);
+    assert_eq!(fn_ty.args[0].ty, gen_tuple2);
+    assert_eq!(fn_ty.ret, gen_tuple2);
+    let fn_def = compile_and_get_fn_def("fn f(v: &? int) { v = 1 }", "f");
+    let fn_ty = fn_def.ty_scheme.ty();
+    assert_eq!(fn_ty.args[0].mut_ty, MutType::mutable());
+    assert_eq!(fn_ty.args[0].ty, int_type());
+    assert_eq!(fn_ty.ret, Type::unit());
+    let fn_def = compile_and_get_fn_def("fn f(v: &? int) { v }", "f");
+    let fn_ty = fn_def.ty_scheme.ty();
+    assert_eq!(fn_ty.args[0].mut_ty, MutType::constant());
+    assert_eq!(fn_ty.args[0].ty, int_type());
+    assert_eq!(fn_ty.ret, int_type());
 }
 
 #[test]

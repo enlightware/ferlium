@@ -17,7 +17,7 @@ use crate::{
     error::LocatedError,
     format::write_with_separator,
     module::FmtWithModuleEnv,
-    mutability::MutVal,
+    mutability::{MutType, MutVal},
     never::Never,
     r#type::Type,
     value::{LiteralValue, Value},
@@ -26,6 +26,12 @@ use crate::{
 
 /// A spanned Ustr
 pub type UstrSpan = (Ustr, Location);
+
+/// A spanned Type
+pub type TypeSpan = (Type, Location);
+
+/// A spanned (MutType, Type)
+pub type MutTypeTypeSpan = (MutType, Type, Location);
 
 /// A phase in the AST processing pipeline
 pub trait Phase {
@@ -48,11 +54,14 @@ impl Phase for Desugared {
     type FormattedString = Never;
 }
 
+pub type ModuleFunctionArg = (UstrSpan, Option<MutTypeTypeSpan>);
+
 #[derive(Debug, Clone)]
 pub struct ModuleFunction<P: Phase> {
     pub name: UstrSpan,
-    pub args: Vec<UstrSpan>,
+    pub args: Vec<ModuleFunctionArg>,
     pub args_span: Location,
+    pub ret_ty: Option<TypeSpan>,
     pub body: B<Expr<P>>,
     pub span: Location,
     pub doc: Option<String>,
@@ -60,8 +69,9 @@ pub struct ModuleFunction<P: Phase> {
 impl<P: Phase> ModuleFunction<P> {
     pub fn new(
         name: UstrSpan,
-        args: Vec<UstrSpan>,
+        args: Vec<ModuleFunctionArg>,
         args_span: Location,
+        ret_ty: Option<TypeSpan>,
         body: B<Expr<P>>,
         span: Location,
         doc: Option<String>,
@@ -70,6 +80,7 @@ impl<P: Phase> ModuleFunction<P> {
             name,
             args,
             args_span,
+            ret_ty,
             body,
             span,
             doc,
@@ -103,8 +114,9 @@ pub struct Module<P: Phase> {
 impl<P: Phase> Module<P> {
     pub fn new_with_function(
         name: UstrSpan,
-        args: Vec<UstrSpan>,
+        args: Vec<ModuleFunctionArg>,
         args_span: Location,
+        ret_ty: Option<TypeSpan>,
         body: Expr<P>,
         span: Location,
         doc: Option<String>,
@@ -114,6 +126,7 @@ impl<P: Phase> Module<P> {
                 name,
                 args,
                 args_span,
+                ret_ty,
                 b(body),
                 span,
                 doc,
@@ -162,6 +175,7 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
             for ModuleFunction {
                 name,
                 args,
+                ret_ty,
                 body,
                 doc,
                 ..
@@ -170,12 +184,27 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
                 if let Some(doc) = doc {
                     writeln!(f, "  /// {}", doc)?;
                 }
-                writeln!(
+                write!(
                     f,
-                    "  fn {}({}):",
+                    "  fn {}({})",
                     name.0,
-                    args.iter().map(|(name, _)| name.to_string()).join(", ")
+                    args.iter()
+                        .map(|((name, _), ty)| if let Some((mut_ty, ty, _)) = ty {
+                            format!(
+                                "{}: {}{}",
+                                name,
+                                if mut_ty.is_mutable() { "&mut " } else { "" },
+                                ty.format_with(env)
+                            )
+                        } else {
+                            name.to_string()
+                        })
+                        .join(", ")
                 )?;
+                if let Some((ret_ty, _)) = ret_ty {
+                    write!(f, " → {}", ret_ty.format_with(env))?;
+                }
+                writeln!(f)?;
                 body.format_ind(f, env, 2)?;
             }
         }
@@ -196,7 +225,7 @@ pub enum ExprKind<P: Phase> {
     FormattedString(P::FormattedString),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Ustr),
-    Let(UstrSpan, MutVal, B<Expr<P>>, bool),
+    Let(UstrSpan, MutVal, B<Expr<P>>, Option<Location>),
     Abstract(Vec<UstrSpan>, B<Expr<P>>),
     Apply(B<Expr<P>>, Vec<Expr<P>>, bool),
     Block(Vec<Expr<P>>),
@@ -210,7 +239,7 @@ pub enum ExprKind<P: Phase> {
     Index(B<Expr<P>>, B<Expr<P>>),
     Match(B<Expr<P>>, Vec<(Pattern, Expr<P>)>, Option<B<Expr<P>>>),
     ForLoop(UstrSpan, B<Expr<P>>, B<Expr<P>>),
-    TypeAnnotation(B<Expr<P>>, Type, Location),
+    TypeAscription(B<Expr<P>>, Type, Location),
     Error,
 }
 
@@ -337,7 +366,7 @@ impl<P: Phase> Expr<P> {
                 body.format_ind(f, env, indent + 1)
             }
             PropertyPath(scope, name) => writeln!(f, "{indent_str}@{}.{}", scope, name),
-            TypeAnnotation(expr, ty, _span) => {
+            TypeAscription(expr, ty, _span) => {
                 expr.format_ind(f, env, indent)?;
                 writeln!(f, "{indent_str}: {}", ty.format_with(env))
             }
@@ -381,7 +410,7 @@ impl<P: Phase> Expr<P> {
                 iterator.visit(visitor);
                 body.visit(visitor);
             }
-            TypeAnnotation(expr, _, _) => expr.visit(visitor),
+            TypeAscription(expr, _, _) => expr.visit(visitor),
             _ => {}
         }
         visitor.visit_end(self);

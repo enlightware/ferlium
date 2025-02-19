@@ -346,7 +346,7 @@ pub fn int_array_type() -> Type {
     cached_ty!(|| array_type(int_type()))
 }
 
-fn array_type_generic() -> Type {
+pub fn array_type_generic() -> Type {
     cached_ty!(|| array_type(Type::variable_id(0)))
 }
 

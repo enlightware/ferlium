@@ -432,7 +432,7 @@ fn eval_args(
     // Automatically cast mutable references to values if the function expects values.
     let f = |(arg, ty): &(&Node, &FnArgType), ctx: &mut EvalCtx| {
         let is_mutable = ty
-            .inout
+            .mut_ty
             .as_resolved()
             .expect("Unresolved mutability variable found during execution")
             .is_mutable();

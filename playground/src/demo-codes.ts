@@ -123,5 +123,18 @@ let count = 3;
 let mut text = f"{a} {count} worlds!";
 string_push_str(text, " ...and more");
 string_concat("He said: ", text)
+`],
+['Optional typing', `fn ty_let() {
+	let a: int = 1;
+	a
+}
+
+fn ty_fn_arg(a: int, b: float) {
+	(a + 1, b + 1)
+}
+
+fn ty_fn_ret(a) -> int {
+	a
+}
 `]
 ] as const;

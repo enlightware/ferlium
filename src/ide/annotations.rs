@@ -23,7 +23,7 @@ impl ModuleAndExpr {
     /// Returns a vector of positions in byte offsets and annotations.
     pub fn display_annotations(
         &self,
-        _src: &str,
+        src: &str,
         other_modules: &Modules,
         style: DisplayStyle,
     ) -> Vec<(usize, String)> {
@@ -75,37 +75,64 @@ impl ModuleAndExpr {
                         }
                     }
                 }
-                for (span, arg_ty) in spans
+                for ((name_span, ty_span), arg_ty) in spans
                     .args
                     .iter()
                     .zip(&function.definition.ty_scheme.ty.args)
                 {
-                    annotations.push((span.end(), format!(": {}", arg_ty.format_with(&env))));
+                    if ty_span.is_none() {
+                        annotations
+                            .push((name_span.end(), format!(": {}", arg_ty.format_with(&env))));
+                    }
                 }
-                let ret_ty_and_eff = if function.definition.ty_scheme.ty.effects.is_empty() {
-                    format!(
-                        " → {}",
-                        function.definition.ty_scheme.ty.ret.format_with(&env)
-                    )
+                let byte_src = src.as_bytes();
+                let past_args_index = spans.args_span.end();
+                let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
+                    ""
                 } else {
-                    format!(
-                        " → {} ! {}",
+                    " "
+                };
+                let mut annotation = if function.definition.ty_scheme.ty.effects.is_empty() {
+                    if spans.ret_ty.is_none() {
+                        Some(format!(
+                            "{start_space}→ {}",
+                            function.definition.ty_scheme.ty.ret.format_with(&env)
+                        ))
+                    } else {
+                        None
+                    }
+                } else if spans.ret_ty.is_none() {
+                    Some(format!(
+                        "{start_space}→ {} ! {}",
                         function.definition.ty_scheme.ty.ret.format_with(&env),
                         function.definition.ty_scheme.ty.effects
-                    )
+                    ))
+                } else {
+                    Some(format!(
+                        "{start_space}! {}",
+                        function.definition.ty_scheme.ty.effects
+                    ))
                 };
-                annotations.push((spans.args_span.end(), ret_ty_and_eff));
                 if style == Rust && !function.definition.ty_scheme.is_just_type_and_effects() {
-                    annotations.push((
-                        spans.args_span.end(),
-                        format!(
-                            " {}",
-                            function
-                                .definition
-                                .ty_scheme
-                                .display_constraints_rust_style(&env)
-                        ),
+                    annotation = Some(format!(
+                        "{}{}{}",
+                        annotation.as_ref().map_or("", |v| v),
+                        annotation.as_ref().map_or(start_space, |_| " "),
+                        function
+                            .definition
+                            .ty_scheme
+                            .display_constraints_rust_style(&env)
                     ));
+                }
+                if let Some(mut annotation) = annotation {
+                    let end_space =
+                        if past_args_index < byte_src.len() && byte_src[past_args_index] == b' ' {
+                            ""
+                        } else {
+                            " "
+                        };
+                    annotation.push_str(end_space);
+                    annotations.push((past_args_index, annotation));
                 }
             }
         }
@@ -192,7 +219,7 @@ impl Node {
             }
             EnvStore(node) => {
                 // Note: synthesized let nodes have empty name span, so we ignore these.
-                if !node.ty_annot && node.name_span.end() != node.name_span.start() {
+                if node.ty_span.is_none() && node.name_span.end() != node.name_span.start() {
                     result.push((
                         node.name_span.end(),
                         format!(": {}", node.node.ty.format_with(env)),

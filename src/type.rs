@@ -276,6 +276,7 @@ impl FmtWithModuleEnv for NativeType {
 /// A struct that can map a type and its effects to another type and effects
 pub trait TypeMapper {
     fn map_type(&mut self, ty: Type) -> Type;
+    fn map_mut_type(&mut self, ty: MutType) -> MutType;
     fn map_effect(&mut self, effects: &EffType) -> EffType;
 }
 
@@ -295,6 +296,9 @@ impl TypeMapper for SubstitutionTypeMapper<'_> {
             ty
         }
     }
+    fn map_mut_type(&mut self, ty: MutType) -> MutType {
+        ty
+    }
     fn map_effect(&mut self, effects: &EffType) -> EffType {
         effects.instantiate(&self.subst.1)
     }
@@ -303,27 +307,27 @@ impl TypeMapper for SubstitutionTypeMapper<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FnArgType {
     pub ty: Type,
-    pub inout: MutType,
+    pub mut_ty: MutType,
 }
 impl FnArgType {
-    pub fn new(ty: Type, inout: MutType) -> Self {
-        Self { ty, inout }
+    pub fn new(ty: Type, mut_ty: MutType) -> Self {
+        Self { ty, mut_ty }
     }
     pub fn new_by_val(ty: Type) -> Self {
         Self {
             ty,
-            inout: MutType::constant(),
+            mut_ty: MutType::constant(),
         }
     }
     fn local_cmp(&self, other: &Self) -> Ordering {
         self.ty
             .local_cmp(&other.ty)
-            .then(self.inout.cmp(&other.inout))
+            .then(self.mut_ty.cmp(&other.mut_ty))
     }
 }
 impl FmtWithModuleEnv for FnArgType {
     fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        self.inout.format_in_fn_arg(f)?;
+        self.mut_ty.format_in_fn_arg(f)?;
         self.ty.fmt_with_module_env(f, env)
     }
 }
@@ -345,7 +349,7 @@ impl FnType {
         Self {
             args: args
                 .iter()
-                .map(|(ty, inout)| FnArgType::new(*ty, MutType::from(*inout)))
+                .map(|(ty, mutable)| FnArgType::new(*ty, MutType::from(*mutable)))
                 .collect(),
             ret,
             effects,
@@ -358,7 +362,7 @@ impl FnType {
                 .iter()
                 .map(|&ty| FnArgType {
                     ty,
-                    inout: MutType::constant(),
+                    mut_ty: MutType::constant(),
                 })
                 .collect(),
             ret,
@@ -370,7 +374,7 @@ impl FnType {
         arg_names
             .iter()
             .zip(self.args.iter())
-            .map(|((name, span), arg)| Local::new(*name, arg.inout, arg.ty, *span))
+            .map(|((name, span), arg)| Local::new(*name, arg.mut_ty, arg.ty, *span))
             .collect()
     }
 
@@ -390,7 +394,7 @@ impl FnType {
                 .iter()
                 .map(|arg| FnArgType {
                     ty: arg.ty.map(f),
-                    inout: arg.inout,
+                    mut_ty: f.map_mut_type(arg.mut_ty),
                 })
                 .collect(),
             ret: self.ret.map(f),

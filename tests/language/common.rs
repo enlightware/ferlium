@@ -10,7 +10,9 @@ use ferlium::{
     effects::{effect, effects, no_effects, PrimitiveEffect},
     error::{CompilationError, RuntimeError},
     eval::EvalResult,
-    function::{NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN},
+    function::{
+        FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN,
+    },
     module::{Module, Modules},
     r#type::{FnType, Type},
     std::{math::int_type, new_std_module_env, option::option_type},
@@ -136,6 +138,18 @@ pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationErr
 /// Compile the src and return its module and expression
 pub fn compile(src: &str) -> (ModuleAndExpr, Modules) {
     try_compile(src).unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
+}
+
+/// Compile and get a specific function definition
+pub fn compile_and_get_fn_def(src: &str, fn_name: &str) -> FunctionDefinition {
+    compile(src)
+        .0
+        .module
+        .functions
+        .get(&ustr(fn_name))
+        .expect("Function not found")
+        .definition
+        .clone()
 }
 
 /// Compile and run the src and return its execution result (either a value or an error)

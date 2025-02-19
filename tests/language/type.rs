@@ -152,7 +152,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        parse_concrete_type("(inout [int]) -> int").unwrap(),
+        parse_concrete_type("(&mut [int]) -> int").unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             &[(array_type(int_type()), true)],
             int_type(),
@@ -160,7 +160,7 @@ fn fn_type() {
         ))
     );
     assert_eq!(
-        parse_concrete_type("(inout [float], inout int) -> ()").unwrap(),
+        parse_concrete_type("(&mut [float], &mut int) -> ()").unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             &[(array_type(float_type()), true), (int_type(), true)],
             Type::unit(),
@@ -168,18 +168,18 @@ fn fn_type() {
         ))
     );
     assert_eq!(
-        parse_concrete_type("(inout int)").unwrap_err().0,
-        "types outside function arguments cannot be inout"
+        parse_concrete_type("(&mut int)").unwrap_err().0,
+        "types outside function arguments cannot be &mut"
     );
     assert_eq!(
-        parse_concrete_type("(inout int,)").unwrap_err().0,
-        "types outside function arguments cannot be inout"
+        parse_concrete_type("(&mut int,)").unwrap_err().0,
+        "types outside function arguments cannot be &mut"
     );
     assert_eq!(
-        parse_concrete_type("(bool, float, inout int)")
+        parse_concrete_type("(bool, float, &mut int)")
             .unwrap_err()
             .0,
-        "types outside function arguments cannot be inout"
+        "types outside function arguments cannot be &mut"
     );
 }
 
@@ -196,7 +196,7 @@ fn generic_types() {
         tuple_type([Type::variable_id(0), Type::variable_id(0)])
     );
     assert_eq!(
-        parse_generic_type("(inout [_], inout int) -> _").unwrap(),
+        parse_generic_type("(&mut [_], &mut int) -> _").unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             &[(array_type(Type::variable_id(0)), true), (int_type(), true)],
             Type::variable_id(0),

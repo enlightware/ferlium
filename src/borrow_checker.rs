@@ -110,7 +110,7 @@ fn check_arguments(
         .iter()
         .enumerate()
         .filter_map(|(i, ty)| {
-            if ty.inout.is_mutable() {
+            if ty.mut_ty.is_mutable() {
                 Some((i, Path::from_node(&arguments[i])))
             } else {
                 None

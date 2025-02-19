@@ -88,12 +88,16 @@ impl Deref for Impls {
     }
 }
 
+/// A module function argument span, with the span of the optional type ascription.
+pub type ModuleFunctionArgSpan = (Location, Option<Location>);
+
 /// If the module function is from code, this struct contains the spans of the function.
 #[derive(Debug, Clone)]
 pub struct ModuleFunctionSpans {
     pub name: Location,
-    pub args: Vec<Location>,
+    pub args: Vec<ModuleFunctionArgSpan>,
     pub args_span: Location,
+    pub ret_ty: Option<Location>,
     pub span: Location,
 }
 
