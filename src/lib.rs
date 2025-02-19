@@ -75,10 +75,19 @@ impl ModuleAndExpr {
     }
 }
 
-/// Parse a type from a source code and return the corresponding Type.
-pub fn parse_type(src: &str) -> Result<Type, LocatedError> {
+/// Parse a type from a source code and return the corresponding concrete Type.
+pub fn parse_concrete_type(src: &str) -> Result<Type, LocatedError> {
     let mut errors = Vec::new();
-    parser::TypeParser::new()
+    parser::ConcreteTypeParser::new()
+        .parse(&mut errors, src)
+        .map_err(describe_parse_error)
+}
+
+/// Parse a type from a source code and return the corresponding Type,
+/// with placeholder filled with first generic variable.
+pub fn parse_generic_type(src: &str) -> Result<Type, LocatedError> {
+    let mut errors = Vec::new();
+    parser::GenericTypeParser::new()
         .parse(&mut errors, src)
         .map_err(describe_parse_error)
 }
@@ -139,10 +148,10 @@ pub fn compile(
     {
         let env = ModuleEnv::new(&module, other_modules);
         log::debug!("Module AST\n{}", module_ast.format_with(&env));
-    }
-    assert_eq!(module_ast.errors(), &[]);
-    if let Some(expr) = expr_ast.as_ref() {
-        log::debug!("Expr AST\n{expr}");
+        assert_eq!(module_ast.errors(), &[]);
+        if let Some(expr) = expr_ast.as_ref() {
+            log::debug!("Expr AST\n{}", expr.format_with(&env));
+        }
     }
 
     // Emit IR for the module.

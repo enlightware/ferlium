@@ -192,7 +192,7 @@ impl Node {
             }
             EnvStore(node) => {
                 // Note: synthesized let nodes have empty name span, so we ignore these.
-                if node.name_span.end() != node.name_span.start() {
+                if !node.ty_annot && node.name_span.end() != node.name_span.start() {
                     result.push((
                         node.name_span.end(),
                         format!(": {}", node.node.ty.format_with(env)),

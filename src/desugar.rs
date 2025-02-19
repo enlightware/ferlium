@@ -137,8 +137,8 @@ impl PExpr {
                 }
                 Identifier(name)
             }
-            Let(name, mut_val, expr) => {
-                let expr = Let(name, mut_val, expr.desugar_boxed(ctx)?);
+            Let(name, mut_val, expr, ty_annot) => {
+                let expr = Let(name, mut_val, expr.desugar_boxed(ctx)?, ty_annot);
                 ctx.locals.push(name.0);
                 expr
             }
@@ -203,6 +203,7 @@ impl PExpr {
             ForLoop(var, iterator, body) => {
                 ForLoop(var, iterator.desugar_boxed(ctx)?, body.desugar_boxed(ctx)?)
             }
+            TypeAnnotation(expr, ty, span) => TypeAnnotation(expr.desugar_boxed(ctx)?, ty, span),
             Error => Error,
         };
         Ok(DExpr {

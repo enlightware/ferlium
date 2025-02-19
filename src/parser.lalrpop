@@ -1,11 +1,12 @@
 use crate::{Location, LocatedError};
 use crate::ast::{UstrSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module};
 use crate::value::{Value, LiteralValue};
-use crate::r#type::Type;
+use crate::r#type::{Type, FnType, FnArgType};
+use crate::effects::EffType;
 use crate::parser_helpers::*;
 use crate::std::{logic::bool_type, math::{int_type, float_type}, array::array_type, string::string_type};
 use crate::containers::{b as boxed};
-use crate::mutability::MutVal;
+use crate::mutability::{MutVal, MutType};
 
 use ustr::{Ustr, ustr};
 
@@ -43,51 +44,97 @@ Function: Module = {
 
 // Type
 
-pub Type: Type = {
+pub ConcreteType: Type = {
+    Type<"">
+}
+
+pub GenericType: Type = {
+    Type<"P">
+}
+
+Type<P>: Type = {
+    PlaceholderType if P != "",
     PrimitiveType,
-    TupleType,
-    ArrayType,
-    RecordType,
-    VariantType,
-    "(" <t:Type> ")" => t,
+    ArrayType<P>,
+    RecordType<P>,
+    VariantType<P>,
+    TupleOrFnType<P>,
+}
+
+TupleOrFnType<P>: Type = {
+    "(" ")" => Type::unit(),
+    "(" ")" <ret:FnRet<P>> => Type::function_type(FnType::new(vec![], ret, EffType::empty())),
+    "(" <l:@L> <arg:ArgType<P>> <r:@R> ")" <ret:FnRet<P>?> =>?
+        Ok(if let Some(ret) = ret {
+            Type::function_type(FnType::new(vec![arg], ret, EffType::empty()))
+        } else if arg.inout != MutType::constant() {
+            return error("types outside function arguments cannot be inout".into(), span(l, r));
+        } else {
+            arg.ty
+        }),
+    "(" <l:@L> <arg0:ArgType<P>> "," <args:Sep<ArgType<P>, ",">>  <r:@R> ")" <ret:FnRet<P>?> =>?
+    {
+        let args = ext_f(arg0, args);
+        Ok(if let Some(ret) = ret {
+            Type::function_type(FnType::new(args, ret, EffType::empty()))
+        } else if args.iter().any(|a| a.inout != MutType::constant()) {
+            return error("types outside function arguments cannot be inout".into(), span(l, r));
+        } else {
+            Type::tuple(args.into_iter().map(|a| a.ty).collect())
+        })
+    }
+}
+
+#[inline]
+FnRet<P>: Type = {
+    "->" <ret:Type<P>> => ret,
+}
+
+ArgType<P>: FnArgType = {
+    "inout" <t:Type<P>> => FnArgType::new(t, MutType::mutable()),
+    <t:Type<P>> => FnArgType::new(t, MutType::constant()),
+}
+
+PlaceholderType: Type = {
+    "_" => Type::variable_id(0),
 }
 
 PrimitiveType: Type = {
-    "(" ")" => Type::unit(),
+    // "(" ")" => Type::unit(),
     "bool" => bool_type(),
     "int" => int_type(),
     "float" => float_type(),
     "string" => string_type(),
 }
 
-TupleType: Type = {
-    "(" <f:Type> "," <r:Sep<Type, ",">> ")" => Type::tuple(ext_f(f, r))
+ArrayType<P>: Type = {
+    "[" <t:Type<P>> "]" => array_type(t)
 }
 
-ArrayType: Type = {
-    "[" <t:Type> "]" => array_type(t)
+RecordType<P>: Type = {
+    "{" <f:RecordTypeField<P>> "}" => Type::record(vec![f]),
+    "{" <f:RecordTypeField<P>> "," <r:Sep<RecordTypeField<P>, ",">> "}" => Type::record(ext_f(f, r)),
 }
 
-RecordType: Type = {
-    "{" <f:RecordTypeField> "}" => Type::record(vec![f]),
-    "{" <f:RecordTypeField> "," <r:Sep<RecordTypeField, ",">> "}" => Type::record(ext_f(f, r)),
+RecordTypeField<P>: (Ustr, Type) = {
+    <n:UIdentifier> ":" <t:Type<P>> => (n, t),
 }
 
-RecordTypeField: (Ustr, Type) = {
-    <n:UIdentifier> ":" <t:Type> => (n, t),
+VariantType<P>: Type = {
+    <f:VariantTypeAlternative<P>> <r:("|" <VariantTypeAlternative<P>>)*> => Type::variant(ext_f(f, r)),
 }
 
-VariantType: Type = {
-    <f:VariantTypeAlternative> <r:("|" <VariantTypeAlternative>)*> => Type::variant(ext_f(f, r)),
-}
-
-VariantTypeAlternative: (Ustr, Type) = {
+VariantTypeAlternative<P>: (Ustr, Type) = {
     <tag:UIdentifier> => (tag, Type::unit()),
-    <tag:UIdentifier> "(" <args:Sep<Type, ",">> ")" => (tag, if args.len() == 1 {
+    <tag:UIdentifier> "(" <args:Sep<Type<P>, ",">> ")" => (tag, if args.len() == 1 {
         args[0]
     } else {
         Type::tuple(args)
     }),
+}
+
+TypeAnnotation: (Type, Location) = {
+    ":" <ty:Sp<Type<"P">>> => ty,
 }
 
 // Expressions
@@ -286,8 +333,20 @@ Stmt = {
 }
 
 LetStmt: ExprKind = {
-    "let" <id:Sp<UIdentifier>> "=" <e:Expr> ";" => Let(id, MutVal::constant(), boxed(e)),
-    "let" "mut" <id:Sp<UIdentifier>> "=" <e:Expr> ";" => Let(id, MutVal::mutable(), boxed(e)),
+    "let" <mut_flag:"mut"?> <id:Sp<UIdentifier>> <ty:TypeAnnotation?> "=" <e:Expr> ";" => {
+        let mut_val = if mut_flag.is_some() {
+            MutVal::mutable()
+        } else {
+            MutVal::constant()
+        };
+        let (e, ty_annot) = if let Some((ty, ty_span)) = ty {
+            let span = e.span;
+            (Expr::new(TypeAnnotation(boxed(e), ty, ty_span), span), true)
+        } else {
+            (e, false)
+        };
+        Let(id, mut_val, boxed(e), ty_annot)
+    }
 }
 
 ExprStmt: Expr = {

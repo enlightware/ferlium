@@ -119,6 +119,7 @@ impl TypeInference {
             let store_variant = K::EnvStore(b(EnvStore {
                 node: condition_node,
                 name_span: cond_expr.span,
+                ty_annot: false,
             }));
             let store_variant_node = N::new(
                 store_variant,
@@ -215,6 +216,7 @@ impl TypeInference {
                                     K::EnvStore(b(EnvStore {
                                         node: project_tuple_inner,
                                         name_span: bind_var_names[i].1,
+                                        ty_annot: false,
                                     })),
                                     Type::unit(),
                                     no_effects(),

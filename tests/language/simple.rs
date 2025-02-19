@@ -8,13 +8,18 @@
 //
 use test_log::test;
 
+use crate::common::compile;
+
 use super::common::{
     fail_compilation, fail_run, get_property_value, run, set_property_value, unit,
 };
 use ferlium::{
     error::{MutabilityMustBeWhat, RuntimeError},
+    r#type::Type,
+    std::array::array_type,
     value::Value,
 };
+use ustr::ustr;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -126,6 +131,29 @@ fn local_variables() {
         bool!(true)
     );
     assert_eq!(run("let f = || 1; let a = f(); a"), int!(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_annotations() {
+    assert_eq!(run("let a: int = 1 ; a"), int!(1));
+    assert_eq!(run("let a: float = 1 ; a"), float!(1.0));
+    assert_eq!(run("let a: [int] = [] ; a"), int_a![]);
+    let result = compile("fn id(x) { let a: [_] = x; a }");
+    let fn_ty = result
+        .0
+        .module
+        .functions
+        .get(&ustr("id"))
+        .unwrap()
+        .definition
+        .ty_scheme
+        .ty();
+    assert_eq!(fn_ty.args.len(), 1);
+    let gen0 = Type::variable_id(0);
+    let gen_array_type = array_type(gen0);
+    assert_eq!(fn_ty.args[0].ty, gen_array_type);
+    assert_eq!(fn_ty.ret, gen_array_type);
 }
 
 #[test]

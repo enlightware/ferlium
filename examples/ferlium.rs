@@ -458,12 +458,14 @@ fn main() {
                 continue;
             }
         };
-        if !module_ast.is_empty() {
+        {
             let env = ModuleEnv::new(&module, &other_modules);
-            println!("Module AST:\n{}", module_ast.format_with(&env));
-        }
-        if let Some(expr_ast) = expr_ast.as_ref() {
-            println!("Expr AST:\n{expr_ast}");
+            if !module_ast.is_empty() {
+                println!("Module AST:\n{}", module_ast.format_with(&env));
+            }
+            if let Some(expr_ast) = expr_ast.as_ref() {
+                println!("Expr AST:\n{}", expr_ast.format_with(&env));
+            }
         }
 
         // Compile module

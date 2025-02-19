@@ -970,7 +970,7 @@ fn format_have_trait(
         f,
     )?;
     if !output_tys.is_empty() {
-        write!(f, "; ")?;
+        write!(f, " ↦ ")?;
         write_with_separator_and_format_fn(
             output_tys.iter(),
             ", ",

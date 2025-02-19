@@ -70,6 +70,7 @@ pub fn emit_format_string_ast(
                 ExprKind::Literal(Value::native(String::new()), string_type()),
                 start_span,
             )),
+            false,
         ),
         start_span,
     )];

@@ -23,7 +23,7 @@ use crate::{
     module::Impls,
     parser_helpers::EMPTY_USTR,
     r#trait::TraitRef,
-    r#type::TypeLike,
+    r#type::{TypeLike, TypeMapper},
     std::logic::bool_type,
     type_substitution::{substitute_fn_type, substitute_type, substitute_types, TypeSubstituer},
 };
@@ -114,6 +114,12 @@ impl UnifyValue for EffType {
 /// A constraint on types.
 #[derive(Debug, Clone)]
 pub enum TypeConstraint {
+    SameType {
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+    },
     SubType {
         current: Type,
         current_span: Location,
@@ -131,6 +137,16 @@ impl FmtWithModuleEnv for TypeConstraint {
     ) -> std::fmt::Result {
         use TypeConstraint::*;
         match self {
+            SameType {
+                current, expected, ..
+            } => {
+                write!(
+                    f,
+                    "{} = {}",
+                    current.format_with(env),
+                    expected.format_with(env)
+                )
+            }
             SubType {
                 current, expected, ..
             } => {
@@ -329,7 +345,7 @@ impl TypeInference {
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
-            Let((name, name_span), mutable, let_expr) => {
+            Let((name, name_span), mutable, let_expr, ty_annot) => {
                 let node = self.infer_expr_drop_mut(env, let_expr)?;
                 env.locals.push(Local::new(
                     *name,
@@ -341,6 +357,7 @@ impl TypeInference {
                 let node = K::EnvStore(b(EnvStore {
                     node,
                     name_span: *name_span,
+                    ty_annot: *ty_annot,
                 }));
                 (node, Type::unit(), MutType::constant(), effects)
             }
@@ -625,6 +642,12 @@ impl TypeInference {
                 let fn_name =
                     property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
                 self.infer_static_apply(env, &fn_name, expr.span, &[] as &[DExpr], expr.span, true)?
+            }
+            TypeAnnotation(expr, ty, span) => {
+                let (node, mut_type) = self.infer_expr(env, expr)?;
+                let ty = ty.map(&mut FreshTypeVariableTypeMapper::new(self));
+                self.add_same_type_constraint(node.ty, expr.span, ty, *span);
+                return Ok((node, mut_type));
             }
             Error => {
                 panic!("attempted to infer type for error node");
@@ -963,6 +986,24 @@ impl TypeInference {
         }
     }
 
+    pub(crate) fn add_same_type_constraint(
+        &mut self,
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+    ) {
+        if current == expected {
+            return;
+        }
+        self.ty_constraints.push(TypeConstraint::SameType {
+            current,
+            current_span,
+            expected,
+            expected_span,
+        });
+    }
+
     pub(crate) fn add_sub_type_constraint(
         &mut self,
         current: Type,
@@ -1067,6 +1108,28 @@ impl TypeInference {
     }
 }
 
+struct FreshTypeVariableTypeMapper<'a> {
+    ty_inf: &'a mut TypeInference,
+}
+impl<'a> FreshTypeVariableTypeMapper<'a> {
+    fn new(ty_inf: &'a mut TypeInference) -> Self {
+        Self { ty_inf }
+    }
+}
+impl TypeMapper for FreshTypeVariableTypeMapper<'_> {
+    fn map_type(&mut self, ty: Type) -> Type {
+        if ty.data().is_variable() {
+            self.ty_inf.fresh_type_var_ty()
+        } else {
+            ty
+        }
+    }
+
+    fn map_effect(&mut self, effects: &EffType) -> EffType {
+        effects.clone()
+    }
+}
+
 /// The type inference after unification, with only public constraints remaining
 #[derive(Default, Debug)]
 pub struct UnifiedTypeInference {
@@ -1141,6 +1204,17 @@ impl UnifiedTypeInference {
         for constraint in ty_constraints {
             use TypeConstraint::*;
             match constraint {
+                SameType {
+                    current,
+                    current_span,
+                    expected,
+                    expected_span,
+                } => unified_ty_inf.unify_same_type(
+                    current,
+                    current_span,
+                    expected,
+                    expected_span,
+                )?,
                 SubType {
                     current,
                     current_span,

@@ -176,7 +176,7 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
                     name.0,
                     args.iter().map(|(name, _)| name.to_string()).join(", ")
                 )?;
-                body.format_ind(f, 2)?;
+                body.format_ind(f, env, 2)?;
             }
         }
         Ok(())
@@ -196,7 +196,7 @@ pub enum ExprKind<P: Phase> {
     FormattedString(P::FormattedString),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Ustr),
-    Let(UstrSpan, MutVal, B<Expr<P>>),
+    Let(UstrSpan, MutVal, B<Expr<P>>, bool),
     Abstract(Vec<UstrSpan>, B<Expr<P>>),
     Apply(B<Expr<P>>, Vec<Expr<P>>, bool),
     Block(Vec<Expr<P>>),
@@ -210,6 +210,7 @@ pub enum ExprKind<P: Phase> {
     Index(B<Expr<P>>, B<Expr<P>>),
     Match(B<Expr<P>>, Vec<(Pattern, Expr<P>)>, Option<B<Expr<P>>>),
     ForLoop(UstrSpan, B<Expr<P>>, B<Expr<P>>),
+    TypeAnnotation(B<Expr<P>>, Type, Location),
     Error,
 }
 
@@ -224,17 +225,22 @@ impl<P: Phase> Expr<P> {
         Self { kind, span }
     }
 
-    pub fn format_ind(&self, f: &mut std::fmt::Formatter, indent: usize) -> std::fmt::Result {
+    pub fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &crate::module::ModuleEnv<'_>,
+        indent: usize,
+    ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
         use ExprKind::*;
         match &self.kind {
             Literal(value, _) => writeln!(f, "{indent_str}{value}"),
             FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
             Identifier(name) => writeln!(f, "{indent_str}{name} (local)"),
-            Let((name, _), mutable, expr) => {
+            Let((name, _), mutable, expr, _) => {
                 let kw = mutable.var_def_string();
                 writeln!(f, "{indent_str}{kw} {name} =")?;
-                expr.format_ind(f, indent + 1)
+                expr.format_ind(f, env, indent + 1)
             }
             Abstract(args, body) => {
                 write!(f, "{indent_str}|")?;
@@ -242,54 +248,54 @@ impl<P: Phase> Expr<P> {
                     write!(f, "{arg}, ")?;
                 }
                 writeln!(f, "|")?;
-                body.format_ind(f, indent + 1)
+                body.format_ind(f, env, indent + 1)
             }
             Apply(func, args, _) => {
                 writeln!(f, "{indent_str}eval")?;
-                func.format_ind(f, indent + 1)?;
+                func.format_ind(f, env, indent + 1)?;
                 if args.is_empty() {
                     writeln!(f, "{indent_str}and apply to ()")
                 } else {
                     writeln!(f, "{indent_str}and apply to (")?;
                     for arg in args {
-                        arg.format_ind(f, indent + 1)?;
+                        arg.format_ind(f, env, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")
                 }
             }
             Block(exprs) => {
                 for expr in exprs.iter() {
-                    expr.format_ind(f, indent)?;
+                    expr.format_ind(f, env, indent)?;
                 }
                 Ok(())
             }
             Assign(place, _, value) => {
                 writeln!(f, "{indent_str}assign")?;
-                place.format_ind(f, indent + 1)?;
-                value.format_ind(f, indent + 1)
+                place.format_ind(f, env, indent + 1)?;
+                value.format_ind(f, env, indent + 1)
             }
             Tuple(args) => {
                 writeln!(f, "{indent_str}(")?;
                 for arg in args.iter() {
-                    arg.format_ind(f, indent + 1)?;
+                    arg.format_ind(f, env, indent + 1)?;
                 }
                 writeln!(f, "{indent_str})")
             }
             Project(expr, (index, _)) => {
-                expr.format_ind(f, indent)?;
+                expr.format_ind(f, env, indent)?;
                 writeln!(f, "{indent_str}  .{index}")
             }
             Record(fields) => {
                 writeln!(f, "{indent_str}{{")?;
                 for ((name, _), value) in fields.iter() {
                     writeln!(f, "{indent_str}  {name}:")?;
-                    value.format_ind(f, indent + 2)?;
+                    value.format_ind(f, env, indent + 2)?;
                     writeln!(f, "{indent_str}  ,")?;
                 }
                 writeln!(f, "{indent_str}}}")
             }
             FieldAccess(expr, (field, _)) => {
-                expr.format_ind(f, indent)?;
+                expr.format_ind(f, env, indent)?;
                 writeln!(f, "{indent_str}  .{field}")
             }
             Array(args) => {
@@ -298,45 +304,45 @@ impl<P: Phase> Expr<P> {
                 } else {
                     writeln!(f, "{indent_str}[")?;
                     for arg in args.iter() {
-                        arg.format_ind(f, indent + 1)?;
+                        arg.format_ind(f, env, indent + 1)?;
                     }
                     writeln!(f, "{indent_str}]")
                 }
             }
             Index(expr, index) => {
-                expr.format_ind(f, indent)?;
+                expr.format_ind(f, env, indent)?;
                 writeln!(f, "{indent_str}[")?;
-                index.format_ind(f, indent + 1)?;
+                index.format_ind(f, env, indent + 1)?;
                 writeln!(f, "{indent_str}]")
             }
             Match(expr, cases, default) => {
                 writeln!(f, "{indent_str}match")?;
-                expr.format_ind(f, indent + 1)?;
+                expr.format_ind(f, env, indent + 1)?;
                 for (value, case) in cases.iter() {
                     writeln!(f, "{indent_str}case")?;
                     value.format_ind(f, indent + 1)?;
                     writeln!(f, "{indent_str}=>")?;
-                    case.format_ind(f, indent + 1)?;
+                    case.format_ind(f, env, indent + 1)?;
                 }
                 if let Some(default) = default {
                     writeln!(f, "{indent_str}case _ =>")?;
-                    default.format_ind(f, indent + 1)?;
+                    default.format_ind(f, env, indent + 1)?;
                 }
                 Ok(())
             }
             ForLoop(var_name, iterator, body) => {
                 writeln!(f, "{indent_str}for {} in", var_name.0)?;
-                iterator.format_ind(f, indent + 1)?;
+                iterator.format_ind(f, env, indent + 1)?;
                 writeln!(f, "{indent_str}do")?;
-                body.format_ind(f, indent + 1)
+                body.format_ind(f, env, indent + 1)
             }
             PropertyPath(scope, name) => writeln!(f, "{indent_str}@{}.{}", scope, name),
+            TypeAnnotation(expr, ty, _span) => {
+                expr.format_ind(f, env, indent)?;
+                writeln!(f, "{indent_str}: {}", ty.format_with(env))
+            }
             Error => writeln!(f, "{indent_str}Error"),
         }
-    }
-
-    pub fn format(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.format_ind(f, 0)
     }
 
     /// Visit all nodes of the expression tree
@@ -344,7 +350,7 @@ impl<P: Phase> Expr<P> {
         visitor.visit_start(self);
         use ExprKind::*;
         match &self.kind {
-            Let(_, _, expr) => expr.visit(visitor),
+            Let(_, _, expr, _) => expr.visit(visitor),
             Abstract(_, expr) => expr.visit(visitor),
             Apply(expr, args, _) => {
                 expr.visit(visitor);
@@ -375,6 +381,7 @@ impl<P: Phase> Expr<P> {
                 iterator.visit(visitor);
                 body.visit(visitor);
             }
+            TypeAnnotation(expr, _, _) => expr.visit(visitor),
             _ => {}
         }
         visitor.visit_end(self);
@@ -383,9 +390,14 @@ impl<P: Phase> Expr<P> {
     // TODO: use the visitor to collect the dependency graph
 }
 
-impl<P: Phase> std::fmt::Display for Expr<P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.format(f)
+impl<P: Phase> FmtWithModuleEnv for Expr<P> {
+    fn fmt_with_module_env(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &crate::module::ModuleEnv<'_>,
+    ) -> std::fmt::Result {
+        // TODO: use env in format_ind
+        self.format_ind(f, env, 0)
     }
 }
 

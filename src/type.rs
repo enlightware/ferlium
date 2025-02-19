@@ -273,6 +273,33 @@ impl FmtWithModuleEnv for NativeType {
     }
 }
 
+/// A struct that can map a type and its effects to another type and effects
+pub trait TypeMapper {
+    fn map_type(&mut self, ty: Type) -> Type;
+    fn map_effect(&mut self, effects: &EffType) -> EffType;
+}
+
+/// Map a type using the given substitution
+struct SubstitutionTypeMapper<'a> {
+    subst: &'a InstSubstitution,
+}
+impl TypeMapper for SubstitutionTypeMapper<'_> {
+    fn map_type(&mut self, ty: Type) -> Type {
+        if ty.data().is_variable() {
+            let var = *ty.data().as_variable().unwrap();
+            match self.subst.0.get(&var) {
+                Some(ty) => *ty,
+                None => Type::variable(var),
+            }
+        } else {
+            ty
+        }
+    }
+    fn map_effect(&mut self, effects: &EffType) -> EffType {
+        effects.instantiate(&self.subst.1)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FnArgType {
     pub ty: Type,
@@ -356,6 +383,21 @@ impl FnType {
             .then(self.ret.local_cmp(&other.ret))
     }
 
+    fn map(&self, f: &mut impl TypeMapper) -> Self {
+        Self {
+            args: self
+                .args
+                .iter()
+                .map(|arg| FnArgType {
+                    ty: arg.ty.map(f),
+                    inout: arg.inout,
+                })
+                .collect(),
+            ret: self.ret.map(f),
+            effects: f.map_effect(&self.effects),
+        }
+    }
+
     #[allow(dead_code)]
     fn fold<V: Clone, F>(&self, f: &F, v: V) -> V
     where
@@ -385,18 +427,7 @@ impl FnType {
 
 impl TypeLike for FnType {
     fn instantiate(&self, subst: &InstSubstitution) -> Self {
-        Self {
-            args: self
-                .args
-                .iter()
-                .map(|arg| FnArgType {
-                    ty: arg.ty.instantiate(subst),
-                    inout: arg.inout,
-                })
-                .collect(),
-            ret: self.ret.instantiate(subst),
-            effects: self.effects.instantiate(&subst.1),
-        }
+        self.map(&mut SubstitutionTypeMapper { subst })
     }
 
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
@@ -560,6 +591,19 @@ impl Type {
         }
     }
 
+    /// Apply f recursively to content and then map the result
+    pub fn map(&self, f: &mut impl TypeMapper) -> Self {
+        self.with_cycle_detection(
+            |ty, _| {
+                let kind = ty.data().clone();
+                let new_ty = kind.map(f);
+                f.map_type(new_ty)
+            },
+            |ty, _| *ty,
+            (),
+        )
+    }
+
     /// Apply f to self if we are not in a self-calling cycle.
     /// Takes two function for normal and cyclic cases, and a context
     fn with_cycle_detection<F, D, C, R>(&self, normal: F, cycle: D, ctx: C) -> R
@@ -602,14 +646,7 @@ impl Type {
 
 impl TypeLike for Type {
     fn instantiate(&self, subst: &InstSubstitution) -> Self {
-        self.with_cycle_detection(
-            |ty, _| {
-                let kind = ty.data().clone();
-                kind.instantiate(subst)
-            },
-            |ty, _| *ty,
-            (),
-        )
+        self.map(&mut SubstitutionTypeMapper { subst })
     }
 
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
@@ -739,41 +776,6 @@ impl TypeKind {
         store_type(self)
     }
 
-    /// Instantiate the type variables within this type with the given substitutions, recursively
-    fn instantiate(&self, subst: &InstSubstitution) -> Type {
-        use TypeKind::*;
-        match self {
-            Variable(var) => match subst.0.get(var) {
-                Some(ty) => *ty,
-                None => Type::variable(*var),
-            },
-            Native(native_ty) => Type::native_type(NativeType::new(
-                native_ty.bare_ty.clone(),
-                native_ty
-                    .arguments
-                    .iter()
-                    .map(|ty| ty.instantiate(subst))
-                    .collect(),
-            )),
-            Variant(types) => Type::variant(
-                types
-                    .iter()
-                    .map(|(name, ty)| (*name, ty.instantiate(subst)))
-                    .collect(),
-            ),
-            Tuple(tuple) => Type::tuple(tuple.iter().map(|ty| ty.instantiate(subst)).collect()),
-            Record(fields) => Type::record(
-                fields
-                    .iter()
-                    .map(|(name, ty)| (*name, ty.instantiate(subst)))
-                    .collect(),
-            ),
-            Function(fn_type) => Type::function_type(fn_type.instantiate(subst)),
-            Newtype(name, ty) => Type::new_type(*name, ty.instantiate(subst)),
-            Never => Type::never(),
-        }
-    }
-
     /// Return all type variables contained in this type, recursively
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
         let mut vars = vec![];
@@ -839,6 +841,28 @@ impl TypeKind {
         }
     }
 
+    /// Apply f recursively to content
+    pub fn map(&self, f: &mut impl TypeMapper) -> Type {
+        use TypeKind::*;
+        match self {
+            Variable(var) => Type::variable(*var),
+            Native(native_ty) => Type::native_type(NativeType::new(
+                native_ty.bare_ty.clone(),
+                native_ty.arguments.iter().map(|ty| ty.map(f)).collect(),
+            )),
+            Variant(types) => {
+                Type::variant(types.iter().map(|(name, ty)| (*name, ty.map(f))).collect())
+            }
+            Tuple(tuple) => Type::tuple(tuple.iter().map(|ty| ty.map(f)).collect()),
+            Record(fields) => {
+                Type::record(fields.iter().map(|(name, ty)| (*name, ty.map(f))).collect())
+            }
+            Function(fn_type) => Type::function_type(fn_type.map(f)),
+            Newtype(name, ty) => Type::new_type(*name, ty.map(f)),
+            Never => Type::never(),
+        }
+    }
+
     /// Reduce using fold function f and initial value v, post-order traversal
     fn fold<V: Clone>(&self, f: &impl Fn(&Self, V) -> V, v: V) -> V {
         struct Visitor<'a, V: Clone, F: Fn(&TypeKind, V) -> V> {
@@ -871,7 +895,7 @@ impl TypeKind {
         self.visit(&mut Visitor { f, v });
     }
 
-    /// Visit this type, allowing for multiple travesal strategies thanks to the TypeKindVisitor trait.
+    /// Visit this type, allowing for multiple traversal strategies thanks to the TypeKindVisitor trait.
     fn visit(&self, visitor: &mut impl TypeKindVisitor) {
         // helper for doing cycle detection on type
         fn process_ty(ty: Type, visitor: &mut impl TypeKindVisitor) {
@@ -1375,7 +1399,7 @@ pub struct TypeNames {
 #[cfg(test)]
 mod tests {
     use crate::{
-        parse_type,
+        parse_concrete_type,
         std::{
             logic::bool_type,
             math::{int_type, Int},
@@ -1391,7 +1415,7 @@ mod tests {
         let current_module = new_module_with_prelude();
         let mod_env = ModuleEnv::new(&current_module, &std_env);
         let check = |name: &str| {
-            let ty = parse_type(name).unwrap();
+            let ty = parse_concrete_type(name).unwrap();
             let formatted = format!("{}", ty.format_with(&mod_env));
             assert_eq!(name, formatted);
         };
