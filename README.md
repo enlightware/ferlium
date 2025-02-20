@@ -40,6 +40,8 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 * Ad hoc polymorphism through type classes (traits)
 * Row polymorphism (subtyping for records and tuples)
 * Algebraic data types (including tagged unions)
+* Optional type annotations, including placeholders for type inference
+* First-class and anonymous functions
 * Pattern matching
 * Mutable value semantics (a simplified version of Rust's ownership system)
 * Modules

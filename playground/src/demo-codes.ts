@@ -136,5 +136,7 @@ fn ty_fn_arg(a: int, b: float) {
 fn ty_fn_ret(a) -> int {
 	a
 }
+
+((1: int), (1: float))
 `]
 ] as const;

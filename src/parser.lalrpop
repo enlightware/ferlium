@@ -223,6 +223,7 @@ AtomExpr = {
 }
 
 ParExpr: ExprKind = {
+    "(" <e:Expr> <ty:TypeAscription> ")" => TypeAscription(boxed(e), ty.0, ty.1),
     "(" <e:Expr> ")" => e.kind,
 }
 
