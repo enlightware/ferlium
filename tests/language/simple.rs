@@ -993,6 +993,21 @@ fn recursive_functions() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fn_pipes() {
+    assert_eq!(run("1 |> add(1)"), int!(2));
+    assert_eq!(run("2 |> mul(3) |> add(1) |> div(2)"), float!(3.5));
+    assert_eq!(
+        run("let mut a = 1; a = 2 |> mul(3) |> add(1) |> div(2); a"),
+        float!(3.5)
+    );
+    assert_eq!(
+        run("[1, 2] |> array_concat([3, 4]) |> array_map(|x| x*x)"),
+        int_a![1, 4, 9, 16]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn properties() {
     set_property_value(0);
     assert_eq!(run("@props::my_scope.my_var"), int!(0));

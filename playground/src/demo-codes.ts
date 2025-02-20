@@ -142,5 +142,7 @@ fn ty_fn_placeholders(a: (_, _)) {
 }
 
 ((1: int), (1: float))
-`]
+`],
+['Function pipe operator',
+`[1, 2] |> array_concat([3, 4]) |> array_map(|x| x*x)`],
 ] as const;

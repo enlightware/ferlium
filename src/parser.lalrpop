@@ -164,14 +164,14 @@ pub Expr = {
 }
 
 TopExpr = {
-    LogicOrExpr,
+    PipeExpr,
     AssignExpr,
     ReturnExpr,
     AbstractExpr,
 }
 
 AssignExpr: ExprKind = {
-    <le:Es<LogicOrExpr>> <ls:@L>"=" <rs:@R> <re:Expr> => Assign(boxed(le), span(ls, rs), boxed(re)),
+    <le:Es<PipeExpr>> <ls:@L>"=" <rs:@R> <re:Expr> => Assign(boxed(le), span(ls, rs), boxed(re)),
 }
 
 ReturnExpr: ExprKind = {
@@ -181,6 +181,11 @@ ReturnExpr: ExprKind = {
 AbstractExpr: ExprKind = {
     "|" <args:StrArgs> "|" <body:Expr> => Abstract(args, boxed(body)),
     "||" <body:Expr> => Abstract(vec![], boxed(body)),
+}
+
+PipeExpr: ExprKind = {
+    <l:Es<PipeExpr>> "|>" <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), ext_f(l, a), false),
+    LogicOrExpr
 }
 
 LogicOrExpr = BinOpLeftAssoc<LogicalOrOp, LogicAndExpr>;

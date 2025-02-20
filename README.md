@@ -43,6 +43,7 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 * Optional type annotations, including placeholders for type inference
 * First-class and anonymous functions
 * Pattern matching
+* Function pipelining with the `|>` operator
 * Mutable value semantics (a simplified version of Rust's ownership system)
 * Modules
 * Simple copy-on-write optimisation on arrays to maintain acceptable performance
