@@ -40,7 +40,7 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 * Ad hoc polymorphism through type classes (traits)
 * Row polymorphism (subtyping for records and tuples)
 * Algebraic data types (including tagged unions)
-* Optional type annotations, including placeholders for type inference
+* Optional type annotations, including `_` placeholders for type inference
 * First-class and anonymous functions
 * Pattern matching
 * Function pipelining with the `|>` operator
