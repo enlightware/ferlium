@@ -60,6 +60,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Set up Rust
         run: rustup update stable && rustup default stable && rustup target add wasm32-unknown-unknown
