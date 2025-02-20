@@ -137,6 +137,10 @@ fn ty_fn_ret(a) -> int {
 	a
 }
 
+fn ty_fn_placeholders(a: (_, _)) {
+	a.0 + a.1
+}
+
 ((1: int), (1: float))
 `]
 ] as const;
