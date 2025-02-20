@@ -35,11 +35,11 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 ### For users
 
 * Functional statically-typed scripting language
+* Algebraic structural data types (including tagged unions)
 * Type inference ([Hindley-Milner style, HM(X) flavor](https://www.researchgate.net/profile/Martin-Sulzmann/publication/220346751_Type_Inference_with_Constrained_Types/links/5ab00c0b0f7e9b4897c1d25b/Type-Inference-with-Constrained-Types.pdf))
 * Parametric polymorphism (generics)
 * Ad hoc polymorphism through type classes (traits)
-* Row polymorphism (subtyping for records and tuples)
-* Algebraic data types (including tagged unions)
+* Row polymorphism (for algebraic data types)
 * Optional type annotations, including `_` placeholders for type inference
 * First-class and anonymous functions
 * Pattern matching
