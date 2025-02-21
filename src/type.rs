@@ -21,12 +21,15 @@ use std::sync::RwLock;
 
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
+use crate::type_like::CastableToType;
+use crate::type_like::TypeLike;
+use crate::type_mapper::TypeMapper;
+use crate::type_visitor::TypeInnerVisitor;
 use crate::Location;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
-use itertools::Itertools;
 use nonmax::NonMaxU32;
 use ustr::{ustr, Ustr};
 
@@ -42,7 +45,7 @@ use crate::module::FmtWithModuleEnv;
 use crate::module::ModuleEnv;
 use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
-use crate::type_inference::InstSubstitution;
+
 use crate::typing_env::Local;
 
 #[macro_export]
@@ -58,62 +61,6 @@ macro_rules! cached_ty {
         static TY: std::sync::OnceLock<Type> = std::sync::OnceLock::new();
         *TY.get_or_init($ty)
     }};
-}
-
-/// Something that is a type or part of it, and that can
-/// be instantiated and queried for its free type variables.
-pub trait TypeLike {
-    /// Instantiate the type variables within this type with the given substitutions
-    fn instantiate(&self, subst: &InstSubstitution) -> Self;
-
-    /// Return all type variables contained in this type
-    fn inner_ty_vars(&self) -> Vec<TypeVar>;
-
-    /// Return all effect variables contained as input (i.e. must be retained)
-    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>);
-
-    /// Return all effect variables contained as input (i.e. must be retained)
-    fn input_effect_vars(&self) -> HashSet<EffectVar> {
-        let mut vars = HashSet::new();
-        self.fill_with_input_effect_vars(&mut vars);
-        vars
-    }
-
-    /// Return all effect variables contained as output (i.e. can be dropped if not used as input)
-    fn fill_with_output_effect_vars(&self, _vars: &mut HashSet<EffectVar>) {
-        // default no output effect variables
-    }
-
-    /// Return all effect variables contained as output (i.e. can be dropped if not used as input)
-    fn output_effect_vars(&self) -> HashSet<EffectVar> {
-        let mut vars = HashSet::new();
-        self.fill_with_output_effect_vars(&mut vars);
-        vars
-    }
-
-    /// Fill the given set with all effect variables contained in this type, union of input and output ones
-    fn fill_with_inner_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
-        self.fill_with_input_effect_vars(vars);
-        self.fill_with_output_effect_vars(vars);
-    }
-
-    /// Return all effect variables contained in this type, union of input and output ones
-    fn inner_effect_vars(&self) -> HashSet<EffectVar> {
-        let mut vars = HashSet::new();
-        self.fill_with_inner_effect_vars(&mut vars);
-        vars
-    }
-
-    /// Return true if the type does not contain any type or effect variables
-    fn is_constant(&self) -> bool {
-        self.inner_ty_vars().is_empty() && self.inner_effect_vars().is_empty()
-    }
-}
-
-/// Something that is like a type and can be casted to a type.
-pub trait CastableToType: TypeLike {
-    /// Return this as a type
-    fn to_type(&self) -> Type;
 }
 
 /// A generic variable for a type
@@ -273,37 +220,6 @@ impl FmtWithModuleEnv for NativeType {
     }
 }
 
-/// A struct that can map a type and its effects to another type and effects
-pub trait TypeMapper {
-    fn map_type(&mut self, ty: Type) -> Type;
-    fn map_mut_type(&mut self, ty: MutType) -> MutType;
-    fn map_effect(&mut self, effects: &EffType) -> EffType;
-}
-
-/// Map a type using the given substitution
-struct SubstitutionTypeMapper<'a> {
-    subst: &'a InstSubstitution,
-}
-impl TypeMapper for SubstitutionTypeMapper<'_> {
-    fn map_type(&mut self, ty: Type) -> Type {
-        if ty.data().is_variable() {
-            let var = *ty.data().as_variable().unwrap();
-            match self.subst.0.get(&var) {
-                Some(ty) => *ty,
-                None => Type::variable(var),
-            }
-        } else {
-            ty
-        }
-    }
-    fn map_mut_type(&mut self, ty: MutType) -> MutType {
-        ty
-    }
-    fn map_effect(&mut self, effects: &EffType) -> EffType {
-        effects.instantiate(&self.subst.1)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FnArgType {
     pub ty: Type,
@@ -386,6 +302,16 @@ impl FnType {
         compare_by(&self.args, &other.args, FnArgType::local_cmp)
             .then(self.ret.local_cmp(&other.ret))
     }
+}
+
+impl TypeLike for FnType {
+    fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+        self.args.iter().for_each(|arg| {
+            visitor.visit_mut_ty(arg.mut_ty);
+            arg.ty.data().visit(visitor)
+        });
+        self.ret.data().visit(visitor);
+    }
 
     fn map(&self, f: &mut impl TypeMapper) -> Self {
         Self {
@@ -400,44 +326,6 @@ impl FnType {
             ret: self.ret.map(f),
             effects: f.map_effect(&self.effects),
         }
-    }
-
-    #[allow(dead_code)]
-    fn fold<V: Clone, F>(&self, f: &F, v: V) -> V
-    where
-        F: Fn(&TypeKind, V) -> V,
-    {
-        let v = self.args.iter().fold(v, |v, arg| arg.ty.data().fold(f, v));
-        self.ret.data().fold(f, v)
-    }
-
-    fn fold_in_place<V, F>(&self, f: &F, v: &mut V)
-    where
-        F: Fn(&TypeKind, &mut V),
-    {
-        self.args
-            .iter()
-            .for_each(|arg| arg.ty.data().fold_in_place(f, v));
-        self.ret.data().fold_in_place(f, v);
-    }
-
-    fn visit(&self, visitor: &mut impl TypeKindVisitor) {
-        self.args
-            .iter()
-            .for_each(|arg| arg.ty.data().visit(visitor));
-        self.ret.data().visit(visitor);
-    }
-}
-
-impl TypeLike for FnType {
-    fn instantiate(&self, subst: &InstSubstitution) -> Self {
-        self.map(&mut SubstitutionTypeMapper { subst })
-    }
-
-    fn inner_ty_vars(&self) -> Vec<TypeVar> {
-        let mut vars = vec![];
-        self.fold_in_place(&TypeKind::extend_ty_vars, &mut vars);
-        vars.into_iter().unique().collect()
     }
 
     fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
@@ -595,19 +483,6 @@ impl Type {
         }
     }
 
-    /// Apply f recursively to content and then map the result
-    pub fn map(&self, f: &mut impl TypeMapper) -> Self {
-        self.with_cycle_detection(
-            |ty, _| {
-                let kind = ty.data().clone();
-                let new_ty = kind.map(f);
-                f.map_type(new_ty)
-            },
-            |ty, _| *ty,
-            (),
-        )
-    }
-
     /// Apply f to self if we are not in a self-calling cycle.
     /// Takes two function for normal and cyclic cases, and a context
     fn with_cycle_detection<F, D, C, R>(&self, normal: F, cycle: D, ctx: C) -> R
@@ -649,20 +524,20 @@ impl Type {
 }
 
 impl TypeLike for Type {
-    fn instantiate(&self, subst: &InstSubstitution) -> Self {
-        self.map(&mut SubstitutionTypeMapper { subst })
-    }
-
-    fn inner_ty_vars(&self) -> Vec<TypeVar> {
-        self.with_cycle_detection(|ty, _| ty.data().inner_ty_vars(), |_, _| vec![], ())
-    }
-
-    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+    fn map(&self, f: &mut impl TypeMapper) -> Self {
         self.with_cycle_detection(
-            |ty, vars| ty.data().fill_with_inner_effect_vars(vars),
-            |_, _| (),
-            vars,
+            |ty, _| {
+                let kind = ty.data().clone();
+                let new_ty = kind.map(f);
+                f.map_type(new_ty)
+            },
+            |ty, _| *ty,
+            (),
         )
+    }
+
+    fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+        self.data().visit(visitor)
     }
 }
 
@@ -780,19 +655,6 @@ impl TypeKind {
         store_type(self)
     }
 
-    /// Return all type variables contained in this type, recursively
-    fn inner_ty_vars(&self) -> Vec<TypeVar> {
-        let mut vars = vec![];
-        self.fold_in_place(&Self::extend_ty_vars, &mut vars);
-        vars.into_iter().unique().collect()
-    }
-
-    fn extend_ty_vars(&self, vars: &mut Vec<TypeVar>) {
-        if let TypeKind::Variable(var) = self {
-            vars.push(*var);
-        }
-    }
-
     /// Return true if the type variable is only found in variants
     pub fn is_ty_var_only_in_variants(&self, ty_var: TypeVar) -> bool {
         struct Visitor {
@@ -801,8 +663,8 @@ impl TypeKind {
             variant_start: Option<usize>,
             output: bool,
         }
-        impl TypeKindVisitor for Visitor {
-            fn visit_start(&mut self, ty: &TypeKind) {
+        impl TypeInnerVisitor for Visitor {
+            fn visit_ty_kind_start(&mut self, ty: &TypeKind) {
                 if self.variant_start.is_none() {
                     if ty.is_variant() {
                         self.variant_start = Some(self.depth);
@@ -815,7 +677,7 @@ impl TypeKind {
                 self.depth += 1;
             }
 
-            fn visit_end(&mut self, _ty: &TypeKind) {
+            fn visit_ty_kind_end(&mut self, _ty: &TypeKind) {
                 self.depth -= 1;
                 if let Some(start_depth) = self.variant_start {
                     if start_depth == self.depth {
@@ -833,16 +695,6 @@ impl TypeKind {
         };
         self.visit(&mut visitor);
         visitor.output
-    }
-
-    fn fill_with_inner_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
-        self.fold_in_place(&Self::extend_effect_vars, vars);
-    }
-
-    fn extend_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
-        if let TypeKind::Function(fn_type) = self {
-            fn_type.effects.fill_with_inner_effect_vars(vars);
-        }
     }
 
     /// Apply f recursively to content
@@ -867,47 +719,15 @@ impl TypeKind {
         }
     }
 
-    /// Reduce using fold function f and initial value v, post-order traversal
-    fn fold<V: Clone>(&self, f: &impl Fn(&Self, V) -> V, v: V) -> V {
-        struct Visitor<'a, V: Clone, F: Fn(&TypeKind, V) -> V> {
-            f: &'a F,
-            v: V,
-        }
-        impl<V: Clone, F: Fn(&TypeKind, V) -> V> TypeKindVisitor for Visitor<'_, V, F> {
-            fn visit_end(&mut self, ty: &TypeKind) {
-                self.v = (self.f)(ty, self.v.clone());
-            }
-        }
-
-        let mut visitor = Visitor { f, v };
-        self.visit(&mut visitor);
-        visitor.v
-    }
-
-    /// Reduce using fold function f and a mutable value v, post-order traversal
-    fn fold_in_place<V>(&self, f: &impl Fn(&Self, &mut V), v: &mut V) {
-        struct Visitor<'a, V, F: Fn(&TypeKind, &mut V)> {
-            f: &'a F,
-            v: &'a mut V,
-        }
-        impl<V, F: Fn(&TypeKind, &mut V)> TypeKindVisitor for Visitor<'_, V, F> {
-            fn visit_end(&mut self, ty: &TypeKind) {
-                (self.f)(ty, self.v);
-            }
-        }
-
-        self.visit(&mut Visitor { f, v });
-    }
-
-    /// Visit this type, allowing for multiple traversal strategies thanks to the TypeKindVisitor trait.
-    fn visit(&self, visitor: &mut impl TypeKindVisitor) {
+    /// Visit this type, allowing for multiple traversal strategies thanks to the TypeInnerVisitor trait.
+    pub(crate) fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
         // helper for doing cycle detection on type
-        fn process_ty(ty: Type, visitor: &mut impl TypeKindVisitor) {
+        fn process_ty(ty: Type, visitor: &mut impl TypeInnerVisitor) {
             ty.with_cycle_detection(|ty, visitor| ty.data().visit(visitor), |_, _| (), visitor)
         }
 
         // start visit
-        visitor.visit_start(self);
+        visitor.visit_ty_kind_start(self);
 
         // recurse
         use TypeKind::*;
@@ -925,42 +745,7 @@ impl TypeKind {
         };
 
         // process self
-        visitor.visit_end(self);
-    }
-
-    /// Returns whether the type contains the given type variable
-    pub fn contains_any_type_var(&self, var: TypeVar) -> bool {
-        self.contains_any_ty_vars(&[var])
-    }
-
-    /// Returns whether the type contains any of the given type variables
-    pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
-        self.fold(
-            &|kind, found| {
-                found
-                    || if let TypeKind::Variable(v) = kind {
-                        vars.contains(v)
-                    } else {
-                        false
-                    }
-            },
-            false,
-        )
-    }
-
-    /// Returns whether all type variables in the type are in the given list
-    pub fn contains_only_ty_vars(&self, vars: &[TypeVar]) -> bool {
-        self.fold(
-            &|kind, all_in| {
-                all_in
-                    && if let TypeKind::Variable(v) = kind {
-                        vars.contains(v)
-                    } else {
-                        true
-                    }
-            },
-            true,
-        )
+        visitor.visit_ty_kind_end(self);
     }
 
     pub fn inner_types(&self) -> B<dyn Iterator<Item = Type> + '_> {
@@ -1170,12 +955,6 @@ impl graph::Node for TypeKind {
             .collect::<Vec<_>>()
             .into_iter()
     }
-}
-
-/// Allow for multiple TypeKind traversal strategies
-trait TypeKindVisitor {
-    fn visit_start(&mut self, _ty: &TypeKind) {}
-    fn visit_end(&mut self, _ty: &TypeKind) {}
 }
 
 type TypeWorld = IndexSet<TypeKind>;

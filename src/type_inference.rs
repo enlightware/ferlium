@@ -23,8 +23,9 @@ use crate::{
     module::Impls,
     parser_helpers::EMPTY_USTR,
     r#trait::TraitRef,
-    r#type::{TypeLike, TypeMapper},
     std::logic::bool_type,
+    type_like::TypeLike,
+    type_mapper::TypeMapper,
     type_substitution::{substitute_fn_type, substitute_type, substitute_types, TypeSubstituer},
 };
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
@@ -1778,7 +1779,7 @@ impl UnifiedTypeInference {
         ty: Type,
         ty_span: Location,
     ) -> Result<(), InternalCompilationError> {
-        if ty.data().contains_any_type_var(var) {
+        if ty.contains_any_type_var(var) {
             Err(internal_compilation_error!(InfiniteType(var, ty, ty_span)))
         } else {
             self.ty_unification_table

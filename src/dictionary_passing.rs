@@ -11,7 +11,7 @@ use std::{collections::HashMap, mem};
 use crate::{
     error::InternalCompilationError, format::write_with_separator_and_format_fn,
     internal_compilation_error, module::Impls, parser_helpers::EMPTY_USTR, r#trait::TraitRef,
-    Location,
+    type_like::TypeLike, Location,
 };
 use itertools::process_results;
 use ustr::Ustr;
@@ -23,7 +23,7 @@ use crate::{
     ir::{self, Node, NodeKind},
     module::FmtWithModuleEnv,
     mutability::MutType,
-    r#type::{FnArgType, Type, TypeKind, TypeLike},
+    r#type::{FnArgType, Type, TypeKind},
     std::math::int_type,
     type_inference::InstSubstitution,
     value::Value,

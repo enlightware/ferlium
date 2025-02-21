@@ -13,7 +13,8 @@ use std::{
 };
 
 use crate::{
-    format::write_with_separator_and_format_fn, location::Span, r#trait::TraitRef, Location,
+    format::write_with_separator_and_format_fn, location::Span, r#trait::TraitRef,
+    type_like::TypeLike, type_mapper::TypeMapper, type_visitor::TypeInnerVisitor, Location,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
@@ -25,7 +26,7 @@ use crate::{
     format::FormatWith,
     ir::FnInstData,
     module::{FmtWithModuleEnv, FormatWithModuleEnv, ModuleEnv},
-    r#type::{Type, TypeLike, TypeSubstitution, TypeVar},
+    r#type::{Type, TypeSubstitution, TypeVar},
     type_inference::{InstSubstitution, TypeInference},
 };
 
@@ -138,66 +139,6 @@ impl PubTypeConstraint {
         }
     }
 
-    pub fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
-        let merge_outputs = |ty: &Type, output: &mut bool| {
-            *output = *output || ty.data().contains_any_ty_vars(vars);
-        };
-        let mut output = false;
-        self.fold_ty_in_place(&merge_outputs, &mut output);
-        output
-    }
-
-    pub fn contains_only_ty_vars(&self, vars: &[TypeVar]) -> bool {
-        let merge_outputs = |ty: &Type, output: &mut bool| {
-            *output = *output && ty.data().contains_only_ty_vars(vars);
-        };
-        let mut output = true;
-        self.fold_ty_in_place(&merge_outputs, &mut output);
-        output
-    }
-
-    fn fold_ty_in_place<V>(&self, f: &impl Fn(&Type, &mut V), v: &mut V) {
-        use PubTypeConstraint::*;
-        match self {
-            TupleAtIndexIs {
-                tuple_ty,
-                element_ty,
-                ..
-            } => {
-                f(tuple_ty, v);
-                f(element_ty, v);
-            }
-            RecordFieldIs {
-                record_ty,
-                element_ty,
-                ..
-            } => {
-                f(record_ty, v);
-                f(element_ty, v);
-            }
-            TypeHasVariant {
-                variant_ty,
-                payload_ty,
-                ..
-            } => {
-                f(variant_ty, v);
-                f(payload_ty, v);
-            }
-            HaveTrait {
-                input_tys,
-                output_tys,
-                ..
-            } => {
-                for ty in input_tys {
-                    f(ty, v);
-                }
-                for ty in output_tys {
-                    f(ty, v);
-                }
-            }
-        }
-    }
-
     fn instantiate_module(&mut self, module_name: Option<Ustr>, inst_span: Span) {
         use PubTypeConstraint::*;
         match self {
@@ -239,7 +180,7 @@ impl PubTypeConstraint {
 }
 
 impl TypeLike for PubTypeConstraint {
-    fn instantiate(&self, subst: &InstSubstitution) -> Self {
+    fn map(&self, f: &mut impl TypeMapper) -> Self {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs {
@@ -249,11 +190,11 @@ impl TypeLike for PubTypeConstraint {
                 index_span,
                 element_ty,
             } => Self::new_tuple_at_index_is(
-                tuple_ty.instantiate(subst),
+                tuple_ty.map(f),
                 *tuple_span,
                 *index,
                 *index_span,
-                element_ty.instantiate(subst),
+                element_ty.map(f),
             ),
             RecordFieldIs {
                 record_ty,
@@ -262,11 +203,11 @@ impl TypeLike for PubTypeConstraint {
                 field_span,
                 element_ty,
             } => Self::new_record_field_is(
-                record_ty.instantiate(subst),
+                record_ty.map(f),
                 *record_span,
                 *field,
                 *field_span,
-                element_ty.instantiate(subst),
+                element_ty.map(f),
             ),
             TypeHasVariant {
                 variant_ty,
@@ -275,10 +216,10 @@ impl TypeLike for PubTypeConstraint {
                 payload_ty,
                 payload_span,
             } => Self::new_type_has_variant(
-                variant_ty.instantiate(subst),
+                variant_ty.map(f),
                 *variant_span,
                 *tag,
-                payload_ty.instantiate(subst),
+                payload_ty.map(f),
                 *payload_span,
             ),
             HaveTrait {
@@ -288,29 +229,53 @@ impl TypeLike for PubTypeConstraint {
                 span,
             } => Self::new_have_trait(
                 trait_ref.clone(),
-                input_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
-                output_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
+                input_tys.iter().map(|ty| ty.map(f)).collect(),
+                output_tys.iter().map(|ty| ty.map(f)).collect(),
                 *span,
             ),
         }
     }
 
-    fn inner_ty_vars(&self) -> Vec<TypeVar> {
-        let extend_vars = |ty: &Type, vars: &mut Vec<TypeVar>| {
-            vars.extend(ty.inner_ty_vars());
-        };
-        let mut vars = Vec::new();
-        self.fold_ty_in_place(&extend_vars, &mut vars);
-        vars.sort();
-        vars.dedup();
-        vars
-    }
-
-    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
-        let extend_vars = |ty: &Type, vars: &mut HashSet<EffectVar>| {
-            ty.fill_with_inner_effect_vars(vars);
-        };
-        self.fold_ty_in_place(&extend_vars, vars);
+    fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+        use PubTypeConstraint::*;
+        match self {
+            TupleAtIndexIs {
+                tuple_ty,
+                element_ty,
+                ..
+            } => {
+                tuple_ty.data().visit(visitor);
+                element_ty.data().visit(visitor);
+            }
+            RecordFieldIs {
+                record_ty,
+                element_ty,
+                ..
+            } => {
+                record_ty.data().visit(visitor);
+                element_ty.data().visit(visitor);
+            }
+            TypeHasVariant {
+                variant_ty,
+                payload_ty,
+                ..
+            } => {
+                variant_ty.data().visit(visitor);
+                payload_ty.data().visit(visitor);
+            }
+            HaveTrait {
+                input_tys,
+                output_tys,
+                ..
+            } => {
+                for ty in input_tys {
+                    ty.data().visit(visitor);
+                }
+                for ty in output_tys {
+                    ty.data().visit(visitor);
+                }
+            }
+        }
     }
 }
 

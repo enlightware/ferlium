@@ -44,8 +44,11 @@ mod sync;
 pub mod r#trait;
 pub mod r#type;
 mod type_inference;
+mod type_like;
+mod type_mapper;
 pub mod type_scheme;
 mod type_substitution;
+mod type_visitor;
 pub mod typing_env;
 pub mod value;
 
