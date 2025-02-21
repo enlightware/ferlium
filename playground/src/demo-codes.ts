@@ -129,6 +129,10 @@ string_concat("He said: ", text)
 	a
 }
 
+fn ty_expr() {
+	(1: int)
+}
+
 fn ty_fn_arg(a: int, b: float) {
 	(a + 1, b + 1)
 }

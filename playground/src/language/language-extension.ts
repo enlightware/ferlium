@@ -17,6 +17,7 @@ const highlight = styleTags({
 	"fn let mut": t.definitionKeyword,
 	"if else match for return": t.controlKeyword,
 	"in": t.operatorKeyword,
+	"Type/...": t.typeName,
 	Identifier: t.variableName,
 	Integer: t.integer,
 	Boolean: t.bool,

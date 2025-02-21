@@ -35,7 +35,75 @@ functionOrType {
 }
 
 Function {
-    kw<'fn'> Identifier '(' identifiersOptComma ')' Block
+    kw<'fn'> Identifier '(' identifierWithOptTypeArgs ')' fnRet? Block
+}
+
+Type {
+    placeholderType
+    | primitiveType
+    | arrayType
+    | recordType
+    | variantType
+    | tupleOrFnType
+}
+
+tupleOrFnType {
+    '(' (argType ',')* argType? ')' fnRet?
+}
+
+fnRet {
+    '->' Type
+}
+
+argType {
+    '&' 'mut' Type
+    | Type
+}
+
+placeholderType {
+    TypeOp { kw<'_'> }
+}
+
+primitiveType {
+    kw<'bool'>
+    | kw<'int'>
+    | kw<'float'>
+    | kw<'string'>
+}
+
+arrayType {
+    '[' Type ']'
+}
+
+recordType {
+    '{' recordTypeField '}'
+    | '{' recordTypeField ',' (recordTypeField ',')* recordTypeField? '}'
+}
+
+recordTypeField {
+    Identifier ':' Type
+}
+
+variantType {
+    variantTypeAlternative ('|' variantTypeAlternative)*
+}
+
+variantTypeAlternative {
+    Identifier
+    | Identifier '(' (Type ',')* Type? ')'
+}
+
+TypeAscription {
+    TypeOp { ':' } Type
+}
+
+RefMutTypeAscription {
+    TypeOp { ':' } ('&' mutTyOrInfer)? Type
+}
+
+mutTyOrInfer {
+    'mut'
+    | '?'
 }
 
 extraExpr {
@@ -131,7 +199,7 @@ atomExpr {
 }
 
 parExpr {
-    '(' expr ')'
+    '(' expr TypeAscription?')'
 }
 
 If {
@@ -177,6 +245,14 @@ exprOptComma {
 
 identifiersOptComma {
     (Identifier ',')* Identifier?
+}
+
+identifierWithOptTypeArgs {
+    (identifierWithOptTypeArg ',')* identifierWithOptTypeArg?
+}
+
+identifierWithOptTypeArg {
+    Identifier RefMutTypeAscription?
 }
 
 exprArgsOptComma {
@@ -228,7 +304,7 @@ stmt {
 }
 
 Let {
-    kw<'let'> kw<'mut'>? Identifier '=' expr ';'
+    kw<'let'> kw<'mut'>? Identifier TypeAscription? '=' expr ';'
 }
 
 exprStmt {
