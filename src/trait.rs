@@ -118,6 +118,27 @@ impl TraitRef {
         trait_data.validate();
         Self(Rc::new(trait_data))
     }
+
+    pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], fn_count: usize) {
+        assert_eq!(
+            self.input_type_count.get(),
+            input_tys.len() as u32,
+            "Mismselfatched input type count when implementing trait {}.",
+            self.name,
+        );
+        assert_eq!(
+            self.output_type_count,
+            output_tys.len() as u32,
+            "Mismatched output type count when implementing trait {}.",
+            self.name,
+        );
+        assert_eq!(
+            self.functions.len(),
+            fn_count,
+            "Mismatched function count when implementing trait {}.",
+            self.name,
+        );
+    }
 }
 
 impl Deref for TraitRef {

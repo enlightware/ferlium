@@ -44,24 +44,7 @@ impl Impls {
         let input_tys = input_tys.into();
         let output_tys = output_tys.into();
         let functions: SVec2<_> = functions.into().into_iter().map(Value::function).collect();
-        assert_eq!(
-            trait_ref.input_type_count.get(),
-            input_tys.len() as u32,
-            "Mismatched input type count with implementing trait {}.",
-            trait_ref.name,
-        );
-        assert_eq!(
-            trait_ref.output_type_count,
-            output_tys.len() as u32,
-            "Mismatched output type count with implementing trait {}.",
-            trait_ref.name,
-        );
-        assert_eq!(
-            trait_ref.functions.len(),
-            functions.len(),
-            "Mismatched function count with implementing trait {}.",
-            trait_ref.name,
-        );
+        trait_ref.validate_impl_size(&input_tys, &output_tys, functions.len());
         let functions = Value::tuple(functions);
         let impl_ = TraitImpl {
             output_tys,
