@@ -456,16 +456,17 @@ fn static_function_arity() {
 fn value_function_arity() {
     let text = "fn a() { 0 } fn b(x) { x + 1 } fn c(x, y) { x + y + 0 }";
     assert_eq!(run(&format!("{text} (a,).0()")), int!(0));
-    fail_compilation(&format!("{text} (b,).0()")).expect_type_mismatch("(B) → B", "() → A ! e₀");
-    fail_compilation(&format!("{text} (c,).0()")).expect_type_mismatch("(B, B) → B", "() → A ! e₀");
-    fail_compilation(&format!("{text} (a,).0(1)")).expect_type_mismatch("() → C", "(A) → B ! e₀");
+    fail_compilation(&format!("{text} (b,).0()")).expect_type_mismatch("(B) -> B", "() -> A ! e₀");
+    fail_compilation(&format!("{text} (c,).0()"))
+        .expect_type_mismatch("(B, B) -> B", "() -> A ! e₀");
+    fail_compilation(&format!("{text} (a,).0(1)")).expect_type_mismatch("() -> C", "(A) -> B ! e₀");
     assert_eq!(run(&format!("{text} (b,).0(1)")), int!(2));
     fail_compilation(&format!("{text} (c,).0(1)"))
-        .expect_type_mismatch("(C, C) → C", "(A) → B ! e₀");
+        .expect_type_mismatch("(C, C) -> C", "(A) -> B ! e₀");
     fail_compilation(&format!("{text} (a,).0(1, 2)"))
-        .expect_type_mismatch("() → D", "(A, B) → C ! e₀");
+        .expect_type_mismatch("() -> D", "(A, B) -> C ! e₀");
     fail_compilation(&format!("{text} (b,).0(1, 2)"))
-        .expect_type_mismatch("(D) → D", "(A, B) → C ! e₀");
+        .expect_type_mismatch("(D) -> D", "(A, B) -> C ! e₀");
     assert_eq!(run(&format!("{text} (c,).0(1, 2)")), int!(3));
 }
 

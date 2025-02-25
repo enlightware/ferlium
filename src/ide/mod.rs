@@ -897,6 +897,6 @@ mod tests {
     fn fn_signature() {
         let compiler = build("fn main(x) { string_len(x) }");
         let signature = compiler.fn_signature("main").unwrap();
-        assert_eq!(signature, "(string) → int");
+        assert_eq!(signature, "(string) -> int");
     }
 }

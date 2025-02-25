@@ -109,7 +109,7 @@ impl ModuleAndExpr {
                         }
                     } else {
                         Some(format!(
-                            "{start_space}→ {}",
+                            "{start_space}-> {}",
                             function.definition.ty_scheme.ty.ret.format_with(&env)
                         ))
                     }
@@ -128,7 +128,7 @@ impl ModuleAndExpr {
                     }
                 } else {
                     Some(format!(
-                        "{start_space}→ {} ! {}",
+                        "{start_space}-> {} ! {}",
                         function.definition.ty_scheme.ty.ret.format_with(&env),
                         function.definition.ty_scheme.ty.effects
                     ))

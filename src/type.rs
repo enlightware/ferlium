@@ -355,7 +355,7 @@ impl FmtWithModuleEnv for FnType {
             }
             arg.fmt_with_module_env(f, env)?;
         }
-        write!(f, ") → ")?;
+        write!(f, ") -> ")?;
         self.ret.fmt_with_module_env(f, env)?;
         if self.effects.is_empty() {
             Ok(())
