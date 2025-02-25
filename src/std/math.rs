@@ -265,4 +265,13 @@ pub fn add_to_module(to: &mut Module) {
             }
         })) as Function],
     );
+    to.functions.insert(
+        ustr("round"),
+        UnaryNativeFnNN::description_with_default_ty(
+            |value: Float| value.round() as Int,
+            ["value"],
+            Some("Rounds a number to the nearest integer."),
+            no_effects(),
+        ),
+    );
 }

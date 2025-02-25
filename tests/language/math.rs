@@ -114,3 +114,14 @@ fn clamp() {
     assert_eq!(run("clamp(0.0, 3.0, 3.0)"), float!(3.0));
     assert!(fail_run("clamp(0.0, 3.0, 2.0)").is_aborted());
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn math_conversions() {
+    assert_eq!(run("round(1.0)"), int!(1));
+    assert_eq!(run("(from_int(1): float)"), float!(1.0));
+    assert_eq!(
+        run("fn round_trip(x) { round(from_int(x)) } round_trip(1)"),
+        int!(1)
+    );
+}
