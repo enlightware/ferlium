@@ -225,7 +225,7 @@ pub enum ExprKind<P: Phase> {
     FormattedString(P::FormattedString),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Ustr),
-    Let(UstrSpan, MutVal, B<Expr<P>>, Option<Location>),
+    Let(UstrSpan, MutVal, B<Expr<P>>, Option<(Location, bool)>),
     Abstract(Vec<UstrSpan>, B<Expr<P>>),
     Apply(B<Expr<P>>, Vec<Expr<P>>, bool),
     Block(Vec<Expr<P>>),

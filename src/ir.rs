@@ -144,7 +144,7 @@ impl TraitFnApplication {
 pub struct EnvStore {
     pub node: Node,
     pub name_span: Location,
-    pub ty_span: Option<Location>,
+    pub ty_span: Option<(Location, bool)>,
 }
 impl EnvStore {
     pub fn instantiate(&mut self, subst: &InstSubstitution) {

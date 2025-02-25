@@ -359,14 +359,16 @@ LetStmt: ExprKind = {
         } else {
             MutVal::constant()
         };
-        let e = if let Some((ty, ty_span)) = ty {
+        let (e, ty_span_and_complete) = if let Some((ty, ty_span)) = ty {
             let span = e.span;
-            Expr::new(TypeAscription(boxed(e), ty, ty_span), span)
+            (
+                Expr::new(TypeAscription(boxed(e), ty, ty_span), span),
+                Some((ty_span, ty.is_constant()))
+            )
         } else {
-            e
+            (e, None)
         };
-        let ty_span = ty.map(|(_, span)| span);
-        Let(id, mut_val, boxed(e), ty_span)
+        Let(id, mut_val, boxed(e), ty_span_and_complete)
     }
 }
 

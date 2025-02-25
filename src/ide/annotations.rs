@@ -80,7 +80,12 @@ impl ModuleAndExpr {
                     .iter()
                     .zip(&function.definition.ty_scheme.ty.args)
                 {
-                    if ty_span.is_none() {
+                    if let Some((ty_span, ty_constant)) = ty_span {
+                        if !ty_constant {
+                            annotations
+                                .push((ty_span.end(), format!(" ⇨ {}", arg_ty.format_with(&env))));
+                        }
+                    } else {
                         annotations
                             .push((name_span.end(), format!(": {}", arg_ty.format_with(&env))));
                     }
@@ -93,23 +98,38 @@ impl ModuleAndExpr {
                     " "
                 };
                 let mut annotation = if function.definition.ty_scheme.ty.effects.is_empty() {
-                    if spans.ret_ty.is_none() {
+                    if let Some((_, ty_constant)) = spans.ret_ty {
+                        if !ty_constant {
+                            Some(format!(
+                                "{start_space}⇨ {}",
+                                function.definition.ty_scheme.ty.ret.format_with(&env)
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
                         Some(format!(
                             "{start_space}→ {}",
                             function.definition.ty_scheme.ty.ret.format_with(&env)
                         ))
-                    } else {
-                        None
                     }
-                } else if spans.ret_ty.is_none() {
+                } else if let Some((_, ty_constant)) = spans.ret_ty {
+                    if !ty_constant {
+                        Some(format!(
+                            "{start_space}⇨ {} ! {}",
+                            function.definition.ty_scheme.ty.ret.format_with(&env),
+                            function.definition.ty_scheme.ty.effects
+                        ))
+                    } else {
+                        Some(format!(
+                            "{start_space}! {}",
+                            function.definition.ty_scheme.ty.effects
+                        ))
+                    }
+                } else {
                     Some(format!(
                         "{start_space}→ {} ! {}",
                         function.definition.ty_scheme.ty.ret.format_with(&env),
-                        function.definition.ty_scheme.ty.effects
-                    ))
-                } else {
-                    Some(format!(
-                        "{start_space}! {}",
                         function.definition.ty_scheme.ty.effects
                     ))
                 };
@@ -219,11 +239,20 @@ impl Node {
             }
             EnvStore(node) => {
                 // Note: synthesized let nodes have empty name span, so we ignore these.
-                if node.ty_span.is_none() && node.name_span.end() != node.name_span.start() {
-                    result.push((
-                        node.name_span.end(),
-                        format!(": {}", node.node.ty.format_with(env)),
-                    ));
+                if node.name_span.end() != node.name_span.start() {
+                    if let Some((ty_span, ty_constant)) = node.ty_span {
+                        if !ty_constant {
+                            result.push((
+                                ty_span.end(),
+                                format!(" ⇨ {}", node.node.ty.format_with(env)),
+                            ));
+                        }
+                    } else {
+                        result.push((
+                            node.name_span.end(),
+                            format!(": {}", node.node.ty.format_with(env)),
+                        ));
+                    }
                 }
                 node.node.variable_type_annotations(result, env);
             }

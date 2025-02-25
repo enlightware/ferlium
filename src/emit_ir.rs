@@ -118,10 +118,15 @@ pub fn emit_module(
                 name: name.1,
                 args: args
                     .iter()
-                    .map(|((_, span), ty)| (*span, ty.map(|ty| ty.2)))
+                    .map(|((_, span), ty)| {
+                        (
+                            *span,
+                            ty.map(|ty| (ty.2, !ty.0.is_variable() && ty.1.is_constant())),
+                        )
+                    })
                     .collect(),
                 args_span: *args_span,
-                ret_ty: ret_ty.map(|ret_ty| ret_ty.1),
+                ret_ty: ret_ty.map(|ret_ty| (ret_ty.1, ret_ty.0.is_constant())),
                 span: *span,
             };
             let arg_names = args.iter().map(|arg| arg.0 .0).collect();
