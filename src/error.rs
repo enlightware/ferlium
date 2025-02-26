@@ -379,11 +379,19 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
                 )
             }
             InvalidVariantName { name, ty } => {
+                let valids = ty
+                    .data()
+                    .as_variant()
+                    .unwrap()
+                    .iter()
+                    .map(|(name, _)| name.as_ref())
+                    .join(", ");
                 write!(
                     f,
-                    "Variant name {} does not exist for variant type {}",
+                    "Variant name {} does not exist for variant type {}, valid names are {}",
                     fmt_span(name),
-                    ty.format_with(env)
+                    ty.format_with(env),
+                    valids,
                 )
             }
             InvalidVariantType { name, ty } => {
