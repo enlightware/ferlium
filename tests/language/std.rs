@@ -246,6 +246,6 @@ fn serialize() {
     fail_compilation(r#"serialize([1])"#).expect_trait_impl_not_found("Serialize", &["[int]"]);
     fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
         "Num",
-        &["Bool (bool) | Float (float) | Int (int) | None | Seq ([variant]) | String (string)"],
+        &["Bool (bool) | Float (float) | Int (int) | None | Seq ([Variant]) | String (string)"],
     );
 }
