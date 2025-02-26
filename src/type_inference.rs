@@ -1134,9 +1134,9 @@ impl TypeMapper for FreshVariableTypeMapper<'_> {
         }
     }
 
-    fn map_effect(&mut self, effects: &EffType) -> EffType {
+    fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType {
         EffType::from_vec(
-            effects
+            eff_ty
                 .iter()
                 .map(|effect| {
                     if effect.is_variable() {

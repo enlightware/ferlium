@@ -324,7 +324,7 @@ impl TypeLike for FnType {
                 })
                 .collect(),
             ret: self.ret.map(f),
-            effects: f.map_effect(&self.effects),
+            effects: f.map_effect_type(&self.effects),
         }
     }
 

@@ -14,8 +14,8 @@ use crate::{
 /// A struct that can map a type and its effects to another type and effects
 pub trait TypeMapper {
     fn map_type(&mut self, ty: Type) -> Type;
-    fn map_mut_type(&mut self, ty: MutType) -> MutType;
-    fn map_effect(&mut self, effects: &EffType) -> EffType;
+    fn map_mut_type(&mut self, mut_ty: MutType) -> MutType;
+    fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType;
 }
 
 /// Map a type using the given substitution
@@ -37,7 +37,7 @@ impl TypeMapper for SubstitutionTypeMapper<'_> {
     fn map_mut_type(&mut self, ty: MutType) -> MutType {
         ty
     }
-    fn map_effect(&mut self, effects: &EffType) -> EffType {
+    fn map_effect_type(&mut self, effects: &EffType) -> EffType {
         effects.instantiate(&self.subst.1)
     }
 }
