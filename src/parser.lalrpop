@@ -64,10 +64,10 @@ Type<P>: Type = {
 
 TupleOrFnType<P>: Type = {
     "(" ")" => Type::unit(),
-    "(" ")" <ret:FnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, EffType::empty())),
+    "(" ")" <ret:FnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, EffType::single_variable_id(0))),
     "(" <l:@L> <arg:ArgType<P>> <r:@R> ")" <ret:FnRet<P>?> =>?
         Ok(if let Some(ret) = ret {
-            Type::function_type(FnType::new(vec![arg], ret.0, EffType::empty()))
+            Type::function_type(FnType::new(vec![arg], ret.0, EffType::single_variable_id(0)))
         } else if arg.mut_ty != MutType::constant() {
             return error("types outside function arguments cannot be &mut".into(), span(l, r));
         } else {
@@ -77,7 +77,7 @@ TupleOrFnType<P>: Type = {
     {
         let args = ext_f(arg0, args);
         Ok(if let Some(ret) = ret {
-            Type::function_type(FnType::new(args, ret.0, EffType::empty()))
+            Type::function_type(FnType::new(args, ret.0, EffType::single_variable_id(0)))
         } else if args.iter().any(|a| a.mut_ty != MutType::constant()) {
             return error("types outside function arguments cannot be &mut".into(), span(l, r));
         } else {

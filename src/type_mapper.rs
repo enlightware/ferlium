@@ -18,7 +18,7 @@ pub trait TypeMapper {
     fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType;
 }
 
-/// Map a type using the given substitution
+/// Map a type using the given (ty_var, eff_var) substitution
 pub(crate) struct SubstitutionTypeMapper<'a> {
     pub(crate) subst: &'a InstSubstitution,
 }

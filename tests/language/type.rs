@@ -118,37 +118,62 @@ fn parentheses() {
 fn fn_type() {
     assert_eq!(
         parse_concrete_type("() -> ()").unwrap(),
-        Type::function_by_val(&[], Type::unit())
+        Type::function_by_val_with_effects(&[], Type::unit(), EffType::single_variable_id(0))
     );
     assert_eq!(
         parse_concrete_type("(int) -> int").unwrap(),
-        Type::function_by_val(&[int_type()], int_type())
+        Type::function_by_val_with_effects(
+            &[int_type()],
+            int_type(),
+            EffType::single_variable_id(0)
+        )
     );
     assert_eq!(
         parse_concrete_type("((int)) -> int").unwrap(),
-        Type::function_by_val(&[int_type()], int_type())
+        Type::function_by_val_with_effects(
+            &[int_type()],
+            int_type(),
+            EffType::single_variable_id(0)
+        )
     );
     assert_eq!(
         parse_concrete_type("(int) -> (int)").unwrap(),
-        Type::function_by_val(&[int_type()], int_type())
+        Type::function_by_val_with_effects(
+            &[int_type()],
+            int_type(),
+            EffType::single_variable_id(0)
+        )
     );
     assert_eq!(
         parse_concrete_type("(int) -> (int,)").unwrap(),
-        Type::function_by_val(&[int_type()], tuple_type([int_type()]))
+        Type::function_by_val_with_effects(
+            &[int_type()],
+            tuple_type([int_type()]),
+            EffType::single_variable_id(0)
+        )
     );
     assert_eq!(
         parse_concrete_type("(int, float) -> ()").unwrap(),
-        Type::function_by_val(&[int_type(), float_type()], Type::unit())
+        Type::function_by_val_with_effects(
+            &[int_type(), float_type()],
+            Type::unit(),
+            EffType::single_variable_id(0)
+        )
     );
     assert_eq!(
         parse_concrete_type("((int, float)) -> ()").unwrap(),
-        Type::function_by_val(&[tuple_type([int_type(), float_type()])], Type::unit())
+        Type::function_by_val_with_effects(
+            &[tuple_type([int_type(), float_type()])],
+            Type::unit(),
+            EffType::single_variable_id(0)
+        )
     );
     assert_eq!(
         parse_concrete_type("((int, float)) -> (bool, string)").unwrap(),
-        Type::function_by_val(
+        Type::function_by_val_with_effects(
             &[tuple_type([int_type(), float_type()])],
-            tuple_type([bool_type(), string_type()])
+            tuple_type([bool_type(), string_type()]),
+            EffType::single_variable_id(0)
         )
     );
     assert_eq!(
@@ -156,7 +181,7 @@ fn fn_type() {
         Type::function_type(FnType::new_mut_resolved(
             &[(array_type(int_type()), true)],
             int_type(),
-            EffType::empty()
+            EffType::single_variable_id(0)
         ))
     );
     assert_eq!(
@@ -164,7 +189,7 @@ fn fn_type() {
         Type::function_type(FnType::new_mut_resolved(
             &[(array_type(float_type()), true), (int_type(), true)],
             Type::unit(),
-            EffType::empty()
+            EffType::single_variable_id(0)
         ))
     );
     assert_eq!(
@@ -200,7 +225,7 @@ fn generic_types() {
         Type::function_type(FnType::new_mut_resolved(
             &[(array_type(Type::variable_id(0)), true), (int_type(), true)],
             Type::variable_id(0),
-            EffType::empty()
+            EffType::single_variable_id(0)
         ))
     );
 }

@@ -145,6 +145,10 @@ fn ty_fn_placeholders(a: (_, _)) {
 	a.0 + a.1
 }
 
+fn ty_fn_arg_fn(f: () -> ()) {
+	f()
+}
+
 ((1: int), (1: float))
 `],
 ['Function pipe operator',
