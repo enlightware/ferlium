@@ -69,6 +69,8 @@ primitiveType {
     | kw<'int'>
     | kw<'float'>
     | kw<'string'>
+    | kw<'Variant'>
+    | kw<'Ordering'>
 }
 
 arrayType {

@@ -5,7 +5,7 @@ use crate::r#type::{Type, FnType, FnArgType};
 use crate::type_like::TypeLike;
 use crate::effects::EffType;
 use crate::parser_helpers::*;
-use crate::std::{logic::bool_type, math::{int_type, float_type}, array::array_type, string::string_type};
+use crate::std::{logic::bool_type, math::{int_type, float_type}, array::array_type, string::string_type, variant::script_variant_type, ordering::ordering_type};
 use crate::containers::{b as boxed};
 use crate::mutability::{MutVal, MutType};
 
@@ -106,6 +106,8 @@ PrimitiveType: Type = {
     "int" => int_type(),
     "float" => float_type(),
     "string" => string_type(),
+    "Variant" => script_variant_type(),
+    "Ordering" => ordering_type(),
 }
 
 ArrayType<P>: Type = {

@@ -41,5 +41,5 @@ pub fn script_variant_type() -> Type {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.types.set("variant", script_variant_type());
+    to.types.set("Variant", script_variant_type());
 }
