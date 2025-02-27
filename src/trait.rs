@@ -7,6 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
+    fmt,
     hash::{Hash, Hasher},
     num::NonZero,
     ops::Deref,
@@ -19,8 +20,8 @@ use ustr::Ustr;
 use crate::{
     containers::iterable_to_string,
     function::FunctionDefinition,
+    module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{FnType, Type},
-    value::Value,
 };
 
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
@@ -94,6 +95,23 @@ impl Trait {
     }
 }
 
+impl FmtWithModuleEnv for Trait {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
+        writeln!(f, "trait {} {{", self.name)?;
+        let mut first = true;
+        for (name, def) in &self.functions {
+            if first {
+                first = false;
+            } else {
+                writeln!(f)?;
+            }
+            def.fmt_with_name_and_module_env(f, name, "    ", env)?;
+        }
+        writeln!(f, "}}")?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TraitRef(Rc<Trait>);
 
@@ -123,7 +141,7 @@ impl TraitRef {
         assert_eq!(
             self.input_type_count.get(),
             input_tys.len() as u32,
-            "Mismselfatched input type count when implementing trait {}.",
+            "Mismatched input type count when implementing trait {}.",
             self.name,
         );
         assert_eq!(
@@ -161,18 +179,6 @@ impl Hash for TraitRef {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::ptr::hash(Rc::as_ptr(&self.0), state)
     }
-}
-
-/// An implementation of a trait.
-/// For now, only support non-generic types and functions in trait implementation.
-/// This will be relaxed later.
-#[derive(Debug, Clone)]
-pub struct TraitImpl {
-    /// The output types of the trait.
-    pub output_tys: Vec<Type>,
-    /// The implemented methods, in a tuple of first-class functions of the proper types.
-    /// We use a tuple to simply clone it when filling the dictionary entries.
-    pub functions: Value,
 }
 
 #[cfg(test)]

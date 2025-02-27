@@ -1,5 +1,5 @@
 use crate::{Location, LocatedError};
-use crate::ast::{UstrSpan, TypeSpan, MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module};
+use crate::ast::{UstrSpan, TypeSpan, MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl};
 use crate::value::{Value, LiteralValue};
 use crate::r#type::{Type, FnType, FnArgType};
 use crate::type_like::TypeLike;
@@ -28,20 +28,38 @@ ExtraExpr: ExprKind = {
 }
 
 pub Module: Module = {
-    FunctionOrType* => {
+    ModuleItem* => {
         <>.into_iter().fold(Module::default(), |a, m| a.merge(m))
     }
 }
 
-FunctionOrType = {
-    Function
+ModuleItem = {
+    ModuleFunction,
+    ModuleTraitImpl
 }
 
-Function: Module = {
+ModuleTraitImpl: Module = {
+    TraitImpl => Module { functions: vec![], impls: vec![<>], types: vec![] }
+}
+
+TraitImpl: TraitImpl = {
+    <l:@L> "impl" <trait_name:Sp<UIdentifier>> "{" <functions:Sep<Function, ",">> "}" <r:@R> => {
+        TraitImpl {
+            trait_name,
+            functions,
+            span: span(l, r),
+        }
+    }
+}
+
+ModuleFunction: Module = {
+    Function => Module { functions: vec![<>], impls: vec![], types: vec![] }
+}
+
+Function: ModuleFunction = {
     <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrWithOptTypeArgs> ")" <ret:FnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
-        Module::new_with_function(name, args, span(al, ar), ret, body, span(l, r), parse_doc_comments(doc)),
+        ModuleFunction::new(name, args, span(al, ar), ret, body, span(l, r), parse_doc_comments(doc)),
 }
-
 
 // Type
 

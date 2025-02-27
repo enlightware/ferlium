@@ -65,6 +65,7 @@ pub enum MutabilityMustBeContext {
 pub enum InternalCompilationErrorImpl {
     SymbolNotFound(Location),
     FunctionNotFound(Location),
+    TraitNotFound(Location),
     WrongNumberOfArguments {
         expected: usize,
         expected_span: Location,
@@ -108,6 +109,7 @@ pub enum InternalCompilationErrorImpl {
     DuplicatedRecordField {
         first_occurrence: Location,
         second_occurrence: Location,
+        record_span: Location,
     },
     InvalidRecordField {
         field_span: Location,
@@ -149,19 +151,38 @@ pub enum InternalCompilationErrorImpl {
     DuplicatedVariant {
         first_occurrence: Location,
         second_occurrence: Location,
+        match_span: Location,
     },
     TraitImplNotFound {
         trait_ref: TraitRef,
         input_tys: Vec<Type>,
         fn_span: Location,
     },
+    MethodNotPartOfTrait {
+        trait_ref: TraitRef,
+        fn_span: Location,
+    },
+    TraitMethodImplMissing {
+        trait_ref: TraitRef,
+        impl_span: Location,
+        missings: Vec<Ustr>,
+    },
+    TraitMethodArgCountMismatch {
+        trait_ref: TraitRef,
+        index: usize,
+        expected: usize,
+        got: usize,
+        args_span: Location,
+    },
     IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Location,
         second_occurrence: Location,
+        pattern_span: Location,
     },
     DuplicatedLiteralPattern {
         first_occurrence: Location,
         second_occurrence: Location,
+        match_span: Location,
     },
     NonExhaustivePattern {
         span: Location,
@@ -249,297 +270,8 @@ impl InternalCompilationError {
 impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &str)> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (env, source) = self.data;
-        let fmt_span = |loc: &Location| match loc.module() {
-            Some(module) => format!(
-                "{}..{} in module {}",
-                module.span().start(),
-                module.span().end(),
-                module.module_name()
-            ),
-            None => source[loc.start()..loc.end()].to_string(),
-        };
-        use InternalCompilationErrorImpl::*;
-        match self.value.deref() {
-            SymbolNotFound(span) => {
-                write!(f, "Variable or function not found: {}", fmt_span(span))
-            }
-            FunctionNotFound(span) => {
-                write!(f, "Function not found: {}", fmt_span(span))
-            }
-            WrongNumberOfArguments { expected, got, .. } => {
-                write!(
-                    f,
-                    "Wrong number of arguments: expected {}, got {}",
-                    expected, got
-                )
-            }
-            MutabilityMustBe {
-                source_span,
-                reason_span,
-                what,
-                ctx,
-            } => {
-                let (source_span, reason_span) =
-                    resolve_must_be_mutable_ctx(*source_span, *reason_span, *ctx, source);
-                let source_name = fmt_span(&source_span);
-                let reason_name = fmt_span(&reason_span);
-                use MutabilityMustBeWhat::*;
-                let what = match what {
-                    Mutable => "mutable due to",
-                    Constant => "constant due to",
-                    Equal => "of same mutability to",
-                };
-                write!(
-                    f,
-                    "Expression \"{source_name}\" must be {what} \"{reason_name}\""
-                )
-            }
-            TypeMismatch {
-                current_ty,
-                expected_ty,
-                sub_or_same,
-                ..
-            } => write!(
-                f,
-                "Type \"{}\" is not {} \"{}\"",
-                current_ty.format_with(env),
-                match sub_or_same {
-                    SubOrSameType::SubType => "a sub-type of",
-                    SubOrSameType::SameType => "the same type as",
-                },
-                expected_ty.format_with(env)
-            ),
-            InfiniteType(ty_var, ty, _span) => {
-                write!(f, "Infinite type: {} = \"{}\"", ty_var, ty.format_with(env))
-            }
-            UnboundTypeVar { ty_var, ty, .. } => {
-                write!(
-                    f,
-                    "Unbound type variable {} in {}",
-                    ty_var,
-                    ty.format_with(env)
-                )
-            }
-            UnresolvedConstraints { constraints, span } => {
-                let constraints = constraints.iter().map(|c| c.format_with(env)).join(" ∧ ");
-                write!(
-                    f,
-                    "Unresolved constraints {} in expression {}",
-                    constraints,
-                    fmt_span(span)
-                )
-            }
-            InvalidTupleIndex {
-                index,
-                tuple_length,
-                ..
-            } => {
-                write!(
-                    f,
-                    "Invalid index {index} of a tuple of length {tuple_length}"
-                )
-            }
-            InvalidTupleProjection {
-                tuple_ty: expr_ty, ..
-            } => {
-                write!(f, "Expected tuple, got \"{}\"", expr_ty.format_with(env))
-            }
-            DuplicatedRecordField {
-                first_occurrence: first_occurrence_span,
-                ..
-            } => {
-                write!(
-                    f,
-                    "Duplicated record field: {}",
-                    fmt_span(first_occurrence_span),
-                )
-            }
-            InvalidRecordField {
-                field_span,
-                record_ty,
-                ..
-            } => {
-                write!(
-                    f,
-                    "Field {} not found in record {}",
-                    fmt_span(field_span),
-                    record_ty.format_with(env)
-                )
-            }
-            InvalidRecordFieldAccess {
-                field_span,
-                record_ty,
-                ..
-            } => {
-                write!(
-                    f,
-                    "Expected record due to {}, got \"{}\"",
-                    fmt_span(field_span),
-                    record_ty.format_with(env)
-                )
-            }
-            InvalidVariantName { name, ty } => {
-                let valids = ty
-                    .data()
-                    .as_variant()
-                    .unwrap()
-                    .iter()
-                    .map(|(name, _)| name.as_ref())
-                    .join(", ");
-                write!(
-                    f,
-                    "Variant name {} does not exist for variant type {}, valid names are {}",
-                    fmt_span(name),
-                    ty.format_with(env),
-                    valids,
-                )
-            }
-            InvalidVariantType { name, ty } => {
-                write!(
-                    f,
-                    "Type {} is not a variant, but variant constructor {} requires it",
-                    ty.format_with(env),
-                    fmt_span(name),
-                )
-            }
-            InvalidVariantConstructor { span } => {
-                write!(
-                    f,
-                    "Variant constructor cannot be paths, but {} is",
-                    fmt_span(span),
-                )
-            }
-            InconsistentADT {
-                a_type,
-                b_type,
-                a_span,
-                b_span,
-            } => {
-                write!(
-                    f,
-                    "Inconsistent data types: {} due to .{} is incompatible with {} due to .{}",
-                    a_type.adt_kind(),
-                    fmt_span(a_span),
-                    b_type.adt_kind(),
-                    fmt_span(b_span),
-                )
-            }
-            InconsistentPattern {
-                a_type,
-                b_type,
-                a_span,
-                b_span,
-            } => {
-                write!(
-                    f,
-                    "Inconsistent pattern types: {} due to {} is incompatible with {} due to {}",
-                    a_type.name(),
-                    fmt_span(a_span),
-                    b_type.name(),
-                    fmt_span(b_span),
-                )
-            }
-            DuplicatedVariant {
-                first_occurrence: first_occurrence_span,
-                ..
-            } => {
-                write!(f, "Duplicated variant: {}", fmt_span(first_occurrence_span),)
-            }
-            TraitImplNotFound {
-                trait_ref,
-                input_tys,
-                fn_span,
-            } => {
-                write!(
-                    f,
-                    "Implementation of trait {} over types {} not found (when calling {})",
-                    trait_ref.name,
-                    input_tys
-                        .iter()
-                        .map(|ty| ty.format_with(env).to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    fmt_span(fn_span),
-                )
-            }
-            IdentifierBoundMoreThanOnceInAPattern {
-                first_occurrence: first_occurrence_span,
-                ..
-            } => {
-                write!(
-                    f,
-                    "Identifier {} bound more than once in a pattern",
-                    fmt_span(first_occurrence_span),
-                )
-            }
-            DuplicatedLiteralPattern {
-                first_occurrence, ..
-            } => {
-                write!(
-                    f,
-                    "Duplicated literal pattern: {}",
-                    fmt_span(first_occurrence),
-                )
-            }
-            EmptyMatchBody { .. } => {
-                write!(f, "Match body cannot be empty")
-            }
-            NonExhaustivePattern { ty, .. } => {
-                write!(
-                    f,
-                    "Non-exhaustive patterns for type {}, all possible values must be covered.",
-                    ty.format_with(env)
-                )
-            }
-            MutablePathsOverlap {
-                a_span,
-                b_span,
-                fn_span,
-            } => {
-                write!(
-                    f,
-                    "Mutable paths overlap: {} and {} when calling {}",
-                    fmt_span(a_span),
-                    fmt_span(b_span),
-                    fmt_span(fn_span),
-                )
-            }
-            UndefinedVarInStringFormatting {
-                var_span,
-                string_span,
-            } => {
-                write!(
-                    f,
-                    "Undefined variable {} used in string formatting {}",
-                    fmt_span(var_span),
-                    fmt_span(string_span),
-                )
-            }
-            InvalidEffectDependency {
-                source: cur,
-                source_span,
-                target,
-                target_span,
-            } => {
-                write!(
-                    f,
-                    "Invalid effect dependency: {} due to {} is incompatible with {} due to {}",
-                    cur,
-                    fmt_span(source_span),
-                    target,
-                    fmt_span(target_span),
-                )
-            }
-            UnknownProperty {
-                scope, variable, ..
-            } => {
-                write!(f, "Unknown property: {}.{}", scope, variable,)
-            }
-            Unsupported { span, reason } => {
-                write!(f, "Unsupported: {} at {}", reason, fmt_span(span))
-            }
-            Internal(msg) => write!(f, "ICE: {}", msg),
-        }
+        let error = CompilationError::from_internal(self.value.clone(), env, source);
+        write!(f, "{}", FormatWith::new(&error, source))
     }
 }
 
@@ -547,8 +279,9 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
 #[derive(Debug, EnumAsInner)]
 pub enum CompilationErrorImpl {
     ParsingFailed(Vec<LocatedError>),
-    VariableNotFound(Location),
+    SymbolNotFound(Location),
     FunctionNotFound(Location),
+    TraitNotFound(Location),
     WrongNumberOfArguments {
         expected: usize,
         expected_span: Location,
@@ -591,6 +324,7 @@ pub enum CompilationErrorImpl {
     DuplicatedRecordField {
         first_occurrence: Location,
         second_occurrence: Location,
+        record_span: Location,
     },
     InvalidRecordField {
         field_span: Location,
@@ -629,19 +363,38 @@ pub enum CompilationErrorImpl {
     DuplicatedVariant {
         first_occurrence: Location,
         second_occurrence: Location,
+        match_span: Location,
     },
     TraitImplNotFound {
         trait_name: String,
         input_tys: Vec<String>,
         fn_span: Location,
     },
+    MethodNotPartOfTrait {
+        trait_ref: TraitRef,
+        fn_span: Location,
+    },
+    TraitMethodImplMissing {
+        trait_ref: TraitRef,
+        missings: Vec<Ustr>,
+        impl_span: Location,
+    },
+    TraitMethodArgCountMismatch {
+        trait_ref: TraitRef,
+        index: usize,
+        expected: usize,
+        got: usize,
+        args_span: Location,
+    },
     IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Location,
         second_occurrence: Location,
+        pattern_span: Location,
     },
     DuplicatedLiteralPattern {
         first_occurrence: Location,
         second_occurrence: Location,
+        match_span: Location,
     },
     EmptyMatchBody {
         span: Location,
@@ -699,6 +452,387 @@ impl Deref for CompilationError {
     }
 }
 
+impl fmt::Display for FormatWith<'_, CompilationError, &str> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let source = self.data;
+        let fmt_span = |loc: &Location| match loc.module() {
+            Some(module) => format!(
+                "{}..{} in module {}",
+                module.span().start(),
+                module.span().end(),
+                module.module_name()
+            ),
+            None => source[loc.start()..loc.end()].to_string(),
+        };
+        use CompilationErrorImpl::*;
+        match self.value.deref() {
+            ParsingFailed(errors) => {
+                write!(f, "Parsing failed: ")?;
+                for (msg, span) in errors {
+                    write!(f, "{} in {}, ", msg, fmt_span(span))?;
+                }
+                Ok(())
+            }
+            SymbolNotFound(span) => {
+                write!(f, "Variable or function not found: {}", fmt_span(span))
+            }
+            FunctionNotFound(span) => {
+                write!(f, "Function not found: {}", fmt_span(span))
+            }
+            TraitNotFound(span) => {
+                write!(f, "Trait not found: {}", fmt_span(span))
+            }
+            WrongNumberOfArguments {
+                expected,
+                expected_span,
+                got,
+                got_span,
+            } => {
+                write!(
+                    f,
+                    "Wrong number of arguments: expected {} due to {}, got {} due to {}",
+                    expected,
+                    fmt_span(expected_span),
+                    got,
+                    fmt_span(got_span)
+                )
+            }
+            MutabilityMustBe {
+                source_span,
+                reason_span,
+                what,
+            } => {
+                let source_name = fmt_span(source_span);
+                let reason_name = fmt_span(reason_span);
+                use MutabilityMustBeWhat::*;
+                let what = match what {
+                    Mutable => "mutable due to",
+                    Constant => "constant due to",
+                    Equal => "of same mutability to",
+                };
+                write!(
+                    f,
+                    "Expression \"{source_name}\" must be {what} \"{reason_name}\""
+                )
+            }
+            TypeMismatch {
+                current_ty,
+                current_span,
+                expected_ty,
+                expected_span,
+                sub_or_same,
+            } => write!(
+                f,
+                "Type \"{}\" in {} is not {} \"{}\" in {}",
+                current_ty,
+                fmt_span(current_span),
+                match sub_or_same {
+                    SubOrSameType::SubType => "a sub-type of",
+                    SubOrSameType::SameType => "the same type as",
+                },
+                expected_ty,
+                fmt_span(expected_span),
+            ),
+            InfiniteType(ty_var, ty, span) => {
+                write!(
+                    f,
+                    "Infinite type: {} = \"{}\" in {}",
+                    ty_var,
+                    ty,
+                    fmt_span(span)
+                )
+            }
+            UnboundTypeVar { ty_var, ty, span } => {
+                write!(
+                    f,
+                    "Unbound type variable {} in type {} in {}",
+                    ty_var,
+                    ty,
+                    fmt_span(span)
+                )
+            }
+            UnresolvedConstraints { constraints, span } => {
+                write!(
+                    f,
+                    "Unresolved constraints {} in expression {}",
+                    constraints.join(" ∧ "),
+                    fmt_span(span)
+                )
+            }
+            InvalidTupleIndex {
+                index,
+                tuple_length,
+                tuple_span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Invalid index {} of a tuple of length {} in {}",
+                    index,
+                    tuple_length,
+                    fmt_span(tuple_span)
+                )
+            }
+            InvalidTupleProjection {
+                expr_ty, expr_span, ..
+            } => {
+                write!(
+                    f,
+                    "Expected tuple, got \"{}\" in {}",
+                    expr_ty,
+                    fmt_span(expr_span)
+                )
+            }
+            DuplicatedRecordField {
+                first_occurrence,
+                record_span: record,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Duplicated record field {} in record {}",
+                    fmt_span(first_occurrence),
+                    fmt_span(record)
+                )
+            }
+            InvalidRecordField {
+                field_span,
+                record_ty,
+                record_span,
+            } => {
+                write!(
+                    f,
+                    "Field {} not found in record {} of type {}",
+                    fmt_span(field_span),
+                    fmt_span(record_span),
+                    record_ty,
+                )
+            }
+            InvalidRecordFieldAccess {
+                field_span,
+                record_ty,
+                record_span,
+            } => {
+                write!(
+                    f,
+                    "Expected record due to {}, got \"{}\" in {}",
+                    fmt_span(field_span),
+                    record_ty,
+                    fmt_span(record_span)
+                )
+            }
+            InvalidVariantName { name, ty, valids } => {
+                write!(
+                    f,
+                    "Variant name {} does not exist for variant type {}, valid names are {}",
+                    fmt_span(name),
+                    ty,
+                    valids.join(", ")
+                )
+            }
+            InvalidVariantType { name, ty } => {
+                write!(
+                    f,
+                    "Type {} is not a variant, but variant constructor {} requires it",
+                    ty,
+                    fmt_span(name)
+                )
+            }
+            InvalidVariantConstructor { span } => {
+                write!(
+                    f,
+                    "Variant constructor cannot be paths, but {} is",
+                    fmt_span(span)
+                )
+            }
+            InconsistentADT {
+                a_type,
+                a_span,
+                b_type,
+                b_span,
+            } => {
+                write!(
+                    f,
+                    "Inconsistent data types: {} due to .{} is incompatible with {} due to .{}",
+                    a_type.adt_kind(),
+                    fmt_span(a_span),
+                    b_type.adt_kind(),
+                    fmt_span(b_span)
+                )
+            }
+            InconsistentPattern {
+                a_type,
+                a_span,
+                b_type,
+                b_span,
+            } => {
+                write!(
+                    f,
+                    "Inconsistent pattern types: {} due to {} is incompatible with {} due to {}",
+                    a_type.name(),
+                    fmt_span(a_span),
+                    b_type.name(),
+                    fmt_span(b_span)
+                )
+            }
+            DuplicatedVariant {
+                first_occurrence,
+                match_span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Duplicated variant {} in match {}",
+                    fmt_span(first_occurrence),
+                    fmt_span(match_span)
+                )
+            }
+            TraitImplNotFound {
+                trait_name,
+                input_tys,
+                fn_span,
+            } => {
+                write!(
+                    f,
+                    "Implementation of trait {} over types {} not found (when calling {})",
+                    trait_name,
+                    input_tys.join(", "),
+                    fmt_span(fn_span)
+                )
+            }
+            MethodNotPartOfTrait { trait_ref, fn_span } => {
+                write!(
+                    f,
+                    "Method {} is not part of trait {}",
+                    fmt_span(fn_span),
+                    trait_ref.name
+                )
+            }
+            TraitMethodImplMissing {
+                trait_ref,
+                missings,
+                impl_span,
+            } => {
+                write!(
+                    f,
+                    "Implementation of trait {} is missing methods {} in {}",
+                    trait_ref.name,
+                    missings.iter().join(", "),
+                    fmt_span(impl_span)
+                )
+            }
+            TraitMethodArgCountMismatch {
+                trait_ref,
+                index,
+                expected,
+                got,
+                args_span,
+            } => {
+                write!(
+                    f,
+                    "Method {} of trait {} expects {} arguments, got {} in {}",
+                    trait_ref.functions[*index].0,
+                    trait_ref.name,
+                    expected,
+                    got,
+                    fmt_span(args_span)
+                )
+            }
+            IdentifierBoundMoreThanOnceInAPattern {
+                first_occurrence,
+                pattern_span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Identifier {} bound more than once in a pattern: {}",
+                    fmt_span(first_occurrence),
+                    fmt_span(pattern_span)
+                )
+            }
+            DuplicatedLiteralPattern {
+                first_occurrence,
+                match_span,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Duplicated literal pattern {} in match {}",
+                    fmt_span(first_occurrence),
+                    fmt_span(match_span)
+                )
+            }
+            EmptyMatchBody { span } => {
+                write!(f, "Match body cannot be empty in {}", fmt_span(span))
+            }
+            NonExhaustivePattern { span, ty } => {
+                write!(
+                    f,
+                    "Non-exhaustive patterns for type {}, all possible values must be covered in {}",
+                    ty, fmt_span(span)
+                )
+            }
+            MutablePathsOverlap {
+                a_span,
+                b_span,
+                fn_span,
+            } => {
+                write!(
+                    f,
+                    "Mutable paths overlap: {} and {} when calling {}",
+                    fmt_span(a_span),
+                    fmt_span(b_span),
+                    fmt_span(fn_span),
+                )
+            }
+            UndefinedVarInStringFormatting {
+                var_span,
+                string_span,
+            } => {
+                write!(
+                    f,
+                    "Undefined variable {} used in string formatting {}",
+                    fmt_span(var_span),
+                    fmt_span(string_span),
+                )
+            }
+            InvalidEffectDependency {
+                source,
+                source_span,
+                target,
+                target_span,
+            } => {
+                write!(
+                    f,
+                    "Invalid effect dependency: {} due to {} is incompatible with {} due to {}",
+                    source,
+                    fmt_span(source_span),
+                    target,
+                    fmt_span(target_span),
+                )
+            }
+            UnknownProperty {
+                scope,
+                variable,
+                cause,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Unknown {} property: {}.{}",
+                    cause.as_prefix(),
+                    scope,
+                    variable
+                )
+            }
+            Unsupported { span, reason } => {
+                write!(f, "Unsupported: {} in {}", reason, fmt_span(span))
+            }
+            Internal(msg) => write!(f, "ICE: {}", msg),
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! compilation_error {
     ($($ctor:tt)*) => {
@@ -716,8 +850,9 @@ impl CompilationError {
     ) -> Self {
         use InternalCompilationErrorImpl::*;
         match error.into_inner() {
-            SymbolNotFound(span) => compilation_error!(VariableNotFound(span)),
+            SymbolNotFound(span) => compilation_error!(SymbolNotFound(span)),
             FunctionNotFound(span) => compilation_error!(FunctionNotFound(span)),
+            TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             WrongNumberOfArguments {
                 expected,
                 expected_span,
@@ -800,9 +935,11 @@ impl CompilationError {
             DuplicatedRecordField {
                 first_occurrence,
                 second_occurrence,
+                record_span,
             } => compilation_error!(DuplicatedRecordField {
                 first_occurrence,
                 second_occurrence,
+                record_span,
             }),
             InvalidRecordField {
                 field_span,
@@ -865,9 +1002,11 @@ impl CompilationError {
             DuplicatedVariant {
                 first_occurrence,
                 second_occurrence,
+                match_span,
             } => compilation_error!(DuplicatedVariant {
                 first_occurrence,
                 second_occurrence,
+                match_span,
             }),
             TraitImplNotFound {
                 trait_ref,
@@ -881,19 +1020,48 @@ impl CompilationError {
                     .collect(),
                 fn_span,
             }),
+            MethodNotPartOfTrait { trait_ref, fn_span } => {
+                compilation_error!(MethodNotPartOfTrait { trait_ref, fn_span })
+            }
+            TraitMethodImplMissing {
+                trait_ref,
+                missings,
+                impl_span,
+            } => compilation_error!(TraitMethodImplMissing {
+                trait_ref,
+                missings,
+                impl_span,
+            }),
+            TraitMethodArgCountMismatch {
+                trait_ref,
+                index,
+                expected,
+                got,
+                args_span,
+            } => compilation_error!(TraitMethodArgCountMismatch {
+                trait_ref,
+                index,
+                expected,
+                got,
+                args_span,
+            }),
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,
+                pattern_span,
             } => compilation_error!(IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,
+                pattern_span,
             }),
             DuplicatedLiteralPattern {
                 first_occurrence,
                 second_occurrence,
+                match_span,
             } => compilation_error!(DuplicatedLiteralPattern {
                 first_occurrence,
                 second_occurrence,
+                match_span,
             }),
             EmptyMatchBody { span: cond_span } => {
                 compilation_error!(EmptyMatchBody { span: cond_span })

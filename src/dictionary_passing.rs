@@ -10,8 +10,8 @@ use std::{collections::HashMap, mem};
 
 use crate::{
     error::InternalCompilationError, format::write_with_separator_and_format_fn,
-    internal_compilation_error, module::Impls, parser_helpers::EMPTY_USTR, r#trait::TraitRef,
-    type_like::TypeLike, Location,
+    parser_helpers::EMPTY_USTR, r#trait::TraitRef, trait_solver::TraitImpls, type_like::TypeLike,
+    Location,
 };
 use itertools::process_results;
 use ustr::Ustr;
@@ -33,15 +33,22 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DictionaryReq {
     FieldIndex(Type, Ustr),
-    TraitImpl(Vec<Type>, TraitRef),
+    TraitImpl {
+        trait_ref: TraitRef,
+        input_tys: Vec<Type>,
+        // FIXME: maybe we need a span here for proper error reporting
+    },
 }
 
 impl DictionaryReq {
     pub fn new_field_index(ty: Type, field: Ustr) -> Self {
         Self::FieldIndex(ty, field)
     }
-    pub fn new_trait_impl(tys: Vec<Type>, trait_ref: TraitRef) -> Self {
-        Self::TraitImpl(tys, trait_ref)
+    pub fn new_trait_impl(trait_ref: TraitRef, input_tys: Vec<Type>) -> Self {
+        Self::TraitImpl {
+            trait_ref,
+            input_tys,
+        }
     }
 }
 impl DictionaryReq {
@@ -49,10 +56,13 @@ impl DictionaryReq {
         use DictionaryReq::*;
         match self {
             FieldIndex(ty, field) => FieldIndex(ty.instantiate(subst), *field),
-            TraitImpl(tys, trait_ref) => TraitImpl(
-                tys.iter().map(|ty| ty.instantiate(subst)).collect(),
-                trait_ref.clone(),
-            ),
+            TraitImpl {
+                trait_ref,
+                input_tys,
+            } => TraitImpl {
+                trait_ref: trait_ref.clone(),
+                input_tys: input_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
+            },
         }
     }
 }
@@ -66,9 +76,12 @@ impl FmtWithModuleEnv for DictionaryReq {
         use DictionaryReq::*;
         match self {
             FieldIndex(ty, field) => write!(f, "{} field {}", ty.format_with(env), field),
-            TraitImpl(tys, trait_ref) => {
+            TraitImpl {
+                trait_ref,
+                input_tys,
+            } => {
                 write_with_separator_and_format_fn(
-                    tys.iter(),
+                    input_tys.iter(),
                     ", ",
                     |ty, f| write!(f, "{}", ty.format_with(env)),
                     f,
@@ -94,11 +107,16 @@ pub fn find_field_dict_index(dicts: &DictionariesReq, ty: Type, field: &str) -> 
 pub fn find_trait_impl_dict_index(
     dicts: &DictionariesReq,
     trait_ref: &TraitRef,
-    tys: &[Type],
+    input_tys: &[Type],
 ) -> Option<usize> {
     dicts.iter().position(|dict| {
-        if let DictionaryReq::TraitImpl(tys2, trait_ref2) = dict {
-            tys == tys2 && trait_ref == trait_ref2
+        if let DictionaryReq::TraitImpl {
+            trait_ref: trait_ref2,
+            input_tys: tys2,
+            ..
+        } = dict
+        {
+            input_tys == tys2 && trait_ref == trait_ref2
         } else {
             false
         }
@@ -148,22 +166,15 @@ fn extra_args_from_inst_data(
                     };
                     (node_kind, int_type())
                 }
-                TraitImpl(input_tys, trait_ref) => {
+                TraitImpl { trait_ref, input_tys, .. } => {
                     // Build a fake type for the trait function array as we might not know the trait output type at this point.
                     let fns_tuple_ty = vec![Type::never(); trait_ref.functions.len()];
                     // Is the trait fully resolved?
                     let resolved = input_tys.iter().all(Type::is_constant);
                     let node_kind = if resolved {
                         // Fully resolved, look up the trait implementation and build the trait function array.
-                        let key = (trait_ref.clone(), input_tys.clone());
-                        let trait_impl = ctx.trait_impls.get(&key).ok_or_else(|| {
-                            internal_compilation_error!(TraitImplNotFound {
-                                trait_ref: trait_ref.clone(),
-                                input_tys: input_tys.clone(),
-                                fn_span: span,
-                            })
-                        })?;
-                        K::Immediate(ir::Immediate::new(trait_impl.functions.clone()))
+                        let functions = ctx.trait_impls.get_functions(trait_ref, input_tys, span)?;
+                        K::Immediate(ir::Immediate::new(functions.clone()))
                     } else {
                         // Not fully resolved, it must be in the input dictionaries, look for it.
                         let index = find_trait_impl_dict_index(ctx.dicts, trait_ref, input_tys)
@@ -220,7 +231,7 @@ pub type ModuleInstData = HashMap<FunctionPtr, DictionariesReq>;
 
 /// The context for elaborating dictionaries.
 /// All necessary information to perform dictionary elaboration.
-#[derive(Clone, Copy)]
+// #[derive(Clone, Copy)]
 pub struct DictElaborationCtx<'a> {
     /// The dictionaries for the current expression being elaborated.
     pub dicts: &'a DictionariesReq,
@@ -228,13 +239,13 @@ pub struct DictElaborationCtx<'a> {
     /// None if compiling an expression.
     pub module_inst_data: Option<&'a ModuleInstData>,
     /// All trait visible implementations.
-    pub trait_impls: &'a Impls,
+    pub trait_impls: &'a mut TraitImpls,
 }
 impl<'a> DictElaborationCtx<'a> {
     pub fn new(
         dicts: &'a DictionariesReq,
         module_inst_data: Option<&'a ModuleInstData>,
-        trait_impls: &'a Impls,
+        trait_impls: &'a mut TraitImpls,
     ) -> Self {
         Self {
             dicts,
@@ -242,12 +253,20 @@ impl<'a> DictElaborationCtx<'a> {
             trait_impls,
         }
     }
+
+    pub fn reborrow(&mut self) -> DictElaborationCtx<'_> {
+        DictElaborationCtx {
+            dicts: self.dicts,
+            module_inst_data: self.module_inst_data,
+            trait_impls: &mut *self.trait_impls,
+        }
+    }
 }
 
 impl Node {
     pub fn elaborate_dictionaries(
         &mut self,
-        ctx: DictElaborationCtx,
+        mut ctx: DictElaborationCtx,
     ) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
         match &mut self.kind {
@@ -279,7 +298,7 @@ impl Node {
                                 // Yes, recurse to elaborate the function.
                                 let mut function = function.borrow_mut();
                                 let script_fn = function.as_script_mut().unwrap();
-                                script_fn.code.elaborate_dictionaries(ctx)?;
+                                script_fn.code.elaborate_dictionaries(ctx.reborrow())?;
                                 // Build closure to capture the dictionaries of this function, if any.
                                 if !ctx.dicts.is_empty() {
                                     let captures = (0..ctx.dicts.len())
@@ -315,14 +334,14 @@ impl Node {
                 panic!("BuildClosure should not be present at this stage");
             }
             Apply(app) => {
-                app.function.elaborate_dictionaries(ctx)?;
+                app.function.elaborate_dictionaries(ctx.reborrow())?;
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx)?;
+                    arg.elaborate_dictionaries(ctx.reborrow())?;
                 }
             }
             StaticApply(app) => {
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx)?;
+                    arg.elaborate_dictionaries(ctx.reborrow())?;
                 }
                 if !app.inst_data.dicts_req.is_empty() {
                     // Build the dictionary requirements for the function by adding extra arguments before normal arguments.
@@ -374,28 +393,25 @@ impl Node {
             }
             TraitFnApply(app) => {
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx)?;
+                    arg.elaborate_dictionaries(ctx.reborrow())?;
                 }
                 assert!(
                     app.inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait function is not supported yet."
                 );
                 // Collect the input types for the trait.
-                let (input_tys, _) = app.trait_ref.io_types_given_fn(app.function_index, &app.ty);
+                let (input_tys, _output_tys) =
+                    app.trait_ref.io_types_given_fn(app.function_index, &app.ty);
                 // Is the trait fully resolved?
                 let resolved = input_tys.iter().all(Type::is_constant);
                 if resolved {
                     // Fully resolved, look up the trait implementation and replace the function directly.
-                    let key = (app.trait_ref.clone(), input_tys.clone());
-                    let trait_impl = ctx.trait_impls.get(&key).ok_or_else(|| {
-                        internal_compilation_error!(TraitImplNotFound {
-                            trait_ref: app.trait_ref.clone(),
-                            input_tys: input_tys.clone(),
-                            fn_span: app.function_span,
-                        })
-                    })?;
-                    let fn_tuple = trait_impl
-                        .functions
+                    let functions = ctx.trait_impls.get_functions(
+                        &app.trait_ref,
+                        &input_tys,
+                        app.function_span,
+                    )?;
+                    let fn_tuple = functions
                         .as_tuple()
                         .expect("Trait impl functions is not a tuple");
                     let function = fn_tuple[app.function_index]
@@ -464,16 +480,16 @@ impl Node {
             }
             Block(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx.reborrow())?;
                 }
             }
             Assign(assignment) => {
-                assignment.place.elaborate_dictionaries(ctx)?;
+                assignment.place.elaborate_dictionaries(ctx.reborrow())?;
                 assignment.value.elaborate_dictionaries(ctx)?;
             }
             Tuple(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx.reborrow())?;
                 }
             }
             Project(projection) => {
@@ -481,12 +497,12 @@ impl Node {
             }
             Record(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx.reborrow())?;
                 }
             }
             FieldAccess(access) => {
                 use TypeKind::*;
-                access.0.elaborate_dictionaries(ctx)?;
+                access.0.elaborate_dictionaries(ctx.reborrow())?;
                 let name = access.1;
                 let span = access.0.span;
                 let ty = access.0.ty;
@@ -541,22 +557,22 @@ impl Node {
             }
             Array(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx.reborrow())?;
                 }
             }
             Index(array, index) => {
-                array.elaborate_dictionaries(ctx)?;
+                array.elaborate_dictionaries(ctx.reborrow())?;
                 index.elaborate_dictionaries(ctx)?;
             }
             Case(case) => {
-                case.value.elaborate_dictionaries(ctx)?;
+                case.value.elaborate_dictionaries(ctx.reborrow())?;
                 for (_, node) in &mut case.alternatives {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx.reborrow())?;
                 }
                 case.default.elaborate_dictionaries(ctx)?;
             }
             Iterate(iteration) => {
-                iteration.iterator.elaborate_dictionaries(ctx)?;
+                iteration.iterator.elaborate_dictionaries(ctx.reborrow())?;
                 iteration.body.elaborate_dictionaries(ctx)?;
             }
         }

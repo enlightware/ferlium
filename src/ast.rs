@@ -72,7 +72,7 @@ impl<P: Phase> ModuleFunction<P> {
         args: Vec<ModuleFunctionArg>,
         args_span: Location,
         ret_ty: Option<TypeSpan>,
-        body: B<Expr<P>>,
+        body: Expr<P>,
         span: Location,
         doc: Option<String>,
     ) -> Self {
@@ -81,7 +81,7 @@ impl<P: Phase> ModuleFunction<P> {
             args,
             args_span,
             ret_ty,
-            body,
+            body: b(body),
             span,
             doc,
         }
@@ -94,49 +94,31 @@ pub type PModuleFunction = ModuleFunction<Parsed>;
 /// An AST module function after desugaring
 pub type DModuleFunction = ModuleFunction<Desugared>;
 
-/// A node of a function dependency graph
-#[derive(Debug)]
-pub struct FnDepGraphNode(pub Vec<usize>);
-
-impl crate::graph::Node for FnDepGraphNode {
-    type Index = usize;
-    fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
-        self.0.iter().copied()
-    }
+/// A trait implementation
+#[derive(Debug, Clone)]
+pub struct TraitImpl<P: Phase> {
+    pub trait_name: UstrSpan,
+    pub functions: Vec<ModuleFunction<P>>,
+    pub span: Location,
 }
+
+/// An AST trait implementation just after parsing
+pub type PTraitImpl = TraitImpl<Parsed>;
+
+/// An AST trait implementation after desugaring
+pub type DTraitImpl = TraitImpl<Desugared>;
 
 // A module is a collection of functions and types, and is the top-level structure of the AST
 #[derive(Debug, Clone, Default)]
 pub struct Module<P: Phase> {
     pub functions: Vec<ModuleFunction<P>>,
+    pub impls: Vec<TraitImpl<P>>,
     pub types: Vec<(Ustr, Type)>,
 }
 impl<P: Phase> Module<P> {
-    pub fn new_with_function(
-        name: UstrSpan,
-        args: Vec<ModuleFunctionArg>,
-        args_span: Location,
-        ret_ty: Option<TypeSpan>,
-        body: Expr<P>,
-        span: Location,
-        doc: Option<String>,
-    ) -> Self {
-        Self {
-            functions: vec![ModuleFunction::new(
-                name,
-                args,
-                args_span,
-                ret_ty,
-                b(body),
-                span,
-                doc,
-            )],
-            types: Vec::new(),
-        }
-    }
-
     pub fn extend(&mut self, other: Self) {
         self.functions.extend(other.functions);
+        self.impls.extend(other.impls);
         self.types.extend(other.types);
     }
 
@@ -154,7 +136,7 @@ impl<P: Phase> Module<P> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.functions.is_empty() && self.types.is_empty()
+        self.functions.is_empty() && self.impls.is_empty() && self.types.is_empty()
     }
 }
 
@@ -162,12 +144,59 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
     fn fmt_with_module_env(
         &self,
         f: &mut std::fmt::Formatter,
-        env: &crate::module::ModuleEnv<'_>,
+        env: &crate::module::ModuleEnv,
     ) -> std::fmt::Result {
         if !self.types.is_empty() {
             writeln!(f, "Types:")?;
             for (name, ty) in self.types.iter() {
                 writeln!(f, "  {}: {}", name, ty.format_with(env))?;
+            }
+        }
+        if !self.impls.is_empty() {
+            writeln!(f, "Trait implementations:")?;
+            for TraitImpl {
+                trait_name,
+                functions,
+                ..
+            } in self.impls.iter()
+            {
+                writeln!(f, "  impl {} {{", trait_name.0)?;
+                for ModuleFunction {
+                    name,
+                    args,
+                    ret_ty,
+                    body,
+                    doc,
+                    ..
+                } in functions.iter()
+                {
+                    if let Some(doc) = doc {
+                        writeln!(f, "    /// {}", doc)?;
+                    }
+                    write!(
+                        f,
+                        "    fn {}({})",
+                        name.0,
+                        args.iter()
+                            .map(|((name, _), ty)| if let Some((mut_ty, ty, _)) = ty {
+                                format!(
+                                    "{}: {}{}",
+                                    name,
+                                    if mut_ty.is_mutable() { "&mut " } else { "" },
+                                    ty.format_with(env)
+                                )
+                            } else {
+                                name.to_string()
+                            })
+                            .join(", ")
+                    )?;
+                    if let Some((ret_ty, _)) = ret_ty {
+                        write!(f, " → {}", ret_ty.format_with(env))?;
+                    }
+                    writeln!(f)?;
+                    body.format_ind(f, env, 3)?;
+                }
+                writeln!(f, "  }}")?;
             }
         }
         if !self.functions.is_empty() {

@@ -78,6 +78,7 @@ impl TypeInference {
                             return Err(internal_compilation_error!(DuplicatedVariant {
                                 first_occurrence: *old_tag_span,
                                 second_occurrence: *tag_span,
+                                match_span,
                             }));
                         }
                         let mut seen_identifier = HashMap::new();
@@ -87,6 +88,7 @@ impl TypeInference {
                                     IdentifierBoundMoreThanOnceInAPattern {
                                         first_occurrence: old_span,
                                         second_occurrence: *span,
+                                        pattern_span: pattern.span,
                                     }
                                 ));
                             }
@@ -375,6 +377,7 @@ impl TypeInference {
                         return Err(internal_compilation_error!(DuplicatedLiteralPattern {
                             first_occurrence: *previous_span,
                             second_occurrence: pattern.span,
+                            match_span: expected_return_span,
                         }));
                     }
                     seen_values.insert(literal.clone(), pattern.span);

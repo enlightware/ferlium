@@ -59,18 +59,23 @@ impl FunctionDefinition {
         &self,
         f: &mut fmt::Formatter,
         name: &str,
+        prefix: &str,
         env: &ModuleEnv<'_>,
     ) -> fmt::Result {
         // function.ty_scheme.format_quantifiers(f)?; write!(f, ". ")?;
         if let Some(doc) = &self.doc {
-            writeln!(f, "/// {}", doc)?;
+            writeln!(f, "{prefix}/// {}", doc)?;
         }
         if self.ty_scheme.is_just_type_and_effects() {
-            writeln!(f, "fn {name} {}", self.ty_scheme.ty.format_with(env))
+            writeln!(
+                f,
+                "{prefix}fn {name} {}",
+                self.ty_scheme.ty.format_with(env)
+            )
         } else {
             writeln!(
                 f,
-                "fn {name} {} {}",
+                "{prefix}fn {name} {} {}",
                 self.ty_scheme.ty.format_with(env),
                 self.ty_scheme.display_constraints_rust_style(env),
             )
@@ -96,6 +101,7 @@ pub trait Callable {
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
+        spacing: usize,
         indent: usize,
     ) -> std::fmt::Result;
 }
@@ -120,8 +126,6 @@ pub enum FunctionRef {
     Strong(FunctionRc),
     /// Weak references are used to avoid cycles in recursive functions
     Weak(FunctionWeak),
-    // TODO: for trait
-    // Trait(TraitRef, Ustr),
 }
 
 impl FunctionRef {
@@ -204,9 +208,10 @@ impl Callable for ScriptFunction {
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
+        spacing: usize,
         indent: usize,
     ) -> std::fmt::Result {
-        self.code.format_ind(f, env, indent)
+        self.code.format_ind(f, env, spacing, indent)
     }
 }
 
@@ -235,17 +240,18 @@ impl Callable for Closure {
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
+        spacing: usize,
         indent: usize,
     ) -> std::fmt::Result {
-        let indent_str = "⎸ ".repeat(indent);
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         writeln!(f, "{indent_str}closure of")?;
         self.function
             .get()
             .borrow()
-            .format_ind(f, env, indent + 1)?;
+            .format_ind(f, env, spacing, indent + 1)?;
         writeln!(f, "{indent_str}with captured [")?;
         for captured in &self.captured {
-            captured.format_ind(f, env, indent + 1)?;
+            captured.format_ind(f, env, spacing, indent + 1)?;
         }
         writeln!(f, "{indent_str}]")
     }
@@ -472,9 +478,10 @@ macro_rules! n_ary_native_fn {
                 &self,
                 f: &mut std::fmt::Formatter,
                 _env: &ModuleEnv<'_>,
+                spacing: usize,
                 indent: usize,
             ) -> std::fmt::Result {
-                let indent_str = "⎸ ".repeat(indent);
+                let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
                 writeln!(f, "{}{} @ {:p}", indent_str, stringify!($struct_name), &self.0)
             }
         }

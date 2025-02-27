@@ -311,6 +311,7 @@ impl TypeLike for FnType {
             arg.ty.data().visit(visitor)
         });
         self.ret.data().visit(visitor);
+        visitor.visit_eff_ty(&self.effects);
     }
 
     fn map(&self, f: &mut impl TypeMapper) -> Self {

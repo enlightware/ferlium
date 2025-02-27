@@ -271,7 +271,7 @@ macro_rules! float {
     };
 }
 
-/// An array of integer values
+/// An array of values
 #[macro_export]
 macro_rules! array {
     [] => {

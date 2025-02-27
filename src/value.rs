@@ -199,6 +199,7 @@ impl Value {
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
+        spacing: usize,
         indent: usize,
     ) -> std::fmt::Result {
         // Thread-local hash-map for cycle detection
@@ -206,7 +207,7 @@ impl Value {
             static FN_VISITED: RefCell<HashSet<FunctionPtr>> = RefCell::new(HashSet::new());
         }
 
-        let indent_str = "⎸ ".repeat(indent);
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         use Value::*;
         match self {
             Native(value) => {
@@ -219,13 +220,13 @@ impl Value {
                     writeln!(f, "{indent_str}{}", variant.tag)
                 } else {
                     writeln!(f, "{indent_str}{} ", variant.tag)?;
-                    variant.value.format_ind(f, env, indent + 1)
+                    variant.value.format_ind(f, env, spacing, indent + 1)
                 }
             }
             Tuple(tuple) => {
                 writeln!(f, "{indent_str}(")?;
                 for element in tuple.iter() {
-                    element.format_ind(f, env, indent + 1)?;
+                    element.format_ind(f, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str})")
             }
@@ -251,7 +252,7 @@ impl Value {
                     writeln!(f, "{indent_str}⎸ self")?;
                     return Ok(());
                 } else {
-                    function.format_ind(f, env, indent + 1)?;
+                    function.format_ind(f, env, spacing, indent + 1)?;
                 }
                 FN_VISITED.with(|visited| {
                     visited.borrow_mut().remove(&fn_ptr);

@@ -22,6 +22,7 @@ use ferlium::Location;
 use ferlium::{parse_module_and_expr, SubOrSameType};
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
+use ustr::ustr;
 
 use ferlium::eval::EvalCtx;
 
@@ -268,6 +269,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
         DuplicatedRecordField {
             first_occurrence,
             second_occurrence,
+            ..
         } => {
             let span = span_union_range(*first_occurrence, *second_occurrence);
             let name = &data.1[span_range(*first_occurrence)];
@@ -383,6 +385,13 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
     }
 }
 
+fn print_help() {
+    println!("Available commands:");
+    println!("\\help: Show this help message.");
+    println!("\\module: Show the current module.");
+    println!("CTRL-D: Exit the REPL.");
+}
+
 fn main() {
     // Logging
     env_logger::init();
@@ -429,6 +438,41 @@ fn main() {
         let readline = rl.readline(">> ");
         let src = match readline {
             Ok(line) => {
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some(command) = line.strip_prefix('\\') {
+                    // a meta command
+                    let args: Vec<_> = command.split(" ").collect();
+                    let store = match args[0] {
+                        "help" => {
+                            print_help();
+                            true
+                        }
+                        "module" => {
+                            let module = if let Some(arg) = args.get(1) {
+                                if let Some(module) = other_modules.get(&ustr(arg)) {
+                                    module.deref()
+                                } else {
+                                    println!("Module {} not found.", arg);
+                                    continue;
+                                }
+                            } else {
+                                &module
+                            };
+                            println!("\n{}", FormatWith::new(module, &other_modules));
+                            true
+                        }
+                        _ => {
+                            println!("Unknown command \"{command}\". Type \\help for help.");
+                            false
+                        }
+                    };
+                    if store {
+                        rl.add_history_entry(line.as_str()).unwrap();
+                    }
+                    continue;
+                }
                 rl.add_history_entry(line.as_str()).unwrap();
                 line
             }
@@ -445,9 +489,6 @@ fn main() {
                 return;
             }
         };
-        if src.is_empty() {
-            continue;
-        }
 
         // Parse input
         let parse_result = parse_module_and_expr(&src);

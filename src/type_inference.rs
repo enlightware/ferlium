@@ -20,10 +20,10 @@ use crate::{
     error::MutabilityMustBeWhat,
     internal_compilation_error,
     location::Location,
-    module::Impls,
     parser_helpers::EMPTY_USTR,
     r#trait::TraitRef,
     std::logic::bool_type,
+    trait_solver::TraitImpls,
     type_like::TypeLike,
     type_mapper::TypeMapper,
     type_substitution::{substitute_fn_type, substitute_type, substitute_types, TypeSubstituer},
@@ -166,6 +166,12 @@ impl FmtWithModuleEnv for TypeConstraint {
 /// A constraint on mutability.
 #[derive(Debug, Clone)]
 pub enum MutConstraint {
+    SameMut {
+        current: MutType,
+        current_span: Location,
+        expected: MutType,
+        expected_span: Location,
+    },
     MutBeAtLeast {
         current: MutType,
         current_span: Location,
@@ -176,10 +182,36 @@ pub enum MutConstraint {
 
 impl Display for MutConstraint {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use MutConstraint::*;
         match self {
-            MutConstraint::MutBeAtLeast {
+            SameMut {
+                current, expected, ..
+            } => write!(f, "{current} = {expected}"),
+            MutBeAtLeast {
                 current, target, ..
             } => write!(f, "{current} ≥ {target}"),
+        }
+    }
+}
+
+/// A constraint on effects.
+#[derive(Debug, Clone)]
+pub enum EffectConstraint {
+    SameEffect {
+        current: EffType,
+        current_span: Location,
+        expected: EffType,
+        expected_span: Location,
+    },
+}
+
+impl Display for EffectConstraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use EffectConstraint::*;
+        match self {
+            SameEffect {
+                current, expected, ..
+            } => write!(f, "{current} = {expected}"),
         }
     }
 }
@@ -199,7 +231,8 @@ pub struct TypeInference {
     mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     mut_constraints: Vec<MutConstraint>,
     ty_coverage_constraints: Vec<(Location, Type, Vec<Value>)>,
-    effect_constraints: InPlaceUnificationTable<EffectVarKey>,
+    effect_unification_table: InPlaceUnificationTable<EffectVarKey>,
+    effect_constraints: Vec<EffectConstraint>,
 }
 
 impl TypeInference {
@@ -229,7 +262,7 @@ impl TypeInference {
     }
 
     pub fn fresh_effect_var(&mut self) -> EffectVar {
-        self.effect_constraints.new_key(None)
+        self.effect_unification_table.new_key(None)
     }
 
     pub fn fresh_effect_var_ty(&mut self) -> EffType {
@@ -291,7 +324,9 @@ impl TypeInference {
                     (node, ty, mut_ty, no_effects())
                 }
                 // Retrieve the trait method from the environment, if it exists
-                else if let Some((module_name, _trait_descr)) = env.get_trait_function(path) {
+                else if let Some((module_name, _trait_descr)) =
+                    env.module_env.get_trait_function(path)
+                {
                     // TODO: add TraitFnImmediate for trait functions
                     let module_text = match module_name {
                         Some(name) => format!(" in module {name}"),
@@ -303,12 +338,11 @@ impl TypeInference {
                     }));
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((module_name, function)) = env.get_function(path) {
-                    let (fn_ty, inst_data) = function.definition.ty_scheme.instantiate(
-                        self,
-                        module_name,
-                        expr.span.span(),
-                    );
+                else if let Some((module_name, function)) = env.module_env.get_function(path) {
+                    let (fn_ty, inst_data) = function
+                        .definition
+                        .ty_scheme
+                        .instantiate_with_fresh_vars(self, module_name, expr.span.span());
                     let value =
                         Value::Function((FunctionRef::new_weak(&function.code), Some(*path)));
                     let node = K::Immediate(b(ir::Immediate {
@@ -504,6 +538,7 @@ impl TypeInference {
                         return Err(internal_compilation_error!(DuplicatedRecordField {
                             first_occurrence: prev_span,
                             second_occurrence: span,
+                            record_span: expr.span,
                         }));
                     }
                 }
@@ -676,7 +711,7 @@ impl TypeInference {
         use ir::NodeKind as K;
         // Get the function and its type from the environment.
         Ok(
-            if let Some((module_name, trait_descr)) = env.get_trait_function(path) {
+            if let Some((module_name, trait_descr)) = env.module_env.get_trait_function(path) {
                 let (trait_ref, function_index, definition) = trait_descr;
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     let got_span = args
@@ -692,10 +727,11 @@ impl TypeInference {
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data) =
-                    definition
-                        .ty_scheme
-                        .instantiate(self, module_name, path_span.span());
+                let (inst_fn_ty, inst_data) = definition.ty_scheme.instantiate_with_fresh_vars(
+                    self,
+                    module_name,
+                    path_span.span(),
+                );
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait function is not supported yet."
@@ -727,7 +763,7 @@ impl TypeInference {
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
-            } else if let Some((module_name, function)) = env.get_function(path) {
+            } else if let Some((module_name, function)) = env.module_env.get_function(path) {
                 if function.definition.ty_scheme.ty.args.len() != args.len() {
                     let got_span = args
                         .iter()
@@ -742,16 +778,16 @@ impl TypeInference {
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data) =
-                    function
-                        .definition
-                        .ty_scheme
-                        .instantiate(self, module_name, path_span.span());
+                let (inst_fn_ty, inst_data) = function
+                    .definition
+                    .ty_scheme
+                    .instantiate_with_fresh_vars(self, module_name, path_span.span());
                 // Get the code and make sure the types of its arguments match the expected types
                 let (args_nodes, args_effects) =
                     self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
                 // Build and return the function node, get back the function to avoid re-borrowing
                 let (_, function) = env
+                    .module_env
                     .get_function(path)
                     .expect("function not found any more after checking");
                 let ret_ty = inst_fn_ty.ret;
@@ -975,13 +1011,13 @@ impl TypeInference {
     #[allow(dead_code)]
     fn log_debug_effect_constraints(&mut self) {
         log::debug!("Effect substitution table:");
-        for i in 0..self.effect_constraints.len() {
+        for i in 0..self.effect_unification_table.len() {
             let var = EffectVar::new(i as u32);
-            let value = self.effect_constraints.probe_value(var);
+            let value = self.effect_unification_table.probe_value(var);
             match value {
                 Some(value) => log::debug!("  {var} → {}", value),
                 None => log::debug!("  {var} → {} (unbound)", {
-                    self.effect_constraints.find(var)
+                    self.effect_unification_table.find(var)
                 }),
             }
         }
@@ -1023,6 +1059,24 @@ impl TypeInference {
         });
     }
 
+    fn add_same_mut_constraint(
+        &mut self,
+        current: MutType,
+        current_span: Location,
+        expected: MutType,
+        expected_span: Location,
+    ) {
+        if current == expected {
+            return;
+        }
+        self.mut_constraints.push(MutConstraint::SameMut {
+            current,
+            current_span,
+            expected,
+            expected_span,
+        });
+    }
+
     fn add_mut_be_at_least_constraint(
         &mut self,
         current: MutType,
@@ -1044,6 +1098,56 @@ impl TypeInference {
             target,
             reason_span,
         });
+    }
+
+    fn add_same_effect_constraint(
+        &mut self,
+        current: &EffType,
+        current_span: Location,
+        expected: &EffType,
+        expected_span: Location,
+    ) {
+        if current == expected {
+            return;
+        }
+        self.effect_constraints.push(EffectConstraint::SameEffect {
+            current: current.clone(),
+            current_span,
+            expected: expected.clone(),
+            expected_span,
+        });
+    }
+
+    /// Add a constraint that the two function types must be equal.
+    /// They must have the same number of arguments.
+    pub(crate) fn add_same_fn_type_constraint(
+        &mut self,
+        current: &FnType,
+        current_span: Location,
+        expected: &FnType,
+        expected_span: Location,
+    ) {
+        for (current_arg, expected_arg) in current.args.iter().zip(expected.args.iter()) {
+            self.add_same_type_constraint(
+                current_arg.ty,
+                current_span,
+                expected_arg.ty,
+                expected_span,
+            );
+            self.add_same_mut_constraint(
+                current_arg.mut_ty,
+                current_span,
+                expected_arg.mut_ty,
+                expected_span,
+            );
+        }
+        self.add_same_type_constraint(current.ret, current_span, expected.ret, expected_span);
+        self.add_same_effect_constraint(
+            &current.effects,
+            current_span,
+            &expected.effects,
+            expected_span,
+        );
     }
 
     /// Make a new effect depending on the given effects
@@ -1076,7 +1180,7 @@ impl TypeInference {
 
         // Otherwise, we need to create a new effect variable.
         let effects = EffType::from_iter(variables.into_iter().chain(primitives).unique());
-        let effect_var = self.effect_constraints.new_key(Some(effects));
+        let effect_var = self.effect_unification_table.new_key(Some(effects));
         EffType::single_variable(effect_var)
     }
 
@@ -1087,15 +1191,17 @@ impl TypeInference {
         match (var1, var2) {
             (None, None) => eff1.union(eff2),
             (None, Some(var)) => {
-                self.effect_constraints.union_value(var, Some(eff1.clone()));
+                self.effect_unification_table
+                    .union_value(var, Some(eff1.clone()));
                 eff1.clone()
             }
             (Some(var), None) => {
-                self.effect_constraints.union_value(var, Some(eff2.clone()));
+                self.effect_unification_table
+                    .union_value(var, Some(eff2.clone()));
                 eff2.clone()
             }
             (Some(var1), Some(var2)) => {
-                self.effect_constraints.union(var1, var2);
+                self.effect_unification_table.union(var1, var2);
                 eff1.clone()
             }
         }
@@ -1103,7 +1209,7 @@ impl TypeInference {
 
     pub fn unify(
         self,
-        trait_impls: &Impls,
+        trait_impls: &mut TraitImpls,
     ) -> Result<UnifiedTypeInference, InternalCompilationError> {
         UnifiedTypeInference::unify_type_inference(self, trait_impls)
     }
@@ -1157,14 +1263,22 @@ pub struct UnifiedTypeInference {
     /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
     remaining_ty_constraints: Vec<PubTypeConstraint>,
     mut_unification_table: InPlaceUnificationTable<MutVarKey>,
-    effect_constraints: InPlaceUnificationTable<EffectVarKey>,
+    effect_unification_table: InPlaceUnificationTable<EffectVarKey>,
     effect_constraints_inv: HashMap<EffType, EffectVarKey>,
 }
 
 impl UnifiedTypeInference {
+    pub fn new_with_ty_vars(count: u32) -> Self {
+        let mut unified_ty_inf = Self::default();
+        for _ in 0..count {
+            unified_ty_inf.ty_unification_table.new_key(None);
+        }
+        unified_ty_inf
+    }
+
     pub fn unify_type_inference(
         ty_inf: TypeInference,
-        trait_impls: &Impls,
+        trait_impls: &mut TraitImpls,
     ) -> Result<Self, InternalCompilationError> {
         let TypeInference {
             ty_unification_table,
@@ -1172,13 +1286,14 @@ impl UnifiedTypeInference {
             mut_unification_table,
             mut_constraints,
             ty_coverage_constraints,
+            effect_unification_table,
             effect_constraints,
         } = ty_inf;
         let mut unified_ty_inf = UnifiedTypeInference {
             ty_unification_table,
             remaining_ty_constraints: vec![],
             mut_unification_table,
-            effect_constraints,
+            effect_unification_table,
             effect_constraints_inv: HashMap::new(),
         };
         let mut remaining_constraints = HashSet::new();
@@ -1187,6 +1302,21 @@ impl UnifiedTypeInference {
         for constraint in mut_constraints {
             use MutConstraint::*;
             match constraint {
+                SameMut {
+                    current,
+                    current_span,
+                    expected,
+                    expected_span,
+                } => {
+                    unified_ty_inf.unify_mut_must_be_at_least_or_equal(
+                        current,
+                        current_span,
+                        expected,
+                        expected_span,
+                        MutabilityMustBeContext::Value,
+                        SubOrSameType::SameType,
+                    )?;
+                }
                 MutBeAtLeast {
                     current,
                     current_span,
@@ -1246,6 +1376,24 @@ impl UnifiedTypeInference {
                 Pub(cst) => {
                     remaining_constraints.insert(cst);
                 }
+            }
+        }
+
+        // Then, solve all effect equalities.
+        for constraint in effect_constraints {
+            use EffectConstraint::*;
+            match constraint {
+                SameEffect {
+                    current,
+                    current_span,
+                    expected,
+                    expected_span,
+                } => unified_ty_inf.unify_same_effect(
+                    current,
+                    current_span,
+                    expected,
+                    expected_span,
+                )?,
             }
         }
 
@@ -1523,7 +1671,7 @@ impl UnifiedTypeInference {
                 fn_arg.effects.iter().for_each(|eff| {
                     if let Some(var) = eff.as_variable() {
                         if let Some(first_var) = first_var {
-                            self.effect_constraints.union(first_var, *var);
+                            self.effect_unification_table.union(first_var, *var);
                         } else {
                             first_var = Some(*var);
                         }
@@ -1534,7 +1682,7 @@ impl UnifiedTypeInference {
     }
 
     pub fn effect_unioned(&mut self, var: EffectVar) -> Option<EffectVar> {
-        let root = self.effect_constraints.find(var);
+        let root = self.effect_unification_table.find(var);
         if root != var {
             Some(root)
         } else {
@@ -1542,7 +1690,7 @@ impl UnifiedTypeInference {
         }
     }
 
-    fn unify_sub_type(
+    pub fn unify_sub_type(
         &mut self,
         current: Type,
         current_span: Location,
@@ -1558,7 +1706,7 @@ impl UnifiedTypeInference {
         )
     }
 
-    fn unify_same_type(
+    pub fn unify_same_type(
         &mut self,
         current: Type,
         current_span: Location,
@@ -1936,7 +2084,7 @@ impl UnifiedTypeInference {
         input_tys: &[Type],
         output_tys: &[Type],
         span: Location,
-        trait_impls: &Impls,
+        trait_impls: &mut TraitImpls,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let input_tys = self.normalize_types(input_tys);
         let output_tys = self.normalize_types(output_tys);
@@ -1944,17 +2092,10 @@ impl UnifiedTypeInference {
         let resolved = input_tys.iter().all(Type::is_constant);
         Ok(if resolved {
             // Fully resolved, validate the trait implementation.
-            let key = (trait_ref.clone(), input_tys.clone());
-            let trait_impl = trait_impls.get(&key).ok_or_else(|| {
-                internal_compilation_error!(TraitImplNotFound {
-                    trait_ref,
-                    input_tys,
-                    fn_span: span,
-                })
-            })?;
+            let impl_output_tys = trait_impls.get_output_types(&trait_ref, &input_tys, span)?;
             // Found, unify the output types.
-            assert!(output_tys.is_empty() || output_tys.len() == trait_impl.output_tys.len());
-            for (cur_ty, exp_ty) in output_tys.iter().zip(trait_impl.output_tys.iter()) {
+            assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
+            for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
                 self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
             }
             None
@@ -2129,6 +2270,80 @@ impl UnifiedTypeInference {
         }
     }
 
+    /// Make current and target the same effect type.
+    pub fn unify_same_effect(
+        &mut self,
+        current: EffType,
+        current_span: Location,
+        target: EffType,
+        target_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        let current_vars = current.inner_vars();
+        let current_any_vars = !current_vars.is_empty();
+        let target_vars = target.inner_vars();
+        let target_any_vars = !target_vars.is_empty();
+        match (current_any_vars, target_any_vars) {
+            (false, false) => {
+                if current == target {
+                    Ok(())
+                } else {
+                    Err(internal_compilation_error!(InvalidEffectDependency {
+                        source: current,
+                        source_span: current_span,
+                        target,
+                        target_span,
+                    }))
+                }
+            }
+            (true, false) => {
+                for var in current_vars {
+                    self.effect_unification_table
+                        .union_value(var, Some(target.clone()));
+                }
+                Ok(())
+            }
+            (false, true) => {
+                for var in target_vars {
+                    self.effect_unification_table
+                        .union_value(var, Some(current.clone()));
+                }
+                Ok(())
+            }
+            (true, true) => {
+                if current_vars.len() > 1 {
+                    return Err(internal_compilation_error!(Unsupported {
+                        span: current_span,
+                        reason: "Cannot unify multiple effect variables in the source".into(),
+                    }));
+                }
+                if target_vars.len() > 1 {
+                    return Err(internal_compilation_error!(Unsupported {
+                        span: target_span,
+                        reason: "Cannot unify multiple effect variables in the target".into(),
+                    }));
+                }
+                self.effect_unification_table.union_value(
+                    current_vars[0],
+                    Some(EffType::multiple_primitive(&target.inner_non_vars())),
+                );
+                self.effect_unification_table.union_value(
+                    target_vars[0],
+                    Some(EffType::multiple_primitive(&current.inner_non_vars())),
+                );
+                self.effect_unification_table
+                    .unify_var_var(current_vars[0], target_vars[0])
+                    .map_err(|_| {
+                        internal_compilation_error!(InvalidEffectDependency {
+                            source: current,
+                            source_span: current_span,
+                            target,
+                            target_span,
+                        })
+                    })
+            }
+        }
+    }
+
     pub fn add_effect_dep(
         &mut self,
         current: &EffType,
@@ -2145,7 +2360,7 @@ impl UnifiedTypeInference {
         let tgt_var = tgt_single.and_then(|eff| eff.as_variable().cloned());
         if let Some(var) = cur_var {
             // Left is a variable, put the effect dependency on the right.
-            self.effect_constraints
+            self.effect_unification_table
                 .union_value(var, Some(target.clone()));
         } else if let Some(var) = tgt_var {
             // Right is a variable, put the effect dependency to the inverted constraints,
@@ -2163,21 +2378,21 @@ impl UnifiedTypeInference {
     }
 
     pub fn expand_inv_effect_dep(&mut self, current: EffType, target: EffectVarKey) {
-        if let Some(existing_effects) = self.effect_constraints.probe_value(target) {
+        if let Some(existing_effects) = self.effect_unification_table.probe_value(target) {
             for eff in existing_effects.iter() {
                 if let Some(var) = eff.as_variable() {
                     self.expand_inv_effect_dep(current.clone(), *var);
                 }
             }
         } else {
-            self.effect_constraints.union_value(
+            self.effect_unification_table.union_value(
                 target,
                 Some(current.union(&EffType::single_variable(target))),
             );
         }
     }
 
-    pub(crate) fn substitute_in_module_function(&mut self, descr: &mut ModuleFunction) {
+    pub fn substitute_in_module_function(&mut self, descr: &mut ModuleFunction) {
         descr.definition.ty_scheme.ty = self.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
         assert!(descr.definition.ty_scheme.constraints.is_empty());
         let mut code = descr.code.borrow_mut();
@@ -2190,7 +2405,7 @@ impl UnifiedTypeInference {
         substitute_type(ty, &mut SubstituteTypes(self))
     }
 
-    fn substitute_in_types(&mut self, tys: &[Type]) -> Vec<Type> {
+    pub fn substitute_in_types(&mut self, tys: &[Type]) -> Vec<Type> {
         substitute_types(tys, &mut SubstituteTypes(self))
     }
 
@@ -2230,9 +2445,9 @@ impl UnifiedTypeInference {
     }
 
     fn resolve_effect_var(&mut self, var: EffectVar) -> EffType {
-        match self.effect_constraints.probe_value(var) {
+        match self.effect_unification_table.probe_value(var) {
             Some(effects) => SubstituteTypes(self).substitute_effect_type(&effects),
-            None => EffType::single_variable(self.effect_constraints.find(var)),
+            None => EffType::single_variable(self.effect_unification_table.find(var)),
         }
     }
 
@@ -2309,10 +2524,13 @@ impl UnifiedTypeInference {
             .iter()
             .map(|dict| match dict {
                 FieldIndex(ty, field) => FieldIndex(self.substitute_in_type(*ty), *field),
-                TraitImpl(tys, trait_ref) => TraitImpl(
-                    tys.iter().map(|ty| self.substitute_in_type(*ty)).collect(),
-                    trait_ref.clone(),
-                ),
+                TraitImpl {
+                    trait_ref,
+                    input_tys,
+                } => TraitImpl {
+                    trait_ref: trait_ref.clone(),
+                    input_tys: self.substitute_in_types(input_tys),
+                },
             })
             .collect();
     }
@@ -2338,8 +2556,10 @@ impl UnifiedTypeInference {
         }
     }
 
-    #[allow(dead_code)]
-    fn substitute_in_constraint(&mut self, constraint: &PubTypeConstraint) -> PubTypeConstraint {
+    pub fn substitute_in_constraint(
+        &mut self,
+        constraint: &PubTypeConstraint,
+    ) -> PubTypeConstraint {
         use PubTypeConstraint::*;
         match constraint {
             TupleAtIndexIs {
@@ -2447,13 +2667,13 @@ impl UnifiedTypeInference {
 
     fn log_debug_effect_constraints(&mut self) {
         log::debug!("Effect substitution table:");
-        for i in 0..self.effect_constraints.len() {
+        for i in 0..self.effect_unification_table.len() {
             let var = EffectVar::new(i as u32);
-            let value = self.effect_constraints.probe_value(var);
+            let value = self.effect_unification_table.probe_value(var);
             match value {
                 Some(value) => log::debug!("  {var} → {}", value),
                 None => log::debug!("  {var} → {} (unbound)", {
-                    self.effect_constraints.find(var)
+                    self.effect_unification_table.find(var)
                 }),
             }
         }
@@ -2552,7 +2772,7 @@ fn property_to_fn_name(
         .next()
         .map_or("".into(), |path| format!("{path}::"));
     let fn_name = format!("{}@{} {}.{}", path, access.as_prefix(), scope, variable);
-    if env.get_function(&fn_name).is_none() {
+    if env.module_env.get_function(&fn_name).is_none() {
         Err(internal_compilation_error!(UnknownProperty {
             scope: ustr(scope),
             variable: ustr(variable),

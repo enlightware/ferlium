@@ -25,6 +25,7 @@ use crate::{
     value::{NativeValue, Value},
     CompilationError, DisplayStyle, Location, Module, ModuleAndExpr, ModuleEnv, Modules,
 };
+use itertools::Itertools;
 use regex::Regex;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -114,13 +115,17 @@ fn compilation_error_to_data(
             .iter()
             .map(|(msg, span)| ErrorData::from_location(span, msg.clone()))
             .collect(),
-        VariableNotFound(span) => vec![ErrorData::from_location(
+        SymbolNotFound(span) => vec![ErrorData::from_location(
             span,
             format!("Variable {} not found", fmt_span(span)),
         )],
         FunctionNotFound(span) => vec![ErrorData::from_location(
             span,
             format!("Function {} not found", fmt_span(span)),
+        )],
+        TraitNotFound(span) => vec![ErrorData::from_location(
+            span,
+            format!("Trait {} not found", fmt_span(span)),
         )],
         WrongNumberOfArguments {
             expected,
@@ -203,6 +208,7 @@ fn compilation_error_to_data(
         DuplicatedRecordField {
             first_occurrence,
             second_occurrence,
+            ..
         } => {
             let name = fmt_span(first_occurrence);
             vec![
@@ -295,6 +301,7 @@ fn compilation_error_to_data(
         DuplicatedVariant {
             first_occurrence,
             second_occurrence,
+            ..
         } => {
             let name = fmt_span(first_occurrence);
             let text = format!("Duplicated variant {name}");
@@ -316,9 +323,50 @@ fn compilation_error_to_data(
                 ),
             )]
         }
+        MethodNotPartOfTrait { trait_ref, fn_span } => {
+            vec![ErrorData::from_location(
+                fn_span,
+                format!(
+                    "Method {} is not part of trait {}",
+                    fmt_span(fn_span),
+                    trait_ref.name
+                ),
+            )]
+        }
+        TraitMethodImplMissing {
+            trait_ref,
+            missings,
+            impl_span,
+        } => {
+            vec![ErrorData::from_location(
+                impl_span,
+                format!(
+                    "Implementation of trait {} is missing methods: {}",
+                    trait_ref.name,
+                    missings.iter().map(|m| m.as_ref()).join(", "),
+                ),
+            )]
+        }
+        TraitMethodArgCountMismatch {
+            trait_ref,
+            index,
+            expected,
+            got,
+            args_span,
+        } => {
+            let method_name = trait_ref.functions[*index].0;
+            vec![ErrorData::from_location(
+                args_span,
+                format!(
+                    "Method {} of trait {} expects {} arguments, got {}",
+                    method_name, trait_ref.name, expected, got
+                ),
+            )]
+        }
         IdentifierBoundMoreThanOnceInAPattern {
             first_occurrence,
             second_occurrence,
+            ..
         } => {
             let name_text = fmt_span(first_occurrence);
             let text = format!("Identifier {name_text} bound more than once in a pattern");
@@ -330,6 +378,7 @@ fn compilation_error_to_data(
         DuplicatedLiteralPattern {
             first_occurrence,
             second_occurrence,
+            ..
         } => {
             let name_text = fmt_span(first_occurrence);
             let text = format!("Duplicated literal pattern {name_text}");

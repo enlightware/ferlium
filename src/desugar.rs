@@ -15,8 +15,8 @@ use ustr::{ustr, Ustr};
 
 use crate::{
     ast::{
-        DExpr, DModule, DModuleFunction, ExprKind, FnDepGraphNode, Module, ModuleFunction, PExpr,
-        PModule, PModuleFunction,
+        DExpr, DModule, DModuleFunction, DTraitImpl, ExprKind, Module, ModuleFunction, PExpr,
+        PModule, PModuleFunction, PTraitImpl,
     },
     containers::{b, B},
     error::InternalCompilationError,
@@ -25,15 +25,48 @@ use crate::{
     std::math::int_type,
 };
 
+/// A node of a function dependency graph
+#[derive(Debug)]
+pub struct FnDepGraphNode(pub Vec<usize>);
+
+impl crate::graph::Node for FnDepGraphNode {
+    type Index = usize;
+    fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
+        self.0.iter().copied()
+    }
+}
+
 type FnMap = HashMap<Ustr, usize>;
 type FnDeps = HashSet<usize>;
 
 pub type FnSccs = Vec<Vec<usize>>;
 
+impl PTraitImpl {
+    pub fn desugar(self) -> Result<DTraitImpl, InternalCompilationError> {
+        let fn_map = self
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(index, func)| (func.name.0, index))
+            .collect::<HashMap<_, _>>();
+        let functions = self
+            .functions
+            .into_iter()
+            .map(|f| f.desugar(&fn_map).map(|(f, _dep_graph)| f))
+            .collect::<Result<_, _>>()?;
+        Ok(DTraitImpl {
+            span: self.span,
+            trait_name: self.trait_name,
+            functions,
+        })
+    }
+}
+
 impl PModule {
     /// Desugar a module parsed AST into a desugared AST and a list of strongly
     /// connected components of its function dependency graph, sorted topologically.
     pub fn desugar(self) -> Result<(DModule, FnSccs), InternalCompilationError> {
+        // Desugar functions
         let fn_map = self
             .functions
             .iter()
@@ -46,8 +79,18 @@ impl PModule {
         )?;
         let sccs = find_strongly_connected_components(&dependency_graph);
         let sorted_sccs = topological_sort_sccs(&dependency_graph, &sccs);
+
+        // Desugar trait implementations
+        let impls = self
+            .impls
+            .into_iter()
+            .map(|i| i.desugar())
+            .collect::<Result<_, _>>()?;
+
+        // Build result
         let module = Module {
             functions,
+            impls,
             types: self.types,
         };
         Ok((module, sorted_sccs))

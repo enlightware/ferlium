@@ -226,24 +226,42 @@ fn string_sub_string() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn serialize() {
-    assert_eq!(run(r#"serialize(())"#), variant!("None", Value::unit()));
-    assert_eq!(run(r#"serialize(true)"#), variant!("Bool", bool!(true)));
-    assert_eq!(run(r#"serialize(1)"#), variant!("Int", int!(1)));
-    assert_eq!(run(r#"serialize(1.0)"#), variant!("Float", float!(1.0)));
+fn serde() {
+    // serialize
+    assert_eq!(run("serialize(())"), variant!("None", Value::unit()));
+    assert_eq!(run("serialize(true)"), variant!("Bool", bool!(true)));
+    assert_eq!(run("serialize(1)"), variant!("Int", int!(1)));
+    assert_eq!(run("serialize(1.0)"), variant!("Float", float!(1.0)));
     assert_eq!(
         run(r#"serialize("hello")"#),
         variant!("String", string!("hello"))
     );
-    // TODO: add type annotations instead of relying to the operator type unification
-    assert_eq!(run(r#"deserialize(serialize(true)) or false"#), bool!(true));
-    assert_eq!(run(r#"deserialize(serialize(1)) + 0"#), int!(1));
-    assert_eq!(run(r#"deserialize(serialize(1.0)) + 0.0"#), float!(1.0));
     assert_eq!(
-        run(r#"string_concat(deserialize(serialize("hello")), "")"#),
+        run("serialize([1])"),
+        variant!("Seq", array![variant!("Int", int!(1))])
+    );
+    assert_eq!(
+        run("serialize([1.0])"),
+        variant!("Seq", array![variant!("Float", float!(1.0))])
+    );
+    // deserialize
+    assert_eq!(run("(deserialize(serialize(())) : ())"), Value::unit());
+    assert_eq!(run("(deserialize(serialize(true)) : bool)"), bool!(true));
+    assert_eq!(run("(deserialize(serialize(1)): int)"), int!(1));
+    assert_eq!(run("(deserialize(serialize(1.0)): float)"), float!(1.0));
+    assert_eq!(
+        run(r#"(deserialize(serialize("hello")): string)"#),
         string!("hello")
     );
-    fail_compilation(r#"serialize([1])"#).expect_trait_impl_not_found("Serialize", &["[int]"]);
+    assert_eq!(
+        run("(deserialize(Seq([Int(1), Int(1)])): [int])"),
+        int_a![1, 1]
+    );
+    assert_eq!(
+        run("(deserialize(Seq([Int(1), Int(1)])): [float])"),
+        array![float!(1.0), float!(1.0)]
+    );
+    // errors
     fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
         "Num",
         &["Bool (bool) | Float (float) | Int (int) | None | Seq ([Variant]) | String (string)"],

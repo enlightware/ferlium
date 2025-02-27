@@ -6,15 +6,22 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{collections::HashMap, fmt, ops::Deref, rc::Rc};
+use std::{
+    cell::{Ref, RefMut},
+    collections::HashMap,
+    fmt,
+    rc::Rc,
+};
 
 use crate::{
-    containers::SVec2,
-    function::{Function, FunctionDefinition},
-    r#trait::{TraitImpl, TraitRef},
-    value::Value,
+    function::FunctionDefinition,
+    ir::Node,
+    r#trait::TraitRef,
+    trait_solver::{TraitImpls, Traits},
+    typing_env::TraitFunctionDescription,
     Location,
 };
+use itertools::Itertools;
 use ustr::{ustr, Ustr};
 
 use crate::{
@@ -23,53 +30,6 @@ use crate::{
     function::FunctionRc,
     r#type::{BareNativeType, Type, TypeAliases},
 };
-
-pub type Traits = Vec<TraitRef>;
-
-/// A pair of a trait reference and a list of input types forming a key for trait implementations.
-pub type TraitImplKey = (TraitRef, Vec<Type>);
-
-/// All trait implementations in a module
-#[derive(Clone, Debug, Default)]
-pub struct Impls(HashMap<TraitImplKey, TraitImpl>);
-impl Impls {
-    /// Add a trait implementation to this module.
-    pub fn add(
-        &mut self,
-        trait_ref: TraitRef,
-        input_tys: impl Into<Vec<Type>>,
-        output_tys: impl Into<Vec<Type>>,
-        functions: impl Into<Vec<Function>>,
-    ) {
-        let input_tys = input_tys.into();
-        let output_tys = output_tys.into();
-        let functions: SVec2<_> = functions.into().into_iter().map(Value::function).collect();
-        trait_ref.validate_impl_size(&input_tys, &output_tys, functions.len());
-        let functions = Value::tuple(functions);
-        let impl_ = TraitImpl {
-            output_tys,
-            functions,
-        };
-        let key = (trait_ref, input_tys);
-        self.0.insert(key, impl_);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-impl FromIterator<(TraitImplKey, TraitImpl)> for Impls {
-    fn from_iter<I: IntoIterator<Item = (TraitImplKey, TraitImpl)>>(iter: I) -> Self {
-        Self(HashMap::from_iter(iter))
-    }
-}
-impl Deref for Impls {
-    type Target = HashMap<TraitImplKey, TraitImpl>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 /// A module function argument span, with the span of the optional type ascription.
 pub type ModuleFunctionArgSpan = (Location, Option<(Location, bool)>);
@@ -90,6 +50,16 @@ pub struct ModuleFunction {
     pub definition: FunctionDefinition,
     pub code: FunctionRc,
     pub spans: Option<ModuleFunctionSpans>,
+}
+impl ModuleFunction {
+    pub fn get_node(&self) -> Option<Ref<Node>> {
+        let code = self.code.borrow();
+        Ref::filter_map(code, |code| code.as_script().map(|s| &s.code)).ok()
+    }
+    pub fn get_node_mut(&mut self) -> Option<RefMut<Node>> {
+        let code = self.code.borrow_mut();
+        RefMut::filter_map(code, |code| code.as_script_mut().map(|s| &mut s.code)).ok()
+    }
 }
 
 pub type FunctionsMap = HashMap<Ustr, ModuleFunction>;
@@ -115,7 +85,7 @@ pub type Uses = Vec<Use>;
 #[derive(Clone, Debug, Default)]
 pub struct Module {
     pub traits: Traits,
-    pub impls: Impls,
+    pub impls: TraitImpls,
     pub functions: FunctionsMap,
     pub types: TypeAliases,
     pub uses: Uses,
@@ -125,6 +95,9 @@ pub struct Module {
 impl Module {
     /// Extend this module with other, consuming it.
     pub fn extend(&mut self, other: Self) {
+        self.traits.extend(other.traits);
+        self.impls.concrete.extend(other.impls.concrete);
+        self.impls.blanket.extend(other.impls.blanket);
         self.functions.extend(other.functions);
         self.types.extend(other.types);
         self.uses.extend(other.uses);
@@ -137,11 +110,6 @@ impl Module {
             && self.functions.is_empty()
             && self.types.is_empty()
             && self.uses.is_empty()
-    }
-
-    /// Return the trait implementations in this module.
-    pub fn impls(&self) -> &Impls {
-        &self.impls
     }
 
     /// Return the type for the source pos, if any.
@@ -176,6 +144,16 @@ impl Module {
             module.functions.get(&ustr(name))
         })
         .map(|(_, f)| f)
+    }
+
+    /// Look-up a function by name only in this module and return its script node, if it is a script function.
+    pub fn get_own_function_node(&mut self, name: Ustr) -> Option<Ref<Node>> {
+        self.functions.get(&name)?.get_node()
+    }
+
+    /// Look-up a function by name only in this module and return its mutable script node, if it is a script function.
+    pub fn get_own_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<Node>> {
+        self.functions.get_mut(&name)?.get_node_mut()
     }
 
     /// Look-up a member by name in this module or in any of the modules this module uses.
@@ -216,23 +194,6 @@ impl Module {
 
     fn format_with_modules(&self, f: &mut fmt::Formatter, modules: &Modules) -> fmt::Result {
         let env = ModuleEnv::new(self, modules);
-        if !self.types.is_empty() {
-            writeln!(f, "Types:")?;
-            for (name, ty) in self.types.iter() {
-                writeln!(f, "  {}: {}", name, ty.format_with(&env))?;
-            }
-            writeln!(f)?;
-        }
-        if !self.functions.is_empty() {
-            writeln!(f, "Functions:")?;
-            for (name, function) in self.functions.iter() {
-                function
-                    .definition
-                    .fmt_with_name_and_module_env(f, name, &env)?;
-                function.code.borrow().format_ind(f, &env, 1)?;
-            }
-            writeln!(f)?;
-        }
         if !self.uses.is_empty() {
             writeln!(f, "Uses:")?;
             for use_module in self.uses.iter() {
@@ -246,6 +207,34 @@ impl Module {
                         writeln!(f)?;
                     }
                 }
+            }
+        }
+        if !self.types.is_empty() {
+            writeln!(f, "Types:")?;
+            for (name, ty) in self.types.iter() {
+                writeln!(f, "  {}: {}", name, ty.format_with(&env))?;
+            }
+            writeln!(f, "\n")?;
+        }
+        if !self.traits.is_empty() {
+            writeln!(f, "Traits:\n")?;
+            for trait_ref in self.traits.iter() {
+                writeln!(f, "{}", trait_ref.format_with(&env))?;
+            }
+            writeln!(f)?;
+        }
+        if !self.impls.is_empty() {
+            writeln!(f, "Trait implementations:\n")?;
+            writeln!(f, "{}", self.impls.format_with(&env))?;
+        }
+        if !self.functions.is_empty() {
+            writeln!(f, "Functions:\n")?;
+            for (name, function) in self.functions.iter() {
+                function
+                    .definition
+                    .fmt_with_name_and_module_env(f, name, "", &env)?;
+                function.code.borrow().format_ind(f, &env, 1, 1)?;
+                writeln!(f)?;
             }
         }
         Ok(())
@@ -326,17 +315,84 @@ impl<'m> ModuleEnv<'m> {
         )
     }
 
-    pub fn collect_trait_impls(&self) -> Impls {
-        self.current
-            .impls
-            .iter()
-            .chain(
-                self.others
+    /// Get a function from the current module, or other ones, return the name of the module if other.
+    pub fn get_function(&'m self, name: &'m str) -> Option<(Option<Ustr>, &'m ModuleFunction)> {
+        self.get_module_member(name, &|name, module| module.functions.get(&ustr(name)))
+    }
+
+    /// Get the trait reference associated to a trait name.
+    pub fn get_trait_ref(&'m self, path: &'m str) -> Option<TraitRef> {
+        self.get_module_member(path, &|name, module| {
+            module.traits.iter().find_map(|trait_ref| {
+                if trait_ref.name == name {
+                    Some(trait_ref.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .map(|(_, t)| t)
+    }
+
+    /// Get a trait function from the current module, or other ones, return the name of the module if other.
+    pub fn get_trait_function(
+        &'m self,
+        path: &'m str,
+    ) -> Option<(Option<Ustr>, TraitFunctionDescription<'m>)> {
+        self.get_module_member(path, &|name, module| {
+            module.traits.iter().find_map(|trait_ref| {
+                trait_ref
+                    .functions
                     .iter()
-                    .flat_map(|(_, module)| module.impls.iter()),
-            )
-            .map(|(key, trait_impl)| ((key.0.clone(), key.1.clone()), trait_impl.clone()))
-            .collect()
+                    .enumerate()
+                    .find_map(|(index, function)| {
+                        if function.0 == name {
+                            Some((trait_ref.clone(), index, &function.1))
+                        } else {
+                            None
+                        }
+                    })
+            })
+        })
+    }
+
+    /// Get a member of a module, by first looking in the current module, and then in others, considering the path.
+    fn get_module_member<T>(
+        &'m self,
+        path: &'m str,
+        getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
+    ) -> Option<(Option<Ustr>, T)> {
+        self.current
+            .get_member(path, self.others, getter)
+            .or_else(|| {
+                let path = path.split("::").next_tuple();
+                if let Some(path) = path {
+                    let (module_name, function_name) = path;
+                    let module_name = ustr(module_name);
+                    self.others
+                        .get(&module_name)
+                        .and_then(|module| module.get_member(function_name, self.others, getter))
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Collect all trait implementations from this module and the others.
+    pub fn collect_trait_impls(&self) -> TraitImpls {
+        let mut combined = self.current.impls.clone();
+        for module in self.others.values() {
+            fn clone_entry<K: Clone, V: Clone>((k, v): (&K, &V)) -> (K, V) {
+                (k.clone(), v.clone())
+            }
+            combined
+                .concrete
+                .extend(module.impls.concrete.iter().map(clone_entry));
+            combined
+                .blanket
+                .extend(module.impls.blanket.iter().map(clone_entry));
+        }
+        combined
     }
 }
 

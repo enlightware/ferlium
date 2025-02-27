@@ -7,12 +7,13 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::collections::HashSet;
+use itertools::Itertools;
 
 use crate::{
-    effects::EffectVar,
+    effects::{EffType, EffectVar},
     mutability::{MutType, MutVar},
     r#type::{TypeKind, TypeVar},
+    type_like::TypeLike,
 };
 
 /// Allow for multiple TypeKind traversal strategies
@@ -20,36 +21,66 @@ pub trait TypeInnerVisitor {
     fn visit_ty_kind_start(&mut self, _ty: &TypeKind) {}
     fn visit_ty_kind_end(&mut self, _ty: &TypeKind) {}
     fn visit_mut_ty(&mut self, _mut_ty: MutType) {}
-}
-
-/// Collect inner mutability variables from a type
-pub(crate) struct MutVarsCollector<'a>(pub(crate) &'a mut Vec<MutVar>);
-impl TypeInnerVisitor for MutVarsCollector<'_> {
-    fn visit_mut_ty(&mut self, mut_ty: MutType) {
-        if let Some(var) = mut_ty.as_variable() {
-            self.0.push(*var);
-        }
-    }
+    fn visit_eff_ty(&mut self, _ef_ty: &EffType) {}
 }
 
 /// Collect inner type variables from a type
-pub(crate) struct TyVarsCollector<'a>(pub(crate) &'a mut Vec<TypeVar>);
-impl TypeInnerVisitor for TyVarsCollector<'_> {
+pub(crate) struct TyVarsCollector<'a, C: Extend<TypeVar>>(pub(crate) &'a mut C);
+impl<C: Extend<TypeVar>> TypeInnerVisitor for TyVarsCollector<'_, C> {
     fn visit_ty_kind_end(&mut self, ty: &TypeKind) {
         if let Some(var) = ty.as_variable() {
-            self.0.push(*var);
+            self.0.extend(std::iter::once(*var));
         }
     }
 }
 
-/// Collect inner effect variables from a type
-pub(crate) struct EffectVarsCollector<'a>(pub(crate) &'a mut HashSet<EffectVar>);
-impl TypeInnerVisitor for EffectVarsCollector<'_> {
-    fn visit_ty_kind_end(&mut self, ty: &TypeKind) {
-        if let TypeKind::Function(fn_type) = ty {
-            fn_type.effects.fill_with_inner_effect_vars(self.0);
+/// Collect all type variables from a list of types
+pub fn collect_ty_vars(tys: &[impl TypeLike]) -> Vec<TypeVar> {
+    let mut vars = Vec::new();
+    let mut collector = TyVarsCollector(&mut vars);
+    for ty in tys {
+        ty.visit(&mut collector);
+    }
+    vars.into_iter().unique().collect()
+}
+
+/// Collect inner mutability variables from a type
+pub(crate) struct MutVarsCollector<'a, C: Extend<MutVar>>(pub(crate) &'a mut C);
+impl<C: Extend<MutVar>> TypeInnerVisitor for MutVarsCollector<'_, C> {
+    fn visit_mut_ty(&mut self, mut_ty: MutType) {
+        if let Some(var) = mut_ty.as_variable() {
+            self.0.extend(std::iter::once(*var));
         }
     }
+}
+
+/// Collect all mutability variables from a list of types
+pub fn collect_mut_vars(tys: &[impl TypeLike]) -> Vec<MutVar> {
+    let mut vars = Vec::new();
+    let mut collector = MutVarsCollector(&mut vars);
+    for ty in tys {
+        ty.visit(&mut collector);
+    }
+    vars.into_iter().unique().collect()
+}
+
+/// Collect inner effect variables from a type
+pub(crate) struct EffectVarsCollector<'a, C: Extend<EffectVar>>(pub(crate) &'a mut C);
+impl<C: Extend<EffectVar>> TypeInnerVisitor for EffectVarsCollector<'_, C> {
+    fn visit_eff_ty(&mut self, ty: &EffType) {
+        self.0
+            .extend(ty.iter().filter_map(|effect| effect.as_variable()).copied());
+    }
+}
+
+/// Collect all effect variables from a list of types
+pub fn collect_effect_vars(tys: &[impl TypeLike]) -> Vec<EffectVar> {
+    let mut vars = Vec::new();
+    let mut collector = EffectVarsCollector(&mut vars);
+    for ty in tys {
+        ty.visit(&mut collector);
+    }
+    vars.into_iter().unique().collect()
 }
 
 /// Returns whether the type contains any of the given type variables

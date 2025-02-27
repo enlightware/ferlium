@@ -42,6 +42,7 @@ mod parser_helpers;
 pub mod std;
 mod sync;
 pub mod r#trait;
+pub mod trait_solver;
 pub mod r#type;
 mod type_inference;
 mod type_like;
@@ -191,6 +192,10 @@ pub fn add_code_to_module(
     let module_ast =
         parse_module(code).map_err(|error| compilation_error!(ParsingFailed(error)))?;
     assert_eq!(module_ast.errors(), &[]);
+    {
+        let env = ModuleEnv::new(to, other_modules);
+        log::debug!("Module AST\n{}", module_ast.format_with(&env));
+    }
 
     // Emit IR for the module.
     let module = emit_module(module_ast, other_modules, Some(to)).map_err(|error| {

@@ -533,7 +533,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Instantiates this type scheme with fresh type variables in ty_inf.
-    pub(crate) fn instantiate(
+    pub(crate) fn instantiate_with_fresh_vars(
         &self,
         ty_inf: &mut TypeInference,
         src_module_name: Option<Ustr>,
@@ -566,15 +566,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
 
     pub(crate) fn normalize(&mut self) -> InstSubstitution {
         // Build a substitution that maps each type quantifier to a fresh type variable from 0.
-        let mut ty_subst = TypeSubstitution::new();
-        self.ty_quantifiers
-            .iter_mut()
-            .enumerate()
-            .for_each(|(i, quantifier)| {
-                let new_var = TypeVar::new(i as u32);
-                ty_subst.insert(*quantifier, Type::variable(new_var));
-                *quantifier = new_var;
-            });
+        let ty_subst = normalize_types(&mut self.ty_quantifiers);
 
         // Build a substitution that maps each input effect quantifier to a fresh effect variable from 0.,
         // Note: in case of recursive functions, we might have output-only effects.
@@ -612,27 +604,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
 
     /// Extra functions parameters that must be passed to resolve polymorphism.
     pub(crate) fn extra_parameters(&self) -> Vec<DictionaryReq> {
-        use PubTypeConstraint::*;
-        self.constraints
-            .iter()
-            .filter_map(|constraint| match constraint {
-                RecordFieldIs {
-                    record_ty, field, ..
-                } => {
-                    if !record_ty.data().is_variable() {
-                        panic!("Type scheme with non-variable record type in constraints")
-                    }
-                    Some(DictionaryReq::new_field_index(*record_ty, *field))
-                }
-                HaveTrait { trait_ref, input_tys, .. } => {
-                    if input_tys.iter().all(Type::is_constant) {
-                        panic!("Type scheme with trait having only non-variable input types in constraints")
-                    }
-                    Some(DictionaryReq::new_trait_impl(input_tys.clone(), trait_ref.clone()))
-                }
-                _ => None,
-            })
-            .collect()
+        extra_parameters_from_constraints(&self.constraints)
     }
 
     pub(crate) fn format_quantifiers_math_style(
@@ -664,135 +636,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
-        use DisplayStyle::*;
-        if style == Rust && !self.constraints.is_empty() {
-            return self.format_constraints_consolidated(f, env);
-        }
-        for (i, constraint) in self.constraints.iter().enumerate() {
-            if i > 0 {
-                match style {
-                    Mathematical => write!(f, " ∧ ")?,
-                    Rust => write!(f, ", ")?,
-                }
-            }
-            match style {
-                Mathematical => write!(f, "({})", constraint.format_with(env)),
-                Rust => write!(f, "{}", constraint.format_with(env)),
-            }?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn format_constraints_consolidated(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
-        let mut first_ty = true;
-        // Build aggregated constraints, except for HaveTrait.
-        let mut aggregated = BTreeMap::new();
-        for constraint in &self.constraints {
-            use PubTypeConstraint::*;
-            match constraint {
-                TupleAtIndexIs {
-                    tuple_ty,
-                    index,
-                    element_ty,
-                    ..
-                } => {
-                    aggregated
-                        .entry(tuple_ty)
-                        .or_insert_with(|| AggregatedConstraint::Tuple(TupleConstraint::new()))
-                        .as_tuple_mut()
-                        .unwrap()
-                        .insert(*index, *element_ty);
-                }
-                RecordFieldIs {
-                    record_ty,
-                    field,
-                    element_ty,
-                    ..
-                } => {
-                    aggregated
-                        .entry(record_ty)
-                        .or_insert_with(|| AggregatedConstraint::Record(VariantConstraint::new()))
-                        .as_record_mut()
-                        .unwrap()
-                        .insert(*field, *element_ty);
-                }
-                TypeHasVariant {
-                    variant_ty,
-                    tag,
-                    payload_ty,
-                    ..
-                } => {
-                    aggregated
-                        .entry(variant_ty)
-                        .or_insert_with(|| AggregatedConstraint::Variant(VariantConstraint::new()))
-                        .as_variant_mut()
-                        .unwrap()
-                        .insert(*tag, *payload_ty);
-                }
-                HaveTrait {
-                    trait_ref,
-                    input_tys,
-                    output_tys,
-                    ..
-                } => {
-                    if first_ty {
-                        first_ty = false;
-                    } else {
-                        f.write_str(", ")?;
-                    }
-                    format_have_trait(trait_ref, input_tys, output_tys, f, env)?;
-                }
-            }
-        }
-        // Format aggregated constraints.
-        for (ty, constraint) in aggregated {
-            use AggregatedConstraint::*;
-            if first_ty {
-                first_ty = false;
-            } else {
-                f.write_str(", ")?;
-            }
-            write!(f, "{}: ", ty.format_with(env))?;
-            match constraint {
-                Tuple(tuple) => {
-                    f.write_str("(")?;
-                    let mut last_index = 0;
-                    for (index, element_ty) in tuple {
-                        while last_index < index {
-                            write!(f, "_, ")?;
-                            last_index += 1;
-                        }
-                        write!(f, "{}, ", element_ty.format_with(env))?;
-                        last_index += 1;
-                    }
-                    f.write_str("…)")?;
-                }
-                Record(record) => {
-                    f.write_str("{ ")?;
-                    for (field, element_ty) in record {
-                        write!(f, "{}: {}, ", field, element_ty.format_with(env))?;
-                    }
-                    f.write_str("… }")?;
-                }
-                Variant(variant) => {
-                    for (tag, payload_ty) in variant {
-                        if payload_ty == Type::unit() {
-                            write!(f, "{} | ", tag)?;
-                        } else if payload_ty.data().is_tuple() {
-                            write!(f, "{} {} | ", tag, payload_ty.format_with(env))?;
-                        } else {
-                            write!(f, "{} ({}) | ", tag, payload_ty.format_with(env))?;
-                        }
-                    }
-                    f.write_str("…")?;
-                }
-            }
-        }
-        Ok(())
+        format_constraints(&self.constraints, style, f, env)
     }
 
     pub(crate) fn format_quantifiers_and_constraints_math_style(
@@ -944,6 +788,181 @@ fn format_have_trait(
         )?;
     }
     write!(f, ")")
+}
+
+// Build a substitution that maps each type variable to a fresh type variable from 0.
+pub(crate) fn normalize_types(tys: &mut [TypeVar]) -> TypeSubstitution {
+    let mut ty_subst: std::collections::HashMap<TypeVar, Type> = TypeSubstitution::new();
+    tys.iter_mut().enumerate().for_each(|(i, quantifier)| {
+        let new_var = TypeVar::new(i as u32);
+        ty_subst.insert(*quantifier, Type::variable(new_var));
+        *quantifier = new_var;
+    });
+    ty_subst
+}
+
+/// Extra functions parameters that must be passed to resolve polymorphism for a list of constraints.
+pub(crate) fn extra_parameters_from_constraints(
+    constraints: &[PubTypeConstraint],
+) -> Vec<DictionaryReq> {
+    use PubTypeConstraint::*;
+    constraints
+        .iter()
+        .filter_map(|constraint| match constraint {
+            RecordFieldIs {
+                record_ty, field, ..
+            } => {
+                if !record_ty.data().is_variable() {
+                    panic!("Type scheme with non-variable record type in constraints")
+                }
+                Some(DictionaryReq::new_field_index(*record_ty, *field))
+            }
+            HaveTrait { trait_ref, input_tys, .. } => {
+                if input_tys.iter().all(Type::is_constant) {
+                    panic!("Type scheme with trait having only non-variable input types in constraints")
+                }
+                Some(DictionaryReq::new_trait_impl(trait_ref.clone(), input_tys.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn format_constraints(
+    constraints: &[PubTypeConstraint],
+    style: DisplayStyle,
+    f: &mut std::fmt::Formatter,
+    env: &ModuleEnv<'_>,
+) -> std::fmt::Result {
+    use DisplayStyle::*;
+    if style == Rust && !constraints.is_empty() {
+        return format_constraints_consolidated(constraints, f, env);
+    }
+    for (i, constraint) in constraints.iter().enumerate() {
+        if i > 0 {
+            match style {
+                Mathematical => write!(f, " ∧ ")?,
+                Rust => write!(f, ", ")?,
+            }
+        }
+        match style {
+            Mathematical => write!(f, "({})", constraint.format_with(env)),
+            Rust => write!(f, "{}", constraint.format_with(env)),
+        }?;
+    }
+    Ok(())
+}
+
+pub(crate) fn format_constraints_consolidated(
+    constraints: &[PubTypeConstraint],
+    f: &mut std::fmt::Formatter,
+    env: &ModuleEnv<'_>,
+) -> std::fmt::Result {
+    let mut first_ty = true;
+    // Build aggregated constraints, except for HaveTrait.
+    let mut aggregated = BTreeMap::new();
+    for constraint in constraints {
+        use PubTypeConstraint::*;
+        match constraint {
+            TupleAtIndexIs {
+                tuple_ty,
+                index,
+                element_ty,
+                ..
+            } => {
+                aggregated
+                    .entry(tuple_ty)
+                    .or_insert_with(|| AggregatedConstraint::Tuple(TupleConstraint::new()))
+                    .as_tuple_mut()
+                    .unwrap()
+                    .insert(*index, *element_ty);
+            }
+            RecordFieldIs {
+                record_ty,
+                field,
+                element_ty,
+                ..
+            } => {
+                aggregated
+                    .entry(record_ty)
+                    .or_insert_with(|| AggregatedConstraint::Record(VariantConstraint::new()))
+                    .as_record_mut()
+                    .unwrap()
+                    .insert(*field, *element_ty);
+            }
+            TypeHasVariant {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => {
+                aggregated
+                    .entry(variant_ty)
+                    .or_insert_with(|| AggregatedConstraint::Variant(VariantConstraint::new()))
+                    .as_variant_mut()
+                    .unwrap()
+                    .insert(*tag, *payload_ty);
+            }
+            HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                ..
+            } => {
+                if first_ty {
+                    first_ty = false;
+                } else {
+                    f.write_str(", ")?;
+                }
+                format_have_trait(trait_ref, input_tys, output_tys, f, env)?;
+            }
+        }
+    }
+    // Format aggregated constraints.
+    for (ty, constraint) in aggregated {
+        use AggregatedConstraint::*;
+        if first_ty {
+            first_ty = false;
+        } else {
+            f.write_str(", ")?;
+        }
+        write!(f, "{}: ", ty.format_with(env))?;
+        match constraint {
+            Tuple(tuple) => {
+                f.write_str("(")?;
+                let mut last_index = 0;
+                for (index, element_ty) in tuple {
+                    while last_index < index {
+                        write!(f, "_, ")?;
+                        last_index += 1;
+                    }
+                    write!(f, "{}, ", element_ty.format_with(env))?;
+                    last_index += 1;
+                }
+                f.write_str("…)")?;
+            }
+            Record(record) => {
+                f.write_str("{ ")?;
+                for (field, element_ty) in record {
+                    write!(f, "{}: {}, ", field, element_ty.format_with(env))?;
+                }
+                f.write_str("… }")?;
+            }
+            Variant(variant) => {
+                for (tag, payload_ty) in variant {
+                    if payload_ty == Type::unit() {
+                        write!(f, "{} | ", tag)?;
+                    } else if payload_ty.data().is_tuple() {
+                        write!(f, "{} {} | ", tag, payload_ty.format_with(env))?;
+                    } else {
+                        write!(f, "{} ({}) | ", tag, payload_ty.format_with(env))?;
+                    }
+                }
+                f.write_str("…")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct FormatQuantifiersAndConstraintsMathStyle<'a, T>(FormatWithModuleEnv<'a, T>);

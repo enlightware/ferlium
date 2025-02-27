@@ -116,6 +116,10 @@ pub trait TypeLike {
     }
 }
 
+pub fn instantiate_types<T: TypeLike>(tys: &[T], subst: &InstSubstitution) -> Vec<T> {
+    tys.iter().map(|ty| ty.instantiate(subst)).collect()
+}
+
 /// Something that is like a type and can be casted to a type.
 pub trait CastableToType: TypeLike {
     /// Return this as a type

@@ -161,6 +161,26 @@ impl EffType {
         }
     }
 
+    pub fn inner_vars(&self) -> Vec<EffectVar> {
+        self.0
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Variable(var) => Some(*var),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn inner_non_vars(&self) -> Vec<PrimitiveEffect> {
+        self.0
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Primitive(effect) => Some(*effect),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn any(&self) -> bool {
         !self.0.is_empty()
     }

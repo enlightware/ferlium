@@ -35,6 +35,7 @@
 		"smallvec",
 		"Stmts",
 		"Struct",
+		"substituer",
 		"subtyping",
 		"unbounds",
 		"unioned",

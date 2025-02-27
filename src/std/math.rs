@@ -165,7 +165,7 @@ pub fn add_to_module(to: &mut Module) {
     use UnaryNativeFnNN as UnaryFn;
 
     // int
-    to.impls.add(
+    to.impls.add_concrete(
         num_trait.clone(),
         [int_type()],
         [],
@@ -180,7 +180,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     let ord_trait = to.traits.iter().find(|t| t.name == "Ord").unwrap();
-    to.impls.add(
+    to.impls.add_concrete(
         ord_trait.clone(),
         [int_type()],
         [],
@@ -233,7 +233,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // float
-    to.impls.add(
+    to.impls.add_concrete(
         num_trait.clone(),
         [float_type()],
         [],
@@ -247,13 +247,13 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(isize_to_not_nan)) as Function,
         ],
     );
-    to.impls.add(
+    to.impls.add_concrete(
         ord_trait.clone(),
         [float_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
     );
-    to.impls.add(
+    to.impls.add_concrete(
         div_trait.clone(),
         [float_type()],
         [],

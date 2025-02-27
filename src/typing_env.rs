@@ -6,12 +6,11 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use itertools::Itertools;
-use ustr::{ustr, Ustr};
+use ustr::Ustr;
 
 use crate::{
     function::FunctionDefinition,
-    module::{Module, ModuleEnv, ModuleFunction},
+    module::ModuleEnv,
     mutability::MutType,
     r#trait::TraitRef,
     r#type::{FnArgType, Type},
@@ -90,55 +89,5 @@ impl<'m> TypingEnv<'m> {
             .position(|local| local.name == name)
             .map(|rev_index| self.locals.len() - 1 - rev_index)
             .map(|index| (index, self.locals[index].ty, self.locals[index].mutable))
-    }
-
-    /// Get a function from the current module, or other ones, return the name of the module if other.
-    pub fn get_function(&'m self, name: &'m str) -> Option<(Option<Ustr>, &'m ModuleFunction)> {
-        self.get_module_member(name, &|name, module| module.functions.get(&ustr(name)))
-    }
-
-    /// Get a trait function from the current module, or other ones, return the name of the module if other.
-    pub fn get_trait_function(
-        &'m self,
-        path: &'m str,
-    ) -> Option<(Option<Ustr>, TraitFunctionDescription<'m>)> {
-        self.get_module_member(path, &|name, module| {
-            module.traits.iter().find_map(|trait_ref| {
-                trait_ref
-                    .functions
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, function)| {
-                        if function.0 == name {
-                            Some((trait_ref.clone(), index, &function.1))
-                        } else {
-                            None
-                        }
-                    })
-            })
-        })
-    }
-
-    /// Get a member of a module, by first looking in the current module, and then in others, considering the path.
-    fn get_module_member<T>(
-        &'m self,
-        path: &'m str,
-        getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
-    ) -> Option<(Option<Ustr>, T)> {
-        self.module_env
-            .current
-            .get_member(path, self.module_env.others, getter)
-            .or_else(|| {
-                let path = path.split("::").next_tuple();
-                if let Some(path) = path {
-                    let (module_name, function_name) = path;
-                    let module_name = ustr(module_name);
-                    self.module_env.others.get(&module_name).and_then(|module| {
-                        module.get_member(function_name, self.module_env.others, getter)
-                    })
-                } else {
-                    None
-                }
-            })
     }
 }
