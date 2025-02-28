@@ -589,6 +589,10 @@ impl TypeAliases {
     // TODO: handle errors
     pub fn set(&mut self, alias: &str, ty: Type) {
         let alias = ustr(alias);
+        self.set_with_ustr(alias, ty);
+    }
+
+    pub fn set_with_ustr(&mut self, alias: Ustr, ty: Type) {
         self.name_to_type.insert(alias, ty);
         self.type_to_name.insert(ty, alias);
     }

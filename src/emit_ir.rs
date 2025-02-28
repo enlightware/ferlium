@@ -55,6 +55,11 @@ pub fn emit_module(
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
     let trait_impls = ModuleEnv::new(&output, others).collect_trait_impls();
 
+    // Add types to output module
+    for (name, ty) in source.types {
+        output.types.set_with_ustr(name, ty);
+    }
+
     // Process each SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
         scc.sort(); // for compatibility due to bug in effect tracking
