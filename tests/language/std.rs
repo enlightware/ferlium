@@ -249,3 +249,12 @@ fn serialize() {
         &["Bool (bool) | Float (float) | Int (int) | None | Seq ([Variant]) | String (string)"],
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn serialize_with_type_ascription() {
+    assert_eq!(
+        run("fn test() -> Variant { Seq([serialize(0)]) } test()"),
+        variant!("Seq", array![variant!("Int", int!(0))])
+    );
+}

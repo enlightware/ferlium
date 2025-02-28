@@ -1582,8 +1582,14 @@ impl UnifiedTypeInference {
         expected_span: Location,
         sub_or_same: SubOrSameType,
     ) -> Result<(), InternalCompilationError> {
+        if current == expected {
+            return Ok(());
+        }
         let current_ty = self.normalize_type(current);
         let expected_ty = self.normalize_type(expected);
+        if current == expected {
+            return Ok(());
+        }
         let cur_data = { current_ty.data().clone() };
         let exp_data = { expected_ty.data().clone() };
         use SubOrSameType::*;

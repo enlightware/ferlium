@@ -271,6 +271,19 @@ macro_rules! float {
     };
 }
 
+/// An array of integer values
+#[macro_export]
+macro_rules! array {
+    [] => {
+        Value::native(ferlium::std::array::Array::new())
+    };
+    [$($elem:expr),+ $(,)?] => {
+        Value::native(ferlium::std::array::Array::from_vec(vec![
+            $($elem),+
+        ]))
+    };
+}
+
 /// A primitive string value
 #[macro_export]
 macro_rules! string {
