@@ -201,20 +201,40 @@ pub fn fail_compilation(src: &str) -> CompilationError {
     }
 }
 
+// helper functions to construct values easily to make tests more readable
+
 /// The value of type unit
 pub fn unit() -> Value {
     Value::unit()
 }
 
-// macros to construct value easily to make tests more readable
-
 /// A primitive boolean value
-#[macro_export]
-macro_rules! bool {
-    ($b:expr) => {
-        Value::native($b)
-    };
+pub fn bool(b: bool) -> Value {
+    Value::native(b)
 }
+
+/// A primitive integer value
+pub fn int(n: isize) -> Value {
+    Value::native(n)
+}
+
+/// A primitive float value
+pub fn float(f: f64) -> Value {
+    Value::native(ferlium::std::math::Float::new(f).unwrap())
+}
+
+/// A primitive string value
+pub fn string(s: &str) -> Value {
+    use std::str::FromStr;
+    Value::native(ferlium::std::string::String::from_str(s).unwrap())
+}
+
+/// A variant value of given tag and value
+pub fn variant(tag: &str, value: Value) -> Value {
+    Value::variant(ustr(tag), value)
+}
+
+// macros to construct values easily to make tests more readable
 
 /// An array of boolean values
 #[macro_export]
@@ -226,14 +246,6 @@ macro_rules! bool_a {
         Value::native(ferlium::std::array::Array::from_vec(vec![
             $(Value::native::<bool>($elem)),+
         ]))
-    };
-}
-
-/// A primitive integer value
-#[macro_export]
-macro_rules! int {
-    ($n:expr) => {
-        Value::native::<ferlium::std::math::Int>($n)
     };
 }
 
@@ -263,11 +275,16 @@ macro_rules! int_tuple {
     };
 }
 
-/// A primitive integer value
+/// An tuple of values
 #[macro_export]
-macro_rules! float {
-    ($n:expr) => {
-        Value::native(ferlium::std::math::Float::new($n).unwrap())
+macro_rules! tuple {
+    () => {
+        Value::tuple([])
+    };
+    ($($elem:expr),+ $(,)?) => {
+        Value::tuple([
+            $($elem),+
+        ])
     };
 }
 
@@ -281,22 +298,5 @@ macro_rules! array {
         Value::native(ferlium::std::array::Array::from_vec(vec![
             $($elem),+
         ]))
-    };
-}
-
-/// A primitive string value
-#[macro_export]
-macro_rules! string {
-    ($s:expr) => {{
-        use std::str::FromStr;
-        Value::native(ferlium::std::string::String::from_str($s).unwrap())
-    }};
-}
-
-/// A variant value of given tag and value
-#[macro_export]
-macro_rules! variant {
-    ($tag:literal, $value:expr) => {
-        Value::variant(ustr::ustr($tag), $value)
     };
 }

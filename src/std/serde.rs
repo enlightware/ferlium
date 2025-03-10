@@ -37,7 +37,7 @@ pub fn add_to_module(to: &mut Module) {
             ),
         )],
     );
-    to.traits.push(serialize_trait.clone());
+    to.traits.push(serialize_trait);
     let deserialize_trait = TraitRef::new(
         DESERIALIZE_TRAIT_NAME,
         1,
@@ -51,7 +51,7 @@ pub fn add_to_module(to: &mut Module) {
             ),
         )],
     );
-    to.traits.push(deserialize_trait.clone());
+    to.traits.push(deserialize_trait);
 
     // Trait implementations are in the prelude.
 }

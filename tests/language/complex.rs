@@ -8,7 +8,7 @@
 //
 use test_log::test;
 
-use super::common::{fail_compilation, run, unit};
+use super::common::{bool, fail_compilation, int, run, unit};
 use ferlium::{error::MutabilityMustBeWhat, value::Value};
 
 #[cfg(target_arch = "wasm32")]
@@ -17,50 +17,50 @@ use wasm_bindgen_test::*;
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn logic_and_comparison() {
-    assert_eq!(run("1 < 2 and 2 < 3"), bool!(true));
-    assert_eq!(run("1 < 2 and 2 > 3"), bool!(false));
-    assert_eq!(run("1 < 2 or 2 > 3"), bool!(true));
-    assert_eq!(run("1 > 2 or 2 > 3"), bool!(false));
-    assert_eq!(run("1 < 2 and 2 < 3 and 3 < 4"), bool!(true));
-    assert_eq!(run("1 < 2 and 2 < 3 and 3 > 4"), bool!(false));
-    assert_eq!(run("1 < 2 or 2 > 3 or 3 < 4"), bool!(true));
-    assert_eq!(run("1 > 2 or 2 > 3 or 3 < 4"), bool!(true));
-    assert_eq!(run("1 > 2 or 2 > 3 or 3 > 4"), bool!(false));
-    assert_eq!(run("1 < 2 and 2 < 3 or 3 < 4"), bool!(true));
-    assert_eq!(run("1 < 2 and 2 > 3 or 3 < 4"), bool!(true));
-    assert_eq!(run("1 < 2 and 2 > 3 or 3 > 4"), bool!(false));
-    assert_eq!(run("1 > 2 and 2 < 3 or 3 < 4"), bool!(true));
-    assert_eq!(run("1 > 2 and 2 < 3 or 3 > 4"), bool!(false));
-    assert_eq!(run("1 > 2 and 2 > 3 or 3 < 4"), bool!(true));
-    assert_eq!(run("1 > 2 and 2 > 3 or 3 > 4"), bool!(false));
-    assert_eq!(run("1 < 2 or 2 < 3 and 3 < 4"), bool!(true));
-    assert_eq!(run("1 < 2 or 2 < 3 and 3 > 4"), bool!(true));
-    assert_eq!(run("1 < 2 or 2 > 3 and 3 < 4"), bool!(true));
-    assert_eq!(run("1 < 2 or 2 > 3 and 3 > 4"), bool!(true));
-    assert_eq!(run("1 > 2 or 2 < 3 and 3 < 4"), bool!(true));
-    assert_eq!(run("1 > 2 or 2 < 3 and 3 > 4"), bool!(false));
-    assert_eq!(run("1 > 2 or 2 > 3 and 3 < 4"), bool!(false));
-    assert_eq!(run("1 > 2 or 2 > 3 and 3 > 4"), bool!(false));
-    assert_eq!(run("(1 < 2 or 2 < 3) and 3 < 4"), bool!(true));
-    assert_eq!(run("(1 < 2 or 2 < 3) and 3 > 4"), bool!(false));
-    assert_eq!(run("(1 < 2 or 2 > 3) and 3 < 4"), bool!(true));
-    assert_eq!(run("(1 < 2 or 2 > 3) and 3 > 4"), bool!(false));
-    assert_eq!(run("(1 > 2 or 2 < 3) and 3 < 4"), bool!(true));
-    assert_eq!(run("(1 > 2 or 2 < 3) and 3 > 4"), bool!(false));
-    assert_eq!(run("(1 > 2 or 2 > 3) and 3 < 4"), bool!(false));
-    assert_eq!(run("(1 > 2 or 2 > 3) and 3 > 4"), bool!(false));
+    assert_eq!(run("1 < 2 and 2 < 3"), bool(true));
+    assert_eq!(run("1 < 2 and 2 > 3"), bool(false));
+    assert_eq!(run("1 < 2 or 2 > 3"), bool(true));
+    assert_eq!(run("1 > 2 or 2 > 3"), bool(false));
+    assert_eq!(run("1 < 2 and 2 < 3 and 3 < 4"), bool(true));
+    assert_eq!(run("1 < 2 and 2 < 3 and 3 > 4"), bool(false));
+    assert_eq!(run("1 < 2 or 2 > 3 or 3 < 4"), bool(true));
+    assert_eq!(run("1 > 2 or 2 > 3 or 3 < 4"), bool(true));
+    assert_eq!(run("1 > 2 or 2 > 3 or 3 > 4"), bool(false));
+    assert_eq!(run("1 < 2 and 2 < 3 or 3 < 4"), bool(true));
+    assert_eq!(run("1 < 2 and 2 > 3 or 3 < 4"), bool(true));
+    assert_eq!(run("1 < 2 and 2 > 3 or 3 > 4"), bool(false));
+    assert_eq!(run("1 > 2 and 2 < 3 or 3 < 4"), bool(true));
+    assert_eq!(run("1 > 2 and 2 < 3 or 3 > 4"), bool(false));
+    assert_eq!(run("1 > 2 and 2 > 3 or 3 < 4"), bool(true));
+    assert_eq!(run("1 > 2 and 2 > 3 or 3 > 4"), bool(false));
+    assert_eq!(run("1 < 2 or 2 < 3 and 3 < 4"), bool(true));
+    assert_eq!(run("1 < 2 or 2 < 3 and 3 > 4"), bool(true));
+    assert_eq!(run("1 < 2 or 2 > 3 and 3 < 4"), bool(true));
+    assert_eq!(run("1 < 2 or 2 > 3 and 3 > 4"), bool(true));
+    assert_eq!(run("1 > 2 or 2 < 3 and 3 < 4"), bool(true));
+    assert_eq!(run("1 > 2 or 2 < 3 and 3 > 4"), bool(false));
+    assert_eq!(run("1 > 2 or 2 > 3 and 3 < 4"), bool(false));
+    assert_eq!(run("1 > 2 or 2 > 3 and 3 > 4"), bool(false));
+    assert_eq!(run("(1 < 2 or 2 < 3) and 3 < 4"), bool(true));
+    assert_eq!(run("(1 < 2 or 2 < 3) and 3 > 4"), bool(false));
+    assert_eq!(run("(1 < 2 or 2 > 3) and 3 < 4"), bool(true));
+    assert_eq!(run("(1 < 2 or 2 > 3) and 3 > 4"), bool(false));
+    assert_eq!(run("(1 > 2 or 2 < 3) and 3 < 4"), bool(true));
+    assert_eq!(run("(1 > 2 or 2 < 3) and 3 > 4"), bool(false));
+    assert_eq!(run("(1 > 2 or 2 > 3) and 3 < 4"), bool(false));
+    assert_eq!(run("(1 > 2 or 2 > 3) and 3 > 4"), bool(false));
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lambdas_in_containers() {
-    assert_eq!(run("(|| 1,).0()"), int!(1));
-    assert_eq!(run("[|| 1][0]()"), int!(1));
-    assert_eq!(run("let i = 0; [|| 1][i]()"), int!(1));
-    assert_eq!(run("let i = 0; [|| 1][i + 0]()"), int!(1));
+    assert_eq!(run("(|| 1,).0()"), int(1));
+    assert_eq!(run("[|| 1][0]()"), int(1));
+    assert_eq!(run("let i = 0; [|| 1][i]()"), int(1));
+    assert_eq!(run("let i = 0; [|| 1][i + 0]()"), int(1));
     assert_eq!(
         run("let f = ([|i| i + 1, |x| x*x], 3); let i = 1; f.0[0](f.0[i](f.1))"),
-        int!(10)
+        int(10)
     );
 }
 
@@ -69,19 +69,19 @@ fn lambdas_in_containers() {
 fn exprs_in_match() {
     assert_eq!(
         run("match 0 { 0 => { let a = 1; a }, _ => { let a = 2; 2 } }"),
-        int!(1)
+        int(1)
     );
     assert_eq!(
         run("match 5 { 0 => { let a = 1; a }, _ => { let a = 2; 2 } }"),
-        int!(2)
+        int(2)
     );
     assert_eq!(
         run("match 0 { 0 => |x| x * 2, _ => |x| x * x } (3)"),
-        int!(6)
+        int(6)
     );
     assert_eq!(
         run("match 1 { 0 => |x| x * 2, _ => |x| x * x } (3)"),
-        int!(9)
+        int(9)
     );
     assert_eq!(run("match 0 { 0 => (1,2), _ => (2,3) }"), int_tuple!(1, 2));
     assert_eq!(run("match 1 { 0 => (1,2), _ => (2,3) }"), int_tuple!(2, 3));
@@ -90,7 +90,7 @@ fn exprs_in_match() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn stuff_in_single_if() {
-    assert_eq!(run("let mut a = 0; if true { a = a + 1}; a"), int!(1));
+    assert_eq!(run("let mut a = 0; if true { a = a + 1}; a"), int(1));
     assert_eq!(
         run("let mut a = [1]; if true { a[-1] = a[0] + 1 }; a"),
         int_a![2]
@@ -102,7 +102,7 @@ fn stuff_in_single_if() {
 fn array_and_let_polymorphism() {
     assert_eq!(
         run("let f = || []; let mut a = f(); array_append(a, 1); a[0]"),
-        int!(1)
+        int(1)
     );
     fail_compilation("let f = || []; let a = f(); ()").expect_unbound_ty_var();
     fail_compilation("let f = || []; let mut a = f(); ()").expect_unbound_ty_var();
@@ -110,7 +110,7 @@ fn array_and_let_polymorphism() {
         .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
     assert_eq!(
         run("let f = || []; let mut a = f(); array_append(a, 1); a[0]"),
-        int!(1)
+        int(1)
     );
 }
 
@@ -136,20 +136,17 @@ fn array_access_in_module_functions() {
 fn recursive_mutable_references() {
     assert_eq!(
         run("fn set_1(a) { a = 1 } fn call_set_1(a) { set_1(a) } let mut a = 0; call_set_1(a); a"),
-        int!(1)
+        int(1)
     );
     assert_eq!(
         run("fn set_1(a) { a = 1 } fn call_set_1(a) { a = 2; set_1(a) } let mut a = 0; call_set_1(a); a"),
-        int!(1)
+        int(1)
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn fn_pipes_and_if_expr() {
-    assert_eq!(run("2 |> (if true { |x| x } else { |x| -x }) ()"), int!(2));
-    assert_eq!(
-        run("2 |> (if false { |x| x } else { |x| -x }) ()"),
-        int!(-2)
-    );
+    assert_eq!(run("2 |> (if true { |x| x } else { |x| -x }) ()"), int(2));
+    assert_eq!(run("2 |> (if false { |x| x } else { |x| -x }) ()"), int(-2));
 }

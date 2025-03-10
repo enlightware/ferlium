@@ -10,7 +10,7 @@ use test_log::test;
 
 use crate::effects::test_mod as test_mod_for_effects;
 
-use super::common::{fail_compilation, run};
+use super::common::{bool, fail_compilation, float, int, run, string, variant};
 use ferlium::{
     effects::{effect, no_effects, PrimitiveEffect},
     value::Value,
@@ -41,10 +41,10 @@ fn array_prepend() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_len() {
     fail_compilation("let a = []; array_len(a)").expect_unbound_ty_var();
-    assert_eq!(run("let a = [1]; array_len(a)"), int!(1));
-    assert_eq!(run("let a = [1, 2]; array_len(a)"), int!(2));
-    assert_eq!(run("let a = [[1], [1, 1]]; array_len(a)"), int!(2));
-    assert_eq!(run("let a = [1, 1, 1]; array_len(a)"), int!(3));
+    assert_eq!(run("let a = [1]; array_len(a)"), int(1));
+    assert_eq!(run("let a = [1, 2]; array_len(a)"), int(2));
+    assert_eq!(run("let a = [[1], [1, 1]]; array_len(a)"), int(2));
+    assert_eq!(run("let a = [1, 1, 1]; array_len(a)"), int(3));
 }
 
 #[test]
@@ -92,11 +92,11 @@ fn array_map() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_any() {
-    assert_eq!(run("array_any([], |x| x == 1)"), bool!(false));
-    assert_eq!(run("array_any([1], |x| x == 1)"), bool!(true));
-    assert_eq!(run("array_any([1, 2, 3], |x| x == 1)"), bool!(true));
-    assert_eq!(run("array_any([1, 2, 3], |x| x >= 2)"), bool!(true));
-    assert_eq!(run("array_any([1, 2, 3], |x| x >= 4)"), bool!(false));
+    assert_eq!(run("array_any([], |x| x == 1)"), bool(false));
+    assert_eq!(run("array_any([1], |x| x == 1)"), bool(true));
+    assert_eq!(run("array_any([1, 2, 3], |x| x == 1)"), bool(true));
+    assert_eq!(run("array_any([1, 2, 3], |x| x >= 2)"), bool(true));
+    assert_eq!(run("array_any([1, 2, 3], |x| x >= 4)"), bool(false));
     use PrimitiveEffect::*;
     test_mod_for_effects(
         "fn f() { let a = [(1: int)]; array_any(a, |v| { v >= 1 }) }",
@@ -113,11 +113,11 @@ fn array_any() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_all() {
-    assert_eq!(run("array_all([], |x| x == 1)"), bool!(true));
-    assert_eq!(run("array_all([1], |x| x == 1)"), bool!(true));
-    assert_eq!(run("array_all([1, 2, 3], |x| x == 1)"), bool!(false));
-    assert_eq!(run("array_all([1, 2, 3], |x| x >= 1)"), bool!(true));
-    assert_eq!(run("array_all([1, 2, 3], |x| x >= 2)"), bool!(false));
+    assert_eq!(run("array_all([], |x| x == 1)"), bool(true));
+    assert_eq!(run("array_all([1], |x| x == 1)"), bool(true));
+    assert_eq!(run("array_all([1, 2, 3], |x| x == 1)"), bool(false));
+    assert_eq!(run("array_all([1, 2, 3], |x| x >= 1)"), bool(true));
+    assert_eq!(run("array_all([1, 2, 3], |x| x >= 2)"), bool(false));
     use PrimitiveEffect::*;
     test_mod_for_effects(
         "fn f() { let a = [(1: int)]; array_all(a, |v| { v >= 1 }) }",
@@ -133,27 +133,36 @@ fn array_all() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_iterators() {
+    assert_eq!(
+        run("let a = [1, 2, 3]; let mut it = array_iter(a); (array_iterator_next(it), array_iterator_next(it))"),
+        tuple!(variant("Some", int(1)), variant("Some", int(2)))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_concat() {
-    assert_eq!(run(r#"string_concat("", "")"#), string!(""));
+    assert_eq!(run(r#"string_concat("", "")"#), string(""));
     assert_eq!(
         run(r#"string_concat("hello", "world")"#),
-        string!("helloworld")
+        string("helloworld")
     );
     assert_eq!(
         run(r#"string_concat("hello", " world")"#),
-        string!("hello world")
+        string("hello world")
     );
     assert_eq!(
         run(r#"string_concat("hello ", "world")"#),
-        string!("hello world")
+        string("hello world")
     );
     assert_eq!(
         run(r#"string_concat("hello ", " world")"#),
-        string!("hello  world")
+        string("hello  world")
     );
     assert_eq!(
         run(r#"string_concat("hello ", "world!")"#),
-        string!("hello world!")
+        string("hello world!")
     );
 }
 
@@ -162,19 +171,19 @@ fn string_concat() {
 fn string_push_str() {
     assert_eq!(
         run(r#"let mut s = ""; string_push_str(s, ""); s"#),
-        string!("")
+        string("")
     );
     assert_eq!(
         run(r#"let mut s = ""; string_push_str(s, "hello"); s"#),
-        string!("hello")
+        string("hello")
     );
     assert_eq!(
         run(r#"let mut s = "hello"; string_push_str(s, " world"); s"#),
-        string!("hello world")
+        string("hello world")
     );
     assert_eq!(
         run(r#"let mut s = "hello"; string_push_str(s, " world!"); s"#),
-        string!("hello world!")
+        string("hello world!")
     );
 }
 
@@ -183,75 +192,69 @@ fn string_push_str() {
 fn string_replace() {
     assert_eq!(
         run(r#"string_replace("hello world", "world", "world!")"#),
-        string!("hello world!")
+        string("hello world!")
     );
     assert_eq!(
         run(r#"string_replace("hello world", "world", "")"#),
-        string!("hello ")
+        string("hello ")
     );
     assert_eq!(
         run(r#"string_replace("hello world", "world", "world")"#),
-        string!("hello world")
+        string("hello world")
     );
     assert_eq!(
         run(r#"string_replace("hello world", "world", "world!!")"#),
-        string!("hello world!!")
+        string("hello world!!")
     );
     assert_eq!(
         run(r#"string_replace("hello world and other world are cool", "world", "home")"#),
-        string!("hello home and other home are cool")
+        string("hello home and other home are cool")
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_sub_string() {
-    assert_eq!(run(r#"string_sub_string("hello", 0, 0)"#), string!(""));
-    assert_eq!(run(r#"string_sub_string("hello", 3, 0)"#), string!(""));
-    assert_eq!(run(r#"string_sub_string("hello", 0, 5)"#), string!("hello"));
-    assert_eq!(
-        run(r#"string_sub_string("hello", 0, 15)"#),
-        string!("hello")
-    );
-    assert_eq!(
-        run(r#"string_sub_string("hello", -5, 5)"#),
-        string!("hello")
-    );
-    assert_eq!(run(r#"string_sub_string("hello", 0, 4)"#), string!("hell"));
-    assert_eq!(run(r#"string_sub_string("hello", 0, -1)"#), string!("hell"));
-    assert_eq!(run(r#"string_sub_string("hello", 1, 4)"#), string!("ell"));
-    assert_eq!(run(r#"string_sub_string("hello", 1, -1)"#), string!("ell"));
-    assert_eq!(run(r#"string_sub_string("hello", -4, -2)"#), string!("el"));
+    assert_eq!(run(r#"string_sub_string("hello", 0, 0)"#), string(""));
+    assert_eq!(run(r#"string_sub_string("hello", 3, 0)"#), string(""));
+    assert_eq!(run(r#"string_sub_string("hello", 0, 5)"#), string("hello"));
+    assert_eq!(run(r#"string_sub_string("hello", 0, 15)"#), string("hello"));
+    assert_eq!(run(r#"string_sub_string("hello", -5, 5)"#), string("hello"));
+    assert_eq!(run(r#"string_sub_string("hello", 0, 4)"#), string("hell"));
+    assert_eq!(run(r#"string_sub_string("hello", 0, -1)"#), string("hell"));
+    assert_eq!(run(r#"string_sub_string("hello", 1, 4)"#), string("ell"));
+    assert_eq!(run(r#"string_sub_string("hello", 1, -1)"#), string("ell"));
+    assert_eq!(run(r#"string_sub_string("hello", -4, -2)"#), string("el"));
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn serde() {
     // serialize
-    assert_eq!(run("serialize(())"), variant!("None", Value::unit()));
-    assert_eq!(run("serialize(true)"), variant!("Bool", bool!(true)));
-    assert_eq!(run("serialize(1)"), variant!("Int", int!(1)));
-    assert_eq!(run("serialize(1.0)"), variant!("Float", float!(1.0)));
+    assert_eq!(run("serialize(())"), variant("None", Value::unit()));
+    assert_eq!(run("serialize(true)"), variant("Bool", bool(true)));
+    assert_eq!(run("serialize(1)"), variant("Int", int(1)));
+    assert_eq!(run("serialize(1.0)"), variant("Float", float(1.0)));
     assert_eq!(
         run(r#"serialize("hello")"#),
-        variant!("String", string!("hello"))
+        variant("String", string("hello"))
     );
     assert_eq!(
         run("serialize([1])"),
-        variant!("Seq", array![variant!("Int", int!(1))])
+        variant("Seq", array![variant("Int", int(1))])
     );
     assert_eq!(
         run("serialize([1.0])"),
-        variant!("Seq", array![variant!("Float", float!(1.0))])
+        variant("Seq", array![variant("Float", float(1.0))])
     );
     // deserialize
     assert_eq!(run("(deserialize(serialize(())) : ())"), Value::unit());
-    assert_eq!(run("(deserialize(serialize(true)) : bool)"), bool!(true));
-    assert_eq!(run("(deserialize(serialize(1)): int)"), int!(1));
-    assert_eq!(run("(deserialize(serialize(1.0)): float)"), float!(1.0));
+    assert_eq!(run("(deserialize(serialize(true)) : bool)"), bool(true));
+    assert_eq!(run("(deserialize(serialize(1)): int)"), int(1));
+    assert_eq!(run("(deserialize(serialize(1.0)): float)"), float(1.0));
     assert_eq!(
         run(r#"(deserialize(serialize("hello")): string)"#),
-        string!("hello")
+        string("hello")
     );
     assert_eq!(
         run("(deserialize(Seq([Int(1), Int(1)])): [int])"),
@@ -259,7 +262,7 @@ fn serde() {
     );
     assert_eq!(
         run("(deserialize(Seq([Int(1), Int(1)])): [float])"),
-        array![float!(1.0), float!(1.0)]
+        array![float(1.0), float(1.0)]
     );
     // errors
     fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
@@ -273,6 +276,6 @@ fn serde() {
 fn serialize_with_type_ascription() {
     assert_eq!(
         run("fn test() -> Variant { Seq([serialize(0)]) } test()"),
-        variant!("Seq", array![variant!("Int", int!(0))])
+        variant("Seq", array![variant("Int", int(0))])
     );
 }

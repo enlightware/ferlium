@@ -16,7 +16,7 @@ pub fn option_type(inner: Type) -> Type {
     variant_type(&[("None", Type::unit()), ("Some", inner)])
 }
 
-pub fn gen_option_type() -> Type {
+pub fn option_type_generic() -> Type {
     option_type(Type::variable_id(0))
 }
 
