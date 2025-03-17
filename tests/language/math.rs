@@ -45,8 +45,11 @@ fn num() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn int_div() {
     assert_eq!(run("idiv(7, 2)"), int(3));
+    assert_eq!(run("idiv(-7, 2)"), int(-3));
     assert_eq!(run("idiv(idiv(12, 3), 2)"), int(2));
     assert_eq!(run("idiv(12, idiv(3, 2))"), int(12));
+    assert_eq!(run("idiv_euclid(7, 2)"), int(3));
+    assert_eq!(run("idiv_euclid(-7, 2)"), int(-4));
     assert_eq!(run("rem(0, 3)"), int(0));
     assert_eq!(run("rem(1, 3)"), int(1));
     assert_eq!(run("rem(2, 3)"), int(2));

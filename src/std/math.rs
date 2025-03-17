@@ -202,6 +202,21 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.functions.insert(
+        ustr("idiv_euclid"),
+        BinaryNativeFnNNFN::description_with_default_ty(
+            |lhs: isize, rhs: isize| {
+                if rhs == 0 {
+                    Err(DivisionByZero)
+                } else {
+                    Ok(lhs.div_euclid(rhs))
+                }
+            },
+            ["lhs", "rhs"],
+            Some("Calculates the quotient of Euclidean division of `lhs` by `rhs`."),
+            no_effects(),
+        ),
+    );
+    to.functions.insert(
         ustr("rem"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
