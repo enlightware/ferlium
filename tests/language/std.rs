@@ -19,7 +19,14 @@ use ferlium::{
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
-// TODO: add array from iterator
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn range_iterators() {
+    assert_eq!(
+        run("let r = range(0, 2); let mut it = iter(r); (next(it), next(it))"),
+        tuple!(variant("Some", int(0)), variant("Some", int(1)))
+    );
+}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

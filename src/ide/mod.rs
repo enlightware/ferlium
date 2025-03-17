@@ -21,7 +21,7 @@ use crate::{
     eval::{EvalCtx, ValOrMut},
     module::{FmtWithModuleEnv, ModuleFunction, Uses},
     r#type::{tuple_type, FnArgType, Type},
-    std::{new_module_with_prelude, new_std_module_env},
+    std::{new_module_using_std, new_std_modules},
     value::{NativeValue, Value},
     CompilationError, DisplayStyle, Location, Module, ModuleAndExpr, ModuleEnv, Modules,
 };
@@ -484,8 +484,8 @@ impl Compiler {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new() -> Self {
         Self {
-            modules: new_std_module_env(),
-            user_module: ModuleAndExpr::new_just_module(new_module_with_prelude()),
+            modules: new_std_modules(),
+            user_module: ModuleAndExpr::new_just_module(new_module_using_std()),
             ..Default::default()
         }
     }
@@ -633,7 +633,7 @@ impl Compiler {
 impl Compiler {
     pub fn new_with_modules(modules: Modules, extra_uses: Uses) -> Self {
         let user_src = String::new();
-        let mut user_module = ModuleAndExpr::new_just_module(new_module_with_prelude());
+        let mut user_module = ModuleAndExpr::new_just_module(new_module_using_std());
         user_module.module.uses.extend(extra_uses.iter().cloned());
         Self {
             modules,

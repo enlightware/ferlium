@@ -169,21 +169,29 @@ pub fn emit_module(
                 .into_iter()
                 .map(|f| Rc::try_unwrap(f).unwrap().into_inner())
                 .collect();
-            output.impls.add_concrete(
+            let key = (trait_ref.clone(), emit_output.input_tys.clone());
+            let imp = output.impls.add_concrete(
                 trait_ref,
                 emit_output.input_tys,
                 emit_output.output_tys,
                 functions,
             );
+            trait_impls.concrete.insert(key, imp);
         } else {
-            output.impls.add_blanket(
-                trait_ref,
+            let input_tys = emit_output.input_tys.clone();
+            let imp = output.impls.add_blanket(
+                trait_ref.clone(),
                 emit_output.input_tys,
                 emit_output.output_tys,
                 emit_output.ty_var_count,
                 emit_output.constraints,
                 functions,
             );
+            trait_impls
+                .blanket
+                .entry(trait_ref)
+                .or_default()
+                .push((input_tys, imp));
         }
     }
 

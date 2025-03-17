@@ -1198,7 +1198,7 @@ mod tests {
         std::{
             logic::bool_type,
             math::{int_type, Int},
-            new_module_with_prelude, new_std_module_env,
+            new_module_using_std, new_std_modules,
         },
     };
 
@@ -1206,8 +1206,8 @@ mod tests {
 
     #[test]
     fn parse_and_format() {
-        let std_env = new_std_module_env();
-        let current_module = new_module_with_prelude();
+        let std_env = new_std_modules();
+        let current_module = new_module_using_std();
         let mod_env = ModuleEnv::new(&current_module, &std_env);
         let check = |name: &str| {
             let ty = parse_concrete_type(name).unwrap();

@@ -12,7 +12,7 @@ use ustr::ustr;
 
 use crate::{
     effects::no_effects,
-    function::{BinaryNativeFnNNN, UnaryNativeFnMV},
+    function::{BinaryNativeFnNNN, UnaryNativeFnMV, UnaryNativeFnNN},
     module::{Module, ModuleFunction},
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
@@ -35,23 +35,23 @@ impl Range {
         Self { start, end }
     }
 
-    // pub fn iter(self) -> RangeIterator {
-    //     RangeIterator {
-    //         range: self,
-    //         next: self.start,
-    //     }
-    // }
+    pub fn iter(self) -> RangeIterator {
+        RangeIterator {
+            range: self,
+            next: self.start,
+        }
+    }
 }
 
-// impl NativeDisplay for Range {
-//     fn native_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         write!(f, "{}‥{}", self.start, self.end)
-//     }
-// }
+impl NativeDisplay for Range {
+    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}‥{}", self.start, self.end)
+    }
+}
 
-// pub fn range_type() -> Type {
-//     Type::native::<Range>(vec![])
-// }
+pub fn range_type() -> Type {
+    Type::primitive::<Range>()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RangeIterator {
@@ -116,14 +116,28 @@ impl NativeDisplay for RangeIterator {
 }
 
 pub fn range_iterator_type() -> Type {
-    Type::native::<RangeIterator>(vec![])
+    Type::primitive::<RangeIterator>()
 }
 
 pub fn add_to_module(to: &mut Module) {
     // Types
+    to.types.set("range", range_type());
     to.types.set("range_iterator", range_iterator_type());
 
     // Functions
+    to.functions.insert(
+        ustr("range"),
+        BinaryNativeFnNNN::description_with_default_ty(
+            Range::new,
+            ["start", "end"],
+            None,
+            no_effects(),
+        ),
+    );
+    to.functions.insert(
+        ustr("range_iter"),
+        UnaryNativeFnNN::description_with_default_ty(Range::iter, ["range"], None, no_effects()),
+    );
     to.functions.insert(
         ustr("range_iterator_new"),
         BinaryNativeFnNNN::description_with_default_ty(

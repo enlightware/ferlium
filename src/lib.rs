@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::new_module_with_prelude;
+use std::new_module_using_std;
 
 use emit_ir::{emit_expr, emit_module, CompiledExpr};
 use error::{CompilationError, LocatedError};
@@ -141,7 +141,7 @@ pub fn compile(
     other_modules: &Modules,
     extra_uses: &[Use],
 ) -> Result<ModuleAndExpr, CompilationError> {
-    let mut module = new_module_with_prelude();
+    let mut module = new_module_using_std();
     module.uses.extend(extra_uses.iter().cloned());
 
     // Parse the source code.

@@ -52,13 +52,13 @@ pub fn std_module() -> Module {
     module
 }
 
-pub fn new_std_module_env() -> Modules {
+pub fn new_std_modules() -> Modules {
     let mut modules: Modules = Default::default();
     modules.insert(ustr("std"), Rc::new(std_module()));
     modules
 }
 
-pub fn new_module_with_prelude() -> Module {
+pub fn new_module_using_std() -> Module {
     let mut new_module = Module::default();
     new_module.uses.push(Use::All(ustr("std")));
     new_module

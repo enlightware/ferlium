@@ -16,7 +16,7 @@ use ferlium::error::{
 };
 use ferlium::format::FormatWith;
 use ferlium::module::{FmtWithModuleEnv, ModuleEnv};
-use ferlium::std::{new_module_with_prelude, new_std_module_env};
+use ferlium::std::{new_module_using_std, new_std_modules};
 use ferlium::typing_env::Local;
 use ferlium::Location;
 use ferlium::{parse_module_and_expr, SubOrSameType};
@@ -397,8 +397,8 @@ fn main() {
     env_logger::init();
 
     // ferlium emission and evaluation contexts
-    let other_modules = new_std_module_env();
-    let mut module = new_module_with_prelude();
+    let other_modules = new_std_modules();
+    let mut module = new_module_using_std();
     let mut locals: Vec<Local> = vec![];
     let mut eval_ctx = EvalCtx::new();
 

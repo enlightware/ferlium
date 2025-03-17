@@ -15,7 +15,7 @@ use ferlium::{
     },
     module::{Module, Modules},
     r#type::{FnType, Type},
-    std::{math::int_type, new_std_module_env, option::option_type},
+    std::{math::int_type, new_std_modules, option::option_type},
     value::Value,
     ModuleAndExpr,
 };
@@ -128,7 +128,7 @@ fn test_property_module() -> Module {
 
 /// Compile and run the src and return its module and expression
 pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationError> {
-    let mut other_modules = new_std_module_env();
+    let mut other_modules = new_std_modules();
     other_modules.insert("testing".into(), Rc::new(testing_module()));
     other_modules.insert("effects".into(), Rc::new(test_effect_module()));
     other_modules.insert("props".into(), Rc::new(test_property_module()));

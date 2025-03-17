@@ -166,10 +166,15 @@ pub fn add_to_module(to: &mut Module) {
             }
         }
 
-        // Iterator for ranges
+        // Iterator and Seq for ranges
         impl Iterator {
             fn next(a) {
                 range_iterator_next(a)
+            }
+        }
+        impl Seq {
+            fn iter(a) {
+                range_iter(a)
             }
         }
         // Iterator and Seq for array

@@ -9,6 +9,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     rc::Rc,
 };
 
@@ -17,12 +18,13 @@ use ustr::Ustr;
 use crate::{
     containers::{b, SVec2},
     error::InternalCompilationError,
-    format::write_with_separator_and_format_fn,
+    format::{write_with_separator_and_format_fn, FormatWith},
     function::{Closure, Function, FunctionDefinition, FunctionRc, FunctionRef},
     internal_compilation_error,
-    module::FmtWithModuleEnv,
+    module::{FmtWithModuleEnv, ModuleEnv},
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar},
+    std::new_module_using_std,
     type_inference::{InstSubstitution, UnifiedTypeInference},
     type_like::TypeLike,
     type_scheme::{format_constraints_consolidated, PubTypeConstraint},
@@ -79,7 +81,7 @@ impl TraitImpls {
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
         functions: impl Into<Vec<Function>>,
-    ) {
+    ) -> Rc<ConcreteTraitImpl> {
         let input_tys = input_tys.into();
         let output_tys = output_tys.into();
         let functions: SVec2<_> = functions.into().into_iter().map(Value::function).collect();
@@ -90,7 +92,9 @@ impl TraitImpls {
             functions,
         };
         let key = (trait_ref, input_tys);
-        self.concrete.insert(key, Rc::new(imp));
+        let imp = Rc::new(imp);
+        self.concrete.insert(key, imp.clone());
+        imp
     }
 
     /// Add a blanket trait implementation to this module.
@@ -102,7 +106,7 @@ impl TraitImpls {
         ty_var_count: u32,
         constraints: impl Into<Vec<PubTypeConstraint>>,
         functions: impl Into<Vec<FunctionRc>>,
-    ) {
+    ) -> Rc<BlanketTraitImpl> {
         let input_tys = input_tys.into();
         let output_tys = output_tys.into();
         let constraints = constraints.into();
@@ -114,10 +118,12 @@ impl TraitImpls {
             output_tys,
             functions,
         };
+        let imp = Rc::new(imp);
         self.blanket
             .entry(trait_ref)
             .or_default()
-            .push((input_tys, Rc::new(imp)));
+            .push((input_tys, imp.clone()));
+        imp
     }
 
     pub fn concrete(&self) -> &HashMap<TraitImplKey, Rc<ConcreteTraitImpl>> {
@@ -288,11 +294,44 @@ impl TraitImpls {
         }
 
         // No matching implementation found.
+        let others = crate::module::Modules::default();
+        let current = new_module_using_std();
+        let module_env = ModuleEnv::new(&current, &others);
+        let filter = |tr: &TraitRef| tr.name == trait_ref.name;
+        println!("Hello {}", trait_ref.name);
+        println!(
+            "{}",
+            FormatWith {
+                value: self,
+                data: &(module_env, filter)
+            }
+        );
         Err(internal_compilation_error!(TraitImplNotFound {
             trait_ref: trait_ref.clone(),
             input_tys: input_tys.to_vec(),
             fn_span,
         }))
+    }
+
+    fn fmt_with_filter(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &crate::module::ModuleEnv<'_>,
+        filter: impl Fn(&TraitRef) -> bool,
+    ) -> std::fmt::Result {
+        for (key, imp) in &self.concrete {
+            if filter(&key.0) {
+                format_concrete_impl(key, imp, f, env)?;
+            }
+        }
+        for (trait_ref, impls) in &self.blanket {
+            if filter(trait_ref) {
+                for (input_ty, imp) in impls {
+                    format_blanket_impl(trait_ref, input_ty, imp, f, env)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -302,15 +341,16 @@ impl FmtWithModuleEnv for TraitImpls {
         f: &mut std::fmt::Formatter,
         env: &crate::module::ModuleEnv<'_>,
     ) -> std::fmt::Result {
-        for (key, imp) in &self.concrete {
-            format_concrete_impl(key, imp, f, env)?;
-        }
-        for (trait_ref, impls) in &self.blanket {
-            for (input_ty, imp) in impls {
-                format_blanket_impl(trait_ref, input_ty, imp, f, env)?;
-            }
-        }
-        Ok(())
+        self.fmt_with_filter(f, env, |_| true)
+    }
+}
+
+impl<F> fmt::Display for FormatWith<'_, TraitImpls, (ModuleEnv<'_>, F)>
+where
+    F: Fn(&TraitRef) -> bool,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt_with_filter(f, &self.data.0, &self.data.1)
     }
 }
 
