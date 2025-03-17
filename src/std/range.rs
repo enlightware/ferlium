@@ -11,8 +11,17 @@ use std::fmt;
 use ustr::ustr;
 
 use crate::{
-    effects::no_effects, function::BinaryNativeFnNNN, module::Module, r#type::Type,
-    value::NativeDisplay,
+    effects::no_effects,
+    function::{BinaryNativeFnNNN, UnaryNativeFnMV},
+    module::{Module, ModuleFunction},
+    r#type::{FnType, Type},
+    type_scheme::TypeScheme,
+    value::{NativeDisplay, Value},
+};
+
+use super::{
+    math::int_type,
+    option::{none, option_type, some},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +65,22 @@ impl RangeIterator {
             range: Range::new(start, end),
             next: start,
         }
+    }
+
+    pub fn next_value(&mut self) -> Value {
+        match self.next() {
+            Some(value) => some(Value::native(value)),
+            None => none(),
+        }
+    }
+
+    fn next_value_descr() -> ModuleFunction {
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            &[(range_iterator_type(), true)],
+            option_type(int_type()),
+            no_effects(),
+        ));
+        UnaryNativeFnMV::description_with_ty_scheme(Self::next_value, ["iterator"], None, ty_scheme)
     }
 }
 
@@ -107,5 +132,9 @@ pub fn add_to_module(to: &mut Module) {
             None,
             no_effects(),
         ),
+    );
+    to.functions.insert(
+        ustr("range_iterator_next"),
+        RangeIterator::next_value_descr(),
     );
 }

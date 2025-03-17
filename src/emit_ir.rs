@@ -219,11 +219,15 @@ where
     // First pass, populate the function table and allocate fresh mono type variables.
     let mut ty_inf = TypeInference::default();
 
-    // If we are emitting a trait implementation, create generics for the trait input and output types.
+    // If we are emitting a trait implementation, create generics for the trait input and output types
+    // and add the constraints from the trait definition to the type inference.
     let trait_output = if let Some(trait_ctx) = &trait_ctx {
         let trait_ref = &trait_ctx.trait_ref;
         let input_tys = ty_inf.fresh_type_var_tys(trait_ref.input_type_count.get() as usize);
         let output_tys = ty_inf.fresh_type_var_tys(trait_ref.output_type_count as usize);
+        for constraint in &trait_ctx.trait_ref.constraints {
+            ty_inf.add_pub_constraint(constraint.clone());
+        }
         Some(EmitTraitOutput {
             input_tys,
             output_tys,
@@ -416,11 +420,18 @@ where
         // Update quantifiers and constraints with substitution.
         quantifiers.retain(|ty_var| !subst.contains_key(ty_var));
         trait_output.ty_var_count = quantifiers.len() as u32;
-        let subst = (subst, HashMap::new());
+        let mut subst = (subst, HashMap::new());
+        let subst_size = subst.0.len();
         trait_output.constraints = constraints
             .iter()
-            .filter_map(|constraint| constraint.instantiate_and_drop_if_known_trait(&subst))
-            .collect();
+            .filter_map(|constraint| {
+                constraint
+                    .instantiate_and_drop_if_known_trait(&mut subst, trait_impls)
+                    .transpose()
+            })
+            .collect::<Result<_, _>>()?;
+        // Make sure substitution is not due to constraint processing.
+        assert_eq!(subst_size, subst.0.len());
         let dicts = extra_parameters_from_constraints(&trait_output.constraints);
 
         // Update node code with substitution and build the module instantiation data
@@ -479,7 +490,7 @@ where
 
             // Clean up constraints and validate them.
             let ConstraintValidationOutput {
-                quantifiers,
+                mut quantifiers,
                 related_constraints,
                 retained_constraints,
                 constraint_subst,
@@ -505,11 +516,16 @@ where
             drop(node);
 
             // Substitute the constraint-originating types in the node.
-            let subst = (constraint_subst, HashMap::new());
+            let mut subst = (constraint_subst, HashMap::new());
             constraints = constraints
                 .iter()
-                .filter_map(|constraint| constraint.instantiate_and_drop_if_known_trait(&subst))
-                .collect();
+                .filter_map(|constraint| {
+                    constraint
+                        .instantiate_and_drop_if_known_trait(&mut subst, trait_impls)
+                        .transpose()
+                })
+                .collect::<Result<_, _>>()?;
+            quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
             let descr = output.functions.get_mut(&name.0).unwrap();
             let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
@@ -665,22 +681,39 @@ pub fn emit_expr_unsafe(
 
     // Clean-up constraints and validate them.
     let ConstraintValidationOutput {
-        quantifiers,
+        mut quantifiers,
         retained_constraints,
         constraint_subst,
         ..
     } = validate_and_cleanup_constraints(&node.ty, &constraints, &node, true, &trait_impls)?;
-    log_dropped_constraints_expr(&constraints, &retained_constraints, module_env);
+    log_dropped_constraints_expr(
+        &constraints,
+        &retained_constraints,
+        &constraint_subst,
+        module_env,
+    );
     constraints.retain(|c| retained_constraints.contains(&constraint_ptr(c)));
     assert_eq!(constraints.len(), retained_constraints.len());
 
     // Apply the constraint-originating substitution.
-    let subst = (constraint_subst, HashMap::new());
+    let mut subst = (constraint_subst, HashMap::new());
+    let mut progress = true;
+    while progress {
+        progress = false;
+        let mut new_constraints = Vec::new();
+        for constraint in constraints.iter() {
+            if let Some(new_constraint) =
+                constraint.instantiate_and_drop_if_known_trait(&mut subst, &mut trait_impls)?
+            {
+                new_constraints.push(new_constraint);
+            } else {
+                progress = true;
+            }
+        }
+        constraints = new_constraints;
+    }
     node.instantiate(&subst);
-    constraints = constraints
-        .iter()
-        .filter_map(|constraint| constraint.instantiate_and_drop_if_known_trait(&subst))
-        .collect();
+    quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);
     }
@@ -768,7 +801,9 @@ fn select_constraints_only_these_ty_vars<'c>(
 ) -> Vec<&'c PubTypeConstraint> {
     constraints
         .iter()
-        .filter(|constraint| constraint.contains_only_ty_vars(ty_vars))
+        .filter(|constraint| {
+            constraint.is_have_trait() || constraint.contains_only_ty_vars(ty_vars)
+        })
         .collect()
 }
 
@@ -1139,20 +1174,34 @@ fn compute_num_trait_default_types(
 fn log_dropped_constraints_expr(
     all: &[PubTypeConstraint],
     retained: &HashSet<PubTypeConstraintPtr>,
+    subst: &TypeSubstitution,
     module_env: ModuleEnv,
 ) {
     if retained.len() == all.len() {
         return;
     }
+    let mut ty_vars_in_dropped = HashSet::new();
     let dropped = all
         .iter()
         .filter(|c| {
             let ptr = constraint_ptr(c);
-            !retained.contains(&ptr)
+            let dropped = !retained.contains(&ptr);
+            if dropped {
+                ty_vars_in_dropped.extend(c.inner_ty_vars());
+            }
+            dropped
         })
         .map(|c| c.format_with(&module_env));
     let dropped = iterable_to_string(dropped, " ∧ ");
     log::debug!("Dropped/resolved constraints in expr: {dropped}");
+    for (ty_var, ty) in subst {
+        if ty_vars_in_dropped.contains(ty_var) {
+            log::debug!(
+                "  Type variable {ty_var} resolved to {}",
+                ty.format_with(&module_env)
+            );
+        }
+    }
 }
 
 fn log_dropped_constraints_module(

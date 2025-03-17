@@ -135,8 +135,38 @@ fn array_all() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_iterators() {
     assert_eq!(
-        run("let a = [1, 2, 3]; let mut it = array_iter(a); (array_iterator_next(it), array_iterator_next(it))"),
+        run("let a = [1, 2, 3]; let mut it = array_iter(a); (next(it), next(it))"),
         tuple!(variant("Some", int(1)), variant("Some", int(2)))
+    );
+    assert_eq!(
+        run("let a = [1.0, 2.0, 3.0]; let mut it = array_iter(a); (next(it), next(it))"),
+        tuple!(variant("Some", float(1.0)), variant("Some", float(2.0)))
+    );
+    assert_eq!(
+        run(
+            r#"let a = ["hello", "world"]; let mut it = array_iter(a); (next(it), next(it), next(it))"#
+        ),
+        tuple!(
+            variant("Some", string("hello")),
+            variant("Some", string("world")),
+            variant("None", Value::unit())
+        )
+    );
+    assert_eq!(
+        run("let a = [1, 2, 3]; let mut it = iter(a); (next(it), next(it))"),
+        tuple!(variant("Some", int(1)), variant("Some", int(2)))
+    );
+    assert_eq!(
+        run("let a = [1.0, 2.0, 3.0]; let mut it = iter(a); (next(it), next(it))"),
+        tuple!(variant("Some", float(1.0)), variant("Some", float(2.0)))
+    );
+    assert_eq!(
+        run(r#"let a = ["hello", "world"]; let mut it = iter(a); (next(it), next(it), next(it))"#),
+        tuple!(
+            variant("Some", string("hello")),
+            variant("Some", string("world")),
+            variant("None", Value::unit())
+        )
     );
 }
 

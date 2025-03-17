@@ -7,7 +7,10 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use ustr::Ustr;
 
@@ -23,7 +26,7 @@ use crate::{
     type_inference::{InstSubstitution, UnifiedTypeInference},
     type_like::TypeLike,
     type_scheme::{format_constraints_consolidated, PubTypeConstraint},
-    type_visitor::{collect_effect_vars, collect_mut_vars, collect_ty_vars},
+    type_visitor::AllVarsCollector,
     value::Value,
     Location,
 };
@@ -189,17 +192,32 @@ impl TraitImpls {
             let blanket_impls = blanket_impls.clone();
             'impl_loop: for (imp_input_tys, imp) in blanket_impls.iter() {
                 // Sanity checks
-                assert_eq!(imp_input_tys.len(), input_tys.len());
-                assert!(collect_mut_vars(imp_input_tys).is_empty());
-                assert!(collect_effect_vars(imp_input_tys).is_empty());
-                assert_eq!(
-                    collect_ty_vars(imp_input_tys).len(),
-                    imp.ty_var_count as usize
-                );
+                #[cfg(debug_assertions)]
+                {
+                    assert_eq!(imp_input_tys.len(), input_tys.len());
+                    let mut ty_vars = HashSet::new();
+                    let mut mut_vars = HashSet::new();
+                    let mut eff_vars = HashSet::new();
+                    let mut collector = AllVarsCollector {
+                        ty_vars: &mut ty_vars,
+                        mut_vars: &mut mut_vars,
+                        effect_vars: &mut eff_vars,
+                    };
+                    for ty in imp_input_tys {
+                        ty.visit(&mut collector);
+                    }
+                    for constraint in imp.constraints.iter() {
+                        constraint.visit(&mut collector);
+                    }
+                    assert!(mut_vars.is_empty());
+                    assert!(eff_vars.is_empty());
+                    assert_eq!(ty_vars.len(), imp.ty_var_count as usize);
+                }
 
-                // Does this implementation matches the types? We try to unify the types to find out.
+                // Does this implementation matches the input types? We try to unify the types to find out.
                 let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(imp.ty_var_count);
-                for (imp_input_ty, input_ty) in input_tys.iter().zip(imp_input_tys.iter()) {
+                for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys.iter()) {
+                    assert!(input_ty.is_constant());
                     // Note: expected_span is wrong in unify_same_type, but it doesn't matter because
                     // this error is not reported to the user.
                     if ty_inf
@@ -214,11 +232,28 @@ impl TraitImpls {
                 // Yes, instantiate the constraints and get the corresponding function dictionaries
                 // (as Value containing a tuple of first-class functions).
                 let mut constraint_fn_dicts = Vec::new();
+                // Note: we assume the constraints are ordered by dependency so that the output types
+                // of one are the input types of the next.
                 for constraint in &imp.constraints {
-                    let (trait_ref, input_tys, _output_tys, _span) = ty_inf
+                    let (trait_ref, input_tys, output_tys, _span) = ty_inf
                         .substitute_in_constraint(constraint)
                         .into_have_trait()
                         .expect("Non trait constraint in blanket impl");
+                    assert!(input_tys.iter().all(Type::is_constant));
+                    let new_output_tys = self.get_output_types(&trait_ref, &input_tys, fn_span)?;
+                    for (new_output_ty, output_ty) in new_output_tys.iter().zip(output_tys.iter()) {
+                        assert!(new_output_ty.is_constant());
+                        // Note: expected_span is wrong in unify_same_type, but it doesn't matter because
+                        // this error is not reported to the user.
+                        if ty_inf
+                            .unify_same_type(*new_output_ty, fn_span, *output_ty, fn_span)
+                            .is_err()
+                        {
+                            // No, try next implementation.
+                            continue 'impl_loop;
+                        }
+                    }
+
                     let functions = self.get_functions(&trait_ref, &input_tys, fn_span);
                     let functions = match functions {
                         Ok(functions) => functions,
@@ -336,7 +371,7 @@ fn format_impl_header(
     f: &mut std::fmt::Formatter,
     env: &crate::module::ModuleEnv<'_>,
 ) -> Result<TypeSubstitution, std::fmt::Error> {
-    write!(f, "impl {} for ", trait_ref.name)?;
+    write!(f, "impl {} for <", trait_ref.name)?;
     write_with_separator_and_format_fn(
         input_tys.iter(),
         ", ",
@@ -352,6 +387,7 @@ fn format_impl_header(
             f,
         )?;
     }
+    write!(f, ">")?;
     let mut subst = TypeSubstitution::new();
     for (i, ty) in input_tys.iter().enumerate() {
         subst.insert(TypeVar::new(i as u32), *ty);

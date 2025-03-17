@@ -339,12 +339,9 @@ pub struct ArrayIterator {
 
 impl ArrayIterator {
     pub fn next_value(&mut self) -> Value {
-        if self.index < self.array.len() {
-            let item = &self.array[self.index];
-            self.index += 1;
-            some(item.clone())
-        } else {
-            none()
+        match self.next() {
+            Some(value) => some(value),
+            None => none(),
         }
     }
 
@@ -354,7 +351,21 @@ impl ArrayIterator {
             option_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnMV::description_with_ty_scheme(Self::next_value, ["array"], None, ty_scheme)
+        UnaryNativeFnMV::description_with_ty_scheme(Self::next_value, ["iterator"], None, ty_scheme)
+    }
+}
+
+impl Iterator for ArrayIterator {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.array.len() {
+            let item = &self.array[self.index];
+            self.index += 1;
+            Some(item.clone())
+        } else {
+            None
+        }
     }
 }
 

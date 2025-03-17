@@ -399,16 +399,13 @@ impl Node {
                     app.inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait function is not supported yet."
                 );
-                // Collect the input types for the trait.
-                let (input_tys, _output_tys) =
-                    app.trait_ref.io_types_given_fn(app.function_index, &app.ty);
                 // Is the trait fully resolved?
-                let resolved = input_tys.iter().all(Type::is_constant);
+                let resolved = app.input_tys.iter().all(Type::is_constant);
                 if resolved {
                     // Fully resolved, look up the trait implementation and replace the function directly.
                     let functions = ctx.trait_impls.get_functions(
                         &app.trait_ref,
-                        &input_tys,
+                        &app.input_tys,
                         app.function_span,
                     )?;
                     let fn_tuple = functions
@@ -436,7 +433,7 @@ impl Node {
                     let fns_tuple_index = find_trait_impl_dict_index(
                         ctx.dicts,
                         &app.trait_ref,
-                        &input_tys,
+                        &app.input_tys,
                     )
                     .expect(
                         "Dictionary for trait impl not found, type inference should have failed",

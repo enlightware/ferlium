@@ -17,6 +17,7 @@ use std::{
 
 use crate::{
     ast::DExpr,
+    containers::continuous_hashmap_to_vec,
     error::MutabilityMustBeWhat,
     internal_compilation_error,
     location::Location,
@@ -339,7 +340,7 @@ impl TypeInference {
                 }
                 // Retrieve the function from the environment, if it exists
                 else if let Some((module_name, function)) = env.module_env.get_function(path) {
-                    let (fn_ty, inst_data) = function
+                    let (fn_ty, inst_data, _subst) = function
                         .definition
                         .ty_scheme
                         .instantiate_with_fresh_vars(self, module_name, expr.span.span());
@@ -713,6 +714,7 @@ impl TypeInference {
         Ok(
             if let Some((module_name, trait_descr)) = env.module_env.get_trait_function(path) {
                 let (trait_ref, function_index, definition) = trait_descr;
+                // Validate the number of arguments
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     let got_span = args
                         .iter()
@@ -727,25 +729,41 @@ impl TypeInference {
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data) = definition.ty_scheme.instantiate_with_fresh_vars(
-                    self,
-                    module_name,
-                    path_span.span(),
-                );
+                let (inst_fn_ty, inst_data, mut subst) = definition
+                    .ty_scheme
+                    .instantiate_with_fresh_vars(self, module_name, path_span.span());
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait function is not supported yet."
                 );
-                // Make sure the types of its arguments match the expected types
+                // Extend the type substitution with not-yet-seen trait type variables, these will be in the constraints.
+                let mut ext_subst = HashMap::new();
+                for ty_var_index in 0..trait_ref.type_var_count() {
+                    let ty_var = TypeVar::new(ty_var_index);
+                    if !subst.0.contains_key(&ty_var) {
+                        ext_subst.insert(ty_var, Type::variable(self.fresh_type_var()));
+                    }
+                }
+                subst.0.extend(ext_subst);
+                // Instantiate the constraints and add them to our list.
+                trait_ref
+                    .constraints
+                    .iter()
+                    .map(|c| c.instantiate(&subst))
+                    .for_each(|c| {
+                        self.ty_constraints.push(TypeConstraint::Pub(c));
+                    });
+                // Make sure the types of the trait arguments match the expected types
                 let (args_nodes, args_effects) =
                     self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
-                // Add the trait constraint
-                let (input_tys, output_tys) =
-                    trait_ref.io_types_given_fn(function_index, &inst_fn_ty);
+                let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
+                assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
+                let output_tys = trait_tys.split_off(trait_ref.input_type_count.get() as usize);
+                let input_tys = trait_tys;
                 self.ty_constraints
                     .push(TypeConstraint::Pub(PubTypeConstraint::new_have_trait(
                         trait_ref.clone(),
-                        input_tys,
+                        input_tys.clone(),
                         output_tys,
                         path_span,
                     )));
@@ -760,6 +778,7 @@ impl TypeInference {
                     function_span: path_span,
                     arguments: args_nodes,
                     ty: inst_fn_ty,
+                    input_tys,
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
@@ -778,7 +797,7 @@ impl TypeInference {
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data) = function
+                let (inst_fn_ty, inst_data, _subst) = function
                     .definition
                     .ty_scheme
                     .instantiate_with_fresh_vars(self, module_name, path_span.span());
@@ -1429,6 +1448,8 @@ impl UnifiedTypeInference {
                     HashMap::new();
                 let mut variants_are: HashMap<Type, HashMap<Ustr, (Type, Location)>> =
                     HashMap::new();
+                let mut have_traits: HashMap<(TraitRef, Vec<Type>), (Vec<Type>, Location)> =
+                    HashMap::new();
                 for constraint in &remaining_constraints {
                     use PubTypeConstraint::*;
                     match constraint {
@@ -1562,8 +1583,30 @@ impl UnifiedTypeInference {
                                 variants_are.insert(variant_ty, variant);
                             }
                         }
-                        HaveTrait { .. } => {
-                            // do not do anything with trait constraints in this pass
+                        HaveTrait {
+                            trait_ref,
+                            input_tys,
+                            output_tys,
+                            span,
+                        } => {
+                            let input_types = unified_ty_inf.normalize_types(input_tys);
+                            let output_types = unified_ty_inf.normalize_types(output_tys);
+                            let key = (trait_ref.clone(), input_types);
+                            if let Some(have_trait) = have_traits.get(&key) {
+                                assert_eq!(have_trait.0.len(), output_types.len());
+                                for (expected, actual) in
+                                    have_trait.0.iter().zip(output_types.iter())
+                                {
+                                    unified_ty_inf.unify_same_type(
+                                        *actual,
+                                        *span,
+                                        *expected,
+                                        have_trait.1,
+                                    )?;
+                                }
+                            } else {
+                                have_traits.insert(key, (output_types, *span));
+                            }
                         }
                     }
                 }
@@ -2472,6 +2515,7 @@ impl UnifiedTypeInference {
             }
             TraitFnApply(app) => {
                 app.ty = self.substitute_in_fn_type(&app.ty);
+                app.input_tys = self.substitute_in_types(&app.input_tys);
                 self.substitute_in_nodes(&mut app.arguments);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }

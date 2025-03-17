@@ -165,6 +165,24 @@ pub fn add_to_module(to: &mut Module) {
                 }
             }
         }
+
+        // Iterator for ranges
+        impl Iterator {
+            fn next(a) {
+                range_iterator_next(a)
+            }
+        }
+        // Iterator and Seq for array
+        impl Iterator {
+            fn next(a) {
+                array_iterator_next(a)
+            }
+        }
+        impl Seq {
+            fn iter(a) {
+                array_iter(a)
+            }
+        }
     "# };
     add_code_to_module(code, to, &Modules::new()).unwrap_or_else(|e| {
         panic!(

@@ -13,8 +13,9 @@ use std::{
 };
 
 use crate::{
-    format::write_with_separator_and_format_fn, location::Span, r#trait::TraitRef,
-    type_like::TypeLike, type_mapper::TypeMapper, type_visitor::TypeInnerVisitor, Location,
+    error::InternalCompilationError, format::write_with_separator_and_format_fn, location::Span,
+    r#trait::TraitRef, trait_solver::TraitImpls, type_like::TypeLike, type_mapper::TypeMapper,
+    type_visitor::TypeInnerVisitor, Location,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
@@ -131,6 +132,8 @@ impl PubTypeConstraint {
         output_tys: Vec<Type>,
         span: Location,
     ) -> Self {
+        assert_eq!(input_tys.len(), trait_ref.input_type_count.get() as usize);
+        assert_eq!(output_tys.len(), trait_ref.output_type_count as usize);
         Self::HaveTrait {
             trait_ref,
             input_tys,
@@ -169,13 +172,40 @@ impl PubTypeConstraint {
         }
     }
 
-    pub fn instantiate_and_drop_if_known_trait(&self, subst: &InstSubstitution) -> Option<Self> {
+    pub fn instantiate_and_drop_if_known_trait(
+        &self,
+        subst: &mut InstSubstitution,
+        trait_impls: &mut TraitImpls,
+    ) -> Result<Option<Self>, InternalCompilationError> {
         let constraint = self.instantiate(subst);
-        if constraint.is_have_trait() && constraint.inner_ty_vars().is_empty() {
-            None
-        } else {
-            Some(constraint)
-        }
+        Ok(
+            if let PubTypeConstraint::HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                span,
+            } = &constraint
+            {
+                if input_tys.iter().all(Type::is_constant) {
+                    let got_output_tys =
+                        trait_impls.get_output_types(trait_ref, input_tys, *span)?;
+                    assert_eq!(got_output_tys.len(), output_tys.len());
+                    for (got_output_ty, output_ty) in got_output_tys.iter().zip(output_tys.iter()) {
+                        if let Some(var) = output_ty.data().as_variable() {
+                            assert!(!subst.0.contains_key(var));
+                            subst.0.insert(*var, *got_output_ty);
+                        } else {
+                            assert_eq!(got_output_ty, output_ty);
+                        }
+                    }
+                    None
+                } else {
+                    Some(constraint)
+                }
+            } else {
+                Some(constraint)
+            },
+        )
     }
 }
 
@@ -538,7 +568,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         ty_inf: &mut TypeInference,
         src_module_name: Option<Ustr>,
         inst_span: Span,
-    ) -> (Ty, FnInstData) {
+    ) -> (Ty, FnInstData, InstSubstitution) {
         let ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
         let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
         let subst = (ty_subst, eff_subst);
@@ -549,7 +579,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         }
         let ty = self.ty.instantiate(&subst);
         let dict_req = instantiate_dictionaries_req(&self.extra_parameters(), &subst);
-        (ty, FnInstData::new(dict_req))
+        (ty, FnInstData::new(dict_req), subst)
     }
 
     /// Helper function to list free type variables in a type and its constraints.
@@ -771,7 +801,7 @@ fn format_have_trait(
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
     let trait_name = trait_ref.name;
-    write!(f, "{} (", trait_name)?;
+    write!(f, "{} <", trait_name)?;
     write_with_separator_and_format_fn(
         input_tys.iter(),
         ", ",
@@ -787,7 +817,7 @@ fn format_have_trait(
             f,
         )?;
     }
-    write!(f, ")")
+    write!(f, ">")
 }
 
 // Build a substitution that maps each type variable to a fresh type variable from 0.

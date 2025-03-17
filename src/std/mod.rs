@@ -46,9 +46,9 @@ pub fn std_module() -> Module {
     io::add_to_module(&mut module);
     string::add_to_module(&mut module);
     variant::add_to_module(&mut module);
+    iterator::add_to_module(&mut module);
     serde::add_to_module(&mut module);
     prelude::add_to_module(&mut module);
-    // option::add_option_functions(&mut module);
     module
 }
 

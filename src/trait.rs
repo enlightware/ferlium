@@ -7,6 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
+    collections::HashSet,
     fmt,
     hash::{Hash, Hasher},
     num::NonZero,
@@ -19,9 +20,13 @@ use ustr::Ustr;
 
 use crate::{
     containers::iterable_to_string,
+    format::write_with_separator_and_format_fn,
     function::FunctionDefinition,
     module::{FmtWithModuleEnv, ModuleEnv},
-    r#type::{FnType, Type},
+    r#type::{Type, TypeVar},
+    type_like::TypeLike,
+    type_scheme::PubTypeConstraint,
+    type_visitor::TyVarsCollector,
 };
 
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
@@ -33,15 +38,32 @@ pub struct Trait {
     pub input_type_count: NonZero<u32>,
     /// Number of output types, by convention, the type variables just after input types correspond to output types.
     pub output_type_count: u32,
+    /// The constraints on the trait, for example related to the associated types.
+    pub constraints: Vec<PubTypeConstraint>,
     /// The functions provided by the trait.
     pub functions: Vec<(Ustr, FunctionDefinition)>,
     // TODO: add spans once traits can be defined in user code.
 }
 
 impl Trait {
+    /// Return the number of type variables in this trait.
+    pub fn type_var_count(&self) -> u32 {
+        self.input_type_count.get() + self.output_type_count
+    }
+
     /// Validate the trait, ensuring that its function signatures adhere to the limitations of the current implementation.
     pub fn validate(&self) {
-        let trait_type_count = self.input_type_count.get() + self.output_type_count;
+        // Make sure that constraints only refer to the input or the output type variables.
+        let trait_type_count = self.type_var_count();
+        for constraint in &self.constraints {
+            for ty_var in constraint.inner_ty_vars() {
+                if ty_var.name() >= trait_type_count {
+                    panic!("Invalid type variable in trait {}: {}", self.name, ty_var);
+                }
+            }
+        }
+
+        // Make sure that all function definitions are valid and refer to the correct type variables.
         for (name, function) in &self.functions {
             for quantifier in &function.ty_scheme.ty_quantifiers {
                 if quantifier.name() >= trait_type_count {
@@ -54,50 +76,67 @@ impl Trait {
             if !function.ty_scheme.constraints.is_empty() {
                 panic!("Generic constraints are not supported in trait functions yet, but function {} of trait {} has {} generic constraints.", name, self.name, function.ty_scheme.constraints.len());
             }
-        }
-    }
-
-    /// Return the input types for this trait given the argument and return types for a function implementing this trait.
-    pub fn io_types_given_fn(&self, index: usize, fn_ty: &FnType) -> (Vec<Type>, Vec<Type>) {
-        let input_type_count = self.input_type_count.get();
-        let mut input_tys = vec![Type::never(); input_type_count as usize];
-        let mut output_tys = vec![Type::never(); self.output_type_count as usize];
-        let definition = &self.functions[index].1;
-        let mut store_ty_if_match = |in_fn_ty, trait_fn_ty: Type| {
-            if let Some(ty_var) = trait_fn_ty.data().as_variable() {
-                let ty_var = ty_var.name();
-                if ty_var < input_type_count {
-                    input_tys[ty_var as usize] = in_fn_ty;
-                } else if ty_var < input_type_count + self.output_type_count {
-                    output_tys[(ty_var - input_type_count) as usize] = in_fn_ty;
+            for input_ty_var in 0..self.input_type_count.get() {
+                let ty_var = TypeVar::new(input_ty_var);
+                if !function.ty_scheme.ty_quantifiers.contains(&ty_var) {
+                    panic!(
+                        "Input type variable {} does appear in the quantifiers of function {} of trait {}.",
+                        ty_var, name, self.name
+                    );
                 }
             }
-        };
-        for (in_fn_ty, trait_fn_ty) in fn_ty.args_ty().zip(definition.ty_scheme.ty.args_ty()) {
-            store_ty_if_match(in_fn_ty, trait_fn_ty);
+            // Make sure that all constraints have their input type variables reachable from
+            // the function type, in a single pass.
+            // The single pass is important because in TraitImpls::get_impl()
+            // we assume that we can get all output type variables in a single pass over the constraints.
+            let mut quantifiers: HashSet<_> =
+                function.ty_scheme.ty_quantifiers.iter().copied().collect();
+            for (i, constraint) in self.constraints.iter().enumerate() {
+                let (_, input_tys, output_tys, _) = constraint
+                    .as_have_trait()
+                    .expect("Only HaveTrait constraints are supported in traits.");
+                assert!(input_tys
+                    .iter()
+                    .flat_map(TypeLike::inner_ty_vars)
+                    .all(|ty_var| quantifiers.contains(&ty_var)), "In trait {}, constraint #{} has unreachable input type variable in function {}.", self.name, i, name);
+                let mut additional_ty_vars = HashSet::new();
+                let mut collector = TyVarsCollector(&mut additional_ty_vars);
+                output_tys.iter().for_each(|ty| ty.visit(&mut collector));
+                quantifiers.extend(additional_ty_vars);
+            }
         }
-        store_ty_if_match(fn_ty.ret, definition.ty_scheme.ty.ret);
-        assert!(
-            input_tys.iter().copied().all(|ty| ty != Type::never()),
-            "Broken trait: not all input types were present in function {index} of trait {}",
-            self.name
-        );
-        if output_tys.iter().copied().all(|ty| ty == Type::never()) {
-            output_tys.clear();
-        }
-        assert!(
-            !output_tys.iter().copied().any(|ty| ty == Type::never()),
-            "Broken trait: only some output types were present in function {index} of trait {}, {}",
-            self.name,
-            output_tys.len()
-        );
-        (input_tys, output_tys)
     }
 }
 
 impl FmtWithModuleEnv for Trait {
     fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
-        writeln!(f, "trait {} {{", self.name)?;
+        write!(f, "trait {} <", self.name)?;
+        let input_ty_count = self.input_type_count.get();
+        write_with_separator_and_format_fn(
+            0..input_ty_count,
+            ", ",
+            |index, f| write!(f, "{}", TypeVar::new(index)),
+            f,
+        )?;
+        if self.output_type_count > 0 {
+            write!(f, " ↦ ")?;
+            write_with_separator_and_format_fn(
+                0..self.output_type_count,
+                ", ",
+                |index, f| write!(f, "{}", TypeVar::new(input_ty_count + index)),
+                f,
+            )?;
+        }
+        if self.constraints.is_empty() {
+            writeln!(f, "> {{")?;
+        } else {
+            writeln!(f, "> where")?;
+            for constraint in &self.constraints {
+                write!(f, "    ")?;
+                constraint.fmt_with_module_env(f, env)?;
+            }
+            writeln!(f, "\n{{")?;
+        }
         let mut first = true;
         for (name, def) in &self.functions {
             if first {
@@ -131,6 +170,30 @@ impl TraitRef {
             name: ustr(name),
             input_type_count: NonZero::new(input_type_count).unwrap(),
             output_type_count,
+            constraints: Vec::new(),
+            functions,
+        };
+        trait_data.validate();
+        Self(Rc::new(trait_data))
+    }
+
+    pub fn new_with_constraints<'a>(
+        name: &str,
+        input_type_count: u32,
+        output_type_count: u32,
+        constraints: impl Into<Vec<PubTypeConstraint>>,
+        functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+    ) -> Self {
+        let functions = functions
+            .into()
+            .into_iter()
+            .map(|(name, def)| (ustr(name), def))
+            .collect();
+        let trait_data = Trait {
+            name: ustr(name),
+            input_type_count: NonZero::new(input_type_count).unwrap(),
+            output_type_count,
+            constraints: constraints.into(),
             functions,
         };
         trait_data.validate();
@@ -183,45 +246,36 @@ impl Hash for TraitRef {
 
 #[cfg(test)]
 mod tests {
-    use std::vec;
+    // use std::vec;
 
-    use crate::{
-        effects::EffType,
-        std::{
-            math::{float_type, int_type},
-            string::string_type,
-        },
-    };
+    // use crate::{
+    //     effects::EffType,
+    //     std::{
+    //         math::{float_type, int_type},
+    //         string::string_type,
+    //     }, r#type::FnType,
+    // };
 
-    use super::*;
+    // use super::*;
 
-    fn trait_add() -> TraitRef {
-        let fn_ty = FnType::new_by_val(
-            &[Type::variable_id(0), Type::variable_id(1)],
-            Type::variable_id(2),
-            EffType::empty(),
-        );
-        TraitRef::new(
-            "Add",
-            2,
-            1,
-            [(
-                "add",
-                FunctionDefinition::new_infer_quantifiers(
-                    fn_ty,
-                    &["lhs", "rhs"],
-                    "test trait function add",
-                ),
-            )],
-        )
-    }
-
-    #[test]
-    fn trait_io_types_given_fn() {
-        let my_fn_ty =
-            FnType::new_by_val(&[int_type(), string_type()], float_type(), EffType::empty());
-        let (input_tys, output_tys) = trait_add().io_types_given_fn(0, &my_fn_ty);
-        assert_eq!(input_tys, vec![int_type(), string_type()]);
-        assert_eq!(output_tys, vec![float_type()]);
-    }
+    // fn trait_add() -> TraitRef {
+    //     let fn_ty = FnType::new_by_val(
+    //         &[Type::variable_id(0), Type::variable_id(1)],
+    //         Type::variable_id(2),
+    //         EffType::empty(),
+    //     );
+    //     TraitRef::new(
+    //         "Add",
+    //         2,
+    //         1,
+    //         [(
+    //             "add",
+    //             FunctionDefinition::new_infer_quantifiers(
+    //                 fn_ty,
+    //                 &["lhs", "rhs"],
+    //                 "test trait function add",
+    //             ),
+    //         )],
+    //     )
+    // }
 }

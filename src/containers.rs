@@ -95,3 +95,31 @@ pub fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> {
     v.sort();
     v
 }
+
+/// A helper trait to convert an index to a value for use in `continuous_hashmap_to_vec`.
+pub trait FromIndex: std::cmp::Eq + std::hash::Hash {
+    fn from_index(index: usize) -> Self;
+}
+
+/// Consumes a HashMap with continuous indices starting at 0 and returns a Vec with the values in order.
+/// If the indices are not continuous, an error is returned.
+pub fn continuous_hashmap_to_vec<K: FromIndex, T>(
+    mut map: HashMap<K, T>,
+) -> Result<Vec<T>, &'static str> {
+    let len = map.len();
+
+    // Check if all keys from 0 to len-1 are present
+    for i in 0..len {
+        if !map.contains_key(&K::from_index(i)) {
+            return Err("HashMap does not contain continuous indices starting at 0");
+        }
+    }
+
+    // Collect values in order
+    let mut vec: Vec<T> = Vec::with_capacity(map.len());
+    for i in 0..len {
+        vec.push(map.remove(&K::from_index(i)).unwrap());
+    }
+
+    Ok(vec)
+}

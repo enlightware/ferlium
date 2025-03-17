@@ -55,6 +55,7 @@ impl<C: Extend<MutVar>> TypeInnerVisitor for MutVarsCollector<'_, C> {
 }
 
 /// Collect all mutability variables from a list of types
+#[allow(dead_code)]
 pub fn collect_mut_vars(tys: &[impl TypeLike]) -> Vec<MutVar> {
     let mut vars = Vec::new();
     let mut collector = MutVarsCollector(&mut vars);
@@ -74,6 +75,7 @@ impl<C: Extend<EffectVar>> TypeInnerVisitor for EffectVarsCollector<'_, C> {
 }
 
 /// Collect all effect variables from a list of types
+#[allow(dead_code)]
 pub fn collect_effect_vars(tys: &[impl TypeLike]) -> Vec<EffectVar> {
     let mut vars = Vec::new();
     let mut collector = EffectVarsCollector(&mut vars);
@@ -81,6 +83,39 @@ pub fn collect_effect_vars(tys: &[impl TypeLike]) -> Vec<EffectVar> {
         ty.visit(&mut collector);
     }
     vars.into_iter().unique().collect()
+}
+
+/// Collect all type, mutability, and effect variables from a type
+pub(crate) struct AllVarsCollector<'a, CT, CM, CE>
+where
+    CT: Extend<TypeVar>,
+    CM: Extend<MutVar>,
+    CE: Extend<EffectVar>,
+{
+    pub(crate) ty_vars: &'a mut CT,
+    pub(crate) mut_vars: &'a mut CM,
+    pub(crate) effect_vars: &'a mut CE,
+}
+impl<CT, CM, CE> TypeInnerVisitor for AllVarsCollector<'_, CT, CM, CE>
+where
+    CT: Extend<TypeVar>,
+    CM: Extend<MutVar>,
+    CE: Extend<EffectVar>,
+{
+    fn visit_ty_kind_end(&mut self, ty: &TypeKind) {
+        if let Some(var) = ty.as_variable() {
+            self.ty_vars.extend(std::iter::once(*var));
+        }
+    }
+    fn visit_mut_ty(&mut self, mut_ty: MutType) {
+        if let Some(var) = mut_ty.as_variable() {
+            self.mut_vars.extend(std::iter::once(*var));
+        }
+    }
+    fn visit_eff_ty(&mut self, ty: &EffType) {
+        self.effect_vars
+            .extend(ty.iter().filter_map(|effect| effect.as_variable()).copied());
+    }
 }
 
 /// Returns whether the type contains any of the given type variables

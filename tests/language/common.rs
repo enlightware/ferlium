@@ -282,7 +282,7 @@ macro_rules! tuple {
         Value::tuple([])
     };
     ($($elem:expr),+ $(,)?) => {
-        Value::tuple([
+        Value::tuple(vec![
             $($elem),+
         ])
     };

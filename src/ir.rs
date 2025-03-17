@@ -128,6 +128,7 @@ pub struct TraitFnApplication {
     pub function_span: Location,
     pub arguments: Vec<Node>,
     pub ty: FnType,
+    pub input_tys: Vec<Type>,
     pub inst_data: FnInstData,
 }
 impl TraitFnApplication {
@@ -677,6 +678,11 @@ impl Node {
             }
             TraitFnApply(app) => {
                 app.ty = app.ty.instantiate(subst);
+                app.input_tys = app
+                    .input_tys
+                    .iter()
+                    .map(|ty| ty.instantiate(subst))
+                    .collect();
                 app.inst_data.instantiate(subst);
                 instantiate_nodes(&mut app.arguments, subst);
             }

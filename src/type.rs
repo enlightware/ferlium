@@ -19,6 +19,7 @@ use std::iter;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use crate::containers::FromIndex;
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
 use crate::type_like::CastableToType;
@@ -88,6 +89,12 @@ impl TypeVar {
 impl Display for TypeVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.format_rust_style(f)
+    }
+}
+
+impl FromIndex for TypeVar {
+    fn from_index(index: usize) -> Self {
+        Self::new(index as u32)
     }
 }
 
