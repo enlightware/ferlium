@@ -26,6 +26,12 @@ fn range_iterators() {
         run("let r = range(0, 2); let mut it = iter(r); (next(it), next(it))"),
         tuple!(variant("Some", int(0)), variant("Some", int(1)))
     );
+    assert_eq!(run("len(3..3)"), int(0));
+    assert_eq!(run("len(3..4)"), int(1));
+    assert_eq!(run("len(3..2)"), int(1));
+    assert_eq!(run("is_empty(3..3)"), bool(true));
+    assert_eq!(run("is_empty(3..4)"), bool(false));
+    assert_eq!(run("is_empty(3..2)"), bool(false));
 }
 
 #[test]
@@ -175,6 +181,12 @@ fn array_iterators() {
             variant("None", Value::unit())
         )
     );
+    assert_eq!(run("len(([]: [int]))"), int(0));
+    assert_eq!(run("len([1, 2])"), int(2));
+    assert_eq!(run("len([true, false, true])"), int(3));
+    assert_eq!(run("is_empty(([]: [int]))"), bool(true));
+    assert_eq!(run("is_empty([1, 2])"), bool(false));
+    assert_eq!(run("is_empty([true, false, true])"), bool(false));
 }
 
 #[test]

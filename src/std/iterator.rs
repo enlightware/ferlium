@@ -12,13 +12,14 @@ use crate::{
     module::Module,
     r#trait::TraitRef,
     r#type::{FnType, Type},
-    std::option::option_type,
+    std::{math::int_type, option::option_type},
     type_scheme::PubTypeConstraint,
     Location,
 };
 
 pub const ITERATOR_TRAIT_NAME: &str = "Iterator";
 pub const SEQ_TRAIT_NAME: &str = "Seq";
+pub const SIZED_SEQ_TRAIT_NAME: &str = "SizedSeq";
 
 pub fn add_to_module(to: &mut Module) {
     // Traits
@@ -67,6 +68,21 @@ pub fn add_to_module(to: &mut Module) {
         )],
     );
     to.traits.push(seq_trait);
+
+    let sized_seq_trait = TraitRef::new(
+        SIZED_SEQ_TRAIT_NAME,
+        1,
+        0,
+        [(
+            "len",
+            Def::new_infer_quantifiers(
+                FnType::new_by_val(&[Type::variable_id(0)], int_type(), EffType::empty()),
+                &["seq"],
+                "Return the number of elements in this sequence.",
+            ),
+        )],
+    );
+    to.traits.push(sized_seq_trait);
 
     // Trait implementations are in the prelude.
 }

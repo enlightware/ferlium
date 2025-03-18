@@ -41,6 +41,14 @@ impl Range {
             next: self.start,
         }
     }
+
+    pub fn is_empty(self) -> bool {
+        self.start == self.end
+    }
+
+    pub fn len(self) -> isize {
+        (self.end - self.start).abs()
+    }
 }
 
 impl NativeDisplay for Range {
@@ -137,6 +145,10 @@ pub fn add_to_module(to: &mut Module) {
     to.functions.insert(
         ustr("range_iter"),
         UnaryNativeFnNN::description_with_default_ty(Range::iter, ["range"], None, no_effects()),
+    );
+    to.functions.insert(
+        ustr("range_len"),
+        UnaryNativeFnNN::description_with_default_ty(Range::len, ["range"], None, no_effects()),
     );
     to.functions.insert(
         ustr("range_iterator_new"),

@@ -66,6 +66,10 @@ pub fn add_to_module(to: &mut Module) {
             }
         }
 
+        fn is_empty(seq) {
+            eq(len(seq), 0)
+        }
+
         // Iterator and Seq for ranges
         impl Iterator {
             fn next(a) {
@@ -77,6 +81,12 @@ pub fn add_to_module(to: &mut Module) {
                 range_iter(a)
             }
         }
+        impl SizedSeq {
+            fn len(a) {
+                range_len(a)
+            }
+        }
+
         // Iterator and Seq for array
         impl Iterator {
             fn next(a) {
@@ -86,6 +96,11 @@ pub fn add_to_module(to: &mut Module) {
         impl Seq {
             fn iter(a) {
                 array_iter(a)
+            }
+        }
+        impl SizedSeq {
+            fn len(a) {
+                array_len(a)
             }
         }
 
