@@ -568,10 +568,10 @@ impl Node {
                 }
                 case.default.elaborate_dictionaries(ctx)?;
             }
-            Iterate(iteration) => {
-                iteration.iterator.elaborate_dictionaries(ctx.reborrow())?;
-                iteration.body.elaborate_dictionaries(ctx)?;
+            Loop(body) => {
+                body.elaborate_dictionaries(ctx)?;
             }
+            SoftBreak => {}
         }
         Ok(())
     }

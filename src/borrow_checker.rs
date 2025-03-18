@@ -213,10 +213,10 @@ impl Node {
                 }
                 case.default.check_borrows()?;
             }
-            Iterate(iteration) => {
-                iteration.iterator.check_borrows()?;
-                iteration.body.check_borrows()?;
+            Loop(body) => {
+                body.check_borrows()?;
             }
+            SoftBreak => {}
         }
         Ok(())
     }

@@ -511,7 +511,7 @@ fn assignment() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn for_loops() {
+fn for_loops_with_range() {
     assert_eq!(run("for i in 0..3 { () }"), unit());
     assert_eq!(run("let mut s = 0; for i in 1..4 { s = s + i }; s"), int(6));
     assert_eq!(
@@ -525,6 +525,20 @@ fn for_loops() {
     assert_eq!(
         run("let mut a = []; for i in 5..2 { array_append(a, i) }; a"),
         int_a![5, 4, 3]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn for_loops_with_arrays() {
+    assert_eq!(run("for i in [0, 1, 2] { () }"), unit());
+    assert_eq!(
+        run("let mut s = 0; for i in [1, 2, 3] { s = s + i }; s"),
+        int(6)
+    );
+    assert_eq!(
+        run("let mut s = 0.5; for i in [1.5, 2.5, 3.5] { s = s + i }; s"),
+        float(8.0)
     );
 }
 

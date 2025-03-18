@@ -15,13 +15,15 @@ use ustr::{ustr, Ustr};
 
 use crate::{
     ast::{
-        DExpr, DModule, DModuleFunction, DTraitImpl, ExprKind, Module, ModuleFunction, PExpr,
-        PModule, PModuleFunction, PTraitImpl,
+        DExpr, DModule, DModuleFunction, DTraitImpl, Expr, ExprKind, Module, ModuleFunction, PExpr,
+        PModule, PModuleFunction, PTraitImpl, Pattern, PatternKind,
     },
     containers::{b, B},
     error::InternalCompilationError,
     format_string::emit_format_string_ast,
     graph::{find_strongly_connected_components, topological_sort_sccs},
+    mutability::MutVal,
+    parser_helpers::static_apply,
     std::math::int_type,
 };
 
@@ -244,9 +246,58 @@ impl PExpr {
                     .collect::<Result<Vec<_>, _>>()?,
                 default.map(|e| e.desugar_boxed(ctx)).transpose()?,
             ),
-            ForLoop(var, iterator, body) => {
-                ForLoop(var, iterator.desugar_boxed(ctx)?, body.desugar_boxed(ctx)?)
+            ForLoop(for_loop) => {
+                let crate::ast::ForLoop {
+                    var_name,
+                    iterator,
+                    body,
+                } = for_loop;
+                let iterator_span = iterator.span;
+                let body_span = body.span;
+                let it_store = Expr::new(
+                    Let(
+                        (ustr("@it"), iterator.span),
+                        MutVal::mutable(),
+                        iterator.desugar_boxed(ctx)?,
+                        None,
+                    ),
+                    iterator_span,
+                );
+                let it_next = Expr::new(
+                    static_apply(
+                        (ustr("next"), iterator_span),
+                        vec![Expr::new(Identifier(ustr("@it")), iterator_span)],
+                    ),
+                    iterator_span,
+                );
+                let it_match = Expr::new(
+                    Match(
+                        b(it_next),
+                        vec![
+                            (
+                                Pattern::new(
+                                    PatternKind::variant((ustr("Some"), body.span), vec![var_name]),
+                                    body.span,
+                                ),
+                                body.desugar(ctx)?,
+                            ),
+                            (
+                                Pattern::new(
+                                    PatternKind::empty_variant((ustr("None"), body_span)),
+                                    body_span,
+                                ),
+                                Expr::new(SoftBreak, body_span),
+                            ),
+                        ],
+                        None,
+                    ),
+                    iterator_span,
+                );
+                let loop_expr = Expr::new(Loop(b(it_match)), body_span);
+                Block(vec![it_store, loop_expr])
             }
+            Loop(body) => Loop(body.desugar_boxed(ctx)?),
+            SoftBreak => SoftBreak,
             TypeAscription(expr, ty, span) => TypeAscription(expr.desugar_boxed(ctx)?, ty, span),
             Error => Error,
         };

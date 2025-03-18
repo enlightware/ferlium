@@ -206,7 +206,12 @@ AbstractExpr: ExprKind = {
 
 PipeExpr: ExprKind = {
     <l:Es<PipeExpr>> "|>" <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), ext_f(l, a), false),
-    LogicOrExpr
+    RangeExpr,
+}
+
+RangeExpr: ExprKind = {
+    <l:Es<UnaryExpr>> <o:Sp<RangeOp>> <r:Es<UnaryExpr>> => static_apply(o, vec![l, r]),
+    LogicOrExpr,
 }
 
 LogicOrExpr = BinOpLeftAssoc<LogicalOrOp, LogicAndExpr>;
@@ -274,8 +279,8 @@ PathIdentifier<E>: String = {
 }
 
 ForExpr: ExprKind = {
-    "for" <id:Sp<UIdentifier>> "in" <start:Expr> ".." <end:Expr> <body:Es<Block>> =>
-        for_loop(id, start, end, body),
+    "for" <id:Sp<UIdentifier>> "in" <seq:Expr> <body:Es<Block>> =>
+        for_loop(id, seq, body),
 }
 
 IfExpr: ExprKind = {
@@ -418,6 +423,10 @@ StrWithOptType: (UstrSpan, Option<MutTypeTypeSpan>) = {
 }
 
 // Terminals
+
+RangeOp: Ustr = {
+    ".." => ustr("std::range"),
+}
 
 UnaryOp: Ustr = {
     "-" => ustr("std::neg"),

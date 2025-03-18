@@ -44,7 +44,7 @@ use crate::{
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
     mutability::{MutType, MutVal, MutVar, MutVarKey},
     r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
-    std::{array::array_type, math::int_type, range::range_iterator_type},
+    std::{array::array_type, math::int_type},
     type_scheme::PubTypeConstraint,
     typing_env::{Local, TypingEnv},
     value::Value,
@@ -645,34 +645,21 @@ impl TypeInference {
                     self.infer_match(env, expr.span, cond_expr, alternatives, default)?;
                 (node, ty, mut_ty, effects)
             }
-            ForLoop(var_name, iterator, body) => {
-                let iterator = self.check_expr(
-                    env,
-                    iterator,
-                    range_iterator_type(),
-                    MutType::constant(),
-                    iterator.span,
-                )?;
-                let env_size = env.locals.len();
-                env.locals.push(Local::new(
-                    var_name.0,
-                    MutType::constant(),
-                    int_type(),
-                    var_name.1,
-                ));
+            ForLoop(_for_loop) => {
+                unreachable!("this cannot happen as payload is never")
+            }
+            Loop(body) => {
                 let body =
                     self.check_expr(env, body, Type::unit(), MutType::constant(), body.span)?;
-                env.locals.truncate(env_size);
-                let var_name_span = var_name.1;
-                let combined_effects =
-                    self.make_dependent_effect([&iterator.effects, &body.effects]);
-                let node = K::Iterate(b(ir::Iteration {
-                    iterator,
-                    body,
-                    var_name_span,
-                }));
-                (node, Type::unit(), MutType::constant(), combined_effects)
+                let effects = body.effects.clone();
+                (K::Loop(b(body)), Type::unit(), MutType::constant(), effects)
             }
+            SoftBreak => (
+                K::SoftBreak,
+                Type::unit(),
+                MutType::constant(),
+                no_effects(),
+            ),
             PropertyPath(scope, variable) => {
                 let fn_name =
                     property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
@@ -2548,10 +2535,8 @@ impl UnifiedTypeInference {
                 }
                 self.substitute_in_node(&mut case.default);
             }
-            Iterate(iteration) => {
-                self.substitute_in_node(&mut iteration.iterator);
-                self.substitute_in_node(&mut iteration.body);
-            }
+            Loop(body) => self.substitute_in_node(body),
+            SoftBreak => {}
         }
     }
 

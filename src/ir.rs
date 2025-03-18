@@ -177,6 +177,7 @@ pub struct Iteration {
     pub iterator: Node,
     pub body: Node,
     pub var_name_span: Location,
+    // TODO: add dictionary of next function.
 }
 
 /// The kind-specific part of the expression-based execution tree
@@ -206,7 +207,8 @@ pub enum NodeKind {
     Array(B<SVec2<Node>>),
     Index(B<Node>, B<Node>),
     Case(B<Case>),
-    Iterate(B<Iteration>),
+    Loop(B<Node>),
+    SoftBreak,
 }
 
 /// A node of the expression-based execution tree
@@ -403,11 +405,12 @@ impl Node {
                 writeln!(f, "{indent_str}default")?;
                 case.default.format_ind(f, env, spacing, indent + 1)?;
             }
-            Iterate(iteration) => {
-                writeln!(f, "{indent_str}iterate from")?;
-                iteration.iterator.format_ind(f, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}in")?;
-                iteration.body.format_ind(f, env, spacing, indent + 1)?;
+            Loop(body) => {
+                writeln!(f, "{indent_str}loop")?;
+                body.format_ind(f, env, spacing, indent + 1)?;
+            }
+            SoftBreak => {
+                writeln!(f, "{indent_str}soft break")?;
             }
         };
         write!(f, "{indent_str}↳ {}", self.ty.format_with(env))?;
@@ -545,14 +548,12 @@ impl Node {
                     return Some(ty);
                 }
             }
-            Iterate(iteration) => {
-                if let Some(ty) = iteration.iterator.type_at(pos) {
-                    return Some(ty);
-                }
-                if let Some(ty) = iteration.body.type_at(pos) {
+            Loop(body) => {
+                if let Some(ty) = body.type_at(pos) {
                     return Some(ty);
                 }
             }
+            SoftBreak => {}
         }
 
         // No children has this position, return our type.
@@ -629,10 +630,10 @@ impl Node {
                 });
                 case.default.unbound_ty_vars(result, ignore);
             }
-            Iterate(iteration) => {
-                iteration.iterator.unbound_ty_vars(result, ignore);
-                iteration.body.unbound_ty_vars(result, ignore);
+            Loop(body) => {
+                body.unbound_ty_vars(result, ignore);
             }
+            SoftBreak => {}
         }
     }
 
@@ -713,10 +714,8 @@ impl Node {
                 }
                 case.default.instantiate(subst);
             }
-            Iterate(iteration) => {
-                iteration.iterator.instantiate(subst);
-                iteration.body.instantiate(subst);
-            }
+            Loop(body) => body.instantiate(subst),
+            SoftBreak => {}
         }
         self.ty = self.ty.instantiate(subst);
         self.effects = self.effects.instantiate(&subst.1);

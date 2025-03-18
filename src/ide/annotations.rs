@@ -13,7 +13,6 @@ use heck::ToSnakeCase;
 use crate::{
     ir::{Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv, Modules},
-    std::math::int_type,
     type_scheme::DisplayStyle,
     ModuleAndExpr,
 };
@@ -289,15 +288,8 @@ impl Node {
                 }
                 case.default.variable_type_annotations(result, env);
             }
-            Iterate(iteration) => {
-                // TODO: once the iterator is generalized, get the type from it!
-                result.push((
-                    iteration.var_name_span.end(),
-                    format!(": {}", int_type().format_with(env)),
-                ));
-                iteration.iterator.variable_type_annotations(result, env);
-                iteration.body.variable_type_annotations(result, env);
-            }
+            Loop(body) => body.variable_type_annotations(result, env),
+            SoftBreak => {}
         }
     }
 }

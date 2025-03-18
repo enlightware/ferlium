@@ -34,24 +34,98 @@ pub type TypeSpan = (Type, Location);
 pub type MutTypeTypeSpan = (MutType, Type, Location);
 
 /// A phase in the AST processing pipeline
-pub trait Phase {
+pub trait Phase: Sized {
     type FormattedString: Debug + Clone + Display;
+    type ForLoop: Debug + Clone + FormatWithIndent + VisitExpr<Self>;
 }
 
 /// The AST after parsing
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 pub struct Parsed;
 
 /// The AST after desugaring
-#[derive(Default)]
+#[derive(Default, Clone, Debug)]
 pub struct Desugared;
 
 impl Phase for Parsed {
     type FormattedString = String;
+    type ForLoop = ForLoop;
 }
 
 impl Phase for Desugared {
     type FormattedString = Never;
+    type ForLoop = Never;
+}
+
+/// Trait for formatting with a module environment
+pub trait FormatWithIndent {
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &crate::module::ModuleEnv,
+        indent: usize,
+    ) -> std::fmt::Result;
+}
+
+impl FormatWithIndent for Never {
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _env: &crate::module::ModuleEnv,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = "  ".repeat(indent);
+        write!(f, "{indent_str}{self}")
+    }
+}
+
+/// Trait for visiting expressions
+pub trait VisitExpr<P: Phase> {
+    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V);
+}
+
+impl<P: Phase> VisitExpr<P> for Never {
+    fn visit<V: ExprVisitor<P>>(&self, _visitor: &mut V) {}
+}
+
+/// The data of a for loop
+#[derive(Clone, Debug)]
+pub struct ForLoop {
+    pub var_name: UstrSpan,
+    pub iterator: B<Expr<Parsed>>,
+    pub body: B<Expr<Parsed>>,
+}
+
+impl ForLoop {
+    pub fn new(var_name: UstrSpan, iterator: Expr<Parsed>, body: Expr<Parsed>) -> Self {
+        Self {
+            var_name,
+            iterator: b(iterator),
+            body: b(body),
+        }
+    }
+}
+
+impl FormatWithIndent for ForLoop {
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &crate::module::ModuleEnv,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = "  ".repeat(indent);
+        writeln!(f, "{indent_str}for {} in", self.var_name.0)?;
+        self.iterator.format_ind(f, env, indent + 1)?;
+        writeln!(f, "{indent_str}do")?;
+        self.body.format_ind(f, env, indent + 1)
+    }
+}
+
+impl VisitExpr<Parsed> for ForLoop {
+    fn visit<V: ExprVisitor<Parsed>>(&self, visitor: &mut V) {
+        self.iterator.visit(visitor);
+        self.body.visit(visitor);
+    }
 }
 
 pub type ModuleFunctionArg = (UstrSpan, Option<MutTypeTypeSpan>);
@@ -267,7 +341,9 @@ pub enum ExprKind<P: Phase> {
     Array(Vec<Expr<P>>),
     Index(B<Expr<P>>, B<Expr<P>>),
     Match(B<Expr<P>>, Vec<(Pattern, Expr<P>)>, Option<B<Expr<P>>>),
-    ForLoop(UstrSpan, B<Expr<P>>, B<Expr<P>>),
+    ForLoop(P::ForLoop),
+    Loop(B<Expr<P>>),
+    SoftBreak,
     TypeAscription(B<Expr<P>>, Type, Location),
     Error,
 }
@@ -282,8 +358,10 @@ impl<P: Phase> Expr<P> {
     pub fn new(kind: ExprKind<P>, span: Location) -> Self {
         Self { kind, span }
     }
+}
 
-    pub fn format_ind(
+impl<P: Phase> FormatWithIndent for Expr<P> {
+    fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
         env: &crate::module::ModuleEnv<'_>,
@@ -388,12 +466,12 @@ impl<P: Phase> Expr<P> {
                 }
                 Ok(())
             }
-            ForLoop(var_name, iterator, body) => {
-                writeln!(f, "{indent_str}for {} in", var_name.0)?;
-                iterator.format_ind(f, env, indent + 1)?;
-                writeln!(f, "{indent_str}do")?;
+            ForLoop(for_loop) => for_loop.format_ind(f, env, indent),
+            Loop(body) => {
+                writeln!(f, "{indent_str}loop")?;
                 body.format_ind(f, env, indent + 1)
             }
+            SoftBreak => writeln!(f, "{indent_str}SoftBreak"),
             PropertyPath(scope, name) => writeln!(f, "{indent_str}@{}.{}", scope, name),
             TypeAscription(expr, ty, _span) => {
                 expr.format_ind(f, env, indent)?;
@@ -402,9 +480,11 @@ impl<P: Phase> Expr<P> {
             Error => writeln!(f, "{indent_str}Error"),
         }
     }
+}
 
+impl<P: Phase> VisitExpr<P> for Expr<P> {
     /// Visit all nodes of the expression tree
-    fn visit(&self, visitor: &mut impl ExprVisitor<P>) {
+    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V) {
         visitor.visit_start(self);
         use ExprKind::*;
         match &self.kind {
@@ -435,10 +515,7 @@ impl<P: Phase> Expr<P> {
                     default.visit(visitor);
                 }
             }
-            ForLoop(_, iterator, body) => {
-                iterator.visit(visitor);
-                body.visit(visitor);
-            }
+            ForLoop(for_loop) => for_loop.visit(visitor),
             TypeAscription(expr, _, _) => expr.visit(visitor),
             _ => {}
         }
@@ -454,7 +531,6 @@ impl<P: Phase> FmtWithModuleEnv for Expr<P> {
         f: &mut std::fmt::Formatter,
         env: &crate::module::ModuleEnv<'_>,
     ) -> std::fmt::Result {
-        // TODO: use env in format_ind
         self.format_ind(f, env, 0)
     }
 }
@@ -505,6 +581,17 @@ pub enum PatternKind {
     Error(String),
 }
 impl PatternKind {
+    pub fn variant(tag: UstrSpan, vars: Vec<UstrSpan>) -> Self {
+        PatternKind::Variant { tag, vars }
+    }
+
+    pub fn empty_variant(tag: UstrSpan) -> Self {
+        PatternKind::Variant {
+            tag,
+            vars: Vec::new(),
+        }
+    }
+
     pub fn r#type(&self) -> PatternType {
         use PatternKind::*;
         match self {

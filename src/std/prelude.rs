@@ -66,6 +66,29 @@ pub fn add_to_module(to: &mut Module) {
             }
         }
 
+        // Iterator and Seq for ranges
+        impl Iterator {
+            fn next(a) {
+                range_iterator_next(a)
+            }
+        }
+        impl Seq {
+            fn iter(a) {
+                range_iter(a)
+            }
+        }
+        // Iterator and Seq for array
+        impl Iterator {
+            fn next(a) {
+                array_iterator_next(a)
+            }
+        }
+        impl Seq {
+            fn iter(a) {
+                array_iter(a)
+            }
+        }
+
         // Serde for basic types
         impl Serialize {
             fn serialize(v: ()) {
@@ -145,7 +168,7 @@ pub fn add_to_module(to: &mut Module) {
         impl Serialize {
             fn serialize(a) {
                 let mut result = [];
-                for i in 0..array_len(a) {
+                for i in range(0, array_len(a)) {
                     array_append(result, serialize(a[i]));
                 };
                 Seq(result)
@@ -156,36 +179,13 @@ pub fn add_to_module(to: &mut Module) {
                 match (a) {
                     Seq(a) => {
                         let mut result = [];
-                        for i in 0..array_len(a) {
+                        for i in range(0, array_len(a)) {
                             array_append(result, deserialize(a[i]));
                         };
                         result
                     },
                     _ => panic("Expected Seq variant")
                 }
-            }
-        }
-
-        // Iterator and Seq for ranges
-        impl Iterator {
-            fn next(a) {
-                range_iterator_next(a)
-            }
-        }
-        impl Seq {
-            fn iter(a) {
-                range_iter(a)
-            }
-        }
-        // Iterator and Seq for array
-        impl Iterator {
-            fn next(a) {
-                array_iterator_next(a)
-            }
-        }
-        impl Seq {
-            fn iter(a) {
-                array_iter(a)
             }
         }
     "# };

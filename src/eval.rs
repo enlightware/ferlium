@@ -18,7 +18,7 @@ use crate::{
     ir::{Node, NodeKind},
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::FnArgType,
-    std::{array, range},
+    std::array,
     value::{NativeValue, Value},
 };
 
@@ -89,6 +89,8 @@ pub struct EvalCtx {
     pub recursion: usize,
     /// maximum number of recursion
     pub recursion_limit: usize,
+    /// a flag to break the evaluation
+    pub break_loop: bool,
 }
 
 impl EvalCtx {
@@ -101,6 +103,7 @@ impl EvalCtx {
             frame_base: 0,
             recursion: 0,
             recursion_limit: Self::DEFAULT_RECURSION_LIMIT,
+            break_loop: false,
         }
     }
 }
@@ -355,18 +358,17 @@ impl Node {
                 }
                 case.default.eval_with_ctx(ctx)
             }
-            Iterate(iteration) => {
-                // TODO: use a more generic type for iterator!
-                let iterator = iteration
-                    .iterator
-                    .eval_with_ctx(ctx)?
-                    .into_primitive_ty::<range::RangeIterator>()
-                    .unwrap();
-                for value in iterator {
-                    ctx.environment.push(ValOrMut::Val(Value::native(value)));
-                    _ = iteration.body.eval_with_ctx(ctx)?;
-                    ctx.environment.pop();
+            Loop(body) => {
+                let break_loop = ctx.break_loop;
+                ctx.break_loop = false;
+                while !ctx.break_loop {
+                    body.eval_with_ctx(ctx)?;
                 }
+                ctx.break_loop = break_loop;
+                Ok(Value::unit())
+            }
+            SoftBreak => {
+                ctx.break_loop = true;
                 Ok(Value::unit())
             }
         }
