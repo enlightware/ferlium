@@ -113,9 +113,9 @@ fn swap(a, i, j) {
 }
 
 let mut a = [5, 4, 11, 3, 2, 1, 0, 7];
-quicksort(a, 0, array_len(a) - 1);
+quicksort(a, 0, len(a) - 1);
 let mut b = [-1.3, 4.3, 2.3, -4.1];
-quicksort(b, 0, array_len(b) - 1);
+quicksort(b, 0, len(b) - 1);
 (a, b)
 `],
 ['String', `let a = "hello";
