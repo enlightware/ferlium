@@ -523,6 +523,12 @@ fn for_loops_with_range() {
         int_a![2, 3, 4]
     );
     assert_eq!(
+        run(
+            "fn s() { 2 } fn e() { 5 } let mut a = []; for i in s()..e() { array_append(a, i) }; a"
+        ),
+        int_a![2, 3, 4]
+    );
+    assert_eq!(
         run("let mut a = []; for i in 5..2 { array_append(a, i) }; a"),
         int_a![5, 4, 3]
     );
