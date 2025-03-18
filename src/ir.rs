@@ -172,14 +172,6 @@ pub struct Case {
     pub default: Node,
 }
 
-#[derive(Debug, Clone)]
-pub struct Iteration {
-    pub iterator: Node,
-    pub body: Node,
-    pub var_name_span: Location,
-    // TODO: add dictionary of next function.
-}
-
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone)]
 pub enum NodeKind {

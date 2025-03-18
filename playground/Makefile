@@ -1,4 +1,4 @@
-RUST_SRC_DIR := script-api
+RUST_SRC_DIR := ..
 RUST_SOURCES := $(shell find $(RUST_SRC_DIR) -type f -name '*.rs')
 RUST_CONFIG_FILES := $(shell find $(RUST_SRC_DIR) -type f -name 'Cargo.*')
 RUST_WASM := $(RUST_SRC_DIR)/pkg/script_api_bg.wasm

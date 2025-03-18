@@ -213,13 +213,12 @@ impl Node {
                 }
             }
             StaticApply(app) => {
+                let arity = app.argument_names.len();
+                let is_synthesized = app.function_span.is_empty();
                 for (arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
-                    if !should_hide_arg_name_hint(
-                        &app.function_path,
-                        app.argument_names.len(),
-                        arg_name,
-                        arg,
-                    ) {
+                    if !is_synthesized
+                        && !should_hide_arg_name_hint(&app.function_path, arity, arg_name, arg)
+                    {
                         result.push((arg.span.start(), format!("{}: ", arg_name)));
                     }
                     arg.variable_type_annotations(result, env);
@@ -229,8 +228,11 @@ impl Node {
                 let function_data = &app.trait_ref.functions[app.function_index];
                 let argument_names = &function_data.1.arg_names;
                 let arity = argument_names.len();
+                let is_synthesized = app.function_span.is_empty();
                 for (arg, arg_name) in app.arguments.iter().zip(argument_names.iter()) {
-                    if !should_hide_arg_name_hint(&app.function_path, arity, arg_name, arg) {
+                    if !is_synthesized
+                        && !should_hide_arg_name_hint(&app.function_path, arity, arg_name, arg)
+                    {
                         result.push((arg.span.start(), format!("{}: ", arg_name)));
                     }
                     arg.variable_type_annotations(result, env);
@@ -238,7 +240,8 @@ impl Node {
             }
             EnvStore(node) => {
                 // Note: synthesized let nodes have empty name span, so we ignore these.
-                if node.name_span.end() != node.name_span.start() {
+                let is_synthesized = node.name_span.is_empty();
+                if !is_synthesized {
                     if let Some((ty_span, ty_constant)) = node.ty_span {
                         if !ty_constant {
                             result.push((
@@ -388,7 +391,7 @@ fn is_argument_similar_to_arg_name(argument: &Node, arg_name: &str) -> bool {
 fn is_obvious_param(arg_name: &str) -> bool {
     let is_obvious_param_name = matches!(
         arg_name,
-        "left" | "right" | "value" | "pat" | "predicate" | "other"
+        "self" | "left" | "right" | "value" | "pat" | "predicate" | "other"
     );
     arg_name.len() == 1 || is_obvious_param_name
 }

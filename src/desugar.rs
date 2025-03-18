@@ -25,6 +25,7 @@ use crate::{
     mutability::MutVal,
     parser_helpers::static_apply,
     std::math::int_type,
+    Location,
 };
 
 /// A node of a function dependency graph
@@ -252,23 +253,26 @@ impl PExpr {
                     iterator,
                     body,
                 } = for_loop;
-                let iterator_span = iterator.span;
-                let body_span = body.span;
+                let iterator_start_span =
+                    Location::new_local(iterator.span.start(), iterator.span.start());
+                let body_span: Location = body.span;
+                let body_start_span = Location::new_local(body_span.start(), body_span.start());
+                let body_end_span = Location::new_local(body_span.end(), body_span.end());
                 let it_store = Expr::new(
                     Let(
-                        (ustr("@it"), iterator.span),
+                        (ustr("@it"), iterator_start_span),
                         MutVal::mutable(),
                         iterator.desugar_boxed(ctx)?,
                         None,
                     ),
-                    iterator_span,
+                    iterator_start_span,
                 );
                 let it_next = Expr::new(
                     static_apply(
-                        (ustr("next"), iterator_span),
-                        vec![Expr::new(Identifier(ustr("@it")), iterator_span)],
+                        (ustr("next"), body_start_span),
+                        vec![Expr::new(Identifier(ustr("@it")), body_start_span)],
                     ),
-                    iterator_span,
+                    body_start_span,
                 );
                 let it_match = Expr::new(
                     Match(
@@ -276,22 +280,25 @@ impl PExpr {
                         vec![
                             (
                                 Pattern::new(
-                                    PatternKind::variant((ustr("Some"), body.span), vec![var_name]),
-                                    body.span,
+                                    PatternKind::variant(
+                                        (ustr("Some"), body_start_span),
+                                        vec![var_name],
+                                    ),
+                                    var_name.1,
                                 ),
                                 body.desugar(ctx)?,
                             ),
                             (
                                 Pattern::new(
-                                    PatternKind::empty_variant((ustr("None"), body_span)),
-                                    body_span,
+                                    PatternKind::empty_variant((ustr("None"), body_end_span)),
+                                    body_end_span,
                                 ),
-                                Expr::new(SoftBreak, body_span),
+                                Expr::new(SoftBreak, body_end_span),
                             ),
                         ],
                         None,
                     ),
-                    iterator_span,
+                    body_span,
                 );
                 let loop_expr = Expr::new(Loop(b(it_match)), body_span);
                 Block(vec![it_store, loop_expr])

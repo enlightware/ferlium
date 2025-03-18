@@ -193,7 +193,11 @@ pub(crate) fn cond_if(cond: PExpr, if_true: PExpr) -> PExprKind {
 /// Create a for loop
 pub(crate) fn for_loop(var_name: (Ustr, Location), seq: PExpr, body: PExpr) -> PExprKind {
     let seq_span = seq.span;
-    let iterator = PExpr::new(static_apply((ustr("iter"), seq_span), vec![seq]), seq_span);
+    let seq_span_start = Location::new_local(seq.span.start(), seq.span.start());
+    let iterator = PExpr::new(
+        static_apply((ustr("iter"), seq_span_start), vec![seq]),
+        seq_span,
+    );
     ExprKind::ForLoop(crate::ast::ForLoop::new(var_name, iterator, body))
 }
 
