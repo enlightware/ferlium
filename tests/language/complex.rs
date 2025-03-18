@@ -150,3 +150,25 @@ fn fn_pipes_and_if_expr() {
     assert_eq!(run("2 |> (if true { |x| x } else { |x| -x }) ()"), int(2));
     assert_eq!(run("2 |> (if false { |x| x } else { |x| -x }) ()"), int(-2));
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn minimalist_variants_and_trait_constraints() {
+    assert_eq!(
+        run(r#"
+    fn count_somes(a) {
+        let mut sum = 0;
+        for option in a {
+            match option {
+                Some(a) => sum = sum + 1,
+                None => ()
+            }
+        };
+        sum
+    }
+
+    count_somes([None, Some(true), None, None, Some(false)])
+    "#),
+        int(2)
+    );
+}

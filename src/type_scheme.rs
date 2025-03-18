@@ -14,8 +14,8 @@ use std::{
 
 use crate::{
     error::InternalCompilationError, format::write_with_separator_and_format_fn, location::Span,
-    r#trait::TraitRef, trait_solver::TraitImpls, type_like::TypeLike, type_mapper::TypeMapper,
-    type_visitor::TypeInnerVisitor, Location,
+    r#trait::TraitRef, trait_solver::TraitImpls, type_inference::UnifiedTypeInference,
+    type_like::TypeLike, type_mapper::TypeMapper, type_visitor::TypeInnerVisitor, Location,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
@@ -191,11 +191,28 @@ impl PubTypeConstraint {
                         trait_impls.get_output_types(trait_ref, input_tys, *span)?;
                     assert_eq!(got_output_tys.len(), output_tys.len());
                     for (got_output_ty, output_ty) in got_output_tys.iter().zip(output_tys.iter()) {
-                        if let Some(var) = output_ty.data().as_variable() {
-                            assert!(!subst.0.contains_key(var));
-                            subst.0.insert(*var, *got_output_ty);
-                        } else {
+                        let inner_ty_vars = output_ty.inner_ty_vars();
+                        if inner_ty_vars.is_empty() {
                             assert_eq!(got_output_ty, output_ty);
+                        } else {
+                            // Unify the two types and get back the substitution
+                            let ty_var_count = inner_ty_vars.len() as u32;
+                            let ty_subst = (0..ty_var_count)
+                                .map(|ty_var| {
+                                    (inner_ty_vars[ty_var as usize], Type::variable_id(ty_var))
+                                })
+                                .collect::<TypeSubstitution>();
+                            let local_subst = (ty_subst, EffectsSubstitution::new());
+                            let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(ty_var_count);
+                            let output_ty = output_ty.instantiate(&local_subst);
+                            ty_inf
+                                .unify_same_type(*got_output_ty, *span, output_ty, *span)
+                                .unwrap();
+                            for (index, inner_ty_var) in inner_ty_vars.iter().enumerate() {
+                                let ty = ty_inf.lookup_type_var(TypeVar::new(index as u32));
+                                assert!(ty.is_constant());
+                                subst.0.insert(*inner_ty_var, ty);
+                            }
                         }
                     }
                     None

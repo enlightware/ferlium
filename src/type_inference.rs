@@ -2443,16 +2443,20 @@ impl UnifiedTypeInference {
         substitute_fn_type(fn_ty, &mut SubstituteTypes(self))
     }
 
+    pub fn lookup_type_var(&mut self, var: TypeVar) -> Type {
+        match self.ty_unification_table.probe_value(var) {
+            Some(ty) => ty,
+            _ => Type::variable(self.ty_unification_table.find(var)),
+        }
+    }
+
     fn substitute_type_lookup(&mut self, ty: Type) -> Type {
         let type_data: TypeKind = { ty.data().clone() };
         let var = match type_data {
             TypeKind::Variable(var) => var,
             _ => return ty,
         };
-        match self.ty_unification_table.probe_value(var) {
-            Some(ty) => ty,
-            _ => Type::variable(self.ty_unification_table.find(var)),
-        }
+        self.lookup_type_var(var)
     }
 
     fn substitute_mut_lookup(&mut self, mut_ty: MutType, accept_var: bool) -> MutType {

@@ -880,7 +880,7 @@ fn partition_variant_constraints(
     for constraint in constraints {
         if let Some(has_variant) = constraint.as_type_has_variant() {
             invalid_ty_vars.extend(has_variant.3.inner_ty_vars())
-        } else {
+        } else if !constraint.is_have_trait() {
             invalid_ty_vars.extend(constraint.inner_ty_vars());
         }
     }
