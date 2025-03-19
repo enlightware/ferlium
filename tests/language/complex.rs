@@ -172,3 +172,24 @@ fn minimalist_variants_and_trait_constraints() {
         int(2)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn double_loop() {
+    assert_eq!(
+        run(r#"
+    fn sums() {
+        let mut sum = 0;
+        for i in 1..3 {
+            for j in 1..4 {
+                sum = sum + i * j;
+            }
+        };
+        sum
+    }
+
+    sums()
+    "#),
+        int(18)
+    );
+}
