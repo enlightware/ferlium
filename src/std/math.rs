@@ -87,7 +87,7 @@ pub fn add_to_module(to: &mut Module) {
     let num_trait = TraitRef::new(
         NUM_TRAIT_NAME,
         1,
-        0,
+        [],
         [
             (
                 "add",
@@ -147,7 +147,7 @@ pub fn add_to_module(to: &mut Module) {
     let div_trait = TraitRef::new(
         DIV_TRAIT_NAME,
         1,
-        0,
+        [],
         [(
             "div",
             Def::new_infer_quantifiers(

@@ -27,7 +27,7 @@ pub fn add_to_module(to: &mut Module) {
     let serialize_trait = TraitRef::new(
         SERIALIZE_TRAIT_NAME,
         1,
-        0,
+        [],
         [(
             "serialize",
             Def::new_infer_quantifiers(
@@ -41,7 +41,7 @@ pub fn add_to_module(to: &mut Module) {
     let deserialize_trait = TraitRef::new(
         DESERIALIZE_TRAIT_NAME,
         1,
-        0,
+        [],
         [(
             "deserialize",
             Def::new_infer_quantifiers(

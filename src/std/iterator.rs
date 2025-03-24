@@ -28,7 +28,7 @@ pub fn add_to_module(to: &mut Module) {
     let iterator_trait = TraitRef::new(
         ITERATOR_TRAIT_NAME,
         1,
-        1,
+        ["Item"],
         [(
             "next",
             Def::new_infer_quantifiers(
@@ -53,7 +53,7 @@ pub fn add_to_module(to: &mut Module) {
     let seq_trait = TraitRef::new_with_constraints(
         SEQ_TRAIT_NAME,
         1,
-        2,
+        ["Item", "Iter"],
         [iter_item_constraint.clone()],
         [(
             "iter",
@@ -94,7 +94,7 @@ pub fn add_to_module(to: &mut Module) {
     let sized_seq_trait = TraitRef::new(
         SIZED_SEQ_TRAIT_NAME,
         1,
-        0,
+        [],
         [(
             "len",
             Def::new_infer_quantifiers(

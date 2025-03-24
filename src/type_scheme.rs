@@ -133,7 +133,7 @@ impl PubTypeConstraint {
         span: Location,
     ) -> Self {
         assert_eq!(input_tys.len(), trait_ref.input_type_count.get() as usize);
-        assert_eq!(output_tys.len(), trait_ref.output_type_count as usize);
+        assert_eq!(output_tys.len(), trait_ref.output_type_count() as usize);
         Self::HaveTrait {
             trait_ref,
             input_tys,
@@ -845,19 +845,36 @@ fn format_have_trait(
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
     let trait_name = trait_ref.name;
-    write!(f, "{} <", trait_name)?;
-    write_with_separator_and_format_fn(
-        input_tys.iter(),
-        ", ",
-        |ty, f| write!(f, "{}", ty.format_with(env)),
-        f,
-    )?;
-    if !output_tys.is_empty() {
-        write!(f, " ↦ ")?;
+    if input_tys.len() == 1 {
+        write!(f, "{}: {}", input_tys[0].format_with(env), trait_name)?;
+        if output_tys.is_empty() {
+            return Ok(());
+        }
+        write!(f, " <")?;
+    } else {
+        write!(f, "{} <", trait_name)?;
         write_with_separator_and_format_fn(
-            output_tys.iter(),
+            input_tys.iter(),
             ", ",
             |ty, f| write!(f, "{}", ty.format_with(env)),
+            f,
+        )?;
+    }
+    if !output_tys.is_empty() {
+        if input_tys.len() != 1 {
+            write!(f, " ↦ ")?;
+        }
+        write_with_separator_and_format_fn(
+            output_tys.iter().enumerate(),
+            ", ",
+            |(index, ty), f| {
+                write!(
+                    f,
+                    "{} = {}",
+                    trait_ref.output_type_names[index],
+                    ty.format_with(env)
+                )
+            },
             f,
         )?;
     }

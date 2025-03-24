@@ -232,7 +232,7 @@ where
     let trait_output = if let Some(trait_ctx) = &trait_ctx {
         let trait_ref = &trait_ctx.trait_ref;
         let input_tys = ty_inf.fresh_type_var_tys(trait_ref.input_type_count.get() as usize);
-        let output_tys = ty_inf.fresh_type_var_tys(trait_ref.output_type_count as usize);
+        let output_tys = ty_inf.fresh_type_var_tys(trait_ref.output_type_count() as usize);
         for constraint in &trait_ctx.trait_ref.constraints {
             ty_inf.add_pub_constraint(constraint.clone());
         }

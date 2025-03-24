@@ -36,8 +36,9 @@ pub struct Trait {
     pub name: Ustr,
     /// Number of input types, by convention, the first type variables correspond to input types.
     pub input_type_count: NonZero<u32>,
-    /// Number of output types, by convention, the type variables just after input types correspond to output types.
-    pub output_type_count: u32,
+    /// Name of the output types.
+    /// By convention, the type variables just after input types correspond to output types.
+    pub output_type_names: Vec<Ustr>,
     /// The constraints on the trait, for example related to the associated types.
     pub constraints: Vec<PubTypeConstraint>,
     /// The functions provided by the trait.
@@ -46,9 +47,14 @@ pub struct Trait {
 }
 
 impl Trait {
+    /// Return the number of output types in this trait.
+    pub fn output_type_count(&self) -> u32 {
+        self.output_type_names.len() as u32
+    }
+
     /// Return the number of type variables in this trait.
     pub fn type_var_count(&self) -> u32 {
-        self.input_type_count.get() + self.output_type_count
+        self.input_type_count.get() + self.output_type_count()
     }
 
     /// Validate the trait, ensuring that its function signatures adhere to the limitations of the current implementation.
@@ -118,12 +124,19 @@ impl FmtWithModuleEnv for Trait {
             |index, f| write!(f, "{}", TypeVar::new(index)),
             f,
         )?;
-        if self.output_type_count > 0 {
+        if self.output_type_count() > 0 {
             write!(f, " ↦ ")?;
             write_with_separator_and_format_fn(
-                0..self.output_type_count,
+                0..self.output_type_count(),
                 ", ",
-                |index, f| write!(f, "{}", TypeVar::new(input_ty_count + index)),
+                |index, f| {
+                    write!(
+                        f,
+                        "{} = {}",
+                        self.output_type_names[index as usize],
+                        TypeVar::new(input_ty_count + index)
+                    )
+                },
                 f,
             )?;
         }
@@ -158,7 +171,7 @@ impl TraitRef {
     pub fn new<'a>(
         name: &str,
         input_type_count: u32,
-        output_type_count: u32,
+        output_type_names: impl Into<Vec<&'a str>>,
         functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
     ) -> Self {
         let functions = functions
@@ -169,7 +182,7 @@ impl TraitRef {
         let trait_data = Trait {
             name: ustr(name),
             input_type_count: NonZero::new(input_type_count).unwrap(),
-            output_type_count,
+            output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: Vec::new(),
             functions,
         };
@@ -180,7 +193,7 @@ impl TraitRef {
     pub fn new_with_constraints<'a>(
         name: &str,
         input_type_count: u32,
-        output_type_count: u32,
+        output_type_names: impl Into<Vec<&'a str>>,
         constraints: impl Into<Vec<PubTypeConstraint>>,
         functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
     ) -> Self {
@@ -192,7 +205,7 @@ impl TraitRef {
         let trait_data = Trait {
             name: ustr(name),
             input_type_count: NonZero::new(input_type_count).unwrap(),
-            output_type_count,
+            output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: constraints.into(),
             functions,
         };
@@ -208,7 +221,7 @@ impl TraitRef {
             self.name,
         );
         assert_eq!(
-            self.output_type_count,
+            self.output_type_count(),
             output_tys.len() as u32,
             "Mismatched output type count when implementing trait {}.",
             self.name,

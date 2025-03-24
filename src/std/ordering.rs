@@ -41,7 +41,7 @@ pub fn add_to_module(to: &mut Module) {
     let ord_trait = TraitRef::new(
         ORD_TRAIT_NAME,
         1,
-        0,
+        [],
         [(
             "cmp",
             Def::new_infer_quantifiers(
