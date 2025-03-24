@@ -298,7 +298,7 @@ impl TraitImpls {
         let current = new_module_using_std();
         let module_env = ModuleEnv::new(&current, &others);
         let filter = |tr: &TraitRef| tr.name == trait_ref.name;
-        println!("Hello {}", trait_ref.name);
+        println!("Existing impls for {}:\n", trait_ref.name);
         println!(
             "{}",
             FormatWith {

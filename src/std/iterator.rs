@@ -19,6 +19,7 @@ use crate::{
 
 pub const ITERATOR_TRAIT_NAME: &str = "Iterator";
 pub const SEQ_TRAIT_NAME: &str = "Seq";
+pub const FROM_ITERATOR_TRAIT_NAME: &str = "FromIterator";
 pub const SIZED_SEQ_TRAIT_NAME: &str = "SizedSeq";
 
 pub fn add_to_module(to: &mut Module) {
@@ -53,7 +54,7 @@ pub fn add_to_module(to: &mut Module) {
         SEQ_TRAIT_NAME,
         1,
         2,
-        [iter_item_constraint],
+        [iter_item_constraint.clone()],
         [(
             "iter",
             Def::new_infer_quantifiers(
@@ -68,6 +69,27 @@ pub fn add_to_module(to: &mut Module) {
         )],
     );
     to.traits.push(seq_trait);
+
+    // Requires per trait method generics
+    // let from_iter_trait = TraitRef::new_with_constraints(
+    //     FROM_ITERATOR_TRAIT_NAME,
+    //     1,
+    //     0,
+    //     [iter_item_constraint],
+    //     [(
+    //         "from_iter",
+    //         Def::new_infer_quantifiers(
+    //             FnType::new_by_val(
+    //                 &[Type::variable_id(2)],
+    //                 Type::variable_id(0),
+    //                 EffType::empty(),
+    //             ),
+    //             &["iterator"],
+    //             "Create a sequence from an iterator.",
+    //         ),
+    //     )],
+    // );
+    // to.traits.push(from_iter_trait);
 
     let sized_seq_trait = TraitRef::new(
         SIZED_SEQ_TRAIT_NAME,

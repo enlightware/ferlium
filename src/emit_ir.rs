@@ -410,9 +410,10 @@ where
 
         // Detect unbound type variables in the code and return error if not in unused variants only.
         // These are neither part of the function signature nor of the constraints.
-        let bounds: Vec<_> = input_quantifiers
-            .into_iter()
-            .chain(subst.keys().cloned())
+        let bounds: Vec<_> = quantifiers
+            .iter()
+            .chain(subst.keys())
+            .cloned()
             .collect();
         for ModuleFunction { name, .. } in functions() {
             let node = output.get_own_function_node_mut(name.0).unwrap();

@@ -169,6 +169,22 @@ pub fn add_to_module(to: &mut Module) {
                 array_iter(a)
             }
         }
+        // Requires per trait method generics
+        // impl FromIterator {
+        //     fn from_iter(it) {
+        //         let mut it = it;
+        //         let mut a = [];
+        //         loop {
+        //             match next(it) {
+        //                 Some(x) => {
+        //                     array_append(a, x);
+        //                 },
+        //                 None => soft_break,
+        //             }
+        //         };
+        //         a
+        //     }
+        // }
         impl SizedSeq {
             fn len(a) {
                 array_len(a)
