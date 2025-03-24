@@ -25,7 +25,7 @@ use crate::{
     ir::{self},
     module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
     r#type::{FnType, Type},
-    type_scheme::TypeScheme,
+    type_scheme::{PubTypeConstraint, TypeScheme},
     value::{NativeDisplay, Value},
 };
 
@@ -50,6 +50,15 @@ impl FunctionDefinition {
         let arg_names = arg_names.iter().copied().map(Ustr::from).collect();
         FunctionDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers(fn_ty),
+            arg_names,
+            doc: Some(String::from(doc)),
+        }
+    }
+
+    pub fn new_infer_quantifiers_with_constraints(fn_ty: FnType, constraints: impl Into<Vec<PubTypeConstraint>>, arg_names: &[&str], doc: &str) -> Self {
+        let arg_names = arg_names.iter().copied().map(Ustr::from).collect();
+        FunctionDefinition {
+            ty_scheme: TypeScheme::new_infer_quantifiers_with_constraints(fn_ty, constraints.into()),
             arg_names,
             doc: Some(String::from(doc)),
         }

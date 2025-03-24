@@ -343,7 +343,7 @@ impl TypeInference {
                     let (fn_ty, inst_data, _subst) = function
                         .definition
                         .ty_scheme
-                        .instantiate_with_fresh_vars(self, module_name, expr.span.span());
+                        .instantiate_with_fresh_vars(self, module_name, expr.span.span(), None);
                     let value =
                         Value::Function((FunctionRef::new_weak(&function.code), Some(*path)));
                     let node = K::Immediate(b(ir::Immediate {
@@ -716,29 +716,21 @@ impl TypeInference {
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data, mut subst) = definition
+                let (inst_fn_ty, inst_data, subst) = definition
                     .ty_scheme
-                    .instantiate_with_fresh_vars(self, module_name, path_span.span());
+                    .instantiate_with_fresh_vars(self, module_name, path_span.span(), Some(trait_ref.type_var_count()));
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait function is not supported yet."
                 );
-                // Extend the type substitution with not-yet-seen trait type variables, these will be in the constraints.
-                let mut ext_subst = HashMap::new();
-                for ty_var_index in 0..trait_ref.type_var_count() {
-                    let ty_var = TypeVar::new(ty_var_index);
-                    if !subst.0.contains_key(&ty_var) {
-                        ext_subst.insert(ty_var, Type::variable(self.fresh_type_var()));
-                    }
-                }
-                subst.0.extend(ext_subst);
                 // Instantiate the constraints and add them to our list.
                 trait_ref
                     .constraints
                     .iter()
-                    .map(|c| c.instantiate(&subst))
-                    .for_each(|c| {
-                        self.ty_constraints.push(TypeConstraint::Pub(c));
+                    .for_each(|constraint| {
+                        let mut constraint = constraint.instantiate(&subst);
+                        constraint.instantiate_module(module_name, path_span.span());
+                        self.add_pub_constraint(constraint);
                     });
                 // Make sure the types of the trait arguments match the expected types
                 let (args_nodes, args_effects) =
@@ -747,13 +739,12 @@ impl TypeInference {
                 assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
                 let output_tys = trait_tys.split_off(trait_ref.input_type_count.get() as usize);
                 let input_tys = trait_tys;
-                self.ty_constraints
-                    .push(TypeConstraint::Pub(PubTypeConstraint::new_have_trait(
-                        trait_ref.clone(),
-                        input_tys.clone(),
-                        output_tys,
-                        path_span,
-                    )));
+                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                    trait_ref.clone(),
+                    input_tys.clone(),
+                    output_tys,
+                    path_span,
+                ));
                 // Build and return the trait function node
                 let ret_ty = inst_fn_ty.ret;
                 let combined_effects =
@@ -787,7 +778,7 @@ impl TypeInference {
                 let (inst_fn_ty, inst_data, _subst) = function
                     .definition
                     .ty_scheme
-                    .instantiate_with_fresh_vars(self, module_name, path_span.span());
+                    .instantiate_with_fresh_vars(self, module_name, path_span.span(), None);
                 // Get the code and make sure the types of its arguments match the expected types
                 let (args_nodes, args_effects) =
                     self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;

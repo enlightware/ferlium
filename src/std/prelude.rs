@@ -66,8 +66,79 @@ pub fn add_to_module(to: &mut Module) {
             }
         }
 
+        // Iterator functions
         fn is_empty(seq) {
             eq(len(seq), 0)
+        }
+
+        /*
+        // This requires capture to be of realistic use
+        fn try_fold(it, init, f) {
+            let mut accum = init;
+            loop {
+                match next(it) {
+                    Some(x) => {
+                        match f(accum, x) {
+                            Continue(v) => {
+                                accum = v;
+                            },
+                            Break => {
+                                soft_break
+                            }
+                        }
+                    },
+                    None => soft_break,
+                }
+            };
+            accum
+        }
+        */
+
+       fn all(it, f) {
+            // When capture is available, do:
+            // try_fold(it, (), |_accum, x| if f(x) { Continue(()) } else { Break })
+            let mut it = it;
+            let mut result = true;
+            loop {
+                match next(it) {
+                    Some(x) => {
+                        if f(x) {
+                            () // not is currently not available in the prelude
+                        } else {
+                            result = false;
+                            soft_break;
+                        }
+                    },
+                    None => soft_break,
+                }
+            };
+            result
+        }
+
+        fn any(it, f) {
+            // When capture is available, build on try_fold (see fn all)
+            let mut it = it;
+            let mut result = false;
+            loop {
+                match next(it) {
+                    Some(x) => {
+                        if f(x) {
+                            result = true;
+                            soft_break;
+                        }
+                    },
+                    None => soft_break,
+                }
+            };
+            result
+        }
+
+        // Compatibility, mark as deprecated when supported
+        fn array_all(array: [_], f) {
+            all(array_iter(array), f)
+        }
+        fn array_any(array: [_], f) {
+            any(array_iter(array), f)
         }
 
         // Iterator and Seq for ranges

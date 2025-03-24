@@ -8,6 +8,7 @@
 //
 use std::new_module_using_std;
 
+use ast::{UnstableCollector, VisitExpr};
 use emit_ir::{emit_expr, emit_module, CompiledExpr};
 use error::{CompilationError, LocatedError};
 use format::FormatWith;
@@ -97,7 +98,7 @@ pub fn parse_generic_type(src: &str) -> Result<Type, LocatedError> {
 }
 
 /// Parse a module from a source code and return the corresponding ASTs.
-pub fn parse_module(src: &str) -> Result<ast::PModule, Vec<LocatedError>> {
+pub fn parse_module(src: &str, accept_unstable: bool) -> Result<ast::PModule, Vec<LocatedError>> {
     let mut errors = Vec::new();
     let module = parser::ModuleParser::new()
         .parse(&mut errors, src)
@@ -109,6 +110,17 @@ pub fn parse_module(src: &str) -> Result<ast::PModule, Vec<LocatedError>> {
             .map(|error| describe_parse_error(error.error))
             .collect();
         Err(errors)
+    } else if !accept_unstable {
+        let unstables = module.visit_with(UnstableCollector::default());
+        if unstables.0.is_empty() {
+            Ok(module)
+        } else {
+            Err(unstables
+                .0
+                .into_iter()
+                .map(|span| ("Unstable feature not allowed".into(), span))
+                .collect())
+        }
     } else {
         Ok(module)
     }
@@ -117,6 +129,7 @@ pub fn parse_module(src: &str) -> Result<ast::PModule, Vec<LocatedError>> {
 /// Parse a module and an expression (if any) from a source code and return the corresponding ASTs.
 pub fn parse_module_and_expr(
     src: &str,
+    accept_unstable: bool,
 ) -> Result<(ast::PModule, Option<ast::PExpr>), Vec<LocatedError>> {
     let mut errors = Vec::new();
     let module_and_expr = parser::ModuleAndExprParser::new()
@@ -129,6 +142,20 @@ pub fn parse_module_and_expr(
             .map(|error| describe_parse_error(error.error))
             .collect();
         Err(errors)
+    } else if !accept_unstable {
+        let mut unstables = module_and_expr.0.visit_with(UnstableCollector::default());
+        if let Some(expr) = module_and_expr.1.as_ref() {
+            unstables = expr.visit_with(unstables);
+        }
+        if unstables.0.is_empty() {
+            Ok(module_and_expr)
+        } else {
+            Err(unstables
+                .0
+                .into_iter()
+                .map(|span| ("Unstable feature not allowed".into(), span))
+                .collect())
+        }
     } else {
         Ok(module_and_expr)
     }
@@ -136,6 +163,7 @@ pub fn parse_module_and_expr(
 
 /// Compile a source code, given some other modules, and return the compiled module and an expression (if any), or an error.
 /// All spans are in byte offsets.
+/// Disallow unstable features as this is typically user code.
 pub fn compile(
     src: &str,
     other_modules: &Modules,
@@ -147,8 +175,8 @@ pub fn compile(
     // Parse the source code.
     log::debug!("Using other modules: {}", other_modules.keys().join(", "));
     log::debug!("Input: {src}");
-    let (module_ast, expr_ast) =
-        parse_module_and_expr(src).map_err(|error| compilation_error!(ParsingFailed(error)))?;
+    let (module_ast, expr_ast) = parse_module_and_expr(src, false)
+        .map_err(|error| compilation_error!(ParsingFailed(error)))?;
     {
         let env = ModuleEnv::new(&module, other_modules);
         log::debug!("Module AST\n{}", module_ast.format_with(&env));
@@ -183,6 +211,7 @@ pub fn compile(
 }
 
 /// Compile a source code, given some other modules, and it to an existing module, or an error.
+/// Allow unstable features as this is typically not user code.
 pub fn add_code_to_module(
     code: &str,
     to: &mut Module,
@@ -190,7 +219,7 @@ pub fn add_code_to_module(
 ) -> Result<(), CompilationError> {
     // Parse the source code.
     let module_ast =
-        parse_module(code).map_err(|error| compilation_error!(ParsingFailed(error)))?;
+        parse_module(code, true).map_err(|error| compilation_error!(ParsingFailed(error)))?;
     assert_eq!(module_ast.errors(), &[]);
     {
         let env = ModuleEnv::new(to, other_modules);

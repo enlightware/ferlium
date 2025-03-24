@@ -105,7 +105,7 @@ fn array_map() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_any() {
-    assert_eq!(run("array_any([], |x| x == 1)"), bool(false));
+    assert_eq!(run("array_any(([]: [int]), |x| x == 1)"), bool(false));
     assert_eq!(run("array_any([1], |x| x == 1)"), bool(true));
     assert_eq!(run("array_any([1, 2, 3], |x| x == 1)"), bool(true));
     assert_eq!(run("array_any([1, 2, 3], |x| x >= 2)"), bool(true));
@@ -126,7 +126,7 @@ fn array_any() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_all() {
-    assert_eq!(run("array_all([], |x| x == 1)"), bool(true));
+    assert_eq!(run("array_all(([]: [int]), |x| x == 1)"), bool(true));
     assert_eq!(run("array_all([1], |x| x == 1)"), bool(true));
     assert_eq!(run("array_all([1, 2, 3], |x| x == 1)"), bool(false));
     assert_eq!(run("array_all([1, 2, 3], |x| x >= 1)"), bool(true));

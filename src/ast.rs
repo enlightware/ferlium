@@ -82,6 +82,11 @@ impl FormatWithIndent for Never {
 /// Trait for visiting expressions
 pub trait VisitExpr<P: Phase> {
     fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V);
+
+    fn visit_with<V: ExprVisitor<P>>(&self, mut visitor: V) -> V {
+        self.visit(&mut visitor);
+        visitor
+    }
 }
 
 impl<P: Phase> VisitExpr<P> for Never {
@@ -202,15 +207,24 @@ impl<P: Phase> Module<P> {
     }
 
     pub fn errors(&self) -> Vec<LocatedError> {
-        let mut collector = ErrorCollector::default();
-        for ModuleFunction { body, .. } in self.functions.iter() {
-            body.visit(&mut collector);
-        }
-        collector.0
+        self.visit_with(ErrorCollector::default()).0
     }
 
     pub fn is_empty(&self) -> bool {
         self.functions.is_empty() && self.impls.is_empty() && self.types.is_empty()
+    }
+}
+
+impl<P: Phase> VisitExpr<P> for Module<P> {
+    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V) {
+        for ModuleFunction { body, .. } in self.functions.iter() {
+            body.visit(visitor);
+        }
+        for imp in self.impls.iter() {
+            for ModuleFunction { body, .. } in imp.functions.iter() {
+                body.visit(visitor);
+            }
+        }
     }
 }
 
@@ -569,6 +583,18 @@ impl<P: Phase> ExprVisitor<P> for ErrorCollector {
     fn visit_start(&mut self, expr: &Expr<P>) {
         if let ExprKind::Error = expr.kind {
             self.0.push(("parse error".into(), expr.span));
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct UnstableCollector(pub(crate) Vec<Location>);
+impl<P: Phase> ExprVisitor<P> for UnstableCollector {
+    fn visit_start(&mut self, expr: &Expr<P>) {
+        use ExprKind::*;
+        match expr.kind {
+            SoftBreak | Loop(_) => self.0.push(expr.span),
+            _ => {}
         }
     }
 }

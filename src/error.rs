@@ -462,7 +462,15 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                 module.span().end(),
                 module.module_name()
             ),
-            None => source[loc.start()..loc.end()].to_string(),
+            None => {
+                if loc.start() < loc.end() {
+                    source[loc.start()..loc.end()].to_string()
+                } else {
+                    let end = source.len().min(loc.end() + 20);
+                    let more = if end < source.len() { "…" } else { "" };
+                    format!("location where \"{}{more}\" starts", &source[loc.start()..end])
+                }
+            },
         };
         use CompilationErrorImpl::*;
         match self.value.deref() {

@@ -491,7 +491,7 @@ fn main() {
         };
 
         // Parse input
-        let parse_result = parse_module_and_expr(&src);
+        let parse_result = parse_module_and_expr(&src, false);
         let (module_ast, expr_ast) = match parse_result {
             Ok(result) => result,
             Err(errors) => {

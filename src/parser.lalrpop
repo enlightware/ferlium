@@ -43,7 +43,7 @@ ModuleTraitImpl: Module = {
 }
 
 TraitImpl: TraitImpl = {
-    <l:@L> "impl" <trait_name:Sp<UIdentifier>> "{" <functions:Sep<Function, ",">> "}" <r:@R> => {
+    <l:@L> "impl" <trait_name:Sp<UIdentifier>> "{" <functions:Function*> "}" <r:@R> => {
         TraitImpl {
             trait_name,
             functions,
@@ -249,6 +249,8 @@ AtomExpr = {
     TupleExpr,
     ArrayExpr,
     RecordExpr,
+    LoopExpr,
+    SoftBreakExpr,
     Block,
     BrokenExpr,
 }
@@ -362,6 +364,14 @@ RecordField: (UstrSpan, Expr) = {
 
 PropertyPath: (Ustr, Ustr) = {
     "@" <p:Path> "." <f:UIdentifier> => (p.into(), f),
+}
+
+LoopExpr: ExprKind = {
+    "loop" <b:Es<Block>> => Loop(boxed(b)),
+}
+
+SoftBreakExpr: ExprKind = {
+    "soft_break" => SoftBreak,
 }
 
 Block: ExprKind = {

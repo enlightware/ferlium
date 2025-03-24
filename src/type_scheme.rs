@@ -8,7 +8,7 @@
 //
 use std::{
     borrow::Borrow,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     hash::{Hash, Hasher},
 };
 
@@ -142,7 +142,7 @@ impl PubTypeConstraint {
         }
     }
 
-    fn instantiate_module(&mut self, module_name: Option<Ustr>, inst_span: Span) {
+    pub fn instantiate_module(&mut self, module_name: Option<Ustr>, inst_span: Span) {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs {
@@ -554,6 +554,18 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         }
     }
 
+    /// Creates a new type scheme by inferring quantifiers from the type, and some constraints.
+    pub fn new_infer_quantifiers_with_constraints(ty: Ty, constraints: Vec<PubTypeConstraint>) -> Self {
+        let ty_quantifiers = Self::list_ty_vars(&ty, constraints.iter());
+        let eff_quantifiers = ty.input_effect_vars();
+        Self {
+            ty_quantifiers,
+            eff_quantifiers,
+            ty,
+            constraints,
+        }
+    }
+
     /// Returns the type quantifiers of this type scheme.
     pub(crate) fn ty_quantifiers_from_signature(&self) -> Vec<TypeVar> {
         Self::list_ty_vars(&self.ty, self.constraints.iter())
@@ -580,14 +592,26 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Instantiates this type scheme with fresh type variables in ty_inf.
+    /// If ty_var_count is not None, it will ensure having fresh type variables from 0 to ty_var_count-1.
     pub(crate) fn instantiate_with_fresh_vars(
         &self,
         ty_inf: &mut TypeInference,
         src_module_name: Option<Ustr>,
         inst_span: Span,
+        ty_var_count: Option<u32>,
     ) -> (Ty, FnInstData, InstSubstitution) {
-        let ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
+        let mut ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
         let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
+        if let Some(ty_var_count) = ty_var_count {
+            let mut ext_subst = HashMap::new();
+            for ty_var_index in 0..ty_var_count {
+                let ty_var = TypeVar::new(ty_var_index);
+                if !ty_subst.contains_key(&ty_var) {
+                    ext_subst.insert(ty_var, Type::variable(ty_inf.fresh_type_var()));
+                }
+            }
+            ty_subst.extend(ext_subst);
+        }
         let subst = (ty_subst, eff_subst);
         for constraint in &self.constraints {
             let mut constraint = constraint.instantiate(&subst);
