@@ -555,7 +555,10 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Creates a new type scheme by inferring quantifiers from the type, and some constraints.
-    pub fn new_infer_quantifiers_with_constraints(ty: Ty, constraints: Vec<PubTypeConstraint>) -> Self {
+    pub fn new_infer_quantifiers_with_constraints(
+        ty: Ty,
+        constraints: Vec<PubTypeConstraint>,
+    ) -> Self {
         let ty_quantifiers = Self::list_ty_vars(&ty, constraints.iter());
         let eff_quantifiers = ty.input_effect_vars();
         Self {

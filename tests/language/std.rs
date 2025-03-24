@@ -191,6 +191,19 @@ fn array_iterators() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn iterator_fns() {
+    assert_eq!(run("0..2 |> iter() |> any(|x| x > 1)"), bool(false));
+    assert_eq!(run("0..2 |> iter() |> any(|x| x >= 1)"), bool(true));
+    assert_eq!(run("[0, 1] |> iter() |> any(|x| x > 1)"), bool(false));
+    assert_eq!(run("[0, 1] |> iter() |> any(|x| x >= 1)"), bool(true));
+    assert_eq!(run("0..2 |> iter() |> all(|x| x > 0)"), bool(false));
+    assert_eq!(run("0..2 |> iter() |> all(|x| x >= 0)"), bool(true));
+    assert_eq!(run("[0, 1] |> iter() |> all(|x| x > 0)"), bool(false));
+    assert_eq!(run("[0, 1] |> iter() |> all(|x| x >= 0)"), bool(true));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_concat() {
     assert_eq!(run(r#"string_concat("", "")"#), string(""));
     assert_eq!(

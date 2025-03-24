@@ -67,6 +67,8 @@ pub fn add_to_module(to: &mut Module) {
         }
 
         // Iterator functions
+
+        /// Returns true if the collection contains no elements.
         fn is_empty(seq) {
             eq(len(seq), 0)
         }
@@ -94,7 +96,8 @@ pub fn add_to_module(to: &mut Module) {
         }
         */
 
-       fn all(it, f) {
+        /// Tests if every element of the iterator matches a predicate.
+        fn all(it, f) {
             // When capture is available, do:
             // try_fold(it, (), |_accum, x| if f(x) { Continue(()) } else { Break })
             let mut it = it;
@@ -115,6 +118,7 @@ pub fn add_to_module(to: &mut Module) {
             result
         }
 
+        /// Tests if any element of the iterator matches a predicate.
         fn any(it, f) {
             // When capture is available, build on try_fold (see fn all)
             let mut it = it;

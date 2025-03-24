@@ -716,22 +716,23 @@ impl TypeInference {
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data, subst) = definition
-                    .ty_scheme
-                    .instantiate_with_fresh_vars(self, module_name, path_span.span(), Some(trait_ref.type_var_count()));
+                let (inst_fn_ty, inst_data, subst) =
+                    definition.ty_scheme.instantiate_with_fresh_vars(
+                        self,
+                        module_name,
+                        path_span.span(),
+                        Some(trait_ref.type_var_count()),
+                    );
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait function is not supported yet."
                 );
                 // Instantiate the constraints and add them to our list.
-                trait_ref
-                    .constraints
-                    .iter()
-                    .for_each(|constraint| {
-                        let mut constraint = constraint.instantiate(&subst);
-                        constraint.instantiate_module(module_name, path_span.span());
-                        self.add_pub_constraint(constraint);
-                    });
+                trait_ref.constraints.iter().for_each(|constraint| {
+                    let mut constraint = constraint.instantiate(&subst);
+                    constraint.instantiate_module(module_name, path_span.span());
+                    self.add_pub_constraint(constraint);
+                });
                 // Make sure the types of the trait arguments match the expected types
                 let (args_nodes, args_effects) =
                     self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
