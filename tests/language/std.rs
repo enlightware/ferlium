@@ -13,6 +13,7 @@ use crate::effects::test_mod as test_mod_for_effects;
 use super::common::{bool, fail_compilation, float, int, run, string, variant};
 use ferlium::{
     effects::{effect, no_effects, PrimitiveEffect},
+    std::option::{none, some},
     value::Value,
 };
 
@@ -48,6 +49,42 @@ fn array_prepend() {
     assert_eq!(run("let mut a = []; array_prepend(a, 1); a"), int_a![1]);
     assert_eq!(run("let mut a = [1]; array_prepend(a, 1); a"), int_a![1, 1]);
     assert_eq!(run("let mut a = [2]; array_prepend(a, 1); a"), int_a![1, 2]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_pop_back() {
+    assert_eq!(run("let mut a: [int] = []; array_pop_back(a)"), none());
+    assert_eq!(run("let mut a = [1]; array_pop_back(a); a"), int_a![]);
+    assert_eq!(run("let mut a = [1]; array_pop_back(a)"), some(int(1)));
+    assert_eq!(run("let mut a = [1, 2]; array_pop_back(a); a"), int_a![1]);
+    assert_eq!(run("let mut a = [1, 2]; array_pop_back(a)"), some(int(2)));
+    assert_eq!(
+        run("let mut a = [1, 2, 3]; array_pop_back(a); a"),
+        int_a![1, 2]
+    );
+    assert_eq!(
+        run("let mut a = [1, 2, 3]; array_pop_back(a)"),
+        some(int(3))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_pop_front() {
+    assert_eq!(run("let mut a: [int] = []; array_pop_front(a)"), none());
+    assert_eq!(run("let mut a = [1]; array_pop_front(a); a"), int_a![]);
+    assert_eq!(run("let mut a = [1]; array_pop_front(a)"), some(int(1)));
+    assert_eq!(run("let mut a = [1, 2]; array_pop_front(a); a"), int_a![2]);
+    assert_eq!(run("let mut a = [1, 2]; array_pop_front(a)"), some(int(1)));
+    assert_eq!(
+        run("let mut a = [1, 2, 3]; array_pop_front(a); a"),
+        int_a![2, 3]
+    );
+    assert_eq!(
+        run("let mut a = [1, 2, 3]; array_pop_front(a)"),
+        some(int(1))
+    );
 }
 
 #[test]

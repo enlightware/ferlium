@@ -66,6 +66,18 @@ pub fn add_to_module(to: &mut Module) {
             }
         }
 
+        // Arrays
+
+        // Blocked due to issue: https://github.com/enlightware/ferlium/issues/59
+        // fn array_peek_back(array) {
+        //     let l = array_len(array);
+        //     if le(l, 0) {
+        //         None
+        //     } else {
+        //         Some(array[sub(l, 1)])
+        //     }
+        // }
+
         // Iterator functions
 
         /// Returns true if the collection contains no elements.

@@ -146,6 +146,42 @@ impl Array {
         )
     }
 
+    pub fn pop_back(&mut self) -> Value {
+        let value = Rc::make_mut(&mut self.0).pop_back();
+        match value {
+            Some(v) => some(v),
+            None => none(),
+        }
+    }
+
+    fn pop_back_desc() -> ModuleFunction {
+        let array = array_type_generic();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            &[(array, true)],
+            option_type_generic(),
+            no_effects(),
+        ));
+        UnaryNativeFnMV::description_with_ty_scheme(Self::pop_back, ["array"], None, ty_scheme)
+    }
+
+    pub fn pop_front(&mut self) -> Value {
+        let value = Rc::make_mut(&mut self.0).pop_front();
+        match value {
+            Some(v) => some(v),
+            None => none(),
+        }
+    }
+
+    fn pop_front_desc() -> ModuleFunction {
+        let array = array_type_generic();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            &[(array, true)],
+            option_type_generic(),
+            no_effects(),
+        ));
+        UnaryNativeFnMV::description_with_ty_scheme(Self::pop_front, ["array"], None, ty_scheme)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -343,6 +379,10 @@ pub fn add_to_module(to: &mut Module) {
         .insert(ustr("array_append"), Array::append_descr());
     to.functions
         .insert(ustr("array_prepend"), Array::prepend_descr());
+    to.functions
+        .insert(ustr("array_pop_back"), Array::pop_back_desc());
+    to.functions
+        .insert(ustr("array_pop_front"), Array::pop_front_desc());
     to.functions.insert(ustr("array_len"), Array::len_descr());
     to.functions
         .insert(ustr("array_concat"), Array::concat_descr());
