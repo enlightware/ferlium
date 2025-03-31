@@ -1,12 +1,12 @@
 use crate::{Location, LocatedError};
 use crate::ast::{UstrSpan, TypeSpan, MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl};
-use crate::value::{Value, LiteralValue};
+use crate::value::LiteralValue;
 use crate::r#type::{Type, FnType, FnArgType};
 use crate::type_like::TypeLike;
 use crate::effects::EffType;
 use crate::parser_helpers::*;
 use crate::std::{logic::bool_type, math::{int_type, float_type}, array::array_type, string::string_type, variant::script_variant_type, ordering::ordering_type};
-use crate::containers::{b as boxed};
+use crate::containers::{b as boxed, SVec2};
 use crate::mutability::{MutVal, MutType};
 
 use ustr::{Ustr, ustr};
@@ -303,15 +303,9 @@ MatchArg: (Pattern, Expr) = {
 }
 
 Pattern: Pattern = {
-    Ps<LiteralPattern>,
     Ps<NullaryVariantPattern>,
     Ps<NAryVariantPattern>,
-}
-
-LiteralPattern: PatK = {
-    Sp<LiteralValue> => PatK::Literal(<>.0.0, <>.0.1),
-    // This is necessary as our IntLiteral parses only unsigned
-    "-" <v:Sp<IntValue>> => PatK::Literal(literal_value(-v.0).0, int_type()),
+    Ps<LiteralPatternKind>,
 }
 
 NullaryVariantPattern: PatK = {
@@ -322,29 +316,53 @@ NAryVariantPattern: PatK = {
     <tag:Sp<UIdentifier>> "(" <vars:StrArgs> ")" => PatK::Variant { tag, vars },
 }
 
+LiteralPatternKind: PatK = {
+    LiteralPattern => PatK::Literal(<>.0, <>.1),
+}
+
+LiteralPattern = {
+    ScalarLiteralPattern,
+    TupleLiteralPattern,
+    // TODO: add RecordLiteralPattern
+    // TODO: add ArrayLiteralPattern
+}
+
+ScalarLiteralPattern: (LiteralValue, Type) = {
+    LiteralValue => <>,
+    // This is necessary as our IntLiteral parses only unsigned
+    "-" <v:IntValue> => (literal_value(-v).0, int_type())
+    // TODO: add float literal pattern
+}
+
+TupleLiteralPattern: (LiteralValue, Type) = {
+    "(" <f:LiteralPattern> "," <r:Sep<LiteralPattern, ",">> ")" => {
+        let (vals, tys): (SVec2<_>, Vec<_>) = ext_f(f, r).into_iter().unzip();
+        let val = LiteralValue::new_tuple(vals);
+        let ty = Type::tuple(tys);
+        (val, ty)
+    },
+}
+
 LiteralExpr: ExprKind = {
     LiteralValue => Literal(<>.0.into_value(), <>.1),
 }
 
 LiteralValue = {
-    IntLiteral,
+    UnitLiteral,
     BoolLiteral,
+    IntLiteral,
+    // Note: floats are not here because their grammar conflict with projections.
     StringLiteral,
 };
 
 TupleExpr: ExprKind = {
-    "(" ")" => Literal(Value::unit(), Type::unit()),
     "(" <a:TupleArgs> ")" => tuple(a),
 }
 
 // Note: we need this to make the difference between a parenthesized expression
 // and a tuple with a single element
 TupleArgs: Vec<Expr> = {
-    <f:Expr> "," <r:Sep<Expr, ",">> => {
-        let mut v = vec![f];
-        v.extend(r);
-        v
-    },
+    <f:Expr> "," <r:Sep<Expr, ",">> => ext_f(f, r),
 }
 
 ArrayExpr: ExprKind = {
@@ -478,6 +496,10 @@ UIdentifier: Ustr = {
 }
 
 Identifier: &'input str = r"[\p{L}_][\p{L}\p{N}_]*" => <>;
+
+UnitLiteral: (LiteralValue, Type) = {
+    "(" ")" => literal_value(())
+}
 
 BoolLiteral: (LiteralValue, Type) = {
     "true" => literal_value(true),

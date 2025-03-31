@@ -23,7 +23,6 @@ use crate::{
     location::Location,
     parser_helpers::EMPTY_USTR,
     r#trait::TraitRef,
-    std::logic::bool_type,
     trait_solver::TraitImpls,
     type_like::TypeLike,
     type_mapper::TypeMapper,
@@ -1398,14 +1397,17 @@ impl UnifiedTypeInference {
         // Then, solve type coverage constraints
         for (span, ty, values) in ty_coverage_constraints {
             let ty = unified_ty_inf.normalize_type(ty);
-            if ty == Type::unit() {
-                continue;
-            }
-            if ty == bool_type()
-                && values.contains(&Value::native(true))
-                && values.contains(&Value::native(false))
-            {
-                continue;
+            if let Some(all_values) = ty.data().all_values() {
+                let mut complete = true;
+                for ty_value in all_values {
+                    if !values.contains(&ty_value) {
+                        complete = false;
+                        break;
+                    }
+                }
+                if complete {
+                    continue;
+                }
             }
             return Err(internal_compilation_error!(NonExhaustivePattern {
                 span,

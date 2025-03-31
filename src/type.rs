@@ -26,6 +26,7 @@ use crate::type_like::CastableToType;
 use crate::type_like::TypeLike;
 use crate::type_mapper::TypeMapper;
 use crate::type_visitor::TypeInnerVisitor;
+use crate::value::Value;
 use crate::Location;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
@@ -861,6 +862,58 @@ impl TypeKind {
             Variant(items) => items.sort_by(|(a, _), (b, _)| a.cmp(b)),
             Record(fields) => fields.sort_by(|a, b| a.0.cmp(&b.0)),
             _ => (),
+        }
+    }
+
+    /// If all values can be exhaustively enumerated, return them,
+    pub fn all_values(&self) -> Option<Vec<Value>> {
+        use TypeKind::*;
+        match self {
+            Native(native) => {
+                if native.arguments.is_empty() {
+                    if native.bare_ty == bare_native_type::<()>() {
+                        Some(vec![Value::unit()])
+                    } else if native.bare_ty == bare_native_type::<bool>() {
+                        Some(vec![Value::native(false), Value::native(true)])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Tuple(elements) => {
+                let mut cardinality = 1;
+                let element_values = elements
+                    .iter()
+                    .map(|element| {
+                        let all_values = element.data().all_values()?;
+                        cardinality *= all_values.len();
+                        Some(all_values)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                if cardinality > 1000 {
+                    None
+                } else {
+                    // We do the Cartesian product of the values of the tuple elements
+                    let mut result = vec![vec![]];
+                    for pool in element_values {
+                        let mut new_result = Vec::new();
+                        for prefix in &result {
+                            for item in &pool {
+                                let mut new_prefix = prefix.clone();
+                                new_prefix.push(item.clone());
+                                new_result.push(new_prefix);
+                            }
+                        }
+                        result = new_result;
+                    }
+                    let result = result.into_iter().map(Value::tuple).collect::<Vec<_>>();
+                    Some(result)
+                }
+            }
+            Never => Some(vec![]),
+            _ => None,
         }
     }
 }

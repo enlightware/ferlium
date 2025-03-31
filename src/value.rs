@@ -315,22 +315,43 @@ impl Display for Value {
 }
 
 /// A literal value is a native value that can be hashed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LiteralValue(B<dyn HashableNativeValue>);
+#[derive(Debug, Clone, PartialEq, Eq, EnumAsInner, Hash)]
+pub enum LiteralValue {
+    Native(B<dyn HashableNativeValue>),
+    Tuple(B<SVec2<LiteralValue>>),
+}
 
 impl LiteralValue {
-    pub fn new<T: HashableNativeValue + 'static>(value: T) -> Self {
-        Self(b(value))
+    pub fn new_native<T: HashableNativeValue + 'static>(value: T) -> Self {
+        Self::Native(b(value))
+    }
+
+    pub fn new_tuple(values: impl Into<SVec2<LiteralValue>>) -> Self {
+        Self::Tuple(b(values.into()))
     }
 
     pub fn into_value(self) -> Value {
-        Value::Native(self.0.into_native_value())
+        use LiteralValue::*;
+        match self {
+            Native(value) => Value::Native(value.into_native_value()),
+            Tuple(args) => {
+                Value::tuple(args.into_iter().map(Self::into_value).collect::<SVec2<_>>())
+            }
+        }
     }
 }
 
 impl Display for LiteralValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt_as_literal(f)
+        use LiteralValue::*;
+        match self {
+            Native(value) => value.fmt_as_literal(f),
+            Tuple(tuple) => {
+                write!(f, "(")?;
+                write_with_separator(tuple.iter(), ", ", f)?;
+                write!(f, ")")
+            }
+        }
     }
 }
 

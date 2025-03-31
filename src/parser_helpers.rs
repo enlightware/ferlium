@@ -58,7 +58,7 @@ pub(crate) fn literal_value<T>(value: T) -> (LiteralValue, Type)
 where
     T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
-    (LiteralValue::new(value), Type::primitive::<T>())
+    (LiteralValue::new_native(value), Type::primitive::<T>())
 }
 
 /// Make a unit literal
@@ -72,7 +72,7 @@ where
     T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
     Pattern::new(
-        PatternKind::Literal(LiteralValue::new(value), Type::primitive::<T>()),
+        PatternKind::Literal(LiteralValue::new_native(value), Type::primitive::<T>()),
         span,
     )
 }
@@ -80,7 +80,7 @@ where
 /// Make a string literal
 pub(crate) fn string_literal(s: &str) -> LiteralValue {
     let s = apply_string_escapes(&s[1..s.len() - 1]);
-    LiteralValue::new(MyString::from_str(&s).unwrap())
+    LiteralValue::new_native(MyString::from_str(&s).unwrap())
 }
 
 /// Make formatted string

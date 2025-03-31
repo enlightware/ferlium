@@ -393,6 +393,53 @@ fn match_expr() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_tuples() {
+    assert_eq!(
+        run(r#"
+            let mut a = [];
+            for l in [false, true] {
+                for r in [false, true] {
+                    let v = match (l, r) {
+                        (true, true) => 1,
+                        (true, false) => 2,
+                        (false, true) => 3,
+                        (false, false) => 4,
+                    };
+                    array_append(a, v);
+                }
+            };
+            a
+        "#),
+        int_a![4, 3, 2, 1]
+    );
+    assert_eq!(
+        run(r#"
+            let mut a = [];
+            for l in [false, true] {
+                for m in [false, true] {
+                    for r in [false, true] {
+                        let v = match (l, (m, r)) {
+                            (true, (true, true)) => 1,
+                            (true, (true, false)) => 2,
+                            (true, (false, true)) => 3,
+                            (true, (false, false)) => 4,
+                            (false, (true, true)) => 5,
+                            (false, (true, false)) => 6,
+                            (false, (false, true)) => 7,
+                            (false, (false, false)) => 8,
+                        };
+                        array_append(a, v);
+                    }
+                }
+            };
+            a
+        "#),
+        int_a![8, 7, 6, 5, 4, 3, 2, 1]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn tuple_creation() {
     assert_eq!(run("()"), unit());
     assert_eq!(run("(1,)"), int_tuple!(1));
