@@ -185,10 +185,10 @@ pub Expr = {
 }
 
 TopExpr = {
-    PipeExpr,
     AssignExpr,
     ReturnExpr,
     AbstractExpr,
+    PipeExpr,
 }
 
 AssignExpr: ExprKind = {
@@ -242,18 +242,22 @@ AtomExpr = {
     ParExpr,
     PathExpr,
     PropertyPathExpr,
-    ForExpr,
-    IfExpr,
-    MatchExpr,
     LiteralExpr,
     FormattedString,
     TupleExpr,
     ArrayExpr,
     RecordExpr,
-    LoopExpr,
     SoftBreakExpr,
-    Block,
+    StmtLikeExpr,
     BrokenExpr,
+}
+
+StmtLikeExpr = {
+    IfExpr,
+    MatchExpr,
+    ForExpr,
+    LoopExpr,
+    Block,
 }
 
 ParExpr: ExprKind = {
@@ -568,6 +572,7 @@ Sep<T, S>: Vec<T> = {
 };
 
 // A tier of expression, for a binary operation, left-associative
+#[inline]
 BinOpLeftAssoc<Op, NextTier>: ExprKind = {
     <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => static_apply(o, vec![l, r]),
     NextTier
