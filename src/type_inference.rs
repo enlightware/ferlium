@@ -1397,17 +1397,18 @@ impl UnifiedTypeInference {
         // Then, solve type coverage constraints
         for (span, ty, values) in ty_coverage_constraints {
             let ty = unified_ty_inf.normalize_type(ty);
-            if let Some(all_values) = ty.data().all_values() {
-                let mut complete = true;
-                for ty_value in all_values {
-                    if !values.contains(&ty_value) {
-                        complete = false;
-                        break;
-                    }
+            let all_values = ty.data().all_values().ok_or_else(|| {
+                internal_compilation_error!(TypeValuesCannotBeEnumerated { span, ty })
+            })?;
+            let mut complete = true;
+            for ty_value in all_values {
+                if !values.contains(&ty_value) {
+                    complete = false;
+                    break;
                 }
-                if complete {
-                    continue;
-                }
+            }
+            if complete {
+                continue;
             }
             return Err(internal_compilation_error!(NonExhaustivePattern {
                 span,

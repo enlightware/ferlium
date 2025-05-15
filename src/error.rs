@@ -189,6 +189,10 @@ pub enum InternalCompilationErrorImpl {
         ty: Type,
         // TODO: have a generic way to talk about the non-covered values
     },
+    TypeValuesCannotBeEnumerated {
+        span: Location,
+        ty: Type,
+    },
     MutablePathsOverlap {
         a_span: Location,
         b_span: Location,
@@ -400,6 +404,10 @@ pub enum CompilationErrorImpl {
         span: Location,
     },
     NonExhaustivePattern {
+        span: Location,
+        ty: String,
+    },
+    TypeValuesCannotBeEnumerated {
         span: Location,
         ty: String,
     },
@@ -783,6 +791,14 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                     ty, fmt_span(span)
                 )
             }
+            TypeValuesCannotBeEnumerated { span, ty } => {
+                write!(
+                    f,
+                    "Values of type {} cannot be enumerated in {}, but all possible values must be known for exhaustive match coverage analysis",
+                    ty,
+                    fmt_span(span)
+                )
+            }
             MutablePathsOverlap {
                 a_span,
                 b_span,
@@ -1081,6 +1097,12 @@ impl CompilationError {
                 span,
                 ty: ty.format_with(env).to_string(),
             }),
+            TypeValuesCannotBeEnumerated { span, ty } => {
+                compilation_error!(TypeValuesCannotBeEnumerated {
+                    span,
+                    ty: ty.format_with(env).to_string(),
+                })
+            }
             MutablePathsOverlap {
                 a_span,
                 b_span,

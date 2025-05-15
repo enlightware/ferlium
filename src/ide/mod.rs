@@ -395,8 +395,14 @@ fn compilation_error_to_data(
             vec![ErrorData::from_location(
                 span,
                 format!(
-                    "Non-exhaustive patterns for type {ty}, all possible values must be covered."
+                    "Non-exhaustive patterns for type {ty}, all possible values must be covered"
                 ),
+            )]
+        }
+        TypeValuesCannotBeEnumerated { span, ty } => {
+            vec![ErrorData::from_location(
+                span,
+                format!("Values of type {ty} cannot be enumerated, but all possible values must be known for exhaustive match coverage analysis"),
             )]
         }
         MutablePathsOverlap {

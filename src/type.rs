@@ -867,6 +867,8 @@ impl TypeKind {
 
     /// If all values can be exhaustively enumerated, return them,
     pub fn all_values(&self) -> Option<Vec<Value>> {
+        // The maximum cardinality for a type to agree to be enumerated
+        const MAX_CARDINALITY: usize = 1000;
         use TypeKind::*;
         match self {
             Native(native) => {
@@ -892,7 +894,7 @@ impl TypeKind {
                         Some(all_values)
                     })
                     .collect::<Option<Vec<_>>>()?;
-                if cardinality > 1000 {
+                if cardinality > MAX_CARDINALITY {
                     None
                 } else {
                     // We do the Cartesian product of the values of the tuple elements

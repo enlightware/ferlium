@@ -373,7 +373,7 @@ fn match_expr() {
     );
     fail_compilation("let a = 0; match a { 0 => 1 }")
         .into_inner()
-        .into_non_exhaustive_pattern()
+        .into_type_values_cannot_be_enumerated()
         .unwrap();
     assert_eq!(run("let a = 1; match a { 0 => 1, _ => 3 }"), int(3));
     assert_eq!(run("let a = 0; match a { 0 => 1, 1 => 2, _ => 3 }"), int(1));
