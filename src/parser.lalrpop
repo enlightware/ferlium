@@ -215,9 +215,15 @@ RangeExpr: ExprKind = {
     LogicOrExpr,
 }
 
-LogicOrExpr = BinOpLeftAssoc<LogicalOrOp, LogicAndExpr>;
+LogicOrExpr: ExprKind = {
+    <l:Es<LogicOrExpr>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr>> => cond_if_else(l, literal_expr(true, o.1), r),
+    LogicAndExpr,
+}
 
-LogicAndExpr = BinOpLeftAssoc<LogicalAndOp, CompExpr>;
+LogicAndExpr: ExprKind = {
+    <l:Es<LogicAndExpr>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr>> => cond_if_else(l, r, literal_expr(false, o.1)),
+    CompExpr,
+}
 
 CompExpr = BinOpLeftAssoc<CompOp, AddExpr>;
 
@@ -487,12 +493,12 @@ CompOp: Ustr = {
 }
 
 LogicalAndOp: Ustr = {
-    "and" => ustr("std::and"),
+    "and" => ustr("std::bitand"),
     <l:@L> "&&" <r:@R> =>? error("for readability, use the \"and\" keyword instead of the C-style && operator".into(), span(l, r)),
 }
 
 LogicalOrOp: Ustr = {
-    "or" => ustr("std::or"),
+    "or" => ustr("std::bitor"),
     <l:@L> "||" <r:@R> =>? error("for readability, use the \"or\" keyword instead of the C-style || operator".into(), span(l, r)),
 }
 

@@ -35,7 +35,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // Operations on booleans
     to.functions.insert(
-        ustr("or"),
+        ustr("bitor"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::BitOr::bitor as fn(bool, bool) -> bool,
             ["left", "right"],
@@ -44,7 +44,7 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.functions.insert(
-        ustr("and"),
+        ustr("bitand"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::BitAnd::bitand as fn(bool, bool) -> bool,
             ["left", "right"],

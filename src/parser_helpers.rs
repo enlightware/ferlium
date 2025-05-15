@@ -61,6 +61,17 @@ where
     (LiteralValue::new_native(value), Type::primitive::<T>())
 }
 
+/// Make a literal expression
+pub(crate) fn literal_expr<T>(value: T, span: Location) -> PExpr
+where
+    T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
+{
+    PExpr::new(
+        PExprKind::Literal(Value::native(value), Type::primitive::<T>()),
+        span,
+    )
+}
+
 /// Make a unit literal
 pub(crate) fn unit_literal_expr(span: Location) -> PExpr {
     PExpr::new(PExprKind::Literal(Value::native(()), Type::unit()), span)

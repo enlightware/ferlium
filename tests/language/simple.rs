@@ -224,6 +224,7 @@ fn mutability() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn logic_operators() {
+    // basic usage
     assert_eq!(run("not true"), bool(false));
     assert_eq!(run("not false"), bool(true));
     assert_eq!(run("not not true"), bool(true));
@@ -234,6 +235,39 @@ fn logic_operators() {
     assert_eq!(run("true and false"), bool(false));
     assert_eq!(run("true or true and false"), bool(true));
     assert_eq!(run("(true or true) and false"), bool(false));
+    // short-circuiting validation
+    assert_eq!(
+        run("let mut a = 0; let mut b = 0; if true or { a = 1; true } { b = 1 }; (a, b)"),
+        int_tuple!(0, 1)
+    );
+    assert_eq!(
+        run("let mut a = 0; let mut b = 0; if false or { a = 1; true } { b = 1 }; (a, b)"),
+        int_tuple!(1, 1)
+    );
+    assert_eq!(
+        run("let mut a = 0; let mut b = 0; if true or { a = 1; false } { b = 1 }; (a, b)"),
+        int_tuple!(0, 1)
+    );
+    assert_eq!(
+        run("let mut a = 0; let mut b = 0; if false or { a = 1; false } { b = 1 }; (a, b)"),
+        int_tuple!(1, 0)
+    );
+    assert_eq!(
+        run("let mut a = 0; let mut b = 0; if true and { a = 1; true } { b = 1 }; (a, b)"),
+        int_tuple!(1, 1)
+    );
+    assert_eq!(
+        run("let mut a = 0; let mut b = 0; if false and { a = 1; true } { b = 1 }; (a, b)"),
+        int_tuple!(0, 0)
+    );
+    assert_eq!(
+        run("let mut a = 0; let mut b = 0; if true and { a = 1; false } { b = 1 }; (a, b)"),
+        int_tuple!(1, 0)
+    );
+    assert_eq!(
+        run("let mut a = 0; let mut b = 0; if false and { a = 1; false } { b = 1 }; (a, b)"),
+        int_tuple!(0, 0)
+    );
 }
 
 #[test]
