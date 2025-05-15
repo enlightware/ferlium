@@ -177,23 +177,35 @@ MutTyOrInfer: MutType = {
 // Also: https://github.com/bleibig/rust-grammar/blob/master/parser-lalr.y
 // Also: https://github.com/nikomatsakis/rustypop/blob/master/src/rusty.lalrpop
 
-// TODO: add Rust-style optional semicolons in block expressions using
-// the guard macro features of lalrpop as in Niko's rustypop.
-
 pub Expr = {
-    Es<TopExpr>
+    ExprR<"B">,
 }
 
-TopExpr = {
-    AssignExpr,
-    ReturnExpr,
-    AbstractExpr,
-    PipeExpr,
+#[inline]
+ExprNonStmtLike: Expr = {
+    <head:NonStmtLikeAtom> <rest:ExprR<"">> => { panic!("todo merge using placeholders") },
+    Es<ReturnExpr> => <>,
+    Es<AbstractExpr> => <>,
+    Es<UnaryExprRec> => <>,
 }
 
-AssignExpr: ExprKind = {
-    <le:Es<PipeExpr>> <ls:@L> "=" <rs:@R> <re:Expr> => Assign(boxed(le), span(ls, rs), boxed(re)),
-    <le:Es<PipeExpr>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Expr> => assign_op(op, le, re),
+#[inline]
+ExprStmtLike = Es<StmtLikeAtom>;
+
+// Expression restricted by parameter B: if non-empty, include block-like/statement-like expressions, otherwise do one step of non statement-like parsing.
+#[inline]
+ExprR<B> = Es<TopExpr<B>>;
+
+TopExpr<B> = {
+    AssignExpr<B>,
+    ReturnExpr if B != "",
+    AbstractExpr if B != "",
+    PipeExpr<B>,
+}
+
+AssignExpr<B>: ExprKind = {
+    <le:Es<PipeExpr<B>>> <ls:@L> "=" <rs:@R> <re:Expr> => Assign(boxed(le), span(ls, rs), boxed(re)),
+    <le:Es<PipeExpr<B>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Expr> => assign_op(op, le, re),
 }
 
 ReturnExpr: ExprKind = {
@@ -205,46 +217,58 @@ AbstractExpr: ExprKind = {
     "||" <body:Expr> => Abstract(vec![], boxed(body)),
 }
 
-PipeExpr: ExprKind = {
-    <l:Es<PipeExpr>> "|>" <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), ext_f(l, a), false),
-    RangeExpr,
+PipeExpr<B>: ExprKind = {
+    <l:Es<PipeExpr<B>>> "|>" <e:Es<SuffixExpr<"B">>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), ext_f(l, a), false),
+    RangeExpr<B>,
 }
 
-RangeExpr: ExprKind = {
-    <l:Es<UnaryExpr>> <o:Sp<RangeOp>> <r:Es<UnaryExpr>> => static_apply(o, vec![l, r]),
-    LogicOrExpr,
+RangeExpr<B>: ExprKind = {
+    <l:Es<UnaryExpr<B>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<"B">>> => static_apply(o, vec![l, r]),
+    LogicOrExpr<B>,
 }
 
-LogicOrExpr: ExprKind = {
-    <l:Es<LogicOrExpr>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr>> => cond_if_else(l, literal_expr(true, o.1), r),
-    LogicAndExpr,
+LogicOrExpr<B>: ExprKind = {
+    <l:Es<LogicOrExpr<B>>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr<"B">>> => cond_if_else(l, literal_expr(true, o.1), r),
+    LogicAndExpr<B>,
 }
 
-LogicAndExpr: ExprKind = {
-    <l:Es<LogicAndExpr>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr>> => cond_if_else(l, r, literal_expr(false, o.1)),
-    CompExpr,
+LogicAndExpr<B>: ExprKind = {
+    <l:Es<LogicAndExpr<B>>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr<"B">>> => cond_if_else(l, r, literal_expr(false, o.1)),
+    CompExpr<B>,
 }
 
-CompExpr = BinOpLeftAssoc<CompOp, AddExpr>;
+CompExpr<B> = BinOpLeftAssoc<CompOp, AddExpr<B>, AddExpr<"B">>;
 
-AddExpr = BinOpLeftAssoc<AddOp, MulExpr>;
+AddExpr<B> = BinOpLeftAssoc<AddOp, MulExpr<B>, MulExpr<"B">>;
 
-MulExpr = BinOpLeftAssoc<MulOp, UnaryExpr>;
+MulExpr<B> = BinOpLeftAssoc<MulOp, UnaryExpr<B>, UnaryExpr<"B">>;
 
-UnaryExpr = {
-    SuffixExpr,
-    <o:Sp<UnaryOp>> <e:Es<UnaryExpr>> => static_apply(o, vec![e]),
+UnaryExpr<B> = {
+    SuffixExpr<B>,
+    UnaryExprRec if B != "",
 }
 
-SuffixExpr = {
-    AtomExpr,
-    <e:Es<SuffixExpr>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
-    <e:Es<SuffixExpr>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
-    <e:Es<SuffixExpr>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
-    <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), a, false),
+#[inline]
+UnaryExprRec: ExprKind = {
+    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<"B">>> => static_apply(o, vec![e])
 }
 
-AtomExpr = {
+SuffixExpr<B> = {
+    AtomExpr<B>,
+    <e:Es<SuffixExpr<B>>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
+    <e:Es<SuffixExpr<B>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
+    <e:Es<SuffixExpr<B>>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
+    <e:Es<SuffixExpr<B>>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), a, false),
+}
+
+AtomExpr<B> = {
+    NonStmtLikeAtom if B != "",
+    StmtLikeAtom if B != "",
+    EmptyAtom if B == "",
+    // BrokenExpr,
+}
+
+NonStmtLikeAtom = {
     ParExpr,
     PathExpr,
     PropertyPathExpr,
@@ -254,16 +278,18 @@ AtomExpr = {
     ArrayExpr,
     RecordExpr,
     SoftBreakExpr,
-    StmtLikeExpr,
-    BrokenExpr,
 }
 
-StmtLikeExpr = {
+StmtLikeAtom = {
     IfExpr,
     MatchExpr,
     ForExpr,
     LoopExpr,
     Block,
+}
+
+EmptyAtom: ExprKind = {
+    () => { panic!("Report placeholder for future merge") },
 }
 
 ParExpr: ExprKind = {
@@ -437,7 +463,9 @@ LetStmt: ExprKind = {
 }
 
 ExprStmt: Expr = {
-    <e:Expr> ";" => e,
+    // <e:Expr> ";" => e,
+    <e:ExprNonStmtLike> ";" => e,
+    <e:ExprStmtLike> ";"? => e,
 }
 
 // Error recovery
@@ -579,9 +607,9 @@ Sep<T, S>: Vec<T> = {
 
 // A tier of expression, for a binary operation, left-associative
 #[inline]
-BinOpLeftAssoc<Op, NextTier>: ExprKind = {
-    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => static_apply(o, vec![l, r]),
-    NextTier
+BinOpLeftAssoc<Op, NextTierR, NextTierUR>: ExprKind = {
+    <l:Es<BinOpLeftAssoc<Op, NextTierR, NextTierUR>>> <o:Sp<Op>> <r:Es<NextTierUR>> => static_apply(o, vec![l, r]),
+    NextTierR
 };
 
 // Skip whitespaces and comments in the lexer
