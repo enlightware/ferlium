@@ -151,6 +151,12 @@ pub(crate) fn static_apply<P: Phase>(
     ExprKind::Apply(b(identifier), args, true)
 }
 
+pub(crate) fn assign_op(op: (Ustr, Location), lhs: PExpr, rhs: PExpr) -> PExprKind {
+    let span = span(lhs.span.start(), rhs.span.end());
+    let apply = Expr::new(static_apply(op, vec![lhs.clone(), rhs]), span);
+    ExprKind::Assign(b(lhs), op.1, b(apply))
+}
+
 /// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor
 pub(crate) fn tuple(args: Vec<PExpr>) -> PExprKind {
     use ExprKind::*;

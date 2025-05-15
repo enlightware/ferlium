@@ -558,6 +558,15 @@ fn assignment() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn op_assignment() {
+    assert_eq!(run("let mut a = 4; a += 1; a"), int(5));
+    assert_eq!(run("let mut a = 4; a -= 1; a"), int(3));
+    assert_eq!(run("let mut a = 4; a *= 2; a"), int(8));
+    assert_eq!(run("let mut a = 4; a /= 2; a"), float(2.0));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn for_loops_with_range() {
     assert_eq!(run("for i in 0..3 { () }"), unit());
     assert_eq!(run("let mut s = 0; for i in 1..4 { s = s + i }; s"), int(6));
