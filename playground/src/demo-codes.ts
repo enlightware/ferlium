@@ -97,7 +97,7 @@ fn partition(a, lo, hi) {
 	for j in lo..hi {
 		if a[j] < pivot {
 			swap(a, i, j);
-			i = i + 1
+			i += 1
 		}
 	};
 
@@ -154,7 +154,7 @@ fn ty_fn_arg_fn(f: () -> ()) {
 ['Iterators',`fn sum2(start, end) {
 	let mut sum = 0;
 	for i in start..end {
-		sum = sum + i * i;
+		sum += i * i;
 	};
 	sum
 }
@@ -162,7 +162,7 @@ fn ty_fn_arg_fn(f: () -> ()) {
 fn array_sum2(a) {
 	let mut sum = 0;
 	for value in a {
-		sum = sum + value * value;
+		sum += value * value;
 	};
 	sum
 }
