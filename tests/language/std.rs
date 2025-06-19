@@ -330,6 +330,7 @@ fn string_sub_string() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn serde() {
     // serialize
+    // basic types
     assert_eq!(run("serialize(())"), variant("None", Value::unit()));
     assert_eq!(run("serialize(true)"), variant("Bool", bool(true)));
     assert_eq!(run("serialize(1)"), variant("Int", int(1)));
@@ -346,6 +347,77 @@ fn serde() {
         run("serialize([1.0])"),
         variant("Seq", array![variant("Float", float(1.0))])
     );
+    // tuples
+    assert_eq!(
+        run("serialize((1, ))"),
+        variant("Seq", array![variant("Int", int(1))])
+    );
+    assert_eq!(
+        run("serialize((1, 2))"),
+        variant(
+            "Seq",
+            array![variant("Int", int(1)), variant("Int", int(2))]
+        )
+    );
+    assert_eq!(
+        run("serialize((1, 2.0, true))"),
+        variant(
+            "Seq",
+            array![
+                variant("Int", int(1)),
+                variant("Float", float(2.)),
+                variant("Bool", bool(true))
+            ]
+        )
+    );
+    // records
+    assert_eq!(
+        run("serialize({a: 1, })"),
+        variant(
+            "Seq",
+            array![variant(
+                "Seq",
+                array![variant("String", string("a")), variant("Int", int(1))]
+            )]
+        )
+    );
+    assert_eq!(
+        run("serialize({a: 1, b: 2})"),
+        variant(
+            "Seq",
+            array![
+                variant(
+                    "Seq",
+                    array![variant("String", string("a")), variant("Int", int(1))]
+                ),
+                variant(
+                    "Seq",
+                    array![variant("String", string("b")), variant("Int", int(2))]
+                )
+            ]
+        )
+    );
+    assert_eq!(
+        run("serialize({a: 1, b: 2, c: true})"),
+        variant(
+            "Seq",
+            array![
+                variant(
+                    "Seq",
+                    array![variant("String", string("a")), variant("Int", int(1))]
+                ),
+                variant(
+                    "Seq",
+                    array![variant("String", string("b")), variant("Int", int(2))]
+                ),
+                variant(
+                    "Seq",
+                    array![variant("String", string("c")), variant("Bool", bool(true))]
+                )
+            ]
+        )
+    );
+
     // deserialize
     assert_eq!(run("(deserialize(serialize(())) : ())"), Value::unit());
     assert_eq!(run("(deserialize(serialize(true)) : bool)"), bool(true));

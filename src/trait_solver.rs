@@ -293,6 +293,23 @@ impl TraitImpls {
             }
         }
 
+        // No blanket implementation found, look for a derived implementation.
+        for derive in &trait_ref.derives {
+            if let Some(concrete_imp) = derive.derive_impl(trait_ref, input_tys, fn_span, self)? {
+                // Cache the derived implementation.
+                let key = (trait_ref.clone(), input_tys.to_vec());
+                let concrete_imp = Rc::new(concrete_imp);
+                self.concrete.insert(key, concrete_imp.clone());
+                // And return it.
+                return Ok(concrete_imp);
+            } else {
+                println!(
+                    "Tried derivation for trait {} with input types {:?}, but failed.",
+                    trait_ref.name, input_tys
+                );
+            }
+        }
+
         // No matching implementation found.
         let others = crate::module::Modules::default();
         let current = new_module_using_std();

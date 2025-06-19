@@ -34,6 +34,7 @@ pub mod function;
 mod graph;
 pub mod ide;
 pub mod ir;
+mod ir_syn;
 mod location;
 mod r#match;
 pub mod module;

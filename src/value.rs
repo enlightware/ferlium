@@ -168,6 +168,14 @@ impl Value {
         }
     }
 
+    pub fn unwrap_fn_tuple_index(&self, index: usize) -> &FunctionRef {
+        let fn_tuple = self.as_tuple().expect("Value is not a tuple");
+        &fn_tuple[index]
+            .as_function()
+            .expect("Entry at index is not a function")
+            .0
+    }
+
     pub fn format_as_string(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Value::*;
         match self {

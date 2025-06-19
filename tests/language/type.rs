@@ -80,6 +80,10 @@ fn record() {
         record_type(&[("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
+        parse_concrete_type("{b: bool, a: int}").unwrap(),
+        parse_concrete_type("{a: int, b: bool}").unwrap(),
+    );
+    assert_eq!(
         parse_concrete_type("{a: int, b: { c: bool, d: float } }").unwrap(),
         record_type(&[
             ("a", int_type()),

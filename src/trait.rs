@@ -9,25 +9,44 @@
 use std::{
     collections::HashSet,
     fmt,
+    fmt::Debug,
     hash::{Hash, Hasher},
     num::NonZero,
     ops::Deref,
     rc::Rc,
 };
 
+use dyn_clone::DynClone;
 use ustr::ustr;
 use ustr::Ustr;
 
 use crate::{
     containers::iterable_to_string,
+    error::InternalCompilationError,
     format::write_with_separator_and_format_fn,
     function::FunctionDefinition,
     module::{FmtWithModuleEnv, ModuleEnv},
     r#type::{Type, TypeVar},
+    trait_solver::{ConcreteTraitImpl, TraitImpls},
     type_like::TypeLike,
     type_scheme::PubTypeConstraint,
     type_visitor::TyVarsCollector,
+    Location,
 };
+
+/// Help deriving implementations of traits.
+pub trait Deriver: Debug + DynClone {
+    /// Derive an implementation of a trait for the given input types, if possible.
+    fn derive_impl(
+        &self,
+        trait_ref: &TraitRef,
+        input_types: &[Type],
+        span: Location,
+        impls: &mut TraitImpls,
+    ) -> Result<Option<ConcreteTraitImpl>, InternalCompilationError>;
+}
+
+dyn_clone::clone_trait_object!(Deriver);
 
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
 #[derive(Debug, Clone)]
@@ -43,6 +62,8 @@ pub struct Trait {
     pub constraints: Vec<PubTypeConstraint>,
     /// The functions provided by the trait.
     pub functions: Vec<(Ustr, FunctionDefinition)>,
+    /// The trait derivators
+    pub derives: Vec<Box<dyn Deriver>>,
     // TODO: add spans once traits can be defined in user code.
 }
 
@@ -165,7 +186,7 @@ impl FmtWithModuleEnv for Trait {
 }
 
 #[derive(Debug, Clone)]
-pub struct TraitRef(Rc<Trait>);
+pub struct TraitRef(pub(crate) Rc<Trait>);
 
 impl TraitRef {
     pub fn new<'a>(
@@ -185,6 +206,7 @@ impl TraitRef {
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: Vec::new(),
             functions,
+            derives: Vec::new(),
         };
         trait_data.validate();
         Self(Rc::new(trait_data))
@@ -208,6 +230,7 @@ impl TraitRef {
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: constraints.into(),
             functions,
+            derives: Vec::new(),
         };
         trait_data.validate();
         Self(Rc::new(trait_data))

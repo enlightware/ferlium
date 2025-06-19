@@ -9,7 +9,7 @@
 use std::{collections::HashMap, mem};
 
 use crate::{
-    error::InternalCompilationError, format::write_with_separator_and_format_fn,
+    error::InternalCompilationError, format::write_with_separator_and_format_fn, ir_syn,
     parser_helpers::EMPTY_USTR, r#trait::TraitRef, trait_solver::TraitImpls, type_like::TypeLike,
     Location,
 };
@@ -182,7 +182,7 @@ fn extra_args_from_inst_data(
                             "Dictionary for trait impl not found, type inference should have failed",
                         );
                         // Load the array of trait implementation functions from the dictionary
-                        K::EnvLoad(b(ir::EnvLoad { index, name: None }))
+                        ir_syn::load(index)
                     };
                     (node_kind, Type::tuple(fns_tuple_ty))
                 }
@@ -408,14 +408,7 @@ impl Node {
                         &app.input_tys,
                         app.function_span,
                     )?;
-                    let fn_tuple = functions
-                        .as_tuple()
-                        .expect("Trait impl functions is not a tuple");
-                    let function = fn_tuple[app.function_index]
-                        .as_function()
-                        .expect("Trait impl function is not a function")
-                        .0
-                        .clone();
+                    let function = functions.unwrap_fn_tuple_index(app.function_index).clone();
                     self.kind = StaticApply(b(ir::StaticApplication {
                         function,
                         function_path: app.function_path,
@@ -446,17 +439,14 @@ impl Node {
                     let fns_tuple_ty = Type::tuple(fns_tuple_ty);
                     // Load that tuple from the correct local variable...
                     let load_fns_tuple = Node::new(
-                        NodeKind::EnvLoad(b(ir::EnvLoad {
-                            index: fns_tuple_index,
-                            name: None,
-                        })),
+                        ir_syn::load(fns_tuple_index),
                         fns_tuple_ty,
                         no_effects(),
                         app.function_span,
                     );
                     // ...and from it the function pointer.
                     let project_fn = Node::new(
-                        NodeKind::Project(b((load_fns_tuple, app.function_index))),
+                        ir_syn::project(load_fns_tuple, app.function_index),
                         fn_ty,
                         no_effects(),
                         app.function_span,
