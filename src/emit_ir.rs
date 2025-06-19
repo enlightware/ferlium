@@ -86,7 +86,7 @@ pub fn emit_module(
     for imp in &source.impls {
         // Build a module environment for the compiling the trait implementation.
         // We create a standalone module, importing the current module as
-        // the "Module" namespace, with a "use all" directive.
+        // the "module" namespace, with a "use all" directive.
         let mut trait_others = others.clone();
         trait_others.insert(ustr("module"), rc_output.clone());
         let mut trait_output = Module {
@@ -486,7 +486,7 @@ where
     } else {
         // We are emitting normal module functions.
 
-        // Limit each founction to its own constants and type variables
+        // Limit each function to its own constants and type variables
         let all_constraints = ty_inf.constraints();
         let mut used_constraints: HashSet<PubTypeConstraintPtr> = HashSet::new();
         for ModuleFunction { name, .. } in functions() {
