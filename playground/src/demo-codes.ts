@@ -151,23 +151,19 @@ fn ty_fn_arg_fn(f: () -> ()) {
 
 ((1: int), (1: float))
 `],
-['Iterators',`fn sum2(start, end) {
+['Iterators',`fn sum2(seq) {
 	let mut sum = 0;
-	for i in start..end {
+	for i in seq {
 		sum += i * i;
 	};
 	sum
 }
 
-fn array_sum2(a) {
-	let mut sum = 0;
-	for value in a {
-		sum += value * value;
-	};
-	sum
+fn range_sum2(start, end) {
+	sum2(start..end)
 }
 
-(sum2(0, 5), array_sum2([1.0, 1.5, 2.0]))
+(range_sum2(0, 5), sum2([1.0, 1.5, 2.0]))
 `],
 ['Function pipe operator',
 `[1, 2] |> array_concat([3, 4]) |> array_map(|x| x*x)`],
