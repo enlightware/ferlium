@@ -398,7 +398,7 @@ fn serde() {
         )
     );
     assert_eq!(
-        run("serialize({a: 1, b: 2, c: true})"),
+        run("serialize({a: 1, b: 2.0, c: true})"),
         variant(
             "Seq",
             array![
@@ -408,7 +408,7 @@ fn serde() {
                 ),
                 variant(
                     "Seq",
-                    array![variant("String", string("b")), variant("Int", int(2))]
+                    array![variant("String", string("b")), variant("Float", float(2.))]
                 ),
                 variant(
                     "Seq",
