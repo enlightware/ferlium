@@ -70,7 +70,7 @@ fn fn_name(arity: usize) -> String {
         1 => "UnaryNativeFn".into(),
         2 => "BinaryNativeFn".into(),
         3 => "TernaryNativeFn".into(),
-        _ => format!("Fn{}Ary", arity),
+        _ => format!("Fn{arity}Ary"),
     }
 }
 

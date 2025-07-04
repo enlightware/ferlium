@@ -6,6 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use std::env;
+use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
 
 use ariadne::Label;
@@ -392,7 +394,193 @@ fn print_help() {
     println!("CTRL-D: Exit the REPL.");
 }
 
+/// Process a single input: parse, compile module, and evaluate expression if present.
+/// Returns Ok(true) if successful, Ok(false) if there was an error but we should continue,
+/// and Err(exit_code) if we should exit with the given code.
+fn process_input(
+    input: &str,
+    module: &mut ferlium::module::Module,
+    other_modules: &ferlium::module::Modules,
+    locals: &mut Vec<Local>,
+    eval_ctx: &mut EvalCtx,
+    is_repl: bool,
+) -> Result<bool, i32> {
+    // Parse input
+    let parse_result = parse_module_and_expr(input, true);
+    let (module_ast, expr_ast) = match parse_result {
+        Ok(result) => result,
+        Err(errors) => {
+            if is_repl {
+                pretty_print_parse_errors(input, &errors);
+                return Ok(false);
+            } else {
+                eprintln!("Parse errors:");
+                pretty_print_parse_errors(input, &errors);
+                return Err(1);
+            }
+        }
+    };
+
+    // Debug output for REPL
+    if is_repl {
+        let env = ModuleEnv::new(module, other_modules);
+        if !module_ast.is_empty() {
+            println!("Module AST:\n{}", module_ast.format_with(&env));
+        }
+        if let Some(expr_ast) = expr_ast.as_ref() {
+            println!("Expr AST:\n{}", expr_ast.format_with(&env));
+        }
+    }
+
+    // Compile module if present
+    if !module_ast.is_empty() {
+        *module = match emit_module(module_ast, other_modules, Some(module)) {
+            Ok(new_module) => new_module,
+            Err(e) => {
+                let env = ModuleEnv::new(module, other_modules);
+                if is_repl {
+                    pretty_print_checking_error(&e, &(env, input));
+                    return Ok(false);
+                } else {
+                    eprintln!("Module compilation error:");
+                    pretty_print_checking_error(&e, &(env, input));
+                    return Err(1);
+                }
+            }
+        };
+        if is_repl {
+            println!("Module IR:\n{}", FormatWith::new(module, other_modules));
+        }
+    }
+    module.source = Some(input.to_string());
+
+    // If there's an expression, compile and evaluate it
+    if let Some(expr_ast) = expr_ast {
+        let module_env = ModuleEnv::new(module, other_modules);
+        let expr_ir = emit_expr(expr_ast, module_env, locals.clone());
+        let compiled_expr = match expr_ir {
+            Ok(res) => res,
+            Err(e) => {
+                if is_repl {
+                    pretty_print_checking_error(&e, &(module_env, input));
+                    return Ok(false);
+                } else {
+                    eprintln!("Expression compilation error:");
+                    pretty_print_checking_error(&e, &(module_env, input));
+                    return Err(1);
+                }
+            }
+        };
+
+        *locals = compiled_expr.locals;
+        if is_repl {
+            println!("Expr IR:\n{}", compiled_expr.expr.format_with(&module_env));
+        }
+
+        // Evaluate expression
+        let old_size = eval_ctx.environment.len();
+        let old_frame_base = eval_ctx.frame_base;
+        let result = compiled_expr.expr.eval_with_ctx(eval_ctx);
+        match result {
+            Ok(value) => {
+                println!(
+                    "{value}: {}",
+                    compiled_expr.ty.display_rust_style(&module_env)
+                );
+                Ok(true)
+            }
+            Err(error) => {
+                if is_repl {
+                    // Restore the context as before starting the evaluation
+                    eval_ctx.environment.truncate(old_size);
+                    eval_ctx.frame_base = old_frame_base;
+                    println!("Runtime error: {error}");
+                    Ok(false)
+                } else {
+                    eprintln!("Runtime error: {error}");
+                    Err(1)
+                }
+            }
+        }
+    } else {
+        // No expression, just module definitions - that's successful
+        if !is_repl {
+            // In pipe mode, if there's no expression to evaluate, that's fine
+            Ok(true)
+        } else {
+            println!("No expression to evaluate.");
+            Ok(true)
+        }
+    }
+}
+
+fn process_pipe_input() -> i32 {
+    // Read all input from stdin
+    let mut input = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut input) {
+        eprintln!("Error reading from stdin: {}", e);
+        return 1;
+    }
+
+    if input.trim().is_empty() {
+        eprintln!("No input provided");
+        return 1;
+    }
+
+    // Initialize ferlium contexts
+    let other_modules = new_std_modules();
+    let mut module = new_module_using_std();
+    let mut locals: Vec<Local> = vec![];
+    let mut eval_ctx = EvalCtx::new();
+
+    // Process the input
+    match process_input(
+        &input,
+        &mut module,
+        &other_modules,
+        &mut locals,
+        &mut eval_ctx,
+        false,
+    ) {
+        Ok(_) => 0, // Success (either expression evaluated or just module definitions)
+        Err(exit_code) => exit_code,
+    }
+}
+
 fn main() {
+    // Check if we're being used in pipe mode (stdin is not a terminal)
+    if !io::stdin().is_terminal() {
+        // Pipe mode: read from stdin, process, and exit
+        std::process::exit(process_pipe_input());
+    }
+
+    // Check for help flag
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 1 && (args[1] == "--help" || args[1] == "-h") {
+        println!("Ferlium REPL - A functional programming language interpreter");
+        println!();
+        println!("Usage:");
+        println!("  {} [--help|-h]", args[0]);
+        println!("  echo 'code' | {}", args[0]);
+        println!();
+        println!("Modes:");
+        println!("  Interactive: Run without arguments to start the REPL");
+        println!("  Pipe: Pipe ferlium code to stdin for batch processing");
+        println!();
+        println!("Examples:");
+        println!("  {}                     # Start interactive REPL", args[0]);
+        println!(
+            "  echo '1 + 2' | {}      # Evaluate expression from pipe",
+            args[0]
+        );
+        return;
+    }
+
+    // Interactive REPL mode
+    run_interactive_repl();
+}
+
+fn run_interactive_repl() {
     // Logging
     env_logger::init();
 
@@ -490,76 +678,17 @@ fn main() {
             }
         };
 
-        // Parse input
-        let parse_result = parse_module_and_expr(&src, true);
-        let (module_ast, expr_ast) = match parse_result {
-            Ok(result) => result,
-            Err(errors) => {
-                pretty_print_parse_errors(&src, &errors);
-                continue;
-            }
-        };
-        {
-            let env = ModuleEnv::new(&module, &other_modules);
-            if !module_ast.is_empty() {
-                println!("Module AST:\n{}", module_ast.format_with(&env));
-            }
-            if let Some(expr_ast) = expr_ast.as_ref() {
-                println!("Expr AST:\n{}", expr_ast.format_with(&env));
-            }
-        }
-
-        // Compile module
-        if !module_ast.is_empty() {
-            module = match emit_module(module_ast, &other_modules, Some(&module)) {
-                Ok(module) => module,
-                Err(e) => {
-                    let env = ModuleEnv::new(&module, &other_modules);
-                    pretty_print_checking_error(&e, &(env, src.as_str()));
-                    continue;
-                }
-            };
-            println!("Module IR:\n{}", FormatWith::new(&module, &other_modules));
-        }
-        module.source = Some(src.clone());
-
-        // Is there an expression?
-        let expr_ast = match expr_ast {
-            Some(expr) => expr,
-            None => {
-                println!("No expression to evaluate.");
-                continue;
-            }
-        };
-
-        // Compile and evaluate expression
-        let module_env = ModuleEnv::new(&module, &other_modules);
-        let expr_ir = emit_expr(expr_ast, module_env, locals.clone());
-        let compiled_expr = match expr_ir {
-            Ok(res) => res,
-            Err(e) => {
-                pretty_print_checking_error(&e, &(module_env, src.as_str()));
-                continue;
-            }
-        };
-        locals = compiled_expr.locals;
-        println!("Expr IR:\n{}", compiled_expr.expr.format_with(&module_env));
-
-        // Evaluate and print result
-        let old_size = eval_ctx.environment.len();
-        let old_frame_base = eval_ctx.frame_base;
-        let result = compiled_expr.expr.eval_with_ctx(&mut eval_ctx);
-        match result {
-            Ok(value) => println!(
-                "{value}: {}",
-                compiled_expr.ty.display_rust_style(&module_env)
-            ),
-            Err(error) => {
-                // We must restore the context as before starting the evaluation
-                eval_ctx.environment.truncate(old_size);
-                eval_ctx.frame_base = old_frame_base;
-                println!("Runtime error: {error}")
-            }
+        // Process the input using the shared function
+        match process_input(
+            &src,
+            &mut module,
+            &other_modules,
+            &mut locals,
+            &mut eval_ctx,
+            true,
+        ) {
+            Ok(_) => {}  // Success, continue the REPL
+            Err(_) => {} // Error handled by process_input, continue the REPL
         }
 
         if let Err(e) = rl.save_history(history_filename) {
