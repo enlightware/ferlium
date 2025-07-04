@@ -33,6 +33,7 @@ fn span_range(span: Location) -> std::ops::Range<usize> {
 }
 
 fn span_union_range(span1: Location, span2: Location) -> std::ops::Range<usize> {
+    assert_eq!(span1.module(), span2.module());
     span1.start().min(span2.start())..span1.end().max(span2.end())
 }
 
@@ -54,18 +55,6 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
     let env = &data.0;
     let src = data.1;
     match error.deref() {
-        SymbolNotFound(span) => {
-            let name = &data.1[span_range(*span)];
-            Report::build(ReportKind::Error, ("input", span_range(*span)))
-                .with_message(format!(
-                    "Variable or function {} not found.",
-                    name.fg(Color::Blue)
-                ))
-                .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
-                .finish()
-                .print(("input", Source::from(src)))
-                .unwrap();
-        }
         FunctionNotFound(span) => {
             let name = &data.1[span_range(*span)];
             Report::build(ReportKind::Error, ("input", span_range(*span)))
@@ -246,9 +235,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let span = span_union_range(*tuple_span, *index_span);
             let colored_ty = expr_ty.format_with(env).fg(Color::Blue);
             Report::build(ReportKind::Error, ("input", span))
-                .with_message(format!(
-                    "Type {colored_ty} cannot be projected as a tuple."
-                ))
+                .with_message(format!("Type {colored_ty} cannot be projected as a tuple."))
                 .with_label(
                     Label::new(("input", span_range(*tuple_span)))
                         .with_message(format!("This expression has type {colored_ty}."))
@@ -267,7 +254,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .print(("input", Source::from(src)))
                 .unwrap();
         }
-        DuplicatedRecordField {
+        DuplicatedField {
             first_occurrence,
             second_occurrence,
             ..

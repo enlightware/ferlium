@@ -20,6 +20,41 @@ pub(crate) fn b<T>(t: T) -> B<T> {
 /// Small vector having two elements inline
 pub type SVec2<T> = smallvec::SmallVec<[T; 2]>;
 
+// A trait that knows how to turn either an owned T or a &T into a T
+pub trait IntoOwned<T> {
+    fn into_owned(self) -> T;
+}
+
+// Moving an owned T is just identity
+impl<T> IntoOwned<T> for T {
+    fn into_owned(self) -> T {
+        self
+    }
+}
+
+// Cloning a &T if we only have a reference
+impl<'a, T: Clone> IntoOwned<T> for &'a T {
+    fn into_owned(self) -> T {
+        self.clone()
+    }
+}
+
+/// Anything that can turn itself into a `SVec<T>`,
+/// moving owned Ts and cloning borrowed ones.
+pub trait IntoSVec2<T> {
+    fn into_svec2(self) -> SVec2<T>;
+}
+
+impl<T, I> IntoSVec2<T> for I
+where
+    I: IntoIterator,
+    I::Item: IntoOwned<T>,
+{
+    fn into_svec2(self) -> SVec2<T> {
+        self.into_iter().map(IntoOwned::into_owned).collect()
+    }
+}
+
 /// A struct that holds an optional first item of an iterator.
 pub struct First<T>(pub Option<T>);
 

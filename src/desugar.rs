@@ -94,7 +94,8 @@ impl PModule {
         let module = Module {
             functions,
             impls,
-            types: self.types,
+            type_aliases: self.type_aliases,
+            type_defs: self.type_defs,
         };
         Ok((module, sorted_sccs))
     }
@@ -214,6 +215,13 @@ impl PExpr {
             PropertyPath(scope, var) => PropertyPath(scope, var),
             Tuple(elements) => Tuple(desugar(elements, ctx)?),
             Project(expr, index) => Project(expr.desugar_boxed(ctx)?, index),
+            StructLiteral(name, elements) => StructLiteral(
+                name,
+                elements
+                    .into_iter()
+                    .map(|(k, v)| Ok((k, v.desugar(ctx)?)))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
             Record(elements) => Record(
                 elements
                     .into_iter()
@@ -235,7 +243,7 @@ impl PExpr {
                     .into_iter()
                     .map(|(pat, expr)| {
                         let env_size = ctx.locals.len();
-                        if let Some((_tag, vars)) = pat.kind.as_variant() {
+                        if let Some((_tag, _kind, vars)) = pat.kind.as_variant() {
                             for var in vars {
                                 ctx.locals.push(var.0);
                             }
@@ -280,7 +288,7 @@ impl PExpr {
                         vec![
                             (
                                 Pattern::new(
-                                    PatternKind::variant(
+                                    PatternKind::tuple_variant(
                                         (ustr("Some"), body_start_span),
                                         vec![var_name],
                                     ),
@@ -290,7 +298,7 @@ impl PExpr {
                             ),
                             (
                                 Pattern::new(
-                                    PatternKind::empty_variant((ustr("None"), body_end_span)),
+                                    PatternKind::empty_tuple_variant((ustr("None"), body_end_span)),
                                     body_end_span,
                                 ),
                                 Expr::new(SoftBreak, body_end_span),

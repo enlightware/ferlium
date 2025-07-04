@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{convert::identity, fmt};
+use std::{convert::identity, fmt, sync::LazyLock};
 
 use num_traits::Signed;
 use ordered_float::NotNan;
@@ -24,12 +24,9 @@ use crate::{
     module::Module,
     r#trait::TraitRef,
     r#type::{FnType, Type},
-    std::ordering::{ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS},
+    std::ordering::{ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS, ORD_TRAIT},
     value::{NativeDisplay, Value},
 };
-
-pub const NUM_TRAIT_NAME: &str = "Num";
-pub const DIV_TRAIT_NAME: &str = "Div";
 
 pub fn int_type() -> Type {
     cached_primitive_ty!(isize)
@@ -72,20 +69,15 @@ where
     }
 }
 
-pub fn add_to_module(to: &mut Module) {
-    use RuntimeError::*;
+use FunctionDefinition as Def;
 
-    // Types
-    to.types.set("int", int_type());
-    to.types.set("float", float_type());
-
-    // Traits
+pub static NUM_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var0_ty = Type::variable_id(0);
-    let unary_fn_ty = FnType::new_by_val(&[var0_ty], var0_ty, EffType::empty());
-    let binary_fn_ty = FnType::new_by_val(&[var0_ty, var0_ty], var0_ty, EffType::empty());
-    use FunctionDefinition as Def;
-    let num_trait = TraitRef::new(
-        NUM_TRAIT_NAME,
+    let unary_fn_ty = FnType::new_by_val([var0_ty], var0_ty, EffType::empty());
+    let binary_fn_ty = FnType::new_by_val([var0_ty, var0_ty], var0_ty, EffType::empty());
+
+    TraitRef::new(
+        "Num",
         1,
         [],
         [
@@ -93,7 +85,7 @@ pub fn add_to_module(to: &mut Module) {
                 "add",
                 Def::new_infer_quantifiers(
                     binary_fn_ty.clone(),
-                    &["lhs", "rhs"],
+                    ["lhs", "rhs"],
                     "Adds two numbers.",
                 ),
             ),
@@ -101,7 +93,7 @@ pub fn add_to_module(to: &mut Module) {
                 "sub",
                 Def::new_infer_quantifiers(
                     binary_fn_ty.clone(),
-                    &["lhs", "rhs"],
+                    ["lhs", "rhs"],
                     "Subtracts `rhs` from `lhs`.",
                 ),
             ),
@@ -109,55 +101,63 @@ pub fn add_to_module(to: &mut Module) {
                 "mul",
                 Def::new_infer_quantifiers(
                     binary_fn_ty.clone(),
-                    &["lhs", "rhs"],
+                    ["lhs", "rhs"],
                     "Multiplies two numbers.",
                 ),
             ),
             (
                 "neg",
-                Def::new_infer_quantifiers(unary_fn_ty.clone(), &["value"], "Negates a number."),
+                Def::new_infer_quantifiers(unary_fn_ty.clone(), ["value"], "Negates a number."),
             ),
             (
                 "abs",
                 Def::new_infer_quantifiers(
                     unary_fn_ty.clone(),
-                    &["value"],
+                    ["value"],
                     "Returns the absolute value of a number.",
                 ),
             ),
             (
                 "signum",
-                Def::new_infer_quantifiers(
-                    unary_fn_ty,
-                    &["value"],
-                    "Returns the sign of a number.",
-                ),
+                Def::new_infer_quantifiers(unary_fn_ty, ["value"], "Returns the sign of a number."),
             ),
             (
                 "from_int",
                 Def::new_infer_quantifiers(
-                    FnType::new_by_val(&[int_type()], var0_ty, EffType::empty()),
-                    &["value"],
+                    FnType::new_by_val([int_type()], var0_ty, EffType::empty()),
+                    ["value"],
                     "Converts an integer to a number.",
                 ),
             ),
         ],
-    );
-    to.traits.push(num_trait.clone());
-    let div_trait = TraitRef::new(
-        DIV_TRAIT_NAME,
+    )
+});
+
+pub static DIV_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
+    let var0_ty = Type::variable_id(0);
+    let binary_fn_ty = FnType::new_by_val([var0_ty, var0_ty], var0_ty, EffType::empty());
+
+    TraitRef::new(
+        "Div",
         1,
         [],
         [(
             "div",
-            Def::new_infer_quantifiers(
-                binary_fn_ty.clone(),
-                &["lhs", "rhs"],
-                "Divides `lhs` by `rhs`.",
-            ),
+            Def::new_infer_quantifiers(binary_fn_ty, ["lhs", "rhs"], "Divides `lhs` by `rhs`."),
         )],
-    );
-    to.traits.push(div_trait.clone());
+    )
+});
+
+pub fn add_to_module(to: &mut Module) {
+    use RuntimeError::*;
+
+    // Types
+    to.type_aliases.set("int", int_type());
+    to.type_aliases.set("float", float_type());
+
+    // Traits
+    to.traits.push(NUM_TRAIT.clone());
+    to.traits.push(DIV_TRAIT.clone());
 
     // Trait implementations
     use std::ops;
@@ -166,7 +166,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // int
     to.impls.add_concrete(
-        num_trait.clone(),
+        NUM_TRAIT.clone().clone(),
         [int_type()],
         [],
         [
@@ -179,9 +179,8 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(identity::<Int>)) as Function,
         ],
     );
-    let ord_trait = to.traits.iter().find(|t| t.name == "Ord").unwrap();
     to.impls.add_concrete(
-        ord_trait.clone(),
+        ORD_TRAIT.clone(),
         [int_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
@@ -249,7 +248,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // float
     to.impls.add_concrete(
-        num_trait.clone(),
+        NUM_TRAIT.clone(),
         [float_type()],
         [],
         [
@@ -263,13 +262,13 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.impls.add_concrete(
-        ord_trait.clone(),
+        ORD_TRAIT.clone(),
         [float_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
     );
     to.impls.add_concrete(
-        div_trait.clone(),
+        DIV_TRAIT.clone(),
         [float_type()],
         [],
         [b(BinaryNativeFnNNFN::new(|lhs: Float, rhs: Float| {

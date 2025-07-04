@@ -13,6 +13,7 @@ use crate::ast::PExprKind;
 use crate::ast::Pattern;
 use crate::ast::PatternKind;
 use crate::ast::Phase;
+use crate::ast::UstrSpan;
 use crate::containers::b;
 use crate::containers::SVec2;
 use crate::error::LocatedError;
@@ -154,15 +155,12 @@ pub(crate) fn proj_or_float<L, T>(
     Ok(Project(b(lhs), rhs))
 }
 
-pub(crate) fn static_apply<P: Phase>(
-    identifier: (Ustr, Location),
-    args: Vec<Expr<P>>,
-) -> ExprKind<P> {
+pub(crate) fn static_apply<P: Phase>(identifier: UstrSpan, args: Vec<Expr<P>>) -> ExprKind<P> {
     let identifier = Expr::<P>::new(ExprKind::Identifier(identifier.0), identifier.1);
     ExprKind::Apply(b(identifier), args, true)
 }
 
-pub(crate) fn assign_op(op: (Ustr, Location), lhs: PExpr, rhs: PExpr) -> PExprKind {
+pub(crate) fn assign_op(op: UstrSpan, lhs: PExpr, rhs: PExpr) -> PExprKind {
     let span = span(lhs.span.start(), rhs.span.end());
     let apply = Expr::new(static_apply(op, vec![lhs.clone(), rhs]), span);
     ExprKind::Assign(b(lhs), op.1, b(apply))
@@ -179,7 +177,7 @@ pub(crate) fn tuple(args: Vec<PExpr>) -> PExprKind {
             return Tuple(args);
         }
     }
-    let (values, tys): (SVec2<_>, _) = values_and_tys.into_iter().unzip();
+    let (values, tys): (SVec2<_>, Vec<_>) = values_and_tys.into_iter().unzip();
     Literal(Value::tuple(values), Type::tuple(tys))
 }
 
@@ -208,7 +206,7 @@ pub(crate) fn cond_if(cond: PExpr, if_true: PExpr) -> PExprKind {
 }
 
 /// Create a for loop
-pub(crate) fn for_loop(var_name: (Ustr, Location), seq: PExpr, body: PExpr) -> PExprKind {
+pub(crate) fn for_loop(var_name: UstrSpan, seq: PExpr, body: PExpr) -> PExprKind {
     let seq_span = seq.span;
     let seq_span_start = Location::new_local(seq.span.start(), seq.span.start());
     let iterator = PExpr::new(

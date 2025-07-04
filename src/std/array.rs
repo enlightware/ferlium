@@ -113,7 +113,7 @@ impl Array {
         let unit = Type::unit();
         let array = array_type_generic();
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(array, true), (gen0, false)],
+            [(array, true), (gen0, false)],
             unit,
             no_effects(),
         ));
@@ -134,7 +134,7 @@ impl Array {
         let unit = Type::unit();
         let array = array_type_generic();
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(array, true), (gen0, false)],
+            [(array, true), (gen0, false)],
             unit,
             no_effects(),
         ));
@@ -157,7 +157,7 @@ impl Array {
     fn pop_back_desc() -> ModuleFunction {
         let array = array_type_generic();
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(array, true)],
+            [(array, true)],
             option_type_generic(),
             no_effects(),
         ));
@@ -175,7 +175,7 @@ impl Array {
     fn pop_front_desc() -> ModuleFunction {
         let array = array_type_generic();
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(array, true)],
+            [(array, true)],
             option_type_generic(),
             no_effects(),
         ));
@@ -193,7 +193,7 @@ impl Array {
     fn len_descr() -> ModuleFunction {
         let array = array_type_generic();
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-            &[array],
+            [array],
             int_type(),
             no_effects(),
         ));
@@ -214,7 +214,7 @@ impl Array {
     fn concat_descr() -> ModuleFunction {
         let array_ty = array_type_generic();
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(array_ty, false), (array_ty, false)],
+            [(array_ty, false), (array_ty, false)],
             array_ty,
             no_effects(),
         ));
@@ -245,11 +245,11 @@ impl Array {
         let gen0 = Type::variable_id(0);
         let gen1 = Type::variable_id(1);
         let effects = EffType::single_variable_id(0);
-        let map_fn = Type::function_by_val_with_effects(&[gen0], gen1, effects.clone());
-        let array0 = Type::native::<Self>(vec![gen0]);
-        let array1 = Type::native::<Self>(vec![gen1]);
+        let map_fn = Type::function_by_val_with_effects([gen0], gen1, effects.clone());
+        let array0 = Type::native::<Self>([gen0]);
+        let array1 = Type::native::<Self>([gen1]);
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-            &[array0, map_fn],
+            [array0, map_fn],
             array1,
             effects,
         ));
@@ -271,7 +271,7 @@ impl Array {
     fn iter_descr() -> ModuleFunction {
         let array = array_type_generic();
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-            &[array],
+            [array],
             array_iter_type_generic(),
             no_effects(),
         ));
@@ -315,7 +315,7 @@ impl ArrayIterator {
 
     fn next_value_descr() -> ModuleFunction {
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(array_iter_type_generic(), true)],
+            [(array_iter_type_generic(), true)],
             option_type_generic(),
             no_effects(),
         ));
@@ -346,7 +346,7 @@ impl NativeDisplay for ArrayIterator {
 }
 
 pub fn array_type(element_ty: Type) -> Type {
-    Type::native::<Array>(vec![element_ty])
+    Type::native::<Array>([element_ty])
 }
 
 pub fn int_array_type() -> Type {
@@ -358,7 +358,7 @@ pub fn array_type_generic() -> Type {
 }
 
 pub fn array_iter_type(element_ty: Type) -> Type {
-    Type::native::<ArrayIterator>(vec![element_ty])
+    Type::native::<ArrayIterator>([element_ty])
 }
 
 pub fn array_iter_type_generic() -> Type {
@@ -367,9 +367,9 @@ pub fn array_iter_type_generic() -> Type {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.types
+    to.type_aliases
         .set_bare_native("array", bare_native_type::<Array>());
-    to.types
+    to.type_aliases
         .set_bare_native("array_iterator", bare_native_type::<ArrayIterator>());
 
     // TODO: use type classes to get rid of the array prefix

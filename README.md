@@ -36,6 +36,7 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 
 * Functional statically-typed scripting language
 * Algebraic structural data types (including tagged unions)
+* Rust-style new types (structs and enums) over structural data types
 * Type inference ([Hindley-Milner style, HM(X) flavor](https://www.researchgate.net/profile/Martin-Sulzmann/publication/220346751_Type_Inference_with_Constrained_Types/links/5ab00c0b0f7e9b4897c1d25b/Type-Inference-with-Constrained-Types.pdf))
 * Parametric polymorphism (generics)
 * Ad hoc polymorphism through type classes (traits), with support for multi-parameter traits and associated types

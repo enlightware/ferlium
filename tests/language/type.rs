@@ -61,23 +61,23 @@ fn tuple() {
 fn record() {
     assert_eq!(
         parse_concrete_type("{a: int}").unwrap(),
-        record_type(&[("a", int_type())])
+        record_type([("a", int_type())])
     );
     assert_eq!(
         parse_concrete_type("{a: int,}").unwrap(),
-        record_type(&[("a", int_type())])
+        record_type([("a", int_type())])
     );
     assert_eq!(
         parse_concrete_type("{a: int, b: bool}").unwrap(),
-        record_type(&[("a", int_type()), ("b", bool_type())])
+        record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
         parse_concrete_type("{a: int, b: bool, }").unwrap(),
-        record_type(&[("a", int_type()), ("b", bool_type())])
+        record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
         parse_concrete_type("{b: bool, a: int}").unwrap(),
-        record_type(&[("a", int_type()), ("b", bool_type())])
+        record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
         parse_concrete_type("{b: bool, a: int}").unwrap(),
@@ -85,9 +85,9 @@ fn record() {
     );
     assert_eq!(
         parse_concrete_type("{a: int, b: { c: bool, d: float } }").unwrap(),
-        record_type(&[
+        record_type([
             ("a", int_type()),
-            ("b", record_type(&[("c", bool_type()), ("d", float_type())]))
+            ("b", record_type([("c", bool_type()), ("d", float_type())]))
         ])
     );
 }
@@ -97,13 +97,13 @@ fn record() {
 fn variant() {
     assert_eq!(
         parse_concrete_type("Some(int)|None").unwrap(),
-        variant_type(&[("Some", int_type()), ("None", Type::unit()),])
+        variant_type([("Some", tuple_type([int_type()])), ("None", Type::unit()),])
     );
     assert_eq!(
         parse_concrete_type("RGB (int, int, int) | Color(string)").unwrap(),
-        variant_type(&[
+        variant_type([
             ("RGB", tuple_type([int_type(), int_type(), int_type()])),
-            ("Color", string_type()),
+            ("Color", tuple_type([string_type()])),
         ])
     );
 }
@@ -122,80 +122,146 @@ fn parentheses() {
 fn fn_type() {
     assert_eq!(
         parse_concrete_type("() -> ()").unwrap(),
-        Type::function_by_val_with_effects(&[], Type::unit(), EffType::single_variable_id(0))
+        Type::function_by_val_with_effects([], Type::unit(), EffType::empty())
     );
     assert_eq!(
         parse_concrete_type("(int) -> int").unwrap(),
-        Type::function_by_val_with_effects(
-            &[int_type()],
-            int_type(),
-            EffType::single_variable_id(0)
-        )
+        Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
         parse_concrete_type("((int)) -> int").unwrap(),
-        Type::function_by_val_with_effects(
-            &[int_type()],
-            int_type(),
-            EffType::single_variable_id(0)
-        )
+        Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
         parse_concrete_type("(int) -> (int)").unwrap(),
-        Type::function_by_val_with_effects(
-            &[int_type()],
-            int_type(),
-            EffType::single_variable_id(0)
-        )
+        Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
         parse_concrete_type("(int) -> (int,)").unwrap(),
         Type::function_by_val_with_effects(
-            &[int_type()],
+            [int_type()],
             tuple_type([int_type()]),
-            EffType::single_variable_id(0)
+            EffType::empty()
         )
     );
     assert_eq!(
         parse_concrete_type("(int, float) -> ()").unwrap(),
         Type::function_by_val_with_effects(
-            &[int_type(), float_type()],
+            [int_type(), float_type()],
             Type::unit(),
-            EffType::single_variable_id(0)
+            EffType::empty()
         )
     );
     assert_eq!(
         parse_concrete_type("((int, float)) -> ()").unwrap(),
         Type::function_by_val_with_effects(
-            &[tuple_type([int_type(), float_type()])],
+            [tuple_type([int_type(), float_type()])],
             Type::unit(),
-            EffType::single_variable_id(0)
+            EffType::empty()
         )
     );
     assert_eq!(
         parse_concrete_type("((int, float)) -> (bool, string)").unwrap(),
         Type::function_by_val_with_effects(
-            &[tuple_type([int_type(), float_type()])],
+            [tuple_type([int_type(), float_type()])],
             tuple_type([bool_type(), string_type()]),
-            EffType::single_variable_id(0)
+            EffType::empty()
         )
     );
     assert_eq!(
         parse_concrete_type("(&mut [int]) -> int").unwrap(),
         Type::function_type(FnType::new_mut_resolved(
-            &[(array_type(int_type()), true)],
+            [(array_type(int_type()), true)],
             int_type(),
-            EffType::single_variable_id(0)
+            EffType::empty()
         ))
     );
     assert_eq!(
         parse_concrete_type("(&mut [float], &mut int) -> ()").unwrap(),
         Type::function_type(FnType::new_mut_resolved(
-            &[(array_type(float_type()), true), (int_type(), true)],
+            [(array_type(float_type()), true), (int_type(), true)],
+            Type::unit(),
+            EffType::empty()
+        ))
+    );
+
+    assert_eq!(
+        parse_generic_type("() -> ()").unwrap(),
+        Type::function_by_val_with_effects([], Type::unit(), EffType::single_variable_id(0))
+    );
+    assert_eq!(
+        parse_generic_type("(int) -> int").unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type()],
+            int_type(),
+            EffType::single_variable_id(0)
+        )
+    );
+    assert_eq!(
+        parse_generic_type("((int)) -> int").unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type()],
+            int_type(),
+            EffType::single_variable_id(0)
+        )
+    );
+    assert_eq!(
+        parse_generic_type("(int) -> (int)").unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type()],
+            int_type(),
+            EffType::single_variable_id(0)
+        )
+    );
+    assert_eq!(
+        parse_generic_type("(int) -> (int,)").unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type()],
+            tuple_type([int_type()]),
+            EffType::single_variable_id(0)
+        )
+    );
+    assert_eq!(
+        parse_generic_type("(int, float) -> ()").unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type(), float_type()],
+            Type::unit(),
+            EffType::single_variable_id(0)
+        )
+    );
+    assert_eq!(
+        parse_generic_type("((int, float)) -> ()").unwrap(),
+        Type::function_by_val_with_effects(
+            [tuple_type([int_type(), float_type()])],
+            Type::unit(),
+            EffType::single_variable_id(0)
+        )
+    );
+    assert_eq!(
+        parse_generic_type("((int, float)) -> (bool, string)").unwrap(),
+        Type::function_by_val_with_effects(
+            [tuple_type([int_type(), float_type()])],
+            tuple_type([bool_type(), string_type()]),
+            EffType::single_variable_id(0)
+        )
+    );
+    assert_eq!(
+        parse_generic_type("(&mut [int]) -> int").unwrap(),
+        Type::function_type(FnType::new_mut_resolved(
+            [(array_type(int_type()), true)],
+            int_type(),
+            EffType::single_variable_id(0)
+        ))
+    );
+    assert_eq!(
+        parse_generic_type("(&mut [float], &mut int) -> ()").unwrap(),
+        Type::function_type(FnType::new_mut_resolved(
+            [(array_type(float_type()), true), (int_type(), true)],
             Type::unit(),
             EffType::single_variable_id(0)
         ))
     );
+
     assert_eq!(
         parse_concrete_type("(&mut int)").unwrap_err().0,
         "types outside function arguments cannot be &mut"
@@ -227,7 +293,7 @@ fn generic_types() {
     assert_eq!(
         parse_generic_type("(&mut [_], &mut int) -> _").unwrap(),
         Type::function_type(FnType::new_mut_resolved(
-            &[(array_type(Type::variable_id(0)), true), (int_type(), true)],
+            [(array_type(Type::variable_id(0)), true), (int_type(), true)],
             Type::variable_id(0),
             EffType::single_variable_id(0)
         ))
@@ -239,12 +305,15 @@ fn generic_types() {
 fn complex_type() {
     assert_eq!(
         parse_concrete_type("[{name: string, age: int, nick: Some(string) | None}]").unwrap(),
-        array_type(record_type(&[
+        array_type(record_type([
             ("name", string_type()),
             ("age", int_type()),
             (
                 "nick",
-                variant_type(&[("Some", string_type()), ("None", Type::unit()),])
+                variant_type([
+                    ("Some", tuple_type([string_type()])),
+                    ("None", Type::unit()),
+                ])
             )
         ]))
     );

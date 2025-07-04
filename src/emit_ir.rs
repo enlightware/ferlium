@@ -30,8 +30,8 @@ use crate::{
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules, Use},
     mutability::MutType,
     r#trait::TraitRef,
-    r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
-    std::math::{float_type, int_type},
+    r#type::{FnArgType, FnType, Type, TypeDefRef, TypeSubstitution, TypeVar},
+    std::math::{float_type, int_type, NUM_TRAIT},
     trait_solver::TraitImpls,
     type_inference::{FreshVariableTypeMapper, TypeInference},
     type_like::{instantiate_types, TypeLike},
@@ -45,12 +45,28 @@ use crate::{
     value::Value,
 };
 
+fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompilationError> {
+    let mut names = HashMap::new();
+    for (name, span) in source.name_iter() {
+        if let Some(first_occurrence) = names.insert(name, span) {
+            return Err(internal_compilation_error!(NameDefinedMultipleTimes {
+                first_occurrence,
+                second_occurrence: span,
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// Emit IR for the given module
 pub fn emit_module(
     source: ast::PModule,
     others: &Modules,
     merge_with: Option<&Module>,
 ) -> Result<Module, InternalCompilationError> {
+    // Preliminary: Make sure no name is defined multiple times.
+    validate_name_uniqueness(&source)?;
+
     // First desugar the module.
     let (source, sorted_sccs) = source.desugar()?;
 
@@ -58,9 +74,23 @@ pub fn emit_module(
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
     let mut trait_impls = ModuleEnv::new(&output, others).collect_trait_impls();
 
-    // Add types to output module
-    for (name, ty) in source.types {
-        output.types.set_with_ustr(name, ty);
+    // Add types aliases and definitions to output module
+    for ((name, _), ty) in source.type_aliases {
+        output.type_aliases.set_with_ustr(name, ty);
+    }
+    for type_def in source.type_defs {
+        assert!(type_def.generic_params.is_empty());
+        assert!(type_def.doc_comments.is_empty());
+        output.type_defs.insert(
+            type_def.name.0,
+            TypeDefRef::new(crate::r#type::TypeDef {
+                name: type_def.name.0,
+                param_names: vec![],
+                shape: type_def.shape,
+                span: type_def.span,
+                attributes: HashMap::new(),
+            }),
+        );
     }
 
     // Process each functions' SCC one by one.
@@ -918,7 +948,7 @@ fn partition_variant_constraints(
     let subst = variants
         .into_iter()
         .map(|(ty_var, variant)| {
-            let variant_ty = Type::variant(variant.into_iter().collect());
+            let variant_ty = Type::variant(variant.into_iter().collect::<Vec<_>>());
             (ty_var, variant_ty)
         })
         .collect();
@@ -947,8 +977,9 @@ fn validate_and_cleanup_constraints(
 ) -> Result<ConstraintValidationOutput, InternalCompilationError> {
     // Filter out constraints that have types not found in our code.
     let unbound = node.all_unbound_ty_vars();
-    let ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
-    let constraints = select_constraints_only_these_ty_vars(constraints, &ty_vars);
+    // let ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
+    // let constraints = select_constraints_only_these_ty_vars(constraints, &ty_vars);
+    let constraints = constraints.iter().collect::<Vec<_>>();
     let related_constraints = constraints.iter().map(|c| constraint_ptr(c)).collect();
 
     let (constraints, subst) = if is_expr {
@@ -1094,8 +1125,7 @@ fn compute_num_trait_default_types(
             assert!(!have_trait.1.is_empty());
             if have_trait.1.len() > 1 {
                 invalid_ty_vars.extend(have_trait.1.iter().flat_map(|ty| ty.inner_ty_vars()));
-            } else if have_trait.0.name == "Num" {
-                // FIXME: Use proper trait ref extracted from std rather than string for the test above.
+            } else if have_trait.0 == &*NUM_TRAIT {
                 let maybe_ty_var = have_trait.1[0].data().as_variable().cloned();
                 if let Some(ty_var) = maybe_ty_var {
                     num_ty_vars.insert(ty_var);

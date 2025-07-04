@@ -46,8 +46,12 @@ impl FunctionDefinition {
         }
     }
 
-    pub fn new_infer_quantifiers(fn_ty: FnType, arg_names: &[&str], doc: &str) -> Self {
-        let arg_names = arg_names.iter().copied().map(Ustr::from).collect();
+    pub fn new_infer_quantifiers<'s>(
+        fn_ty: FnType,
+        arg_names: impl IntoIterator<Item = &'s str>,
+        doc: &str,
+    ) -> Self {
+        let arg_names = arg_names.into_iter().map(Ustr::from).collect();
         FunctionDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers(fn_ty),
             arg_names,
@@ -55,13 +59,13 @@ impl FunctionDefinition {
         }
     }
 
-    pub fn new_infer_quantifiers_with_constraints(
+    pub fn new_infer_quantifiers_with_constraints<'s>(
         fn_ty: FnType,
         constraints: impl Into<Vec<PubTypeConstraint>>,
-        arg_names: &[&str],
+        arg_names: impl IntoIterator<Item = &'s str>,
         doc: &str,
     ) -> Self {
-        let arg_names = arg_names.iter().copied().map(Ustr::from).collect();
+        let arg_names = arg_names.into_iter().map(Ustr::from).collect();
         FunctionDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers_with_constraints(
                 fn_ty,
@@ -83,19 +87,27 @@ impl FunctionDefinition {
         if let Some(doc) = &self.doc {
             writeln!(f, "{prefix}/// {doc}")?;
         }
-        if self.ty_scheme.is_just_type_and_effects() {
-            writeln!(
-                f,
-                "{prefix}fn {name} {}",
-                self.ty_scheme.ty.format_with(env)
+        write!(f, "{prefix}fn {name}")?;
+        let mut quantifiers = self
+            .ty_scheme
+            .ty_quantifiers
+            .iter()
+            .map(|q| format!("{q}"))
+            .chain(
+                self.ty_scheme
+                    .eff_quantifiers
+                    .iter()
+                    .map(|q| format!("{q}")),
             )
+            .peekable();
+        if quantifiers.peek().is_some() {
+            write!(f, "<{}>", quantifiers.collect::<Vec<_>>().join(", "))?;
+        }
+        write!(f, "{}", self.ty_scheme.ty.format_with(env))?;
+        if !self.ty_scheme.is_just_type_and_effects() {
+            writeln!(f, " {}", self.ty_scheme.display_constraints_rust_style(env),)
         } else {
-            writeln!(
-                f,
-                "{prefix}fn {name} {} {}",
-                self.ty_scheme.ty.format_with(env),
-                self.ty_scheme.display_constraints_rust_style(env),
-            )
+            writeln!(f)
         }
     }
 }
@@ -446,7 +458,7 @@ macro_rules! n_ary_native_fn {
             #[allow(clippy::too_many_arguments)]
             pub fn description_with_ty(f: F, arg_names: [&'static str; count!($($arg)*)], doc: Option<&'static str>, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-                    &[$(([<$arg:lower _ty>], $arg::MUTABLE)), *],
+                    [$(([<$arg:lower _ty>], $arg::MUTABLE)), *],
                     o_ty,
                     effects,
                 ));

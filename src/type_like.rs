@@ -40,9 +40,14 @@ pub trait TypeLike {
 
     /// Return all type variables contained in this type
     fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        self.inner_ty_vars_iter().collect()
+    }
+
+    /// Return all type variables contained in this type, as an iterator
+    fn inner_ty_vars_iter(&self) -> impl Iterator<Item = TypeVar> {
         let mut vars = vec![];
         self.visit(&mut TyVarsCollector(&mut vars));
-        vars.into_iter().unique().collect()
+        vars.into_iter().unique()
     }
 
     /// Return all mutability variables contained in this type

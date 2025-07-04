@@ -13,7 +13,7 @@ use crate::{
     containers::b,
     effects::EffType,
     mutability::MutType,
-    r#type::{store_types, FnArgType, FnType, NativeType, Type, TypeKind},
+    r#type::{store_types, FnArgType, FnType, NamedType, NativeType, Type, TypeKind},
 };
 
 /// A struct that can substitute types, possibly mutating itself in the process.
@@ -111,7 +111,13 @@ fn substitute_type_rec(
                 .collect(),
         ),
         Function(fn_ty) => Function(b(substitute_fn_type_rec(&fn_ty, substituer, output, seen))),
-        Newtype(name, ty) => Newtype(name, substitute_type_rec(ty, substituer, output, seen)),
+        Named(NamedType {
+            def: decl,
+            params: args,
+        }) => Named(NamedType {
+            def: decl,
+            params: substitute_types_rec(&args, substituer, output, seen),
+        }),
         Never => Never,
     };
 
@@ -146,7 +152,7 @@ fn substitute_fn_type_rec(
                 substituer.substitute_mut_type(arg.mut_ty),
             )
         })
-        .collect::<Vec<_>>();
+        .collect();
     let ret = substitute_type_rec(fn_ty.ret, substituer, output, seen);
     let effects = substituer.substitute_effect_type(&fn_ty.effects);
     FnType::new(args, ret, effects)

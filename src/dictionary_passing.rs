@@ -10,8 +10,8 @@ use std::{collections::HashMap, mem};
 
 use crate::{
     error::InternalCompilationError, format::write_with_separator_and_format_fn, ir_syn,
-    parser_helpers::EMPTY_USTR, r#trait::TraitRef, trait_solver::TraitImpls, type_like::TypeLike,
-    Location,
+    parser_helpers::EMPTY_USTR, r#trait::TraitRef, r#type::TypeVar, trait_solver::TraitImpls,
+    type_like::TypeLike, Location,
 };
 use itertools::process_results;
 use ustr::Ustr;
@@ -32,7 +32,10 @@ use crate::{
 /// A dictionary requirement, that will be passed as extra parameter to a function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DictionaryReq {
-    FieldIndex(Type, Ustr),
+    FieldIndex {
+        ty: Type,
+        field: Ustr,
+    },
     TraitImpl {
         trait_ref: TraitRef,
         input_tys: Vec<Type>,
@@ -42,7 +45,7 @@ pub enum DictionaryReq {
 
 impl DictionaryReq {
     pub fn new_field_index(ty: Type, field: Ustr) -> Self {
-        Self::FieldIndex(ty, field)
+        Self::FieldIndex { ty, field }
     }
     pub fn new_trait_impl(trait_ref: TraitRef, input_tys: Vec<Type>) -> Self {
         Self::TraitImpl {
@@ -55,7 +58,10 @@ impl DictionaryReq {
     pub fn instantiate(&self, subst: &InstSubstitution) -> DictionaryReq {
         use DictionaryReq::*;
         match self {
-            FieldIndex(ty, field) => FieldIndex(ty.instantiate(subst), *field),
+            FieldIndex { ty, field } => FieldIndex {
+                ty: ty.instantiate(subst),
+                field: *field,
+            },
             TraitImpl {
                 trait_ref,
                 input_tys,
@@ -75,7 +81,7 @@ impl FmtWithModuleEnv for DictionaryReq {
     ) -> std::fmt::Result {
         use DictionaryReq::*;
         match self {
-            FieldIndex(ty, field) => write!(f, "{} field {}", ty.format_with(env), field),
+            FieldIndex { ty, field } => write!(f, "{} field {}", ty.format_with(env), field),
             TraitImpl {
                 trait_ref,
                 input_tys,
@@ -94,9 +100,37 @@ impl FmtWithModuleEnv for DictionaryReq {
 
 pub type DictionariesReq = Vec<DictionaryReq>;
 
-pub fn find_field_dict_index(dicts: &DictionariesReq, ty: Type, field: &str) -> Option<usize> {
-    dicts.iter().position(|dict| {
-        if let DictionaryReq::FieldIndex(ty2, field2) = &dict {
+/// Data structure to hold extra parameters for a function.
+#[derive(Clone, Debug)]
+pub struct ExtraParameters {
+    /// The dictionary requirements for the function.
+    /// This is a list of dictionaries that will be passed as extra parameters to the function.
+    pub requirements: Vec<DictionaryReq>,
+    /// A map from type variables to other type variables containing their representation type.
+    /// This is used to resolve type variables when looking up field dict indices.
+    pub repr_map: HashMap<TypeVar, TypeVar>,
+}
+
+impl ExtraParameters {
+    pub fn is_empty(&self) -> bool {
+        self.requirements.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.requirements.len()
+    }
+}
+
+pub fn find_field_dict_index(dicts: &ExtraParameters, var: TypeVar, field: &str) -> Option<usize> {
+    // Resolve the variable to its representation type if it is a different type variable.
+    let var = dicts.repr_map.get(&var).unwrap_or(&var);
+    let ty = Type::variable(*var);
+    // Find the index of the dictionary that matches the type and field.
+    dicts.requirements.iter().position(|dict| {
+        if let DictionaryReq::FieldIndex {
+            ty: ty2,
+            field: field2,
+        } = &dict
+        {
             *ty2 == ty && field2 == &field
         } else {
             false
@@ -105,11 +139,11 @@ pub fn find_field_dict_index(dicts: &DictionariesReq, ty: Type, field: &str) -> 
 }
 
 pub fn find_trait_impl_dict_index(
-    dicts: &DictionariesReq,
+    dicts: &ExtraParameters,
     trait_ref: &TraitRef,
     input_tys: &[Type],
 ) -> Option<usize> {
-    dicts.iter().position(|dict| {
+    dicts.requirements.iter().position(|dict| {
         if let DictionaryReq::TraitImpl {
             trait_ref: trait_ref2,
             input_tys: tys2,
@@ -143,7 +177,7 @@ fn extra_args_from_inst_data(
         .map(|dict| {
             use DictionaryReq::*;
             let (node_kind, node_ty) = match dict {
-                FieldIndex(ty, name) => {
+                FieldIndex { ty, field: name } => {
                     let ty_data = ty.data().clone();
                     let node_kind = match ty_data {
                         Record(record) => {
@@ -153,11 +187,11 @@ fn extra_args_from_inst_data(
                             );
                             K::Immediate(ir::Immediate::new(Value::native(index as isize)))
                         }
-                        Variable(_var) => {
+                        Variable(var) => {
                             // Variable, it must be in the input dictionaries, look for it.
-                            let index = find_field_dict_index(ctx.dicts, *ty, name).expect(
-                                "Dictionary for field not found, type inference should have failed",
-                            );
+                            let index = find_field_dict_index(ctx.dicts, var, name).unwrap_or_else(
+                            || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
+                        );
                             K::EnvLoad(b(ir::EnvLoad { index, name: None }))
                         }
                         _ => {
@@ -198,7 +232,7 @@ fn extra_args_from_inst_data(
 fn extra_args_for_module_function(
     inst_data: &DictionariesReq,
     span: Location,
-    dicts: &DictionariesReq,
+    dicts: &ExtraParameters,
 ) -> (Vec<Node>, Vec<FnArgType>) {
     inst_data
         .iter()
@@ -207,6 +241,7 @@ fn extra_args_for_module_function(
             // in our requirement dicts. As dictionary passing is done
             // before type scheme simplification, they can be matched 1 to 1.
             let index = dicts
+                .requirements
                 .iter()
                 .position(|d| d == dict)
                 .expect("Target dictionary not found in ours");
@@ -227,14 +262,14 @@ fn extra_args_for_module_function(
 /// This is a map from function pointers to the dictionaries required by the function.
 /// This is necessary as recursive functions in the current modules could not get their
 /// dictionary requirements during type inference as they were not known yet.
-pub type ModuleInstData = HashMap<FunctionPtr, DictionariesReq>;
+pub type ModuleInstData = HashMap<FunctionPtr, ExtraParameters>;
 
 /// The context for elaborating dictionaries.
 /// All necessary information to perform dictionary elaboration.
 // #[derive(Clone, Copy)]
 pub struct DictElaborationCtx<'a> {
     /// The dictionaries for the current expression being elaborated.
-    pub dicts: &'a DictionariesReq,
+    pub dicts: &'a ExtraParameters,
     /// The dictionaries for the current module, if compiling a module.
     /// None if compiling an expression.
     pub module_inst_data: Option<&'a ModuleInstData>,
@@ -243,7 +278,7 @@ pub struct DictElaborationCtx<'a> {
 }
 impl<'a> DictElaborationCtx<'a> {
     pub fn new(
-        dicts: &'a DictionariesReq,
+        dicts: &'a ExtraParameters,
         module_inst_data: Option<&'a ModuleInstData>,
         trait_impls: &'a mut TraitImpls,
     ) -> Self {
@@ -283,6 +318,7 @@ impl Node {
                         {
                             // Yes, build the dictionary requirements for the function if it has non-empty inst data
                             if !inst_data.is_empty() {
+                                let inst_data = &inst_data.requirements;
                                 // We have an instantiation, so we need a closure to pass dictionary requirements.
                                 let (captures, _) =
                                     extra_args_for_module_function(inst_data, self.span, ctx.dicts);
@@ -361,6 +397,7 @@ impl Node {
                         .module_inst_data
                         .and_then(|inst_data| inst_data.get(&fn_ptr))
                     {
+                        let inst_data = &inst_data.requirements;
                         // Yes, build the dictionary requirements for the function.
                         let (extra_args, extra_args_ty) =
                             extra_args_for_module_function(inst_data, self.span, ctx.dicts);
@@ -494,6 +531,15 @@ impl Node {
                 let span = access.0.span;
                 let ty = access.0.ty;
                 let ty_data = ty.data().clone();
+                let ty_data = if let Some(named) = ty_data.as_named() {
+                    assert!(
+                        named.params.is_empty(),
+                        "Field access on named types with parameters is not supported yet"
+                    );
+                    named.def.shape.data().clone()
+                } else {
+                    ty_data
+                };
                 match ty_data {
                     Record(record) => {
                         // Known type, get the index from the type and replace the IR instruction.
@@ -512,10 +558,10 @@ impl Node {
                         );
                         self.kind = Project(b((node, index)));
                     }
-                    Variable(_var) => {
+                    Variable(var) => {
                         // Variable type, it must be in the type scheme, use the dictionary to lookup local variable.
-                        let index = find_field_dict_index(ctx.dicts, ty, &name).expect(
-                            "Dictionary for field not found, type inference should have failed",
+                        let index = find_field_dict_index(ctx.dicts, var, &name).unwrap_or_else(
+                            || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                         );
                         let node = mem::replace(
                             &mut access.as_mut().0,

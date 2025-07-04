@@ -321,7 +321,7 @@ impl Node {
             }
             Variant(variant) => {
                 let value = variant.1.eval_with_ctx(ctx)?;
-                Ok(Value::variant(variant.0, value))
+                Ok(Value::raw_variant(variant.0, value))
             }
             ExtractTag(node) => {
                 let value = node.eval_with_ctx(ctx)?;

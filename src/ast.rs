@@ -192,13 +192,16 @@ pub type DTraitImpl = TraitImpl<Desugared>;
 pub struct Module<P: Phase> {
     pub functions: Vec<ModuleFunction<P>>,
     pub impls: Vec<TraitImpl<P>>,
-    pub types: Vec<(Ustr, Type)>,
+    pub type_aliases: Vec<(UstrSpan, Type)>,
+    // TODO: use type definition intermediate representation
+    pub type_defs: Vec<TypeDef>,
 }
 impl<P: Phase> Module<P> {
     pub fn extend(&mut self, other: Self) {
         self.functions.extend(other.functions);
         self.impls.extend(other.impls);
-        self.types.extend(other.types);
+        self.type_aliases.extend(other.type_aliases);
+        self.type_defs.extend(other.type_defs);
     }
 
     pub fn merge(mut self, other: Self) -> Self {
@@ -211,7 +214,18 @@ impl<P: Phase> Module<P> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.functions.is_empty() && self.impls.is_empty() && self.types.is_empty()
+        self.functions.is_empty()
+            && self.impls.is_empty()
+            && self.type_aliases.is_empty()
+            && self.type_defs.is_empty()
+    }
+
+    pub fn name_iter(&self) -> impl Iterator<Item = UstrSpan> + '_ {
+        self.functions
+            .iter()
+            .map(|f| f.name)
+            .chain(self.type_aliases.iter().map(|(name, _)| name.clone()))
+            .chain(self.type_defs.iter().map(|def| def.name))
     }
 }
 
@@ -234,10 +248,10 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
         f: &mut std::fmt::Formatter,
         env: &crate::module::ModuleEnv,
     ) -> std::fmt::Result {
-        if !self.types.is_empty() {
+        if !self.type_aliases.is_empty() {
             writeln!(f, "Types:")?;
-            for (name, ty) in self.types.iter() {
-                writeln!(f, "  {}: {}", name, ty.format_with(env))?;
+            for (name, ty) in self.type_aliases.iter() {
+                writeln!(f, "  {}: {}", name.0, ty.format_with(env))?;
             }
         }
         if !self.impls.is_empty() {
@@ -335,6 +349,12 @@ pub type PModule = Module<Parsed>;
 /// An AST module after desugaring
 pub type DModule = Module<Desugared>;
 
+/// A record field in an expression
+pub type RecordField<P> = (UstrSpan, Expr<P>);
+
+/// A collection of record fields in an expression
+pub type RecordFields<P> = Vec<RecordField<P>>;
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum ExprKind<P: Phase> {
@@ -350,7 +370,8 @@ pub enum ExprKind<P: Phase> {
     PropertyPath(Ustr, Ustr),
     Tuple(Vec<Expr<P>>),
     Project(B<Expr<P>>, (usize, Location)),
-    Record(Vec<(UstrSpan, Expr<P>)>),
+    Record(RecordFields<P>),
+    StructLiteral(UstrSpan, RecordFields<P>),
     FieldAccess(B<Expr<P>>, UstrSpan),
     Array(Vec<Expr<P>>),
     Index(B<Expr<P>>, B<Expr<P>>),
@@ -435,6 +456,15 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
                 expr.format_ind(f, env, indent)?;
                 writeln!(f, "{indent_str}  .{index}")
             }
+            StructLiteral(name, fields) => {
+                writeln!(f, "{indent_str}{} {{", name.0)?;
+                for ((name, _), value) in fields.iter() {
+                    writeln!(f, "{indent_str}  {name}:")?;
+                    value.format_ind(f, env, indent + 2)?;
+                    writeln!(f, "{indent_str}  ,")?;
+                }
+                writeln!(f, "{indent_str}}}")
+            }
             Record(fields) => {
                 writeln!(f, "{indent_str}{{")?;
                 for ((name, _), value) in fields.iter() {
@@ -515,6 +545,7 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
             }
             Tuple(args) => visitor.visit_exprs(args.iter()),
             Project(expr, _) => expr.visit(visitor),
+            StructLiteral(_, fields) => visitor.visit_exprs(fields.iter().map(|(_, expr)| expr)),
             Record(fields) => visitor.visit_exprs(fields.iter().map(|(_, expr)| expr)),
             FieldAccess(expr, _) => expr.visit(visitor),
             Array(args) => visitor.visit_exprs(args.iter()),
@@ -599,21 +630,44 @@ impl<P: Phase> ExprVisitor<P> for UnstableCollector {
     }
 }
 
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum PatternVariantKind {
+    Tuple,
+    Record,
+}
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum PatternKind {
     Literal(LiteralValue, Type),
-    Variant { tag: UstrSpan, vars: Vec<UstrSpan> },
+    Variant {
+        tag: UstrSpan,
+        kind: PatternVariantKind,
+        vars: Vec<UstrSpan>,
+    },
     Error(String),
 }
 impl PatternKind {
-    pub fn variant(tag: UstrSpan, vars: Vec<UstrSpan>) -> Self {
-        PatternKind::Variant { tag, vars }
-    }
-
-    pub fn empty_variant(tag: UstrSpan) -> Self {
+    pub fn tuple_variant(tag: UstrSpan, vars: Vec<UstrSpan>) -> Self {
         PatternKind::Variant {
             tag,
+            kind: PatternVariantKind::Tuple,
+            vars,
+        }
+    }
+
+    pub fn struct_variant(tag: UstrSpan, vars: Vec<UstrSpan>) -> Self {
+        PatternKind::Variant {
+            tag,
+            kind: PatternVariantKind::Record,
+            vars,
+        }
+    }
+
+    pub fn empty_tuple_variant(tag: UstrSpan) -> Self {
+        PatternKind::Variant {
+            tag,
+            kind: PatternVariantKind::Tuple,
             vars: Vec::new(),
         }
     }
@@ -690,4 +744,16 @@ impl PropertyAccess {
             Set => "set",
         }
     }
+}
+
+/// A type definition with common metadata
+#[derive(Debug, Clone)]
+pub struct TypeDef {
+    pub name: UstrSpan,
+    pub generic_params: Vec<UstrSpan>,
+    // The structural shape of the type (record, tuple, or unit)
+    pub shape: Type,
+    pub span: Location,
+    pub doc_comments: Vec<String>,
+    // TODO: add constraints for the type arguments
 }

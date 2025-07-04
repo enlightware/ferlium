@@ -20,7 +20,7 @@ use parser_helpers::describe_parse_error;
 mod assert;
 mod ast;
 mod borrow_checker;
-mod containers;
+pub mod containers;
 mod desugar;
 mod dictionary_passing;
 pub mod effects;

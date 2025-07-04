@@ -37,7 +37,7 @@ pub fn add_to_module(to: &mut Module) {
             abort,
             [],
             Some("Aborts the program."),
-            TypeScheme::new_just_type(FnType::new_by_val(&[], Type::never(), no_effects())),
+            TypeScheme::new_just_type(FnType::new_by_val([], Type::never(), no_effects())),
         ),
     );
     to.functions.insert(
@@ -47,7 +47,7 @@ pub fn add_to_module(to: &mut Module) {
             ["msg"],
             Some("Aborts the program with a message."),
             TypeScheme::new_just_type(FnType::new_by_val(
-                &[string_type()],
+                [string_type()],
                 Type::never(),
                 no_effects(),
             )),

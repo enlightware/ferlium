@@ -8,9 +8,9 @@
 //
 use test_log::test;
 
-use crate::effects::test_mod as test_mod_for_effects;
+use crate::{common::variant_0, effects::test_mod as test_mod_for_effects};
 
-use super::common::{bool, fail_compilation, float, int, run, string, variant};
+use super::common::{bool, fail_compilation, float, int, run, string, variant_t1};
 use ferlium::{
     effects::{effect, no_effects, PrimitiveEffect},
     std::option::{none, some},
@@ -25,7 +25,7 @@ use wasm_bindgen_test::*;
 fn range_iterators() {
     assert_eq!(
         run("let r = range(0, 2); let mut it = iter(r); (next(it), next(it))"),
-        tuple!(variant("Some", int(0)), variant("Some", int(1)))
+        tuple!(variant_t1("Some", int(0)), variant_t1("Some", int(1)))
     );
     assert_eq!(run("len(3..3)"), int(0));
     assert_eq!(run("len(3..4)"), int(1));
@@ -186,36 +186,36 @@ fn array_all() {
 fn array_iterators() {
     assert_eq!(
         run("let a = [1, 2, 3]; let mut it = array_iter(a); (next(it), next(it))"),
-        tuple!(variant("Some", int(1)), variant("Some", int(2)))
+        tuple!(variant_t1("Some", int(1)), variant_t1("Some", int(2)))
     );
     assert_eq!(
         run("let a = [1.0, 2.0, 3.0]; let mut it = array_iter(a); (next(it), next(it))"),
-        tuple!(variant("Some", float(1.0)), variant("Some", float(2.0)))
+        tuple!(variant_t1("Some", float(1.0)), variant_t1("Some", float(2.0)))
     );
     assert_eq!(
         run(
             r#"let a = ["hello", "world"]; let mut it = array_iter(a); (next(it), next(it), next(it))"#
         ),
         tuple!(
-            variant("Some", string("hello")),
-            variant("Some", string("world")),
-            variant("None", Value::unit())
+            variant_t1("Some", string("hello")),
+            variant_t1("Some", string("world")),
+            variant_0("None")
         )
     );
     assert_eq!(
         run("let a = [1, 2, 3]; let mut it = iter(a); (next(it), next(it))"),
-        tuple!(variant("Some", int(1)), variant("Some", int(2)))
+        tuple!(variant_t1("Some", int(1)), variant_t1("Some", int(2)))
     );
     assert_eq!(
         run("let a = [1.0, 2.0, 3.0]; let mut it = iter(a); (next(it), next(it))"),
-        tuple!(variant("Some", float(1.0)), variant("Some", float(2.0)))
+        tuple!(variant_t1("Some", float(1.0)), variant_t1("Some", float(2.0)))
     );
     assert_eq!(
         run(r#"let a = ["hello", "world"]; let mut it = iter(a); (next(it), next(it), next(it))"#),
         tuple!(
-            variant("Some", string("hello")),
-            variant("Some", string("world")),
-            variant("None", Value::unit())
+            variant_t1("Some", string("hello")),
+            variant_t1("Some", string("world")),
+            variant_0("None")
         )
     );
     assert_eq!(run("len(([]: [int]))"), int(0));
@@ -331,88 +331,94 @@ fn string_sub_string() {
 fn serde() {
     // serialize
     // basic types
-    assert_eq!(run("serialize(())"), variant("None", Value::unit()));
-    assert_eq!(run("serialize(true)"), variant("Bool", bool(true)));
-    assert_eq!(run("serialize(1)"), variant("Int", int(1)));
-    assert_eq!(run("serialize(1.0)"), variant("Float", float(1.0)));
+    assert_eq!(run("serialize(())"), variant_0("None"));
+    assert_eq!(run("serialize(true)"), variant_t1("Bool", bool(true)));
+    assert_eq!(run("serialize(1)"), variant_t1("Int", int(1)));
+    assert_eq!(run("serialize(1.0)"), variant_t1("Float", float(1.0)));
     assert_eq!(
         run(r#"serialize("hello")"#),
-        variant("String", string("hello"))
+        variant_t1("String", string("hello"))
     );
     assert_eq!(
         run("serialize([1])"),
-        variant("Seq", array![variant("Int", int(1))])
+        variant_t1("Seq", array![variant_t1("Int", int(1))])
     );
     assert_eq!(
         run("serialize([1.0])"),
-        variant("Seq", array![variant("Float", float(1.0))])
+        variant_t1("Seq", array![variant_t1("Float", float(1.0))])
     );
     // tuples
     assert_eq!(
         run("serialize((1, ))"),
-        variant("Seq", array![variant("Int", int(1))])
+        variant_t1("Seq", array![variant_t1("Int", int(1))])
     );
     assert_eq!(
         run("serialize((1, 2))"),
-        variant(
+        variant_t1(
             "Seq",
-            array![variant("Int", int(1)), variant("Int", int(2))]
+            array![variant_t1("Int", int(1)), variant_t1("Int", int(2))]
         )
     );
     assert_eq!(
         run("serialize((1, 2.0, true))"),
-        variant(
+        variant_t1(
             "Seq",
             array![
-                variant("Int", int(1)),
-                variant("Float", float(2.)),
-                variant("Bool", bool(true))
+                variant_t1("Int", int(1)),
+                variant_t1("Float", float(2.)),
+                variant_t1("Bool", bool(true))
             ]
         )
     );
     // records
     assert_eq!(
         run("serialize({a: 1, })"),
-        variant(
+        variant_t1(
             "Seq",
-            array![variant(
+            array![variant_t1(
                 "Seq",
-                array![variant("String", string("a")), variant("Int", int(1))]
+                array![variant_t1("String", string("a")), variant_t1("Int", int(1))]
             )]
         )
     );
     assert_eq!(
         run("serialize({a: 1, b: 2})"),
-        variant(
+        variant_t1(
             "Seq",
             array![
-                variant(
+                variant_t1(
                     "Seq",
-                    array![variant("String", string("a")), variant("Int", int(1))]
+                    array![variant_t1("String", string("a")), variant_t1("Int", int(1))]
                 ),
-                variant(
+                variant_t1(
                     "Seq",
-                    array![variant("String", string("b")), variant("Int", int(2))]
+                    array![variant_t1("String", string("b")), variant_t1("Int", int(2))]
                 )
             ]
         )
     );
     assert_eq!(
         run("serialize({a: 1, b: 2.0, c: true})"),
-        variant(
+        variant_t1(
             "Seq",
             array![
-                variant(
+                variant_t1(
                     "Seq",
-                    array![variant("String", string("a")), variant("Int", int(1))]
+                    array![variant_t1("String", string("a")), variant_t1("Int", int(1))]
                 ),
-                variant(
+                variant_t1(
                     "Seq",
-                    array![variant("String", string("b")), variant("Float", float(2.))]
+                    array![
+                        variant_t1("String", string("b")),
+                        variant_t1("Float", float(2.))
+                    ]
                 ),
-                variant(
+                variant_t1(
                     "Seq",
-                    array![variant("String", string("c")), variant("Bool", bool(true))]
+                    array![
+                        variant_t1("String", string("c")),
+                        variant_t1("Bool", bool(true))
+                    ]
                 )
             ]
         )
@@ -447,6 +453,6 @@ fn serde() {
 fn serialize_with_type_ascription() {
     assert_eq!(
         run("fn test() -> Variant { Seq([serialize(0)]) } test()"),
-        variant("Seq", array![variant("Int", int(0))])
+        variant_t1("Seq", array![variant_t1("Int", int(0))])
     );
 }

@@ -1,5 +1,5 @@
 use crate::{Location, LocatedError};
-use crate::ast::{UstrSpan, TypeSpan, MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl};
+use crate::ast::{UstrSpan, TypeSpan, MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, TypeDef};
 use crate::value::LiteralValue;
 use crate::r#type::{Type, FnType, FnArgType};
 use crate::type_like::TypeLike;
@@ -35,11 +35,12 @@ pub Module: Module = {
 
 ModuleItem = {
     ModuleFunction,
-    ModuleTraitImpl
+    ModuleTraitImpl,
+    ModuleTypeDef,
 }
 
 ModuleTraitImpl: Module = {
-    TraitImpl => Module { functions: vec![], impls: vec![<>], types: vec![] }
+    TraitImpl => Module { functions: vec![], impls: vec![<>], type_aliases: vec![], type_defs: vec![] }
 }
 
 TraitImpl: TraitImpl = {
@@ -53,11 +54,15 @@ TraitImpl: TraitImpl = {
 }
 
 ModuleFunction: Module = {
-    Function => Module { functions: vec![<>], impls: vec![], types: vec![] }
+    Function => Module { functions: vec![<>], impls: vec![], type_aliases: vec![], type_defs: vec![] }
+}
+
+ModuleTypeDef: Module = {
+    TypeDefinition => Module { functions: vec![], impls: vec![], type_aliases: vec![], type_defs: vec![<>] }
 }
 
 Function: ModuleFunction = {
-    <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrWithOptTypeArgs> ")" <ret:FnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
+    <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrWithOptTypeArgs> ")" <ret:SpFnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
         ModuleFunction::new(name, args, span(al, ar), ret, body, span(l, r), parse_doc_comments(doc)),
 }
 
@@ -82,31 +87,37 @@ Type<P>: Type = {
 
 TupleOrFnType<P>: Type = {
     "(" ")" => Type::unit(),
-    "(" ")" <ret:FnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, EffType::single_variable_id(0))),
-    "(" <l:@L> <arg:ArgType<P>> <r:@R> ")" <ret:FnRet<P>?> =>?
+    "(" ")" <ret:EffFnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, ret.1)),
+    "(" <l:@L> <arg:ArgType<P>> <r:@R> ")" <ret:EffFnRet<P>?> =>?
         Ok(if let Some(ret) = ret {
-            Type::function_type(FnType::new(vec![arg], ret.0, EffType::single_variable_id(0)))
+            Type::function_type(FnType::new(vec![arg], ret.0, ret.1))
         } else if arg.mut_ty != MutType::constant() {
             return error("types outside function arguments cannot be &mut".into(), span(l, r));
         } else {
             arg.ty
         }),
-    "(" <l:@L> <arg0:ArgType<P>> "," <args:Sep<ArgType<P>, ",">>  <r:@R> ")" <ret:FnRet<P>?> =>?
+    "(" <l:@L> <arg0:ArgType<P>> "," <args:Sep<ArgType<P>, ",">>  <r:@R> ")" <ret:EffFnRet<P>?> =>?
     {
         let args = ext_f(arg0, args);
         Ok(if let Some(ret) = ret {
-            Type::function_type(FnType::new(args, ret.0, EffType::single_variable_id(0)))
+            Type::function_type(FnType::new(args, ret.0, ret.1))
         } else if args.iter().any(|a| a.mut_ty != MutType::constant()) {
             return error("types outside function arguments cannot be &mut".into(), span(l, r));
         } else {
-            Type::tuple(args.into_iter().map(|a| a.ty).collect())
+            Type::tuple(args.into_iter().map(|a| a.ty).collect::<Vec<_>>())
         })
     }
 }
 
 #[inline]
-FnRet<P>: TypeSpan = {
-    "->" <ret:Sp<Type<P>>> => ret,
+EffFnRet<P>: (Type, EffType) = {
+    "->" <ret:Type<P>> if P != "" => (ret, EffType::single_variable_id(0)),
+    "->" <ret:Type<P>> if P == "" => (ret, EffType::empty())
+}
+
+#[inline]
+SpFnRet<P>: TypeSpan = {
+    "->" <ret:Sp<Type<P>>> => ret
 }
 
 ArgType<P>: FnArgType = {
@@ -133,8 +144,13 @@ ArrayType<P>: Type = {
 }
 
 RecordType<P>: Type = {
-    "{" <f:RecordTypeField<P>> "}" => Type::record(vec![f]),
-    "{" <f:RecordTypeField<P>> "," <r:Sep<RecordTypeField<P>, ",">> "}" => Type::record(ext_f(f, r)),
+    "{" <RecordTypeFields<P>> "}" => <>,
+    "{" "}" => Type::record(vec![])
+}
+
+RecordTypeFields<P>: Type = {
+    <f:RecordTypeField<P>> => Type::record(vec![f]),
+    <f:RecordTypeField<P>> "," <r:Sep<RecordTypeField<P>, ",">> => Type::record(ext_f(f, r)),
 }
 
 RecordTypeField<P>: (Ustr, Type) = {
@@ -147,11 +163,7 @@ VariantType<P>: Type = {
 
 VariantTypeAlternative<P>: (Ustr, Type) = {
     <tag:UIdentifier> => (tag, Type::unit()),
-    <tag:UIdentifier> "(" <args:Sep<Type<P>, ",">> ")" => (tag, if args.len() == 1 {
-        args[0]
-    } else {
-        Type::tuple(args)
-    }),
+    <tag:UIdentifier> "(" <args:Sep<Type<P>, ",">> ")" => (tag, Type::tuple(args)),
 }
 
 TypeAscription: TypeSpan = {
@@ -171,6 +183,105 @@ MutTyOrInfer: MutType = {
     "?" => MutType::variable_id(0),
 }
 
+// Type Definitions
+
+TypeDefinition: TypeDef = {
+    StructDefinition,
+    EnumDefinition,
+}
+
+StructDefinition: TypeDef = {
+    <l:@L> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <shape:StructBody> <r:@R> => {
+        TypeDef {
+            name,
+            generic_params: generics.unwrap_or_default(),
+            shape: shape,
+            span: span(l, r),
+            doc_comments: vec![],
+        }
+    }
+}
+
+StructBody: Type = {
+    "{" <fields:StructNamedFields?> "}" => Type::record(fields.unwrap_or_default()),
+    "(" <fields:StructTupleFields> ")" => Type::tuple(fields),
+    ";" => Type::unit(), // Unit struct
+}
+
+StructNamedFields: Vec<(Ustr, Type)> = {
+    <f:StructNamedField> => vec![f],
+    <f:StructNamedField> "," <r:StructNamedFields> => ext_f(f, r),
+    <f:StructNamedField> "," => vec![f], // trailing comma
+}
+
+StructNamedField: (Ustr, Type) = {
+    <field:RecordTypeField<"">> => (field.0, field.1),
+}
+
+StructTupleFields: Vec<Type> = {
+    <t:Type<"">> => vec![t],
+    <t:Type<"">> "," <r:StructTupleFields> => ext_f(t, r),
+    <t:Type<"">> "," => vec![t], // trailing comma
+}
+
+EnumDefinition: TypeDef = {
+    <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" "}" <r:@R> => {
+        TypeDef {
+            name,
+            generic_params: generics.unwrap_or_default(),
+            shape: Type::never(),
+            span: span(l, r),
+            doc_comments: vec![],
+        }
+    },
+    <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" <variants:EnumVariants> "}" <r:@R> => {
+        let variant_ty = Type::variant(variants);
+        TypeDef {
+            name,
+            generic_params: generics.unwrap_or_default(),
+            shape: variant_ty,
+            span: span(l, r),
+            doc_comments: vec![],
+        }
+    }
+}
+
+EnumVariants: Vec<(Ustr, Type)> = {
+    <v:EnumVariant> => vec![v],
+    <v:EnumVariant> "," <r:EnumVariants> => ext_f(v, r),
+    <v:EnumVariant> "," => vec![v], // trailing comma
+}
+
+EnumVariant: (Ustr, Type) = {
+    // Unit variant: Name
+    <name:UIdentifier> => (name, Type::unit()),
+
+    // Tuple variant with single type: Name(Type)
+    <name:UIdentifier> "(" <ty:Type<"">> ")" => (name, Type::tuple(vec![ty])),
+
+    // Tuple variant with multiple types: Name(Type1, Type2, ...)
+    <name:UIdentifier> "(" <f:Type<"">> "," <rest:Sep<Type<"">, ",">> ")" => {
+        let tys = ext_f(f, rest);
+        let tuple_ty = Type::tuple(tys);
+        (name, tuple_ty)
+    },
+
+    // Record variant: Name { field1: Type1, field2: Type2, ... }
+    <name:UIdentifier> <ty:RecordType<"">> => {
+        (name, ty)
+    },
+}
+
+GenericParams: Vec<UstrSpan> = {
+    "<" <params:GenericParamList?> ">" => params.unwrap_or_default(),
+}
+
+GenericParamList: Vec<UstrSpan> = {
+    <p:Sp<UIdentifier>> => vec![p],
+    <p:Sp<UIdentifier>> "," <r:GenericParamList> => ext_f(p, r),
+    <p:Sp<UIdentifier>> "," => vec![p], // trailing comma
+}
+
 // Expressions
 
 // Expressions inspired from Rust: https://doc.rust-lang.org/reference/expressions.html
@@ -181,72 +292,72 @@ MutTyOrInfer: MutType = {
 // the guard macro features of lalrpop as in Niko's rustypop.
 
 pub Expr = {
-    Es<TopExpr>
+    Es<TopExpr<"">>
 }
 
-TopExpr = {
-    AssignExpr,
-    ReturnExpr,
-    AbstractExpr,
-    PipeExpr,
+TopExpr<NoStruct> = {
+    AssignExpr<NoStruct>,
+    ReturnExpr<NoStruct>,
+    AbstractExpr<NoStruct>,
+    PipeExpr<NoStruct>,
 }
 
-AssignExpr: ExprKind = {
-    <le:Es<PipeExpr>> <ls:@L> "=" <rs:@R> <re:Expr> => Assign(boxed(le), span(ls, rs), boxed(re)),
-    <le:Es<PipeExpr>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Expr> => assign_op(op, le, re),
+AssignExpr<NoStruct>: ExprKind = {
+    <le:Es<PipeExpr<NoStruct>>> <ls:@L> "=" <rs:@R> <re:Es<TopExpr<NoStruct>>> => Assign(boxed(le), span(ls, rs), boxed(re)),
+    <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op, le, re),
 }
 
-ReturnExpr: ExprKind = {
-    <l:@L> "return" <r:@R> <e:Expr> =>? error("return keyword is not implemented yet".to_string(), span(l, r)),
+ReturnExpr<NoStruct>: ExprKind = {
+    <l:@L> "return" <r:@R> <e:Es<TopExpr<NoStruct>>> =>? error("return keyword is not implemented yet".to_string(), span(l, r)),
 }
 
-AbstractExpr: ExprKind = {
-    "|" <args:StrArgs> "|" <body:Expr> => Abstract(args, boxed(body)),
-    "||" <body:Expr> => Abstract(vec![], boxed(body)),
+AbstractExpr<NoStruct>: ExprKind = {
+    "|" <args:StrArgs> "|" <body:Es<TopExpr<NoStruct>>> => Abstract(args, boxed(body)),
+    "||" <body:Es<TopExpr<NoStruct>>> => Abstract(vec![], boxed(body)),
 }
 
-PipeExpr: ExprKind = {
-    <l:Es<PipeExpr>> "|>" <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), ext_f(l, a), false),
-    RangeExpr,
+PipeExpr<NoStruct>: ExprKind = {
+    <l:Es<PipeExpr<NoStruct>>> "|>" <e:Es<SuffixExpr<"">>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), ext_f(l, a), false),
+    RangeExpr<NoStruct>,
 }
 
-RangeExpr: ExprKind = {
-    <l:Es<UnaryExpr>> <o:Sp<RangeOp>> <r:Es<UnaryExpr>> => static_apply(o, vec![l, r]),
-    LogicOrExpr,
+RangeExpr<NoStruct>: ExprKind = {
+    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => static_apply(o, vec![l, r]),
+    LogicOrExpr<NoStruct>,
 }
 
-LogicOrExpr: ExprKind = {
-    <l:Es<LogicOrExpr>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr>> => cond_if_else(l, literal_expr(true, o.1), r),
-    LogicAndExpr,
+LogicOrExpr<NoStruct>: ExprKind = {
+    <l:Es<LogicOrExpr<NoStruct>>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr<NoStruct>>> => cond_if_else(l, literal_expr(true, o.1), r),
+    LogicAndExpr<NoStruct>,
 }
 
-LogicAndExpr: ExprKind = {
-    <l:Es<LogicAndExpr>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr>> => cond_if_else(l, r, literal_expr(false, o.1)),
-    CompExpr,
+LogicAndExpr<NoStruct>: ExprKind = {
+    <l:Es<LogicAndExpr<NoStruct>>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr<NoStruct>>> => cond_if_else(l, r, literal_expr(false, o.1)),
+    CompExpr<NoStruct>,
 }
 
-CompExpr = BinOpLeftAssoc<CompOp, AddExpr>;
+CompExpr<NoStruct> = BinOpLeftAssoc<CompOp, AddExpr<NoStruct>>;
 
-AddExpr = BinOpLeftAssoc<AddOp, MulExpr>;
+AddExpr<NoStruct> = BinOpLeftAssoc<AddOp, MulExpr<NoStruct>>;
 
-MulExpr = BinOpLeftAssoc<MulOp, UnaryExpr>;
+MulExpr<NoStruct> = BinOpLeftAssoc<MulOp, UnaryExpr<NoStruct>>;
 
-UnaryExpr = {
-    SuffixExpr,
-    <o:Sp<UnaryOp>> <e:Es<UnaryExpr>> => static_apply(o, vec![e]),
+UnaryExpr<NoStruct> = {
+    SuffixExpr<NoStruct>,
+    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => static_apply(o, vec![e]),
 }
 
-SuffixExpr = {
-    AtomExpr,
-    <e:Es<SuffixExpr>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
-    <e:Es<SuffixExpr>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
-    <e:Es<SuffixExpr>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
-    <e:Es<SuffixExpr>> "(" <a:Sep<Expr, ",">> ")" => Apply(boxed(e), a, false),
+SuffixExpr<NoStruct> = {
+    AtomExpr<NoStruct>,
+    <e:Es<SuffixExpr<NoStruct>>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
+    <e:Es<SuffixExpr<NoStruct>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
+    <e:Es<SuffixExpr<NoStruct>>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
+    <e:Es<SuffixExpr<NoStruct>>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), a, false),
 }
 
-AtomExpr = {
+AtomExpr<NoStruct> = {
     ParExpr,
-    PathExpr,
+    PathOrStructExpr<NoStruct>,
     PropertyPathExpr,
     LiteralExpr,
     FormattedString,
@@ -271,8 +382,10 @@ ParExpr: ExprKind = {
     "(" <e:Expr> ")" => e.kind,
 }
 
-PathExpr: ExprKind = {
+PathOrStructExpr<NoStruct>: ExprKind = {
     <p:Path> => Identifier(ustr(&p)),
+    <p:Sp<Path>> <body:RecordExprImpl> if NoStruct != "NoStruct" => StructLiteral((ustr(&p.0), p.1), body),
+    <p:Sp<Path>> "{" "}" if NoStruct != "NoStruct" => StructLiteral((ustr(&p.0), p.1), vec![]),
 }
 
 PropertyPathExpr: ExprKind = {
@@ -292,20 +405,20 @@ PathIdentifier<E>: String = {
 }
 
 ForExpr: ExprKind = {
-    "for" <id:Sp<UIdentifier>> "in" <seq:Expr> <body:Es<Block>> =>
+    "for" <id:Sp<UIdentifier>> "in" <seq:Es<TopExpr<"NoStruct">>> <body:Es<Block>> =>
         for_loop(id, seq, body),
 }
 
 IfExpr: ExprKind = {
-    "if" <c:Expr> <t:Es<Block>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f),
-    "if" <c:Expr> <t:Es<Block>> "else" <f:Es<Block>> => cond_if_else(c, t, f),
-    "if" <c:Expr> <t:Es<Block>> => cond_if(c, t),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<Block>> => cond_if_else(c, t, f),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> => cond_if(c, t),
 }
 
 MatchExpr: ExprKind = {
-    "match" <e:Expr> "{" <m:Sep<MatchArg, ",">> "}" =>
+    "match" <e:Es<TopExpr<"NoStruct">>> "{" <m:Sep<MatchArg, ",">> "}" =>
         Match(boxed(e), m, None),
-    "match" <e:Expr> "{" <m:(<MatchArg> ",")*> "_" "=>" <d:Expr> ","? "}" =>
+    "match" <e:Es<TopExpr<"NoStruct">>> "{" <m:(<MatchArg> ",")*> "_" "=>" <d:Expr> ","? "}" =>
         Match(boxed(e), m, Some(boxed(d))),
 }
 
@@ -316,15 +429,20 @@ MatchArg: (Pattern, Expr) = {
 Pattern: Pattern = {
     Ps<NullaryVariantPattern>,
     Ps<NAryVariantPattern>,
+    Ps<StructVariantPattern>,
     Ps<LiteralPatternKind>,
 }
 
 NullaryVariantPattern: PatK = {
-    Sp<UIdentifier> => PatK::Variant { tag: <>, vars: vec![] },
+    Sp<UIdentifier> => PatK::empty_tuple_variant(<>),
 }
 
 NAryVariantPattern: PatK = {
-    <tag:Sp<UIdentifier>> "(" <vars:StrArgs> ")" => PatK::Variant { tag, vars },
+    <tag:Sp<UIdentifier>> "(" <vars:StrArgs> ")" => PatK::tuple_variant(tag, vars),
+}
+
+StructVariantPattern: PatK = {
+    <tag:Sp<UIdentifier>> "{" <vars:StrArgs> "}" => PatK::struct_variant(tag, vars),
 }
 
 LiteralPatternKind: PatK = {
@@ -380,12 +498,17 @@ ArrayExpr: ExprKind = {
     "[" <a:Sep<Expr, ",">> "]" => Array(a),
 }
 
+RecordExpr: ExprKind = {
+    <r:RecordExprImpl> => Record(r),
+}
+
 // Note: we need this to make the difference between an empty block
 // and a record, disallowing records with no elements
-RecordExpr: ExprKind = {
-    "{" <f:RecordField> "}" => Record(vec![f]),
-    "{" <f:RecordField> "," <r:Sep<RecordField, ",">> "}" => Record(ext_f(f, r)),
+RecordExprImpl: Vec<(UstrSpan, Expr)> = {
+    "{" <f:RecordField> "}" => vec![f],
+    "{" <f:RecordField> "," <r:Sep<RecordField, ",">> "}" => ext_f(f, r),
 }
+
 
 RecordField: (UstrSpan, Expr) = {
     <n:Sp<UIdentifier>> ":" <e:Expr> => (n, e),

@@ -135,7 +135,7 @@ pub fn string_type() -> Type {
 }
 
 pub fn add_to_module(to: &mut Module) {
-    to.types.set("string", string_type());
+    to.type_aliases.set("string", string_type());
 
     to.functions.insert(
         ustr("to_string"),

@@ -7,17 +7,10 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    effects::{effect, effects, no_effects, PrimitiveEffect},
-    error::{CompilationError, RuntimeError},
-    eval::EvalResult,
-    function::{
-        FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN,
-    },
-    module::{Module, Modules},
-    r#type::{FnType, Type},
-    std::{math::int_type, new_std_modules, option::option_type},
-    value::Value,
-    ModuleAndExpr,
+    containers::IntoSVec2, effects::{effect, effects, no_effects, PrimitiveEffect}, error::{CompilationError, RuntimeError}, eval::EvalResult, function::{
+        BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
+        UnaryNativeFnVN,
+    }, module::{Module, Modules}, std::{math::int_type, new_std_modules, option::option_type}, r#type::{variant_type, FnType, Type}, value::Value, ModuleAndExpr
 };
 use std::{rc::Rc, sync::atomic::AtomicIsize};
 use ustr::ustr;
@@ -35,11 +28,24 @@ fn testing_module() -> Module {
     module.functions.insert(
         "some_int".into(),
         UnaryNativeFnNV::description_with_ty(
-            |v: isize| Value::variant(ustr("Some"), Value::native(v)),
+            |v: isize| Value::tuple_variant(ustr("Some"), [Value::native(v)]),
             ["option"],
             None,
             int_type(),
             option_type(int_type()),
+            no_effects(),
+        ),
+    );
+    let pair_variant_type = variant_type([("Pair", Type::tuple([int_type(), int_type()]))]);
+    module.functions.insert(
+        "pair".into(),
+        BinaryNativeFnNNV::description_with_ty(
+            |a: isize, b: isize| Value::tuple_variant(ustr("Pair"), [Value::native(a), Value::native(b)]),
+            ["first", "second"],
+            None,
+            int_type(),
+            int_type(),
+            pair_variant_type,
             no_effects(),
         ),
     );
@@ -228,10 +234,19 @@ pub fn string(s: &str) -> Value {
     use std::str::FromStr;
     Value::native(ferlium::std::string::String::from_str(s).unwrap())
 }
+/// A variant value of given tag and no values
+pub fn variant_0(tag: &str) -> Value {
+    Value::unit_variant(ustr(tag))
+}
 
-/// A variant value of given tag and value
-pub fn variant(tag: &str, value: Value) -> Value {
-    Value::variant(ustr(tag), value)
+/// A variant value of given tag and exactly 1 value
+pub fn variant_t1(tag: &str, value: Value) -> Value {
+    Value::tuple_variant(ustr(tag), [value])
+}
+
+/// A variant value of given tag and N values
+pub fn variant_tn(tag: &str, values: impl IntoSVec2<Value>) -> Value {
+    Value::tuple_variant(ustr(tag), values)
 }
 
 // macros to construct values easily to make tests more readable

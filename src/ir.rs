@@ -9,6 +9,7 @@
 use crate::{
     function::Callable,
     r#trait::TraitRef,
+    r#type::TypeKind,
     type_like::{CastableToType, TypeLike},
     Location,
 };
@@ -342,9 +343,13 @@ impl Node {
                 writeln!(f, "{indent_str}at {index}", index = projection.1)?;
             }
             Record(nodes) => {
+                let inner_ty = if let TypeKind::Named(named) = &*self.ty.data() {
+                    named.def.shape
+                } else {
+                    self.ty
+                };
                 writeln!(f, "{indent_str}build record {{")?;
-                let fields: Vec<_> = self
-                    .ty
+                let fields: Vec<_> = inner_ty
                     .data()
                     .as_record()
                     .unwrap()

@@ -1,5 +1,5 @@
 use crate::{
-    containers::{b, SVec2},
+    containers::{b, IntoSVec2},
     function::FunctionRef,
     ir::{self, Node},
     r#type::FnType,
@@ -50,6 +50,10 @@ pub fn variant(tag: &str, payload: Node) -> NodeKind {
     K::Variant(b((ustr(tag), payload)))
 }
 
-pub fn array(values: impl Into<SVec2<Node>>) -> NodeKind {
-    K::Array(b(values.into()))
+pub fn tuple(values: impl IntoSVec2<Node>) -> NodeKind {
+    K::Tuple(b(values.into_svec2()))
+}
+
+pub fn array(values: impl IntoSVec2<Node>) -> NodeKind {
+    K::Array(b(values.into_svec2()))
 }

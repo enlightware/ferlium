@@ -17,7 +17,9 @@ use std::{
 
 use crate::{
     compile,
-    error::{CompilationErrorImpl, MutabilityMustBeWhat},
+    error::{
+        CompilationErrorImpl, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
+    },
     eval::{EvalCtx, ValOrMut},
     module::{FmtWithModuleEnv, ModuleFunction, Uses},
     r#type::{tuple_type, FnArgType, Type},
@@ -115,10 +117,20 @@ fn compilation_error_to_data(
             .iter()
             .map(|(msg, span)| ErrorData::from_location(span, msg.clone()))
             .collect(),
-        SymbolNotFound(span) => vec![ErrorData::from_location(
-            span,
-            format!("Variable {} not found", fmt_span(span)),
-        )],
+        NameDefinedMultipleTimes {
+            name,
+            first_occurrence,
+            second_occurrence,
+        } => vec![
+            ErrorData::from_location(
+                first_occurrence,
+                format!("Name {name} defined multiple times"),
+            ),
+            ErrorData::from_location(
+                second_occurrence,
+                format!("Name {name} defined multiple times"),
+            ),
+        ],
         FunctionNotFound(span) => vec![ErrorData::from_location(
             span,
             format!("Function {} not found", fmt_span(span)),
@@ -142,6 +154,12 @@ fn compilation_error_to_data(
                 format!("Expected {expected} arguments, got {got} here"),
             ),
         ],
+        TypeDefinitionNotFound { span } => {
+            vec![ErrorData::from_location(
+                span,
+                format!("Type definition {} not found", fmt_span(span)),
+            )]
+        }
         MutabilityMustBe {
             source_span,
             reason_span,
@@ -172,6 +190,23 @@ fn compilation_error_to_data(
         } => vec![ErrorData::from_location(
             current_span,
             format!("Type {current_ty} is incompatible with type {expected_ty}"),
+        )],
+        NamedTypeMismatch {
+            current_decl,
+            current_decl_location,
+            current_span,
+            expected_decl,
+            expected_decl_location,
+            ..
+        } => vec![ErrorData::from_location(
+            current_span,
+            format!(
+                "Named type \"{}\" from {} is different from named type \"{}\" from {}",
+                current_decl,
+                fmt_span(current_decl_location),
+                expected_decl,
+                fmt_span(expected_decl_location),
+            ),
         )],
         InfiniteType(ty_var, ty, span) => vec![ErrorData::from_location(
             span,
@@ -205,7 +240,7 @@ fn compilation_error_to_data(
                 format!("Expected tuple because of .{index_name}, got {expr_ty}"),
             )]
         }
-        DuplicatedRecordField {
+        DuplicatedField {
             first_occurrence,
             second_occurrence,
             ..
@@ -238,7 +273,11 @@ fn compilation_error_to_data(
                 format!("Expected record because of .{field_name}, got {record_ty}"),
             )]
         }
-        InvalidVariantName { name, ty, valids } => {
+        InvalidVariantName {
+            name,
+            ty,
+            valid: valids,
+        } => {
             let name_text = fmt_span(name);
             vec![ErrorData::from_location(
                 name,
@@ -258,6 +297,50 @@ fn compilation_error_to_data(
             vec![ErrorData::from_location(
                 span,
                 "Variant constructor cannot be a path".to_string(),
+            )]
+        }
+        IsNotCorrectProductType {
+            which,
+            type_def,
+            what,
+            instantiation_span,
+        } => {
+            use WhichProductTypeIsNot::*;
+            let which = match which {
+                Unit => "arguments, but none are provided here",
+                Record => "a record, but none is provided here",
+                Tuple => "a tuple, but none is provided here",
+            };
+            let what = match what {
+                WhatIsNotAProductType::EnumVariant(tag) => {
+                    format!("Variant \"{tag}\" of {type_def}")
+                }
+                WhatIsNotAProductType::Struct => format!("{type_def}"),
+            };
+            vec![ErrorData::from_location(
+                instantiation_span,
+                format!("{what} requires {which}"),
+            )]
+        }
+        InvalidStructField {
+            type_def,
+            field_span,
+            ..
+        } => {
+            let field_name = fmt_span(field_span);
+            vec![ErrorData::from_location(
+                field_span,
+                format!("Field \"{}\" does not exists in {}", field_name, type_def),
+            )]
+        }
+        MissingStructField {
+            type_def,
+            field_name,
+            instantiation_span,
+        } => {
+            vec![ErrorData::from_location(
+                instantiation_span,
+                format!("Field \"{}\" from {} is missing here", field_name, type_def),
             )]
         }
         InconsistentADT {

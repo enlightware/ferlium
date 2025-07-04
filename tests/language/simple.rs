@@ -8,7 +8,7 @@
 //
 use test_log::test;
 
-use crate::common::variant;
+use crate::common::{variant_0, variant_t1, variant_tn};
 
 use super::common::{
     bool, compile_and_get_fn_def, fail_compilation, fail_run, float, get_property_value, int, run,
@@ -418,10 +418,18 @@ fn match_expr() {
         run("match testing::some_int(0) { Some(x) => 1, None => 0 }"),
         int(1)
     );
+    assert_eq!(
+        run("match testing::some_int(1) { Some(x) => x, None => 0 }"),
+        int(1)
+    );
+    assert_eq!(
+        run("match testing::pair(1, 2) { Pair(a, b) => a + b }"),
+        int(3)
+    );
     fail_compilation("match testing::some_int(0) { None => 0 }")
         .expect_type_mismatch("None | Some (int)", "None");
     fail_compilation("match testing::some_int(0) { Some(x) => 0 }")
-        .expect_type_mismatch("None | Some (int)", "Some (B)");
+        .expect_type_mismatch("None | Some (int)", "Some (C)");
     // TODO: add more complex literals (tuples, array) once optimisation is in place
 }
 
@@ -728,7 +736,7 @@ fn records() {
     );
     assert_eq!(
         run("let f = |x, y| (x.a, x.a.b, y == x.a); f({a: {a: 3, b: 1}}, {a: 4, b: 1})"),
-        Value::tuple(vec![int_tuple!(3, 1), int(1), bool(false)])
+        Value::tuple([int_tuple!(3, 1), int(1), bool(false)])
     );
     assert_eq!(
         run("fn l(v) { ((|v| v.x)(v), (|v| v.y)(v)) } l({x:1, y:2})"),
@@ -755,10 +763,23 @@ fn records() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variants() {
-    // simple example
-    assert_eq!(run("MyVariant"), variant("MyVariant", Value::unit()));
-    assert_eq!(run("MyVariant2(1.1)"), variant("MyVariant2", float(1.1)));
-    // TODO: add more variant constructor tests
+    // tuple constructors
+    assert_eq!(run("MyVariant"), variant_0("MyVariant"));
+    assert_eq!(run("MyVariant2(1.0)"), variant_t1("MyVariant2", float(1.0)));
+    assert_eq!(run("MyVariant2(1.0, 2.0)"), variant_tn("MyVariant2", [float(1.0), float(2.0)]));
+    // Note: the following doesn't work due to a bug in recursive application of type defaulting substitution
+    // (see https://github.com/enlightware/ferlium/issues/59)
+    //assert_eq!(run("MyVariant2(\"hi\", 1)"), variant_tn("MyVariant2", [string("hi"), int(1)]));
+    assert_eq!(run("MyVariant2(\"hi\", 1.0)"), variant_tn("MyVariant2", [string("hi"), float(1.0)]));
+
+    // record constructors
+    assert_eq!(run("MyVariant2 { a: 1.0 }"), variant_t1("MyVariant2", float(1.0)));
+    assert_eq!(run("MyVariant2 { b: 2.0, a: 1.0 }"), variant_tn("MyVariant2", [float(1.0), float(2.0)]));
+    // Note: the following doesn't work due to a bug in recursive application of type defaulting substitution
+    // (see https://github.com/enlightware/ferlium/issues/59)
+    //assert_eq!(run("MyVariant2(\"hi\", 1)"), variant_tn("MyVariant2", [string("hi"), int(1)]));
+    assert_eq!(run("MyVariant2 { name: \"hi\", value: 1.0 }"), variant_tn("MyVariant2", [string("hi"), float(1.0)]));
+
     // option example
     let match_exhaustive = r#"fn s(x) { match x { None => "no", Some(x) => f"hi {x}" } }"#;
     assert_eq!(
@@ -797,6 +818,7 @@ fn variants() {
         run(&format!("{match_open} fn f() {{ s(None) }} f()")),
         string("no")
     );
+
     // area example
     let match_exhaustive = r#"fn a(x) { match x { Square(r) => r * r, Rect(w, h) => w * h } }"#;
     assert_eq!(run(&format!("{match_exhaustive} a(Square(3))")), int(9));
@@ -829,6 +851,52 @@ fn variants() {
         )),
         int(0)
     );
+
+    // match with record
+    let match_exhaustive_rec = r#"fn s(x) {
+        match x {
+            A { a } => a,
+            B { a, b } => a + b
+        }
+    }"#;
+    assert_eq!(run(&format!("{match_exhaustive_rec} s(A {{ a: 1.0 }})")), float(1.0));
+    assert_eq!(run(&format!("{match_exhaustive_rec} s(B {{ a: 2.0, b: 3.0 }})")), float(5.0));
+    let match_open_rec = r#"fn s(x) {
+        match x {
+            A { a } => a,
+            B { a, b } => a + b,
+            _ => 0.0
+        }
+    }"#;
+    assert_eq!(run(&format!("{match_open_rec} s(A {{ a: 1.0 }})")), float(1.0));
+    assert_eq!(run(&format!("{match_open_rec} s(B {{ a: 2.0, b: 3.0 }})")), float(5.0));
+    assert_eq!(run(&format!("{match_open_rec} s(C {{ z: \"hi\" }})")), float(0.0));
+
+    // match mixed
+    let match_exhaustive_mixed = r#"fn s(x) {
+        match x {
+            Quit => 0.0,
+            Jump(h) => h,
+            Move { y, x } => x - y,
+        }
+    }"#;
+    assert_eq!(run(&format!("{match_exhaustive_mixed} s(Quit)")), float(0.0));
+    assert_eq!(run(&format!("{match_exhaustive_mixed} s(Jump(2.0))")), float(2.0));
+    assert_eq!(run(&format!("{match_exhaustive_mixed} s(Move {{ x: 3.0, y: 1.0 }} )")), float(2.0));
+    let match_open_mixed = r#"fn s(x) {
+        match x {
+            Quit => 0.0,
+            Jump(h) => h,
+            Move { y, x } => x - y,
+            _ => -1.0
+        }
+    }"#;
+    assert_eq!(run(&format!("{match_open_mixed} s(Quit)")), float(0.0));
+    assert_eq!(run(&format!("{match_open_mixed} s(Jump(2.0))")), float(2.0));
+    assert_eq!(run(&format!("{match_open_mixed} s(Move {{ x: 3.0, y: 1.0 }} )")), float(2.0));
+    assert_eq!(run(&format!("{match_open_mixed} s(Bla)")), float(-1.0));
+    assert_eq!(run(&format!("{match_open_mixed} s(Oh(1.0, true))")), float(-1.0));
+    assert_eq!(run(&format!("{match_open_mixed} s(Teleport {{ z: -4.0 }})")), float(-1.0));
 }
 
 #[test]
@@ -1054,6 +1122,12 @@ fn modules() {
         run("fn d(x) { 2 * x } fn s(x) { x + 1 } d(s(s(1)))"),
         int(6)
     );
+    fail_compilation("fn a() {} fn a() {}").expect_name_defined_multiple_times("a");
+    fail_compilation("struct a; fn a() {}").expect_name_defined_multiple_times("a");
+    fail_compilation("struct a(int, bool) fn a() {}").expect_name_defined_multiple_times("a");
+    fail_compilation("struct a { x: int } fn a() {}").expect_name_defined_multiple_times("a");
+    fail_compilation("enum a {} fn a() {}").expect_name_defined_multiple_times("a");
+    fail_compilation("enum a { True, False } fn a() {}").expect_name_defined_multiple_times("a");
 }
 
 #[test]

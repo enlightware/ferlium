@@ -19,6 +19,7 @@ use math::{Float, Int};
 use ustr::ustr;
 
 pub mod array;
+pub mod core;
 pub mod flow;
 pub mod io;
 pub mod iterator;
@@ -35,7 +36,7 @@ pub mod variant;
 
 pub fn std_module() -> Module {
     let mut module = Module::default();
-    module.types.set("()", Type::unit());
+    core::add_to_module(&mut module);
     flow::add_to_module(&mut module);
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);
@@ -141,20 +142,14 @@ mod tests {
         );
         assert_eq!(
             def_val(tuple_type([int_type(), bool_type()])),
-            Some(Value::tuple(vec![
-                Value::native(0_isize),
-                Value::native(false)
-            ]))
+            Some(Value::tuple([Value::native(0_isize), Value::native(false)]))
         );
         assert_eq!(
-            def_val(Type::record(vec![
+            def_val(Type::record([
                 (ustr("a"), int_type()),
                 (ustr("b"), bool_type())
             ])),
-            Some(Value::tuple(vec![
-                Value::native(0_isize),
-                Value::native(false)
-            ]))
+            Some(Value::tuple([Value::native(0_isize), Value::native(false)]))
         );
     }
 }

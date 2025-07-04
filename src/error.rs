@@ -13,12 +13,12 @@ use std::{
 };
 
 use crate::{
-    location::Location, r#trait::TraitRef, type_inference::SubOrSameType,
+    location::Location, r#trait::TraitRef, r#type::TypeDefRef, type_inference::SubOrSameType,
     type_scheme::PubTypeConstraint,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
-use ustr::Ustr;
+use ustr::{ustr, Ustr};
 
 use crate::{
     ast::{PatternType, PropertyAccess},
@@ -60,10 +60,60 @@ pub enum MutabilityMustBeContext {
     FnTypeArg(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicatedFieldContext {
+    Record,
+    Struct,
+}
+impl DuplicatedFieldContext {
+    pub fn as_str(&self) -> &'static str {
+        use DuplicatedFieldContext::*;
+        match self {
+            Record => "record",
+            Struct => "struct",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhichProductTypeIsNot {
+    Unit,
+    Record,
+    Tuple,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InternalWhatIsNotAProductType {
+    EnumVariant(Ustr),
+    Struct,
+}
+impl InternalWhatIsNotAProductType {
+    pub fn from_tag(tag: Option<Ustr>) -> Self {
+        tag.map_or(Self::Struct, |tag| Self::EnumVariant(tag))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhatIsNotAProductType {
+    EnumVariant(Ustr),
+    Struct,
+}
+impl WhatIsNotAProductType {
+    pub fn from_internal(what: InternalWhatIsNotAProductType) -> Self {
+        match what {
+            InternalWhatIsNotAProductType::EnumVariant(tag) => Self::EnumVariant(tag),
+            InternalWhatIsNotAProductType::Struct => Self::Struct,
+        }
+    }
+}
+
 /// Compilation error, for internal use
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InternalCompilationErrorImpl {
-    SymbolNotFound(Location),
+    NameDefinedMultipleTimes {
+        first_occurrence: Location,
+        second_occurrence: Location,
+    },
     FunctionNotFound(Location),
     TraitNotFound(Location),
     WrongNumberOfArguments {
@@ -71,6 +121,9 @@ pub enum InternalCompilationErrorImpl {
         expected_span: Location,
         got: usize,
         got_span: Location,
+    },
+    TypeDefinitionNotFound {
+        span: Location,
     },
     MutabilityMustBe {
         source_span: Location,
@@ -84,6 +137,12 @@ pub enum InternalCompilationErrorImpl {
         expected_ty: Type,
         expected_span: Location,
         sub_or_same: SubOrSameType,
+    },
+    NamedTypeMismatch {
+        current_decl: TypeDefRef,
+        current_span: Location,
+        expected_decl: TypeDefRef,
+        expected_span: Location,
     },
     InfiniteType(TypeVar, Type, Location),
     UnboundTypeVar {
@@ -106,10 +165,11 @@ pub enum InternalCompilationErrorImpl {
         tuple_span: Location,
         index_span: Location,
     },
-    DuplicatedRecordField {
+    DuplicatedField {
         first_occurrence: Location,
         second_occurrence: Location,
-        record_span: Location,
+        constructor_span: Location,
+        ctx: DuplicatedFieldContext,
     },
     InvalidRecordField {
         field_span: Location,
@@ -132,6 +192,22 @@ pub enum InternalCompilationErrorImpl {
     InvalidVariantConstructor {
         span: Location,
         // Only one error type for now: a path was used as a variant constructor
+    },
+    IsNotCorrectProductType {
+        which: WhichProductTypeIsNot,
+        type_def: TypeDefRef,
+        what: InternalWhatIsNotAProductType,
+        instantiation_span: Location,
+    },
+    InvalidStructField {
+        type_def: TypeDefRef,
+        field_span: Location,
+        instantiation_span: Location,
+    },
+    MissingStructField {
+        type_def: TypeDefRef,
+        field_name: Ustr,
+        instantiation_span: Location,
     },
     InconsistentADT {
         a_type: ADTAccessType,
@@ -283,7 +359,11 @@ impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &
 #[derive(Debug, EnumAsInner)]
 pub enum CompilationErrorImpl {
     ParsingFailed(Vec<LocatedError>),
-    SymbolNotFound(Location),
+    NameDefinedMultipleTimes {
+        name: Ustr,
+        first_occurrence: Location,
+        second_occurrence: Location,
+    },
     FunctionNotFound(Location),
     TraitNotFound(Location),
     WrongNumberOfArguments {
@@ -291,6 +371,9 @@ pub enum CompilationErrorImpl {
         expected_span: Location,
         got: usize,
         got_span: Location,
+    },
+    TypeDefinitionNotFound {
+        span: Location,
     },
     MutabilityMustBe {
         source_span: Location,
@@ -303,6 +386,14 @@ pub enum CompilationErrorImpl {
         expected_ty: String,
         expected_span: Location,
         sub_or_same: SubOrSameType,
+    },
+    NamedTypeMismatch {
+        current_decl: String,
+        current_decl_location: Location,
+        current_span: Location,
+        expected_decl: String,
+        expected_span: Location,
+        expected_decl_location: Location,
     },
     InfiniteType(String, String, Location),
     UnboundTypeVar {
@@ -325,10 +416,11 @@ pub enum CompilationErrorImpl {
         expr_span: Location,
         index_span: Location,
     },
-    DuplicatedRecordField {
+    DuplicatedField {
         first_occurrence: Location,
         second_occurrence: Location,
-        record_span: Location,
+        constructor_span: Location,
+        ctx: DuplicatedFieldContext,
     },
     InvalidRecordField {
         field_span: Location,
@@ -343,7 +435,7 @@ pub enum CompilationErrorImpl {
     InvalidVariantName {
         name: Location,
         ty: String,
-        valids: Vec<String>,
+        valid: Vec<String>,
     },
     InvalidVariantType {
         name: Location,
@@ -351,6 +443,23 @@ pub enum CompilationErrorImpl {
     },
     InvalidVariantConstructor {
         span: Location,
+    },
+    IsNotCorrectProductType {
+        which: WhichProductTypeIsNot,
+        type_def: String,
+        what: WhatIsNotAProductType,
+        instantiation_span: Location,
+    },
+    InvalidStructField {
+        type_def: String,
+        field_name: Ustr,
+        field_span: Location,
+        instantiation_span: Location,
+    },
+    MissingStructField {
+        type_def: String,
+        field_name: Ustr,
+        instantiation_span: Location,
     },
     InconsistentADT {
         a_type: ADTAccessType,
@@ -439,6 +548,29 @@ pub enum CompilationErrorImpl {
     Internal(String),
 }
 
+fn span_to_string(loc: &Location, source: &str) -> String {
+    match loc.module() {
+        Some(module) => format!(
+            "{}..{} in module {}",
+            module.span().start(),
+            module.span().end(),
+            module.module_name()
+        ),
+        None => {
+            if loc.start() < loc.end() {
+                source[loc.start()..loc.end()].to_string()
+            } else {
+                let end = source.len().min(loc.end() + 20);
+                let more = if end < source.len() { "…" } else { "" };
+                format!(
+                    "location where \"{}{more}\" starts",
+                    &source[loc.start()..end]
+                )
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CompilationError(Box<CompilationErrorImpl>);
 
@@ -463,26 +595,7 @@ impl Deref for CompilationError {
 impl fmt::Display for FormatWith<'_, CompilationError, &str> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let source = self.data;
-        let fmt_span = |loc: &Location| match loc.module() {
-            Some(module) => format!(
-                "{}..{} in module {}",
-                module.span().start(),
-                module.span().end(),
-                module.module_name()
-            ),
-            None => {
-                if loc.start() < loc.end() {
-                    source[loc.start()..loc.end()].to_string()
-                } else {
-                    let end = source.len().min(loc.end() + 20);
-                    let more = if end < source.len() { "…" } else { "" };
-                    format!(
-                        "location where \"{}{more}\" starts",
-                        &source[loc.start()..end]
-                    )
-                }
-            }
-        };
+        let fmt_span = |loc: &Location| span_to_string(loc, source);
         use CompilationErrorImpl::*;
         match self.value.deref() {
             ParsingFailed(errors) => {
@@ -492,8 +605,14 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                 }
                 Ok(())
             }
-            SymbolNotFound(span) => {
-                write!(f, "Variable or function not found: {}", fmt_span(span))
+            NameDefinedMultipleTimes {
+                name,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Name {name} defined multiple times"
+                )
             }
             FunctionNotFound(span) => {
                 write!(f, "Function not found: {}", fmt_span(span))
@@ -514,6 +633,13 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                     fmt_span(expected_span),
                     got,
                     fmt_span(got_span)
+                )
+            }
+            TypeDefinitionNotFound { span } => {
+                write!(
+                    f,
+                    "Type definition not found: {}",
+                    fmt_span(span)
                 )
             }
             MutabilityMustBe {
@@ -551,6 +677,23 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                 },
                 expected_ty,
                 fmt_span(expected_span),
+            ),
+            NamedTypeMismatch {
+                current_decl,
+                current_decl_location,
+                current_span,
+                expected_decl,
+                expected_span,
+                expected_decl_location,
+            } => write!(
+                f,
+                "Named type \"{}\" in {} (from {}) is different than named type \"{}\" in {} (from {})",
+                current_decl,
+                fmt_span(current_span),
+                fmt_span(current_decl_location),
+                expected_decl,
+                fmt_span(expected_span),
+                fmt_span(expected_decl_location),
             ),
             InfiniteType(ty_var, ty, span) => {
                 write!(
@@ -602,16 +745,18 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                     fmt_span(expr_span)
                 )
             }
-            DuplicatedRecordField {
+            DuplicatedField {
                 first_occurrence,
-                record_span: record,
+                constructor_span,
+                ctx,
                 ..
             } => {
                 write!(
                     f,
-                    "Duplicated record field {} in record {}",
+                    "Duplicated field {} in {} {}",
                     fmt_span(first_occurrence),
-                    fmt_span(record)
+                    ctx.as_str(),
+                    fmt_span(constructor_span)
                 )
             }
             InvalidRecordField {
@@ -640,7 +785,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                     fmt_span(record_span)
                 )
             }
-            InvalidVariantName { name, ty, valids } => {
+            InvalidVariantName { name, ty, valid: valids } => {
                 write!(
                     f,
                     "Variant name {} does not exist for variant type {}, valid names are {}",
@@ -662,6 +807,59 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                     f,
                     "Variant constructor cannot be paths, but {} is",
                     fmt_span(span)
+                )
+            }
+            IsNotCorrectProductType {
+                which,
+                type_def,
+                what,
+                instantiation_span,
+            } => {
+                use WhichProductTypeIsNot::*;
+                let which = match which {
+                    Unit => "arguments, but none are provided in",
+                    Record => "a record, but none is provided in",
+                    Tuple => "a tuple, but none is provided in",
+                };
+                let what = match what {
+                    WhatIsNotAProductType::EnumVariant(tag) => {
+                        format!("Variant \"{tag}\" of {type_def}")
+                    }
+                    WhatIsNotAProductType::Struct => format!("{type_def}"),
+                };
+                write!(
+                    f,
+                    "{} requires {} {}",
+                    what,
+                    which,
+                    fmt_span(instantiation_span)
+                )
+            }
+            InvalidStructField {
+                type_def,
+                instantiation_span,
+                field_name,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Field \"{}\" does not exists in {}, but is present in {}",
+                    field_name,
+                    type_def,
+                    fmt_span(instantiation_span)
+                )
+            }
+            MissingStructField {
+                type_def,
+                field_name,
+                instantiation_span,
+            } => {
+                write!(
+                    f,
+                    "Field \"{}\" from {} is missing in {}",
+                    field_name,
+                    type_def,
+                    fmt_span(instantiation_span)
                 )
             }
             InconsistentADT {
@@ -877,7 +1075,14 @@ impl CompilationError {
     ) -> Self {
         use InternalCompilationErrorImpl::*;
         match error.into_inner() {
-            SymbolNotFound(span) => compilation_error!(SymbolNotFound(span)),
+            NameDefinedMultipleTimes {
+                first_occurrence,
+                second_occurrence,
+            } => compilation_error!(NameDefinedMultipleTimes {
+                name: ustr(&span_to_string(&first_occurrence, source)),
+                first_occurrence,
+                second_occurrence,
+            }),
             FunctionNotFound(span) => compilation_error!(FunctionNotFound(span)),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             WrongNumberOfArguments {
@@ -891,6 +1096,9 @@ impl CompilationError {
                 got,
                 got_span,
             }),
+            TypeDefinitionNotFound { span } => {
+                compilation_error!(TypeDefinitionNotFound { span })
+            }
             MutabilityMustBe {
                 source_span,
                 reason_span,
@@ -917,6 +1125,19 @@ impl CompilationError {
                 expected_ty: expected_ty.format_with(env).to_string(),
                 expected_span,
                 sub_or_same,
+            }),
+            NamedTypeMismatch {
+                current_decl,
+                current_span,
+                expected_decl,
+                expected_span,
+            } => compilation_error!(NamedTypeMismatch {
+                current_decl: current_decl.name.to_string(),
+                current_decl_location: current_decl.span,
+                current_span,
+                expected_decl: expected_decl.name.to_string(),
+                expected_decl_location: expected_decl.span,
+                expected_span,
             }),
             InfiniteType(ty_var, ty, span) => {
                 compilation_error!(InfiniteType(
@@ -959,14 +1180,16 @@ impl CompilationError {
                 expr_span,
                 index_span,
             }),
-            DuplicatedRecordField {
+            DuplicatedField {
                 first_occurrence,
                 second_occurrence,
-                record_span,
-            } => compilation_error!(DuplicatedRecordField {
+                constructor_span,
+                ctx,
+            } => compilation_error!(DuplicatedField {
                 first_occurrence,
                 second_occurrence,
-                record_span,
+                constructor_span,
+                ctx,
             }),
             InvalidRecordField {
                 field_span,
@@ -989,7 +1212,7 @@ impl CompilationError {
             InvalidVariantName { name, ty } => compilation_error!(InvalidVariantName {
                 name,
                 ty: ty.format_with(env).to_string(),
-                valids: ty
+                valid: ty
                     .data()
                     .as_variant()
                     .unwrap()
@@ -1004,6 +1227,36 @@ impl CompilationError {
             InvalidVariantConstructor { span } => {
                 compilation_error!(InvalidVariantConstructor { span })
             }
+            IsNotCorrectProductType {
+                which,
+                type_def,
+                what,
+                instantiation_span,
+            } => compilation_error!(IsNotCorrectProductType {
+                which,
+                type_def: Type::named(type_def, []).format_with(env).to_string(),
+                what: WhatIsNotAProductType::from_internal(what),
+                instantiation_span,
+            }),
+            InvalidStructField {
+                type_def,
+                field_span,
+                instantiation_span,
+            } => compilation_error!(InvalidStructField {
+                type_def: Type::named(type_def, []).format_with(env).to_string(),
+                field_span,
+                field_name: ustr(&span_to_string(&field_span, source)),
+                instantiation_span,
+            }),
+            MissingStructField {
+                type_def,
+                field_name,
+                instantiation_span,
+            } => compilation_error!(MissingStructField {
+                type_def: Type::named(type_def, []).format_with(env).to_string(),
+                field_name,
+                instantiation_span,
+            }),
             InconsistentADT {
                 a_type,
                 a_span,
@@ -1146,6 +1399,22 @@ impl CompilationError {
         }
     }
 
+    pub fn expect_name_defined_multiple_times(&self, name: &str) {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            NameDefinedMultipleTimes { name: n, .. } => {
+                if *n == name {
+                    return;
+                }
+                panic!(
+                    "expect_name_defined_multiple_times failed: expected \"{}\", got \"{}\"",
+                    name, n
+                );
+            }
+            _ => panic!("expect_name_defined_multiple_times called on non-NameDefinedMultipleTimes error {self:?}"),
+        }
+    }
+
     pub fn expect_wrong_number_of_arguments(&self, expected: usize, got: usize) {
         use CompilationErrorImpl::*;
         match self.deref() {
@@ -1213,7 +1482,7 @@ impl CompilationError {
     pub fn expect_duplicate_record_field(&self, src: &str, exp_name: &str) {
         use CompilationErrorImpl::*;
         match self.deref() {
-            DuplicatedRecordField {
+            DuplicatedField {
                 first_occurrence: first_occurrence_span,
                 ..
             } => {

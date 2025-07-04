@@ -33,11 +33,11 @@ pub fn add_to_module(to: &mut Module) {
             "next",
             Def::new_infer_quantifiers(
                 FnType::new_mut_resolved(
-                    &[(Type::variable_id(0), true)],
+                    [(Type::variable_id(0), true)],
                     option_type(Type::variable_id(1)),
                     EffType::empty(),
                 ),
-                &["iterator"],
+                ["iterator"],
                 "Get the next element of the iterator, or None if the iterator is exhausted.",
             ),
         )],
@@ -59,11 +59,11 @@ pub fn add_to_module(to: &mut Module) {
             "iter",
             Def::new_infer_quantifiers(
                 FnType::new_by_val(
-                    &[Type::variable_id(0)],
+                    [Type::variable_id(0)],
                     Type::variable_id(2),
                     EffType::empty(),
                 ),
-                &["seq"],
+                ["seq"],
                 "Get an iterator over the elements of this sequence.",
             ),
         )],
@@ -98,8 +98,8 @@ pub fn add_to_module(to: &mut Module) {
         [(
             "len",
             Def::new_infer_quantifiers(
-                FnType::new_by_val(&[Type::variable_id(0)], int_type(), EffType::empty()),
-                &["seq"],
+                FnType::new_by_val([Type::variable_id(0)], int_type(), EffType::empty()),
+                ["seq"],
                 "Return the number of elements in this sequence.",
             ),
         )],

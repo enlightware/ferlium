@@ -8,12 +8,11 @@
 //
 use std::{
     collections::HashSet,
-    fmt,
-    fmt::Debug,
+    fmt::{self, Debug},
     hash::{Hash, Hasher},
     num::NonZero,
     ops::Deref,
-    rc::Rc,
+    sync::Arc,
 };
 
 use dyn_clone::DynClone;
@@ -35,7 +34,7 @@ use crate::{
 };
 
 /// Help deriving implementations of traits.
-pub trait Deriver: Debug + DynClone {
+pub trait Deriver: Debug + DynClone + Sync + Send {
     /// Derive an implementation of a trait for the given input types, if possible.
     fn derive_impl(
         &self,
@@ -186,7 +185,7 @@ impl FmtWithModuleEnv for Trait {
 }
 
 #[derive(Debug, Clone)]
-pub struct TraitRef(pub(crate) Rc<Trait>);
+pub struct TraitRef(pub(crate) Arc<Trait>);
 
 impl TraitRef {
     pub fn new<'a>(
@@ -209,7 +208,7 @@ impl TraitRef {
             derives: Vec::new(),
         };
         trait_data.validate();
-        Self(Rc::new(trait_data))
+        Self(Arc::new(trait_data))
     }
 
     pub fn new_with_constraints<'a>(
@@ -233,7 +232,7 @@ impl TraitRef {
             derives: Vec::new(),
         };
         trait_data.validate();
-        Self(Rc::new(trait_data))
+        Self(Arc::new(trait_data))
     }
 
     pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], fn_count: usize) {
@@ -268,7 +267,7 @@ impl Deref for TraitRef {
 
 impl PartialEq for TraitRef {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -276,7 +275,7 @@ impl Eq for TraitRef {}
 
 impl Hash for TraitRef {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        std::ptr::hash(Rc::as_ptr(&self.0), state)
+        std::ptr::hash(Arc::as_ptr(&self.0), state)
     }
 }
 

@@ -21,7 +21,7 @@ use std::{
 use ustr::Ustr;
 
 use crate::{
-    containers::{b, SVec2, B},
+    containers::{b, IntoSVec2, SVec2, B},
     format::{write_with_separator, write_with_separator_and_format_fn},
     function::{Function, FunctionPtr, FunctionRef},
     module::ModuleEnv,
@@ -124,7 +124,11 @@ impl Value {
         Self::Native(b(value))
     }
 
-    pub fn variant(tag: Ustr, value: Value) -> Self {
+    pub fn tuple_variant(tag: Ustr, values: impl IntoSVec2<Value>) -> Self {
+        Self::raw_variant(tag, Self::tuple(values))
+    }
+
+    pub fn raw_variant(tag: Ustr, value: Value) -> Self {
         Self::Variant(b(VariantValue { tag, value }))
     }
 
@@ -135,8 +139,12 @@ impl Value {
         }))
     }
 
-    pub fn tuple(values: impl Into<SVec2<Value>>) -> Self {
-        Self::Tuple(b(values.into()))
+    pub fn tuple(values: impl IntoSVec2<Value>) -> Self {
+        Self::Tuple(b(values.into_svec2()))
+    }
+
+    pub fn empty_tuple() -> Self {
+        Self::Tuple(b(SVec2::new()))
     }
 
     pub fn function(function: Function) -> Self {
@@ -342,9 +350,7 @@ impl LiteralValue {
         use LiteralValue::*;
         match self {
             Native(value) => Value::Native(value.into_native_value()),
-            Tuple(args) => {
-                Value::tuple(args.into_iter().map(Self::into_value).collect::<SVec2<_>>())
-            }
+            Tuple(args) => Value::tuple(args.into_iter().map(Self::into_value).collect::<Vec<_>>()),
         }
     }
 }

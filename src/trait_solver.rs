@@ -24,7 +24,7 @@ use crate::{
     module::{FmtWithModuleEnv, ModuleEnv},
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar},
-    std::new_module_using_std,
+    std::{core::REPR_TRAIT, new_module_using_std},
     type_inference::{InstSubstitution, UnifiedTypeInference},
     type_like::TypeLike,
     type_scheme::{format_constraints_consolidated, PubTypeConstraint},
@@ -185,6 +185,24 @@ impl TraitImpls {
             input_tys.iter().all(Type::is_constant),
             "Getting trait implementation for non-constant input types"
         );
+
+        // Special case for `Repr` trait.
+        if trait_ref == &*REPR_TRAIT {
+            let input_ty = input_tys[0];
+            let ty_data = input_ty.data();
+            let output_ty = if let Some(named) = ty_data.as_named() {
+                if !named.params.is_empty() {
+                    todo!("Repr trait for named types with arguments is not supported yet");
+                }
+                named.def.shape
+            } else {
+                input_ty
+            };
+            return Ok(Rc::new(ConcreteTraitImpl {
+                output_tys: vec![output_ty],
+                functions: Value::empty_tuple(),
+            }));
+        }
 
         // If a concrete implementation is found, return it.
         let key = (trait_ref.clone(), input_tys.to_vec());

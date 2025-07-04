@@ -31,7 +31,7 @@ impl NativeDisplay for bool {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.types.set("bool", bool_type());
+    to.type_aliases.set("bool", bool_type());
 
     // Operations on booleans
     to.functions.insert(

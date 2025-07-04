@@ -84,7 +84,7 @@ impl RangeIterator {
 
     fn next_value_descr() -> ModuleFunction {
         let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            &[(range_iterator_type(), true)],
+            [(range_iterator_type(), true)],
             option_type(int_type()),
             no_effects(),
         ));
@@ -129,8 +129,8 @@ pub fn range_iterator_type() -> Type {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.types.set("range", range_type());
-    to.types.set("range_iterator", range_iterator_type());
+    to.type_aliases.set("range", range_type());
+    to.type_aliases.set("range_iterator", range_iterator_type());
 
     // Functions
     to.functions.insert(

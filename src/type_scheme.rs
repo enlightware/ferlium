@@ -13,8 +13,9 @@ use std::{
 };
 
 use crate::{
-    error::InternalCompilationError, format::write_with_separator_and_format_fn, location::Span,
-    r#trait::TraitRef, trait_solver::TraitImpls, type_inference::UnifiedTypeInference,
+    dictionary_passing::ExtraParameters, error::InternalCompilationError,
+    format::write_with_separator_and_format_fn, location::Span, r#trait::TraitRef,
+    std::core::REPR_TRAIT, trait_solver::TraitImpls, type_inference::UnifiedTypeInference,
     type_like::TypeLike, type_mapper::TypeMapper, type_visitor::TypeInnerVisitor, Location,
 };
 use enum_as_inner::EnumAsInner;
@@ -622,7 +623,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             ty_inf.add_pub_constraint(constraint);
         }
         let ty = self.ty.instantiate(&subst);
-        let dict_req = instantiate_dictionaries_req(&self.extra_parameters(), &subst);
+        let dict_req = instantiate_dictionaries_req(&self.extra_parameters().requirements, &subst);
         (ty, FnInstData::new(dict_req), subst)
     }
 
@@ -677,7 +678,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Extra functions parameters that must be passed to resolve polymorphism.
-    pub(crate) fn extra_parameters(&self) -> Vec<DictionaryReq> {
+    pub(crate) fn extra_parameters(&self) -> ExtraParameters {
         extra_parameters_from_constraints(&self.constraints)
     }
 
@@ -895,9 +896,46 @@ pub(crate) fn normalize_types(tys: &mut [TypeVar]) -> TypeSubstitution {
 /// Extra functions parameters that must be passed to resolve polymorphism for a list of constraints.
 pub(crate) fn extra_parameters_from_constraints(
     constraints: &[PubTypeConstraint],
-) -> Vec<DictionaryReq> {
+) -> ExtraParameters {
     use PubTypeConstraint::*;
-    constraints
+
+    // Build a map from input type variables to their next representation type.
+    let mut repr_map_shallow = HashMap::new();
+    for constraint in constraints {
+        if let HaveTrait {
+            trait_ref,
+            input_tys,
+            output_tys,
+            ..
+        } = constraint
+        {
+            if trait_ref == &*REPR_TRAIT {
+                let input_ty = input_tys.first().unwrap();
+                let output_ty = output_tys.first().unwrap();
+                let in_var = input_ty.data().as_variable().copied();
+                let out_var = output_ty.data().as_variable().copied();
+                if let Some(in_var) = in_var {
+                    if let Some(out_var) = out_var {
+                        let prev = repr_map_shallow.insert(in_var, out_var);
+                        assert!(prev.is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    // Resolve for each input type variable their deepest representation type.
+    let mut repr_map = HashMap::new();
+    for (in_var, out_var) in repr_map_shallow.iter() {
+        let mut next = *out_var;
+        while let Some(next_out_var) = repr_map_shallow.get(&next) {
+            next = *next_out_var;
+        }
+        repr_map.insert(*in_var, next);
+    }
+
+    // Process other constraints needing dictionaries.
+    let requirements = constraints
         .iter()
         .filter_map(|constraint| match constraint {
             RecordFieldIs {
@@ -912,11 +950,20 @@ pub(crate) fn extra_parameters_from_constraints(
                 if input_tys.iter().all(Type::is_constant) {
                     panic!("Type scheme with trait having only non-variable input types in constraints")
                 }
-                Some(DictionaryReq::new_trait_impl(trait_ref.clone(), input_tys.clone()))
+                if trait_ref == &*REPR_TRAIT {
+                    None // Repr is a special marker trait with an empty function dictionary.
+                } else {
+                    Some(DictionaryReq::new_trait_impl(trait_ref.clone(), input_tys.clone()))
+                }
             }
             _ => None,
         })
-        .collect()
+        .collect();
+
+    ExtraParameters {
+        requirements,
+        repr_map,
+    }
 }
 
 pub(crate) fn format_constraints(
@@ -978,7 +1025,12 @@ pub(crate) fn format_constraints_consolidated(
                     .entry(record_ty)
                     .or_insert_with(|| AggregatedConstraint::Record(VariantConstraint::new()))
                     .as_record_mut()
-                    .unwrap()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Expected record constraint for {}",
+                            record_ty.format_with(env)
+                        )
+                    })
                     .insert(*field, *element_ty);
             }
             TypeHasVariant {

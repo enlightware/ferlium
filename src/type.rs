@@ -15,10 +15,14 @@ use std::collections::HashSet;
 use std::fmt::Display;
 use std::fmt::{self, Debug};
 use std::hash::Hash;
+use std::hash::Hasher;
 use std::iter;
+use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
@@ -84,6 +88,13 @@ impl TypeVar {
     }
     pub fn format_math_style(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", type_variable_index_to_string_greek(self.name))
+    }
+    pub fn instantiate(&self, subst: &TypeSubstitution) -> Type {
+        if let Some(ty) = subst.get(self) {
+            *ty
+        } else {
+            Type::variable(*self)
+        }
     }
 }
 
@@ -269,22 +280,26 @@ impl FnType {
         Self { args, ret, effects }
     }
 
-    pub fn new_mut_resolved(args: &[(Type, bool)], ret: Type, effects: EffType) -> Self {
+    pub fn new_mut_resolved(
+        args: impl IntoIterator<Item = (Type, bool)>,
+        ret: Type,
+        effects: EffType,
+    ) -> Self {
         Self {
             args: args
-                .iter()
-                .map(|(ty, mutable)| FnArgType::new(*ty, MutType::from(*mutable)))
+                .into_iter()
+                .map(|(ty, mutable)| FnArgType::new(ty, MutType::from(mutable)))
                 .collect(),
             ret,
             effects,
         }
     }
 
-    pub fn new_by_val(args: &[Type], ret: Type, effects: EffType) -> Self {
+    pub fn new_by_val(args: impl IntoIterator<Item = Type>, ret: Type, effects: EffType) -> Self {
         Self {
             args: args
-                .iter()
-                .map(|&ty| FnArgType {
+                .into_iter()
+                .map(|ty| FnArgType {
                     ty,
                     mut_ty: MutType::constant(),
                 })
@@ -294,7 +309,7 @@ impl FnType {
         }
     }
 
-    pub fn as_locals_no_bound(&self, arg_names: &[(Ustr, Location)]) -> Vec<Local> {
+    pub fn as_locals_no_bound(&self, arg_names: &[UstrSpan]) -> Vec<Local> {
         arg_names
             .iter()
             .zip(self.args.iter())
@@ -388,12 +403,16 @@ impl Type {
     }
 
     pub fn primitive<T: Clone + 'static>() -> Self {
-        Self::native::<T>(vec![])
+        Self::native::<T>([])
     }
 
-    pub fn native<T: Clone + 'static>(arguments: Vec<Type>) -> Self {
+    pub fn native<T: Clone + 'static>(arguments: impl Into<Vec<Type>>) -> Self {
         let bare_ty = bare_native_type::<T>();
-        TypeKind::Native(b(NativeType { arguments, bare_ty })).store()
+        TypeKind::Native(b(NativeType {
+            arguments: arguments.into(),
+            bare_ty,
+        }))
+        .store()
     }
 
     pub fn native_type(native_type: NativeType) -> Self {
@@ -408,49 +427,56 @@ impl Type {
         TypeKind::Variable(var).store()
     }
 
-    pub fn variant(types: Vec<(Ustr, Self)>) -> Self {
-        TypeKind::Variant(types).store()
+    pub fn variant(types: impl Into<Vec<(Ustr, Self)>>) -> Self {
+        TypeKind::Variant(types.into()).store()
     }
 
-    pub fn tuple(elements: Vec<Self>) -> Self {
-        TypeKind::Tuple(elements).store()
+    pub fn tuple(elements: impl Into<Vec<Self>>) -> Self {
+        TypeKind::Tuple(elements.into()).store()
     }
 
-    pub fn record(fields: Vec<(Ustr, Self)>) -> Self {
-        TypeKind::Record(fields).store()
+    pub fn record(fields: impl Into<Vec<(Ustr, Self)>>) -> Self {
+        TypeKind::Record(fields.into()).store()
     }
 
     pub fn function_type(ty: FnType) -> Self {
         TypeKind::Function(b(ty)).store()
     }
 
-    pub fn function_by_val_with_effects(args: &[Self], ret: Self, effects: EffType) -> Self {
+    pub fn function_by_val_with_effects(
+        args: impl IntoIterator<Item = Self>,
+        ret: Self,
+        effects: EffType,
+    ) -> Self {
         Self::function_type(FnType::new_by_val(args, ret, effects))
     }
 
-    pub fn function_by_val(args: &[Self], ret: Self) -> Self {
+    pub fn function_by_val(args: impl IntoIterator<Item = Self>, ret: Self) -> Self {
         Self::function_by_val_with_effects(args, ret, EffType::empty())
     }
 
     pub fn nullary_function_by_val(ret: Self) -> Self {
-        Self::function_by_val(&[], ret)
+        Self::function_by_val([], ret)
     }
 
     pub fn unary_function_by_val(arg: Self, ret: Self) -> Self {
-        Self::function_by_val(&[arg], ret)
+        Self::function_by_val([arg], ret)
     }
 
     pub fn binary_function_by_val(arg1: Self, arg2: Self, ret: Self) -> Self {
-        Self::function_by_val(&[arg1, arg2], ret)
+        Self::function_by_val([arg1, arg2], ret)
     }
 
-    pub fn new_type(name: Ustr, ty: Self) -> Self {
-        TypeKind::Newtype(name, ty).store()
+    pub fn named(decl: TypeDefRef, arg_tys: impl Into<Vec<Self>>) -> Self {
+        TypeKind::Named(NamedType {
+            def: decl,
+            params: arg_tys.into(),
+        })
+        .store()
     }
 
     pub fn never() -> Self {
-        static TY: OnceLock<Type> = OnceLock::new();
-        *TY.get_or_init(|| TypeKind::Never.store())
+        cached_ty!(|| TypeKind::Never.store())
     }
 
     pub fn new_local(index: u32) -> Self {
@@ -559,7 +585,7 @@ impl CastableToType for Type {
 impl FmtWithModuleEnv for Type {
     fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         // If we have a name for this type, use it
-        if let Some(name) = env.type_name(*self) {
+        if let Some(name) = env.type_alias(*self) {
             return write!(f, "{name}");
         }
 
@@ -587,7 +613,7 @@ impl PartialOrd for Type {
 
 pub type TypeSubstitution = HashMap<TypeVar, Type>;
 
-/// Named types
+/// Aliased types
 #[derive(Debug, Clone, Default)]
 pub struct TypeAliases {
     name_to_type: HashMap<Ustr, Type>,
@@ -639,6 +665,84 @@ impl TypeAliases {
     }
 }
 
+/// Named type declaration
+#[derive(Debug, Clone)]
+pub struct TypeDef {
+    /// The name of the type
+    pub name: Ustr,
+    /// The names of the generic parameters of this type, if any
+    pub param_names: Vec<Ustr>,
+    /// The inner type data, possibly with generic arguments
+    pub shape: Type,
+    /// The location of the type declaration in the source code
+    pub span: Location,
+    /// The attributes of the type
+    pub attributes: HashMap<Ustr, Ustr>,
+}
+
+impl TypeDef {
+    pub fn is_enum(&self) -> bool {
+        self.shape.data().is_variant()
+    }
+
+    pub fn is_record_struct(&self) -> bool {
+        self.shape.data().is_record()
+    }
+
+    pub fn is_tuple_struct(&self) -> bool {
+        self.shape.data().is_tuple()
+    }
+
+    pub fn is_unit_struct(&self) -> bool {
+        self.shape == Type::unit()
+    }
+
+    pub fn is_struct_like(&self) -> bool {
+        self.is_record_struct() || self.is_tuple_struct() || self.is_unit_struct()
+    }
+}
+
+/// A handle to a type declaration.
+#[derive(Debug, Clone)]
+pub struct TypeDefRef(Arc<TypeDef>);
+impl TypeDefRef {
+    pub fn new(def: TypeDef) -> Self {
+        Self(Arc::new(def))
+    }
+}
+
+impl Deref for TypeDefRef {
+    type Target = TypeDef;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PartialEq for TypeDefRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TypeDefRef {}
+
+impl Hash for TypeDefRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(Arc::as_ptr(&self.0), state)
+    }
+}
+
+/// A named type, possibly with type arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedType {
+    /// The type declaration reference
+    pub def: TypeDefRef,
+    /// The type arguments for this named type to replace its generic variables
+    pub params: Vec<Type>,
+    // TODO: add constraints for the type arguments
+}
+
 /// The representation of a type in the system
 #[derive(Debug, Clone, PartialEq, Eq, Hash, EnumAsInner)]
 pub enum TypeKind {
@@ -655,8 +759,8 @@ pub enum TypeKind {
     Record(Vec<(Ustr, Type)>),
     /// A function type
     Function(B<FnType>),
-    /// A named newtype
-    Newtype(Ustr, Type),
+    /// A named newtype, with its instantiated type-arguments
+    Named(NamedType),
     /// Bottom type
     Never,
 }
@@ -717,17 +821,33 @@ impl TypeKind {
             Variable(var) => Type::variable(*var),
             Native(native_ty) => Type::native_type(NativeType::new(
                 native_ty.bare_ty.clone(),
-                native_ty.arguments.iter().map(|ty| ty.map(f)).collect(),
+                native_ty
+                    .arguments
+                    .iter()
+                    .map(|ty| ty.map(f))
+                    .collect::<Vec<_>>(),
             )),
-            Variant(types) => {
-                Type::variant(types.iter().map(|(name, ty)| (*name, ty.map(f))).collect())
-            }
-            Tuple(tuple) => Type::tuple(tuple.iter().map(|ty| ty.map(f)).collect()),
-            Record(fields) => {
-                Type::record(fields.iter().map(|(name, ty)| (*name, ty.map(f))).collect())
-            }
+            Variant(types) => Type::variant(
+                types
+                    .iter()
+                    .map(|(name, ty)| (*name, ty.map(f)))
+                    .collect::<Vec<_>>(),
+            ),
+            Tuple(tuple) => Type::tuple(tuple.iter().map(|ty| ty.map(f)).collect::<Vec<_>>()),
+            Record(fields) => Type::record(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (*name, ty.map(f)))
+                    .collect::<Vec<_>>(),
+            ),
             Function(fn_type) => Type::function_type(fn_type.map(f)),
-            Newtype(name, ty) => Type::new_type(*name, ty.map(f)),
+            Named(NamedType {
+                def: decl,
+                params: args,
+            }) => Type::named(
+                decl.clone(),
+                args.iter().map(|ty| ty.map(f)).collect::<Vec<_>>(),
+            ),
             Never => Type::never(),
         }
     }
@@ -754,7 +874,13 @@ impl TypeKind {
             Tuple(types) => types.iter().for_each(|ty| process_ty(*ty, visitor)),
             Record(fields) => fields.iter().for_each(|(_, ty)| process_ty(*ty, visitor)),
             Function(fn_type) => fn_type.visit(visitor),
-            Newtype(_, ty) => process_ty(*ty, visitor),
+            Named(NamedType {
+                def: decl,
+                params: args,
+            }) => {
+                process_ty(decl.shape, visitor);
+                args.iter().for_each(|ty| process_ty(*ty, visitor));
+            }
         };
 
         // process self
@@ -774,7 +900,10 @@ impl TypeKind {
                 .iter()
                 .map(|arg| arg.ty)
                 .chain(iter::once(function.ret))),
-            Newtype(_, ty) => b(iter::once(*ty)),
+            Named(NamedType {
+                def: decl,
+                params: args,
+            }) => b(iter::once(decl.shape).chain(args.iter().copied())),
             Never => b(iter::empty()),
         }
     }
@@ -792,7 +921,7 @@ impl TypeKind {
                 .iter_mut()
                 .map(|arg| &mut arg.ty)
                 .chain(iter::once(&mut function.ret))),
-            Newtype(_, ty) => b(iter::once(ty)),
+            Named(named) => b(named.params.iter_mut()),
             Never => b(iter::empty()),
         }
     }
@@ -839,7 +968,7 @@ impl TypeKind {
             Tuple(_) => 4,
             Record(_) => 5,
             Function(_) => 6,
-            Newtype(_, _) => 7,
+            Named(_) => 7,
             Never => 8,
         }
     }
@@ -944,12 +1073,17 @@ impl FmtWithModuleEnv for TypeKind {
                         write!(f, "{name}")?;
                     } else {
                         write!(f, "{name} ")?;
-                        if ty.data().is_tuple() {
-                            ty.fmt_with_module_env(f, env)?;
+                        let ty_data = ty.data();
+                        if let Tuple(tuple_ty) = &*ty_data {
+                            if tuple_ty.len() == 1 {
+                                write!(f, "(")?;
+                                tuple_ty[0].fmt_with_module_env(f, env)?;
+                                write!(f, ")")?;
+                            } else {
+                                ty.fmt_with_module_env(f, env)?;
+                            }
                         } else {
-                            write!(f, "(")?;
                             ty.fmt_with_module_env(f, env)?;
-                            write!(f, ")")?;
                         }
                     }
                 }
@@ -980,10 +1114,46 @@ impl FmtWithModuleEnv for TypeKind {
                 write!(f, " }}")
             }
             Function(function) => function.fmt_with_module_env(f, env),
-            Newtype(name, ty) => {
-                write!(f, "{name}(")?;
-                ty.fmt_with_module_env(f, env)?;
-                write!(f, ")")
+            Named(NamedType { def, params: args }) => {
+                if def.is_struct_like() {
+                    write!(f, "struct")?;
+                } else {
+                    write!(f, "enum")?;
+                }
+                write!(f, " {}", def.name)?;
+                if !args.is_empty() {
+                    write!(f, "<")?;
+                    for (i, ty) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        ty.fmt_with_module_env(f, env)?;
+                    }
+                    write!(f, ">")?;
+                }
+                write!(f, " ")?;
+                if def.is_enum() {
+                    write!(f, "{{ ")?;
+                    if def.shape != Type::never() {
+                        for (i, (name, ty)) in
+                            def.shape.data().as_variant().unwrap().iter().enumerate()
+                        {
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
+                            if *ty == Type::unit() {
+                                write!(f, "{name}")?;
+                            } else {
+                                write!(f, "{name} ")?;
+                                ty.fmt_with_module_env(f, env)?;
+                            }
+                        }
+                    }
+                    write!(f, " }}")?;
+                } else {
+                    def.shape.fmt_with_module_env(f, env)?;
+                }
+                Ok(())
             }
             Never => write!(f, "never"),
         }
@@ -1191,14 +1361,20 @@ pub fn tuple_type(types: impl Into<Vec<Type>>) -> Type {
 }
 
 /// An ergonomic constructor for a variant type when constructing it from a list of strings and types
-pub fn variant_type(types: &[(&str, Type)]) -> Type {
-    let types = types.iter().map(|(name, ty)| (ustr(name), *ty)).collect();
+pub fn variant_type<'s>(types: impl IntoIterator<Item = (&'s str, Type)>) -> Type {
+    let types: Vec<_> = types
+        .into_iter()
+        .map(|(name, ty)| (ustr(name), ty))
+        .collect();
     Type::variant(types)
 }
 
 /// An ergonomic constructor for a record type when constructing it from a list of strings and types
-pub fn record_type(fields: &[(&str, Type)]) -> Type {
-    let fields = fields.iter().map(|(name, ty)| (ustr(name), *ty)).collect();
+pub fn record_type<'s>(fields: impl IntoIterator<Item = (&'s str, Type)>) -> Type {
+    let fields: Vec<_> = fields
+        .into_iter()
+        .map(|(name, ty)| (ustr(name), ty))
+        .collect();
     Type::record(fields)
 }
 

@@ -17,7 +17,9 @@ use crate::{
     function::FunctionDefinition,
     ir::Node,
     r#trait::TraitRef,
+    r#type::TypeDefRef,
     trait_solver::{TraitImpls, Traits},
+    type_like::TypeLike,
     typing_env::TraitFunctionDescription,
     Location,
 };
@@ -64,6 +66,8 @@ impl ModuleFunction {
 
 pub type FunctionsMap = HashMap<Ustr, ModuleFunction>;
 
+pub type TypeDefMap = HashMap<Ustr, TypeDefRef>;
+
 #[derive(Debug, Clone)]
 pub struct UseSome {
     module: Ustr,
@@ -87,7 +91,8 @@ pub struct Module {
     pub traits: Traits,
     pub impls: TraitImpls,
     pub functions: FunctionsMap,
-    pub types: TypeAliases,
+    pub type_aliases: TypeAliases,
+    pub type_defs: TypeDefMap,
     pub uses: Uses,
     pub source: Option<String>,
 }
@@ -99,7 +104,8 @@ impl Module {
         self.impls.concrete.extend(other.impls.concrete);
         self.impls.blanket.extend(other.impls.blanket);
         self.functions.extend(other.functions);
-        self.types.extend(other.types);
+        self.type_aliases.extend(other.type_aliases);
+        self.type_defs.extend(other.type_defs);
         self.uses.extend(other.uses);
     }
 
@@ -108,7 +114,8 @@ impl Module {
         self.traits.is_empty()
             && self.impls.is_empty()
             && self.functions.is_empty()
-            && self.types.is_empty()
+            && self.type_aliases.is_empty()
+            && self.type_defs.is_empty()
             && self.uses.is_empty()
     }
 
@@ -209,10 +216,26 @@ impl Module {
                 }
             }
         }
-        if !self.types.is_empty() {
+        if !self.type_aliases.is_empty() {
             writeln!(f, "Types:")?;
-            for (name, ty) in self.types.iter() {
+            for (name, ty) in self.type_aliases.iter() {
                 writeln!(f, "  {}: {}", name, ty.format_with(&env))?;
+            }
+            writeln!(f, "\n")?;
+        }
+        if !self.type_defs.is_empty() {
+            writeln!(f, "New types:")?;
+            for (_, decl) in self.type_defs.iter() {
+                // Rebuild the list of type arguments for the type declaration
+                let args = decl
+                    .shape
+                    .inner_ty_vars_iter()
+                    .sorted()
+                    .map(Type::variable)
+                    .collect::<Vec<_>>();
+                // Build a type to show
+                let ty = Type::named(decl.clone(), args);
+                writeln!(f, "  {}", ty.format_with(&env))?;
             }
             writeln!(f, "\n")?;
         }
@@ -247,6 +270,24 @@ impl fmt::Display for FormatWith<'_, Module, Modules> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum TypeDefLookupResult {
+    Enum(TypeDefRef, Ustr, Type),
+    Struct(TypeDefRef),
+}
+impl TypeDefLookupResult {
+    pub fn lookup_payload(&self) -> (TypeDefRef, Type, Option<Ustr>) {
+        use TypeDefLookupResult::*;
+        match self {
+            Enum(type_def, tag, variant_ty) => (type_def.clone(), *variant_ty, Some(*tag)),
+            Struct(type_def) => {
+                let payload_ty = type_def.shape;
+                (type_def.clone(), payload_ty, None)
+            }
+        }
+    }
+}
+
 pub type Modules = HashMap<Ustr, Rc<Module>>;
 
 #[derive(Clone, Copy)]
@@ -260,11 +301,11 @@ impl<'m> ModuleEnv<'m> {
         Self { current, others }
     }
 
-    pub fn type_name(&self, ty: Type) -> Option<String> {
-        self.current.types.get_name(ty).map_or_else(
+    pub fn type_alias(&self, ty: Type) -> Option<String> {
+        self.current.type_aliases.get_name(ty).map_or_else(
             || {
                 self.others.iter().find_map(|(mod_name, module)| {
-                    module.types.get_name(ty).map(|ty_name| {
+                    module.type_aliases.get_name(ty).map(|ty_name| {
                         if self.current.uses(*mod_name, ty_name) {
                             ty_name.to_string()
                         } else {
@@ -278,20 +319,63 @@ impl<'m> ModuleEnv<'m> {
     }
 
     pub fn bare_native_name(&self, native: &B<dyn BareNativeType>) -> Option<String> {
-        self.current.types.get_bare_native_name(native).map_or_else(
-            || {
-                self.others.iter().find_map(|(mod_name, module)| {
-                    module.types.get_bare_native_name(native).map(|ty_name| {
-                        if self.current.uses(*mod_name, ty_name) {
-                            ty_name.to_string()
-                        } else {
-                            format!("{mod_name}::{ty_name}")
-                        }
+        self.current
+            .type_aliases
+            .get_bare_native_name(native)
+            .map_or_else(
+                || {
+                    self.others.iter().find_map(|(mod_name, module)| {
+                        module
+                            .type_aliases
+                            .get_bare_native_name(native)
+                            .map(|ty_name| {
+                                if self.current.uses(*mod_name, ty_name) {
+                                    ty_name.to_string()
+                                } else {
+                                    format!("{mod_name}::{ty_name}")
+                                }
+                            })
                     })
-                })
-            },
-            |name| Some(name.to_string()),
-        )
+                },
+                |name| Some(name.to_string()),
+            )
+    }
+
+    pub fn type_def(&self, path: &str) -> Option<TypeDefLookupResult> {
+        let path = path.split("::").collect::<Vec<_>>();
+        // First search for a matching enum
+        let len = path.len();
+        if len >= 2 {
+            let enum_name = path[len - 2];
+            let variant_name = path[len - 1];
+            if let Some((_, ty_def)) = self.get_module_member(enum_name, &|name, module| {
+                module.type_defs.get(&ustr(name)).cloned()
+            }) {
+                if ty_def.is_enum() {
+                    let ty_data = ty_def.shape.data();
+                    let variants = ty_data.as_variant().unwrap();
+                    let variant = variants
+                        .iter()
+                        .find(|(name, _)| name.as_str() == variant_name);
+                    if let Some((tag, ty)) = variant {
+                        return Some(TypeDefLookupResult::Enum(ty_def.clone(), *tag, *ty));
+                    }
+                }
+            }
+        }
+        // Not found, search for a matching struct
+        if len >= 1 {
+            let name = path[len - 1];
+            if let Some((_, ty_def)) = self.get_module_member(name, &|name, module| {
+                module.type_defs.get(&ustr(name)).cloned()
+            }) {
+                if ty_def.is_struct_like() {
+                    return Some(TypeDefLookupResult::Struct(ty_def.clone()));
+                }
+            }
+        }
+
+        None
     }
 
     pub fn function_name(&self, func: &FunctionRc) -> Option<String> {

@@ -22,24 +22,29 @@ use ustr::ustr;
 
 pub fn script_variant_type() -> Type {
     cached_ty!(|| {
+        let bool_tuple1 = Type::tuple([bool_type()]);
+        let int_tuple1 = Type::tuple([int_type()]);
+        let float_tuple1 = Type::tuple([float_type()]);
+        let string_tuple1 = Type::tuple([string_type()]);
         let bare_array_ty = bare_native_type::<Array>();
-        let seq = TypeKind::Native(b(NativeType {
+        let seq_array = TypeKind::Native(b(NativeType {
             bare_ty: bare_array_ty,
-            arguments: vec![Type::new_local(1)],
+            arguments: vec![Type::new_local(2)],
         }));
+        let seq_tuple1 = TypeKind::Tuple(vec![Type::new_local(0)]);
         let variant = TypeKind::Variant(vec![
             (ustr("None"), Type::unit()),
-            (ustr("Bool"), bool_type()),
-            (ustr("Int"), int_type()),
-            (ustr("Float"), float_type()),
-            (ustr("String"), string_type()),
-            (ustr("Seq"), Type::new_local(0)),
+            (ustr("Bool"), bool_tuple1),
+            (ustr("Int"), int_tuple1),
+            (ustr("Float"), float_tuple1),
+            (ustr("String"), string_tuple1),
+            (ustr("Seq"), Type::new_local(1)),
         ]);
-        store_types(&[seq, variant])[1]
+        store_types(&[seq_array, seq_tuple1, variant])[2]
     })
 }
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.types.set("Variant", script_variant_type());
+    to.type_aliases.set("Variant", script_variant_type());
 }

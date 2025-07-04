@@ -16,13 +16,17 @@ use std::{
 };
 
 use crate::{
-    ast::DExpr,
+    ast::{DExpr, Desugared, RecordField, RecordFields},
     containers::continuous_hashmap_to_vec,
-    error::MutabilityMustBeWhat,
+    error::{
+        DuplicatedFieldContext, InternalWhatIsNotAProductType, MutabilityMustBeWhat,
+        WhichProductTypeIsNot,
+    },
     internal_compilation_error,
     location::Location,
     parser_helpers::EMPTY_USTR,
     r#trait::TraitRef,
+    std::core::REPR_TRAIT,
     trait_solver::TraitImpls,
     type_like::TypeLike,
     type_mapper::TypeMapper,
@@ -357,6 +361,29 @@ impl TypeInference {
                         no_effects(),
                     )
                 }
+                // Retrieve the struct constructor, if it exists
+                else if let Some(type_def) = env.module_env.type_def(path) {
+                    // Retrieve the payload type and the tag, if it is an enum.
+                    let (type_def, payload_ty, tag) = type_def.lookup_payload();
+                    if payload_ty != Type::unit() {
+                        return Err(internal_compilation_error!(IsNotCorrectProductType {
+                            which: WhichProductTypeIsNot::Unit,
+                            type_def: type_def.clone(),
+                            what: InternalWhatIsNotAProductType::from_tag(tag),
+                            instantiation_span: expr.span,
+                        }));
+                    }
+                    // The type of the node is the named type.
+                    let ty = Type::named(type_def.clone(), []);
+                    // But the value of the node is the underlying data.
+                    let value = if let Some(tag) = tag {
+                        Value::unit_variant(tag)
+                    } else {
+                        Value::unit()
+                    };
+                    let node = K::Immediate(Immediate::new(value));
+                    (node, ty, MutType::constant(), EffType::empty())
+                }
                 // Otherwise, the name is neither a known variable or function, assume it to be a variant constructor
                 else {
                     // Variants cannot be paths
@@ -374,7 +401,7 @@ impl TypeInference {
                         ),
                     ));
                     // Build the variant value.
-                    let node = K::Immediate(Immediate::new(Value::variant(*path, Value::unit())));
+                    let node = K::Immediate(Immediate::new(Value::unit_variant(*path)));
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
@@ -513,71 +540,205 @@ impl TypeInference {
                 (node, ty, MutType::constant(), effects)
             }
             Project(tuple_expr, (index, index_span)) => {
+                // Generates the following constraints:
+                // Project(tuple_expr: T, index) -> V
+                //     where T: Coercible<Target = U>, TupleHasField(U, V, index)
                 let (tuple_node, tuple_mut) = self.infer_expr(env, tuple_expr)?;
-                let element_ty = self.fresh_type_var_ty();
-                self.ty_constraints.push(TypeConstraint::Pub(
-                    PubTypeConstraint::new_tuple_at_index_is(
-                        tuple_node.ty,
-                        tuple_expr.span,
-                        *index,
-                        *index_span,
-                        element_ty,
-                    ),
+                // Note: tuple_node.ty is T
+                let tuple_ty = self.fresh_type_var_ty(); // U
+                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                    REPR_TRAIT.clone(),
+                    vec![tuple_node.ty],
+                    vec![tuple_ty],
+                    *index_span,
+                ));
+                let element_ty = self.fresh_type_var_ty(); // V
+                self.add_pub_constraint(PubTypeConstraint::new_tuple_at_index_is(
+                    tuple_ty,
+                    tuple_expr.span,
+                    *index,
+                    *index_span,
+                    element_ty,
                 ));
                 let effects = tuple_node.effects.clone();
                 let node = K::Project(b((tuple_node, *index)));
                 (node, element_ty, tuple_mut, effects)
             }
             Record(fields) => {
-                let (exprs, names): (Vec<_>, Vec<_>) =
-                    fields.iter().map(|(name, expr)| (expr, *name)).unzip();
-                // Check that all fields are unique.
-                let mut names_seen = HashMap::new();
-                for (name, span) in names.iter().copied() {
-                    if let Some(prev_span) = names_seen.insert(name, span) {
-                        return Err(internal_compilation_error!(DuplicatedRecordField {
-                            first_occurrence: prev_span,
-                            second_occurrence: span,
-                            record_span: expr.span,
-                        }));
-                    }
-                }
+                // Check that all fields are unique and collect their expressions and names.
+                let fields = Self::check_and_sort_record_fields(
+                    fields,
+                    expr.span,
+                    DuplicatedFieldContext::Record,
+                )?;
                 // Infer the types of the nodes.
-                let (nodes, types, effects) = self.infer_exprs_drop_mut(env, &exprs)?;
-                // Reorder the names, the types and the nodes to have fields sorted by name.
-                let mut names = names.into_iter().map(|(name, _)| name).collect::<Vec<_>>();
-                let mut named_nodes = HashMap::new();
-                for (name, node_and_ty) in
-                    names.iter().zip(nodes.into_iter().zip(types.into_iter()))
-                {
-                    named_nodes.insert(*name, node_and_ty);
-                }
-                names.sort();
-                let (nodes, types): (Vec<_>, Vec<_>) = names
-                    .iter()
-                    .map(|name| named_nodes.remove(name).unwrap())
-                    .unzip();
-                // Build the record node and return it.
-                // Note: we assume that while building the record, if the names are sorted, they won't be shuffled.
-                let ty = Type::record(names.into_iter().zip(types).collect());
-                let node = if let Some(values) = nodes_as_bare_immediate(&nodes) {
-                    K::Immediate(Immediate::new(Value::tuple(values)))
-                } else {
-                    K::Record(b(SVec2::from_vec(nodes)))
-                };
+                let (node, ty, effects) = self.infer_record(env, &fields)?;
                 (node, ty, MutType::constant(), effects)
             }
+            StructLiteral(path, fields) => {
+                // Check that all fields are unique and collect their expressions and names.
+                let fields = Self::check_and_sort_record_fields(
+                    fields,
+                    expr.span,
+                    DuplicatedFieldContext::Struct,
+                )?;
+                // First check if the path is a known type definition.
+                if let Some(type_def) = env.module_env.type_def(&path.0) {
+                    // Then resolve the layout of the struct.
+                    let (type_def, payload_ty, tag) = type_def.lookup_payload();
+                    // Check that it is a record.
+                    if !payload_ty.data().is_record() {
+                        return Err(internal_compilation_error!(IsNotCorrectProductType {
+                            which: WhichProductTypeIsNot::Record,
+                            type_def: type_def.clone(),
+                            what: InternalWhatIsNotAProductType::from_tag(tag),
+                            instantiation_span: expr.span,
+                        }));
+                    }
+                    // Validate the fields towards the record layout.
+                    let layout = payload_ty.data().clone().into_record().unwrap();
+                    let layout_size = layout.len();
+                    let layout_iter = layout.iter();
+                    let fields_size = fields.len();
+                    let field_iter = fields.iter();
+                    for (layout_field, field) in layout_iter.zip(field_iter) {
+                        let layout_field_name = layout_field.0;
+                        let (field_name, field_span) = &field.0;
+                        if &layout_field_name < &*field_name {
+                            // Missing record entry
+                            return Err(internal_compilation_error!(MissingStructField {
+                                type_def,
+                                field_name: layout_field.0,
+                                instantiation_span: expr.span,
+                            }));
+                        } else if &layout_field_name > &*field_name {
+                            // Extra record entry
+                            return Err(internal_compilation_error!(InvalidStructField {
+                                type_def,
+                                field_span: *field_span,
+                                instantiation_span: expr.span,
+                            }));
+                        }
+                    }
+                    if layout_size > fields_size {
+                        // Layout still has entries: Missing record entry
+                        let layout_field = layout[fields_size];
+                        return Err(internal_compilation_error!(MissingStructField {
+                            type_def,
+                            field_name: layout_field.0,
+                            instantiation_span: expr.span,
+                        }));
+                    } else if layout_size < fields_size {
+                        // Record still has entries: Extra record entry
+                        let field = fields[layout_size];
+                        return Err(internal_compilation_error!(InvalidStructField {
+                            type_def,
+                            field_span: field.0 .1,
+                            instantiation_span: expr.span,
+                        }));
+                    }
+                    // Here we know that we have the right fields, validate the types.
+                    let mut effects = EffType::empty();
+                    let nodes: Vec<_> = layout
+                        .iter()
+                        .zip(fields.iter())
+                        .map(|(layout_field, field)| {
+                            assert_eq!(
+                                layout_field.0, field.0 .0,
+                                "Record field names should match the layout",
+                            );
+                            let node = self.check_expr(
+                                env,
+                                &field.1,
+                                layout_field.1,
+                                MutType::constant(),
+                                field.1.span,
+                            )?;
+                            effects = effects.union(&node.effects);
+                            Ok(node)
+                        })
+                        .collect::<Result<_, _>>()?;
+                    // The type of the node is the named type.
+                    let ty = Type::named(type_def.clone(), []);
+                    // But the value of the node is the underlying record.
+                    // If all nodes can be resolved to bare immediates, we can create an immediate value.
+                    let resolved_nodes_value =
+                        nodes_as_bare_immediate(&nodes).map(|values| Value::tuple(values));
+                    let node = if let Some(tag) = tag {
+                        if let Some(value) = resolved_nodes_value {
+                            let value = Value::raw_variant(tag, value);
+                            K::Immediate(Immediate::new(value))
+                        } else {
+                            let node = N::new(
+                                K::Record(b(SVec2::from_vec(nodes))),
+                                payload_ty,
+                                effects.clone(),
+                                expr.span,
+                            );
+                            K::Variant(b((tag, node)))
+                        }
+                    } else {
+                        if let Some(value) = resolved_nodes_value {
+                            K::Immediate(Immediate::new(value))
+                        } else {
+                            K::Record(b(SVec2::from_vec(nodes)))
+                        }
+                    };
+                    (node, ty, MutType::constant(), effects)
+                } else {
+                    // Structural variants cannot be paths
+                    if path.0.contains("::") {
+                        return Err(internal_compilation_error!(InvalidVariantConstructor {
+                            span: path.1,
+                        }));
+                    }
+                    // If it is not a known type def, assume it to be a variant constructor.
+                    let (record_node, record_ty, effects) = self.infer_record(env, &fields)?;
+                    let record_span =
+                        Location::fuse_range(fields.iter().map(|(n, _)| n.1)).unwrap();
+                    let payload_node = N::new(record_node, record_ty, effects.clone(), record_span);
+                    let name = path.0;
+                    // Create a fresh type and add a constraint for that type to include this variant.
+                    let variant_ty = self.fresh_type_var_ty();
+                    self.ty_constraints.push(TypeConstraint::Pub(
+                        PubTypeConstraint::new_type_has_variant(
+                            variant_ty,
+                            expr.span,
+                            name,
+                            record_ty,
+                            payload_node.span,
+                        ),
+                    ));
+                    // Build the variant construction node.
+                    let node = if let Some(values) = nodes_as_bare_immediate(&[&payload_node]) {
+                        let value = values.first().unwrap().clone();
+                        K::Immediate(Immediate::new(Value::raw_variant(name, value)))
+                    } else {
+                        K::Variant(b((name, payload_node)))
+                    };
+                    (node, variant_ty, MutType::constant(), effects)
+                }
+            }
             FieldAccess(record_expr, (field, field_span)) => {
+                // Generates the following constraints:
+                // FieldAccess(record_expr: T, field) -> V
+                //     where T: Coercible<Target = U>, RecordFieldIs(U, V, field)
                 let (record_node, record_mut) = self.infer_expr(env, record_expr)?;
-                let element_ty = self.fresh_type_var_ty();
-                self.ty_constraints.push(TypeConstraint::Pub(
-                    PubTypeConstraint::new_record_field_is(
-                        record_node.ty,
-                        record_expr.span,
-                        *field,
-                        *field_span,
-                        element_ty,
-                    ),
+                // Note: record_node.ty is T
+                let record_ty = self.fresh_type_var_ty(); // U
+                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                    REPR_TRAIT.clone(),
+                    vec![record_node.ty],
+                    vec![record_ty],
+                    *field_span,
+                ));
+                let element_ty = self.fresh_type_var_ty(); // V
+                self.add_pub_constraint(PubTypeConstraint::new_record_field_is(
+                    record_ty,
+                    record_expr.span,
+                    *field,
+                    *field_span,
+                    element_ty,
                 ));
                 let effects = record_node.effects.clone();
                 let node = K::FieldAccess(b((record_node, *field)));
@@ -696,22 +857,23 @@ impl TypeInference {
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
+        let args_span = || {
+            args.iter()
+                .map(|arg| arg.borrow().span)
+                .reduce(|a, b| Location::new_local(a.start(), b.end()))
+                .unwrap_or(path_span)
+        };
         // Get the function and its type from the environment.
         Ok(
             if let Some((module_name, trait_descr)) = env.module_env.get_trait_function(path) {
                 let (trait_ref, function_index, definition) = trait_descr;
                 // Validate the number of arguments
                 if definition.ty_scheme.ty.args.len() != args.len() {
-                    let got_span = args
-                        .iter()
-                        .map(|arg| arg.borrow().span)
-                        .reduce(|a, b| Location::new_local(a.start(), b.end()))
-                        .unwrap_or(path_span);
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: definition.ty_scheme.ty.args.len(),
                         expected_span: path_span,
                         got: args.len(),
-                        got_span,
+                        got_span: args_span(),
                     }));
                 }
                 // Instantiate its type scheme
@@ -762,16 +924,11 @@ impl TypeInference {
                 (node, ret_ty, MutType::constant(), combined_effects)
             } else if let Some((module_name, function)) = env.module_env.get_function(path) {
                 if function.definition.ty_scheme.ty.args.len() != args.len() {
-                    let got_span = args
-                        .iter()
-                        .map(|arg| arg.borrow().span)
-                        .reduce(|a, b| Location::new_local(a.start(), b.end()))
-                        .unwrap_or(path_span);
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: function.definition.ty_scheme.ty.args.len(),
                         expected_span: path_span,
                         got: args.len(),
-                        got_span,
+                        got_span: args_span(),
                     }));
                 }
                 // Instantiate its type scheme
@@ -810,16 +967,81 @@ impl TypeInference {
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
+            } else if let Some(type_def) = env.module_env.type_def(path) {
+                // Retrieve the payload type and the tag, if it is an enum.
+                let (type_def, payload_ty, tag) = type_def.lookup_payload();
+                // Compute the arity from the payload type.
+                let payload_tys = if payload_ty == Type::unit() {
+                    vec![]
+                } else {
+                    match &*payload_ty.data() {
+                        TypeKind::Tuple(tuple) => tuple.clone(),
+                        TypeKind::Record(_) => {
+                            return Err(internal_compilation_error!(IsNotCorrectProductType {
+                                which: WhichProductTypeIsNot::Tuple,
+                                type_def: type_def.clone(),
+                                what: InternalWhatIsNotAProductType::from_tag(tag),
+                                instantiation_span: expr_span,
+                            }));
+                        }
+                        _ => vec![payload_ty],
+                    }
+                };
+                // Validate the number of arguments.
+                let arity = payload_tys.len();
+                let arg_count = args.len();
+                if arity != arg_count {
+                    return Err(internal_compilation_error!(WrongNumberOfArguments {
+                        expected: arity,
+                        expected_span: path_span,
+                        got: arg_count,
+                        got_span: args_span(),
+                    }));
+                }
+                // Here we know that we have the right number of arguments, validate the types.
+                let mut effects = EffType::empty();
+                let nodes: Vec<_> = payload_tys
+                    .iter()
+                    .zip(args.iter())
+                    .map(|(ty, arg)| {
+                        let node = self.check_expr(
+                            env,
+                            arg.borrow(),
+                            *ty,
+                            MutType::constant(),
+                            arg.borrow().span,
+                        )?;
+                        effects = effects.union(&node.effects);
+                        Ok(node)
+                    })
+                    .collect::<Result<_, _>>()?;
+                // The type of the node is the named type.
+                let ty = Type::named(type_def.clone(), []);
+                // But the value of the node is the underlying tuple.
+                // If all nodes can be resolved to bare immediates, we can create an immediate value.
+                let resolved_nodes_value =
+                    nodes_as_bare_immediate(&nodes).map(|values| Value::tuple(values));
+                let inner_kind = if let Some(value) = resolved_nodes_value {
+                    K::Immediate(Immediate::new(value))
+                } else {
+                    K::Tuple(b(SVec2::from_vec(nodes)))
+                };
+                let node = if let Some(tag) = tag {
+                    let node = N::new(inner_kind, payload_ty, effects.clone(), expr_span);
+                    K::Variant(b((tag, node)))
+                } else {
+                    inner_kind
+                };
+                (node, ty, MutType::constant(), effects)
             } else {
-                // Variants cannot be paths
+                // Structural variants cannot be paths
                 if path.contains("::") {
                     return Err(internal_compilation_error!(InvalidVariantConstructor {
                         span: path_span,
                     }));
                 }
-                // If it is not a known function, assume it to be a variant constructor
-                // Create a fresh type and add a constraint for that type to include this variant.
-                let variant_ty = self.fresh_type_var_ty();
+                // If it is not a known function or trait or type def, assume it to be a variant constructor.
+                // Build the payload type and node.
                 let (payload_nodes, payload_types, effects) =
                     self.infer_exprs_drop_mut(env, args)?;
                 let (payload_ty, payload_node) = match payload_nodes.len() {
@@ -832,11 +1054,6 @@ impl TypeInference {
                             path_span,
                         ),
                     ),
-                    1 => {
-                        let payload_ty = payload_types[0];
-                        let payload_node = payload_nodes.into_iter().next().unwrap();
-                        (payload_ty, payload_node)
-                    }
                     _ => {
                         let payload_ty = Type::tuple(payload_types);
                         let payload_span =
@@ -851,6 +1068,8 @@ impl TypeInference {
                     }
                 };
                 let name = ustr(path);
+                // Create a fresh type and add a constraint for that type to include this variant.
+                let variant_ty = self.fresh_type_var_ty();
                 self.ty_constraints.push(TypeConstraint::Pub(
                     PubTypeConstraint::new_type_has_variant(
                         variant_ty,
@@ -863,7 +1082,7 @@ impl TypeInference {
                 // Build the variant construction node.
                 let node = if let Some(values) = nodes_as_bare_immediate(&[&payload_node]) {
                     let value = values.first().unwrap().clone();
-                    K::Immediate(Immediate::new(Value::variant(name, value)))
+                    K::Immediate(Immediate::new(Value::raw_variant(name, value)))
                 } else {
                     K::Variant(b((name, payload_node)))
                 };
@@ -891,6 +1110,42 @@ impl TypeInference {
         Ok((nodes, tys, combined_effects))
     }
 
+    fn infer_record(
+        &mut self,
+        env: &mut TypingEnv,
+        fields: &[&RecordField<Desugared>],
+    ) -> Result<(NodeKind, Type, EffType), InternalCompilationError> {
+        let exprs = fields.iter().map(|(_, expr)| expr).collect::<Vec<_>>();
+        let (nodes, types, effects) = self.infer_exprs_drop_mut(env, &exprs)?;
+        let payload_ty = fields_to_record_type(&fields, types);
+        let payload_node = if let Some(values) = nodes_as_bare_immediate(&nodes) {
+            NodeKind::Immediate(Immediate::new(Value::tuple(values)))
+        } else {
+            NodeKind::Record(b(SVec2::from_vec(nodes)))
+        };
+        Ok((payload_node, payload_ty, effects))
+    }
+
+    // fn infer_exprs_drop_mut_zipped(
+    //     &mut self,
+    //     env: &mut TypingEnv,
+    //     exprs: &[impl Borrow<DExpr>],
+    // ) -> Result<(Vec<(ir::Node, Type)>, EffType), InternalCompilationError> {
+    //     let mut effects = Vec::with_capacity(exprs.len());
+    //     let nodes_and_tys = exprs
+    //         .iter()
+    //         .map(|arg| {
+    //             let node = self.infer_expr_drop_mut(env, arg.borrow())?;
+    //             let ty = node.ty;
+    //             effects.push(node.effects.clone());
+    //             Ok::<(ir::Node, Type), InternalCompilationError>((node, ty))
+    //         })
+    //         .collect::<Result<Vec<_>, _>>()?;
+
+    //     let combined_effects = self.make_dependent_effect(&effects);
+    //     Ok((nodes_and_tys, combined_effects))
+    // }
+
     fn infer_exprs_ret_arg_ty(
         &mut self,
         env: &mut TypingEnv,
@@ -911,6 +1166,29 @@ impl TypeInference {
             .process_results(|iter| multiunzip(iter))?;
         let combined_effects = self.make_dependent_effect(&effects);
         Ok((nodes, tys, combined_effects))
+    }
+
+    fn check_and_sort_record_fields(
+        fields: &RecordFields<Desugared>,
+        constructor_span: Location,
+        ctx: DuplicatedFieldContext,
+    ) -> Result<Vec<&RecordField<Desugared>>, InternalCompilationError> {
+        // Check that all fields are unique.
+        let mut names_seen = HashMap::new();
+        for ((name, span), _) in fields.iter() {
+            if let Some(prev_span) = names_seen.insert(name, span) {
+                return Err(internal_compilation_error!(DuplicatedField {
+                    first_occurrence: *prev_span,
+                    second_occurrence: *span,
+                    constructor_span,
+                    ctx,
+                }));
+            }
+        }
+        // Reorder the names, the types and the nodes to have fields sorted by name.
+        let mut fields = fields.iter().collect::<Vec<_>>();
+        fields.sort_by(|(name_a, _), (name_b, _)| name_a.0.cmp(&name_b.0));
+        Ok(fields)
     }
 
     fn check_exprs(
@@ -1420,7 +1698,6 @@ impl UnifiedTypeInference {
         if !remaining_constraints.is_empty() {
             loop {
                 // Loop as long as we make progress.
-                let mut progress = false;
 
                 // Perform simplification for algebraic data type constraints.
                 // Check for incompatible constraints as well.
@@ -1595,6 +1872,7 @@ impl UnifiedTypeInference {
 
                 // Perform unification.
                 let mut new_remaining_constraints = HashSet::new();
+                let old_constraint_count = remaining_constraints.len();
                 for constraint in remaining_constraints {
                     use PubTypeConstraint::*;
                     let unified_constraint = match constraint {
@@ -1638,29 +1916,38 @@ impl UnifiedTypeInference {
                             input_tys,
                             output_tys,
                             span,
-                        } => unified_ty_inf.unify_have_trait(
-                            trait_ref,
-                            &input_tys,
-                            &output_tys,
-                            span,
-                            trait_impls,
-                        )?,
-                    };
-                    match unified_constraint {
-                        Some(new_constraint) => {
-                            new_remaining_constraints.insert(new_constraint);
+                        } => {
+                            let is_ty_adt = |ty| {
+                                tuples_at_index_is.contains_key(&ty)
+                                    || records_field_is.contains_key(&ty)
+                                    || variants_are.contains_key(&ty)
+                            };
+                            unified_ty_inf.unify_have_trait(
+                                trait_ref,
+                                &input_tys,
+                                &output_tys,
+                                span,
+                                is_ty_adt,
+                                trait_impls,
+                            )?
                         }
-                        None => progress = true,
+                    };
+                    if let Some(new_constraint) = unified_constraint {
+                        new_remaining_constraints.insert(new_constraint);
                     }
                 }
                 remaining_constraints = new_remaining_constraints;
 
                 // Break if no progress was made
-                if !progress {
+                if remaining_constraints.len() == old_constraint_count {
                     break;
                 }
             }
         }
+
+        // Create minimalist types for orphan variant constraints.
+        // FIXME: something is missing here
+        // remaining_constraints = unified_ty_inf.simplify_variant_constraints(remaining_constraints);
 
         // Flatten inverted effect constraints into normal constraints
         let effect_constraints_inv = mem::take(&mut unified_ty_inf.effect_constraints_inv);
@@ -1923,23 +2210,30 @@ impl UnifiedTypeInference {
                     sub_or_same,
                 )
             }
-            (Newtype(cur_name, current_ty), Newtype(exp_name, expected_ty)) => {
-                if cur_name != exp_name {
-                    return Err(internal_compilation_error!(TypeMismatch {
-                        current_ty,
+            (Named(cur), Named(exp)) => {
+                if cur.def != exp.def {
+                    return Err(internal_compilation_error!(NamedTypeMismatch {
+                        current_decl: cur.def,
                         current_span,
-                        expected_ty,
+                        expected_decl: exp.def,
                         expected_span,
-                        sub_or_same,
                     }));
                 }
-                self.unify_sub_or_same_type(
-                    current_ty,
-                    current_span,
-                    expected_ty,
-                    expected_span,
-                    sub_or_same,
-                )
+                assert_eq!(
+                    cur.params.len(),
+                    exp.params.len(),
+                    "A Named type must have the same number of arguments for all its instances"
+                );
+                for (cur_el_ty, exp_el_ty) in cur.params.into_iter().zip(exp.params.into_iter()) {
+                    self.unify_sub_or_same_type(
+                        cur_el_ty,
+                        current_span,
+                        exp_el_ty,
+                        expected_span,
+                        sub_or_same,
+                    )?;
+                }
+                Ok(())
             }
             _ => Err(internal_compilation_error!(TypeMismatch {
                 current_ty,
@@ -2109,10 +2403,38 @@ impl UnifiedTypeInference {
         input_tys: &[Type],
         output_tys: &[Type],
         span: Location,
+        is_ty_adt: impl Fn(Type) -> bool,
         trait_impls: &mut TraitImpls,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let input_tys = self.normalize_types(input_tys);
         let output_tys = self.normalize_types(output_tys);
+
+        // Look for the special case of a Repr trait constraint where the target
+        // is either definitely not a named type or is a tuple, a record or a variant.
+        // This is needed to avoid creating functions where tuples and records would
+        // unify indirectly through the Repr constraint, which could never be instantiated.
+        if trait_ref == *REPR_TRAIT {
+            let input_ty = input_tys[0];
+            let ty_data = input_ty.data();
+            let is_known_non_named_ty = !ty_data.is_named() && !ty_data.is_variable();
+            let unify_to_ty = if let Some(named) = ty_data.as_named() {
+                if !named.params.is_empty() {
+                    todo!("Repr trait for named types with arguments is not supported yet");
+                }
+                Some(named.def.shape)
+            } else if is_known_non_named_ty || is_ty_adt(input_ty) {
+                Some(input_ty)
+            } else {
+                None
+            };
+            drop(ty_data);
+            if let Some(unify_to_ty) = unify_to_ty {
+                self.unify_same_type(unify_to_ty, span, output_tys[0], span)?;
+                return Ok(None);
+            }
+        }
+
+        // Normal case.
         // Is the trait fully resolved?
         let resolved = input_tys.iter().all(Type::is_constant);
         Ok(if resolved {
@@ -2551,7 +2873,10 @@ impl UnifiedTypeInference {
             .dicts_req
             .iter()
             .map(|dict| match dict {
-                FieldIndex(ty, field) => FieldIndex(self.substitute_in_type(*ty), *field),
+                FieldIndex { ty, field } => FieldIndex {
+                    ty: self.substitute_in_type(*ty),
+                    field: *field,
+                },
                 TraitImpl {
                     trait_ref,
                     input_tys,
@@ -2810,6 +3135,19 @@ fn property_to_fn_name(
     } else {
         Ok(fn_name)
     }
+}
+
+fn fields_to_record_type<P: crate::ast::Phase>(
+    fields: &[&RecordField<P>],
+    types: Vec<Type>,
+) -> Type {
+    Type::record(
+        fields
+            .iter()
+            .map(|field| field.0 .0)
+            .zip(types)
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Return a list of cloned values if all nodes are immediate values and have no effects.

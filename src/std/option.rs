@@ -13,7 +13,7 @@ use crate::{
 use ustr::ustr;
 
 pub fn option_type(inner: Type) -> Type {
-    variant_type(&[("None", Type::unit()), ("Some", inner)])
+    variant_type([("None", Type::unit()), ("Some", Type::tuple([inner]))])
 }
 
 pub fn option_type_generic() -> Type {
@@ -21,9 +21,9 @@ pub fn option_type_generic() -> Type {
 }
 
 pub fn none() -> Value {
-    Value::variant(ustr("None"), Value::unit())
+    Value::unit_variant(ustr("None"))
 }
 
 pub fn some(value: Value) -> Value {
-    Value::variant(ustr("Some"), value)
+    Value::tuple_variant(ustr("Some"), [value])
 }

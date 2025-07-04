@@ -8,7 +8,7 @@
 //
 use std::collections::HashMap;
 
-use crate::{internal_compilation_error, Location};
+use crate::{internal_compilation_error, r#type::TypeKind, std::core::REPR_TRAIT, Location};
 use itertools::{multiunzip, Itertools};
 use ustr::ustr;
 
@@ -54,12 +54,21 @@ impl TypeInference {
         // Infer the condition expression and get the pattern type.
         // Currently the type must be the same for all alternatives.
         let (condition_node, _) = self.infer_expr(env, cond_expr)?;
-        let pattern_ty = condition_node.ty;
         let cond_eff = condition_node.effects.clone();
+
+        // Generate a repr projection to get a condition_node.ty: Repr<Is = U> type
+        let pattern_ty = self.fresh_type_var_ty(); // U
+        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+            REPR_TRAIT.clone(),
+            vec![condition_node.ty],
+            vec![pattern_ty],
+            condition_node.span,
+        ));
+
         let first_alternative = alternatives.first().unwrap();
         let first_alternative_span = first_alternative.0.span;
         let is_variant = first_alternative.0.kind.is_variant();
-        let variants_span = Location::new_local(
+        let alternatives_span = Location::new_local(
             alternatives.first().unwrap().0.span.start(),
             alternatives.last().unwrap().0.span.end(),
         );
@@ -73,7 +82,7 @@ impl TypeInference {
             let (types, exprs): (Vec<_>, Vec<_>) = alternatives
                 .iter()
                 .map(|(pattern, expr)| {
-                    if let Some(((tag, tag_span), vars)) = pattern.kind.as_variant() {
+                    if let Some(((tag, tag_span), kind, vars)) = pattern.kind.as_variant() {
                         if let Some(old_tag_span) = seen_tags.insert(tag, tag_span) {
                             return Err(internal_compilation_error!(DuplicatedVariant {
                                 first_occurrence: *old_tag_span,
@@ -95,13 +104,28 @@ impl TypeInference {
                         }
                         let (inner_tys, variant_inner_ty) = match vars.len() {
                             0 => (vec![], Type::unit()),
-                            1 => {
-                                let ty = self.fresh_type_var_ty();
-                                (vec![ty], ty)
-                            }
                             n => {
                                 let inner_tys = self.fresh_type_var_tys(n);
-                                let variant_inner_ty = Type::tuple(inner_tys.clone());
+                                let variant_inner_ty = if kind.is_tuple() {
+                                    Type::tuple(inner_tys.clone())
+                                } else {
+                                    let fields = vars
+                                        .iter()
+                                        .zip(inner_tys.iter())
+                                        .map(|((name, _), ty)| {
+                                            // TODO: later, for partial support (allow to omit fields)
+                                            // self.add_pub_constraint(PubTypeConstraint::new_type_has_field(
+                                            //     pattern_ty,
+                                            //     pattern.span,
+                                            //     *name,
+                                            //     *ty,
+                                            //     alternatives_span,
+                                            // ));
+                                            (*name, *ty)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    Type::record(fields)
+                                };
                                 (inner_tys, variant_inner_ty)
                             }
                         };
@@ -196,7 +220,7 @@ impl TypeInference {
                         // Generate the variable binding code
                         if !bind_var_names.is_empty() {
                             let mut project_nodes = Vec::new();
-                            let mut add_projection = |i, is_tuple| {
+                            for i in 0..inner_tys.len() {
                                 let project_variant_inner = N::new(
                                     K::Project(b((load_variant.clone(), 0))),
                                     *variant_inner_ty,
@@ -204,16 +228,22 @@ impl TypeInference {
                                     expr.span,
                                 );
                                 let inner_ty = inner_tys[i];
-                                let project_tuple_inner = if is_tuple {
-                                    N::new(
-                                        K::Project(b((project_variant_inner, i))),
-                                        inner_ty,
-                                        no_effects(),
-                                        expr.span,
-                                    )
+                                let project_index = if variant_inner_ty.data().is_tuple() {
+                                    i
+                                } else if let TypeKind::Record(record) = &*variant_inner_ty.data() {
+                                    record
+                                        .iter()
+                                        .position(|(name, _)| *name == bind_var_names[i].0)
+                                        .expect("Expected record field to be present")
                                 } else {
-                                    project_variant_inner
+                                    panic!("Expected variant inner type to be tuple or record");
                                 };
+                                let project_tuple_inner = N::new(
+                                    K::Project(b((project_variant_inner, project_index))),
+                                    inner_ty,
+                                    no_effects(),
+                                    expr.span,
+                                );
                                 let store_projected_inner = N::new(
                                     K::EnvStore(b(EnvStore {
                                         node: project_tuple_inner,
@@ -225,15 +255,6 @@ impl TypeInference {
                                     expr.span,
                                 );
                                 project_nodes.push(store_projected_inner);
-                            };
-                            if bind_var_names.len() == 1 {
-                                // single value payload, payload is the stored directly
-                                add_projection(0, false);
-                            } else {
-                                // multiple value payload, payload is a tuple
-                                for i in 0..inner_tys.len() {
-                                    add_projection(i, true);
-                                }
                             }
                             project_nodes.push(node);
                             let proj_effects = self.make_dependent_effect(
@@ -268,7 +289,7 @@ impl TypeInference {
                         cond_expr.span,
                         tag,
                         variant_inner_ty,
-                        variants_span,
+                        alternatives_span,
                     ));
                 }
 
@@ -276,9 +297,15 @@ impl TypeInference {
                 self.check_expr(env, default, return_ty, MutType::constant(), return_ty_span)?
             } else {
                 // No default, compute a full variant type.
-                let variant_inner_tys = types.into_iter().map(|(tag, _, ty)| (tag, ty)).collect();
+                let variant_inner_tys: Vec<_> =
+                    types.into_iter().map(|(tag, _, ty)| (tag, ty)).collect();
                 let variant_ty = Type::variant(variant_inner_tys);
-                self.add_sub_type_constraint(pattern_ty, cond_expr.span, variant_ty, variants_span);
+                self.add_sub_type_constraint(
+                    pattern_ty,
+                    cond_expr.span,
+                    variant_ty,
+                    alternatives_span,
+                );
 
                 // Generate the default code node
                 alternatives

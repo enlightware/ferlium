@@ -27,7 +27,12 @@ impl TypeMapper for SubstitutionTypeMapper<'_> {
         if ty.data().is_variable() {
             let var = *ty.data().as_variable().unwrap();
             match self.subst.0.get(&var) {
-                Some(ty) => *ty,
+                Some(ty) => {
+                    // FIXME: This should work but break existing code, probably due to the way
+                    // we generate substitutions post-unification.
+                    // ty.map(self)
+                    *ty
+                }
                 None => Type::variable(var),
             }
         } else {
