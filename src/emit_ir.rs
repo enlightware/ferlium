@@ -1169,7 +1169,7 @@ fn compute_num_trait_default_types(
             subst
                 .entry(ty_var)
                 .and_modify(|prev_ty| {
-                    panic!("Type variable {ty_var} already exists in type substitution with type {:?}, trying to use type {:?} instead", prev_ty, default_ty)
+                    panic!("Type variable {ty_var} already exists in type substitution with type {prev_ty:?}, trying to use type {default_ty:?} instead")
                 })
                 .or_insert(*default_ty);
         }

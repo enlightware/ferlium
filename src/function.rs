@@ -81,7 +81,7 @@ impl FunctionDefinition {
     ) -> fmt::Result {
         // function.ty_scheme.format_quantifiers(f)?; write!(f, ". ")?;
         if let Some(doc) = &self.doc {
-            writeln!(f, "{prefix}/// {}", doc)?;
+            writeln!(f, "{prefix}/// {doc}")?;
         }
         if self.ty_scheme.is_just_type_and_effects() {
             writeln!(
@@ -125,7 +125,7 @@ pub trait Callable {
 
 impl Debug for dyn Callable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "fn @ {:p}", self)
+        write!(f, "fn @ {self:p}")
     }
 }
 
@@ -171,7 +171,7 @@ impl FunctionRef {
 impl Debug for FunctionRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.get().try_borrow() {
-            Ok(func) => write!(f, "{:?}", func),
+            Ok(func) => write!(f, "{func:?}"),
             Err(_) => write!(f, "self"),
         }
     }

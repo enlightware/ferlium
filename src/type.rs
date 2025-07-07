@@ -560,7 +560,7 @@ impl FmtWithModuleEnv for Type {
     fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         // If we have a name for this type, use it
         if let Some(name) = env.type_name(*self) {
-            return write!(f, "{}", name);
+            return write!(f, "{name}");
         }
 
         self.with_cycle_detection(

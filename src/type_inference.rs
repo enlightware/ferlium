@@ -1000,7 +1000,7 @@ impl TypeInference {
         } else {
             log::debug!("Mutability constraints before unification:");
             for constraint in &self.mut_constraints {
-                log::debug!("  {}", constraint);
+                log::debug!("  {constraint}");
             }
         }
     }
@@ -1012,7 +1012,7 @@ impl TypeInference {
             let var = EffectVar::new(i as u32);
             let value = self.effect_unification_table.probe_value(var);
             match value {
-                Some(value) => log::debug!("  {var} → {}", value),
+                Some(value) => log::debug!("  {var} → {value}"),
                 None => log::debug!("  {var} → {} (unbound)", {
                     self.effect_unification_table.find(var)
                 }),
@@ -2684,7 +2684,7 @@ impl UnifiedTypeInference {
             let var = MutVar::new(i as u32);
             let value = self.mut_unification_table.probe_value(var);
             match value {
-                Some(value) => log::debug!("  {var} → {}", value),
+                Some(value) => log::debug!("  {var} → {value}"),
                 None => log::debug!("  {var} → {} (unbound)", {
                     self.mut_unification_table.find(var)
                 }),
@@ -2699,7 +2699,7 @@ impl UnifiedTypeInference {
             let var = EffectVar::new(i as u32);
             let value = self.effect_unification_table.probe_value(var);
             match value {
-                Some(value) => log::debug!("  {var} → {}", value),
+                Some(value) => log::debug!("  {var} → {value}"),
                 None => log::debug!("  {var} → {} (unbound)", {
                     self.effect_unification_table.find(var)
                 }),
@@ -2708,7 +2708,7 @@ impl UnifiedTypeInference {
         if !self.effect_constraints_inv.is_empty() {
             log::debug!("Inverted effect constraints:");
             for (eff, var) in &self.effect_constraints_inv {
-                log::debug!("  {} → {var}", eff);
+                log::debug!("  {eff} → {var}");
             }
         }
     }

@@ -64,7 +64,7 @@ pub(crate) fn write_with_separator(
 ) -> fmt::Result {
     let mut iter = iter.into_iter();
     if let Some(element) = iter.next() {
-        write!(f, "{}", element)?;
+        write!(f, "{element}")?;
     }
     for element in iter {
         write!(f, "{separator}{element}")?;

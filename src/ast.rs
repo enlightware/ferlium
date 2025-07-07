@@ -259,7 +259,7 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
                 } in functions.iter()
                 {
                     if let Some(doc) = doc {
-                        writeln!(f, "    /// {}", doc)?;
+                        writeln!(f, "    /// {doc}")?;
                     }
                     write!(
                         f,
@@ -299,7 +299,7 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
             } in self.functions.iter()
             {
                 if let Some(doc) = doc {
-                    writeln!(f, "  /// {}", doc)?;
+                    writeln!(f, "  /// {doc}")?;
                 }
                 write!(
                     f,
@@ -486,7 +486,7 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
                 body.format_ind(f, env, indent + 1)
             }
             SoftBreak => writeln!(f, "{indent_str}SoftBreak"),
-            PropertyPath(scope, name) => writeln!(f, "{indent_str}@{}.{}", scope, name),
+            PropertyPath(scope, name) => writeln!(f, "{indent_str}@{scope}.{name}"),
             TypeAscription(expr, ty, _span) => {
                 expr.format_ind(f, env, indent)?;
                 writeln!(f, "{indent_str}: {}", ty.format_with(env))

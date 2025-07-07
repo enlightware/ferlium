@@ -855,7 +855,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             Unsupported { span, reason } => {
                 write!(f, "Unsupported: {} in {}", reason, fmt_span(span))
             }
-            Internal(msg) => write!(f, "ICE: {}", msg),
+            Internal(msg) => write!(f, "ICE: {msg}"),
         }
     }
 }
@@ -1354,7 +1354,7 @@ impl Display for RuntimeError {
         use RuntimeError::*;
         match self {
             Aborted(msg) => match msg {
-                Some(msg) => write!(f, "Aborted: {}", msg),
+                Some(msg) => write!(f, "Aborted: {msg}"),
                 None => write!(f, "Aborted"),
             },
             DivisionByZero => write!(f, "Division by zero"),
@@ -1363,12 +1363,11 @@ impl Display for RuntimeError {
             ArrayAccessOutOfBounds { index, len } => {
                 write!(
                     f,
-                    "Array access out of bounds: index {} for length {}",
-                    index, len
+                    "Array access out of bounds: index {index} for length {len}"
                 )
             }
             RecursionLimitExceeded { limit } => {
-                write!(f, "Recursion limit exceeded: limit is {}", limit)
+                write!(f, "Recursion limit exceeded: limit is {limit}")
             }
         }
     }

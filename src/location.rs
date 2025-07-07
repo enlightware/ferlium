@@ -19,7 +19,7 @@ pub struct Span {
 impl Span {
     pub fn new(start: usize, end: usize) -> Self {
         if end < start {
-            panic!("Span starts ({}) after it ends ({})!", start, end);
+            panic!("Span starts ({start}) after it ends ({end})!");
         }
         Span { start, end }
     }

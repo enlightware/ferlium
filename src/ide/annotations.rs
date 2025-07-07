@@ -219,7 +219,7 @@ impl Node {
                     if !is_synthesized
                         && !should_hide_arg_name_hint(&app.function_path, arity, arg_name, arg)
                     {
-                        result.push((arg.span.start(), format!("{}: ", arg_name)));
+                        result.push((arg.span.start(), format!("{arg_name}: ")));
                     }
                     arg.variable_type_annotations(result, env);
                 }
@@ -233,7 +233,7 @@ impl Node {
                     if !is_synthesized
                         && !should_hide_arg_name_hint(&app.function_path, arity, arg_name, arg)
                     {
-                        result.push((arg.span.start(), format!("{}: ", arg_name)));
+                        result.push((arg.span.start(), format!("{arg_name}: ")));
                     }
                     arg.variable_type_annotations(result, env);
                 }

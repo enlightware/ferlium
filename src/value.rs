@@ -198,7 +198,7 @@ impl Value {
             Function((function, _)) => {
                 let function = function.get();
                 let function = function.borrow();
-                write!(f, "{:?}", function)
+                write!(f, "{function:?}")
             }
         }
     }
@@ -316,7 +316,7 @@ impl Display for Value {
             Function((function, _)) => {
                 let function = function.get();
                 let function = function.borrow();
-                write!(f, "{:?}", function)
+                write!(f, "{function:?}")
             }
         }
     }

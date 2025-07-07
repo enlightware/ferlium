@@ -198,11 +198,11 @@ impl Module {
             writeln!(f, "Uses:")?;
             for use_module in self.uses.iter() {
                 match use_module {
-                    Use::All(module) => writeln!(f, "  {}: *", module)?,
+                    Use::All(module) => writeln!(f, "  {module}: *")?,
                     Use::Some(use_some) => {
                         write!(f, "  {}:", use_some.module)?;
                         for symbol in use_some.symbols.iter() {
-                            write!(f, " {}", symbol)?;
+                            write!(f, " {symbol}")?;
                         }
                         writeln!(f)?;
                     }

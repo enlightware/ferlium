@@ -109,7 +109,7 @@ impl MutType {
 
     pub fn format_in_fn_arg(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            MutType::Variable(var) => write!(f, "&mut?:{} ", var),
+            MutType::Variable(var) => write!(f, "&mut?:{var} "),
             MutType::Resolved(val) => {
                 if val.is_mutable() {
                     write!(f, "&mut ")
@@ -131,8 +131,8 @@ impl Display for MutType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use MutType::*;
         match self {
-            Variable(var) => write!(f, "mut?:{}", var),
-            Resolved(val) => write!(f, "{}", val),
+            Variable(var) => write!(f, "mut?:{var}"),
+            Resolved(val) => write!(f, "{val}"),
         }
     }
 }

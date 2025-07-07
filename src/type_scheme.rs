@@ -852,7 +852,7 @@ fn format_have_trait(
         }
         write!(f, " <")?;
     } else {
-        write!(f, "{} <", trait_name)?;
+        write!(f, "{trait_name} <")?;
         write_with_separator_and_format_fn(
             input_tys.iter(),
             ", ",
@@ -1042,7 +1042,7 @@ pub(crate) fn format_constraints_consolidated(
             Variant(variant) => {
                 for (tag, payload_ty) in variant {
                     if payload_ty == Type::unit() {
-                        write!(f, "{} | ", tag)?;
+                        write!(f, "{tag} | ")?;
                     } else if payload_ty.data().is_tuple() {
                         write!(f, "{} {} | ", tag, payload_ty.format_with(env))?;
                     } else {

@@ -30,7 +30,7 @@ pub fn static_apply(
         function_path: ustr("synthesized"),
         function_span: span,
         argument_names: (0..arguments.len())
-            .map(|i| ustr(&format!("arg{}", i)))
+            .map(|i| ustr(&format!("arg{i}")))
             .collect(),
         arguments,
         ty,
