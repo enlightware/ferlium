@@ -219,10 +219,10 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let span = span_union_range(*index_span, *tuple_span);
             let colored_index = (*index).fg(Color::Blue);
             Report::build(ReportKind::Error, ("input", span))
-                .with_message(format!("Tuple index {} is out of bounds.", colored_index))
+                .with_message(format!("Tuple index {colored_index} is out of bounds."))
                 .with_label(
                     Label::new(("input", span_range(*index_span)))
-                        .with_message(format!("Index is {}.", colored_index))
+                        .with_message(format!("Index is {colored_index}."))
                         .with_color(Color::Blue),
                 )
                 .with_label(
@@ -247,12 +247,11 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let colored_ty = expr_ty.format_with(env).fg(Color::Blue);
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
-                    "Type {} cannot be projected as a tuple.",
-                    colored_ty
+                    "Type {colored_ty} cannot be projected as a tuple."
                 ))
                 .with_label(
                     Label::new(("input", span_range(*tuple_span)))
-                        .with_message(format!("This expression has type {}.", colored_ty))
+                        .with_message(format!("This expression has type {colored_ty}."))
                         .with_color(Color::Blue),
                 )
                 .with_label(
@@ -313,17 +312,16 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             let b_ty = b_type.adt_kind().fg(Color::Magenta);
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
-                    "Data type {} is different than data type {}.",
-                    a_ty, b_ty
+                    "Data type {a_ty} is different than data type {b_ty}."
                 ))
                 .with_label(
                     Label::new(("input", span_range(*a_span)))
-                        .with_message(format!("type is {} here", a_ty))
+                        .with_message(format!("type is {a_ty} here"))
                         .with_color(Color::Blue),
                 )
                 .with_label(
                     Label::new(("input", span_range(*b_span)))
-                        .with_message(format!("but type is {} here", b_ty))
+                        .with_message(format!("but type is {b_ty} here"))
                         .with_color(Color::Magenta),
                 )
                 .finish()
@@ -374,7 +372,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
         }
         Unsupported { span, reason } => {
             Report::build(ReportKind::Error, ("input", span_range(*span)))
-                .with_message(format!("Unsupported feature: {}.", reason))
+                .with_message(format!("Unsupported feature: {reason}."))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
@@ -518,7 +516,7 @@ fn process_pipe_input() -> i32 {
     // Read all input from stdin
     let mut input = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut input) {
-        eprintln!("Error reading from stdin: {}", e);
+        eprintln!("Error reading from stdin: {e}");
         return 1;
     }
 
@@ -642,7 +640,7 @@ fn run_interactive_repl() {
                                 if let Some(module) = other_modules.get(&ustr(arg)) {
                                     module.deref()
                                 } else {
-                                    println!("Module {} not found.", arg);
+                                    println!("Module {arg} not found.");
                                     continue;
                                 }
                             } else {
@@ -673,7 +671,7 @@ fn run_interactive_repl() {
                 return;
             }
             Err(err) => {
-                println!("Readline Error: {:?}", err);
+                println!("Readline Error: {err:?}");
                 return;
             }
         };
@@ -692,7 +690,7 @@ fn run_interactive_repl() {
         }
 
         if let Err(e) = rl.save_history(history_filename) {
-            println!("Failed to save history: {:?}", e);
+            println!("Failed to save history: {e:?}");
         }
     }
 }

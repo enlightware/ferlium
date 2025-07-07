@@ -37,7 +37,7 @@ impl NativeDisplay for List {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{}", v)?;
+            write!(f, "{v}")?;
         }
         write!(f, "]")
     }
@@ -120,11 +120,11 @@ fn main() {
     // test printing values
     println!("\nSome values:\n");
     let v_int = Value::Native(Box::new(11_isize));
-    println!("{}", v_int);
+    println!("{v_int}");
     let v_list_int = Value::Native(Box::new(List(vec![
         Value::native(11_isize),
         Value::native(22_isize),
     ])));
-    println!("{}", v_list_int);
-    println!("{}", add_value);
+    println!("{v_list_int}");
+    println!("{add_value}");
 }
