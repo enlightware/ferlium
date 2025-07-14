@@ -7,6 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use ferlium::error::{DuplicatedFieldContext, DuplicatedVariantContext};
 use ferlium::r#type::Type;
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
@@ -161,6 +162,39 @@ fn define_enum_types() {
     let empty_type = module.type_defs.get(&ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));
     assert!(empty_type.shape.data().is_never());
+
+    assert_eq!(
+        fail_compilation("enum Invalid { A, B, A }")
+            .into_inner()
+            .into_duplicated_variant()
+            .unwrap()
+            .3,
+        DuplicatedVariantContext::Enum
+    );
+    assert_eq!(
+        fail_compilation("enum Invalid { A, B, A(int) }")
+            .into_inner()
+            .into_duplicated_variant()
+            .unwrap()
+            .3,
+        DuplicatedVariantContext::Enum
+    );
+    assert_eq!(
+        fail_compilation("enum Invalid { A, B, A { a: int } }")
+            .into_inner()
+            .into_duplicated_variant()
+            .unwrap()
+            .3,
+        DuplicatedVariantContext::Enum
+    );
+    assert_eq!(
+        fail_compilation("enum Invalid { A, B { a: T | T(int) } }")
+            .into_inner()
+            .into_duplicated_variant()
+            .unwrap()
+            .3,
+        DuplicatedVariantContext::Variant
+    );
 }
 
 #[test]
@@ -385,6 +419,31 @@ fn define_struct_types() {
             ustr("callback"),
             Type::function_by_val([string_type()], Type::unit())
         ),]
+    );
+
+    assert_eq!(
+        fail_compilation("struct Invalid { a: int, a: int }")
+            .into_inner()
+            .into_duplicated_field()
+            .unwrap()
+            .3,
+        DuplicatedFieldContext::Struct
+    );
+    assert_eq!(
+        fail_compilation("struct Invalid { a: int, b: string, a: float }")
+            .into_inner()
+            .into_duplicated_field()
+            .unwrap()
+            .3,
+        DuplicatedFieldContext::Struct
+    );
+    assert_eq!(
+        fail_compilation("struct Invalid { a: int, b: { a: int, a: float } }")
+            .into_inner()
+            .into_duplicated_field()
+            .unwrap()
+            .3,
+        DuplicatedFieldContext::Record
     );
 }
 

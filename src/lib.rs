@@ -59,9 +59,10 @@ pub use ide::Compiler;
 pub use location::Location;
 pub use type_inference::SubOrSameType;
 
-use r#type::Type;
 use type_scheme::DisplayStyle;
 pub use ustr::{ustr, Ustr};
+
+use crate::r#type::Type;
 
 lalrpop_mod!(
     #[allow(clippy::ptr_arg)]
@@ -82,20 +83,39 @@ impl ModuleAndExpr {
 }
 
 /// Parse a type from a source code and return the corresponding concrete Type.
-pub fn parse_concrete_type(src: &str) -> Result<Type, LocatedError> {
+pub fn parse_concrete_type(src: &str) -> Result<ast::PType, LocatedError> {
     let mut errors = Vec::new();
     parser::ConcreteTypeParser::new()
         .parse(&mut errors, src)
         .map_err(describe_parse_error)
 }
 
+/// Resolve a concrete type from a source code and return the corresponding Type.
+pub fn resolve_concrete_type(src: &str, env: &ModuleEnv<'_>) -> Result<Type, CompilationError> {
+    let ast =
+        parse_concrete_type(src).map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
+    let span = Location::new_local(0, src.len());
+    ast.desugar(span, false, env)
+        .map_err(|error| CompilationError::from_internal(error, env, src))
+}
+
 /// Parse a type from a source code and return the corresponding Type,
 /// with placeholder filled with first generic variable.
-pub fn parse_generic_type(src: &str) -> Result<Type, LocatedError> {
+pub fn parse_generic_type(src: &str) -> Result<ast::PType, LocatedError> {
     let mut errors = Vec::new();
     parser::GenericTypeParser::new()
         .parse(&mut errors, src)
         .map_err(describe_parse_error)
+}
+
+/// Resolve a generic type from a source code and return the corresponding Type,
+/// with placeholder filled with first generic variable.
+pub fn resolve_generic_type(src: &str, env: &ModuleEnv<'_>) -> Result<Type, CompilationError> {
+    let ast =
+        parse_generic_type(src).map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
+    let span = Location::new_local(0, src.len());
+    ast.desugar(span, false, env)
+        .map_err(|error| CompilationError::from_internal(error, env, src))
 }
 
 /// Parse a module from a source code and return the corresponding ASTs.

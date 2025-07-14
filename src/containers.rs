@@ -33,7 +33,7 @@ impl<T> IntoOwned<T> for T {
 }
 
 // Cloning a &T if we only have a reference
-impl<'a, T: Clone> IntoOwned<T> for &'a T {
+impl<T: Clone> IntoOwned<T> for &T {
     fn into_owned(self) -> T {
         self.clone()
     }

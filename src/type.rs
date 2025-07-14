@@ -26,6 +26,7 @@ use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
+use crate::mutability::FormatInFnArg;
 use crate::type_like::CastableToType;
 use crate::type_like::TypeLike;
 use crate::type_mapper::TypeMapper;
@@ -585,7 +586,7 @@ impl CastableToType for Type {
 impl FmtWithModuleEnv for Type {
     fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         // If we have a name for this type, use it
-        if let Some(name) = env.type_alias(*self) {
+        if let Some(name) = env.type_alias_name(*self) {
             return write!(f, "{name}");
         }
 
@@ -708,6 +709,14 @@ pub struct TypeDefRef(Arc<TypeDef>);
 impl TypeDefRef {
     pub fn new(def: TypeDef) -> Self {
         Self(Arc::new(def))
+    }
+
+    pub fn as_type(&self) -> Type {
+        assert!(
+            self.param_names.is_empty(),
+            "Generic type definitions not implemented yet"
+        );
+        Type::named(self.clone(), vec![])
     }
 }
 
@@ -1425,11 +1434,11 @@ pub struct TypeNames {
 #[cfg(test)]
 mod tests {
     use crate::{
-        parse_concrete_type,
+        resolve_concrete_type,
         std::{
             logic::bool_type,
             math::{int_type, Int},
-            new_module_using_std, new_std_modules,
+            StdModuleEnv,
         },
     };
 
@@ -1437,12 +1446,10 @@ mod tests {
 
     #[test]
     fn parse_and_format() {
-        let std_env = new_std_modules();
-        let current_module = new_module_using_std();
-        let mod_env = ModuleEnv::new(&current_module, &std_env);
+        let env = StdModuleEnv::new();
         let check = |name: &str| {
-            let ty = parse_concrete_type(name).unwrap();
-            let formatted = format!("{}", ty.format_with(&mod_env));
+            let ty = resolve_concrete_type(name, &env.get()).unwrap();
+            let formatted = format!("{}", ty.format_with(&env.get()));
             assert_eq!(name, formatted);
         };
         check("()");

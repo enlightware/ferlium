@@ -15,7 +15,7 @@ use super::common::{
     set_property_value, string, unit,
 };
 use ferlium::{
-    error::{MutabilityMustBeWhat, RuntimeError},
+    error::{DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeError},
     mutability::MutType,
     r#type::{tuple_type, Type},
     std::{
@@ -400,6 +400,14 @@ fn match_expr() {
         .into_inner()
         .into_duplicated_literal_pattern()
         .unwrap();
+    assert_eq!(
+        fail_compilation("match A { A => 1, A => 2 }")
+            .into_inner()
+            .into_duplicated_variant()
+            .unwrap()
+            .3,
+        DuplicatedVariantContext::Match
+    );
     assert_eq!(run("let a = 0; match a { 0 => 1, _ => 3 }"), int(1));
     assert_eq!(
         run("let a = -1; match a { -1 => true, 0 => false, -3 => false, 7 => false, _ => false }"),
@@ -766,19 +774,34 @@ fn variants() {
     // tuple constructors
     assert_eq!(run("MyVariant"), variant_0("MyVariant"));
     assert_eq!(run("MyVariant2(1.0)"), variant_t1("MyVariant2", float(1.0)));
-    assert_eq!(run("MyVariant2(1.0, 2.0)"), variant_tn("MyVariant2", [float(1.0), float(2.0)]));
+    assert_eq!(
+        run("MyVariant2(1.0, 2.0)"),
+        variant_tn("MyVariant2", [float(1.0), float(2.0)])
+    );
     // Note: the following doesn't work due to a bug in recursive application of type defaulting substitution
     // (see https://github.com/enlightware/ferlium/issues/59)
     //assert_eq!(run("MyVariant2(\"hi\", 1)"), variant_tn("MyVariant2", [string("hi"), int(1)]));
-    assert_eq!(run("MyVariant2(\"hi\", 1.0)"), variant_tn("MyVariant2", [string("hi"), float(1.0)]));
+    assert_eq!(
+        run("MyVariant2(\"hi\", 1.0)"),
+        variant_tn("MyVariant2", [string("hi"), float(1.0)])
+    );
 
     // record constructors
-    assert_eq!(run("MyVariant2 { a: 1.0 }"), variant_t1("MyVariant2", float(1.0)));
-    assert_eq!(run("MyVariant2 { b: 2.0, a: 1.0 }"), variant_tn("MyVariant2", [float(1.0), float(2.0)]));
+    assert_eq!(
+        run("MyVariant2 { a: 1.0 }"),
+        variant_t1("MyVariant2", float(1.0))
+    );
+    assert_eq!(
+        run("MyVariant2 { b: 2.0, a: 1.0 }"),
+        variant_tn("MyVariant2", [float(1.0), float(2.0)])
+    );
     // Note: the following doesn't work due to a bug in recursive application of type defaulting substitution
     // (see https://github.com/enlightware/ferlium/issues/59)
     //assert_eq!(run("MyVariant2(\"hi\", 1)"), variant_tn("MyVariant2", [string("hi"), int(1)]));
-    assert_eq!(run("MyVariant2 { name: \"hi\", value: 1.0 }"), variant_tn("MyVariant2", [string("hi"), float(1.0)]));
+    assert_eq!(
+        run("MyVariant2 { name: \"hi\", value: 1.0 }"),
+        variant_tn("MyVariant2", [string("hi"), float(1.0)])
+    );
 
     // option example
     let match_exhaustive = r#"fn s(x) { match x { None => "no", Some(x) => f"hi {x}" } }"#;
@@ -859,8 +882,14 @@ fn variants() {
             B { a, b } => a + b
         }
     }"#;
-    assert_eq!(run(&format!("{match_exhaustive_rec} s(A {{ a: 1.0 }})")), float(1.0));
-    assert_eq!(run(&format!("{match_exhaustive_rec} s(B {{ a: 2.0, b: 3.0 }})")), float(5.0));
+    assert_eq!(
+        run(&format!("{match_exhaustive_rec} s(A {{ a: 1.0 }})")),
+        float(1.0)
+    );
+    assert_eq!(
+        run(&format!("{match_exhaustive_rec} s(B {{ a: 2.0, b: 3.0 }})")),
+        float(5.0)
+    );
     let match_open_rec = r#"fn s(x) {
         match x {
             A { a } => a,
@@ -868,9 +897,18 @@ fn variants() {
             _ => 0.0
         }
     }"#;
-    assert_eq!(run(&format!("{match_open_rec} s(A {{ a: 1.0 }})")), float(1.0));
-    assert_eq!(run(&format!("{match_open_rec} s(B {{ a: 2.0, b: 3.0 }})")), float(5.0));
-    assert_eq!(run(&format!("{match_open_rec} s(C {{ z: \"hi\" }})")), float(0.0));
+    assert_eq!(
+        run(&format!("{match_open_rec} s(A {{ a: 1.0 }})")),
+        float(1.0)
+    );
+    assert_eq!(
+        run(&format!("{match_open_rec} s(B {{ a: 2.0, b: 3.0 }})")),
+        float(5.0)
+    );
+    assert_eq!(
+        run(&format!("{match_open_rec} s(C {{ z: \"hi\" }})")),
+        float(0.0)
+    );
 
     // match mixed
     let match_exhaustive_mixed = r#"fn s(x) {
@@ -880,9 +918,20 @@ fn variants() {
             Move { y, x } => x - y,
         }
     }"#;
-    assert_eq!(run(&format!("{match_exhaustive_mixed} s(Quit)")), float(0.0));
-    assert_eq!(run(&format!("{match_exhaustive_mixed} s(Jump(2.0))")), float(2.0));
-    assert_eq!(run(&format!("{match_exhaustive_mixed} s(Move {{ x: 3.0, y: 1.0 }} )")), float(2.0));
+    assert_eq!(
+        run(&format!("{match_exhaustive_mixed} s(Quit)")),
+        float(0.0)
+    );
+    assert_eq!(
+        run(&format!("{match_exhaustive_mixed} s(Jump(2.0))")),
+        float(2.0)
+    );
+    assert_eq!(
+        run(&format!(
+            "{match_exhaustive_mixed} s(Move {{ x: 3.0, y: 1.0 }} )"
+        )),
+        float(2.0)
+    );
     let match_open_mixed = r#"fn s(x) {
         match x {
             Quit => 0.0,
@@ -893,10 +942,19 @@ fn variants() {
     }"#;
     assert_eq!(run(&format!("{match_open_mixed} s(Quit)")), float(0.0));
     assert_eq!(run(&format!("{match_open_mixed} s(Jump(2.0))")), float(2.0));
-    assert_eq!(run(&format!("{match_open_mixed} s(Move {{ x: 3.0, y: 1.0 }} )")), float(2.0));
+    assert_eq!(
+        run(&format!("{match_open_mixed} s(Move {{ x: 3.0, y: 1.0 }} )")),
+        float(2.0)
+    );
     assert_eq!(run(&format!("{match_open_mixed} s(Bla)")), float(-1.0));
-    assert_eq!(run(&format!("{match_open_mixed} s(Oh(1.0, true))")), float(-1.0));
-    assert_eq!(run(&format!("{match_open_mixed} s(Teleport {{ z: -4.0 }})")), float(-1.0));
+    assert_eq!(
+        run(&format!("{match_open_mixed} s(Oh(1.0, true))")),
+        float(-1.0)
+    );
+    assert_eq!(
+        run(&format!("{match_open_mixed} s(Teleport {{ z: -4.0 }})")),
+        float(-1.0)
+    );
 }
 
 #[test]

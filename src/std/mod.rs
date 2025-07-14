@@ -9,7 +9,7 @@
 use std::{rc::Rc, str::FromStr};
 
 use crate::{
-    module::{Module, Modules, Use},
+    module::{Module, ModuleEnv, Modules, Use},
     r#type::{bare_native_type, Type, TypeKind},
     value::Value,
 };
@@ -63,6 +63,32 @@ pub fn new_module_using_std() -> Module {
     let mut new_module = Module::default();
     new_module.uses.push(Use::All(ustr("std")));
     new_module
+}
+
+#[derive(Debug, Clone)]
+pub struct StdModuleEnv {
+    others: Modules,
+    pub current: Module,
+}
+impl Default for StdModuleEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StdModuleEnv {
+    pub fn new() -> Self {
+        Self {
+            others: new_std_modules(),
+            current: new_module_using_std(),
+        }
+    }
+    pub fn get(&self) -> ModuleEnv<'_> {
+        ModuleEnv {
+            others: &self.others,
+            current: &self.current,
+        }
+    }
 }
 
 pub fn default_value_for_type(ty: Type) -> Option<Value> {

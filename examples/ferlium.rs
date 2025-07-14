@@ -55,10 +55,13 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
     let env = &data.0;
     let src = data.1;
     match error.deref() {
-        FunctionNotFound(span) => {
+        TypeNotFound(span) => {
             let name = &data.1[span_range(*span)];
             Report::build(ReportKind::Error, ("input", span_range(*span)))
-                .with_message(format!("Function {} not found.", name.fg(Color::Blue)))
+                .with_message(format!(
+                    "Cannot find type `{}` in this scope.",
+                    name.fg(Color::Blue)
+                ))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
                 .print(("input", Source::from(src)))
@@ -257,14 +260,16 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
         DuplicatedField {
             first_occurrence,
             second_occurrence,
+            ctx,
             ..
         } => {
             let span = span_union_range(*first_occurrence, *second_occurrence);
             let name = &data.1[span_range(*first_occurrence)];
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
-                    "Duplicated field \"{}\" in record.",
-                    name.fg(Color::Blue)
+                    "Duplicated field \"{}\" in {}.",
+                    name.fg(Color::Blue),
+                    ctx.as_str(),
                 ))
                 .with_label(
                     Label::new(("input", span_range(*first_occurrence))).with_color(Color::Blue),

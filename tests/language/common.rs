@@ -7,10 +7,19 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    containers::IntoSVec2, effects::{effect, effects, no_effects, PrimitiveEffect}, error::{CompilationError, RuntimeError}, eval::EvalResult, function::{
+    containers::IntoSVec2,
+    effects::{effect, effects, no_effects, PrimitiveEffect},
+    error::{CompilationError, RuntimeError},
+    eval::EvalResult,
+    function::{
         BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnVN,
-    }, module::{Module, Modules}, std::{math::int_type, new_std_modules, option::option_type}, r#type::{variant_type, FnType, Type}, value::Value, ModuleAndExpr
+    },
+    module::{Module, Modules},
+    r#type::{variant_type, FnType, Type},
+    std::{math::int_type, new_std_modules, option::option_type},
+    value::Value,
+    ModuleAndExpr,
 };
 use std::{rc::Rc, sync::atomic::AtomicIsize};
 use ustr::ustr;
@@ -40,7 +49,9 @@ fn testing_module() -> Module {
     module.functions.insert(
         "pair".into(),
         BinaryNativeFnNNV::description_with_ty(
-            |a: isize, b: isize| Value::tuple_variant(ustr("Pair"), [Value::native(a), Value::native(b)]),
+            |a: isize, b: isize| {
+                Value::tuple_variant(ustr("Pair"), [Value::native(a), Value::native(b)])
+            },
             ["first", "second"],
             None,
             int_type(),

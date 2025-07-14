@@ -8,7 +8,10 @@
 //
 use std::collections::HashMap;
 
-use crate::{internal_compilation_error, r#type::TypeKind, std::core::REPR_TRAIT, Location};
+use crate::{
+    error::DuplicatedVariantContext, internal_compilation_error, r#type::TypeKind,
+    std::core::REPR_TRAIT, Location,
+};
 use itertools::{multiunzip, Itertools};
 use ustr::ustr;
 
@@ -87,7 +90,8 @@ impl TypeInference {
                             return Err(internal_compilation_error!(DuplicatedVariant {
                                 first_occurrence: *old_tag_span,
                                 second_occurrence: *tag_span,
-                                match_span,
+                                ctx_span: match_span,
+                                ctx: DuplicatedVariantContext::Match,
                             }));
                         }
                         let mut seen_identifier = HashMap::new();

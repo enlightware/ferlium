@@ -124,20 +124,20 @@ fn compilation_error_to_data(
         } => vec![
             ErrorData::from_location(
                 first_occurrence,
-                format!("Name {name} defined multiple times"),
+                format!("Name `{name}` defined multiple times"),
             ),
             ErrorData::from_location(
                 second_occurrence,
-                format!("Name {name} defined multiple times"),
+                format!("Name `{name}` defined multiple times"),
             ),
         ],
-        FunctionNotFound(span) => vec![ErrorData::from_location(
+        TypeNotFound(span) => vec![ErrorData::from_location(
             span,
-            format!("Function {} not found", fmt_span(span)),
+            format!("Cannot find type `{}` in this scope", fmt_span(span)),
         )],
         TraitNotFound(span) => vec![ErrorData::from_location(
             span,
-            format!("Trait {} not found", fmt_span(span)),
+            format!("Cannot find trait `{}` in this scope", fmt_span(span)),
         )],
         WrongNumberOfArguments {
             expected,
@@ -147,19 +147,13 @@ fn compilation_error_to_data(
         } => vec![
             ErrorData::from_location(
                 expected_span,
-                format!("Expected {expected} arguments here, got {got}"),
+                format!("Expected {expected} arguments here, but {got} were provided"),
             ),
             ErrorData::from_location(
                 got_span,
-                format!("Expected {expected} arguments, got {got} here"),
+                format!("Expected {expected} arguments, but {got} are provided here"),
             ),
         ],
-        TypeDefinitionNotFound { span } => {
-            vec![ErrorData::from_location(
-                span,
-                format!("Type definition {} not found", fmt_span(span)),
-            )]
-        }
         MutabilityMustBe {
             source_span,
             reason_span,
@@ -169,15 +163,15 @@ fn compilation_error_to_data(
             use MutabilityMustBeWhat::*;
             match what {
                 Mutable => format!(
-                    "Expression must be mutable due to {}",
+                    "Expression must be mutable due to `{}`",
                     fmt_span(reason_span)
                 ),
                 Constant => format!(
-                    "Expression must be constant due to {}",
+                    "Expression must be constant due to `{}`",
                     fmt_span(reason_span)
                 ),
                 Equal => format!(
-                    "Expression must be of the same mutability as {}",
+                    "Expression must be of the same mutability as `{}`",
                     fmt_span(reason_span)
                 ),
             }
@@ -189,7 +183,7 @@ fn compilation_error_to_data(
             ..
         } => vec![ErrorData::from_location(
             current_span,
-            format!("Type {current_ty} is incompatible with type {expected_ty}"),
+            format!("Type `{current_ty}` is incompatible with type `{expected_ty}`"),
         )],
         NamedTypeMismatch {
             current_decl,
@@ -201,7 +195,7 @@ fn compilation_error_to_data(
         } => vec![ErrorData::from_location(
             current_span,
             format!(
-                "Named type \"{}\" from {} is different from named type \"{}\" from {}",
+                "Named type `{}` from `{}` is different from named type `{}` from `{}`",
                 current_decl,
                 fmt_span(current_decl_location),
                 expected_decl,
@@ -210,15 +204,15 @@ fn compilation_error_to_data(
         )],
         InfiniteType(ty_var, ty, span) => vec![ErrorData::from_location(
             span,
-            format!("Infinite type: {ty_var} = {ty}"),
+            format!("Infinite type: `{ty_var}` = `{ty}`"),
         )],
         UnboundTypeVar { ty_var, ty, span } => vec![ErrorData::from_location(
             span,
-            format!("Unbound type variable {ty_var} in {ty}"),
+            format!("Unbound type variable `{ty_var}` in `{ty}`"),
         )],
         UnresolvedConstraints { constraints, span } => vec![ErrorData::from_location(
             span,
-            format!("Unresolved constraints: {}", constraints.join(" ∧ ")),
+            format!("Unresolved constraints: `{}`", constraints.join(" ∧ ")),
         )],
         InvalidTupleIndex {
             index,
@@ -237,7 +231,7 @@ fn compilation_error_to_data(
             let index_name = fmt_span(index_span);
             vec![ErrorData::from_location(
                 expr_span,
-                format!("Expected tuple because of .{index_name}, got {expr_ty}"),
+                format!("Expected tuple because of `.{index_name}`, but `{expr_ty}` was provided instead"),
             )]
         }
         DuplicatedField {
@@ -246,9 +240,10 @@ fn compilation_error_to_data(
             ..
         } => {
             let name = fmt_span(first_occurrence);
+            let text = format!("Duplicated field `{name}`");
             vec![
-                ErrorData::from_location(first_occurrence, format!("Duplicated field {name}")),
-                ErrorData::from_location(second_occurrence, format!("Duplicated field {name}")),
+                ErrorData::from_location(first_occurrence, text.clone()),
+                ErrorData::from_location(second_occurrence, text),
             ]
         }
         InvalidRecordField {
@@ -259,7 +254,7 @@ fn compilation_error_to_data(
             let field_name = fmt_span(field_span);
             vec![ErrorData::from_location(
                 field_span,
-                format!("Field {field_name} not found in record {record_ty}"),
+                format!("Field `{field_name}` not found in record `{record_ty}`"),
             )]
         }
         InvalidRecordFieldAccess {
@@ -270,7 +265,7 @@ fn compilation_error_to_data(
             let field_name = fmt_span(field_span);
             vec![ErrorData::from_location(
                 field_span,
-                format!("Expected record because of .{field_name}, got {record_ty}"),
+                format!("Expected record because of `.{field_name}`, but `{record_ty}` was provided instead"),
             )]
         }
         InvalidVariantName {
@@ -281,7 +276,7 @@ fn compilation_error_to_data(
             let name_text = fmt_span(name);
             vec![ErrorData::from_location(
                 name,
-                format!("Variant name {name_text} does not exist for variant type {ty}, valid names are {}", valids.join(", ")),
+                format!("Variant name `{name_text}` does not exist for variant type `{ty}`, valid names are `{}`", valids.join(", ")),
             )]
         }
         InvalidVariantType { name, ty } => {
@@ -289,7 +284,7 @@ fn compilation_error_to_data(
             vec![ErrorData::from_location(
                 name,
                 format!(
-                    "Type {ty} is not a variant, but variant constructor {name_text} requires it"
+                    "Type `{ty}` is not a variant, but variant constructor `{name_text}` requires it"
                 ),
             )]
         }
@@ -313,9 +308,9 @@ fn compilation_error_to_data(
             };
             let what = match what {
                 WhatIsNotAProductType::EnumVariant(tag) => {
-                    format!("Variant \"{tag}\" of {type_def}")
+                    format!("Variant `{tag}` of `{type_def}`")
                 }
-                WhatIsNotAProductType::Struct => format!("{type_def}"),
+                WhatIsNotAProductType::Struct => format!("`{type_def}`"),
             };
             vec![ErrorData::from_location(
                 instantiation_span,
@@ -330,7 +325,7 @@ fn compilation_error_to_data(
             let field_name = fmt_span(field_span);
             vec![ErrorData::from_location(
                 field_span,
-                format!("Field \"{}\" does not exists in {}", field_name, type_def),
+                format!("Field `{field_name}` does not exists in `{type_def}`"),
             )]
         }
         MissingStructField {
@@ -340,7 +335,7 @@ fn compilation_error_to_data(
         } => {
             vec![ErrorData::from_location(
                 instantiation_span,
-                format!("Field \"{}\" from {} is missing here", field_name, type_def),
+                format!("Field `{field_name}` from `{type_def}` is missing here"),
             )]
         }
         InconsistentADT {
@@ -373,11 +368,11 @@ fn compilation_error_to_data(
             vec![
                 ErrorData::from_location(
                     a_span,
-                    format!("Pattern expects {a_name}, but got {b_name}"),
+                    format!("Pattern expects a {a_name}, but {b_name} was provided instead"),
                 ),
                 ErrorData::from_location(
                     b_span,
-                    format!("Pattern expects {b_name}, but got {a_name}"),
+                    format!("Pattern expects a {b_name}, but {a_name} was provided instead"),
                 ),
             ]
         }
@@ -387,7 +382,7 @@ fn compilation_error_to_data(
             ..
         } => {
             let name = fmt_span(first_occurrence);
-            let text = format!("Duplicated variant {name}");
+            let text = format!("Duplicated variant `{name}`");
             vec![
                 ErrorData::from_location(first_occurrence, text.clone()),
                 ErrorData::from_location(second_occurrence, text),
@@ -401,7 +396,7 @@ fn compilation_error_to_data(
             vec![ErrorData::from_location(
                 fn_span,
                 format!(
-                    "Implementation of trait {trait_name} over types {} not found",
+                    "Implementation of trait `{trait_name}` over types `{}` not found",
                     input_tys.join(", ")
                 ),
             )]
@@ -410,7 +405,7 @@ fn compilation_error_to_data(
             vec![ErrorData::from_location(
                 fn_span,
                 format!(
-                    "Method {} is not part of trait {}",
+                    "Method `{}` is not part of trait `{}`",
                     fmt_span(fn_span),
                     trait_ref.name
                 ),
@@ -424,7 +419,7 @@ fn compilation_error_to_data(
             vec![ErrorData::from_location(
                 impl_span,
                 format!(
-                    "Implementation of trait {} is missing methods: {}",
+                    "Implementation of trait `{}` is missing methods: `{}`",
                     trait_ref.name,
                     missings.iter().map(|m| m.as_ref()).join(", "),
                 ),
@@ -441,7 +436,7 @@ fn compilation_error_to_data(
             vec![ErrorData::from_location(
                 args_span,
                 format!(
-                    "Method {} of trait {} expects {} arguments, got {}",
+                    "Method `{}` of trait `{}` expects {} arguments, got {}",
                     method_name, trait_ref.name, expected, got
                 ),
             )]
@@ -452,7 +447,7 @@ fn compilation_error_to_data(
             ..
         } => {
             let name_text = fmt_span(first_occurrence);
-            let text = format!("Identifier {name_text} bound more than once in a pattern");
+            let text = format!("Identifier `{name_text}` bound more than once in a pattern");
             vec![
                 ErrorData::from_location(first_occurrence, text.clone()),
                 ErrorData::from_location(second_occurrence, text),
@@ -464,7 +459,7 @@ fn compilation_error_to_data(
             ..
         } => {
             let name_text = fmt_span(first_occurrence);
-            let text = format!("Duplicated literal pattern {name_text}");
+            let text = format!("Duplicated literal pattern `{name_text}`");
             vec![
                 ErrorData::from_location(first_occurrence, text.clone()),
                 ErrorData::from_location(second_occurrence, text),
@@ -478,14 +473,14 @@ fn compilation_error_to_data(
             vec![ErrorData::from_location(
                 span,
                 format!(
-                    "Non-exhaustive patterns for type {ty}, all possible values must be covered"
+                    "Non-exhaustive patterns for type `{ty}`, all possible values must be covered"
                 ),
             )]
         }
         TypeValuesCannotBeEnumerated { span, ty } => {
             vec![ErrorData::from_location(
                 span,
-                format!("Values of type {ty} cannot be enumerated, but all possible values must be known for exhaustive match coverage analysis"),
+                format!("Values of type `{ty}` cannot be enumerated, but all possible values must be known for exhaustive match coverage analysis"),
             )]
         }
         MutablePathsOverlap {
@@ -497,9 +492,9 @@ fn compilation_error_to_data(
             let b_name = fmt_span(b_span);
             let fn_name = fmt_span(fn_span);
             vec![
-                ErrorData::from_location(a_span, format!("Mutable path {a_name} (here) overlaps with {b_name} when calling function {fn_name}")),
-                ErrorData::from_location(b_span, format!("Mutable path {a_name} overlaps with {b_name} (here) when calling function {fn_name}")),
-                ErrorData::from_location(fn_span, format!("When calling function {fn_name}: mutable path {a_name} overlaps with {b_name}")),
+                ErrorData::from_location(a_span, format!("Mutable path `{a_name}` (here) overlaps with `{b_name}` when calling function `{fn_name}`")),
+                ErrorData::from_location(b_span, format!("Mutable path `{a_name}` overlaps with `{b_name}` (here) when calling function `{fn_name}`")),
+                ErrorData::from_location(fn_span, format!("When calling function `{fn_name}`: mutable path `{a_name}` overlaps with `{b_name}`")),
             ]
         }
         UndefinedVarInStringFormatting {
@@ -510,7 +505,9 @@ fn compilation_error_to_data(
             let string_text = fmt_span(string_span);
             vec![ErrorData::from_location(
                 var_span,
-                format!("Undefined variable {var_text} used in string formatting: {string_text}"),
+                format!(
+                    "Undefined variable `{var_text}` used in string formatting: `{string_text}`"
+                ),
             )]
         }
         InvalidEffectDependency {
@@ -521,7 +518,7 @@ fn compilation_error_to_data(
         } => {
             vec![ErrorData::from_location(
                 source_span,
-                format!("Effect {source} cannot depend on {target}"),
+                format!("Effect `{source}` cannot depend on `{target}`"),
             )]
         }
         UnknownProperty {
@@ -532,7 +529,7 @@ fn compilation_error_to_data(
         } => {
             vec![ErrorData::from_location(
                 span,
-                format!("Unknown property {scope}.{variable}"),
+                format!("Unknown property `{scope}.{variable}`"),
             )]
         }
         Unsupported { span, reason } => vec![ErrorData::from_location(span, reason.to_string())],

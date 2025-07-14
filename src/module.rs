@@ -88,35 +88,35 @@ pub type Uses = Vec<Use>;
 /// A module is a collection of traits, functions, type aliases and use statements.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
+    pub uses: Uses,
+    pub type_aliases: TypeAliases,
+    pub type_defs: TypeDefMap,
     pub traits: Traits,
     pub impls: TraitImpls,
     pub functions: FunctionsMap,
-    pub type_aliases: TypeAliases,
-    pub type_defs: TypeDefMap,
-    pub uses: Uses,
     pub source: Option<String>,
 }
 
 impl Module {
     /// Extend this module with other, consuming it.
     pub fn extend(&mut self, other: Self) {
+        self.uses.extend(other.uses);
+        self.type_aliases.extend(other.type_aliases);
+        self.type_defs.extend(other.type_defs);
         self.traits.extend(other.traits);
         self.impls.concrete.extend(other.impls.concrete);
         self.impls.blanket.extend(other.impls.blanket);
         self.functions.extend(other.functions);
-        self.type_aliases.extend(other.type_aliases);
-        self.type_defs.extend(other.type_defs);
-        self.uses.extend(other.uses);
     }
 
     /// Return whether this module has no compiled content.
     pub fn is_empty(&self) -> bool {
-        self.traits.is_empty()
-            && self.impls.is_empty()
-            && self.functions.is_empty()
+        self.uses.is_empty()
             && self.type_aliases.is_empty()
             && self.type_defs.is_empty()
-            && self.uses.is_empty()
+            && self.traits.is_empty()
+            && self.impls.is_empty()
+            && self.functions.is_empty()
     }
 
     /// Return the type for the source pos, if any.
@@ -290,7 +290,7 @@ impl TypeDefLookupResult {
 
 pub type Modules = HashMap<Ustr, Rc<Module>>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ModuleEnv<'m> {
     pub(crate) current: &'m Module,
     pub(crate) others: &'m Modules,
@@ -301,7 +301,7 @@ impl<'m> ModuleEnv<'m> {
         Self { current, others }
     }
 
-    pub fn type_alias(&self, ty: Type) -> Option<String> {
+    pub fn type_alias_name(&self, ty: Type) -> Option<String> {
         self.current.type_aliases.get_name(ty).map_or_else(
             || {
                 self.others.iter().find_map(|(mod_name, module)| {
@@ -341,14 +341,22 @@ impl<'m> ModuleEnv<'m> {
             )
     }
 
-    pub fn type_def(&self, path: &str) -> Option<TypeDefLookupResult> {
-        let path = path.split("::").collect::<Vec<_>>();
+    pub fn type_alias_type(&self, path: &str) -> Option<Type> {
+        self.get_module_member(path, &|name, module| {
+            module.type_aliases.get_type(&ustr(name))
+        })
+        .map(|(_, ty)| ty)
+    }
+
+    pub fn type_def_for_construction(&self, joined_path: &str) -> Option<TypeDefLookupResult> {
+        let path = joined_path.split("::").collect::<Vec<_>>();
         // First search for a matching enum
         let len = path.len();
         if len >= 2 {
-            let enum_name = path[len - 2];
+            // FIXME: this is inefficient, we should keep the split path all the way from parsing
+            let enum_path = path[0..=len - 2].join("::");
             let variant_name = path[len - 1];
-            if let Some((_, ty_def)) = self.get_module_member(enum_name, &|name, module| {
+            if let Some((_, ty_def)) = self.get_module_member(&enum_path, &|name, module| {
                 module.type_defs.get(&ustr(name)).cloned()
             }) {
                 if ty_def.is_enum() {
@@ -365,8 +373,7 @@ impl<'m> ModuleEnv<'m> {
         }
         // Not found, search for a matching struct
         if len >= 1 {
-            let name = path[len - 1];
-            if let Some((_, ty_def)) = self.get_module_member(name, &|name, module| {
+            if let Some((_, ty_def)) = self.get_module_member(joined_path, &|name, module| {
                 module.type_defs.get(&ustr(name)).cloned()
             }) {
                 if ty_def.is_struct_like() {
@@ -376,6 +383,13 @@ impl<'m> ModuleEnv<'m> {
         }
 
         None
+    }
+
+    pub fn type_def_type(&self, path: &str) -> Option<Type> {
+        self.get_module_member(path, &|name, module| {
+            module.type_defs.get(&ustr(name)).cloned()
+        })
+        .map(|(_, ty_def)| ty_def.as_type())
     }
 
     pub fn function_name(&self, func: &FunctionRc) -> Option<String> {

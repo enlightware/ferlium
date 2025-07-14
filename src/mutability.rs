@@ -77,6 +77,10 @@ impl Display for MutVar {
 
 pub type MutVarKey = MutVar;
 
+pub trait FormatInFnArg {
+    fn format_in_fn_arg(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+}
+
 /// A mutability type, can be a variable or a resolved value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EnumAsInner)]
 pub enum MutType {
@@ -106,11 +110,14 @@ impl MutType {
             MutType::Resolved(val) => val.is_mutable(),
         }
     }
+}
 
-    pub fn format_in_fn_arg(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl FormatInFnArg for MutType {
+    fn format_in_fn_arg(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use MutType::*;
         match self {
-            MutType::Variable(var) => write!(f, "&mut?:{var} "),
-            MutType::Resolved(val) => {
+            Variable(var) => write!(f, "&{var} "),
+            Resolved(val) => {
                 if val.is_mutable() {
                     write!(f, "&mut ")
                 } else {

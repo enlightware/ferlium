@@ -31,7 +31,10 @@ use crate::{
     mutability::MutType,
     r#trait::TraitRef,
     r#type::{FnArgType, FnType, Type, TypeDefRef, TypeSubstitution, TypeVar},
-    std::math::{float_type, int_type, NUM_TRAIT},
+    std::{
+        math::{float_type, int_type, NUM_TRAIT},
+        StdModuleEnv,
+    },
     trait_solver::TraitImpls,
     type_inference::{FreshVariableTypeMapper, TypeInference},
     type_like::{instantiate_types, TypeLike},
@@ -68,7 +71,7 @@ pub fn emit_module(
     validate_name_uniqueness(&source)?;
 
     // First desugar the module.
-    let (source, sorted_sccs) = source.desugar()?;
+    let (source, sorted_sccs) = source.desugar(others, merge_with)?;
 
     // Prepare target module and list of all available trait implementations.
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
@@ -76,7 +79,7 @@ pub fn emit_module(
 
     // Add types aliases and definitions to output module
     for ((name, _), ty) in source.type_aliases {
-        output.type_aliases.set_with_ustr(name, ty);
+        output.type_aliases.set_with_ustr(name, ty.0);
     }
     for type_def in source.type_defs {
         assert!(type_def.generic_params.is_empty());
@@ -294,9 +297,12 @@ where
         let args_ty = args
             .iter()
             .map(|arg| {
-                if let Some((mut_ty, ty, _)) = arg.1 {
+                if let Some((mut_ty, ty, _)) = &arg.ty {
                     let mut mapper = FreshVariableTypeMapper::new(&mut ty_inf);
-                    let mut_ty = mapper.map_mut_type(mut_ty);
+                    let mut_ty = match mut_ty {
+                        Some(mut_ty) => mapper.map_mut_type(*mut_ty),
+                        None => MutType::constant(),
+                    };
                     let ty = ty.map(&mut mapper);
                     FnArgType::new(ty, mut_ty)
                 } else {
@@ -342,19 +348,14 @@ where
             name: name.1,
             args: args
                 .iter()
-                .map(|((_, span), ty)| {
-                    (
-                        *span,
-                        ty.map(|ty| (ty.2, !ty.0.is_variable() && ty.1.is_constant())),
-                    )
-                })
+                .map(DModuleFunctionArg::locations_and_ty_concreteness)
                 .collect(),
             args_span: *args_span,
             ret_ty: ret_ty.map(|ret_ty| (ret_ty.1, ret_ty.0.is_constant())),
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
-        let arg_names = args.iter().map(|arg| arg.0 .0).collect();
+        let arg_names = args.iter().map(|arg| arg.name.0).collect();
         let descr = module::ModuleFunction {
             definition: FunctionDefinition::new(ty_scheme, arg_names, doc.clone()),
             code: Rc::new(RefCell::new(dummy_code)),
@@ -368,7 +369,7 @@ where
         let name = function.name.0;
         let descr = output.functions.get(&name).unwrap();
         let module_env = ModuleEnv::new(output, others);
-        let arg_names: Vec<_> = function.args.iter().map(|arg| arg.0).collect();
+        let arg_names: Vec<_> = function.args.iter().map(|arg| arg.name).collect();
         let mut ty_env = TypingEnv::new(
             descr.definition.ty_scheme.ty.as_locals_no_bound(&arg_names),
             module_env,
@@ -690,7 +691,7 @@ pub fn emit_expr_unsafe(
     let mut trait_impls = module_env.collect_trait_impls();
 
     // First desugar the expression.
-    let source = source.desugar_with_empty_ctx()?;
+    let source = source.desugar_with_empty_ctx(&module_env)?;
 
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
@@ -830,17 +831,17 @@ fn select_constraints_any_of_these_ty_vars(
 }
 
 /// Filter constraints that contain only type variables listed in the ty_vars
-fn select_constraints_only_these_ty_vars<'c>(
-    constraints: &'c [PubTypeConstraint],
-    ty_vars: &[TypeVar],
-) -> Vec<&'c PubTypeConstraint> {
-    constraints
-        .iter()
-        .filter(|constraint| {
-            constraint.is_have_trait() || constraint.contains_only_ty_vars(ty_vars)
-        })
-        .collect()
-}
+// fn select_constraints_only_these_ty_vars<'c>(
+//     constraints: &'c [PubTypeConstraint],
+//     ty_vars: &[TypeVar],
+// ) -> Vec<&'c PubTypeConstraint> {
+//     constraints
+//         .iter()
+//         .filter(|constraint| {
+//             constraint.is_have_trait() || constraint.contains_only_ty_vars(ty_vars)
+//         })
+//         .collect()
+// }
 
 /// Return the constraints that are transitively accessible from the ty_vars
 fn select_constraints_accessible_from<'c: 'r, 'r, C, T>(
@@ -1007,7 +1008,7 @@ fn validate_and_cleanup_constraints(
             &mut other_orphans,
             &mut subst,
             trait_impls,
-        );
+        )?;
         if !other_orphans.is_empty() {
             return Err(internal_compilation_error!(Internal(format!(
                 "Orphan constraints found: {other_orphans:?}"
@@ -1041,7 +1042,7 @@ fn validate_and_cleanup_constraints(
             &mut retained_constraints,
             &mut constraint_subst,
             trait_impls,
-        );
+        )?;
     }
 
     // Simplify quantifiers with substitution
@@ -1073,7 +1074,7 @@ fn validate_and_simplify_trait_imp_constraints(
         &mut other_orphans,
         &mut subst,
         trait_impls,
-    );
+    )?;
     if !other_orphans.is_empty() {
         return Err(internal_compilation_error!(Internal(format!(
             "Orphan constraints found: {other_orphans:?}"
@@ -1098,7 +1099,7 @@ fn compute_num_trait_default_types(
     selected_constraints: &mut HashSet<PubTypeConstraintPtr>,
     subst: &mut TypeSubstitution,
     trait_impls: &TraitImpls,
-) {
+) -> Result<(), InternalCompilationError> {
     // In debug, check that all_constraints contains all selected_constraints.
     #[cfg(debug_assertions)]
     {
@@ -1196,14 +1197,28 @@ fn compute_num_trait_default_types(
     for (ty_var, default_ty_index) in defaulted_ty_vars {
         let default_ty = default_tys.get(default_ty_index);
         if let Some(default_ty) = default_ty {
-            subst
-                .entry(ty_var)
-                .and_modify(|prev_ty| {
-                    panic!("Type variable {ty_var} already exists in type substitution with type {prev_ty:?}, trying to use type {default_ty:?} instead")
-                })
-                .or_insert(*default_ty);
+            let entry = subst.entry(ty_var);
+            use std::collections::hash_map::Entry;
+            match entry {
+                Entry::Occupied(entry) => {
+                    // FIXME: This is due lack of unification when doing this part, in a way that is a similar bug to
+                    // https://github.com/enlightware/ferlium/issues/59, a proper fix would likely solve both.
+                    let env = StdModuleEnv::new();
+                    let env = env.get();
+                    return Err(internal_compilation_error!(Internal(format!(
+                        "Type variable {ty_var} already exists in type substitution with type `{}`, but trying to use type `{}` instead",
+                        entry.get().format_with(&env),
+                        default_ty.format_with(&env)
+                    ))));
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(*default_ty);
+                }
+            }
         }
     }
+
+    Ok(())
 }
 
 fn log_dropped_constraints_expr(

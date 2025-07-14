@@ -8,7 +8,7 @@
 //
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
-use std::fmt::{Debug, Display};
+use std::fmt::{self, Debug, Display};
 
 use ustr::Ustr;
 
@@ -16,10 +16,11 @@ use crate::{
     containers::{b, B},
     error::LocatedError,
     format::write_with_separator,
-    module::FmtWithModuleEnv,
-    mutability::{MutType, MutVal},
+    module::{FmtWithModuleEnv, ModuleEnv},
+    mutability::{FormatInFnArg, MutType as IrMutType, MutVal},
     never::Never,
-    r#type::Type,
+    r#type::Type as IrType,
+    type_like::TypeLike,
     value::{LiteralValue, Value},
     Location,
 };
@@ -28,33 +29,208 @@ use crate::{
 pub type UstrSpan = (Ustr, Location);
 
 /// A spanned Type
-pub type TypeSpan = (Type, Location);
+pub type TypeSpan<P> = (<P as Phase>::Type, Location);
+
+/// A spanned Type during parsing
+pub type PTypeSpan = TypeSpan<Parsed>;
 
 /// A spanned (MutType, Type)
-pub type MutTypeTypeSpan = (MutType, Type, Location);
+pub type MutTypeTypeSpan<P> = (Option<<P as Phase>::MutType>, <P as Phase>::Type, Location);
+
+/// A spanned (MutType, Type) during parsing
+pub type PMutTypeTypeSpan = MutTypeTypeSpan<Parsed>;
 
 /// A phase in the AST processing pipeline
 pub trait Phase: Sized {
     type FormattedString: Debug + Clone + Display;
     type ForLoop: Debug + Clone + FormatWithIndent + VisitExpr<Self>;
+    type Type: Debug + Clone + FmtWithModuleEnv;
+    type MutType: Debug + Clone + FormatInFnArg;
+    type LetTyAscriptionComplete: Debug + Clone;
 }
 
 /// The AST after parsing
 #[derive(Default, Clone, Debug)]
 pub struct Parsed;
 
-/// The AST after desugaring
+/// The AST after type name resolution and desugaring
 #[derive(Default, Clone, Debug)]
 pub struct Desugared;
 
+/// The state of the AST just after parsing, before any transformations
 impl Phase for Parsed {
     type FormattedString = String;
     type ForLoop = ForLoop;
+    type Type = PType;
+    type MutType = PMutType;
+    type LetTyAscriptionComplete = ();
 }
 
+/// The state of the AST after type name resolution and desugaring, ready for type inference
 impl Phase for Desugared {
     type FormattedString = Never;
     type ForLoop = Never;
+    type Type = IrType;
+    type MutType = IrMutType;
+    type LetTyAscriptionComplete = bool;
+}
+
+/// Types
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PMutType {
+    Mut,
+    Infer,
+}
+impl Display for PMutType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PMutType::Mut => write!(f, "mut"),
+            PMutType::Infer => write!(f, "?"),
+        }
+    }
+}
+impl FormatInFnArg for PMutType {
+    fn format_in_fn_arg(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "&{self} ")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PFnArgType {
+    pub ty: TypeSpan<Parsed>,
+    // TODO: currently we do not support generic mutability in type annotations
+    pub mut_ty: Option<PMutType>,
+    pub span: Location,
+}
+impl PFnArgType {
+    pub fn new(ty: TypeSpan<Parsed>, mut_ty: Option<PMutType>, span: Location) -> Self {
+        Self { ty, mut_ty, span }
+    }
+}
+
+impl FmtWithModuleEnv for PFnArgType {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        if let Some(mut_ty) = &self.mut_ty {
+            write!(f, "&{mut_ty} ")?;
+        }
+        self.ty.0.fmt_with_module_env(f, env)
+    }
+}
+
+/// The type of a function
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PFnType {
+    pub args: Vec<PFnArgType>,
+    pub ret: TypeSpan<Parsed>,
+    pub effects: bool, // true if this function should have generic effects
+}
+impl PFnType {
+    pub fn new(args: Vec<PFnArgType>, ret: TypeSpan<Parsed>, effects: bool) -> Self {
+        Self { args, ret, effects }
+    }
+}
+
+impl FmtWithModuleEnv for PFnType {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        write!(f, "(")?;
+        for (i, arg) in self.args.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            arg.fmt_with_module_env(f, env)?;
+        }
+        write!(f, ") -> ")?;
+        self.ret.0.fmt_with_module_env(f, env)
+    }
+}
+
+/// AST-level type representation before resolution
+#[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
+pub enum PType {
+    /// A never type, i.e., a type that cannot have any values
+    Never,
+    /// A unit type, i.e., `()`
+    Unit,
+    /// A known, resolved type
+    Resolved(IrType),
+    /// A type that must be inferred (`_`)
+    Infer,
+    /// A path to a type
+    Path(Vec<UstrSpan>),
+    /// Tagged union sum type
+    Variant(Vec<(UstrSpan, TypeSpan<Parsed>)>),
+    /// Position-based product type
+    Tuple(Vec<TypeSpan<Parsed>>),
+    /// Named product type
+    Record(Vec<(UstrSpan, TypeSpan<Parsed>)>),
+    /// An array type
+    Array(Box<TypeSpan<Parsed>>),
+    /// Function type (args -> return)
+    Function(B<PFnType>),
+    // TODO: currently we do not support explicit generic types in the AST
+}
+impl PType {
+    pub fn function_type(fn_type: PFnType) -> Self {
+        PType::Function(b(fn_type))
+    }
+}
+
+impl FmtWithModuleEnv for PType {
+    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        use PType::*;
+        match self {
+            Never => write!(f, "never"),
+            Unit => write!(f, "()"),
+            Resolved(ty) => ty.fmt_with_module_env(f, env),
+            Infer => write!(f, "_"),
+            Path(items) => write!(f, "{}", items.iter().map(|(s, _)| s).join("::")),
+            Variant(types) => {
+                for (i, ((name, _), (ty, _))) in types.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    if *ty == Unit {
+                        write!(f, "{name}")?;
+                    } else {
+                        write!(f, "{name} ")?;
+                        ty.fmt_with_module_env(f, env)?;
+                    }
+                }
+                Ok(())
+            }
+            Tuple(elements) => {
+                write!(f, "(")?;
+                for (i, (ty, _)) in elements.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    ty.fmt_with_module_env(f, env)?;
+                    if elements.len() == 1 {
+                        write!(f, ",")?;
+                    }
+                }
+                write!(f, ")")
+            }
+            Record(fields) => {
+                write!(f, "{{ ")?;
+                for (i, ((name, _), (ty, _))) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{name}: ")?;
+                    ty.fmt_with_module_env(f, env)?;
+                }
+                write!(f, " }}")
+            }
+            Array(inner) => {
+                write!(f, "[")?;
+                inner.0.fmt_with_module_env(f, env)?;
+                write!(f, "]")
+            }
+            Function(fn_type) => fn_type.fmt_with_module_env(f, env),
+        }
+    }
 }
 
 /// Trait for formatting with a module environment
@@ -133,14 +309,35 @@ impl VisitExpr<Parsed> for ForLoop {
     }
 }
 
-pub type ModuleFunctionArg = (UstrSpan, Option<MutTypeTypeSpan>);
+#[derive(Debug, Clone)]
+pub struct ModuleFunctionArg<P: Phase> {
+    pub name: UstrSpan,
+    pub ty: Option<MutTypeTypeSpan<P>>,
+}
+
+pub type PModuleFunctionArg = ModuleFunctionArg<Parsed>;
+
+pub type DModuleFunctionArg = ModuleFunctionArg<Desugared>;
+
+impl DModuleFunctionArg {
+    pub fn locations_and_ty_concreteness(&self) -> (Location, Option<(Location, bool)>) {
+        (
+            self.name.1,
+            self.ty.map(|(mut_ty, ty, span)| {
+                let mut_concrete = mut_ty.map_or(true, |m| !m.is_variable());
+                let ty_concrete = ty.is_constant();
+                (span, mut_concrete && ty_concrete)
+            }),
+        )
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ModuleFunction<P: Phase> {
     pub name: UstrSpan,
-    pub args: Vec<ModuleFunctionArg>,
+    pub args: Vec<ModuleFunctionArg<P>>,
     pub args_span: Location,
-    pub ret_ty: Option<TypeSpan>,
+    pub ret_ty: Option<TypeSpan<P>>,
     pub body: B<Expr<P>>,
     pub span: Location,
     pub doc: Option<String>,
@@ -148,9 +345,9 @@ pub struct ModuleFunction<P: Phase> {
 impl<P: Phase> ModuleFunction<P> {
     pub fn new(
         name: UstrSpan,
-        args: Vec<ModuleFunctionArg>,
+        args: Vec<ModuleFunctionArg<P>>,
         args_span: Location,
-        ret_ty: Option<TypeSpan>,
+        ret_ty: Option<TypeSpan<P>>,
         body: Expr<P>,
         span: Location,
         doc: Option<String>,
@@ -188,13 +385,12 @@ pub type PTraitImpl = TraitImpl<Parsed>;
 pub type DTraitImpl = TraitImpl<Desugared>;
 
 // A module is a collection of functions and types, and is the top-level structure of the AST
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Module<P: Phase> {
     pub functions: Vec<ModuleFunction<P>>,
     pub impls: Vec<TraitImpl<P>>,
-    pub type_aliases: Vec<(UstrSpan, Type)>,
-    // TODO: use type definition intermediate representation
-    pub type_defs: Vec<TypeDef>,
+    pub type_aliases: Vec<(UstrSpan, TypeSpan<P>)>,
+    pub type_defs: Vec<TypeDef<P>>,
 }
 impl<P: Phase> Module<P> {
     pub fn extend(&mut self, other: Self) {
@@ -224,8 +420,19 @@ impl<P: Phase> Module<P> {
         self.functions
             .iter()
             .map(|f| f.name)
-            .chain(self.type_aliases.iter().map(|(name, _)| name.clone()))
+            .chain(self.type_aliases.iter().map(|(name, _)| *name))
             .chain(self.type_defs.iter().map(|def| def.name))
+    }
+}
+
+impl<P: Phase> Default for Module<P> {
+    fn default() -> Self {
+        Self {
+            functions: Vec::new(),
+            impls: Vec::new(),
+            type_aliases: Vec::new(),
+            type_defs: Vec::new(),
+        }
     }
 }
 
@@ -251,7 +458,7 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
         if !self.type_aliases.is_empty() {
             writeln!(f, "Types:")?;
             for (name, ty) in self.type_aliases.iter() {
-                writeln!(f, "  {}: {}", name.0, ty.format_with(env))?;
+                writeln!(f, "  {}: {}", name.0, ty.0.format_with(env))?;
             }
         }
         if !self.impls.is_empty() {
@@ -275,23 +482,22 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
                     if let Some(doc) = doc {
                         writeln!(f, "    /// {doc}")?;
                     }
-                    write!(
-                        f,
-                        "    fn {}({})",
-                        name.0,
-                        args.iter()
-                            .map(|((name, _), ty)| if let Some((mut_ty, ty, _)) = ty {
-                                format!(
-                                    "{}: {}{}",
-                                    name,
-                                    if mut_ty.is_mutable() { "&mut " } else { "" },
-                                    ty.format_with(env)
-                                )
-                            } else {
-                                name.to_string()
-                            })
-                            .join(", ")
-                    )?;
+                    write!(f, "    fn {}(", name.0,)?;
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        if let Some((mut_ty, ty, _)) = &arg.ty {
+                            write!(f, "{}: ", arg.name.0)?;
+                            if let Some(mut_ty) = mut_ty {
+                                mut_ty.format_in_fn_arg(f)?;
+                            }
+                            write!(f, "{}", ty.format_with(env))?;
+                        } else {
+                            write!(f, "{}", arg.name.0)?;
+                        }
+                    }
+                    write!(f, ")")?;
                     if let Some((ret_ty, _)) = ret_ty {
                         write!(f, " → {}", ret_ty.format_with(env))?;
                     }
@@ -315,23 +521,22 @@ impl<P: Phase> FmtWithModuleEnv for Module<P> {
                 if let Some(doc) = doc {
                     writeln!(f, "  /// {doc}")?;
                 }
-                write!(
-                    f,
-                    "  fn {}({})",
-                    name.0,
-                    args.iter()
-                        .map(|((name, _), ty)| if let Some((mut_ty, ty, _)) = ty {
-                            format!(
-                                "{}: {}{}",
-                                name,
-                                if mut_ty.is_mutable() { "&mut " } else { "" },
-                                ty.format_with(env)
-                            )
-                        } else {
-                            name.to_string()
-                        })
-                        .join(", ")
-                )?;
+                write!(f, "    fn {}(", name.0,)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if let Some((mut_ty, ty, _)) = &arg.ty {
+                        write!(f, "{}: ", arg.name.0)?;
+                        if let Some(mut_ty) = mut_ty {
+                            mut_ty.format_in_fn_arg(f)?;
+                        }
+                        write!(f, "{}", ty.format_with(env))?;
+                    } else {
+                        write!(f, "{}", arg.name.0)?;
+                    }
+                }
+                write!(f, ")")?;
                 if let Some((ret_ty, _)) = ret_ty {
                     write!(f, " → {}", ret_ty.format_with(env))?;
                 }
@@ -358,11 +563,16 @@ pub type RecordFields<P> = Vec<RecordField<P>>;
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum ExprKind<P: Phase> {
-    Literal(Value, Type),
+    Literal(Value, IrType),
     FormattedString(P::FormattedString),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Ustr),
-    Let(UstrSpan, MutVal, B<Expr<P>>, Option<(Location, bool)>),
+    Let(
+        UstrSpan,
+        MutVal,
+        B<Expr<P>>,
+        Option<(Location, P::LetTyAscriptionComplete)>,
+    ),
     Abstract(Vec<UstrSpan>, B<Expr<P>>),
     Apply(B<Expr<P>>, Vec<Expr<P>>, bool),
     Block(Vec<Expr<P>>),
@@ -379,7 +589,7 @@ pub enum ExprKind<P: Phase> {
     ForLoop(P::ForLoop),
     Loop(B<Expr<P>>),
     SoftBreak,
-    TypeAscription(B<Expr<P>>, Type, Location),
+    TypeAscription(B<Expr<P>>, P::Type, Location),
     Error,
 }
 
@@ -639,7 +849,7 @@ pub enum PatternVariantKind {
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum PatternKind {
-    Literal(LiteralValue, Type),
+    Literal(LiteralValue, IrType),
     Variant {
         tag: UstrSpan,
         kind: PatternVariantKind,
@@ -748,12 +958,18 @@ impl PropertyAccess {
 
 /// A type definition with common metadata
 #[derive(Debug, Clone)]
-pub struct TypeDef {
+pub struct TypeDef<P: Phase> {
     pub name: UstrSpan,
     pub generic_params: Vec<UstrSpan>,
     // The structural shape of the type (record, tuple, or unit)
-    pub shape: Type,
+    pub shape: P::Type,
     pub span: Location,
     pub doc_comments: Vec<String>,
     // TODO: add constraints for the type arguments
 }
+
+/// A type definition just after parsing
+pub type PTypeDef = TypeDef<Parsed>;
+
+/// A type definition just after desugaring
+pub type DTypeDef = TypeDef<Desugared>;

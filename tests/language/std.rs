@@ -190,7 +190,10 @@ fn array_iterators() {
     );
     assert_eq!(
         run("let a = [1.0, 2.0, 3.0]; let mut it = array_iter(a); (next(it), next(it))"),
-        tuple!(variant_t1("Some", float(1.0)), variant_t1("Some", float(2.0)))
+        tuple!(
+            variant_t1("Some", float(1.0)),
+            variant_t1("Some", float(2.0))
+        )
     );
     assert_eq!(
         run(
@@ -208,7 +211,10 @@ fn array_iterators() {
     );
     assert_eq!(
         run("let a = [1.0, 2.0, 3.0]; let mut it = iter(a); (next(it), next(it))"),
-        tuple!(variant_t1("Some", float(1.0)), variant_t1("Some", float(2.0)))
+        tuple!(
+            variant_t1("Some", float(1.0)),
+            variant_t1("Some", float(2.0))
+        )
     );
     assert_eq!(
         run(r#"let a = ["hello", "world"]; let mut it = iter(a); (next(it), next(it), next(it))"#),

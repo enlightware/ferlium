@@ -76,6 +76,23 @@ impl DuplicatedFieldContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicatedVariantContext {
+    Match,
+    Enum,
+    Variant,
+}
+impl DuplicatedVariantContext {
+    pub fn as_str(&self) -> &'static str {
+        use DuplicatedVariantContext::*;
+        match self {
+            Match => "match",
+            Enum => "enum",
+            Variant => "variant union",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhichProductTypeIsNot {
     Unit,
     Record,
@@ -89,7 +106,7 @@ pub enum InternalWhatIsNotAProductType {
 }
 impl InternalWhatIsNotAProductType {
     pub fn from_tag(tag: Option<Ustr>) -> Self {
-        tag.map_or(Self::Struct, |tag| Self::EnumVariant(tag))
+        tag.map_or(Self::Struct, Self::EnumVariant)
     }
 }
 
@@ -114,16 +131,13 @@ pub enum InternalCompilationErrorImpl {
         first_occurrence: Location,
         second_occurrence: Location,
     },
-    FunctionNotFound(Location),
+    TypeNotFound(Location),
     TraitNotFound(Location),
     WrongNumberOfArguments {
         expected: usize,
         expected_span: Location,
         got: usize,
         got_span: Location,
-    },
-    TypeDefinitionNotFound {
-        span: Location,
     },
     MutabilityMustBe {
         source_span: Location,
@@ -227,7 +241,8 @@ pub enum InternalCompilationErrorImpl {
     DuplicatedVariant {
         first_occurrence: Location,
         second_occurrence: Location,
-        match_span: Location,
+        ctx_span: Location,
+        ctx: DuplicatedVariantContext,
     },
     TraitImplNotFound {
         trait_ref: TraitRef,
@@ -364,16 +379,13 @@ pub enum CompilationErrorImpl {
         first_occurrence: Location,
         second_occurrence: Location,
     },
-    FunctionNotFound(Location),
+    TypeNotFound(Location),
     TraitNotFound(Location),
     WrongNumberOfArguments {
         expected: usize,
         expected_span: Location,
         got: usize,
         got_span: Location,
-    },
-    TypeDefinitionNotFound {
-        span: Location,
     },
     MutabilityMustBe {
         source_span: Location,
@@ -476,7 +488,8 @@ pub enum CompilationErrorImpl {
     DuplicatedVariant {
         first_occurrence: Location,
         second_occurrence: Location,
-        match_span: Location,
+        ctx_span: Location,
+        ctx: DuplicatedVariantContext,
     },
     TraitImplNotFound {
         trait_name: String,
@@ -600,8 +613,11 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
         match self.value.deref() {
             ParsingFailed(errors) => {
                 write!(f, "Parsing failed: ")?;
-                for (msg, span) in errors {
-                    write!(f, "{} in {}, ", msg, fmt_span(span))?;
+                for (i, (msg, span)) in errors.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} in {}", msg, fmt_span(span))?;
                 }
                 Ok(())
             }
@@ -611,14 +627,14 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Name {name} defined multiple times"
+                    "Name `{name}` defined multiple times"
                 )
             }
-            FunctionNotFound(span) => {
-                write!(f, "Function not found: {}", fmt_span(span))
+            TypeNotFound(span) => {
+                write!(f, "Cannot find type `{}` in this scope", fmt_span(span))
             }
             TraitNotFound(span) => {
-                write!(f, "Trait not found: {}", fmt_span(span))
+                write!(f, "Cannot find trait `{}` in this scope", fmt_span(span))
             }
             WrongNumberOfArguments {
                 expected,
@@ -628,18 +644,11 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Wrong number of arguments: expected {} due to {}, got {} due to {}",
+                    "Wrong number of arguments: expected {} due to `{}`, but {} were provided in `{}`",
                     expected,
                     fmt_span(expected_span),
                     got,
                     fmt_span(got_span)
-                )
-            }
-            TypeDefinitionNotFound { span } => {
-                write!(
-                    f,
-                    "Type definition not found: {}",
-                    fmt_span(span)
                 )
             }
             MutabilityMustBe {
@@ -657,7 +666,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                 };
                 write!(
                     f,
-                    "Expression \"{source_name}\" must be {what} \"{reason_name}\""
+                    "Expression `{source_name}` must be {what} `{reason_name}`"
                 )
             }
             TypeMismatch {
@@ -668,7 +677,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                 sub_or_same,
             } => write!(
                 f,
-                "Type \"{}\" in {} is not {} \"{}\" in {}",
+                "Type `{}` in `{}` is not {} `{}` in `{}`",
                 current_ty,
                 fmt_span(current_span),
                 match sub_or_same {
@@ -687,7 +696,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                 expected_decl_location,
             } => write!(
                 f,
-                "Named type \"{}\" in {} (from {}) is different than named type \"{}\" in {} (from {})",
+                "Named type `{}` in `{}` (from `{}`) is different than named type `{}` in `{}` (from `{}`)",
                 current_decl,
                 fmt_span(current_span),
                 fmt_span(current_decl_location),
@@ -698,7 +707,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             InfiniteType(ty_var, ty, span) => {
                 write!(
                     f,
-                    "Infinite type: {} = \"{}\" in {}",
+                    "Infinite type: `{}` = `{}` in `{}`",
                     ty_var,
                     ty,
                     fmt_span(span)
@@ -707,7 +716,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             UnboundTypeVar { ty_var, ty, span } => {
                 write!(
                     f,
-                    "Unbound type variable {} in type {} in {}",
+                    "Unbound type variable `{}` in type `{}` in `{}`",
                     ty_var,
                     ty,
                     fmt_span(span)
@@ -716,7 +725,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             UnresolvedConstraints { constraints, span } => {
                 write!(
                     f,
-                    "Unresolved constraints {} in expression {}",
+                    "Unresolved constraints `{}` in expression `{}`",
                     constraints.join(" ∧ "),
                     fmt_span(span)
                 )
@@ -729,7 +738,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Invalid index {} of a tuple of length {} in {}",
+                    "Invalid index {} of a tuple of length {} in `{}`",
                     index,
                     tuple_length,
                     fmt_span(tuple_span)
@@ -740,7 +749,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Expected tuple, got \"{}\" in {}",
+                    "Expected tuple, got `{}` in `{}`",
                     expr_ty,
                     fmt_span(expr_span)
                 )
@@ -753,7 +762,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Duplicated field {} in {} {}",
+                    "Duplicated field `{}` in {} `{}`",
                     fmt_span(first_occurrence),
                     ctx.as_str(),
                     fmt_span(constructor_span)
@@ -766,7 +775,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Field {} not found in record {} of type {}",
+                    "Field `{}` not found in record `{}` of type `{}`",
                     fmt_span(field_span),
                     fmt_span(record_span),
                     record_ty,
@@ -779,7 +788,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Expected record due to {}, got \"{}\" in {}",
+                    "Expected record due to `{}`, got `{}` in `{}`",
                     fmt_span(field_span),
                     record_ty,
                     fmt_span(record_span)
@@ -788,7 +797,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             InvalidVariantName { name, ty, valid: valids } => {
                 write!(
                     f,
-                    "Variant name {} does not exist for variant type {}, valid names are {}",
+                    "Variant name `{}` does not exist for variant type `{}`, valid names are `{}`",
                     fmt_span(name),
                     ty,
                     valids.join(", ")
@@ -797,7 +806,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             InvalidVariantType { name, ty } => {
                 write!(
                     f,
-                    "Type {} is not a variant, but variant constructor {} requires it",
+                    "Type `{}` is not a variant, but variant constructor `{}` requires it",
                     ty,
                     fmt_span(name)
                 )
@@ -805,7 +814,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             InvalidVariantConstructor { span } => {
                 write!(
                     f,
-                    "Variant constructor cannot be paths, but {} is",
+                    "Variant constructor cannot be paths, but `{}` is",
                     fmt_span(span)
                 )
             }
@@ -823,13 +832,13 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
                 };
                 let what = match what {
                     WhatIsNotAProductType::EnumVariant(tag) => {
-                        format!("Variant \"{tag}\" of {type_def}")
+                        format!("Variant `{tag}` of `{type_def}`")
                     }
-                    WhatIsNotAProductType::Struct => format!("{type_def}"),
+                    WhatIsNotAProductType::Struct => format!("`{type_def}`"),
                 };
                 write!(
                     f,
-                    "{} requires {} {}",
+                    "{} requires {} `{}`",
                     what,
                     which,
                     fmt_span(instantiation_span)
@@ -843,7 +852,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Field \"{}\" does not exists in {}, but is present in {}",
+                    "Field `{}` does not exists in `{}`, but is present in `{}`",
                     field_name,
                     type_def,
                     fmt_span(instantiation_span)
@@ -856,7 +865,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Field \"{}\" from {} is missing in {}",
+                    "Field `{}` from `{}` is missing in `{}`",
                     field_name,
                     type_def,
                     fmt_span(instantiation_span)
@@ -870,7 +879,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Inconsistent data types: {} due to .{} is incompatible with {} due to .{}",
+                    "Inconsistent data types: {} due to `{}` is incompatible with {} due to `{}`",
                     a_type.adt_kind(),
                     fmt_span(a_span),
                     b_type.adt_kind(),
@@ -885,7 +894,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Inconsistent pattern types: {} due to {} is incompatible with {} due to {}",
+                    "Inconsistent pattern types: {} due to `{}` is incompatible with {} due to `{}`",
                     a_type.name(),
                     fmt_span(a_span),
                     b_type.name(),
@@ -894,14 +903,16 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             }
             DuplicatedVariant {
                 first_occurrence,
-                match_span,
+                ctx_span,
+                ctx,
                 ..
             } => {
                 write!(
                     f,
-                    "Duplicated variant {} in match {}",
+                    "Duplicated variant `{}` in {} `{}`",
                     fmt_span(first_occurrence),
-                    fmt_span(match_span)
+                    ctx.as_str(),
+                    fmt_span(ctx_span)
                 )
             }
             TraitImplNotFound {
@@ -911,7 +922,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Implementation of trait {} over types {} not found (when calling {})",
+                    "Implementation of trait `{}` over types `{}` not found (when calling `{}`)",
                     trait_name,
                     input_tys.join(", "),
                     fmt_span(fn_span)
@@ -920,7 +931,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             MethodNotPartOfTrait { trait_ref, fn_span } => {
                 write!(
                     f,
-                    "Method {} is not part of trait {}",
+                    "Method `{}` is not part of trait `{}`",
                     fmt_span(fn_span),
                     trait_ref.name
                 )
@@ -932,7 +943,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Implementation of trait {} is missing methods {} in {}",
+                    "Implementation of trait `{}` is missing methods `{}` in `{}`",
                     trait_ref.name,
                     missings.iter().join(", "),
                     fmt_span(impl_span)
@@ -947,7 +958,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Method {} of trait {} expects {} arguments, got {} in {}",
+                    "Method `{}` of trait `{}` expects {} arguments, but {} are provided in `{}`",
                     trait_ref.functions[*index].0,
                     trait_ref.name,
                     expected,
@@ -962,7 +973,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Identifier {} bound more than once in a pattern: {}",
+                    "Identifier `{}` bound more than once in a pattern: `{}`",
                     fmt_span(first_occurrence),
                     fmt_span(pattern_span)
                 )
@@ -974,25 +985,25 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Duplicated literal pattern {} in match {}",
+                    "Duplicated literal pattern `{}` in match `{}`",
                     fmt_span(first_occurrence),
                     fmt_span(match_span)
                 )
             }
             EmptyMatchBody { span } => {
-                write!(f, "Match body cannot be empty in {}", fmt_span(span))
+                write!(f, "Match body cannot be empty in `{}`", fmt_span(span))
             }
             NonExhaustivePattern { span, ty } => {
                 write!(
                     f,
-                    "Non-exhaustive patterns for type {}, all possible values must be covered in {}",
+                    "Non-exhaustive patterns for type `{}`, all possible values must be covered in `{}`",
                     ty, fmt_span(span)
                 )
             }
             TypeValuesCannotBeEnumerated { span, ty } => {
                 write!(
                     f,
-                    "Values of type {} cannot be enumerated in {}, but all possible values must be known for exhaustive match coverage analysis",
+                    "Values of type `{}` cannot be enumerated in `{}`, but all possible values must be known for exhaustive match coverage analysis",
                     ty,
                     fmt_span(span)
                 )
@@ -1004,7 +1015,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Mutable paths overlap: {} and {} when calling {}",
+                    "Mutable paths overlap: `{}` and `{}` when calling `{}`",
                     fmt_span(a_span),
                     fmt_span(b_span),
                     fmt_span(fn_span),
@@ -1016,7 +1027,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Undefined variable {} used in string formatting {}",
+                    "Undefined variable `{}` used in string formatting `{}`",
                     fmt_span(var_span),
                     fmt_span(string_span),
                 )
@@ -1029,7 +1040,7 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Invalid effect dependency: {} due to {} is incompatible with {} due to {}",
+                    "Invalid effect dependency: `{}` due to `{}` is incompatible with `{}` due to `{}`",
                     source,
                     fmt_span(source_span),
                     target,
@@ -1044,14 +1055,14 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             } => {
                 write!(
                     f,
-                    "Unknown {} property: {}.{}",
+                    "Unknown {} property: `{}.{}`",
                     cause.as_prefix(),
                     scope,
                     variable
                 )
             }
             Unsupported { span, reason } => {
-                write!(f, "Unsupported: {} in {}", reason, fmt_span(span))
+                write!(f, "Unsupported: {} in `{}`", reason, fmt_span(span))
             }
             Internal(msg) => write!(f, "ICE: {msg}"),
         }
@@ -1083,7 +1094,7 @@ impl CompilationError {
                 first_occurrence,
                 second_occurrence,
             }),
-            FunctionNotFound(span) => compilation_error!(FunctionNotFound(span)),
+            TypeNotFound(span) => compilation_error!(TypeNotFound(span)),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
             WrongNumberOfArguments {
                 expected,
@@ -1096,9 +1107,6 @@ impl CompilationError {
                 got,
                 got_span,
             }),
-            TypeDefinitionNotFound { span } => {
-                compilation_error!(TypeDefinitionNotFound { span })
-            }
             MutabilityMustBe {
                 source_span,
                 reason_span,
@@ -1282,11 +1290,13 @@ impl CompilationError {
             DuplicatedVariant {
                 first_occurrence,
                 second_occurrence,
-                match_span,
+                ctx_span,
+                ctx,
             } => compilation_error!(DuplicatedVariant {
                 first_occurrence,
                 second_occurrence,
-                match_span,
+                ctx_span,
+                ctx
             }),
             TraitImplNotFound {
                 trait_ref,

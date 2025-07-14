@@ -15,16 +15,22 @@ use ustr::{ustr, Ustr};
 
 use crate::{
     ast::{
-        DExpr, DModule, DModuleFunction, DTraitImpl, Expr, ExprKind, Module, ModuleFunction, PExpr,
-        PModule, PModuleFunction, PTraitImpl, Pattern, PatternKind,
+        self, DExpr, DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, DTypeDef, Expr,
+        ExprKind, ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction,
+        PModuleFunctionArg, PTraitImpl, PTypeDef, Pattern, PatternKind,
     },
     containers::{b, B},
-    error::InternalCompilationError,
+    effects::EffType,
+    error::{DuplicatedFieldContext, DuplicatedVariantContext, InternalCompilationError},
     format_string::emit_format_string_ast,
     graph::{find_strongly_connected_components, topological_sort_sccs},
-    mutability::MutVal,
+    internal_compilation_error,
+    module::{Module, ModuleEnv, Modules},
+    mutability::{MutType, MutVal},
     parser_helpers::static_apply,
-    std::math::int_type,
+    r#type::{FnArgType, FnType, Type},
+    std::{array::array_type, math::int_type},
+    type_like::TypeLike,
     Location,
 };
 
@@ -44,8 +50,170 @@ type FnDeps = HashSet<usize>;
 
 pub type FnSccs = Vec<Vec<usize>>;
 
+impl ast::PFnArgType {
+    pub fn desugar(self, env: &ModuleEnv<'_>) -> Result<FnArgType, InternalCompilationError> {
+        let ty = self.ty.0.desugar(self.ty.1, false, env)?;
+        let mut_ty = match self.mut_ty {
+            Some(mut_ty) => match mut_ty {
+                ast::PMutType::Mut => MutType::mutable(),
+                // if placeholder, always emit variable id 0 that will be replaced by fresh variables in type inference
+                ast::PMutType::Infer => MutType::variable_id(0),
+            },
+            None => MutType::constant(),
+        };
+        Ok(FnArgType::new(ty, mut_ty))
+    }
+}
+
+impl ast::PFnType {
+    pub fn desugar(self, env: &ModuleEnv<'_>) -> Result<FnType, InternalCompilationError> {
+        let args = self
+            .args
+            .into_iter()
+            .map(|arg| arg.desugar(env))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ret = self.ret.0.desugar(self.ret.1, false, env)?;
+        // if this function has generic effects, always emit variable id 0 that will be replaced by fresh variables in type inference
+        let effects = if self.effects {
+            EffType::single_variable_id(0)
+        } else {
+            EffType::empty()
+        };
+        Ok(FnType::new(args, ret, effects))
+    }
+}
+
+impl ast::PType {
+    pub fn desugar(
+        self,
+        span: Location,
+        in_ty_def: bool,
+        env: &ModuleEnv<'_>,
+    ) -> Result<Type, InternalCompilationError> {
+        use ast::PType::*;
+        Ok(match self {
+            Never => Type::never(),
+            Unit => Type::unit(),
+            Resolved(ty) => ty,
+            Infer => Type::variable_id(0), // always emit variable id 0 that will be replaced by fresh variables in type inference
+            Path(items) => {
+                // FIXME: this is inefficient, we should keep the split path all the way from parsing
+                let path: String = items
+                    .into_iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                if let Some(ty) = env.type_alias_type(&path) {
+                    ty
+                } else if let Some(ty) = env.type_def_type(&path) {
+                    ty
+                } else {
+                    return Err(internal_compilation_error!(TypeNotFound(span)));
+                }
+            }
+            Variant(types) => {
+                let mut seen = HashMap::new();
+                Type::variant(
+                    types
+                        .into_iter()
+                        .map(|((name, name_span), (ty, ty_span))| {
+                            if let Some(prev_span) = seen.get(&name) {
+                                Err(internal_compilation_error!(DuplicatedVariant {
+                                    first_occurrence: *prev_span,
+                                    second_occurrence: name_span,
+                                    ctx_span: span,
+                                    ctx: if in_ty_def {
+                                        DuplicatedVariantContext::Enum
+                                    } else {
+                                        DuplicatedVariantContext::Variant
+                                    },
+                                }))
+                            } else {
+                                seen.insert(name, name_span);
+                                Ok((name, ty.desugar(ty_span, false, env)?))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
+            Tuple(elements) => Type::tuple(
+                elements
+                    .into_iter()
+                    .map(|(ty, span)| ty.desugar(span, false, env))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Record(fields) => {
+                let mut seen = HashMap::new();
+                Type::record(
+                    fields
+                        .into_iter()
+                        .map(|((name, name_span), (ty, ty_span))| {
+                            if let Some(prev_span) = seen.get(&name) {
+                                Err(internal_compilation_error!(DuplicatedField {
+                                    first_occurrence: *prev_span,
+                                    second_occurrence: name_span,
+                                    constructor_span: span,
+                                    ctx: if in_ty_def {
+                                        DuplicatedFieldContext::Struct
+                                    } else {
+                                        DuplicatedFieldContext::Record
+                                    },
+                                }))
+                            } else {
+                                seen.insert(name, name_span);
+                                Ok((name, ty.desugar(ty_span, false, env)?))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
+            Array(array) => array_type(array.0.desugar(array.1, false, env)?),
+            Function(fn_type) => Type::function_type(fn_type.desugar(env)?),
+        })
+    }
+}
+
+impl PTypeDef {
+    pub fn desugar(self, env: &ModuleEnv<'_>) -> Result<DTypeDef, InternalCompilationError> {
+        let shape = self.shape.desugar(self.span, true, env)?;
+        Ok(DTypeDef {
+            name: self.name,
+            generic_params: self.generic_params,
+            shape,
+            span: self.span,
+            doc_comments: self.doc_comments,
+        })
+    }
+}
+
+impl PModuleFunctionArg {
+    pub fn desugar(
+        self,
+        env: &ModuleEnv<'_>,
+    ) -> Result<DModuleFunctionArg, InternalCompilationError> {
+        let ty = self
+            .ty
+            .map(|(mut_ty, ty, span)| {
+                Ok((
+                    mut_ty.map(|m| match m {
+                        ast::PMutType::Mut => MutType::mutable(),
+                        // if placeholder, always emit variable id 0 that will be replaced by fresh variables in type inference
+                        ast::PMutType::Infer => MutType::variable_id(0),
+                    }),
+                    ty.desugar(span, false, env)?,
+                    span,
+                ))
+            })
+            .transpose()?;
+        Ok(ModuleFunctionArg {
+            name: self.name,
+            ty,
+        })
+    }
+}
+
 impl PTraitImpl {
-    pub fn desugar(self) -> Result<DTraitImpl, InternalCompilationError> {
+    pub fn desugar(self, env: &ModuleEnv<'_>) -> Result<DTraitImpl, InternalCompilationError> {
         let fn_map = self
             .functions
             .iter()
@@ -55,7 +223,7 @@ impl PTraitImpl {
         let functions = self
             .functions
             .into_iter()
-            .map(|f| f.desugar(&fn_map).map(|(f, _dep_graph)| f))
+            .map(|f| f.desugar(&fn_map, env).map(|(f, _dep_graph)| f))
             .collect::<Result<_, _>>()?;
         Ok(DTraitImpl {
             span: self.span,
@@ -68,7 +236,29 @@ impl PTraitImpl {
 impl PModule {
     /// Desugar a module parsed AST into a desugared AST and a list of strongly
     /// connected components of its function dependency graph, sorted topologically.
-    pub fn desugar(self) -> Result<(DModule, FnSccs), InternalCompilationError> {
+    pub fn desugar(
+        self,
+        others: &Modules,
+        merge_with: Option<&Module>,
+    ) -> Result<(DModule, FnSccs), InternalCompilationError> {
+        // Resolve type aliases and type definitions
+        let empty_module = Module::default();
+        let env = ModuleEnv::new(
+            merge_with.map_or_else(|| &empty_module, |module| module),
+            others,
+        );
+        let type_aliases = self
+            .type_aliases
+            .into_iter()
+            .map(|(name, alias)| Ok((name, (alias.0.desugar(alias.1, false, &env)?, alias.1))))
+            .collect::<Result<_, _>>()?;
+        let type_defs = self
+            .type_defs
+            .into_iter()
+            .map(|def| def.desugar(&env))
+            .collect::<Result<_, _>>()?;
+        // TODO: further modify the module to merge with
+
         // Desugar functions
         let fn_map = self
             .functions
@@ -77,7 +267,7 @@ impl PModule {
             .map(|(index, func)| (func.name.0, index))
             .collect::<HashMap<_, _>>();
         let (functions, dependency_graph): (_, Vec<_>) = process_results(
-            self.functions.into_iter().map(|f| f.desugar(&fn_map)),
+            self.functions.into_iter().map(|f| f.desugar(&fn_map, &env)),
             |iter| iter.unzip(),
         )?;
         let sccs = find_strongly_connected_components(&dependency_graph);
@@ -87,15 +277,15 @@ impl PModule {
         let impls = self
             .impls
             .into_iter()
-            .map(|i| i.desugar())
+            .map(|i| i.desugar(&env))
             .collect::<Result<_, _>>()?;
 
         // Build result
-        let module = Module {
+        let module = DModule {
             functions,
             impls,
-            type_aliases: self.type_aliases,
-            type_defs: self.type_defs,
+            type_aliases,
+            type_defs,
         };
         Ok((module, sorted_sccs))
     }
@@ -105,15 +295,26 @@ impl PModuleFunction {
     pub fn desugar(
         self,
         fn_map: &FnMap,
+        env: &ModuleEnv<'_>,
     ) -> Result<(DModuleFunction, FnDepGraphNode), InternalCompilationError> {
-        let locals = self.args.iter().map(|arg| arg.0 .0).collect();
-        let mut ctx = DesugarCtx::new_with_locals(fn_map, locals);
+        let locals = self.args.iter().map(|arg| arg.name.0).collect();
+        let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env);
         let body = self.body.desugar(&mut ctx)?;
+        let args = self
+            .args
+            .into_iter()
+            .map(|arg| arg.desugar(env))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Collect function dependencies
+        let ret_ty = self
+            .ret_ty
+            .map(|(ty, span)| Ok((ty.desugar(span, false, env)?, span)))
+            .transpose()?;
         let function = ModuleFunction {
             name: self.name,
-            args: self.args,
+            args,
             args_span: self.args_span,
-            ret_ty: self.ret_ty,
+            ret_ty,
             body: b(body),
             span: self.span,
             doc: self.doc,
@@ -132,30 +333,41 @@ struct DesugarCtx<'a> {
     fn_deps: FnDeps,
     /// Locals for desugaring and function dependencies collection
     locals: Vec<Ustr>,
+    /// Module environment, used for desugaring types
+    module_env: &'a ModuleEnv<'a>,
 }
 
 impl<'a> DesugarCtx<'a> {
-    fn new(fn_map: &'a FnMap) -> Self {
+    fn new(fn_map: &'a FnMap, module_env: &'a ModuleEnv<'a>) -> Self {
         Self {
             fn_map,
             fn_deps: HashSet::new(),
             locals: Vec::new(),
+            module_env,
         }
     }
-    fn new_with_locals(fn_map: &'a FnMap, locals: Vec<Ustr>) -> Self {
+    fn new_with_locals(
+        fn_map: &'a FnMap,
+        locals: Vec<Ustr>,
+        module_env: &'a ModuleEnv<'a>,
+    ) -> Self {
         Self {
             fn_map,
             fn_deps: HashSet::new(),
             locals,
+            module_env,
         }
     }
 }
 
 impl PExpr {
     /// Desugar without a context, to be used outside modules.
-    pub fn desugar_with_empty_ctx(self) -> Result<DExpr, InternalCompilationError> {
+    pub fn desugar_with_empty_ctx(
+        self,
+        module_env: &ModuleEnv<'_>,
+    ) -> Result<DExpr, InternalCompilationError> {
         let empty_fn_map = HashMap::new();
-        let mut ctx = DesugarCtx::new(&empty_fn_map);
+        let mut ctx = DesugarCtx::new(&empty_fn_map, module_env);
         self.desugar(&mut ctx)
     }
 
@@ -186,7 +398,14 @@ impl PExpr {
                 Identifier(name)
             }
             Let(name, mut_val, expr, ty_ascription) => {
-                let expr = Let(name, mut_val, expr.desugar_boxed(ctx)?, ty_ascription);
+                let expr = expr.desugar_boxed(ctx)?;
+                // Look inside the type ascription node to see if the type is constant, to be used later for display.
+                let ty_ascription = ty_ascription.map(|(span, _)| {
+                    let ty = expr.kind.as_type_ascription().unwrap().1;
+                    let is_constant = ty.is_constant();
+                    (span, is_constant)
+                });
+                let expr = Let(name, mut_val, expr, ty_ascription);
                 ctx.locals.push(name.0);
                 expr
             }
@@ -313,7 +532,11 @@ impl PExpr {
             }
             Loop(body) => Loop(body.desugar_boxed(ctx)?),
             SoftBreak => SoftBreak,
-            TypeAscription(expr, ty, span) => TypeAscription(expr.desugar_boxed(ctx)?, ty, span),
+            TypeAscription(expr, ty, span) => TypeAscription(
+                expr.desugar_boxed(ctx)?,
+                ty.desugar(span, false, ctx.module_env)?,
+                span,
+            ),
             Error => Error,
         };
         Ok(DExpr {

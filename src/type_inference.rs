@@ -362,7 +362,7 @@ impl TypeInference {
                     )
                 }
                 // Retrieve the struct constructor, if it exists
-                else if let Some(type_def) = env.module_env.type_def(path) {
+                else if let Some(type_def) = env.module_env.type_def_for_construction(path) {
                     // Retrieve the payload type and the tag, if it is an enum.
                     let (type_def, payload_ty, tag) = type_def.lookup_payload();
                     if payload_ty != Type::unit() {
@@ -583,7 +583,7 @@ impl TypeInference {
                     DuplicatedFieldContext::Struct,
                 )?;
                 // First check if the path is a known type definition.
-                if let Some(type_def) = env.module_env.type_def(&path.0) {
+                if let Some(type_def) = env.module_env.type_def_for_construction(&path.0) {
                     // Then resolve the layout of the struct.
                     let (type_def, payload_ty, tag) = type_def.lookup_payload();
                     // Check that it is a record.
@@ -604,14 +604,14 @@ impl TypeInference {
                     for (layout_field, field) in layout_iter.zip(field_iter) {
                         let layout_field_name = layout_field.0;
                         let (field_name, field_span) = &field.0;
-                        if &layout_field_name < &*field_name {
+                        if &layout_field_name < field_name {
                             // Missing record entry
                             return Err(internal_compilation_error!(MissingStructField {
                                 type_def,
                                 field_name: layout_field.0,
                                 instantiation_span: expr.span,
                             }));
-                        } else if &layout_field_name > &*field_name {
+                        } else if &layout_field_name > field_name {
                             // Extra record entry
                             return Err(internal_compilation_error!(InvalidStructField {
                                 type_def,
@@ -663,7 +663,7 @@ impl TypeInference {
                     // But the value of the node is the underlying record.
                     // If all nodes can be resolved to bare immediates, we can create an immediate value.
                     let resolved_nodes_value =
-                        nodes_as_bare_immediate(&nodes).map(|values| Value::tuple(values));
+                        nodes_as_bare_immediate(&nodes).map(Value::tuple);
                     let node = if let Some(tag) = tag {
                         if let Some(value) = resolved_nodes_value {
                             let value = Value::raw_variant(tag, value);
@@ -677,12 +677,10 @@ impl TypeInference {
                             );
                             K::Variant(b((tag, node)))
                         }
+                    } else if let Some(value) = resolved_nodes_value {
+                        K::Immediate(Immediate::new(value))
                     } else {
-                        if let Some(value) = resolved_nodes_value {
-                            K::Immediate(Immediate::new(value))
-                        } else {
-                            K::Record(b(SVec2::from_vec(nodes)))
-                        }
+                        K::Record(b(SVec2::from_vec(nodes)))
                     };
                     (node, ty, MutType::constant(), effects)
                 } else {
@@ -967,7 +965,7 @@ impl TypeInference {
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
-            } else if let Some(type_def) = env.module_env.type_def(path) {
+            } else if let Some(type_def) = env.module_env.type_def_for_construction(path) {
                 // Retrieve the payload type and the tag, if it is an enum.
                 let (type_def, payload_ty, tag) = type_def.lookup_payload();
                 // Compute the arity from the payload type.
@@ -1020,7 +1018,7 @@ impl TypeInference {
                 // But the value of the node is the underlying tuple.
                 // If all nodes can be resolved to bare immediates, we can create an immediate value.
                 let resolved_nodes_value =
-                    nodes_as_bare_immediate(&nodes).map(|values| Value::tuple(values));
+                    nodes_as_bare_immediate(&nodes).map(Value::tuple);
                 let inner_kind = if let Some(value) = resolved_nodes_value {
                     K::Immediate(Immediate::new(value))
                 } else {
@@ -1117,7 +1115,7 @@ impl TypeInference {
     ) -> Result<(NodeKind, Type, EffType), InternalCompilationError> {
         let exprs = fields.iter().map(|(_, expr)| expr).collect::<Vec<_>>();
         let (nodes, types, effects) = self.infer_exprs_drop_mut(env, &exprs)?;
-        let payload_ty = fields_to_record_type(&fields, types);
+        let payload_ty = fields_to_record_type(fields, types);
         let payload_node = if let Some(values) = nodes_as_bare_immediate(&nodes) {
             NodeKind::Immediate(Immediate::new(Value::tuple(values)))
         } else {

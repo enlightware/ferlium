@@ -1,13 +1,11 @@
 use crate::{Location, LocatedError};
-use crate::ast::{UstrSpan, TypeSpan, MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, TypeDef};
+use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType};
 use crate::value::LiteralValue;
-use crate::r#type::{Type, FnType, FnArgType};
-use crate::type_like::TypeLike;
-use crate::effects::EffType;
+use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
-use crate::std::{logic::bool_type, math::{int_type, float_type}, array::array_type, string::string_type, variant::script_variant_type, ordering::ordering_type};
+use crate::std::{math::int_type, string::string_type};
 use crate::containers::{b as boxed, SVec2};
-use crate::mutability::{MutVal, MutType};
+use crate::mutability::{MutVal};
 
 use ustr::{Ustr, ustr};
 
@@ -62,8 +60,14 @@ ModuleTypeDef: Module = {
 }
 
 Function: ModuleFunction = {
-    <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:StrWithOptTypeArgs> ")" <ret:SpFnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
+    <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
         ModuleFunction::new(name, args, span(al, ar), ret, body, span(l, r), parse_doc_comments(doc)),
+}
+
+ModuleFunctionArgs: Vec<ModuleFunctionArg> = {
+    <args:StrWithOptTypeArgs> => args.into_iter().map(|(name, ty)| {
+        ModuleFunctionArg { name, ty }
+    }).collect(),
 }
 
 // Type
@@ -78,7 +82,7 @@ pub GenericType: Type = {
 
 Type<P>: Type = {
     PlaceholderType if P != "",
-    PrimitiveType,
+    PathType,
     ArrayType<P>,
     RecordType<P>,
     VariantType<P>,
@@ -86,33 +90,33 @@ Type<P>: Type = {
 }
 
 TupleOrFnType<P>: Type = {
-    "(" ")" => Type::unit(),
+    "(" ")" => Type::Unit,
     "(" ")" <ret:EffFnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, ret.1)),
-    "(" <l:@L> <arg:ArgType<P>> <r:@R> ")" <ret:EffFnRet<P>?> =>?
+    "(" <arg:ArgType<P>> ")" <ret:EffFnRet<P>?> =>?
         Ok(if let Some(ret) = ret {
             Type::function_type(FnType::new(vec![arg], ret.0, ret.1))
-        } else if arg.mut_ty != MutType::constant() {
-            return error("types outside function arguments cannot be &mut".into(), span(l, r));
+        } else if arg.mut_ty.is_some() {
+            return error("types outside function arguments cannot be &mut".into(), arg.span);
         } else {
-            arg.ty
+            arg.ty.0
         }),
-    "(" <l:@L> <arg0:ArgType<P>> "," <args:Sep<ArgType<P>, ",">>  <r:@R> ")" <ret:EffFnRet<P>?> =>?
+    "(" <arg0:ArgType<P>> "," <args:Sep<ArgType<P>, ",">> ")" <ret:EffFnRet<P>?> =>?
     {
         let args = ext_f(arg0, args);
         Ok(if let Some(ret) = ret {
             Type::function_type(FnType::new(args, ret.0, ret.1))
-        } else if args.iter().any(|a| a.mut_ty != MutType::constant()) {
-            return error("types outside function arguments cannot be &mut".into(), span(l, r));
+        } else if let Some(arg) = args.iter().find(|a| a.mut_ty.is_some()) {
+            return error("types outside function arguments cannot be &mut".into(), arg.span);
         } else {
-            Type::tuple(args.into_iter().map(|a| a.ty).collect::<Vec<_>>())
+            Type::Tuple(args.into_iter().map(|a| a.ty).collect::<Vec<_>>())
         })
     }
 }
 
 #[inline]
-EffFnRet<P>: (Type, EffType) = {
-    "->" <ret:Type<P>> if P != "" => (ret, EffType::single_variable_id(0)),
-    "->" <ret:Type<P>> if P == "" => (ret, EffType::empty())
+EffFnRet<P>: (TypeSpan, bool) = {
+    "->" <ret:Sp<Type<P>>> if P != "" => (ret, true),
+    "->" <ret:Sp<Type<P>>> if P == "" => (ret, false)
 }
 
 #[inline]
@@ -121,49 +125,45 @@ SpFnRet<P>: TypeSpan = {
 }
 
 ArgType<P>: FnArgType = {
-    "&" "mut" <t:Type<P>> => FnArgType::new(t, MutType::mutable()),
-    <t:Type<P>> => FnArgType::new(t, MutType::constant()),
+    <l:@L> "&" "mut" <t:Sp<Type<P>>> <r:@R> => FnArgType::new(t, Some(MutType::Mut), span(l, r)),
+    <l:@L> "&" "?" <t:Sp<Type<P>>> <r:@R> if P !=  "" => FnArgType::new(t, Some(MutType::Infer), span(l, r)),
+    <t:Sp<Type<P>>> => { let span = t.1; FnArgType::new(t, None, span) },
 }
 
 PlaceholderType: Type = {
-    "_" => Type::variable_id(0),
+    "_" => Type::Infer,
 }
 
-PrimitiveType: Type = {
-    // "(" ")" => Type::unit(),
-    "bool" => bool_type(),
-    "int" => int_type(),
-    "float" => float_type(),
-    "string" => string_type(),
-    "Variant" => script_variant_type(),
-    "Ordering" => ordering_type(),
+PathType: Type = {
+    <p:Path> => Type::Path(p),
 }
 
 ArrayType<P>: Type = {
-    "[" <t:Type<P>> "]" => array_type(t)
+    "[" <t:Sp<Type<P>>> "]" => Type::Array(boxed(t))
 }
 
 RecordType<P>: Type = {
     "{" <RecordTypeFields<P>> "}" => <>,
-    "{" "}" => Type::record(vec![])
+    "{" "}" => Type::Record(vec![])
 }
 
 RecordTypeFields<P>: Type = {
-    <f:RecordTypeField<P>> => Type::record(vec![f]),
-    <f:RecordTypeField<P>> "," <r:Sep<RecordTypeField<P>, ",">> => Type::record(ext_f(f, r)),
+    <f:RecordTypeField<P>> => Type::Record(vec![f]),
+    <f:RecordTypeField<P>> "," <r:Sep<RecordTypeField<P>, ",">> => Type::Record(ext_f(f, r)),
 }
 
-RecordTypeField<P>: (Ustr, Type) = {
-    <n:UIdentifier> ":" <t:Type<P>> => (n, t),
+RecordTypeField<P>: (UstrSpan, TypeSpan) = {
+    <n:Sp<UIdentifier>> ":" <t:Sp<Type<P>>> => (n, t),
 }
 
 VariantType<P>: Type = {
-    <f:VariantTypeAlternative<P>> <r:("|" <VariantTypeAlternative<P>>)*> => Type::variant(ext_f(f, r)),
+    <f:VariantTypeAlternative<P, "">> => Type::Variant(vec![f]),
+    <f:VariantTypeAlternative<P, "U">> "|" <n:VariantTypeAlternative<P, "U">> <r:("|" <VariantTypeAlternative<P, "U">>)*> => Type::Variant(ext_f(f, ext_f(n, r))),
 }
 
-VariantTypeAlternative<P>: (Ustr, Type) = {
-    <tag:UIdentifier> => (tag, Type::unit()),
-    <tag:UIdentifier> "(" <args:Sep<Type<P>, ",">> ")" => (tag, Type::tuple(args)),
+VariantTypeAlternative<P, U>: (UstrSpan, TypeSpan) = {
+    <tag:Sp<UIdentifier>> if U != "" => (tag, (Type::Unit, tag.1)),
+    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P>>, ",">> ")" <r:@R> => (tag, (Type::Tuple(args), span(l, r))),
 }
 
 TypeAscription: TypeSpan = {
@@ -171,16 +171,12 @@ TypeAscription: TypeSpan = {
 }
 
 RefMutTypeAscription: MutTypeTypeSpan = {
-    ":" <l:@L> <ref_mut:("&" MutTyOrInfer)?> <ty:Type<"P">> <r:@R> => if let Some(mut_ty) = ref_mut {
-        (mut_ty.1, ty, span(l, r))
-    } else {
-        (MutType::constant(), ty, span(l, r))
-    },
+    ":" <l:@L> <ref_mut:("&" MutTyOrInfer)?> <ty:Type<"P">> <r:@R> => (ref_mut.map(|(_, m)| m), ty, span(l, r))
 }
 
 MutTyOrInfer: MutType = {
-    "mut" => MutType::mutable(),
-    "?" => MutType::variable_id(0),
+    "mut" => MutType::Mut,
+    "?" => MutType::Infer,
 }
 
 // Type Definitions
@@ -195,7 +191,7 @@ StructDefinition: TypeDef = {
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
-            shape: shape,
+            shape,
             span: span(l, r),
             doc_comments: vec![],
         }
@@ -203,25 +199,25 @@ StructDefinition: TypeDef = {
 }
 
 StructBody: Type = {
-    "{" <fields:StructNamedFields?> "}" => Type::record(fields.unwrap_or_default()),
-    "(" <fields:StructTupleFields> ")" => Type::tuple(fields),
-    ";" => Type::unit(), // Unit struct
+    "{" <fields:StructNamedFields?> "}" => Type::Record(fields.unwrap_or_default()),
+    "(" <fields:StructTupleFields> ")" => Type::Tuple(fields),
+    ";" => Type::Unit, // Unit struct
 }
 
-StructNamedFields: Vec<(Ustr, Type)> = {
+StructNamedFields: Vec<(UstrSpan, TypeSpan)> = {
     <f:StructNamedField> => vec![f],
     <f:StructNamedField> "," <r:StructNamedFields> => ext_f(f, r),
     <f:StructNamedField> "," => vec![f], // trailing comma
 }
 
-StructNamedField: (Ustr, Type) = {
-    <field:RecordTypeField<"">> => (field.0, field.1),
+StructNamedField: (UstrSpan, TypeSpan) = {
+    <field:RecordTypeField<"">> => <>,
 }
 
-StructTupleFields: Vec<Type> = {
-    <t:Type<"">> => vec![t],
-    <t:Type<"">> "," <r:StructTupleFields> => ext_f(t, r),
-    <t:Type<"">> "," => vec![t], // trailing comma
+StructTupleFields: Vec<TypeSpan> = {
+    <t:Sp<Type<"">>> => vec![t],
+    <t:Sp<Type<"">>> "," <r:StructTupleFields> => ext_f(t, r),
+    <t:Sp<Type<"">>> "," => vec![t], // trailing comma
 }
 
 EnumDefinition: TypeDef = {
@@ -229,13 +225,13 @@ EnumDefinition: TypeDef = {
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
-            shape: Type::never(),
+            shape: Type::Never,
             span: span(l, r),
             doc_comments: vec![],
         }
     },
     <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" <variants:EnumVariants> "}" <r:@R> => {
-        let variant_ty = Type::variant(variants);
+        let variant_ty = Type::Variant(variants);
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
@@ -246,28 +242,28 @@ EnumDefinition: TypeDef = {
     }
 }
 
-EnumVariants: Vec<(Ustr, Type)> = {
+EnumVariants: Vec<(UstrSpan, TypeSpan)> = {
     <v:EnumVariant> => vec![v],
     <v:EnumVariant> "," <r:EnumVariants> => ext_f(v, r),
     <v:EnumVariant> "," => vec![v], // trailing comma
 }
 
-EnumVariant: (Ustr, Type) = {
+EnumVariant: (UstrSpan, TypeSpan) = {
     // Unit variant: Name
-    <name:UIdentifier> => (name, Type::unit()),
+    <name:Sp<UIdentifier>> => (name, (Type::Unit, name.1)),
 
     // Tuple variant with single type: Name(Type)
-    <name:UIdentifier> "(" <ty:Type<"">> ")" => (name, Type::tuple(vec![ty])),
+    <name:Sp<UIdentifier>> <l:@L> "(" <ty:Sp<Type<"">>> ")" <r:@R> => (name, (Type::Tuple(vec![ty]), span(l, r))),
 
     // Tuple variant with multiple types: Name(Type1, Type2, ...)
-    <name:UIdentifier> "(" <f:Type<"">> "," <rest:Sep<Type<"">, ",">> ")" => {
+    <name:Sp<UIdentifier>> <l:@L> "(" <f:Sp<Type<"">>> "," <rest:Sep<Sp<Type<"">>, ",">> ")" <r:@R> => {
         let tys = ext_f(f, rest);
-        let tuple_ty = Type::tuple(tys);
-        (name, tuple_ty)
+        let tuple_ty = Type::Tuple(tys);
+        (name, (tuple_ty, span(l, r)))
     },
 
     // Record variant: Name { field1: Type1, field2: Type2, ... }
-    <name:UIdentifier> <ty:RecordType<"">> => {
+    <name:Sp<UIdentifier>> <ty:Sp<RecordType<"">>> => {
         (name, ty)
     },
 }
@@ -383,25 +379,29 @@ ParExpr: ExprKind = {
 }
 
 PathOrStructExpr<NoStruct>: ExprKind = {
-    <p:Path> => Identifier(ustr(&p)),
-    <p:Sp<Path>> <body:RecordExprImpl> if NoStruct != "NoStruct" => StructLiteral((ustr(&p.0), p.1), body),
-    <p:Sp<Path>> "{" "}" if NoStruct != "NoStruct" => StructLiteral((ustr(&p.0), p.1), vec![]),
+    <p:FlatPath> => Identifier(p),
+    <p:Sp<FlatPath>> <body:RecordExprImpl> if NoStruct != "NoStruct" => StructLiteral((p.0, p.1), body),
+    <p:Sp<FlatPath>> "{" "}" if NoStruct != "NoStruct" => StructLiteral((p.0, p.1), vec![]),
 }
 
 PropertyPathExpr: ExprKind = {
     <p:PropertyPath> => PropertyPath(p.0, p.1),
 }
 
-Path: String = {
-    PathIdentifier<""> => <>.to_string(),
-    <l:Path> "::" <r:PathIdentifier<"E">> => l + "::" + &r,
+FlatPath: Ustr = {
+    <p:Path> => ustr(&p.into_iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join("::")),
 }
 
-PathIdentifier<E>: String = {
-    Identifier => <>.to_string(),
-    "and" if E != "" => "and".to_string(),
-    "or" if E != "" => "or".to_string(),
-    "not" if E != "" => "not".to_string(),
+Path: Vec<UstrSpan> = {
+    Sp<PathIdentifier<"">> => vec![<>],
+    <p:Path> "::" <e:Sp<PathIdentifier<"E">>> => ext_b(p, e),
+}
+
+PathIdentifier<E>: Ustr = {
+    UIdentifier => <>,
+    "and" if E != "" => ustr("and"),
+    "or" if E != "" => ustr("or"),
+    "not" if E != "" => ustr("not"),
 }
 
 ForExpr: ExprKind = {
@@ -456,18 +456,18 @@ LiteralPattern = {
     // TODO: add ArrayLiteralPattern
 }
 
-ScalarLiteralPattern: (LiteralValue, Type) = {
+ScalarLiteralPattern: (LiteralValue, IrType) = {
     LiteralValue => <>,
     // This is necessary as our IntLiteral parses only unsigned
     "-" <v:IntValue> => (literal_value(-v).0, int_type())
     // TODO: add float literal pattern
 }
 
-TupleLiteralPattern: (LiteralValue, Type) = {
+TupleLiteralPattern: (LiteralValue, IrType) = {
     "(" <f:LiteralPattern> "," <r:Sep<LiteralPattern, ",">> ")" => {
         let (vals, tys): (SVec2<_>, Vec<_>) = ext_f(f, r).into_iter().unzip();
         let val = LiteralValue::new_tuple(vals);
-        let ty = Type::tuple(tys);
+        let ty = IrType::tuple(tys);
         (val, ty)
     },
 }
@@ -515,7 +515,7 @@ RecordField: (UstrSpan, Expr) = {
 }
 
 PropertyPath: (Ustr, Ustr) = {
-    "@" <p:Path> "." <f:UIdentifier> => (p.into(), f),
+    "@" <p:FlatPath> "." <f:UIdentifier> => (p, f),
 }
 
 LoopExpr: ExprKind = {
@@ -550,7 +550,7 @@ LetStmt: ExprKind = {
             let span = e.span;
             (
                 Expr::new(TypeAscription(boxed(e), ty, ty_span), span),
-                Some((ty_span, ty.is_constant()))
+                Some((ty_span, ()))
             )
         } else {
             (e, None)
@@ -631,16 +631,16 @@ UIdentifier: Ustr = {
 
 Identifier: &'input str = r"[\p{L}_][\p{L}\p{N}_]*" => <>;
 
-UnitLiteral: (LiteralValue, Type) = {
+UnitLiteral: (LiteralValue, IrType) = {
     "(" ")" => literal_value(())
 }
 
-BoolLiteral: (LiteralValue, Type) = {
+BoolLiteral: (LiteralValue, IrType) = {
     "true" => literal_value(true),
     "false" => literal_value(false),
 };
 
-IntLiteral: (LiteralValue, Type) = {
+IntLiteral: (LiteralValue, IrType) = {
     IntValue => literal_value(<>),
 };
 
@@ -654,7 +654,7 @@ UIntValue: usize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<usiz
     Err(msg) => error(msg, span(l, r)),
 };
 
-StringLiteral: (LiteralValue, Type) = r#"\"([^\\\"]|\\.)*\""# => (string_literal(<>), string_type());
+StringLiteral: (LiteralValue, IrType) = r#"\"([^\\\"]|\\.)*\""# => (string_literal(<>), string_type());
 
 FormattedString: ExprKind = r#"f\"([^\\\"]|\\.)*\""# => formatted_string(<>);
 
