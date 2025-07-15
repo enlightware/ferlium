@@ -30,7 +30,7 @@ use crate::{
     module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules, Use},
     mutability::MutType,
     r#trait::TraitRef,
-    r#type::{FnArgType, FnType, Type, TypeDefRef, TypeSubstitution, TypeVar},
+    r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
     std::{
         math::{float_type, int_type, NUM_TRAIT},
         StdModuleEnv,
@@ -70,31 +70,14 @@ pub fn emit_module(
     // Preliminary: Make sure no name is defined multiple times.
     validate_name_uniqueness(&source)?;
 
+    // TODO: check that uses do not bring name conflicts.
+
     // First desugar the module.
-    let (source, sorted_sccs) = source.desugar(others, merge_with)?;
+    let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
+    let (source, sorted_sccs) = source.desugar(others, &mut output)?;
 
     // Prepare target module and list of all available trait implementations.
-    let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
     let mut trait_impls = ModuleEnv::new(&output, others).collect_trait_impls();
-
-    // Add types aliases and definitions to output module
-    for ((name, _), ty) in source.type_aliases {
-        output.type_aliases.set_with_ustr(name, ty.0);
-    }
-    for type_def in source.type_defs {
-        assert!(type_def.generic_params.is_empty());
-        assert!(type_def.doc_comments.is_empty());
-        output.type_defs.insert(
-            type_def.name.0,
-            TypeDefRef::new(crate::r#type::TypeDef {
-                name: type_def.name.0,
-                param_names: vec![],
-                shape: type_def.shape,
-                span: type_def.span,
-                attributes: HashMap::new(),
-            }),
-        );
-    }
 
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {

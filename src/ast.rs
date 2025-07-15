@@ -8,14 +8,18 @@
 //
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
-use std::fmt::{self, Debug, Display};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::{self, Debug, Display},
+};
 
 use ustr::Ustr;
 
 use crate::{
     containers::{b, B},
-    error::LocatedError,
+    error::{InternalCompilationError, LocatedError},
     format::write_with_separator,
+    internal_compilation_error,
     module::{FmtWithModuleEnv, ModuleEnv},
     mutability::{FormatInFnArg, MutType as IrMutType, MutVal},
     never::Never,
@@ -47,6 +51,8 @@ pub trait Phase: Sized {
     type Type: Debug + Clone + FmtWithModuleEnv;
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
+    type TypeAliasInModule: Debug + Clone;
+    type TypeDefInModule: Debug + Clone;
 }
 
 /// The AST after parsing
@@ -64,6 +70,8 @@ impl Phase for Parsed {
     type Type = PType;
     type MutType = PMutType;
     type LetTyAscriptionComplete = ();
+    type TypeAliasInModule = (UstrSpan, TypeSpan<Self>);
+    type TypeDefInModule = TypeDef<Self>;
 }
 
 /// The state of the AST after type name resolution and desugaring, ready for type inference
@@ -73,6 +81,8 @@ impl Phase for Desugared {
     type Type = IrType;
     type MutType = IrMutType;
     type LetTyAscriptionComplete = bool;
+    type TypeAliasInModule = Never;
+    type TypeDefInModule = Never;
 }
 
 /// Types
@@ -129,6 +139,19 @@ impl PFnType {
     pub fn new(args: Vec<PFnArgType>, ret: TypeSpan<Parsed>, effects: bool) -> Self {
         Self { args, ret, effects }
     }
+
+    /// Collect indices of types in ty_names that are referenced in this type.
+    pub fn collect_refs(
+        &self,
+        name: Ustr,
+        ty_names: &HashMap<Ustr, usize>,
+        collected: &mut HashSet<usize>,
+    ) -> Result<(), InternalCompilationError> {
+        for arg in &self.args {
+            arg.ty.0.collect_refs(name, ty_names, collected)?;
+        }
+        self.ret.0.collect_refs(name, ty_names, collected)
+    }
 }
 
 impl FmtWithModuleEnv for PFnType {
@@ -173,6 +196,45 @@ pub enum PType {
 impl PType {
     pub fn function_type(fn_type: PFnType) -> Self {
         PType::Function(b(fn_type))
+    }
+
+    /// Collect indices of types in ty_names that are referenced in this type.
+    pub fn collect_refs(
+        &self,
+        name: Ustr,
+        ty_names: &HashMap<Ustr, usize>,
+        collected: &mut HashSet<usize>,
+    ) -> Result<(), InternalCompilationError> {
+        use PType::*;
+        match self {
+            Path(items) => {
+                if items.len() == 1 {
+                    let ty_name = items[0].0;
+                    if ty_name == name {
+                        return Err(internal_compilation_error!(Unsupported {
+                            reason: format!("Self-referential type paths are not supported, but `{}` refers to itself", ty_name),
+                            span: items[0].1,
+                        }));
+                    }
+                    if let Some(index) = ty_names.get(&ty_name) {
+                        collected.insert(*index);
+                    }
+                }
+            }
+            Variant(types) => types
+                .iter()
+                .try_for_each(|(_, (ty, _))| ty.collect_refs(name, ty_names, collected))?,
+            Tuple(elements) => elements
+                .iter()
+                .try_for_each(|(ty, _)| ty.collect_refs(name, ty_names, collected))?,
+            Record(fields) => fields
+                .iter()
+                .try_for_each(|(_, (ty, _))| ty.collect_refs(name, ty_names, collected))?,
+            Array(inner) => inner.0.collect_refs(name, ty_names, collected)?,
+            Function(fn_type) => fn_type.collect_refs(name, ty_names, collected)?,
+            _ => (),
+        }
+        Ok(())
     }
 }
 
@@ -389,8 +451,8 @@ pub type DTraitImpl = TraitImpl<Desugared>;
 pub struct Module<P: Phase> {
     pub functions: Vec<ModuleFunction<P>>,
     pub impls: Vec<TraitImpl<P>>,
-    pub type_aliases: Vec<(UstrSpan, TypeSpan<P>)>,
-    pub type_defs: Vec<TypeDef<P>>,
+    pub type_aliases: Vec<P::TypeAliasInModule>,
+    pub type_defs: Vec<P::TypeDefInModule>,
 }
 impl<P: Phase> Module<P> {
     pub fn extend(&mut self, other: Self) {
@@ -415,7 +477,9 @@ impl<P: Phase> Module<P> {
             && self.type_aliases.is_empty()
             && self.type_defs.is_empty()
     }
-
+}
+impl Module<Parsed> {
+    /// Returns all the names defined in this module, including functions, type aliases, and type definitions.
     pub fn name_iter(&self) -> impl Iterator<Item = UstrSpan> + '_ {
         self.functions
             .iter()
@@ -449,7 +513,7 @@ impl<P: Phase> VisitExpr<P> for Module<P> {
     }
 }
 
-impl<P: Phase> FmtWithModuleEnv for Module<P> {
+impl FmtWithModuleEnv for Module<Parsed> {
     fn fmt_with_module_env(
         &self,
         f: &mut std::fmt::Formatter,
@@ -970,6 +1034,3 @@ pub struct TypeDef<P: Phase> {
 
 /// A type definition just after parsing
 pub type PTypeDef = TypeDef<Parsed>;
-
-/// A type definition just after desugaring
-pub type DTypeDef = TypeDef<Desugared>;

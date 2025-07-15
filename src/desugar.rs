@@ -15,9 +15,9 @@ use ustr::{ustr, Ustr};
 
 use crate::{
     ast::{
-        self, DExpr, DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, DTypeDef, Expr,
-        ExprKind, ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction,
-        PModuleFunctionArg, PTraitImpl, PTypeDef, Pattern, PatternKind,
+        self, DExpr, DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, Expr, ExprKind,
+        ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction, PModuleFunctionArg,
+        PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, UstrSpan,
     },
     containers::{b, B},
     effects::EffType,
@@ -28,7 +28,7 @@ use crate::{
     module::{Module, ModuleEnv, Modules},
     mutability::{MutType, MutVal},
     parser_helpers::static_apply,
-    r#type::{FnArgType, FnType, Type},
+    r#type::{FnArgType, FnType, Type, TypeDefRef},
     std::{array::array_type, math::int_type},
     type_like::TypeLike,
     Location,
@@ -36,9 +36,9 @@ use crate::{
 
 /// A node of a function dependency graph
 #[derive(Debug)]
-pub struct FnDepGraphNode(pub Vec<usize>);
+pub struct DepGraphNode(pub Vec<usize>);
 
-impl crate::graph::Node for FnDepGraphNode {
+impl crate::graph::Node for DepGraphNode {
     type Index = usize;
     fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
         self.0.iter().copied()
@@ -51,7 +51,7 @@ type FnDeps = HashSet<usize>;
 pub type FnSccs = Vec<Vec<usize>>;
 
 impl ast::PFnArgType {
-    pub fn desugar(self, env: &ModuleEnv<'_>) -> Result<FnArgType, InternalCompilationError> {
+    pub fn desugar(&self, env: &ModuleEnv<'_>) -> Result<FnArgType, InternalCompilationError> {
         let ty = self.ty.0.desugar(self.ty.1, false, env)?;
         let mut_ty = match self.mut_ty {
             Some(mut_ty) => match mut_ty {
@@ -66,10 +66,10 @@ impl ast::PFnArgType {
 }
 
 impl ast::PFnType {
-    pub fn desugar(self, env: &ModuleEnv<'_>) -> Result<FnType, InternalCompilationError> {
+    pub fn desugar(&self, env: &ModuleEnv<'_>) -> Result<FnType, InternalCompilationError> {
         let args = self
             .args
-            .into_iter()
+            .iter()
             .map(|arg| arg.desugar(env))
             .collect::<Result<Vec<_>, _>>()?;
         let ret = self.ret.0.desugar(self.ret.1, false, env)?;
@@ -85,7 +85,7 @@ impl ast::PFnType {
 
 impl ast::PType {
     pub fn desugar(
-        self,
+        &self,
         span: Location,
         in_ty_def: bool,
         env: &ModuleEnv<'_>,
@@ -94,7 +94,7 @@ impl ast::PType {
         Ok(match self {
             Never => Type::never(),
             Unit => Type::unit(),
-            Resolved(ty) => ty,
+            Resolved(ty) => *ty,
             Infer => Type::variable_id(0), // always emit variable id 0 that will be replaced by fresh variables in type inference
             Path(items) => {
                 // FIXME: this is inefficient, we should keep the split path all the way from parsing
@@ -115,12 +115,12 @@ impl ast::PType {
                 let mut seen = HashMap::new();
                 Type::variant(
                     types
-                        .into_iter()
+                        .iter()
                         .map(|((name, name_span), (ty, ty_span))| {
                             if let Some(prev_span) = seen.get(&name) {
                                 Err(internal_compilation_error!(DuplicatedVariant {
                                     first_occurrence: *prev_span,
-                                    second_occurrence: name_span,
+                                    second_occurrence: *name_span,
                                     ctx_span: span,
                                     ctx: if in_ty_def {
                                         DuplicatedVariantContext::Enum
@@ -129,8 +129,8 @@ impl ast::PType {
                                     },
                                 }))
                             } else {
-                                seen.insert(name, name_span);
-                                Ok((name, ty.desugar(ty_span, false, env)?))
+                                seen.insert(name, *name_span);
+                                Ok((*name, ty.desugar(*ty_span, false, env)?))
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?,
@@ -138,20 +138,20 @@ impl ast::PType {
             }
             Tuple(elements) => Type::tuple(
                 elements
-                    .into_iter()
-                    .map(|(ty, span)| ty.desugar(span, false, env))
+                    .iter()
+                    .map(|(ty, span)| ty.desugar(*span, false, env))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Record(fields) => {
                 let mut seen = HashMap::new();
                 Type::record(
                     fields
-                        .into_iter()
+                        .iter()
                         .map(|((name, name_span), (ty, ty_span))| {
                             if let Some(prev_span) = seen.get(&name) {
                                 Err(internal_compilation_error!(DuplicatedField {
                                     first_occurrence: *prev_span,
-                                    second_occurrence: name_span,
+                                    second_occurrence: *name_span,
                                     constructor_span: span,
                                     ctx: if in_ty_def {
                                         DuplicatedFieldContext::Struct
@@ -160,8 +160,8 @@ impl ast::PType {
                                     },
                                 }))
                             } else {
-                                seen.insert(name, name_span);
-                                Ok((name, ty.desugar(ty_span, false, env)?))
+                                seen.insert(name, *name_span);
+                                Ok((*name, ty.desugar(*ty_span, false, env)?))
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?,
@@ -174,15 +174,17 @@ impl ast::PType {
 }
 
 impl PTypeDef {
-    pub fn desugar(self, env: &ModuleEnv<'_>) -> Result<DTypeDef, InternalCompilationError> {
+    pub fn desugar(&self, env: &ModuleEnv<'_>) -> Result<TypeDefRef, InternalCompilationError> {
+        assert!(self.generic_params.is_empty());
+        assert!(self.doc_comments.is_empty());
         let shape = self.shape.desugar(self.span, true, env)?;
-        Ok(DTypeDef {
-            name: self.name,
-            generic_params: self.generic_params,
+        Ok(TypeDefRef::new(crate::r#type::TypeDef {
+            name: self.name.0,
+            param_names: vec![],
             shape,
             span: self.span,
-            doc_comments: self.doc_comments,
-        })
+            attributes: HashMap::new(),
+        }))
     }
 }
 
@@ -233,31 +235,108 @@ impl PTraitImpl {
     }
 }
 
+/// A reference to name of a type, either an alias or a definition, in parsed AST.
+enum NamedTypeData {
+    Alias(UstrSpan, PTypeSpan),
+    Def(PTypeDef),
+}
+impl NamedTypeData {
+    fn collect_refs(
+        &self,
+        ty_names: &HashMap<Ustr, usize>,
+        collected: &mut HashSet<usize>,
+    ) -> Result<(), InternalCompilationError> {
+        use NamedTypeData::*;
+        match self {
+            Alias(name, alias) => alias.0.collect_refs(name.0, ty_names, collected),
+            Def(def) => def.shape.collect_refs(def.name.0, ty_names, collected),
+        }
+    }
+    fn name(&self) -> Ustr {
+        use NamedTypeData::*;
+        match self {
+            Alias(name, _) => name.0,
+            Def(def) => def.name.0,
+        }
+    }
+    fn name_span(&self) -> Location {
+        use NamedTypeData::*;
+        match self {
+            Alias(name, _) => name.1,
+            Def(def) => def.name.1,
+        }
+    }
+}
+
 impl PModule {
-    /// Desugar a module parsed AST into a desugared AST and a list of strongly
-    /// connected components of its function dependency graph, sorted topologically.
+    /// Desugars a parsed module and resolve its types and write them into output.
+    /// Returns a desugared AST and a list of strongly connected components of its
+    /// function dependency graph, sorted topologically.
     pub fn desugar(
         self,
         others: &Modules,
-        merge_with: Option<&Module>,
+        output: &mut Module,
     ) -> Result<(DModule, FnSccs), InternalCompilationError> {
-        // Resolve type aliases and type definitions
-        let empty_module = Module::default();
-        let env = ModuleEnv::new(
-            merge_with.map_or_else(|| &empty_module, |module| module),
-            others,
-        );
-        let type_aliases = self
+        // Build a map of type names to their location and definitions or aliases.
+        // The ty_names map holds indices to the ty_refs vector, which contains the data.
+        let (ty_names, ty_refs): (HashMap<_, _>, Vec<_>) = self
             .type_aliases
             .into_iter()
-            .map(|(name, alias)| Ok((name, (alias.0.desugar(alias.1, false, &env)?, alias.1))))
-            .collect::<Result<_, _>>()?;
-        let type_defs = self
-            .type_defs
-            .into_iter()
-            .map(|def| def.desugar(&env))
-            .collect::<Result<_, _>>()?;
-        // TODO: further modify the module to merge with
+            .map(|(name, alias)| (name.0, NamedTypeData::Alias(name, alias)))
+            .chain(
+                self.type_defs
+                    .into_iter()
+                    .map(|def| (def.name.0, NamedTypeData::Def(def))),
+            )
+            .enumerate()
+            .map(|(index, (name, ty_data))| ((name, index), ty_data))
+            .unzip();
+
+        // Create the dependency graph of the named types in this module.
+        let ty_dep_graph = ty_refs
+            .iter()
+            .map(|ty_ref| {
+                let mut collected = HashSet::new();
+                ty_ref.collect_refs(&ty_names, &mut collected)?;
+                Ok(DepGraphNode(collected.into_iter().collect()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let sccs = find_strongly_connected_components(&ty_dep_graph);
+        for scc in &sccs {
+            if scc.len() > 1 {
+                // If there are multiple types in the same SCC, we have a cycle.
+                // This is currently not allowed in type definitions.
+                let ty_ref = &ty_refs[scc[0]];
+                return Err(internal_compilation_error!(Unsupported {
+                    reason: format!(
+                        "Cyclic types are not supported, but `{}` indirectly refers to itself",
+                        ty_ref.name()
+                    ),
+                    span: ty_ref.name_span(),
+                }));
+            }
+        }
+
+        // Build a module environment with the current module and the others.
+        let mut env = ModuleEnv::new(output, others);
+
+        // Process types in order of their dependencies and resolve type aliases and type definitions.
+        // Directly insert them into the output module once they are resolved.
+        let sorted_sccs = topological_sort_sccs(&ty_dep_graph, &sccs);
+        for scc in sorted_sccs.into_iter().rev() {
+            assert_eq!(scc.len(), 1);
+            let ty_ref = &ty_refs[scc[0]];
+            match ty_ref {
+                NamedTypeData::Alias(name, alias) => {
+                    let ty = alias.0.desugar(alias.1, false, &env)?;
+                    output.type_aliases.set_with_ustr(name.0, ty);
+                }
+                NamedTypeData::Def(def) => {
+                    output.type_defs.insert(def.name.0, def.desugar(&env)?);
+                }
+            }
+            env = ModuleEnv::new(output, others);
+        }
 
         // Desugar functions
         let fn_map = self
@@ -266,12 +345,12 @@ impl PModule {
             .enumerate()
             .map(|(index, func)| (func.name.0, index))
             .collect::<HashMap<_, _>>();
-        let (functions, dependency_graph): (_, Vec<_>) = process_results(
+        let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
             self.functions.into_iter().map(|f| f.desugar(&fn_map, &env)),
             |iter| iter.unzip(),
         )?;
-        let sccs = find_strongly_connected_components(&dependency_graph);
-        let sorted_sccs = topological_sort_sccs(&dependency_graph, &sccs);
+        let sccs = find_strongly_connected_components(&fn_dep_graph);
+        let sorted_sccs = topological_sort_sccs(&fn_dep_graph, &sccs);
 
         // Desugar trait implementations
         let impls = self
@@ -284,8 +363,8 @@ impl PModule {
         let module = DModule {
             functions,
             impls,
-            type_aliases,
-            type_defs,
+            type_aliases: vec![],
+            type_defs: vec![],
         };
         Ok((module, sorted_sccs))
     }
@@ -296,7 +375,7 @@ impl PModuleFunction {
         self,
         fn_map: &FnMap,
         env: &ModuleEnv<'_>,
-    ) -> Result<(DModuleFunction, FnDepGraphNode), InternalCompilationError> {
+    ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
         let locals = self.args.iter().map(|arg| arg.name.0).collect();
         let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env);
         let body = self.body.desugar(&mut ctx)?;
@@ -319,7 +398,7 @@ impl PModuleFunction {
             span: self.span,
             doc: self.doc,
         };
-        let deps = FnDepGraphNode(ctx.fn_deps.into_iter().collect());
+        let deps = DepGraphNode(ctx.fn_deps.into_iter().collect());
         Ok((function, deps))
     }
 }

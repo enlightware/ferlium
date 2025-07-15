@@ -23,7 +23,7 @@ use crate::common::{bool, compile, fail_compilation, float, int, run, string};
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn define_enum_types() {
-    let code = indoc! { r#"
+    let mod_src = indoc! { r#"
         // Basic unit variants
         enum SimpleColor {
             Red,
@@ -67,7 +67,7 @@ fn define_enum_types() {
         // Empty enum
         enum Empty {}
     "# };
-    let module = compile(code).0.module;
+    let module = compile(mod_src).0.module;
 
     let simple_color = module.type_defs.get(&ustr("SimpleColor")).unwrap();
     assert_eq!(simple_color.name, ustr("SimpleColor"));
@@ -212,7 +212,12 @@ fn create_record_enum_values() {
         Value::raw_variant(ustr("Move"), Value::tuple([int(30), int(40)]))
     );
 
-    let mod_src = "enum Message { Quit, Flag { v0: bool, v1: bool } }";
+    let mod_src = indoc! { "
+        enum Message {
+            Quit,
+            Flag { v0: bool, v1: bool }
+        }
+    " };
     assert_eq!(
         run(&format!(
             "{mod_src} Message::Flag {{ v1: false, v0: true }}"
@@ -257,7 +262,12 @@ fn create_tuple_enum_values() {
         Value::raw_variant(ustr("Positioned"), Value::tuple([int(40), int(0)]))
     );
 
-    let mod_src = "enum Player { Basic(string), State(bool) }";
+    let mod_src = indoc! { "
+        enum Player {
+            Basic(string),
+            State(bool)
+        }
+    " };
     assert_eq!(
         run(&format!(r#"{mod_src} Player::Basic("ok")"#)),
         Value::raw_variant(ustr("Basic"), Value::tuple([string("ok")]))
@@ -339,7 +349,7 @@ fn enum_projections() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn define_struct_types() {
-    let code = indoc! { r#"
+    let mod_src = indoc! { r#"
         // Empty struct
         struct Empty {}
 
@@ -371,7 +381,7 @@ fn define_struct_types() {
             callback: (string) -> ()
         }
     "# };
-    let module = compile(code).0.module;
+    let module = compile(mod_src).0.module;
 
     let empty_type = module.type_defs.get(&ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));
@@ -538,7 +548,6 @@ fn create_tuple_struct_values() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn struct_projections() {
-    // doesn't work due to storing the type not in a tuple
     assert_eq!(run(r#"struct Email(string) Email("hi").0"#), string("hi"));
 
     assert_eq!(
@@ -551,9 +560,96 @@ fn struct_projections() {
         string("John")
     );
 
-    // lack of type parsing dependencies prevents this from working
-    // assert_eq!(
-    //     run(r#"struct Age(int) struct Person(string, Age) Person("John", Age(30)).0"#),
-    //     string("John")
-    // );
+    assert_eq!(
+        run(r#"struct Age(int) struct Person(string, Age) Person("John", Age(30)).0"#),
+        string("John")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn same_module_references() {
+    assert_eq!(
+        run(r#"
+            struct Age(int)
+            struct Name(string)
+            struct Person { name: Name, age: Age }
+
+            fn get_name(person: Person) { person.name }
+            fn get_age(person: Person) { person.age }
+            fn get_data(person: Person) { (get_name(person).0, get_age(person).0) }
+
+            get_data(Person { name: Name("John"), age: Age(30) })
+        "#),
+        tuple!(string("John"), int(30))
+    );
+
+    assert_eq!(
+        fail_compilation("struct A { a: A }")
+            .into_inner()
+            .into_unsupported()
+            .unwrap()
+            .1,
+        "Self-referential type paths are not supported, but `A` refers to itself"
+    );
+    assert_eq!(
+        fail_compilation("enum A { X(A) }")
+            .into_inner()
+            .into_unsupported()
+            .unwrap()
+            .1,
+        "Self-referential type paths are not supported, but `A` refers to itself"
+    );
+    assert_eq!(
+        fail_compilation("enum A { X(B) } struct B { a: A }")
+            .into_inner()
+            .into_unsupported()
+            .unwrap()
+            .1,
+        "Cyclic types are not supported, but `B` indirectly refers to itself"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_annotations() {
+    let mod_src = indoc! { r#"
+        struct Age(int)
+        struct Person1 { age: Age }
+        struct Person2 { age: Age }
+
+        fn age(d) { d.age.0 }
+        fn age1(d: Person1) { d.age.0 }
+    "# };
+    assert_eq!(
+        run(&format!(r"{mod_src} age(Person1 {{ age: Age(30) }})")),
+        int(30)
+    );
+    assert_eq!(
+        run(&format!(r"{mod_src} age1(Person1 {{ age: Age(30) }})")),
+        int(30)
+    );
+    assert_eq!(
+        run(&format!(r"{mod_src} age(Person2 {{ age: Age(30) }})")),
+        int(30)
+    );
+    assert_eq!(run(&format!(r"{mod_src} age({{ age: Age(30) }})")), int(30));
+    let error = fail_compilation(&format!(r"{mod_src} age1(Person2 {{ age: Age(30) }})"))
+        .into_inner()
+        .into_named_type_mismatch()
+        .unwrap();
+    assert_eq!((error.0.as_str(), error.3.as_str()), ("Person2", "Person1"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn double_newtype() {
+    let mod_src = indoc! { r#"
+        struct Person(string)
+        struct Creature(Person)
+    "# };
+    assert_eq!(
+        run(&format!(r#"{mod_src} Creature(Person("Alice")).0.0"#)),
+        string("Alice")
+    );
 }
