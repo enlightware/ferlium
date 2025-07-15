@@ -44,7 +44,7 @@ fn pretty_print_parse_errors(src: &str, errors: &[LocatedError]) {
             .with_message(format!("Parse error: {text}.",))
             .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
             .finish()
-            .print(("input", Source::from(src)))
+            .eprint(("input", Source::from(src)))
             .unwrap();
     }
 }
@@ -64,7 +64,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 ))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         WrongNumberOfArguments {
@@ -84,7 +84,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 )
                 .with_label(Label::new(("input", span_range(*got_span))).with_color(Color::Magenta))
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         MutabilityMustBe {
@@ -117,7 +117,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                             .with_order(1),
                     )
                     .finish()
-                    .print(("input", Source::from(src)))
+                    .eprint(("input", Source::from(src)))
                     .unwrap(),
                 Constant => Report::build(ReportKind::Error, ("input", span))
                     .with_message(format!(
@@ -136,7 +136,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                             .with_order(1),
                     )
                     .finish()
-                    .print(("input", Source::from(src)))
+                    .eprint(("input", Source::from(src)))
                     .unwrap(),
                 Equal => Report::build(ReportKind::Error, ("input", span))
                     .with_message(format!(
@@ -156,7 +156,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                             .with_order(1),
                     )
                     .finish()
-                    .print(("input", Source::from(src)))
+                    .eprint(("input", Source::from(src)))
                     .unwrap(),
             }
         }
@@ -187,7 +187,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                     Label::new(("input", span_range(*expected_span))).with_color(Color::Blue),
                 )
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         UnboundTypeVar { ty_var, ty, span } => {
@@ -199,7 +199,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 ))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         InvalidTupleIndex {
@@ -227,7 +227,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                         .with_order(1),
                 )
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         InvalidTupleProjection {
@@ -254,7 +254,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                         .with_order(1),
                 )
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         DuplicatedField {
@@ -278,7 +278,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                     Label::new(("input", span_range(*second_occurrence))).with_color(Color::Blue),
                 )
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         InvalidVariantConstructor { span } => {
@@ -290,7 +290,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 ))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         InconsistentADT {
@@ -317,7 +317,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                         .with_color(Color::Magenta),
                 )
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         MutablePathsOverlap {
@@ -340,7 +340,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .with_label(Label::new(("input", span_range(*b_span))).with_color(Color::Blue))
                 .with_label(Label::new(("input", span_range(*fn_span))).with_color(Color::Green))
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         UndefinedVarInStringFormatting {
@@ -359,7 +359,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .with_label(Label::new(("input", span_range(*var_span))).with_color(Color::Blue))
                 .with_label(Label::new(("input", span_range(*string_span))))
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
         Unsupported { span, reason } => {
@@ -367,10 +367,10 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .with_message(format!("Unsupported feature: {reason}."))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
-                .print(("input", Source::from(src)))
+                .eprint(("input", Source::from(src)))
                 .unwrap();
         }
-        _ => println!(
+        _ => eprintln!(
             "Module emission error: {}",
             FormatWith { value: error, data }
         ),
@@ -394,20 +394,15 @@ fn process_input(
     locals: &mut Vec<Local>,
     eval_ctx: &mut EvalCtx,
     is_repl: bool,
-) -> Result<bool, i32> {
+) -> i32 {
     // Parse input
     let parse_result = parse_module_and_expr(input, true);
     let (module_ast, expr_ast) = match parse_result {
         Ok(result) => result,
         Err(errors) => {
-            if is_repl {
-                pretty_print_parse_errors(input, &errors);
-                return Ok(false);
-            } else {
-                eprintln!("Parse errors:");
-                pretty_print_parse_errors(input, &errors);
-                return Err(1);
-            }
+            eprintln!("Parse errors:");
+            pretty_print_parse_errors(input, &errors);
+            return 1;
         }
     };
 
@@ -428,14 +423,9 @@ fn process_input(
             Ok(new_module) => new_module,
             Err(e) => {
                 let env = ModuleEnv::new(module, other_modules);
-                if is_repl {
-                    pretty_print_checking_error(&e, &(env, input));
-                    return Ok(false);
-                } else {
-                    eprintln!("Module compilation error:");
-                    pretty_print_checking_error(&e, &(env, input));
-                    return Err(1);
-                }
+                eprintln!("Module compilation error:");
+                pretty_print_checking_error(&e, &(env, input));
+                return 2;
             }
         };
         if is_repl {
@@ -451,14 +441,9 @@ fn process_input(
         let compiled_expr = match expr_ir {
             Ok(res) => res,
             Err(e) => {
-                if is_repl {
-                    pretty_print_checking_error(&e, &(module_env, input));
-                    return Ok(false);
-                } else {
-                    eprintln!("Expression compilation error:");
-                    pretty_print_checking_error(&e, &(module_env, input));
-                    return Err(1);
-                }
+                eprintln!("Expression compilation error:");
+                pretty_print_checking_error(&e, &(module_env, input));
+                return 3;
             }
         };
 
@@ -477,30 +462,24 @@ fn process_input(
                     "{value}: {}",
                     compiled_expr.ty.display_rust_style(&module_env)
                 );
-                Ok(true)
+                0
             }
             Err(error) => {
                 if is_repl {
                     // Restore the context as before starting the evaluation
                     eval_ctx.environment.truncate(old_size);
                     eval_ctx.frame_base = old_frame_base;
-                    println!("Runtime error: {error}");
-                    Ok(false)
-                } else {
-                    eprintln!("Runtime error: {error}");
-                    Err(1)
                 }
+                eprintln!("Runtime error: {error}");
+                4
             }
         }
     } else {
         // No expression, just module definitions - that's successful
         if !is_repl {
-            // In pipe mode, if there's no expression to evaluate, that's fine
-            Ok(true)
-        } else {
             println!("No expression to evaluate.");
-            Ok(true)
         }
+        0
     }
 }
 
@@ -524,17 +503,14 @@ fn process_pipe_input() -> i32 {
     let mut eval_ctx = EvalCtx::new();
 
     // Process the input
-    match process_input(
+    process_input(
         &input,
         &mut module,
         &other_modules,
         &mut locals,
         &mut eval_ctx,
         false,
-    ) {
-        Ok(_) => 0, // Success (either expression evaluated or just module definitions)
-        Err(exit_code) => exit_code,
-    }
+    )
 }
 
 fn main() {
@@ -669,17 +645,14 @@ fn run_interactive_repl() {
         };
 
         // Process the input using the shared function
-        match process_input(
+        process_input(
             &src,
             &mut module,
             &other_modules,
             &mut locals,
             &mut eval_ctx,
             true,
-        ) {
-            Ok(_) => {}  // Success, continue the REPL
-            Err(_) => {} // Error handled by process_input, continue the REPL
-        }
+        );
 
         if let Err(e) = rl.save_history(history_filename) {
             println!("Failed to save history: {e:?}");

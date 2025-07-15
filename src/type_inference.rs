@@ -662,8 +662,7 @@ impl TypeInference {
                     let ty = Type::named(type_def.clone(), []);
                     // But the value of the node is the underlying record.
                     // If all nodes can be resolved to bare immediates, we can create an immediate value.
-                    let resolved_nodes_value =
-                        nodes_as_bare_immediate(&nodes).map(Value::tuple);
+                    let resolved_nodes_value = nodes_as_bare_immediate(&nodes).map(Value::tuple);
                     let node = if let Some(tag) = tag {
                         if let Some(value) = resolved_nodes_value {
                             let value = Value::raw_variant(tag, value);
@@ -1017,8 +1016,7 @@ impl TypeInference {
                 let ty = Type::named(type_def.clone(), []);
                 // But the value of the node is the underlying tuple.
                 // If all nodes can be resolved to bare immediates, we can create an immediate value.
-                let resolved_nodes_value =
-                    nodes_as_bare_immediate(&nodes).map(Value::tuple);
+                let resolved_nodes_value = nodes_as_bare_immediate(&nodes).map(Value::tuple);
                 let inner_kind = if let Some(value) = resolved_nodes_value {
                     K::Immediate(Immediate::new(value))
                 } else {
