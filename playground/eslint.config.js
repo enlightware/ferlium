@@ -30,7 +30,6 @@ export default typescriptEslint.config(
 				}
 			],
 			"indent": ["error", "tab"],
-			"@typescript-eslint/indent": ["error", "tab"],
 			"vue/html-indent": ["error", "tab", {
 				"baseIndent": 1,
 				"switchCase": 0,

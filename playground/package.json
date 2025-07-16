@@ -1,5 +1,5 @@
 {
-  "name": "script-playground",
+  "name": "ferlium-playground",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,31 +9,29 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@babel/types": "^7.24.9",
-    "@codemirror/commands": "^6.6.0",
-    "@codemirror/language": "^6.10.2",
-    "@codemirror/lint": "^6.8.1",
-    "@codemirror/state": "^6.4.1",
-    "@codemirror/view": "^6.28.6",
-    "@lezer/highlight": "^1.2.0",
-    "@lezer/lr": "^1.4.1",
-    "codemirror": "^6.0.1",
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/language": "^6.11.2",
+    "@codemirror/lint": "^6.8.5",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.1",
+    "@lezer/highlight": "^1.2.1",
+    "codemirror": "^6.0.2",
     "unplugin-lezer": "^1.0.1",
     "vite-plugin-wasm-pack": "github:enlightware/vite-plugin-wasm-pack#60995dd",
-    "vue": "^3.4.33"
+    "vue": "^3.5.17"
   },
   "devDependencies": {
-    "@eslint/js": "^9.7.0",
     "@lezer/generator": "^1.8.0",
     "@nabla/vite-plugin-eslint": "^2.0.4",
-    "@types/node": "^20.14.11",
-    "@vitejs/plugin-vue": "^5.0.5",
-    "eslint": "^8.57.0",
-    "eslint-plugin-vue": "^9.27.0",
-    "typescript": "^5.5.4",
-    "typescript-eslint": "^7.17.0",
-    "vite": "^5.3.4",
-    "vite-plugin-mkcert": "^1.17.5",
-    "vue-tsc": "^2.0.28"
+    "@types/node": "^22.16.4",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "eslint": "^9.31.0",
+    "eslint-plugin-vue": "^10.3.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.37.0",
+    "vite": "^6.3.5",
+    "vite-plugin-mkcert": "^1.17.8",
+    "vue-eslint-parser": "^10.2.0",
+    "vue-tsc": "^3.0.1"
   }
 }

@@ -23,7 +23,7 @@ install-npm-deps:
 install-dev-deps: install-npm-deps install-wasm-deps
 
 lint:
-	./node_modules/.bin/eslint
+	./node_modules/.bin/eslint --ignore-pattern "script-api/pkg/*"
 
 validate-grammar: install-npm-deps
 	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
