@@ -14,24 +14,28 @@ build-rust-code: $(RUST_WASM)
 $(RUST_WASM): $(RUST_SOURCES) $(RUST_CONFIG_FILES)
 	wasm-pack build script-api/ --target web
 
-install-dev-deps:
+install-wasm-deps:
 	cargo install wasm-pack
+
+install-npm-deps:
 	npm i
+
+install-dev-deps: install-npm-deps install-wasm-deps
 
 lint:
 	./node_modules/.bin/eslint
 
-validate-grammar: install-dev-deps
+validate-grammar: install-npm-deps
 	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
 	cd test && node extract-test-grammar.js ./temp-grammar.js
 	rm -f test/temp-grammar.js test/temp-grammar.terms.js
 
-list-grammar-errors: install-dev-deps
+list-grammar-errors: install-npm-deps
 	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
 	cd test && node extract-test-grammar.js ./temp-grammar.js --errors
 	rm -f test/temp-grammar.js test/temp-grammar.terms.js
 
-validate-grammar-verbose: install-dev-deps
+validate-grammar-verbose: install-npm-deps
 	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
 	cd test && node extract-test-grammar.js ./temp-grammar.js --verbose
 	rm -f test/temp-grammar.js test/temp-grammar.terms.js

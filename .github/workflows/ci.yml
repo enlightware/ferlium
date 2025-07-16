@@ -87,6 +87,28 @@ jobs:
         with:
           path: site
 
+  validate_lezer_grammar:
+    name: Validate Lezer grammar
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playground
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install npm dependencies
+        run: make install-npm-deps
+
+      - name: Validate Lezer grammar
+        run: make validate-grammar
+
   deploy_pages:
     name: Deploy playground
     environment:
