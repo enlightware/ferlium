@@ -20,3 +20,18 @@ install-dev-deps:
 
 lint:
 	./node_modules/.bin/eslint
+
+validate-grammar: install-dev-deps
+	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
+	cd test && node extract-test-grammar.js ./temp-grammar.js
+	rm -f test/temp-grammar.js test/temp-grammar.terms.js
+
+list-grammar-errors: install-dev-deps
+	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
+	cd test && node extract-test-grammar.js ./temp-grammar.js --errors
+	rm -f test/temp-grammar.js test/temp-grammar.terms.js
+
+validate-grammar-verbose: install-dev-deps
+	./node_modules/.bin/lezer-generator src/language/language.grammar -o test/temp-grammar.js
+	cd test && node extract-test-grammar.js ./temp-grammar.js --verbose
+	rm -f test/temp-grammar.js test/temp-grammar.terms.js

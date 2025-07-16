@@ -8,6 +8,8 @@
 //
 use test_log::test;
 
+use indoc::indoc;
+
 use crate::common::{variant_0, variant_t1, variant_tn};
 
 use super::common::{
@@ -445,7 +447,7 @@ fn match_expr() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn match_tuples() {
     assert_eq!(
-        run(r#"
+        run(indoc! { r#"
             let mut a = [];
             for l in [false, true] {
                 for r in [false, true] {
@@ -459,11 +461,11 @@ fn match_tuples() {
                 }
             };
             a
-        "#),
+        "# }),
         int_a![4, 3, 2, 1]
     );
     assert_eq!(
-        run(r#"
+        run(indoc! { r#"
             let mut a = [];
             for l in [false, true] {
                 for m in [false, true] {
@@ -483,7 +485,7 @@ fn match_tuples() {
                 }
             };
             a
-        "#),
+        "# }),
         int_a![8, 7, 6, 5, 4, 3, 2, 1]
     );
 }

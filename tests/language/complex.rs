@@ -8,6 +8,8 @@
 //
 use test_log::test;
 
+use indoc::indoc;
+
 use super::common::{bool, fail_compilation, int, run, unit};
 use ferlium::{error::MutabilityMustBeWhat, value::Value};
 
@@ -155,20 +157,20 @@ fn fn_pipes_and_if_expr() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn minimalist_variants_and_trait_constraints() {
     assert_eq!(
-        run(r#"
-    fn count_somes(a) {
-        let mut sum = 0;
-        for option in a {
-            match option {
-                Some(a) => sum = sum + 1,
-                None => ()
+        run(indoc! { r#"
+            fn count_somes(a) {
+                let mut sum = 0;
+                for option in a {
+                    match option {
+                        Some(a) => sum = sum + 1,
+                        None => ()
+                    }
+                };
+                sum
             }
-        };
-        sum
-    }
 
-    count_somes([None, Some(true), None, None, Some(false)])
-    "#),
+            count_somes([None, Some(true), None, None, Some(false)])
+        "# }),
         int(2)
     );
 }
@@ -177,19 +179,19 @@ fn minimalist_variants_and_trait_constraints() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn double_loop() {
     assert_eq!(
-        run(r#"
-    fn sums() {
-        let mut sum = 0;
-        for i in 1..3 {
-            for j in 1..4 {
-                sum = sum + i * j;
+        run(indoc! { r#"
+            fn sums() {
+                let mut sum = 0;
+                for i in 1..3 {
+                    for j in 1..4 {
+                        sum = sum + i * j;
+                    }
+                };
+                sum
             }
-        };
-        sum
-    }
 
-    sums()
-    "#),
+            sums()
+        "# }),
         int(18)
     );
 }

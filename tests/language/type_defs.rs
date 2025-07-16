@@ -201,14 +201,14 @@ fn define_enum_types() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_record_enum_values() {
     assert_eq!(
-        run(r#"
+        run(indoc! { r#"
             enum Message {
                 Quit,
                 Move { x: int, y: int },
             }
 
             Message::Move { y: 30 + 10, x: 30 }
-        "#),
+        "# }),
         Value::raw_variant(ustr("Move"), Value::tuple([int(30), int(40)]))
     );
 
@@ -251,14 +251,14 @@ fn create_record_enum_values() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_tuple_enum_values() {
     assert_eq!(
-        run(r#"
+        run(indoc! { r#"
             enum Player {
                 Basic(string),
                 Positioned(int, int),
             }
 
             Player::Positioned(30 + 10, 0)
-        "#),
+        "# }),
         Value::raw_variant(ustr("Positioned"), Value::tuple([int(40), int(0)]))
     );
 
@@ -327,7 +327,7 @@ fn create_mix_enum_values() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn enum_projections() {
     assert_eq!(
-        run(r#"
+        run(indoc! { r#"
             enum Action {
                 Quit,
                 Jump(float),
@@ -341,7 +341,7 @@ fn enum_projections() {
             };
 
             f(Action::Move { x: 30.0, y: 40.0 }) + f(Action::Jump(5.0))
-        "#),
+        "# }),
         float(-5.0)
     );
 }
@@ -461,7 +461,7 @@ fn define_struct_types() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_record_struct_values() {
     assert_eq!(
-        run(r#"
+        run(indoc! { r#"
             struct Person {
                 name: string,
                 age: int,
@@ -473,7 +473,7 @@ fn create_record_struct_values() {
                 age: 20 + 10,
                 is_active: true
             }
-        "#),
+        "# }),
         Value::tuple(vec![int(30), bool(true), string("Alice")])
     );
 
@@ -570,7 +570,7 @@ fn struct_projections() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn same_module_references() {
     assert_eq!(
-        run(r#"
+        run(indoc! { r#"
             struct Age(int)
             struct Name(string)
             struct Person { name: Name, age: Age }
@@ -580,7 +580,7 @@ fn same_module_references() {
             fn get_data(person: Person) { (get_name(person).0, get_age(person).0) }
 
             get_data(Person { name: Name("John"), age: Age(30) })
-        "#),
+        "# }),
         tuple!(string("John"), int(30))
     );
 

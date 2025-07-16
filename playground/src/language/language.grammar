@@ -1,6 +1,6 @@
 @tokens {
     Identifier { $[a-zA-Z_]$[a-zA-Z0-9_]* }
-    Integer { $[0-9]$[0-9]* }
+    UInt { $[0-9]$[0-9]* }
     String { 'f'? '"' (!["\\] | "\\" _)* '"' }
     Boolean { "true" | "false" }
     LineComment[isolate] { "//" ![\n]* }
@@ -9,13 +9,19 @@
     blockCommentAfterStar { "/" | "*" blockCommentAfterStar | ![/*] blockCommentRest }
     whitespace { @whitespace+ }
     CompareOp { "==" | "!="| ">"| ">="| "<" | "<=" }
+    AssignOp { "=" | "+=" | "-=" | "*=" | "/="  }
 
     "[" "]" "{" "}" "(" ")"
     ";" ":" "::" ","
-    "=" "=>" ".."
+    "=>" ".." "|>"
 
     @precedence { LineComment, BlockComment, "/" }
     @precedence { Boolean, String, Identifier }
+}
+
+@precedence {
+    noStruct,
+    structLiteral
 }
 
 kw<term> { @specialize[@name={term}]<Identifier, term> }
@@ -27,20 +33,55 @@ kw<term> { @specialize[@name={term}]<Identifier, term> }
 }
 
 Module {
-    functionOrType*
+    modelItem*
 }
 
-functionOrType {
+modelItem {
     Function
+    | TraitImpl
+    | TypeDef
 }
 
 Function {
     kw<'fn'> Identifier '(' identifierWithOptTypeArgs ')' fnRet? Block
 }
 
+TraitImpl {
+    kw<'impl'> Identifier '{' Function* '}'
+}
+
+TypeDef {
+    StructDef
+    | EnumDef
+}
+
+StructDef {
+    kw<'struct'> Identifier TypeArgs? structBody
+}
+
+structBody {
+    recordType
+    | '(' (Type ',')* Type? ')'
+    | ';' // empty struct
+}
+
+TypeArgs {
+    '<' Identifier (',' Identifier)* '>'
+}
+
+EnumDef {
+    kw<'enum'> Identifier TypeArgs? '{' (enumVariant ',')* enumVariant? '}'
+}
+
+enumVariant {
+    Identifier
+    | Identifier '(' (Type ',')* Type? ')'
+    | Identifier recordType
+}
+
 Type {
     placeholderType
-    | primitiveType
+    | Path
     | arrayType
     | recordType
     | variantType
@@ -64,22 +105,12 @@ placeholderType {
     TypeOp { kw<'_'> }
 }
 
-primitiveType {
-    kw<'bool'>
-    | kw<'int'>
-    | kw<'float'>
-    | kw<'string'>
-    | kw<'Variant'>
-    | kw<'Ordering'>
-}
-
 arrayType {
     '[' Type ']'
 }
 
 recordType {
-    '{' recordTypeField '}'
-    | '{' recordTypeField ',' (recordTypeField ',')* recordTypeField? '}'
+    '{' (recordTypeField ',')* recordTypeField? '}'
 }
 
 recordTypeField {
@@ -87,7 +118,12 @@ recordTypeField {
 }
 
 variantType {
-    variantTypeAlternative ('|' variantTypeAlternative)*
+    variantTypeAlternativeRestricted
+    | variantTypeAlternative '|' variantTypeAlternative ('|' variantTypeAlternative)*
+}
+
+variantTypeAlternativeRestricted {
+    Identifier '(' (Type ',')* Type? ')'
 }
 
 variantTypeAlternative {
@@ -113,14 +149,14 @@ extraExpr {
 }
 
 expr {
-    logicOrExpr
-    | Assignment
+    Assignment
     | Return
     | Abstraction
+    | pipeExpr
 }
 
 Assignment {
-    logicOrExpr '=' expr
+    pipeExpr AssignOp expr
 }
 
 Return {
@@ -130,6 +166,16 @@ Return {
 Abstraction {
     '|' identifiersOptComma '|' expr
     | '||' expr
+}
+
+pipeExpr {
+    rangeExpr
+    | pipeExpr '|>' suffixExpr '(' exprArgsOptComma ')'
+}
+
+rangeExpr {
+    logicOrExpr
+    | unaryExpr '..' unaryExpr
 }
 
 logicOrExpr {
@@ -175,7 +221,7 @@ suffixExpr {
 
 Projection {
     suffixExpr '.' Identifier
-    | suffixExpr '.' Integer
+    | suffixExpr '.' UInt
 }
 
 Indexing {
@@ -188,7 +234,7 @@ Application {
 
 atomExpr {
     parExpr
-    | Path
+    | pathOrStructCtor
     | PropertyPath
     | For
     | If
@@ -211,11 +257,11 @@ If {
 
 Match {
     kw<'match'> expr '{' matchArgsOptComma '}'
-    | kw<'match'> expr '{' matchArgs ',' kw<'_'> '=>' exprOptComma '}'
+    | kw<'match'> expr '{' (matchArgs ',')? kw<'_'> '=>' exprOptComma '}'
 }
 
 For {
-    kw<'for'> Identifier kw<'in'> expr '..' expr Block
+    kw<'for'> Identifier kw<'in'> expr Block
 }
 
 Tuple {
@@ -276,21 +322,42 @@ MatchBranch {
 }
 
 Pattern {
-    Literal
+    literalPattern
     | Identifier
     | Identifier '(' identifiersOptComma ')'
+    | Identifier '{' identifiersOptComma '}'
 }
 
 PropertyPath {
     '@' Path '.' Identifier
 }
 
+pathOrStructCtor {
+    Path !noStruct
+    | Path Record !structLiteral
+    | Path '{' '}' !structLiteral
+}
+
 Path {
     (Identifier '::')* Identifier
 }
 
+literalPattern {
+    scalarLiteralPattern
+    | tupleLiteralPattern
+}
+
+scalarLiteralPattern {
+    Literal
+    | '-' UInt
+}
+
+tupleLiteralPattern {
+    '(' literalPattern (',' literalPattern)* ')'
+}
+
 Literal {
-    Integer
+    UInt
     | String
     | Boolean
 }
