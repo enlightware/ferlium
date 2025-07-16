@@ -18,6 +18,7 @@ const highlight = styleTags({
 	"if else match for return": t.controlKeyword,
 	"in": t.operatorKeyword,
 	"Type/...": t.typeName,
+	MutTyOrInfer: t.typeName,
 	Identifier: t.variableName,
 	Integer: t.integer,
 	Boolean: t.bool,

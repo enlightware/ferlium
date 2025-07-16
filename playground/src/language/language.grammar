@@ -136,12 +136,12 @@ TypeAscription {
 }
 
 RefMutTypeAscription {
-    TypeOp { ':' } ('&' mutTyOrInfer)? Type
+    TypeOp { ':' } (MutTyOrInfer)? Type
 }
 
-mutTyOrInfer {
-    'mut'
-    | '?'
+MutTyOrInfer {
+    '&' 'mut'
+    | '&' '?'
 }
 
 extraExpr {
