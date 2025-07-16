@@ -20,6 +20,9 @@ use ustr::ustr;
 
 use crate::common::{bool, compile, fail_compilation, float, int, run, string};
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn define_enum_types() {
