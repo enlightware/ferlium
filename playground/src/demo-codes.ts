@@ -68,6 +68,45 @@ fn s_def(x) {
 
 (s_full(Some(1)), s_full(None), s_def(Some(1)), s_def(Other))
 `],
+['Rust-style named types', `struct Point {
+	x: int,
+	y: int
+}
+
+fn dist2_gen(p) {
+	p.x * p.x + p.y * p.y
+}
+
+fn dist2_point(p: Point) {
+	p.x * p.x + p.y * p.y
+}
+
+enum Message {
+	Quit,
+	Move { x: int, y: int },
+	Write(string),
+	ChangeColor(int, int, int),
+	Callback(() -> int)
+}
+
+fn energy_cost(m: Message) {
+	match m {
+		Quit => 0,
+		Move { x, y } => x * x + y * y,
+		Write(s) => string_len(s),
+		ChangeColor(r, g, b) => r + g + b,
+		Callback(f) => f()
+	}
+}
+
+let dist_eq = dist2_gen({x: 3, y: 4}) == dist2_point(Point {x: 3, y: 4});
+let e = energy_cost(Message::Write("hello"))
+	+ energy_cost(Message::Move { x: 1, y: 2 })
+	+ energy_cost(Message::ChangeColor(255, 0, 0))
+	+ energy_cost(Message::Callback(|| 42));
+
+(dist_eq, e)
+`],
 ['Effects', `fn a(i, f, g) {
 	if i > 0 {
 	    b(i - 1, f, g); ()
