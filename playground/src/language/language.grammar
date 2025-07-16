@@ -9,7 +9,8 @@
     blockCommentAfterStar { "/" | "*" blockCommentAfterStar | ![/*] blockCommentRest }
     whitespace { @whitespace+ }
     CompareOp { "==" | "!="| ">"| ">="| "<" | "<=" }
-    AssignOp { "=" | "+=" | "-=" | "*=" | "/="  }
+    AssignOp { "="  }
+    UpdateOp { "+=" | "-=" | "*=" | "/="  }
 
     "[" "]" "{" "}" "(" ")"
     ";" ":" "::" ","
@@ -56,7 +57,7 @@ TypeDef {
 }
 
 StructDef {
-    kw<'struct'> Identifier TypeArgs? structBody
+    kw<'struct'> TypeName { Identifier } TypeArgs? structBody
 }
 
 structBody {
@@ -70,13 +71,13 @@ TypeArgs {
 }
 
 EnumDef {
-    kw<'enum'> Identifier TypeArgs? '{' (enumVariant ',')* enumVariant? '}'
+    kw<'enum'> TypeName { Identifier } TypeArgs? '{' (enumVariant ',')* enumVariant? '}'
 }
 
 enumVariant {
-    Identifier
-    | Identifier '(' (Type ',')* Type? ')'
-    | Identifier recordType
+    TagName { Identifier }
+    | TagName { Identifier } '(' (Type ',')* Type? ')'
+    | TagName { Identifier } recordType
 }
 
 Type {
@@ -114,7 +115,7 @@ recordType {
 }
 
 recordTypeField {
-    Identifier ':' Type
+    FieldName { Identifier } ':' Type
 }
 
 variantType {
@@ -157,6 +158,7 @@ expr {
 
 Assignment {
     pipeExpr AssignOp expr
+    | pipeExpr UpdateOp expr
 }
 
 Return {
@@ -283,7 +285,7 @@ Record {
 }
 
 RecordField {
-    Identifier ':' expr
+    FieldName { Identifier } ':' expr
 }
 
 exprOptComma {
@@ -323,9 +325,9 @@ MatchBranch {
 
 Pattern {
     literalPattern
-    | Identifier
-    | Identifier '(' identifiersOptComma ')'
-    | Identifier '{' identifiersOptComma '}'
+    | TagName { Identifier }
+    | TagName { Identifier } '(' identifiersOptComma ')'
+    | TagName { Identifier } '{' identifiersOptComma '}'
 }
 
 PropertyPath {
