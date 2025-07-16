@@ -212,7 +212,7 @@ impl PType {
                     let ty_name = items[0].0;
                     if ty_name == name {
                         return Err(internal_compilation_error!(Unsupported {
-                            reason: format!("Self-referential type paths are not supported, but `{}` refers to itself", ty_name),
+                            reason: format!("Self-referential type paths are not supported, but `{ty_name}` refers to itself"),
                             span: items[0].1,
                         }));
                     }

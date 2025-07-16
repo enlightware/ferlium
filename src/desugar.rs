@@ -99,7 +99,7 @@ impl ast::PType {
             Path(items) => {
                 // FIXME: this is inefficient, we should keep the split path all the way from parsing
                 let path: String = items
-                    .into_iter()
+                    .iter()
                     .map(|(name, _)| name.as_str())
                     .collect::<Vec<_>>()
                     .join("::");
