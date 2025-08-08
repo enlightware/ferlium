@@ -480,7 +480,11 @@ impl PExpr {
                 let expr = expr.desugar_boxed(ctx)?;
                 // Look inside the type ascription node to see if the type is constant, to be used later for display.
                 let ty_ascription = ty_ascription.map(|(span, _)| {
-                    let ty = expr.kind.as_type_ascription().unwrap().1;
+                    let ty = expr
+                        .kind
+                        .as_type_ascription()
+                        .map(|ty_asc| ty_asc.1)
+                        .unwrap_or_else(|| expr.kind.as_literal().unwrap().1);
                     let is_constant = ty.is_constant();
                     (span, is_constant)
                 });
@@ -611,11 +615,22 @@ impl PExpr {
             }
             Loop(body) => Loop(body.desugar_boxed(ctx)?),
             SoftBreak => SoftBreak,
-            TypeAscription(expr, ty, span) => TypeAscription(
-                expr.desugar_boxed(ctx)?,
-                ty.desugar(span, false, ctx.module_env)?,
-                span,
-            ),
+            TypeAscription(expr, ty, span) => {
+                let ty = ty.desugar(span, false, ctx.module_env)?;
+                if let Some((value, lit_ty)) = expr.kind.as_literal() {
+                    // If the expression is a literal and the type of the literal matches
+                    // the type we want to ascribe, we can just emit the literal.
+                    if *lit_ty == ty {
+                        Literal(value.clone(), *lit_ty)
+                    } else {
+                        // Otherwise, we need to emit a type ascription node.
+                        TypeAscription(expr.desugar_boxed(ctx)?, ty, span)
+                    }
+                } else {
+                    // Otherwise, we need to emit a type ascription node.
+                    TypeAscription(expr.desugar_boxed(ctx)?, ty, span)
+                }
+            }
             Error => Error,
         };
         Ok(DExpr {

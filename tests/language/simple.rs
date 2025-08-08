@@ -10,7 +10,7 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::common::{variant_0, variant_t1, variant_tn};
+use crate::common::{compile, variant_0, variant_t1, variant_tn};
 
 use super::common::{
     bool, compile_and_get_fn_def, fail_compilation, fail_run, float, get_property_value, int, run,
@@ -1254,4 +1254,18 @@ fn properties() {
         .unwrap();
     fail_compilation("@props::my_scope.my_var.a = 2")
         .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_ascription() {
+    // Basic case
+    assert_eq!(run("let x: int = 5; x"), int(5));
+    assert_eq!(run("let x: float = 5; x"), float(5.0));
+    assert_eq!(run("(5: int)"), int(5));
+    assert_eq!(run("(5: float)"), float(5.0));
+    // Optimisation
+    let compile_expr = |s: &str| compile(s).0.expr.unwrap().expr;
+    assert!(compile_expr("1").kind.is_static_apply());
+    assert!(compile_expr("(1: int)").kind.is_immediate());
 }

@@ -13,6 +13,7 @@ use crate::{
     type_like::{CastableToType, TypeLike},
     Location,
 };
+use enum_as_inner::EnumAsInner;
 use indexmap::IndexMap;
 use ustr::Ustr;
 
@@ -174,7 +175,7 @@ pub struct Case {
 }
 
 /// The kind-specific part of the expression-based execution tree
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind {
     Immediate(B<Immediate>),
     BuildClosure(B<BuildClosure>),
