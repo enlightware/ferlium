@@ -762,7 +762,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         write!(f, ">")
     }
 
-    pub(crate) fn display_quantifiers_rust_style(&self) -> FormatQuantifiersRustStyle<Self> {
+    pub(crate) fn display_quantifiers_rust_style(&self) -> FormatQuantifiersRustStyle<'_, Self> {
         FormatQuantifiersRustStyle(FormatWith {
             value: self,
             data: &(),

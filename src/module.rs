@@ -54,11 +54,11 @@ pub struct ModuleFunction {
     pub spans: Option<ModuleFunctionSpans>,
 }
 impl ModuleFunction {
-    pub fn get_node(&self) -> Option<Ref<Node>> {
+    pub fn get_node(&self) -> Option<Ref<'_, Node>> {
         let code = self.code.borrow();
         Ref::filter_map(code, |code| code.as_script().map(|s| &s.code)).ok()
     }
-    pub fn get_node_mut(&mut self) -> Option<RefMut<Node>> {
+    pub fn get_node_mut(&mut self) -> Option<RefMut<'_, Node>> {
         let code = self.code.borrow_mut();
         RefMut::filter_map(code, |code| code.as_script_mut().map(|s| &mut s.code)).ok()
     }
@@ -154,12 +154,12 @@ impl Module {
     }
 
     /// Look-up a function by name only in this module and return its script node, if it is a script function.
-    pub fn get_own_function_node(&mut self, name: Ustr) -> Option<Ref<Node>> {
+    pub fn get_own_function_node(&mut self, name: Ustr) -> Option<Ref<'_, Node>> {
         self.functions.get(&name)?.get_node()
     }
 
     /// Look-up a function by name only in this module and return its mutable script node, if it is a script function.
-    pub fn get_own_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<Node>> {
+    pub fn get_own_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<'_, Node>> {
         self.functions.get_mut(&name)?.get_node_mut()
     }
 
