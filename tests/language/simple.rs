@@ -10,7 +10,7 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::common::{compile, variant_0, variant_t1, variant_tn};
+use crate::common::{compile, set_array_property_value, variant_0, variant_t1, variant_tn};
 
 use super::common::{
     bool, compile_and_get_fn_def, fail_compilation, fail_run, float, get_property_value, int, run,
@@ -21,7 +21,7 @@ use ferlium::{
     mutability::MutType,
     r#type::{tuple_type, Type},
     std::{
-        array::array_type_generic,
+        array::{array_type_generic, Array},
         math::{float_type, int_type},
     },
     value::Value,
@@ -1238,6 +1238,7 @@ fn fn_pipes() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn properties() {
+    // simple value
     set_property_value(0);
     assert_eq!(run("@props::my_scope.my_var"), int(0));
     set_property_value(1);
@@ -1254,6 +1255,14 @@ fn properties() {
         .unwrap();
     fail_compilation("@props::my_scope.my_var.a = 2")
         .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
+
+    // array value
+    set_array_property_value(Array::new());
+    assert_eq!(run("@props::my_scope.my_array"), int_a![]);
+    run("@props::my_scope.my_array = [1, 2]");
+    assert_eq!(run("@props::my_scope.my_array"), int_a![1, 2]);
+    run("@props::my_scope.my_array = array_concat(@props::my_scope.my_array, [3, 4])");
+    assert_eq!(run("@props::my_scope.my_array"), int_a![1, 2, 3, 4]);
 }
 
 #[test]

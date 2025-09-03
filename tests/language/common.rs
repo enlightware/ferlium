@@ -17,11 +17,16 @@ use ferlium::{
     },
     module::{Module, Modules},
     r#type::{variant_type, FnType, Type},
-    std::{math::int_type, new_std_modules, option::option_type},
+    std::{
+        array::{array_type, Array},
+        math::int_type,
+        new_std_modules,
+        option::option_type,
+    },
     value::Value,
     ModuleAndExpr,
 };
-use std::{rc::Rc, sync::atomic::AtomicIsize};
+use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -109,23 +114,34 @@ fn test_effect_module() -> Module {
     module
 }
 
-static PROPERTY_VALUE: AtomicIsize = AtomicIsize::new(0);
+static INT_PROPERTY_VALUE: AtomicIsize = AtomicIsize::new(0);
 
 pub fn set_property_value(value: isize) {
-    PROPERTY_VALUE.store(value, std::sync::atomic::Ordering::Relaxed);
+    INT_PROPERTY_VALUE.store(value, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn get_property_value() -> isize {
-    PROPERTY_VALUE.load(std::sync::atomic::Ordering::Relaxed)
+    INT_PROPERTY_VALUE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+thread_local! {
+    static INT_ARRAY_PROPERTY_VALUE: RefCell<Array> = RefCell::new(Array::new());
+}
+
+pub fn set_array_property_value(value: Array) {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = value);
+}
+
+pub fn get_array_property_value() -> Array {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| cell.borrow().clone())
 }
 
 fn test_property_module() -> Module {
-    use std::sync::atomic::Ordering;
     let mut module: Module = Default::default();
     module.functions.insert(
         "@get my_scope.my_var".into(),
         NullaryNativeFnN::description_with_default_ty(
-            || PROPERTY_VALUE.load(Ordering::Relaxed),
+            get_property_value,
             [],
             None,
             effect(PrimitiveEffect::Read),
@@ -134,9 +150,29 @@ fn test_property_module() -> Module {
     module.functions.insert(
         "@set my_scope.my_var".into(),
         UnaryNativeFnNN::description_with_default_ty(
-            |value: isize| PROPERTY_VALUE.store(value, Ordering::Relaxed),
+            set_property_value,
             ["value"],
             None,
+            effect(PrimitiveEffect::Write),
+        ),
+    );
+    module.functions.insert(
+        "@get my_scope.my_array".into(),
+        NullaryNativeFnN::description_with_ty(
+            get_array_property_value,
+            [],
+            None,
+            array_type(int_type()),
+            effect(PrimitiveEffect::Read),
+        ),
+    );
+    module.functions.insert(
+        "@set my_scope.my_array".into(),
+        UnaryNativeFnNN::description_with_in_ty(
+            set_array_property_value,
+            ["value"],
+            None,
+            array_type(int_type()),
             effect(PrimitiveEffect::Write),
         ),
     );
