@@ -509,11 +509,55 @@ impl PExpr {
                 ctx.locals.truncate(env_size);
                 block
             }
-            Assign(place, sign_loc, value) => Assign(
-                place.desugar_boxed(ctx)?,
-                sign_loc,
-                value.desugar_boxed(ctx)?,
-            ),
+            Assign(place, sign_loc, value) => {
+                let place = place.desugar_boxed(ctx)?;
+                let value = value.desugar_boxed(ctx)?;
+                if let Some(index) = place.kind.as_index() {
+                    if index.0.kind.is_property_path() {
+                        /*
+                            Desugar:
+                                @scope.property[expr1] = expr2
+                            into:
+                                {
+                                    let mut tmp = @scope.property;
+                                    tmp[expr1] = expr2;
+                                    @scope.property = tmp;
+                                }
+                        */
+                        let let_stmt = Expr::new(
+                            Let(
+                                (ustr("tmp"), self.span),
+                                MutVal::mutable(),
+                                index.0.clone(),
+                                None,
+                            ),
+                            self.span,
+                        );
+                        let index_expr = Expr::new(
+                            Index(
+                                b(DExpr::new(Identifier(ustr("tmp")), self.span)),
+                                index.1.clone(),
+                            ),
+                            self.span,
+                        );
+                        let assign_tmp_stmt =
+                            Expr::new(Assign(b(index_expr), sign_loc, value), self.span);
+                        let assign_back_stmt = Expr::new(
+                            Assign(
+                                index.0.clone(),
+                                sign_loc,
+                                b(DExpr::new(Identifier(ustr("tmp")), self.span)),
+                            ),
+                            self.span,
+                        );
+                        return Ok(Expr::new(
+                            Block(vec![let_stmt, assign_tmp_stmt, assign_back_stmt]),
+                            self.span,
+                        ));
+                    }
+                }
+                Assign(place, sign_loc, value)
+            }
             PropertyPath(scope, var) => PropertyPath(scope, var),
             Tuple(elements) => Tuple(desugar(elements, ctx)?),
             Project(expr, index) => Project(expr.desugar_boxed(ctx)?, index),

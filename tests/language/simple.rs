@@ -10,7 +10,9 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::common::{compile, set_array_property_value, variant_0, variant_t1, variant_tn};
+use crate::common::{
+    compile, get_array_property_value, set_array_property_value, variant_0, variant_t1, variant_tn,
+};
 
 use super::common::{
     bool, compile_and_get_fn_def, fail_compilation, fail_run, float, get_property_value, int, run,
@@ -1263,6 +1265,16 @@ fn properties() {
     assert_eq!(run("@props::my_scope.my_array"), int_a![1, 2]);
     run("@props::my_scope.my_array = array_concat(@props::my_scope.my_array, [3, 4])");
     assert_eq!(run("@props::my_scope.my_array"), int_a![1, 2, 3, 4]);
+    run("@props::my_scope.my_array[0] = 5");
+    assert_eq!(
+        Value::native(get_array_property_value()),
+        int_a![5, 2, 3, 4]
+    );
+    run("@props::my_scope.my_array[3] += 1");
+    assert_eq!(
+        Value::native(get_array_property_value()),
+        int_a![5, 2, 3, 5]
+    );
 }
 
 #[test]
