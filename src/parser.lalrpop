@@ -380,7 +380,7 @@ ParExpr: ExprKind = {
 
 PathOrStructExpr<NoStruct>: ExprKind = {
     <p:FlatPath> => Identifier(p),
-    <p:Sp<FlatPath>> <body:RecordExprImpl> if NoStruct != "NoStruct" => StructLiteral((p.0, p.1), body),
+    <p:Sp<FlatPath>> <body:StructExprImpl> if NoStruct != "NoStruct" => StructLiteral((p.0, p.1), body),
     <p:Sp<FlatPath>> "{" "}" if NoStruct != "NoStruct" => StructLiteral((p.0, p.1), vec![]),
 }
 
@@ -512,6 +512,19 @@ RecordExprImpl: Vec<(UstrSpan, Expr)> = {
 
 RecordField: (UstrSpan, Expr) = {
     <n:Sp<UIdentifier>> ":" <e:Expr> => (n, e),
+}
+
+// Struct literals support both explicit and shorthand field syntax
+StructExprImpl: Vec<(UstrSpan, Expr)> = {
+    "{" <f:StructField> "}" => vec![f],
+    "{" <f:StructField> "," <r:Sep<StructField, ",">> "}" => ext_f(f, r),
+}
+
+StructField: (UstrSpan, Expr) = {
+    // Explicit field assignment: field_name: expression
+    <n:Sp<UIdentifier>> ":" <e:Expr> => (n, e),
+    // Shorthand syntax: field_name (equivalent to field_name: field_name)
+    <n:Sp<UIdentifier>> => (n, Expr::new(Identifier(n.0), n.1)),
 }
 
 PropertyPath: (Ustr, Ustr) = {

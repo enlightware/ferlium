@@ -248,6 +248,11 @@ fn create_record_enum_values() {
         r#"{mod_src} Message::Flag {{ v1: false, v0: 1.0 }}"#
     ))
     .expect_type_mismatch("float", "bool");
+
+    // shorthand syntax when variable name matches field name
+    run(&format!(
+        r#"{mod_src} let v0 = true; let v1 = false; Message::Flag {{ v0, v1 }}"#
+    ));
 }
 
 #[test]
@@ -508,6 +513,11 @@ fn create_record_struct_values() {
         r#"{mod_src} Person {{ name: "Alice", is_active: 1.2 }}"#
     ))
     .expect_type_mismatch("float", "bool");
+
+    // shorthand syntax when variable name matches field name
+    run(&format!(
+        r#"{mod_src} let name = "Alice"; let is_active = true; Person {{ name, is_active }}"#
+    ));
 }
 
 #[test]
