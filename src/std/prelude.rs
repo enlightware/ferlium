@@ -217,14 +217,14 @@ pub fn add_to_module(to: &mut Module) {
             fn deserialize(v) -> () {
                 match (v) {
                     None => (),
-                    Seq(a) => {
+                    Array(a) => {
                         if eq(array_len(a), 0) {
                             ()
                         } else {
                             panic("Expected array of size 0")
                         }
                     },
-                    _ => panic("Expected None variant or Seq variant of size 0")
+                    _ => panic("Expected None variant or Array variant of size 0")
                 }
             }
         }
@@ -289,20 +289,20 @@ pub fn add_to_module(to: &mut Module) {
                 for i in range(0, array_len(a)) {
                     array_append(result, serialize(a[i]));
                 };
-                Seq(result)
+                Array(result)
             }
         }
         impl Deserialize {
             fn deserialize(a) {
                 match (a) {
-                    Seq(a) => {
+                    Array(a) => {
                         let mut result = [];
                         for i in range(0, array_len(a)) {
                             array_append(result, deserialize(a[i]));
                         };
                         result
                     },
-                    _ => panic("Expected Seq variant")
+                    _ => panic("Expected Array variant")
                 }
             }
         }

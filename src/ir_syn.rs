@@ -46,6 +46,10 @@ pub fn project(tuple: Node, index: usize) -> NodeKind {
     K::Project(b((tuple, index)))
 }
 
+pub fn extract_tag(variant: Node) -> NodeKind {
+    K::ExtractTag(b(variant))
+}
+
 pub fn variant(tag: &str, payload: Node) -> NodeKind {
     K::Variant(b((ustr(tag), payload)))
 }
@@ -56,4 +60,16 @@ pub fn tuple(values: impl IntoSVec2<Node>) -> NodeKind {
 
 pub fn array(values: impl IntoSVec2<Node>) -> NodeKind {
     K::Array(b(values.into_svec2()))
+}
+
+pub fn case_from_complete_alternatives(
+    value: Node,
+    mut alternatives: Vec<(Value, Node)>,
+) -> NodeKind {
+    let default = alternatives.pop().unwrap().1;
+    K::Case(b(ir::Case {
+        value,
+        alternatives,
+        default,
+    }))
 }

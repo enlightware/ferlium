@@ -42,6 +42,18 @@ pub struct ConcreteTraitImpl {
     /// We use a tuple to simply clone it when filling the dictionary entries.
     pub functions: Value,
 }
+impl ConcreteTraitImpl {
+    /// Create a concrete trait implementation from a list of functions.
+    /// The output types are assumed to be empty.
+    /// The functions are assumed to be in the correct order and of the correct type.
+    pub fn from_functions(functions: Value) -> Self {
+        assert!(functions.is_tuple());
+        Self {
+            output_tys: vec![],
+            functions,
+        }
+    }
+}
 
 /// A blanket implementation of a trait.
 #[derive(Debug, Clone)]

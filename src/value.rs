@@ -91,6 +91,10 @@ pub enum CompoundValueType {
     Record(B<SVec2<Ustr>>),
 }
 
+pub fn ustr_to_isize(tag: Ustr) -> isize {
+    tag.as_char_ptr() as isize
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantValue {
     pub tag: Ustr,
@@ -98,7 +102,7 @@ pub struct VariantValue {
 }
 impl VariantValue {
     pub fn tag_as_isize(&self) -> isize {
-        self.tag.as_char_ptr() as isize
+        ustr_to_isize(self.tag)
     }
 }
 

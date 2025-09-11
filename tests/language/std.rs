@@ -334,8 +334,7 @@ fn string_sub_string() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn serde() {
-    // serialize
+fn serde_serialize() {
     // basic types
     assert_eq!(run("serialize(())"), variant_0("None"));
     assert_eq!(run("serialize(true)"), variant_t1("Bool", bool(true)));
@@ -347,28 +346,51 @@ fn serde() {
     );
     assert_eq!(
         run("serialize([1])"),
-        variant_t1("Seq", array![variant_t1("Int", int(1))])
+        variant_t1("Array", array![variant_t1("Int", int(1))])
     );
     assert_eq!(
         run("serialize([1.0])"),
-        variant_t1("Seq", array![variant_t1("Float", float(1.0))])
+        variant_t1("Array", array![variant_t1("Float", float(1.0))])
     );
+
+    // variants
+    assert_eq!(
+        run("serialize(None)"),
+        variant_t1(
+            "Object",
+            array![tuple!(string("type"), variant_t1("String", string("None"))),]
+        )
+    );
+    assert_eq!(
+        run("serialize(Some(1.0))"),
+        variant_t1(
+            "Object",
+            array![
+                tuple!(string("type"), variant_t1("String", string("Some"))),
+                tuple!(
+                    string("data"),
+                    variant_t1("Array", array![variant_t1("Float", float(1.0))])
+                )
+            ]
+        )
+    );
+
     // tuples
     assert_eq!(
         run("serialize((1, ))"),
-        variant_t1("Seq", array![variant_t1("Int", int(1))])
+        variant_t1("Array", array![variant_t1("Int", int(1))])
     );
     assert_eq!(
         run("serialize((1, 2))"),
         variant_t1(
-            "Seq",
+            "Array",
             array![variant_t1("Int", int(1)), variant_t1("Int", int(2))]
         )
     );
     assert_eq!(
         run("serialize((1, 2.0, true))"),
         variant_t1(
-            "Seq",
+            "Array",
             array![
                 variant_t1("Int", int(1)),
                 variant_t1("Float", float(2.)),
@@ -376,61 +398,55 @@ fn serde() {
             ]
         )
     );
+
     // records
     assert_eq!(
         run("serialize({a: 1, })"),
         variant_t1(
-            "Seq",
-            array![variant_t1(
-                "Seq",
-                array![variant_t1("String", string("a")), variant_t1("Int", int(1))]
-            )]
+            "Object",
+            array![tuple!(string("a"), variant_t1("Int", int(1)))]
         )
     );
     assert_eq!(
         run("serialize({a: 1, b: 2})"),
         variant_t1(
-            "Seq",
+            "Object",
             array![
-                variant_t1(
-                    "Seq",
-                    array![variant_t1("String", string("a")), variant_t1("Int", int(1))]
-                ),
-                variant_t1(
-                    "Seq",
-                    array![variant_t1("String", string("b")), variant_t1("Int", int(2))]
-                )
+                tuple!(string("a"), variant_t1("Int", int(1))),
+                tuple!(string("b"), variant_t1("Int", int(2)))
             ]
         )
     );
     assert_eq!(
         run("serialize({a: 1, b: 2.0, c: true})"),
         variant_t1(
-            "Seq",
+            "Object",
             array![
-                variant_t1(
-                    "Seq",
-                    array![variant_t1("String", string("a")), variant_t1("Int", int(1))]
-                ),
-                variant_t1(
-                    "Seq",
-                    array![
-                        variant_t1("String", string("b")),
-                        variant_t1("Float", float(2.))
-                    ]
-                ),
-                variant_t1(
-                    "Seq",
-                    array![
-                        variant_t1("String", string("c")),
-                        variant_t1("Bool", bool(true))
-                    ]
-                )
+                tuple!(string("a"), variant_t1("Int", int(1))),
+                tuple!(string("b"), variant_t1("Float", float(2.))),
+                tuple!(string("c"), variant_t1("Bool", bool(true)))
             ]
         )
     );
 
-    // deserialize
+    // named types, by default serialize as their inner type
+    assert_eq!(
+        run("struct Age(float) serialize(Age(1.0))"),
+        run("serialize((1.0, ))")
+    );
+    assert_eq!(
+        run("struct Person { name: string, age: float } serialize( Person { name: \"Alice\", age: 30.0 })"),
+        run("serialize({name: \"Alice\", age: 30.0})")
+    );
+    assert_eq!(
+        run("enum SimpleColor { Red, Green, Blue } serialize(Blue)"),
+        run("serialize(Blue)")
+    )
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn serde_deserialize() {
     assert_eq!(run("(deserialize(serialize(())) : ())"), Value::unit());
     assert_eq!(run("(deserialize(serialize(true)) : bool)"), bool(true));
     assert_eq!(run("(deserialize(serialize(1)): int)"), int(1));
@@ -440,17 +456,18 @@ fn serde() {
         string("hello")
     );
     assert_eq!(
-        run("(deserialize(Seq([Int(1), Int(1)])): [int])"),
+        run("(deserialize(Array([Int(1), Int(1)])): [int])"),
         int_a![1, 1]
     );
     assert_eq!(
-        run("(deserialize(Seq([Int(1), Int(1)])): [float])"),
+        run("(deserialize(Array([Int(1), Int(1)])): [float])"),
         array![float(1.0), float(1.0)]
     );
+
     // errors
     fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
         "Num",
-        &["Bool (bool) | Float (float) | Int (int) | None | Seq ([Variant]) | String (string)"],
+        &["Array ([Variant]) | Bool (bool) | Float (float) | Int (int) | None | Object ([(string, Variant)]) | String (string)"],
     );
 }
 
@@ -458,7 +475,7 @@ fn serde() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn serialize_with_type_ascription() {
     assert_eq!(
-        run("fn test() -> Variant { Seq([serialize(0)]) } test()"),
-        variant_t1("Seq", array![variant_t1("Int", int(0))])
+        run("fn test() -> Variant { Array([serialize(0)]) } test()"),
+        variant_t1("Array", array![variant_t1("Int", int(0))])
     );
 }

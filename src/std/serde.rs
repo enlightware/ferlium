@@ -14,21 +14,24 @@ use crate::{
     effects::EffType,
     error::InternalCompilationError,
     function::{FunctionDefinition, ScriptFunction},
-    ir, ir_syn,
+    ir::{self, Node},
+    ir_syn,
     module::Module,
     r#trait::{Deriver, TraitRef},
     r#type::{tuple_type, FnType, Type, TypeKind},
     std::{
         array::array_type,
+        math::int_type,
         string::{string_type, String as Str},
+        variant::variant_object_entry_type,
     },
     trait_solver::{ConcreteTraitImpl, TraitImpls},
     type_like::TypeLike,
-    value::Value,
+    value::{ustr_to_isize, Value},
     Location,
 };
 
-use super::variant::script_variant_type;
+use super::variant::variant_type;
 
 pub const SERIALIZE_TRAIT_NAME: &str = "Serialize";
 pub const DESERIALIZE_TRAIT_NAME: &str = "Deserialize";
@@ -56,19 +59,21 @@ impl Deriver for ProductTypeDeriver {
         // helpers to synthesize IR
         let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
+        // helper to create a concrete trait implementation from a single function defined by code
+        let concrete_trait_from_code = |code: Node| {
+            let function = ScriptFunction::new(code);
+            let functions = Value::tuple([Value::function(b(function))]);
+            ConcreteTraitImpl::from_functions(functions)
+        };
+
         // helper to create the concrete trait implementation for sequences
-        let build_serialize_to_seq = |nodes| {
-            let array_ty = array_type(script_variant_type());
+        let build_serialize_to_seq = |nodes, tag| {
+            let array_ty = array_type(variant_type());
             let array = n(array(nodes), array_ty);
             let payload_ty = tuple_type([array_ty]);
             let payload = n(tuple([array]), payload_ty);
-            let code = n(variant("Seq", payload), script_variant_type());
-            let function = ScriptFunction::new(code);
-            let functions = Value::tuple([Value::function(b(function))]);
-            ConcreteTraitImpl {
-                output_tys: vec![],
-                functions,
-            }
+            let code = n(variant(tag, payload), variant_type());
+            concrete_trait_from_code(code)
         };
 
         // helper to build the serialization a member
@@ -83,23 +88,23 @@ impl Deriver for ProductTypeDeriver {
             let apply = n(
                 ir_syn::static_apply(
                     function.clone(),
-                    FnType::new_by_val([ty], script_variant_type(), EffType::empty()),
+                    FnType::new_by_val([ty], variant_type(), EffType::empty()),
                     span,
                     vec![project],
                 ),
-                script_variant_type(),
+                variant_type(),
             );
             Ok(apply)
         };
 
-        // derive tuple and record serialization
+        // derive tuple, record, variant serialization
         let ty_data = ty.data().clone();
         if let TypeKind::Tuple(tys) = ty_data {
             /*
             Example source code for serialization of a tuple:
             impl Serialize {
                 fn serialize(t: (_, _)) {
-                    Seq([
+                    Array([
                         serialize(t.0),
                         serialize(t.1),
                     ])
@@ -107,7 +112,7 @@ impl Deriver for ProductTypeDeriver {
             }
 
             Example corresponding IR:
-            variant with tag: Seq
+            variant with tag: Array
                 build tuple (
                     build array [
                         serialize(t.0),
@@ -124,45 +129,37 @@ impl Deriver for ProductTypeDeriver {
                     build_serialize_fn(index, ty_i)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Ok(Some(build_serialize_to_seq(nodes)))
+            Ok(Some(build_serialize_to_seq(nodes, "Array")))
         } else if let TypeKind::Record(fields) = ty_data {
             /*
             Example source code for serialization of a record:
             impl Serialize {
                 fn serialize(r: {a: _, b: _}) {
-                    Seq([
-                        Seq([
+                    Object([
+                        (
                             String("a"),
                             serialize(r.0)
-                        ]),
-                        Seq([
+                        ),
+                        (
                             String("b"),
                             serialize(r.1)
-                        ]),
+                        ),
                     ])
                 }
             }
 
             Example corresponding IR:
-            variant with tag: Seq
+            variant with tag: Object
                 build tuple (
                     build array [
-                        variant with tag: Seq
-                            build tuple (
-                                build array [
-                                    variant with tag: String
-                                        value: "a"
-                                    serialize(r.0),
-                                ]
-                            ),
-                        variant with tag: Seq
-                            build tuple (
-                                build array [
-                                    variant with tag: String
-                                        value: "b"
-                                    serialize(r.1),
-                                ]
-                            ),
+                        build tuple (
+                            value: "a",
+                            serialize(r.0),
+                        ),
+                        build tuple (
+                            value: "b"
+                            serialize(r.1),
+                        ),
                     ]
                 )
             */
@@ -170,23 +167,108 @@ impl Deriver for ProductTypeDeriver {
                 .into_iter()
                 .enumerate()
                 .map(|(index, (name, ty_i))| {
-                    // variant with tag: String and name
                     let tag = n(native(Str::from_str(&name).unwrap()), string_type());
-                    let tag_payload_ty = tuple_type([string_type()]);
-                    let tag_payload = n(tuple([tag]), tag_payload_ty);
-                    let tag = n(variant("String", tag_payload), script_variant_type());
-                    // serialize the i-th element
                     let payload = build_serialize_fn(index, ty_i)?;
-                    // field entry
-                    let array_ty = array_type(script_variant_type());
-                    let array = n(array([tag, payload]), array_ty);
-                    let variant_payload_ty = tuple_type([array_ty]);
-                    let variant_payload = n(tuple([array]), variant_payload_ty);
-                    let entry = n(variant("Seq", variant_payload), script_variant_type());
+                    let entry = n(tuple([tag, payload]), variant_object_entry_type());
                     Ok(entry)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Ok(Some(build_serialize_to_seq(nodes)))
+            Ok(Some(build_serialize_to_seq(nodes, "Object")))
+        } else if let TypeKind::Variant(variants) = ty_data {
+            // default to adjacently tagged into an object, with tag = "type", content = "data"
+            /*
+            impl Serialize {
+                fn serialize(v: V) {
+                    match v {
+                        Variant1 => Object([
+                            (String("type"), String("Variant1")),
+                        ]),
+                        Variant2(x) => Object([
+                            (String("type"), String("Variant2")),
+                            (String("data"), serialize(x)),
+                        ]),
+                    }
+                }
+            }
+            */
+            // Build the different variants
+            let alternatives = variants
+                .into_iter()
+                .map(|(tag, payload_ty)| {
+                    let tag_node = n(
+                        native(Str::from_str(&tag.to_string()).unwrap()),
+                        string_type(),
+                    );
+                    let tag_tuple_ty = tuple_type([string_type()]);
+                    let tag_tuple_node = n(tuple([tag_node]), tag_tuple_ty);
+                    let tag_variant_node = n(variant("String", tag_tuple_node), variant_type());
+                    let tag_entry = n(
+                        tuple([
+                            n(native(Str::from_str("type").unwrap()), string_type()),
+                            tag_variant_node,
+                        ]),
+                        variant_object_entry_type(),
+                    );
+                    let array_ty = array_type(variant_object_entry_type());
+                    let array = if payload_ty != Type::unit() {
+                        // variant with payload
+                        let payload_node = build_serialize_fn(0, payload_ty)?;
+                        let payload_entry = n(
+                            tuple([
+                                n(native(Str::from_str("data").unwrap()), string_type()),
+                                payload_node,
+                            ]),
+                            variant_object_entry_type(),
+                        );
+                        n(array([tag_entry, payload_entry]), array_ty)
+                    } else {
+                        // variant without payload
+                        n(array([tag_entry]), array_ty)
+                    };
+                    let payload_ty = tuple_type([array_ty]);
+                    let payload = n(tuple([array]), payload_ty);
+                    let code = n(variant("Object", payload), variant_type());
+                    let tag_value = Value::native(ustr_to_isize(tag));
+                    Ok((tag_value, code))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // build the match node
+            let load = n(load(0), ty);
+            let extract_tag = n(extract_tag(load), int_type());
+            let code = n(
+                case_from_complete_alternatives(extract_tag, alternatives),
+                variant_type(),
+            );
+            Ok(Some(concrete_trait_from_code(code)))
+        } else if let TypeKind::Named(named) = ty_data {
+            let ty_def = named.def;
+            // serialize the inner type
+            Ok(Some(ConcreteTraitImpl::from_functions(
+                impls.get_functions(trait_ref, &[ty_def.shape], span)?,
+            )))
+            /*
+            if let Some(variant) = ty_def.shape.data().as_variant() {
+                // default to adjacently tagged, with tag = "type", content = "data"
+                // enum like, todo
+                Err(internal_compilation_error!( Unsupported {
+                    reason: "Serialization of enum-like named types is not yet supported.".to_string(),
+                    span,
+                }))
+            } else {
+                // struct-like, serialize the inner type
+                /*
+                Example source code for serialization of a struct-like named type:
+                impl Serialize {
+                    fn serialize(s: S) {
+                        serialize(s)
+                    }
+                }
+                */
+                Ok(Some(ConcreteTraitImpl::from_functions(
+                    impls.get_functions(trait_ref, &[ty_def.shape], span)?,
+                )))
+            }
+            */
         } else {
             Ok(None)
         }
@@ -204,7 +286,7 @@ pub fn add_to_module(to: &mut Module) {
         [(
             SERIALIZE_FN_NAME,
             Def::new_infer_quantifiers(
-                FnType::new_by_val([var0_ty], script_variant_type(), EffType::empty()),
+                FnType::new_by_val([var0_ty], variant_type(), EffType::empty()),
                 ["value"],
                 "Serialize this value into a variant.",
             ),
@@ -222,7 +304,7 @@ pub fn add_to_module(to: &mut Module) {
         [(
             DESERIALIZE_FN_NAME,
             Def::new_infer_quantifiers(
-                FnType::new_by_val([script_variant_type()], var0_ty, EffType::empty()),
+                FnType::new_by_val([variant_type()], var0_ty, EffType::empty()),
                 ["variant"],
                 "Deserialize a variant into a value of this type.",
             ),
