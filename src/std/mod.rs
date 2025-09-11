@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{rc::Rc, str::FromStr};
+use std::{cell::OnceCell, rc::Rc, str::FromStr};
 
 use crate::{
     module::{Module, ModuleEnv, Modules, Use},
@@ -34,28 +34,39 @@ pub mod serde;
 pub mod string;
 pub mod variant;
 
-pub fn std_module() -> Module {
-    let mut module = Module::default();
-    core::add_to_module(&mut module);
-    flow::add_to_module(&mut module);
-    // mem::add_to_module(&mut module);
-    logic::add_to_module(&mut module);
-    ordering::add_to_module(&mut module);
-    math::add_to_module(&mut module);
-    range::add_to_module(&mut module);
-    array::add_to_module(&mut module);
-    io::add_to_module(&mut module);
-    string::add_to_module(&mut module);
-    variant::add_to_module(&mut module);
-    iterator::add_to_module(&mut module);
-    serde::add_to_module(&mut module);
-    prelude::add_to_module(&mut module);
-    module
+thread_local! {
+    static STD_MODULE: OnceCell<Rc<Module>> = const { OnceCell::new() };
+}
+
+pub fn std_module() -> Rc<Module> {
+    STD_MODULE.with(|cell| {
+        cell.get_or_init(|| {
+            Rc::new({
+                let mut module = Module::default();
+                core::add_to_module(&mut module);
+                flow::add_to_module(&mut module);
+                // mem::add_to_module(&mut module);
+                logic::add_to_module(&mut module);
+                ordering::add_to_module(&mut module);
+                math::add_to_module(&mut module);
+                range::add_to_module(&mut module);
+                array::add_to_module(&mut module);
+                io::add_to_module(&mut module);
+                string::add_to_module(&mut module);
+                variant::add_to_module(&mut module);
+                iterator::add_to_module(&mut module);
+                serde::add_to_module(&mut module);
+                prelude::add_to_module(&mut module);
+                module
+            })
+        })
+        .clone()
+    })
 }
 
 pub fn new_std_modules() -> Modules {
     let mut modules: Modules = Default::default();
-    modules.insert(ustr("std"), Rc::new(std_module()));
+    modules.insert(ustr("std"), std_module());
     modules
 }
 
