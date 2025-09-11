@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use crate::ast::Attribute;
 use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
 use crate::graph::find_strongly_connected_components;
@@ -678,7 +679,7 @@ pub struct TypeDef {
     /// The location of the type declaration in the source code
     pub span: Location,
     /// The attributes of the type
-    pub attributes: HashMap<Ustr, Ustr>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl TypeDef {

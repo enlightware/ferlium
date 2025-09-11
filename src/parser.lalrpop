@@ -1,5 +1,5 @@
 use crate::{Location, LocatedError};
-use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType};
+use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -187,11 +187,12 @@ TypeDefinition: TypeDef = {
 }
 
 StructDefinition: TypeDef = {
-    <l:@L> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <shape:StructBody> <r:@R> => {
+    <l:@L> <attributes:(Attribute)*> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <shape:StructBody> <r:@R> => {
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
             shape,
+            attributes,
             span: span(l, r),
             doc_comments: vec![],
         }
@@ -221,24 +222,56 @@ StructTupleFields: Vec<TypeSpan> = {
 }
 
 EnumDefinition: TypeDef = {
-    <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" "}" <r:@R> => {
+    <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" "}" <r:@R> => {
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
             shape: Type::Never,
+            attributes,
             span: span(l, r),
             doc_comments: vec![],
         }
     },
-    <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" <variants:EnumVariants> "}" <r:@R> => {
+    <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" <variants:EnumVariants> "}" <r:@R> => {
         let variant_ty = Type::Variant(variants);
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
             shape: variant_ty,
+            attributes,
             span: span(l, r),
             doc_comments: vec![],
         }
+    }
+}
+
+Attribute: Attribute = {
+    <l:@L> "#[" <path:Sp<UIdentifier>> <items:AttrMetaList?> "]" <r:@R> => {
+        let items = items.unwrap_or_default();
+        Attribute {
+            path,
+            items,
+            span: span(l, r)
+        }
+    }
+}
+
+AttrMetaList: Vec<MetaItem> = {
+    "(" <items:AttrMetaItems> ")" => items,
+}
+
+AttrMetaItems: Vec<MetaItem> = {
+    <item:AttrMetaItem> => vec![item],
+    <item:AttrMetaItem> "," <r:AttrMetaItems> => ext_f(item, r),
+    <item:AttrMetaItem> "," => vec![item], // trailing comma
+}
+
+AttrMetaItem: MetaItem = {
+    // bare identifier flag
+    <id:Sp<UIdentifier>> => MetaItem::Flag(id),
+    // identifier = string value
+    <l:@L> <key:Sp<UIdentifier>> "=" <value:Sp<UString>> <r:@R> => {
+        MetaItem::NameValue { key, value, span: span(l, r) }
     }
 }
 
@@ -277,6 +310,7 @@ GenericParamList: Vec<UstrSpan> = {
     <p:Sp<UIdentifier>> "," <r:GenericParamList> => ext_f(p, r),
     <p:Sp<UIdentifier>> "," => vec![p], // trailing comma
 }
+
 
 // Expressions
 
@@ -667,7 +701,11 @@ UIntValue: usize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<usiz
     Err(msg) => error(msg, span(l, r)),
 };
 
-StringLiteral: (LiteralValue, IrType) = r#"\"([^\\\"]|\\.)*\""# => (string_literal(<>), string_type());
+StringLiteral: (LiteralValue, IrType) = StringToken => (string_literal(<>), string_type());
+
+UString: Ustr = StringToken => ustr(&parse_string(<>));
+
+StringToken: &'input str = r#"\"([^\\\"]|\\.)*\""# => <>;
 
 FormattedString: ExprKind = r#"f\"([^\\\"]|\\.)*\""# => formatted_string(<>);
 

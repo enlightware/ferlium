@@ -89,6 +89,11 @@ where
     )
 }
 
+/// Parse a string literal, handling escapes
+pub(crate) fn parse_string(s: &str) -> String {
+    apply_string_escapes(&s[1..s.len() - 1])
+}
+
 /// Make a string literal
 pub(crate) fn string_literal(s: &str) -> LiteralValue {
     let s = apply_string_escapes(&s[1..s.len() - 1]);

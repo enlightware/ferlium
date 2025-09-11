@@ -1020,6 +1020,25 @@ impl PropertyAccess {
     }
 }
 
+/// A single, Rust-like attribute
+#[derive(Debug, Clone)]
+pub struct Attribute {
+    pub path: UstrSpan,
+    pub items: Vec<MetaItem>,
+    pub span: Location,
+}
+
+/// A single item in an attribute
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum MetaItem {
+    Flag(UstrSpan),
+    NameValue {
+        key: UstrSpan,
+        value: UstrSpan,
+        span: Location,
+    },
+}
+
 /// A type definition with common metadata
 #[derive(Debug, Clone)]
 pub struct TypeDef<P: Phase> {
@@ -1027,6 +1046,7 @@ pub struct TypeDef<P: Phase> {
     pub generic_params: Vec<UstrSpan>,
     // The structural shape of the type (record, tuple, or unit)
     pub shape: P::Type,
+    pub attributes: Vec<Attribute>,
     pub span: Location,
     pub doc_comments: Vec<String>,
     // TODO: add constraints for the type arguments

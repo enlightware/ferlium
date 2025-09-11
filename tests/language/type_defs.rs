@@ -666,3 +666,105 @@ fn double_newtype() {
         string("Alice")
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn attributes() {
+    // Helper to get attributes of a type definition
+    let attrs = |code, name| {
+        compile(code)
+            .0
+            .module
+            .type_defs
+            .get(&ustr(name))
+            .unwrap()
+            .attributes
+            .clone()
+    };
+
+    // No attributes by default
+    let attributes = attrs(
+        indoc! { r#"
+            enum SimpleColor { Red, Green, Blue }
+        "# },
+        "SimpleColor",
+    );
+    assert!(attributes.is_empty());
+
+    // Flag attribute
+    let attributes = attrs(
+        indoc! { r#"
+            #[flag]
+            enum SimpleColor { Red, Green, Blue }
+        "# },
+        "SimpleColor",
+    );
+    assert_eq!(attributes.len(), 1);
+    assert_eq!(attributes[0].path.0, ustr("flag"));
+
+    // Multiple attributes
+    let attributes = attrs(
+        indoc! { r#"
+            #[flag]
+            #[path(name = "value")]
+            #[multi(name1 = "value1", name2 = "value2")]
+            enum SimpleColor { Red, Green, Blue }
+        "# },
+        "SimpleColor",
+    );
+    assert_eq!(attributes.len(), 3);
+    assert_eq!(attributes[0].path.0, ustr("flag"));
+    assert_eq!(attributes[1].path.0, ustr("path"));
+    assert_eq!(attributes[1].items.len(), 1);
+    assert_eq!(
+        attributes[1].items[0].as_name_value().unwrap().0 .0,
+        ustr("name")
+    );
+    assert_eq!(
+        attributes[1].items[0].as_name_value().unwrap().1 .0,
+        ustr("value")
+    );
+    assert_eq!(attributes[2].path.0, ustr("multi"));
+    assert_eq!(attributes[2].items.len(), 2);
+    let item1 = attributes[2].items[0].as_name_value().unwrap();
+    assert_eq!(item1.0 .0, ustr("name1"));
+    assert_eq!(item1.1 .0, ustr("value1"));
+    let item2 = attributes[2].items[1].as_name_value().unwrap();
+    assert_eq!(item2.0 .0, ustr("name2"));
+    assert_eq!(item2.1 .0, ustr("value2"));
+
+    // Also works on structs
+    let attributes = attrs(
+        indoc! { r#"
+            #[flag]
+            #[path(name = "value")]
+            #[multi(name1 = "value1", name2 = "value2")]
+            struct Person {
+                name: string,
+                age: int,
+                is_active: bool
+            }
+        "# },
+        "Person",
+    );
+    assert_eq!(attributes.len(), 3);
+    assert_eq!(attributes[0].path.0, ustr("flag"));
+    assert_eq!(attributes[1].path.0, ustr("path"));
+    assert_eq!(attributes[1].items.len(), 1);
+    assert_eq!(
+        attributes[1].items[0].as_name_value().unwrap().0 .0,
+        ustr("name")
+    );
+    assert_eq!(
+        attributes[1].items[0].as_name_value().unwrap().1 .0,
+        ustr("value")
+    );
+    assert_eq!(attributes[2].path.0, ustr("multi"));
+    assert_eq!(attributes[2].items.len(), 2);
+    let item1 = attributes[2].items[0].as_name_value().unwrap();
+    assert_eq!(item1.0 .0, ustr("name1"));
+    assert_eq!(item1.1 .0, ustr("value1"));
+    let item2 = attributes[2].items[1].as_name_value().unwrap();
+    assert_eq!(item2.0 .0, ustr("name2"));
+    assert_eq!(item2.1 .0, ustr("value2"));
+}

@@ -183,7 +183,7 @@ impl PTypeDef {
             param_names: vec![],
             shape,
             span: self.span,
-            attributes: HashMap::new(),
+            attributes: self.attributes.clone(),
         }))
     }
 }
