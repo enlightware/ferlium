@@ -1,8 +1,10 @@
 use crate::{
     containers::{b, IntoSVec2},
+    effects::EffType,
     function::FunctionRef,
     ir::{self, Node},
     r#type::FnType,
+    std::math::int_type,
     value::{NativeValue, Value},
     Location,
 };
@@ -46,6 +48,16 @@ pub fn project(tuple: Node, index: usize) -> NodeKind {
     K::Project(b((tuple, index)))
 }
 
+pub fn index_immediate(array: Node, index: isize) -> NodeKind {
+    let index_node = Node::new(
+        immediate(Value::native(index)),
+        int_type(),
+        EffType::empty(),
+        array.span,
+    );
+    K::Index(b(array), b(index_node))
+}
+
 pub fn extract_tag(variant: Node) -> NodeKind {
     K::ExtractTag(b(variant))
 }
@@ -60,6 +72,14 @@ pub fn tuple(values: impl IntoSVec2<Node>) -> NodeKind {
 
 pub fn array(values: impl IntoSVec2<Node>) -> NodeKind {
     K::Array(b(values.into_svec2()))
+}
+
+pub fn case(value: Node, alternatives: Vec<(Value, Node)>, default: Node) -> NodeKind {
+    K::Case(b(ir::Case {
+        value,
+        alternatives,
+        default,
+    }))
 }
 
 pub fn case_from_complete_alternatives(

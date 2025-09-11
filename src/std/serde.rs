@@ -7,6 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use ustr::ustr;
+
 use std::{str::FromStr, sync::Arc};
 
 use crate::{
@@ -39,9 +41,16 @@ pub const DESERIALIZE_TRAIT_NAME: &str = "Deserialize";
 pub const SERIALIZE_FN_NAME: &str = "serialize";
 pub const DESERIALIZE_FN_NAME: &str = "deserialize";
 
+// helper to create a concrete trait implementation from a single function defined by code
+fn concrete_trait_from_code(code: Node) -> ConcreteTraitImpl {
+    let function = ScriptFunction::new(code);
+    let functions = Value::tuple([Value::function(b(function))]);
+    ConcreteTraitImpl::from_functions(functions)
+}
+
 #[derive(Debug, Clone)]
-struct ProductTypeDeriver;
-impl Deriver for ProductTypeDeriver {
+struct ProductTypeSerializeDeriver;
+impl Deriver for ProductTypeSerializeDeriver {
     fn derive_impl(
         &self,
         trait_ref: &TraitRef,
@@ -59,13 +68,6 @@ impl Deriver for ProductTypeDeriver {
         // helpers to synthesize IR
         let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
-        // helper to create a concrete trait implementation from a single function defined by code
-        let concrete_trait_from_code = |code: Node| {
-            let function = ScriptFunction::new(code);
-            let functions = Value::tuple([Value::function(b(function))]);
-            ConcreteTraitImpl::from_functions(functions)
-        };
-
         // helper to create the concrete trait implementation for sequences
         let build_serialize_to_seq = |nodes, tag| {
             let array_ty = array_type(variant_type());
@@ -76,8 +78,8 @@ impl Deriver for ProductTypeDeriver {
             concrete_trait_from_code(code)
         };
 
-        // helper to build the serialization a member
-        let mut build_serialize_fn = |index, ty| {
+        // helper to build the serialization of a member of a tuple
+        let mut build_serialize_i = |index, ty| {
             // load function parameter (that is a tuple in memory)
             let load = n(load(0), ty);
             // project the i-th element
@@ -126,7 +128,7 @@ impl Deriver for ProductTypeDeriver {
                 .enumerate()
                 .map(|(index, ty_i)| {
                     // serialize the i-th element
-                    build_serialize_fn(index, ty_i)
+                    build_serialize_i(index, ty_i)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
             Ok(Some(build_serialize_to_seq(nodes, "Array")))
@@ -168,7 +170,7 @@ impl Deriver for ProductTypeDeriver {
                 .enumerate()
                 .map(|(index, (name, ty_i))| {
                     let tag = n(native(Str::from_str(&name).unwrap()), string_type());
-                    let payload = build_serialize_fn(index, ty_i)?;
+                    let payload = build_serialize_i(index, ty_i)?;
                     let entry = n(tuple([tag, payload]), variant_object_entry_type());
                     Ok(entry)
                 })
@@ -212,7 +214,7 @@ impl Deriver for ProductTypeDeriver {
                     let array_ty = array_type(variant_object_entry_type());
                     let array = if payload_ty != Type::unit() {
                         // variant with payload
-                        let payload_node = build_serialize_fn(0, payload_ty)?;
+                        let payload_node = build_serialize_i(0, payload_ty)?;
                         let payload_entry = n(
                             tuple([
                                 n(native(Str::from_str("data").unwrap()), string_type()),
@@ -275,10 +277,108 @@ impl Deriver for ProductTypeDeriver {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ProductTypeDeserializeDeriver;
+impl Deriver for ProductTypeDeserializeDeriver {
+    fn derive_impl(
+        &self,
+        trait_ref: &TraitRef,
+        input_types: &[Type],
+        span: Location,
+        impls: &mut TraitImpls,
+    ) -> Result<Option<ConcreteTraitImpl>, InternalCompilationError> {
+        use ir_syn::*;
+
+        // safety checks
+        assert!(input_types.len() == 1);
+        let ty = input_types[0];
+        assert!(ty.is_constant());
+
+        // helpers to synthesize IR
+        let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
+
+        // helper to build the deserialization of a member of a tuple
+        let mut build_deserialize_i = |index, ty| {
+            // load input Variant
+            let load = n(load(0), variant_type());
+            // get the value, note: we expect a (array variant, ) as we have guard on the level above
+            let variant_value_ty = tuple_type([array_type(variant_type())]);
+            let project_from_variant = n(project(load, 0), variant_value_ty);
+            // get the array variant out of the tuple
+            let project_from_tuple =
+                n(project(project_from_variant, 0), array_type(variant_type()));
+            // get the i-th element
+            let index = n(
+                index_immediate(project_from_tuple, index as isize),
+                variant_type(),
+            );
+            // deserialize the i-th element
+            let functions = impls.get_functions(trait_ref, &[ty], span)?;
+            let function = functions.unwrap_fn_tuple_index(0);
+            let apply = n(
+                ir_syn::static_apply(
+                    function.clone(),
+                    FnType::new_by_val([variant_type()], ty, EffType::empty()),
+                    span,
+                    vec![index],
+                ),
+                ty,
+            );
+            Ok(apply)
+        };
+
+        // derive tuple, record, variant serialization
+        let ty_data = ty.data().clone();
+        if let TypeKind::Tuple(tys) = ty_data {
+            /*
+            Example source code for deserialization of a tuple:
+            impl Deserialize {
+                fn deserialize(v: Variant) -> (_, _) {
+                    match v {
+                        Array(arr) => (
+                            deserialize(arr[0]),
+                            deserialize(arr[1]),
+                        ),
+                        _ => panic!("Expected array variant"),
+                    }
+                }
+            }
+            */
+            let load = n(load(0), variant_type());
+            let extract_tag = n(extract_tag(load), int_type());
+            let build_elements = tys
+                .into_iter()
+                .enumerate()
+                .map(|(i, ty_i)| build_deserialize_i(i, ty_i))
+                .collect::<Result<SVec2<_>, _>>()?;
+            let build_tuple = n(tuple(build_elements), ty);
+            // let panic_message = n(
+            //     native(Str::from_str("Expected Array variant").unwrap()),
+            //     string_type(),
+            // );
+            // FIXME: properly pass the outer module functions here, so that panic is found
+            let panic = panic_node(span);
+            let case = n(
+                case(
+                    extract_tag,
+                    vec![(Value::native(ustr_to_isize(ustr("Array"))), build_tuple)],
+                    panic,
+                ),
+                ty,
+            );
+            Ok(Some(concrete_trait_from_code(case)))
+        } else {
+            Ok(None) // deserialization of rest not yet supported
+        }
+    }
+}
+
 pub fn add_to_module(to: &mut Module) {
     // Traits
     let var0_ty = Type::variable_id(0);
     use FunctionDefinition as Def;
+
+    // Serialize trait
     let mut serialize_trait = TraitRef::new(
         SERIALIZE_TRAIT_NAME,
         1,
@@ -295,9 +395,11 @@ pub fn add_to_module(to: &mut Module) {
     Arc::get_mut(&mut serialize_trait.0)
         .unwrap()
         .derives
-        .push(Box::new(ProductTypeDeriver));
+        .push(Box::new(ProductTypeSerializeDeriver));
     to.traits.push(serialize_trait);
-    let deserialize_trait = TraitRef::new(
+
+    // Deserialize trait
+    let mut deserialize_trait = TraitRef::new(
         DESERIALIZE_TRAIT_NAME,
         1,
         [],
@@ -310,7 +412,40 @@ pub fn add_to_module(to: &mut Module) {
             ),
         )],
     );
+    Arc::get_mut(&mut deserialize_trait.0)
+        .unwrap()
+        .derives
+        .push(Box::new(ProductTypeDeserializeDeriver));
     to.traits.push(deserialize_trait);
 
-    // Trait implementations are in the prelude.
+    // Trait implementations for basic types are in the prelude.
+}
+
+// Local panic code, to work around not having access to the full modules here.
+// FIXME: properly pass the outer module functions here, so that panic is found
+fn panic_node(span: Location) -> Node {
+    fn abort() -> Result<(), crate::error::RuntimeError> {
+        Err(crate::error::RuntimeError::Aborted(None))
+    }
+    let abort_descr = crate::function::NullaryNativeFnFN::description_with_ty_scheme(
+        abort,
+        [],
+        Some("Aborts the program."),
+        crate::type_scheme::TypeScheme::new_just_type(FnType::new_by_val(
+            [],
+            Type::never(),
+            crate::effects::no_effects(),
+        )),
+    );
+    Node::new(
+        ir_syn::static_apply(
+            crate::function::FunctionRef::Strong(abort_descr.code),
+            FnType::new_by_val([], Type::never(), EffType::empty()),
+            span,
+            vec![],
+        ),
+        Type::never(),
+        EffType::empty(),
+        span,
+    )
 }

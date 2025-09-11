@@ -447,6 +447,7 @@ fn serde_serialize() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn serde_deserialize() {
+    // basic types
     assert_eq!(run("(deserialize(serialize(())) : ())"), Value::unit());
     assert_eq!(run("(deserialize(serialize(true)) : bool)"), bool(true));
     assert_eq!(run("(deserialize(serialize(1)): int)"), int(1));
@@ -462,6 +463,16 @@ fn serde_deserialize() {
     assert_eq!(
         run("(deserialize(Array([Int(1), Int(1)])): [float])"),
         array![float(1.0), float(1.0)]
+    );
+
+    // tuples
+    assert_eq!(
+        run("(deserialize(serialize( (1, ) )): (int, ))"),
+        tuple!(int(1))
+    );
+    assert_eq!(
+        run("(deserialize(serialize( (1, 1, true) )): (int, float, bool))"),
+        tuple!(int(1), float(1.0), bool(true))
     );
 
     // errors
