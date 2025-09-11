@@ -198,7 +198,7 @@ impl Deriver for ProductTypeSerializeDeriver {
                 .into_iter()
                 .map(|(tag, payload_ty)| {
                     let tag_node = n(
-                        native(Str::from_str(&tag.to_string()).unwrap()),
+                        native(Str::from_str(tag.as_ref()).unwrap()),
                         string_type(),
                     );
                     let tag_tuple_ty = tuple_type([string_type()]);
