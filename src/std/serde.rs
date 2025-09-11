@@ -197,10 +197,7 @@ impl Deriver for ProductTypeSerializeDeriver {
             let alternatives = variants
                 .into_iter()
                 .map(|(tag, payload_ty)| {
-                    let tag_node = n(
-                        native(Str::from_str(tag.as_ref()).unwrap()),
-                        string_type(),
-                    );
+                    let tag_node = n(native(Str::from_str(tag.as_ref()).unwrap()), string_type());
                     let tag_tuple_ty = tuple_type([string_type()]);
                     let tag_tuple_node = n(tuple([tag_node]), tag_tuple_ty);
                     let tag_variant_node = n(variant("String", tag_tuple_node), variant_type());
