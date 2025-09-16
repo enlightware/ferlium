@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::{self, Debug},
     hash::{Hash, Hasher},
     num::NonZero,
@@ -22,11 +22,11 @@ use ustr::Ustr;
 use crate::{
     containers::iterable_to_string,
     error::InternalCompilationError,
-    format::write_with_separator_and_format_fn,
+    format::{write_with_separator_and_format_fn, FormatWith},
     function::FunctionDefinition,
-    module::{FmtWithModuleEnv, ModuleEnv},
-    r#type::{Type, TypeVar},
-    trait_solver::{ConcreteTraitImpl, TraitImpls},
+    module::{ModuleEnv, TraitImplId},
+    r#type::{Type, TypeSubstitution, TypeVar},
+    trait_solver::TraitSolver,
     type_like::TypeLike,
     type_scheme::PubTypeConstraint,
     type_visitor::TyVarsCollector,
@@ -41,8 +41,8 @@ pub trait Deriver: Debug + DynClone + Sync + Send {
         trait_ref: &TraitRef,
         input_types: &[Type],
         span: Location,
-        impls: &mut TraitImpls,
-    ) -> Result<Option<ConcreteTraitImpl>, InternalCompilationError>;
+        solver: &mut TraitSolver,
+    ) -> Result<Option<TraitImplId>, InternalCompilationError>;
 }
 
 dyn_clone::clone_trait_object!(Deriver);
@@ -75,6 +75,12 @@ impl Trait {
     /// Return the number of type variables in this trait.
     pub fn type_var_count(&self) -> u32 {
         self.input_type_count.get() + self.output_type_count()
+    }
+
+    pub fn method_index(&self, name: Ustr) -> Option<usize> {
+        self.functions
+            .iter()
+            .position(|(fn_name, _)| *fn_name == name)
     }
 
     /// Validate the trait, ensuring that its function signatures adhere to the limitations of the current implementation.
@@ -132,10 +138,56 @@ impl Trait {
             }
         }
     }
+
+    /// Instantiate all function definitions of this trait for the given input and output types.
+    pub fn instantiate_for_tys(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+    ) -> Vec<FunctionDefinition> {
+        let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
+        let inst_subst = (ty_subst, HashMap::new());
+        self.functions
+            .iter()
+            .map(|(_, def)| {
+                let mut def = def.instantiate(&inst_subst);
+                def.ty_scheme.simplify();
+                def
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// Get the type of the dictionary for this trait for the given input and output types.
+    /// Only the types are substituted, the constraints are not considered.
+    pub fn get_dictionary_type_for_tys(&self, input_tys: &[Type], output_tys: &[Type]) -> Type {
+        let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
+        let inst_subst = (ty_subst, HashMap::new());
+        Type::tuple(
+            self.functions
+                .iter()
+                .map(|(_, def)| Type::function_type(def.ty_scheme.ty.instantiate(&inst_subst)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn get_substitution_for_tys(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+    ) -> TypeSubstitution {
+        assert!(input_tys.len() == self.input_type_count.get() as usize);
+        assert!(output_tys.len() == self.output_type_count() as usize);
+        input_tys
+            .iter()
+            .chain(output_tys.iter())
+            .enumerate()
+            .map(|(i, ty)| (TypeVar::new(i as u32), *ty))
+            .collect::<HashMap<_, _>>()
+    }
 }
 
-impl FmtWithModuleEnv for Trait {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for Trait {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
         write!(f, "trait {} <", self.name)?;
         let input_ty_count = self.input_type_count.get();
         write_with_separator_and_format_fn(
@@ -163,10 +215,10 @@ impl FmtWithModuleEnv for Trait {
         if self.constraints.is_empty() {
             writeln!(f, "> {{")?;
         } else {
-            writeln!(f, "> where")?;
+            write!(f, ">\nwhere")?;
             for constraint in &self.constraints {
-                write!(f, "    ")?;
-                constraint.fmt_with_module_env(f, env)?;
+                write!(f, "\n    ")?;
+                constraint.fmt_with(f, env)?;
             }
             writeln!(f, "\n{{")?;
         }
@@ -177,9 +229,9 @@ impl FmtWithModuleEnv for Trait {
             } else {
                 writeln!(f)?;
             }
-            def.fmt_with_name_and_module_env(f, name, "    ", env)?;
+            def.fmt_with_name_and_module_env(f, &Some(*name), "    ", env)?;
         }
-        writeln!(f, "}}")?;
+        writeln!(f, "\n}}")?;
         Ok(())
     }
 }

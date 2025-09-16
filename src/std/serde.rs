@@ -15,10 +15,10 @@ use crate::{
     containers::{b, SVec2},
     effects::EffType,
     error::InternalCompilationError,
-    function::{FunctionDefinition, ScriptFunction},
+    function::{Function, FunctionDefinition, ScriptFunction},
     ir::{self, Node},
     ir_syn,
-    module::Module,
+    module::{LocalImplId, Module, TraitImplId},
     r#trait::{Deriver, TraitRef},
     r#type::{tuple_type, FnType, Type, TypeKind},
     std::{
@@ -27,7 +27,7 @@ use crate::{
         string::{string_type, String as Str},
         variant::variant_object_entry_type,
     },
-    trait_solver::{ConcreteTraitImpl, TraitImpls},
+    trait_solver::TraitSolver,
     type_like::TypeLike,
     value::{ustr_to_isize, Value},
     Location,
@@ -42,10 +42,21 @@ pub const SERIALIZE_FN_NAME: &str = "serialize";
 pub const DESERIALIZE_FN_NAME: &str = "deserialize";
 
 // helper to create a concrete trait implementation from a single function defined by code
-fn concrete_trait_from_code(code: Node) -> ConcreteTraitImpl {
-    let function = ScriptFunction::new(code);
-    let functions = Value::tuple([Value::function(b(function))]);
-    ConcreteTraitImpl::from_functions(functions)
+fn add_concrete_impl_from_code(
+    code: Node,
+    trait_ref: &TraitRef,
+    input_types: &[Type],
+    solver: &mut TraitSolver,
+) -> LocalImplId {
+    let arg_names = trait_ref.functions[0].1.arg_names.clone();
+    let function: Function = b(ScriptFunction::new(code, arg_names));
+    solver.impls.add_concrete_raw(
+        trait_ref.clone(),
+        input_types.to_vec(),
+        [],
+        [function],
+        &mut solver.fn_collector,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -56,8 +67,8 @@ impl Deriver for ProductTypeSerializeDeriver {
         trait_ref: &TraitRef,
         input_types: &[Type],
         span: Location,
-        impls: &mut TraitImpls,
-    ) -> Result<Option<ConcreteTraitImpl>, InternalCompilationError> {
+        solver: &mut TraitSolver,
+    ) -> Result<Option<TraitImplId>, InternalCompilationError> {
         use ir_syn::*;
 
         // safety checks
@@ -69,13 +80,18 @@ impl Deriver for ProductTypeSerializeDeriver {
         let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
         // helper to create the concrete trait implementation for sequences
-        let build_serialize_to_seq = |nodes, tag| {
+        let build_serialize_to_seq = |nodes, tag, solver| {
             let array_ty = array_type(variant_type());
             let array = n(array(nodes), array_ty);
             let payload_ty = tuple_type([array_ty]);
             let payload = n(tuple([array]), payload_ty);
             let code = n(variant(tag, payload), variant_type());
-            concrete_trait_from_code(code)
+            TraitImplId::Local(add_concrete_impl_from_code(
+                code,
+                trait_ref,
+                input_types,
+                solver,
+            ))
         };
 
         // helper to build the serialization of a member of a tuple
@@ -85,11 +101,10 @@ impl Deriver for ProductTypeSerializeDeriver {
             // project the i-th element
             let project = n(project(load, index), ty);
             // serialize the i-th element
-            let functions = impls.get_functions(trait_ref, &[ty], span)?;
-            let function = functions.unwrap_fn_tuple_index(0);
+            let function = solver.solve_impl_method(trait_ref, &[ty], 0, span)?;
             let apply = n(
                 ir_syn::static_apply(
-                    function.clone(),
+                    function,
                     FnType::new_by_val([ty], variant_type(), EffType::empty()),
                     span,
                     vec![project],
@@ -131,7 +146,7 @@ impl Deriver for ProductTypeSerializeDeriver {
                     build_serialize_i(index, ty_i)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Ok(Some(build_serialize_to_seq(nodes, "Array")))
+            Ok(Some(build_serialize_to_seq(nodes, "Array", solver)))
         } else if let TypeKind::Record(fields) = ty_data {
             /*
             Example source code for serialization of a record:
@@ -175,7 +190,7 @@ impl Deriver for ProductTypeSerializeDeriver {
                     Ok(entry)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Ok(Some(build_serialize_to_seq(nodes, "Object")))
+            Ok(Some(build_serialize_to_seq(nodes, "Object", solver)))
         } else if let TypeKind::Variant(variants) = ty_data {
             // default to adjacently tagged into an object, with tag = "type", content = "data"
             /*
@@ -238,13 +253,12 @@ impl Deriver for ProductTypeSerializeDeriver {
                 case_from_complete_alternatives(extract_tag, alternatives),
                 variant_type(),
             );
-            Ok(Some(concrete_trait_from_code(code)))
+            let local_impl_id = add_concrete_impl_from_code(code, trait_ref, input_types, solver);
+            Ok(Some(TraitImplId::Local(local_impl_id)))
         } else if let TypeKind::Named(named) = ty_data {
             let ty_def = named.def;
             // serialize the inner type
-            Ok(Some(ConcreteTraitImpl::from_functions(
-                impls.get_functions(trait_ref, &[ty_def.shape], span)?,
-            )))
+            Ok(Some(solver.solve_impl(trait_ref, &[ty_def.shape], span)?))
             /*
             if let Some(variant) = ty_def.shape.data().as_variant() {
                 // default to adjacently tagged, with tag = "type", content = "data"
@@ -263,9 +277,7 @@ impl Deriver for ProductTypeSerializeDeriver {
                     }
                 }
                 */
-                Ok(Some(ConcreteTraitImpl::from_functions(
-                    impls.get_functions(trait_ref, &[ty_def.shape], span)?,
-                )))
+                Ok(Some(solver.get_impl(trait_ref, &[ty_def.shape], span)?))
             }
             */
         } else {
@@ -282,8 +294,8 @@ impl Deriver for ProductTypeDeserializeDeriver {
         trait_ref: &TraitRef,
         input_types: &[Type],
         span: Location,
-        impls: &mut TraitImpls,
-    ) -> Result<Option<ConcreteTraitImpl>, InternalCompilationError> {
+        solver: &mut TraitSolver,
+    ) -> Result<Option<TraitImplId>, InternalCompilationError> {
         use ir_syn::*;
 
         // safety checks
@@ -310,11 +322,10 @@ impl Deriver for ProductTypeDeserializeDeriver {
                 variant_type(),
             );
             // deserialize the i-th element
-            let functions = impls.get_functions(trait_ref, &[ty], span)?;
-            let function = functions.unwrap_fn_tuple_index(0);
+            let function = solver.solve_impl_method(trait_ref, &[ty], 0, span)?;
             let apply = n(
                 ir_syn::static_apply(
-                    function.clone(),
+                    function,
                     FnType::new_by_val([variant_type()], ty, EffType::empty()),
                     span,
                     vec![index],
@@ -353,8 +364,7 @@ impl Deriver for ProductTypeDeserializeDeriver {
             //     native(Str::from_str("Expected Array variant").unwrap()),
             //     string_type(),
             // );
-            // FIXME: properly pass the outer module functions here, so that panic is found
-            let panic = panic_node(span);
+            let panic = panic_node(solver, span)?;
             let case = n(
                 case(
                     extract_tag,
@@ -363,7 +373,8 @@ impl Deriver for ProductTypeDeserializeDeriver {
                 ),
                 ty,
             );
-            Ok(Some(concrete_trait_from_code(case)))
+            let local_impl_id = add_concrete_impl_from_code(case, trait_ref, input_types, solver);
+            Ok(Some(TraitImplId::Local(local_impl_id)))
         } else {
             Ok(None) // deserialization of rest not yet supported
         }
@@ -418,25 +429,12 @@ pub fn add_to_module(to: &mut Module) {
     // Trait implementations for basic types are in the prelude.
 }
 
-// Local panic code, to work around not having access to the full modules here.
-// FIXME: properly pass the outer module functions here, so that panic is found
-fn panic_node(span: Location) -> Node {
-    fn abort() -> Result<(), crate::error::RuntimeError> {
-        Err(crate::error::RuntimeError::Aborted(None))
-    }
-    let abort_descr = crate::function::NullaryNativeFnFN::description_with_ty_scheme(
-        abort,
-        [],
-        Some("Aborts the program."),
-        crate::type_scheme::TypeScheme::new_just_type(FnType::new_by_val(
-            [],
-            Type::never(),
-            crate::effects::no_effects(),
-        )),
-    );
-    Node::new(
+// Fetch the panic function node from the trait solver, importing it if necessary.
+fn panic_node(solver: &mut TraitSolver, span: Location) -> Result<Node, InternalCompilationError> {
+    let function = solver.get_function(ustr("std"), ustr("panic"))?;
+    Ok(Node::new(
         ir_syn::static_apply(
-            crate::function::FunctionRef::Strong(abort_descr.code),
+            function,
             FnType::new_by_val([], Type::never(), EffType::empty()),
             span,
             vec![],
@@ -444,5 +442,5 @@ fn panic_node(span: Location) -> Node {
         Type::never(),
         EffType::empty(),
         span,
-    )
+    ))
 }

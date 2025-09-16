@@ -6,22 +6,30 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+
 use std::{collections::HashMap, mem};
 
 use crate::{
-    error::InternalCompilationError, format::write_with_separator_and_format_fn, ir_syn,
-    parser_helpers::EMPTY_USTR, r#trait::TraitRef, r#type::TypeVar, trait_solver::TraitImpls,
-    type_like::TypeLike, Location,
+    error::InternalCompilationError,
+    format::FormatWith,
+    ir_syn,
+    module::{FunctionId, LocalFunctionId, ModuleEnv},
+    parser_helpers::EMPTY_USTR,
+    r#trait::TraitRef,
+    r#type::TypeVar,
+    trait_solver::TraitSolver,
+    type_like::TypeLike,
+    type_scheme::format_have_trait,
+    Location,
 };
+use derive_new::new;
 use itertools::process_results;
-use ustr::Ustr;
+use ustr::{ustr, Ustr};
 
 use crate::{
     containers::b,
     effects::no_effects,
-    function::FunctionPtr,
     ir::{self, Node, NodeKind},
-    module::FmtWithModuleEnv,
     mutability::MutType,
     r#type::{FnArgType, Type, TypeKind},
     std::math::int_type,
@@ -30,7 +38,7 @@ use crate::{
 };
 
 /// A dictionary requirement, that will be passed as extra parameter to a function.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum DictionaryReq {
     FieldIndex {
         ty: Type,
@@ -39,7 +47,8 @@ pub enum DictionaryReq {
     TraitImpl {
         trait_ref: TraitRef,
         input_tys: Vec<Type>,
-        // FIXME: maybe we need a span here for proper error reporting
+        output_tys: Vec<Type>, // stored here for type generation, but not used in comparisons
+                               // FIXME: maybe we need a span here for proper error reporting
     },
 }
 
@@ -47,14 +56,19 @@ impl DictionaryReq {
     pub fn new_field_index(ty: Type, field: Ustr) -> Self {
         Self::FieldIndex { ty, field }
     }
-    pub fn new_trait_impl(trait_ref: TraitRef, input_tys: Vec<Type>) -> Self {
+
+    pub fn new_trait_impl(
+        trait_ref: TraitRef,
+        input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
+    ) -> Self {
         Self::TraitImpl {
             trait_ref,
             input_tys,
+            output_tys,
         }
     }
-}
-impl DictionaryReq {
+
     pub fn instantiate(&self, subst: &InstSubstitution) -> DictionaryReq {
         use DictionaryReq::*;
         match self {
@@ -65,16 +79,61 @@ impl DictionaryReq {
             TraitImpl {
                 trait_ref,
                 input_tys,
+                output_tys,
             } => TraitImpl {
                 trait_ref: trait_ref.clone(),
                 input_tys: input_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
+                output_tys: output_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
             },
+        }
+    }
+
+    pub fn to_dict_name(&self, i: usize) -> String {
+        use DictionaryReq::*;
+        match self {
+            FieldIndex { field, .. } => format!("_d{i}_{field}"),
+            TraitImpl { trait_ref, .. } => {
+                format!("_d{i}_impl_{}", trait_ref.name)
+            }
         }
     }
 }
 
-impl FmtWithModuleEnv for DictionaryReq {
-    fn fmt_with_module_env(
+impl PartialEq for DictionaryReq {
+    fn eq(&self, other: &Self) -> bool {
+        use DictionaryReq::*;
+        match (self, other) {
+            (
+                FieldIndex {
+                    ty: ty1,
+                    field: field1,
+                },
+                FieldIndex {
+                    ty: ty2,
+                    field: field2,
+                },
+            ) => ty1 == ty2 && field1 == field2,
+            (
+                TraitImpl {
+                    trait_ref: tr1,
+                    input_tys: in1,
+                    ..
+                },
+                TraitImpl {
+                    trait_ref: tr2,
+                    input_tys: in2,
+                    ..
+                },
+            ) => tr1 == tr2 && in1 == in2,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for DictionaryReq {}
+
+impl FormatWith<ModuleEnv<'_>> for DictionaryReq {
+    fn fmt_with(
         &self,
         f: &mut std::fmt::Formatter,
         env: &crate::module::ModuleEnv<'_>,
@@ -85,15 +144,8 @@ impl FmtWithModuleEnv for DictionaryReq {
             TraitImpl {
                 trait_ref,
                 input_tys,
-            } => {
-                write_with_separator_and_format_fn(
-                    input_tys.iter(),
-                    ", ",
-                    |ty, f| write!(f, "{}", ty.format_with(env)),
-                    f,
-                )?;
-                write!(f, " impl {}", trait_ref.name)
-            }
+                output_tys,
+            } => format_have_trait(trait_ref, input_tys, output_tys, f, env),
         }
     }
 }
@@ -164,10 +216,10 @@ pub fn instantiate_dictionaries_req(
     dicts.iter().map(|dict| dict.instantiate(subst)).collect()
 }
 
-fn extra_args_from_inst_data(
+fn extra_args_from_inst_data<'d, 'sr, 'sm>(
     inst_data: &ir::FnInstData,
     span: Location,
-    ctx: DictElaborationCtx,
+    ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
 ) -> Result<(Vec<Node>, Vec<FnArgType>), InternalCompilationError> {
     use NodeKind as K;
     use TypeKind::*;
@@ -200,15 +252,13 @@ fn extra_args_from_inst_data(
                     };
                     (node_kind, int_type())
                 }
-                TraitImpl { trait_ref, input_tys, .. } => {
-                    // Build a fake type for the trait function array as we might not know the trait output type at this point.
-                    let fns_tuple_ty = vec![Type::never(); trait_ref.functions.len()];
+                TraitImpl { trait_ref, input_tys, output_tys, .. } => {
                     // Is the trait fully resolved?
                     let resolved = input_tys.iter().all(Type::is_constant);
                     let node_kind = if resolved {
                         // Fully resolved, look up the trait implementation and build the trait function array.
-                        let functions = ctx.trait_impls.get_functions(trait_ref, input_tys, span)?;
-                        K::Immediate(ir::Immediate::new(functions.clone()))
+                        let dictionary = ctx.trait_solver.solve_impl(trait_ref, input_tys, span)?;
+                        K::GetDictionary(ir::GetDictionary { dictionary })
                     } else {
                         // Not fully resolved, it must be in the input dictionaries, look for it.
                         let index = find_trait_impl_dict_index(ctx.dicts, trait_ref, input_tys)
@@ -218,7 +268,8 @@ fn extra_args_from_inst_data(
                         // Load the array of trait implementation functions from the dictionary
                         ir_syn::load(index)
                     };
-                    (node_kind, Type::tuple(fns_tuple_ty))
+                    let ty = trait_ref.get_dictionary_type_for_tys(input_tys, output_tys);
+                    (node_kind, ty)
                 }
             };
             Ok((
@@ -262,103 +313,62 @@ fn extra_args_for_module_function(
 /// This is a map from function pointers to the dictionaries required by the function.
 /// This is necessary as recursive functions in the current modules could not get their
 /// dictionary requirements during type inference as they were not known yet.
-pub type ModuleInstData = HashMap<FunctionPtr, ExtraParameters>;
+pub type ModuleInstData = HashMap<LocalFunctionId, ExtraParameters>;
 
 /// The context for elaborating dictionaries.
 /// All necessary information to perform dictionary elaboration.
 // #[derive(Clone, Copy)]
-pub struct DictElaborationCtx<'a> {
+#[derive(new)]
+pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     /// The dictionaries for the current expression being elaborated.
-    pub dicts: &'a ExtraParameters,
+    pub dicts: &'d ExtraParameters,
     /// The dictionaries for the current module, if compiling a module.
     /// None if compiling an expression.
-    pub module_inst_data: Option<&'a ModuleInstData>,
-    /// All trait visible implementations.
-    pub trait_impls: &'a mut TraitImpls,
-}
-impl<'a> DictElaborationCtx<'a> {
-    pub fn new(
-        dicts: &'a ExtraParameters,
-        module_inst_data: Option<&'a ModuleInstData>,
-        trait_impls: &'a mut TraitImpls,
-    ) -> Self {
-        Self {
-            dicts,
-            module_inst_data,
-            trait_impls,
-        }
-    }
-
-    pub fn reborrow(&mut self) -> DictElaborationCtx<'_> {
-        DictElaborationCtx {
-            dicts: self.dicts,
-            module_inst_data: self.module_inst_data,
-            trait_impls: &mut *self.trait_impls,
-        }
-    }
+    pub module_inst_data: Option<&'d ModuleInstData>,
+    /// The trait solver. The borrow lifetime is independent from `dicts`.
+    pub trait_solver: &'sr mut TraitSolver<'sm>,
 }
 
 impl Node {
-    pub fn elaborate_dictionaries(
+    pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
         &mut self,
-        mut ctx: DictElaborationCtx,
+        ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
     ) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
         match &mut self.kind {
             Immediate(immediate) => {
-                if let Some(function) = immediate.value.as_function_mut() {
-                    // Is this a function to instantiate?
-                    if immediate.inst_data.dicts_req.is_empty() {
-                        let function = function.0.get();
-                        // No instantiation, check if it is a module function
-                        let fn_ptr = function.as_ptr();
-                        if let Some(inst_data) = ctx
-                            .module_inst_data
-                            .and_then(|inst_data| inst_data.get(&fn_ptr))
-                        {
-                            // Yes, build the dictionary requirements for the function if it has non-empty inst data
-                            if !inst_data.is_empty() {
-                                let inst_data = &inst_data.requirements;
-                                // We have an instantiation, so we need a closure to pass dictionary requirements.
-                                let (captures, _) =
-                                    extra_args_for_module_function(inst_data, self.span, ctx.dicts);
-                                assert!(immediate.inst_data.dicts_req.is_empty());
-                                self.kind = BuildClosure(b(ir::BuildClosure {
-                                    function: self.clone(),
-                                    captures,
-                                }));
-                            }
-                        } else {
-                            // It is not a module function, is it from the local scope?
-                            if immediate.substitute_in_value_fn {
-                                // Yes, recurse to elaborate the function.
-                                let mut function = function.borrow_mut();
-                                let script_fn = function.as_script_mut().unwrap();
-                                script_fn.code.elaborate_dictionaries(ctx.reborrow())?;
-                                // Build closure to capture the dictionaries of this function, if any.
-                                if !ctx.dicts.is_empty() {
-                                    let captures = (0..ctx.dicts.len())
-                                        .map(|index| {
-                                            Node::new(
-                                                EnvLoad(b(ir::EnvLoad { index, name: None })),
-                                                int_type(),
-                                                no_effects(),
-                                                self.span,
-                                            )
-                                        })
-                                        .collect();
-                                    self.kind = BuildClosure(b(ir::BuildClosure {
-                                        function: self.clone(),
-                                        captures,
-                                    }));
-                                }
-                            }
-                        }
-                    } else {
-                        // We have an instantiation, so we need a closure to pass dictionary requirements.
-                        let (captures, _) =
-                            extra_args_from_inst_data(&immediate.inst_data, self.span, ctx)?;
-                        immediate.inst_data.dicts_req.clear();
+                assert!(
+                    !immediate.value.is_function(),
+                    "Resolved functions should not be present at this stage"
+                );
+                if let Some(function) = immediate.value.as_pending_function_mut() {
+                    // It is from the local scope, recurse to elaborate the function.
+                    let mut function = function.borrow_mut();
+                    let script_fn = function.as_script_mut().unwrap();
+                    script_fn.code.elaborate_dictionaries(ctx)?;
+                    if !ctx.dicts.is_empty() {
+                        script_fn.arg_names.splice(
+                            0..0,
+                            ctx.dicts
+                                .requirements
+                                .iter()
+                                .enumerate()
+                                .map(|(i, r)| ustr(&r.to_dict_name(i))),
+                        );
+                    }
+                    drop(function);
+                    // Build closure to capture the dictionaries of this function, if any.
+                    if !ctx.dicts.is_empty() {
+                        let captures = (0..ctx.dicts.len())
+                            .map(|index| {
+                                Node::new(
+                                    EnvLoad(b(ir::EnvLoad { index, name: None })),
+                                    int_type(),
+                                    no_effects(),
+                                    self.span,
+                                )
+                            })
+                            .collect();
                         self.kind = BuildClosure(b(ir::BuildClosure {
                             function: self.clone(),
                             captures,
@@ -370,14 +380,14 @@ impl Node {
                 panic!("BuildClosure should not be present at this stage");
             }
             Apply(app) => {
-                app.function.elaborate_dictionaries(ctx.reborrow())?;
+                app.function.elaborate_dictionaries(ctx)?;
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx.reborrow())?;
+                    arg.elaborate_dictionaries(ctx)?;
                 }
             }
             StaticApply(app) => {
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx.reborrow())?;
+                    arg.elaborate_dictionaries(ctx)?;
                 }
                 if !app.inst_data.dicts_req.is_empty() {
                     // Build the dictionary requirements for the function by adding extra arguments before normal arguments.
@@ -392,45 +402,46 @@ impl Node {
                     app.ty.args.splice(0..0, extra_args_ty);
                 } else {
                     // Is the called function part of the current module being compiled?
-                    let fn_ptr = app.function.get().as_ptr();
-                    if let Some(inst_data) = ctx
-                        .module_inst_data
-                        .and_then(|inst_data| inst_data.get(&fn_ptr))
-                    {
-                        let inst_data = &inst_data.requirements;
-                        // Yes, build the dictionary requirements for the function.
-                        let (extra_args, extra_args_ty) =
-                            extra_args_for_module_function(inst_data, self.span, ctx.dicts);
-                        app.argument_names
-                            .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
-                        app.arguments.splice(0..0, extra_args);
-                        app.ty.args.splice(0..0, extra_args_ty);
+                    if let FunctionId::Local(id) = app.function {
+                        if let Some(inst_data) = ctx
+                            .module_inst_data
+                            .and_then(|inst_data| inst_data.get(&id))
+                        {
+                            let inst_data = &inst_data.requirements;
+                            // Yes, build the dictionary requirements for the function.
+                            let (extra_args, extra_args_ty) =
+                                extra_args_for_module_function(inst_data, self.span, ctx.dicts);
+                            app.argument_names
+                                .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
+                            app.arguments.splice(0..0, extra_args);
+                            app.ty.args.splice(0..0, extra_args_ty);
 
-                        // Debug dump
-                        // let current = new_module_with_prelude();
-                        // let others = crate::std::new_std_module_env();
-                        // let module_env = crate::module::ModuleEnv::new(&current, &others);
-                        // println!(
-                        //     "StaticApply app fn type: {}",
-                        //     app.ty.format_with(&module_env)
-                        // );
-                        // // TODO: use function ty
-                        // print!("Extra params for that function: ");
-                        // for param in extra_params {
-                        //     print!("{}, ", param.format_with(&module_env));
-                        // }
-                        // println!();
-                        // print!("Extra params for cur function: ");
-                        // for dict in dicts {
-                        //     print!("{}, ", dict.format_with(&module_env));
-                        // }
-                        // println!();
+                            // Debug dump
+                            // let current = new_module_with_prelude();
+                            // let others = crate::std::new_std_module_env();
+                            // let module_env = crate::module::ModuleEnv::new(&current, &others);
+                            // println!(
+                            //     "StaticApply app fn type: {}",
+                            //     app.ty.format_with(&module_env)
+                            // );
+                            // // TODO: use function ty
+                            // print!("Extra params for that function: ");
+                            // for param in extra_params {
+                            //     print!("{}, ", param.format_with(&module_env));
+                            // }
+                            // println!();
+                            // print!("Extra params for cur function: ");
+                            // for dict in dicts {
+                            //     print!("{}, ", dict.format_with(&module_env));
+                            // }
+                            // println!();
+                        }
                     }
                 }
             }
             TraitFnApply(app) => {
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx.reborrow())?;
+                    arg.elaborate_dictionaries(ctx)?;
                 }
                 assert!(
                     app.inst_data.dicts_req.is_empty(),
@@ -440,12 +451,12 @@ impl Node {
                 let resolved = app.input_tys.iter().all(Type::is_constant);
                 if resolved {
                     // Fully resolved, look up the trait implementation and replace the function directly.
-                    let functions = ctx.trait_impls.get_functions(
+                    let function = ctx.trait_solver.solve_impl_method(
                         &app.trait_ref,
                         &app.input_tys,
+                        app.function_index,
                         app.function_span,
                     )?;
-                    let function = functions.unwrap_fn_tuple_index(app.function_index).clone();
                     self.kind = StaticApply(b(ir::StaticApplication {
                         function,
                         function_path: app.function_path,
@@ -496,24 +507,63 @@ impl Node {
                     }));
                 }
             }
+            GetFunction(get_fn) => {
+                // Is it a function to instantiate?
+                if get_fn.inst_data.dicts_req.is_empty() {
+                    // No instantiation, check if it is a module function
+                    if let FunctionId::Local(id) = get_fn.function {
+                        // Is the function part of the current module being compiled?
+                        if let Some(inst_data) = ctx
+                            .module_inst_data
+                            .and_then(|inst_data| inst_data.get(&id))
+                        {
+                            // Yes, build the dictionary requirements for the function if it has non-empty inst data
+                            if !inst_data.is_empty() {
+                                let inst_data = &inst_data.requirements;
+                                // We have an instantiation, so we need a closure to pass dictionary requirements.
+                                let (captures, _) =
+                                    extra_args_for_module_function(inst_data, self.span, ctx.dicts);
+                                assert!(get_fn.inst_data.dicts_req.is_empty());
+                                self.kind = BuildClosure(b(ir::BuildClosure {
+                                    function: self.clone(),
+                                    captures,
+                                }));
+                            }
+                        }
+                    }
+                } else {
+                    // We have an instantiation, so we need a closure to pass dictionary requirements.
+                    let (captures, _) =
+                        extra_args_from_inst_data(&get_fn.inst_data, self.span, ctx)?;
+                    get_fn.inst_data.dicts_req.clear();
+                    self.kind = BuildClosure(b(ir::BuildClosure {
+                        function: self.clone(),
+                        captures,
+                    }));
+                }
+            }
+            GetDictionary(_) => {
+                // nothing to do
+            }
             EnvStore(store) => {
-                store.node.elaborate_dictionaries(ctx)?;
+                store.index += ctx.dicts.len();
+                store.value.elaborate_dictionaries(ctx)?;
             }
             EnvLoad(load) => {
                 load.index += ctx.dicts.len();
             }
             Block(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx.reborrow())?;
+                    node.elaborate_dictionaries(ctx)?;
                 }
             }
             Assign(assignment) => {
-                assignment.place.elaborate_dictionaries(ctx.reborrow())?;
+                assignment.place.elaborate_dictionaries(ctx)?;
                 assignment.value.elaborate_dictionaries(ctx)?;
             }
             Tuple(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx.reborrow())?;
+                    node.elaborate_dictionaries(ctx)?;
                 }
             }
             Project(projection) => {
@@ -521,12 +571,12 @@ impl Node {
             }
             Record(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx.reborrow())?;
+                    node.elaborate_dictionaries(ctx)?;
                 }
             }
             FieldAccess(access) => {
                 use TypeKind::*;
-                access.0.elaborate_dictionaries(ctx.reborrow())?;
+                access.0.elaborate_dictionaries(ctx)?;
                 let name = access.1;
                 let span = access.0.span;
                 let ty = access.0.ty;
@@ -590,17 +640,17 @@ impl Node {
             }
             Array(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx.reborrow())?;
+                    node.elaborate_dictionaries(ctx)?;
                 }
             }
             Index(array, index) => {
-                array.elaborate_dictionaries(ctx.reborrow())?;
+                array.elaborate_dictionaries(ctx)?;
                 index.elaborate_dictionaries(ctx)?;
             }
             Case(case) => {
-                case.value.elaborate_dictionaries(ctx.reborrow())?;
+                case.value.elaborate_dictionaries(ctx)?;
                 for (_, node) in &mut case.alternatives {
-                    node.elaborate_dictionaries(ctx.reborrow())?;
+                    node.elaborate_dictionaries(ctx)?;
                 }
                 case.default.elaborate_dictionaries(ctx)?;
             }

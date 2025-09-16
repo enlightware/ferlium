@@ -11,7 +11,6 @@ use std::{
     collections::HashSet,
     fmt::{self, Display},
     ops::Deref,
-    rc::Rc,
     sync::LazyLock,
 };
 
@@ -21,11 +20,12 @@ use crate::{
         CompilationErrorImpl, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     eval::{EvalCtx, ValOrMut},
-    module::{FmtWithModuleEnv, ModuleFunction, Uses},
+    format::FormatWith,
+    module::{ModuleFunction, ModuleRc, Modules, Uses},
     r#type::{tuple_type, FnArgType, Type},
     std::{new_module_using_std, new_std_modules},
     value::{NativeValue, Value},
-    CompilationError, DisplayStyle, Location, Module, ModuleAndExpr, ModuleEnv, Modules,
+    CompilationError, DisplayStyle, Location, ModuleAndExpr, ModuleEnv,
 };
 use itertools::Itertools;
 use regex::Regex;
@@ -616,7 +616,7 @@ impl Compiler {
 
     pub fn run_expr_to_html(&self) -> String {
         if let Some(expr) = &self.user_module.expr {
-            match expr.expr.eval() {
+            match expr.expr.eval(self.user_module.module.clone()) {
                 Ok(value) => {
                     let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
                     let output = format!("{}: {}", value, expr.ty.display_rust_style(&module_env));
@@ -658,17 +658,22 @@ impl Compiler {
 
     pub fn list_module_fns(&self) -> Vec<FunctionSignature> {
         let mut sigs = Vec::new();
-        for module in &self.modules {
+        for module in &self.modules.modules {
             let mod_name = *module.0;
-            for (sym_name, func) in &module.1.functions {
+            for local_fn in &module.1.functions {
+                let sym_name = match local_fn.name {
+                    Some(name) => name,
+                    None => continue,
+                };
                 if sym_name.starts_with('@') {
                     continue; // skip hidden functions
                 }
-                let name = if self.user_module.module.uses(mod_name, *sym_name) {
+                let name = if self.user_module.module.uses(mod_name, sym_name) {
                     sym_name.to_string()
                 } else {
                     format!("{mod_name}::{sym_name}")
                 };
+                let func = &local_fn.function;
                 sigs.push(FunctionSignature {
                     name,
                     args: func
@@ -688,10 +693,13 @@ impl Compiler {
         static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@(get|set) (.*)$").unwrap());
         let mut getters = HashSet::new();
         let mut setters = HashSet::new();
-        for module in &self.modules {
+        for module in &self.modules.modules {
             let mod_name = *module.0;
-            for f in &module.1.functions {
-                let sym_name = *f.0;
+            for local_fn in &module.1.functions {
+                let sym_name = match local_fn.name {
+                    Some(name) => name,
+                    None => continue,
+                };
                 let captures = if let Some(captures) = RE.captures(&sym_name) {
                     captures
                 } else {
@@ -719,8 +727,9 @@ impl Compiler {
 impl Compiler {
     pub fn new_with_modules(modules: Modules, extra_uses: Uses) -> Self {
         let user_src = String::new();
-        let mut user_module = ModuleAndExpr::new_just_module(new_module_using_std());
-        user_module.module.uses.extend(extra_uses.iter().cloned());
+        let mut module = new_module_using_std();
+        module.uses.extend(extra_uses.iter().cloned());
+        let user_module = ModuleAndExpr::new_just_module(module);
         Self {
             modules,
             extra_uses,
@@ -729,38 +738,40 @@ impl Compiler {
         }
     }
 
-    pub fn with_module(mut self, name: &str, module: Module, extra_uses: Uses) -> Self {
-        self.modules.insert(name.into(), Rc::new(module));
+    /* TODO: figure out how to clean that
+    pub fn with_module(mut self, name: &str, module: ModuleRc, extra_uses: Uses) -> Self {
+        self.modules.modules.insert(name.into(), module);
         self.extra_uses.extend(extra_uses.iter().cloned());
         self.user_module.module.uses.extend(extra_uses);
         self
     }
+    */
 
     fn run_fn<R>(
         &self,
         name: &str,
-        f: impl FnOnce(&ModuleFunction, &ModuleEnv<'_>) -> Result<R, String>,
+        f: impl FnOnce(&ModuleFunction, &ModuleRc, &Modules) -> Result<R, String>,
     ) -> Result<R, String> {
         if let Some(func) = self.user_module.module.get_function(name, &self.modules) {
-            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
-            f(func, &module_env)
+            f(func, &self.user_module.module, &self.modules)
         } else {
             Err(format!("Function {name} not found"))
         }
     }
 
     pub fn run_fn_unit_unit(&self, name: &str) -> Result<(), String> {
-        self.run_fn(name, |func, module_env| {
+        self.run_fn(name, |func, current, others| {
             if !func.definition.ty_scheme.is_just_type_and_effects()
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != Type::unit()
             {
+                let module_env = ModuleEnv::new(current, others);
                 Err(format!(
                     "Function {name} does not have type \"() -> ()\", it has \"{}\" instead",
-                    func.definition.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new();
+                let mut ctx = EvalCtx::new(current.clone());
                 let _ret = func
                     .code
                     .borrow()
@@ -772,20 +783,21 @@ impl Compiler {
     }
 
     pub fn run_fn_unit_o<O: NativeValue + Clone>(&self, name: &str) -> Result<O, String> {
-        self.run_fn(name, |func, module_env| {
+        self.run_fn(name, |func, current, others| {
             let o_ty = Type::primitive::<O>();
-            let o_ty_fmt = o_ty.format_with(module_env);
             if !func.definition.ty_scheme.is_just_type_and_effects()
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
+                let module_env = ModuleEnv::new(current, others);
+                let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
                     o_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new();
+                let mut ctx = EvalCtx::new(current.clone());
                 let ret = func
                     .code
                     .borrow()
@@ -800,22 +812,23 @@ impl Compiler {
         &self,
         name: &str,
     ) -> Result<(OA, OB), String> {
-        self.run_fn(name, |func, module_env| {
+        self.run_fn(name, |func, current, others| {
             let oa_ty = Type::primitive::<OA>();
             let ob_ty = Type::primitive::<OB>();
             let o_ty = tuple_type([oa_ty, ob_ty]);
-            let o_ty_fmt = o_ty.format_with(module_env);
             if !func.definition.ty_scheme.is_just_type_and_effects()
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
+                let module_env = ModuleEnv::new(current, others);
+                let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
                     o_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new();
+                let mut ctx = EvalCtx::new(current.clone());
                 let ret = func
                     .code
                     .borrow()
@@ -839,25 +852,26 @@ impl Compiler {
         name: &str,
         input: I,
     ) -> Result<(OA, OB), String> {
-        self.run_fn(name, |func, module_env| {
+        self.run_fn(name, |func, current, others| {
             let i_ty = Type::primitive::<I>();
-            let i_ty_fmt = i_ty.format_with(module_env);
             let oa_ty = Type::primitive::<OA>();
             let ob_ty = Type::primitive::<OB>();
             let o_ty = tuple_type([oa_ty, ob_ty]);
-            let o_ty_fmt = o_ty.format_with(module_env);
             if !func.definition.ty_scheme.is_just_type_and_effects()
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
+                let module_env = ModuleEnv::new(current, others);
+                let i_ty_fmt = i_ty.format_with(&module_env);
+                let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
                     i_ty_fmt,
                     o_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new();
+                let mut ctx = EvalCtx::new(current.clone());
                 let ret = func
                     .code
                     .borrow()
@@ -877,20 +891,21 @@ impl Compiler {
         name: &str,
         input: I,
     ) -> Result<(), String> {
-        self.run_fn(name, |func, module_env| {
+        self.run_fn(name, |func, current, others| {
             let i_ty = Type::primitive::<I>();
-            let i_ty_fmt = i_ty.format_with(module_env);
             if !func.definition.ty_scheme.is_just_type_and_effects()
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != Type::unit()
             {
+                let module_env = ModuleEnv::new(current, others);
+                let i_ty_fmt = i_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"({}) -> ()\", it has \"{}\" instead",
                     i_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new();
+                let mut ctx = EvalCtx::new(current.clone());
                 let _ret = func
                     .code
                     .borrow()
@@ -906,23 +921,24 @@ impl Compiler {
         name: &str,
         input: I,
     ) -> Result<O, String> {
-        self.run_fn(name, |func, module_env| {
+        self.run_fn(name, |func, current, others| {
             let i_ty = Type::primitive::<I>();
-            let i_ty_fmt = i_ty.format_with(module_env);
             let o_ty = Type::primitive::<O>();
-            let o_ty_fmt = o_ty.format_with(module_env);
             if !func.definition.ty_scheme.is_just_type_and_effects()
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
+                let module_env = ModuleEnv::new(current, others);
+                let i_ty_fmt = i_ty.format_with(&module_env);
+                let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
                     i_ty_fmt,
                     o_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(module_env)
+                    func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new();
+                let mut ctx = EvalCtx::new(current.clone());
                 let ret = func
                     .code
                     .borrow()

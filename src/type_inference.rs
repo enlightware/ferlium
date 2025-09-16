@@ -22,16 +22,20 @@ use crate::{
         DuplicatedFieldContext, InternalWhatIsNotAProductType, MutabilityMustBeWhat,
         WhichProductTypeIsNot,
     },
+    format::FormatWith,
+    function::FunctionRc,
     internal_compilation_error,
     location::Location,
+    module::ModuleFunction,
     parser_helpers::EMPTY_USTR,
     r#trait::TraitRef,
     std::core::REPR_TRAIT,
-    trait_solver::TraitImpls,
+    trait_solver::TraitSolver,
     type_like::TypeLike,
     type_mapper::TypeMapper,
     type_substitution::{substitute_fn_type, substitute_type, substitute_types, TypeSubstituer},
 };
+use derive_new::new;
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
 use itertools::{multiunzip, Itertools};
 use ustr::{ustr, Ustr};
@@ -42,9 +46,9 @@ use crate::{
     dictionary_passing::DictionaryReq,
     effects::{no_effects, EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution},
     error::{ADTAccessType, InternalCompilationError, MutabilityMustBeContext},
-    function::{FunctionRef, ScriptFunction},
+    function::ScriptFunction,
     ir::{self, EnvStore, FnInstData, Immediate, Node, NodeKind},
-    module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
+    module::ModuleEnv,
     mutability::{MutType, MutVal, MutVar, MutVarKey},
     r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
     std::{array::array_type, math::int_type},
@@ -134,12 +138,8 @@ pub enum TypeConstraint {
     Pub(PubTypeConstraint),
 }
 
-impl FmtWithModuleEnv for TypeConstraint {
-    fn fmt_with_module_env(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for TypeConstraint {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         use TypeConstraint::*;
         match self {
             SameType {
@@ -162,7 +162,7 @@ impl FmtWithModuleEnv for TypeConstraint {
                     expected.format_with(env)
                 )
             }
-            Pub(constraint) => constraint.fmt_with_module_env(f, env),
+            Pub(constraint) => constraint.fmt_with(f, env),
         }
     }
 }
@@ -240,7 +240,7 @@ pub struct TypeInference {
 }
 
 impl TypeInference {
-    pub fn new() -> Self {
+    pub fn new_empty() -> Self {
         Self::default()
     }
 
@@ -342,17 +342,15 @@ impl TypeInference {
                     }));
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((module_name, function)) = env.module_env.get_function(path) {
-                    let (fn_ty, inst_data, _subst) = function
-                        .definition
+                else if let Some((definition, function, module_name)) = env.get_function(path) {
+                    let (fn_ty, inst_data, _subst) = definition
                         .ty_scheme
                         .instantiate_with_fresh_vars(self, module_name, expr.span.span(), None);
-                    let value =
-                        Value::Function((FunctionRef::new_weak(&function.code), Some(*path)));
-                    let node = K::Immediate(b(ir::Immediate {
-                        value,
+                    let node = K::GetFunction(b(ir::GetFunction {
+                        function,
+                        function_path: ustr(path),
+                        function_span: expr.span,
                         inst_data,
-                        substitute_in_value_fn: false,
                     }));
                     (
                         node,
@@ -407,6 +405,7 @@ impl TypeInference {
             }
             Let((name, name_span), mutable, let_expr, ty_span) => {
                 let node = self.infer_expr_drop_mut(env, let_expr)?;
+                let index = env.locals.len();
                 env.locals.push(Local::new(
                     *name,
                     MutType::resolved(*mutable),
@@ -415,7 +414,9 @@ impl TypeInference {
                 ));
                 let effects = node.effects.clone();
                 let node = K::EnvStore(b(EnvStore {
-                    node,
+                    value: node,
+                    index,
+                    name: *name,
                     name_span: *name_span,
                     ty_span: *ty_span,
                 }));
@@ -436,12 +437,13 @@ impl TypeInference {
                     .collect::<Vec<_>>();
                 let args_ty = locals.iter().map(Local::as_fn_arg_type).collect();
                 // Build environment for typing the function's body
-                let mut env = TypingEnv::new(locals, env.module_env);
+                let mut env = TypingEnv::new(locals, env.new_import_slots, env.module_env);
                 // Infer the body's type
                 let code = self.infer_expr_drop_mut(&mut env, body)?;
                 // Store and return the function's type
                 let fn_ty = FnType::new(args_ty, code.ty, code.effects.clone());
-                let value_fn = Value::function(b(ScriptFunction::new(code)));
+                let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
+                let value_fn = Value::pending_function(b(ScriptFunction::new(code, arg_names)));
                 let node = K::Immediate(Immediate::new(value_fn));
                 (
                     node,
@@ -919,43 +921,34 @@ impl TypeInference {
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
-            } else if let Some((module_name, function)) = env.module_env.get_function(path) {
-                if function.definition.ty_scheme.ty.args.len() != args.len() {
+            } else if let Some((definition, function, module_name)) = env.get_function(path) {
+                if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
-                        expected: function.definition.ty_scheme.ty.args.len(),
+                        expected: definition.ty_scheme.ty.args.len(),
                         expected_span: path_span,
                         got: args.len(),
                         got_span: args_span(),
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data, _subst) = function
-                    .definition
+                let (inst_fn_ty, inst_data, _subst) = definition
                     .ty_scheme
                     .instantiate_with_fresh_vars(self, module_name, path_span.span(), None);
+                // Get argument names if any
+                let argument_names = if synthesized {
+                    definition.arg_names.iter().map(|_| *EMPTY_USTR).collect()
+                } else {
+                    definition.arg_names.clone()
+                };
                 // Get the code and make sure the types of its arguments match the expected types
                 let (args_nodes, args_effects) =
                     self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
-                // Build and return the function node, get back the function to avoid re-borrowing
-                let (_, function) = env
-                    .module_env
-                    .get_function(path)
-                    .expect("function not found any more after checking");
+                // Build and return the function node
                 let ret_ty = inst_fn_ty.ret;
                 let combined_effects =
                     self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                let argument_names = if synthesized {
-                    function
-                        .definition
-                        .arg_names
-                        .iter()
-                        .map(|_| *EMPTY_USTR)
-                        .collect()
-                } else {
-                    function.definition.arg_names.clone()
-                };
                 let node = K::StaticApply(b(ir::StaticApplication {
-                    function: FunctionRef::new_weak(&function.code),
+                    function,
                     function_path: ustr(path),
                     function_span: path_span,
                     arguments: args_nodes,
@@ -1241,13 +1234,14 @@ impl TypeInference {
                     })
                     .collect::<Vec<_>>();
                 // Build environment for typing the function's body
-                let mut env = TypingEnv::new(locals, env.module_env);
+                let mut env = TypingEnv::new(locals, env.new_import_slots, env.module_env);
                 // Recursively check the function's body
                 let code =
                     self.check_expr(&mut env, body, fn_ty.ret, MutType::constant(), body.span)?;
                 self.unify_effects(&code.effects, &fn_ty.effects);
                 // Store and return the function's type
-                let value_fn = Value::function(b(ScriptFunction::new(code)));
+                let arg_names = args.iter().map(|(name, _)| *name).collect();
+                let value_fn = Value::pending_function(b(ScriptFunction::new(code, arg_names)));
                 let node = K::Immediate(Immediate::new(value_fn));
                 return Ok(N::new(node, expected_ty, no_effects(), expr.span));
             }
@@ -1480,19 +1474,15 @@ impl TypeInference {
 
     pub fn unify(
         self,
-        trait_impls: &mut TraitImpls,
+        trait_solver: &mut TraitSolver<'_>,
     ) -> Result<UnifiedTypeInference, InternalCompilationError> {
-        UnifiedTypeInference::unify_type_inference(self, trait_impls)
+        UnifiedTypeInference::unify_type_inference(self, trait_solver)
     }
 }
 
+#[derive(new)]
 pub struct FreshVariableTypeMapper<'a> {
     ty_inf: &'a mut TypeInference,
-}
-impl<'a> FreshVariableTypeMapper<'a> {
-    pub fn new(ty_inf: &'a mut TypeInference) -> Self {
-        Self { ty_inf }
-    }
 }
 impl TypeMapper for FreshVariableTypeMapper<'_> {
     fn map_type(&mut self, ty: Type) -> Type {
@@ -1549,7 +1539,7 @@ impl UnifiedTypeInference {
 
     pub fn unify_type_inference(
         ty_inf: TypeInference,
-        trait_impls: &mut TraitImpls,
+        trait_solver: &mut TraitSolver<'_>,
     ) -> Result<Self, InternalCompilationError> {
         let TypeInference {
             ty_unification_table,
@@ -1924,7 +1914,7 @@ impl UnifiedTypeInference {
                                 &output_tys,
                                 span,
                                 is_ty_adt,
-                                trait_impls,
+                                trait_solver,
                             )?
                         }
                     };
@@ -2297,8 +2287,8 @@ impl UnifiedTypeInference {
             }
             // Not a tuple, error
             _ => Err(internal_compilation_error!(InvalidTupleProjection {
-                tuple_ty,
-                tuple_span,
+                expr_ty: tuple_ty,
+                expr_span: tuple_span,
                 index_span,
             })),
         }
@@ -2400,7 +2390,7 @@ impl UnifiedTypeInference {
         output_tys: &[Type],
         span: Location,
         is_ty_adt: impl Fn(Type) -> bool,
-        trait_impls: &mut TraitImpls,
+        trait_solver: &mut TraitSolver<'_>,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let input_tys = self.normalize_types(input_tys);
         let output_tys = self.normalize_types(output_tys);
@@ -2435,7 +2425,7 @@ impl UnifiedTypeInference {
         let resolved = input_tys.iter().all(Type::is_constant);
         Ok(if resolved {
             // Fully resolved, validate the trait implementation.
-            let impl_output_tys = trait_impls.get_output_types(&trait_ref, &input_tys, span)?;
+            let impl_output_tys = trait_solver.solve_output_types(&trait_ref, &input_tys, span)?;
             // Found, unify the output types.
             assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
             for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
@@ -2805,7 +2795,6 @@ impl UnifiedTypeInference {
         match &mut node.kind {
             Immediate(immediate) => {
                 self.substitute_in_value(&mut immediate.value);
-                self.substitute_in_fn_inst_data(&mut immediate.inst_data);
             }
             BuildClosure(_) => panic!("BuildClosure should not be present at this stage"),
             Apply(app) => {
@@ -2823,8 +2812,12 @@ impl UnifiedTypeInference {
                 self.substitute_in_nodes(&mut app.arguments);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
+            GetFunction(get_fn) => {
+                self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
+            }
+            GetDictionary(_) => {}
             EnvStore(node) => {
-                self.substitute_in_node(&mut node.node);
+                self.substitute_in_node(&mut node.value);
             }
             EnvLoad(_) => {}
             Block(nodes) => self.substitute_in_nodes(nodes),
@@ -2876,32 +2869,43 @@ impl UnifiedTypeInference {
                 TraitImpl {
                     trait_ref,
                     input_tys,
+                    output_tys,
                 } => TraitImpl {
                     trait_ref: trait_ref.clone(),
                     input_tys: self.substitute_in_types(input_tys),
+                    output_tys: self.substitute_in_types(output_tys),
                 },
             })
             .collect();
     }
 
     fn substitute_in_value(&mut self, value: &mut Value) {
+        use Value::*;
         match value {
-            Value::Tuple(tuple) => {
+            Native(_) => {}
+            Variant(variant) => {
+                self.substitute_in_value(&mut variant.value);
+            }
+            Tuple(tuple) => {
                 for value in tuple.iter_mut() {
                     self.substitute_in_value(value);
                 }
             }
-            Value::Function((function, _)) => {
-                let function = function.get();
-                // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
-                let function = function.try_borrow_mut();
-                if let Ok(mut function) = function {
-                    if let Some(script_fn) = function.as_script_mut() {
-                        self.substitute_in_node(&mut script_fn.code);
-                    }
-                }
+            PendingFunction(function) => {
+                self.substitute_in_value_fn(function);
             }
-            _ => {}
+            Function(fv) => {
+                self.substitute_in_value_fn(&mut fv.function);
+            }
+        }
+    }
+
+    fn substitute_in_value_fn(&mut self, function: &mut FunctionRc) {
+        let function = function.try_borrow_mut();
+        if let Ok(mut function) = function {
+            if let Some(script_fn) = function.as_script_mut() {
+                self.substitute_in_node(&mut script_fn.code);
+            }
         }
     }
 
@@ -3156,10 +3160,7 @@ fn nodes_as_bare_immediate(nodes: &[impl Borrow<Node>]) -> Option<Vec<Value>> {
                 NodeKind::Immediate(immediate) => {
                     // For now, do not support function values for transformation into composed immediates.
                     // The reason is that different functions might have different instantiation requirements.
-                    if node.effects.any()
-                        || immediate.inst_data.any()
-                        || node.ty.data().is_function()
-                    {
+                    if node.effects.any() || node.ty.data().is_function() {
                         None
                     } else {
                         Some(&immediate.value)

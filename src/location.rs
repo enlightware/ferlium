@@ -6,7 +6,10 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use ustr::Ustr;
+
+use std::ops::Range;
+
+use ustr::{ustr, Ustr};
 
 /// A range of bytes in the user's input.
 /// It only contains the start and end byte offsets, not the actual input string.
@@ -34,6 +37,10 @@ impl Span {
 
     pub fn len(&self) -> usize {
         self.end - self.start
+    }
+
+    pub fn as_range(&self) -> Range<usize> {
+        self.start..self.end
     }
 }
 
@@ -82,13 +89,20 @@ impl Location {
     /// Create a new location by fusing the spans of multiple locations.
     /// Panics if `others` is empty or are from different modules.
     pub fn fuse_range(others: impl IntoIterator<Item = Self>) -> Option<Self> {
-        let mut module = None;
+        let mut module: Option<Option<ExternalLocation>> = None;
         let mut start = usize::MAX;
         let mut end = 0;
         for other in others {
             if let Some(module) = module {
                 if module != other.module {
-                    panic!("Cannot fuse locations from different modules");
+                    let self_name = module
+                        .map(|m| m.module_name)
+                        .unwrap_or(ustr("<current module>"));
+                    let other_name = other
+                        .module
+                        .map(|m| m.module_name)
+                        .unwrap_or(ustr("<current module>"));
+                    panic!("Cannot fuse locations from different modules: {self_name}:{:?} with {other_name}: {:?}", start..end, other.span.as_range());
                 }
             } else {
                 module = Some(other.module);

@@ -1,3 +1,4 @@
+use derive_new::new;
 // Copyright 2025 Enlightware GmbH
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
@@ -16,15 +17,16 @@ use std::{
     collections::HashSet,
     fmt::{self, Display},
     hash::Hash,
-    rc::Rc,
+    mem,
+    rc::{Rc, Weak},
 };
 use ustr::Ustr;
 
 use crate::{
     containers::{b, IntoSVec2, SVec2, B},
     format::{write_with_separator, write_with_separator_and_format_fn},
-    function::{Function, FunctionPtr, FunctionRef},
-    module::ModuleEnv,
+    function::{Function, FunctionPtr, FunctionRc},
+    module::{ModuleEnv, ModuleRc, ModuleWeak},
     type_inference::InstSubstitution,
 };
 
@@ -106,8 +108,29 @@ impl VariantValue {
     }
 }
 
+#[derive(Debug, Clone, new)]
+pub struct FunctionValue {
+    pub function: FunctionRc,
+    pub module: ModuleWeak,
+}
+
+impl FunctionValue {
+    pub fn upgrade_module(&self) -> ModuleRc {
+        self.module
+            .upgrade()
+            .expect("Module dropped while function value still alive")
+    }
+}
+
+impl PartialEq for FunctionValue {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.function, &other.function) && Weak::ptr_eq(&self.module, &other.module)
+    }
+}
+impl Eq for FunctionValue {}
+
 /// A value in the system
-#[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
+#[derive(Debug, Clone, EnumAsInner)]
 pub enum Value {
     /// A native value, a pointer to the underlying Rust value
     Native(B<dyn NativeValue>),
@@ -115,9 +138,31 @@ pub enum Value {
     Variant(B<VariantValue>),
     /// A tuple of values, or the data of a record
     Tuple(B<SVec2<Value>>),
+    /// A pending script function whose module weak pointer is not yet known.
+    /// This will be converted into a `Function` variant during the module finalization phase
+    /// once the module `Rc` is available. Only user-defined script functions (lambdas / abstracts)
+    /// should use this variant.
+    PendingFunction(FunctionRc),
     /// A function, with an optional name (if part of an immediate pointing to a named function)
-    Function((FunctionRef, Option<Ustr>)),
+    Function(FunctionValue),
 }
+
+// Note: later we will not need that as Eq will be implemented through a trait
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        use Value::*;
+        match (self, other) {
+            (Native(l0), Native(r0)) => l0 == r0,
+            (Variant(l0), Variant(r0)) => l0 == r0,
+            (Tuple(l0), Tuple(r0)) => l0 == r0,
+            (PendingFunction(l0), PendingFunction(r0)) => Rc::ptr_eq(&l0, &r0),
+            (Function(l0), Function(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
 
 impl Value {
     pub fn unit() -> Self {
@@ -151,11 +196,55 @@ impl Value {
         Self::Tuple(b(SVec2::new()))
     }
 
-    pub fn function(function: Function) -> Self {
-        Self::Function((
-            FunctionRef::new_strong(&Rc::new(RefCell::new(function))),
-            None,
-        ))
+    pub fn function(function: Function, module: ModuleWeak) -> Self {
+        Self::function_rc(Rc::new(RefCell::new(function)), module)
+    }
+
+    pub fn function_rc(function: FunctionRc, module: ModuleWeak) -> Self {
+        Self::Function(FunctionValue::new(function, module))
+    }
+
+    /// Create a pending function value (used when the module weak reference is not yet known).
+    pub fn pending_function(function: Function) -> Self {
+        Self::pending_function_rc(Rc::new(RefCell::new(function)))
+    }
+
+    /// Create a pending function value (used when the module weak reference is not yet known).
+    pub fn pending_function_rc(function: FunctionRc) -> Self {
+        Self::PendingFunction(function)
+    }
+
+    /// Finalize this value (and nested values) by converting any pending script functions
+    /// into proper module-bound functions using the provided module weak reference.
+    pub fn finalize_pending(&mut self, module: &ModuleRc) {
+        use Value::*;
+        match self {
+            Native(_) => {}
+            Variant(variant) => variant.value.finalize_pending(module),
+            Tuple(tuple) => {
+                for v in tuple.iter_mut() {
+                    v.finalize_pending(module);
+                }
+            }
+            PendingFunction(_) => {
+                // Move out the function, wrap it, and replace self.
+                let old = mem::replace(self, Self::unit());
+                let mut function = old.into_pending_function().unwrap();
+                Self::finalize_pending_fn(&mut function, module);
+                *self = Value::Function(FunctionValue::new(function, Rc::downgrade(module)));
+            }
+            Function(fv) => {
+                Self::finalize_pending_fn(&mut fv.function, module);
+            }
+        }
+    }
+
+    fn finalize_pending_fn(function: &mut FunctionRc, module: &ModuleRc) {
+        if let Ok(mut func) = function.try_borrow_mut() {
+            if let Some(script) = func.as_script_mut() {
+                script.code.finalize_pending_values(module);
+            }
+        };
     }
 
     pub fn into_primitive_ty<T: 'static>(self) -> Option<T> {
@@ -180,14 +269,6 @@ impl Value {
         }
     }
 
-    pub fn unwrap_fn_tuple_index(&self, index: usize) -> &FunctionRef {
-        let fn_tuple = self.as_tuple().expect("Value is not a tuple");
-        &fn_tuple[index]
-            .as_function()
-            .expect("Entry at index is not a function")
-            .0
-    }
-
     pub fn format_as_string(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Value::*;
         match self {
@@ -207,9 +288,11 @@ impl Value {
                 write_with_separator_and_format_fn(tuple.iter(), ", ", Value::format_as_string, f)?;
                 write!(f, ")")
             }
-            Function((function, _)) => {
-                let function = function.get();
-                let function = function.borrow();
+            PendingFunction(function) => {
+                write!(f, "{function:?} (pending)")
+            }
+            Function(fv) => {
+                let function = fv.function.borrow();
                 write!(f, "{function:?}")
             }
         }
@@ -222,11 +305,6 @@ impl Value {
         spacing: usize,
         indent: usize,
     ) -> std::fmt::Result {
-        // Thread-local hash-map for cycle detection
-        thread_local! {
-            static FN_VISITED: RefCell<HashSet<FunctionPtr>> = RefCell::new(HashSet::new());
-        }
-
         let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         use Value::*;
         match self {
@@ -250,36 +328,49 @@ impl Value {
                 }
                 writeln!(f, "{indent_str})")
             }
-            Function((function, name)) => {
-                let function = function.get();
-                let fn_ptr = function.as_ptr();
-                let function = function.borrow();
-                if let Some(name) = name {
-                    writeln!(f, "{indent_str}function {name}")?;
-                } else {
-                    writeln!(f, "{indent_str}function @ {:p}", *function)?;
-                }
-                let cycle_detected = FN_VISITED.with(|visited| {
-                    let mut visited = visited.borrow_mut();
-                    if visited.contains(&fn_ptr) {
-                        true
-                    } else {
-                        visited.insert(fn_ptr);
-                        false
-                    }
-                });
-                if cycle_detected {
-                    writeln!(f, "{indent_str}⎸ self")?;
-                    return Ok(());
-                } else {
-                    function.format_ind(f, env, spacing, indent + 1)?;
-                }
-                FN_VISITED.with(|visited| {
-                    visited.borrow_mut().remove(&fn_ptr);
-                });
-                Ok(())
+            PendingFunction(function) => {
+                Self::format_fn_ind(f, "pending ", function, env, spacing, indent)
             }
+            Function(fv) => Self::format_fn_ind(f, "", &fv.function, env, spacing, indent),
         }
+    }
+
+    fn format_fn_ind(
+        f: &mut std::fmt::Formatter,
+        prefix: &str,
+        function: &FunctionRc,
+        env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+    ) -> std::fmt::Result {
+        // Thread-local hash-map for cycle detection
+        thread_local! {
+            static FN_VISITED: RefCell<HashSet<FunctionPtr>> = RefCell::new(HashSet::new());
+        }
+
+        let fn_ptr = function.as_ptr();
+        let function = function.borrow();
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
+        writeln!(f, "{indent_str}{prefix}function @ {:p}", *function)?;
+        let cycle_detected = FN_VISITED.with(|visited| {
+            let mut visited = visited.borrow_mut();
+            if visited.contains(&fn_ptr) {
+                true
+            } else {
+                visited.insert(fn_ptr);
+                false
+            }
+        });
+
+        if cycle_detected {
+            writeln!(f, "{indent_str}⎸ self")?;
+        } else {
+            function.format_ind(f, env, spacing, indent + 1)?;
+            FN_VISITED.with(|visited| {
+                visited.borrow_mut().remove(&fn_ptr);
+            });
+        }
+        Ok(())
     }
 
     pub fn instantiate(&mut self, subst: &InstSubstitution) {
@@ -294,15 +385,16 @@ impl Value {
                     element.instantiate(subst);
                 }
             }
-            Function((function, _)) => {
-                let function = function.get();
-                // Note: this can fail if we are having a recursive function used as a value, in that case do not recurse.
-                let function = function.try_borrow_mut();
-                if let Ok(mut function) = function {
-                    if let Some(script_fn) = function.as_script_mut() {
-                        script_fn.code.instantiate(subst);
-                    }
-                }
+            PendingFunction(function) => Self::instantiate_fn(function, subst),
+            Function(fv) => Self::instantiate_fn(&mut fv.function, subst),
+        }
+    }
+
+    fn instantiate_fn(function: &mut FunctionRc, subst: &InstSubstitution) {
+        let function = function.try_borrow_mut();
+        if let Ok(mut function) = function {
+            if let Some(script_fn) = function.as_script_mut() {
+                script_fn.code.instantiate(subst);
             }
         }
     }
@@ -325,9 +417,11 @@ impl Display for Value {
                 write_with_separator(tuple.iter(), ", ", f)?;
                 write!(f, ")")
             }
-            Function((function, _)) => {
-                let function = function.get();
-                let function = function.borrow();
+            PendingFunction(function) => {
+                write!(f, "{function:?} (pending)")
+            }
+            Function(fv) => {
+                let function = fv.function.borrow();
                 write!(f, "{function:?}")
             }
         }

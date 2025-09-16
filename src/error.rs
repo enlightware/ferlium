@@ -13,8 +13,8 @@ use std::{
 };
 
 use crate::{
-    location::Location, r#trait::TraitRef, r#type::TypeDefRef, type_inference::SubOrSameType,
-    type_scheme::PubTypeConstraint,
+    format::FormatWith, location::Location, r#trait::TraitRef, r#type::TypeDefRef,
+    type_inference::SubOrSameType, type_scheme::PubTypeConstraint,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
@@ -23,8 +23,7 @@ use ustr::{ustr, Ustr};
 use crate::{
     ast::{PatternType, PropertyAccess},
     effects::EffType,
-    format::FormatWith,
-    module::{FmtWithModuleEnv, ModuleEnv},
+    module::ModuleEnv,
     r#type::{Type, TypeVar},
 };
 
@@ -175,8 +174,8 @@ pub enum InternalCompilationErrorImpl {
         tuple_span: Location,
     },
     InvalidTupleProjection {
-        tuple_ty: Type,
-        tuple_span: Location,
+        expr_ty: Type,
+        expr_span: Location,
         index_span: Location,
     },
     DuplicatedField {
@@ -309,6 +308,20 @@ pub enum InternalCompilationErrorImpl {
         span: Location,
         reason: String,
     },
+    /*UnresolvedImport {
+        function_path: String,
+        span: Location,
+    },
+    ImportSignatureMismatch {
+        function_path: String,
+        expected_signature: String,
+        got_signature: String,
+        span: Location,
+    },
+    CircularImportDependency {
+        import_chain: Vec<String>,
+        span: Location,
+    },*/
     Internal(String),
 }
 
@@ -362,11 +375,11 @@ impl InternalCompilationError {
     }
 }
 
-impl fmt::Display for FormatWith<'_, InternalCompilationError, (ModuleEnv<'_>, &str)> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (env, source) = self.data;
-        let error = CompilationError::from_internal(self.value.clone(), env, source);
-        write!(f, "{}", FormatWith::new(&error, source))
+impl FormatWith<(ModuleEnv<'_>, &str)> for InternalCompilationError {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &(ModuleEnv<'_>, &str)) -> fmt::Result {
+        let (env, source) = data;
+        let error = CompilationError::from_internal(self.clone(), env, source);
+        write!(f, "{}", error.format_with(source))
     }
 }
 
@@ -558,6 +571,20 @@ pub enum CompilationErrorImpl {
         span: Location,
         reason: String,
     },
+    /*UnresolvedImport {
+        function_path: String,
+        span: Location,
+    },
+    ImportSignatureMismatch {
+        function_path: String,
+        expected_signature: String,
+        got_signature: String,
+        span: Location,
+    },
+    CircularImportDependency {
+        import_chain: Vec<String>,
+        span: Location,
+    },*/
     Internal(String),
 }
 
@@ -605,12 +632,12 @@ impl Deref for CompilationError {
     }
 }
 
-impl fmt::Display for FormatWith<'_, CompilationError, &str> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let source = self.data;
+impl FormatWith<&str> for CompilationError {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &&'_ str) -> fmt::Result {
+        let source = data;
         let fmt_span = |loc: &Location| span_to_string(loc, source);
         use CompilationErrorImpl::*;
-        match self.value.deref() {
+        match self.deref() {
             ParsingFailed(errors) => {
                 write!(f, "Parsing failed: ")?;
                 for (i, (msg, span)) in errors.iter().enumerate() {
@@ -1064,6 +1091,38 @@ impl fmt::Display for FormatWith<'_, CompilationError, &str> {
             Unsupported { span, reason } => {
                 write!(f, "Unsupported: {} in `{}`", reason, fmt_span(span))
             }
+            /*UnresolvedImport {
+                function_path,
+                span,
+            } => {
+                write!(f, "Unresolved import: `{}` in `{}`", function_path, fmt_span(span))
+            }
+            ImportSignatureMismatch {
+                function_path,
+                expected_signature,
+                got_signature,
+                span,
+            } => {
+                write!(
+                    f,
+                    "Import signature mismatch for `{}`: expected `{}`, got `{}` in `{}`",
+                    function_path,
+                    expected_signature,
+                    got_signature,
+                    fmt_span(span)
+                )
+            }
+            CircularImportDependency {
+                import_chain,
+                span,
+            } => {
+                write!(
+                    f,
+                    "Circular import dependency: {} in `{}`",
+                    import_chain.join(" -> "),
+                    fmt_span(span)
+                )
+            }*/
             Internal(msg) => write!(f, "ICE: {msg}"),
         }
     }
@@ -1180,8 +1239,8 @@ impl CompilationError {
                 tuple_span,
             }),
             InvalidTupleProjection {
-                tuple_ty: expr_ty,
-                tuple_span: expr_span,
+                expr_ty,
+                expr_span,
                 index_span,
             } => compilation_error!(InvalidTupleProjection {
                 expr_ty: expr_ty.format_with(env).to_string(),
@@ -1405,6 +1464,27 @@ impl CompilationError {
                 span,
             }),
             Unsupported { span, reason } => compilation_error!(Unsupported { span, reason }),
+            /*UnresolvedImport {
+                function_path,
+                span,
+            } => compilation_error!(UnresolvedImport {
+                function_path,
+                span,
+            }),
+            ImportSignatureMismatch {
+                function_path,
+                expected_signature,
+                got_signature,
+                span,
+            } => compilation_error!(ImportSignatureMismatch {
+                function_path,
+                expected_signature,
+                got_signature,
+                span,
+            }),
+            CircularImportDependency { import_chain, span } => {
+                compilation_error!(CircularImportDependency { import_chain, span })
+            }*/
             Internal(msg) => compilation_error!(Internal(msg)),
         }
     }

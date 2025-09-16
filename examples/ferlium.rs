@@ -6,27 +6,24 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
+use std::rc::Rc;
 
 use ariadne::Label;
-use ferlium::emit_ir::{emit_expr, emit_module};
-use ferlium::error::{
-    resolve_must_be_mutable_ctx, InternalCompilationError, InternalCompilationErrorImpl,
-    LocatedError, MutabilityMustBeWhat,
-};
+use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
-use ferlium::module::{FmtWithModuleEnv, ModuleEnv};
+use ferlium::module::{Module, ModuleEnv, ModuleRc, Modules, ShowModuleDetails, Use, UseSome};
 use ferlium::std::{new_module_using_std, new_std_modules};
 use ferlium::typing_env::Local;
-use ferlium::Location;
-use ferlium::{parse_module_and_expr, SubOrSameType};
+use ferlium::{ast, compile_to, Location, ModuleAndExpr, SubOrSameType};
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
-use ustr::ustr;
+use ustr::{ustr, Ustr};
 
-use ferlium::eval::EvalCtx;
+use ferlium::eval::{EvalCtx, ValOrMut};
 
 fn span_range(span: Location) -> std::ops::Range<usize> {
     span.start()..span.end()
@@ -49,14 +46,15 @@ fn pretty_print_parse_errors(src: &str, errors: &[LocatedError]) {
     }
 }
 
-fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleEnv<'_>, &str)) {
+fn pretty_print_checking_error(error: &CompilationError, src: &str) {
     use ariadne::{Color, Fmt, Report, ReportKind, Source};
-    use InternalCompilationErrorImpl::*;
-    let env = &data.0;
-    let src = data.1;
+    use CompilationErrorImpl::*;
     match error.deref() {
+        ParsingFailed(errors) => {
+            pretty_print_parse_errors(src, errors);
+        }
         TypeNotFound(span) => {
-            let name = &data.1[span_range(*span)];
+            let name = &src[span_range(*span)];
             Report::build(ReportKind::Error, ("input", span_range(*span)))
                 .with_message(format!(
                     "Cannot find type `{}` in this scope.",
@@ -91,13 +89,12 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             source_span,
             reason_span,
             what,
-            ctx,
         } => {
-            let (source_span, reason_span) =
-                resolve_must_be_mutable_ctx(*source_span, *reason_span, *ctx, src);
+            let source_span = *source_span;
+            let reason_span = *reason_span;
             let span = span_union_range(source_span, reason_span);
-            let source = &data.1[span_range(source_span)];
-            let reason = &data.1[span_range(reason_span)];
+            let source = &src[span_range(source_span)];
+            let reason = &src[span_range(reason_span)];
             use MutabilityMustBeWhat::*;
             match what {
                 Mutable => Report::build(ReportKind::Error, ("input", span))
@@ -176,8 +173,8 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Type {} is incompatible with type {} (i.e. {}).",
-                    current_ty.format_with(env).fg(Color::Magenta),
-                    expected_ty.format_with(env).fg(Color::Blue),
+                    current_ty.fg(Color::Magenta),
+                    expected_ty.fg(Color::Blue),
                     extra_reason
                 ))
                 .with_label(
@@ -195,7 +192,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .with_message(format!(
                     "Unbound type variable {} in type {}.",
                     ty_var.fg(Color::Blue),
-                    ty.format_with(env).fg(Color::Blue)
+                    ty.fg(Color::Blue)
                 ))
                 .with_label(Label::new(("input", span_range(*span))).with_color(Color::Blue))
                 .finish()
@@ -231,16 +228,16 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         InvalidTupleProjection {
-            tuple_ty: expr_ty,
-            tuple_span,
+            expr_ty,
+            expr_span,
             index_span,
         } => {
-            let span = span_union_range(*tuple_span, *index_span);
-            let colored_ty = expr_ty.format_with(env).fg(Color::Blue);
+            let span = span_union_range(*expr_span, *index_span);
+            let colored_ty = expr_ty.fg(Color::Blue);
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!("Type {colored_ty} cannot be projected as a tuple."))
                 .with_label(
-                    Label::new(("input", span_range(*tuple_span)))
+                    Label::new(("input", span_range(*expr_span)))
                         .with_message(format!("This expression has type {colored_ty}."))
                         .with_color(Color::Blue),
                 )
@@ -264,7 +261,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             ..
         } => {
             let span = span_union_range(*first_occurrence, *second_occurrence);
-            let name = &data.1[span_range(*first_occurrence)];
+            let name = &src[span_range(*first_occurrence)];
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Duplicated field \"{}\" in {}.",
@@ -282,7 +279,7 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .unwrap();
         }
         InvalidVariantConstructor { span } => {
-            let name = &data.1[span_range(*span)];
+            let name = &src[span_range(*span)];
             Report::build(ReportKind::Error, ("input", span_range(*span)))
                 .with_message(format!(
                     "Variant constructor cannot be a path, but {} is.",
@@ -326,9 +323,9 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             fn_span,
         } => {
             let span = span_union_range(*a_span, *b_span);
-            let a_name = &data.1[span_range(*a_span)];
-            let b_name = &data.1[span_range(*b_span)];
-            let fn_name = &data.1[span_range(*fn_span)];
+            let a_name = &src[span_range(*a_span)];
+            let b_name = &src[span_range(*b_span)];
+            let fn_name = &src[span_range(*fn_span)];
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Mutable paths {} and {} overlap when calling {}.",
@@ -348,8 +345,8 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
             string_span,
         } => {
             let span = span_union_range(*var_span, *string_span);
-            let var_name = &data.1[span_range(*var_span)];
-            let string = &data.1[span_range(*string_span)];
+            let var_name = &src[span_range(*var_span)];
+            let string = &src[span_range(*string_span)];
             Report::build(ReportKind::Error, ("input", span))
                 .with_message(format!(
                     "Undefined variable {} used in string formatting {}.",
@@ -370,17 +367,17 @@ fn pretty_print_checking_error(error: &InternalCompilationError, data: &(ModuleE
                 .eprint(("input", Source::from(src)))
                 .unwrap();
         }
-        _ => eprintln!(
-            "Module emission error: {}",
-            FormatWith { value: error, data }
-        ),
+        _ => eprintln!("Module emission error: {}", error.format_with(&src)),
     }
 }
 
 fn print_help() {
     println!("Available commands:");
     println!("\\help: Show this help message.");
-    println!("\\module: Show the current module.");
+    println!(
+        "\\module MOD_NAME?: Show a module by name, or the current module if no name is given."
+    );
+    println!("\\function FN_ID MOD_NAME?: Shows the code of a function given by its identifier, in a given module.");
     println!("CTRL-D: Exit the REPL.");
 }
 
@@ -389,89 +386,80 @@ fn print_help() {
 /// and Err(exit_code) if we should exit with the given code.
 fn process_input(
     input: &str,
-    module: &mut ferlium::module::Module,
-    other_modules: &ferlium::module::Modules,
+    reverse_uses: HashMap<Ustr, Ustr>,
+    other_modules: &Modules,
     locals: &mut Vec<Local>,
-    eval_ctx: &mut EvalCtx,
+    environment: &mut Vec<ValOrMut>,
     is_repl: bool,
-) -> i32 {
-    // Parse input
-    let parse_result = parse_module_and_expr(input, true);
-    let (module_ast, expr_ast) = match parse_result {
-        Ok(result) => result,
-        Err(errors) => {
-            eprintln!("Parse errors:");
-            pretty_print_parse_errors(input, &errors);
-            return 1;
+) -> Result<ModuleRc, i32> {
+    // Initialize module with use directives
+    let mut module = new_module_using_std();
+    for (sym_name, mod_name) in reverse_uses {
+        module
+            .uses
+            .push(Use::Some(UseSome::new(mod_name, vec![sym_name])));
+    }
+
+    // AST debug output for REPL
+    let dbg_module = module.clone();
+    let ast_inspector = |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>| {
+        let module_env = ModuleEnv::new(&dbg_module, other_modules);
+        if !module_ast.is_empty() {
+            println!("Module AST:\n{}", module_ast.format_with(&module_env));
+        }
+        if let Some(expr_ast) = expr_ast.as_ref() {
+            println!("Expr AST:\n{}", expr_ast.format_with(&module_env));
         }
     };
 
-    // Debug output for REPL
+    // Compile the input to a module and an expression (if any)
+    let ModuleAndExpr { module, expr } =
+        compile_to(input, module, other_modules, Some(&ast_inspector)).map_err(|e| {
+            eprintln!("Compilation error:");
+            pretty_print_checking_error(&e, input);
+            1
+        })?;
+
+    // Show IR
     if is_repl {
-        let env = ModuleEnv::new(module, other_modules);
-        if !module_ast.is_empty() {
-            println!("Module AST:\n{}", module_ast.format_with(&env));
-        }
-        if let Some(expr_ast) = expr_ast.as_ref() {
-            println!("Expr AST:\n{}", expr_ast.format_with(&env));
-        }
-    }
-
-    // Compile module if present
-    if !module_ast.is_empty() {
-        *module = match emit_module(module_ast, other_modules, Some(module)) {
-            Ok(new_module) => new_module,
-            Err(e) => {
-                let env = ModuleEnv::new(module, other_modules);
-                eprintln!("Module compilation error:");
-                pretty_print_checking_error(&e, &(env, input));
-                return 2;
-            }
-        };
-        if is_repl {
-            println!("Module IR:\n{}", FormatWith::new(module, other_modules));
+        let module: &Module = &module;
+        println!(
+            "Module IR:\n{}",
+            module.format_with(&ShowModuleDetails(other_modules))
+        );
+        if let Some(expr) = expr.as_ref() {
+            let module_env = ModuleEnv::new(&module, other_modules);
+            println!("Expr IR:\n{}", expr.expr.format_with(&module_env));
         }
     }
-    module.source = Some(input.to_string());
 
-    // If there's an expression, compile and evaluate it
-    if let Some(expr_ast) = expr_ast {
-        let module_env = ModuleEnv::new(module, other_modules);
-        let expr_ir = emit_expr(expr_ast, module_env, locals.clone());
-        let compiled_expr = match expr_ir {
-            Ok(res) => res,
-            Err(e) => {
-                eprintln!("Expression compilation error:");
-                pretty_print_checking_error(&e, &(module_env, input));
-                return 3;
-            }
-        };
-
+    // If there's an expression, evaluate it
+    if let Some(compiled_expr) = expr {
         *locals = compiled_expr.locals;
-        if is_repl {
-            println!("Expr IR:\n{}", compiled_expr.expr.format_with(&module_env));
-        }
 
         // Evaluate expression
+        let mut eval_ctx = EvalCtx::with_environment(module.clone(), environment.clone());
         let old_size = eval_ctx.environment.len();
-        let old_frame_base = eval_ctx.frame_base;
-        let result = compiled_expr.expr.eval_with_ctx(eval_ctx);
+        let result = compiled_expr.expr.eval_with_ctx(&mut eval_ctx);
         match result {
             Ok(value) => {
+                let module_env = ModuleEnv::new(&module, other_modules);
                 println!(
                     "{value}: {}",
                     compiled_expr.ty.display_rust_style(&module_env)
                 );
-                0
             }
             Err(error) => {
+                eprintln!("Runtime error: {error}");
+                if cfg!(debug_assertions) {
+                    eval_ctx.print_environment();
+                }
                 if is_repl {
                     // Restore the context as before starting the evaluation
                     eval_ctx.environment.truncate(old_size);
-                    eval_ctx.frame_base = old_frame_base;
+                    *environment = eval_ctx.environment;
                 }
-                eprintln!("Runtime error: {error}");
-                4
+                return Err(2);
             }
         }
     } else {
@@ -479,8 +467,9 @@ fn process_input(
         if !is_repl {
             println!("No expression to evaluate.");
         }
-        0
     }
+
+    Ok(module)
 }
 
 fn process_pipe_input() -> i32 {
@@ -498,19 +487,19 @@ fn process_pipe_input() -> i32 {
 
     // Initialize ferlium contexts
     let other_modules = new_std_modules();
-    let mut module = new_module_using_std();
     let mut locals: Vec<Local> = vec![];
-    let mut eval_ctx = EvalCtx::new();
+    let mut environment: Vec<ValOrMut> = vec![];
 
     // Process the input
     process_input(
         &input,
-        &mut module,
+        HashMap::new(),
         &other_modules,
         &mut locals,
-        &mut eval_ctx,
+        &mut environment,
         false,
     )
+    .map_or_else(|code| code, |_| 0)
 }
 
 fn main() {
@@ -551,10 +540,11 @@ fn run_interactive_repl() {
     env_logger::init();
 
     // ferlium emission and evaluation contexts
-    let other_modules = new_std_modules();
-    let mut module = new_module_using_std();
+    let mut other_modules = new_std_modules();
+    let mut last_module = Rc::new(new_module_using_std());
     let mut locals: Vec<Local> = vec![];
-    let mut eval_ctx = EvalCtx::new();
+    let mut environment: Vec<ValOrMut> = vec![];
+    let mut counter: usize = 0;
 
     // REPL loop
     let mut rl = DefaultEditor::new().unwrap();
@@ -570,7 +560,7 @@ fn run_interactive_repl() {
             println!("No locals.");
         } else {
             println!("Locals:");
-            let env = ModuleEnv::new(&module, &other_modules);
+            let env = ModuleEnv::new(&last_module, &other_modules);
             for (i, local) in locals.iter().enumerate() {
                 println!(
                     "{} {}: {} = {}",
@@ -581,7 +571,7 @@ fn run_interactive_repl() {
                         .var_def_string(),
                     local.name,
                     local.ty.format_with(&env),
-                    eval_ctx.environment[eval_ctx.frame_base + i]
+                    environment[i]
                         .as_val()
                         .expect("reference found in REPL locals"),
                 );
@@ -589,7 +579,7 @@ fn run_interactive_repl() {
         }
 
         // Read input
-        let readline = rl.readline(">> ");
+        let readline = rl.readline(&format!("repl{counter} >> "));
         let src = match readline {
             Ok(line) => {
                 if line.is_empty() {
@@ -612,9 +602,44 @@ fn run_interactive_repl() {
                                     continue;
                                 }
                             } else {
-                                &module
+                                &last_module
                             };
-                            println!("\n{}", FormatWith::new(module, &other_modules));
+                            println!("\n{}", module.format_with(&other_modules));
+                            true
+                        }
+                        "function" => {
+                            let index = if let Some(arg) = args.get(1) {
+                                match arg.parse::<usize>() {
+                                    Ok(id) => id,
+                                    Err(_) => {
+                                        println!("Invalid function id {arg}.");
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                println!("Function id is required.");
+                                continue;
+                            };
+                            let (module, module_name): (&Module, &str) =
+                                if let Some(arg) = args.get(2) {
+                                    let name = *arg;
+                                    if let Some(module) = other_modules.get(&ustr(arg)) {
+                                        (&module, name)
+                                    } else {
+                                        println!("Module {arg} not found.");
+                                        continue;
+                                    }
+                                } else {
+                                    (&last_module, "current")
+                                };
+                            let local_fn = if let Some(local_fn) = module.functions.get(index) {
+                                local_fn
+                            } else {
+                                println!("Function id {index} not found in module {module_name}.");
+                                continue;
+                            };
+                            let env = ModuleEnv::new(&module, &other_modules);
+                            println!("{}", (&local_fn.function, local_fn.name).format_with(&env));
                             true
                         }
                         _ => {
@@ -644,15 +669,36 @@ fn run_interactive_repl() {
             }
         };
 
+        // Build use directives to import last modules as repl<counter>
+        let mut reverse_uses = HashMap::new();
+        for i in 0..counter {
+            let index = counter - i - 1;
+            let mod_name = ustr(&format!("repl{index}"));
+            let module = other_modules
+                .get(&mod_name)
+                .expect("missing repl<counter> module");
+            for sym in module.own_symbols() {
+                if !reverse_uses.contains_key(&sym) {
+                    reverse_uses.insert(sym, mod_name);
+                }
+            }
+        }
+
         // Process the input using the shared function
-        process_input(
+        let result = process_input(
             &src,
-            &mut module,
+            reverse_uses,
             &other_modules,
             &mut locals,
-            &mut eval_ctx,
+            &mut environment,
             true,
         );
+        if let Ok(module) = result {
+            last_module = module;
+            let name = ustr(&format!("repl{counter}"));
+            other_modules.register_module_rc(name, last_module.clone());
+            counter += 1;
+        }
 
         if let Err(e) = rl.save_history(history_filename) {
             println!("Failed to save history: {e:?}");

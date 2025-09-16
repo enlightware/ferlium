@@ -146,8 +146,11 @@ impl TypeInference {
                 .process_results(|iter| iter.unzip())?;
 
             // Code to store the variant value in the environment.
+            let match_condition_name = ustr("@match_condition");
             let store_variant = K::EnvStore(b(EnvStore {
-                node: condition_node,
+                value: condition_node,
+                index: initial_env_size,
+                name: match_condition_name,
                 name_span: cond_expr.span,
                 ty_span: None,
             }));
@@ -157,7 +160,6 @@ impl TypeInference {
                 cond_eff.clone(),
                 cond_expr.span,
             );
-            let match_condition_name = ustr("@match_condition");
             env.locals.push(Local::new(
                 match_condition_name,
                 MutType::constant(),
@@ -250,7 +252,9 @@ impl TypeInference {
                                 );
                                 let store_projected_inner = N::new(
                                     K::EnvStore(b(EnvStore {
-                                        node: project_tuple_inner,
+                                        value: project_tuple_inner,
+                                        index: alt_start_env_size + i,
+                                        name: bind_var_names[i].0,
                                         name_span: bind_var_names[i].1,
                                         ty_span: None,
                                     })),
@@ -271,6 +275,7 @@ impl TypeInference {
                                 expr.span,
                             );
                         }
+                        assert!(env.locals.len() == alt_start_env_size + bind_var_names.len());
                         env.locals.truncate(alt_start_env_size);
                         Result::<_, InternalCompilationError>::Ok((tag_value, node))
                     },

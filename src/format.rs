@@ -6,17 +6,74 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::fmt;
+
+use std::fmt::{self, Display};
+
+use derive_new::new;
 
 /// A wrapper to fmt::Display types that depend on third-party data
-pub struct FormatWith<'a, T: ?Sized + 'a, D: ?Sized + 'a> {
+#[derive(new)]
+pub struct FormatWithData<'a, T: ?Sized + 'a, D: ?Sized + 'a> {
     pub value: &'a T,
     pub data: &'a D,
 }
 
-impl<'a, T, D> FormatWith<'a, T, D> {
-    pub fn new(value: &'a T, data: &'a D) -> Self {
-        Self { value, data }
+pub trait FormatWith<X> {
+    fn format_with<'a>(&'a self, data: &'a X) -> FormatWithData<'a, Self, X> {
+        FormatWithData { value: self, data }
+    }
+
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &X) -> std::fmt::Result;
+}
+
+impl<X, T: FormatWith<X>> Display for FormatWithData<'_, T, X> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt_with(f, self.data)
+    }
+}
+
+impl<'a, X, U: ?Sized + FormatWith<X>> FormatWith<X> for &'a U {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &X) -> std::fmt::Result {
+        (**self).fmt_with(f, data)
+    }
+}
+
+impl<T, X> FormatWith<X> for [T]
+where
+    T: FormatWith<X>,
+{
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &X) -> fmt::Result {
+        for (i, item) in self.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            item.fmt_with(f, data)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T, X> FormatWith<X> for Vec<T>
+where
+    T: FormatWith<X>,
+{
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &X) -> std::fmt::Result {
+        self.as_slice().fmt_with(f, data)
+    }
+}
+
+impl<K, V, X> FormatWith<X> for std::collections::HashMap<K, V>
+where
+    K: Display,
+    V: FormatWith<X>,
+{
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &X) -> std::fmt::Result {
+        for (k, v) in self {
+            write!(f, "{k}: ")?;
+            v.fmt_with(f, data)?;
+            f.write_str(", ")?;
+        }
+        Ok(())
     }
 }
 

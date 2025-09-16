@@ -8,6 +8,8 @@
 //
 use test_log::test;
 
+use ustr::ustr;
+
 use super::common::{compile, fail_compilation};
 use ferlium::effects::*;
 
@@ -18,7 +20,7 @@ pub fn test_mod(src: &str, f: &str, exp_eff: EffType) {
     let (module, others) = compile(src);
     let effects = module
         .module
-        .get_local_function(f)
+        .get_own_function(ustr(f))
         .unwrap()
         .definition
         .ty_scheme

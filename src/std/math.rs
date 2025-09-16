@@ -165,7 +165,7 @@ pub fn add_to_module(to: &mut Module) {
     use UnaryNativeFnNN as UnaryFn;
 
     // int
-    to.impls.add_concrete(
+    to.add_concrete_impl(
         NUM_TRAIT.clone().clone(),
         [int_type()],
         [],
@@ -179,13 +179,13 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(identity::<Int>)) as Function,
         ],
     );
-    to.impls.add_concrete(
+    to.add_concrete_impl(
         ORD_TRAIT.clone(),
         [int_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("idiv"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
@@ -200,7 +200,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("idiv_euclid"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
@@ -215,7 +215,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("rem"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
@@ -230,7 +230,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("mod"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
@@ -247,7 +247,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // float
-    to.impls.add_concrete(
+    to.add_concrete_impl(
         NUM_TRAIT.clone(),
         [float_type()],
         [],
@@ -261,13 +261,13 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(isize_to_not_nan)) as Function,
         ],
     );
-    to.impls.add_concrete(
+    to.add_concrete_impl(
         ORD_TRAIT.clone(),
         [float_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
     );
-    to.impls.add_concrete(
+    to.add_concrete_impl(
         DIV_TRAIT.clone(),
         [float_type()],
         [],
@@ -279,7 +279,7 @@ pub fn add_to_module(to: &mut Module) {
             }
         })) as Function],
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("round"),
         UnaryNativeFnNN::description_with_default_ty(
             |value: Float| value.round() as Int,

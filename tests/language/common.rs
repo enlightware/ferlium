@@ -15,7 +15,8 @@ use ferlium::{
         BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnVN,
     },
-    module::{Module, Modules},
+    module::Module,
+    module::Modules,
     r#type::{variant_type, FnType, Type},
     std::{
         array::{array_type, Array},
@@ -26,7 +27,7 @@ use ferlium::{
     value::Value,
     ModuleAndExpr,
 };
-use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicIsize};
+use std::{cell::RefCell, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -39,7 +40,7 @@ pub type CompileRunResult = Result<Value, Error>;
 
 fn testing_module() -> Module {
     let mut module: Module = Default::default();
-    module.functions.insert(
+    module.add_named_function(
         "some_int".into(),
         UnaryNativeFnNV::description_with_ty(
             |v: isize| Value::tuple_variant(ustr("Some"), [Value::native(v)]),
@@ -51,7 +52,7 @@ fn testing_module() -> Module {
         ),
     );
     let pair_variant_type = variant_type([("Pair", Type::tuple([int_type(), int_type()]))]);
-    module.functions.insert(
+    module.add_named_function(
         "pair".into(),
         BinaryNativeFnNNV::description_with_ty(
             |a: isize, b: isize| {
@@ -70,7 +71,7 @@ fn testing_module() -> Module {
 
 fn test_effect_module() -> Module {
     let mut module: Module = Default::default();
-    module.functions.insert(
+    module.add_named_function(
         "read".into(),
         NullaryNativeFnN::description_with_default_ty(
             || (),
@@ -79,7 +80,7 @@ fn test_effect_module() -> Module {
             effect(PrimitiveEffect::Read),
         ),
     );
-    module.functions.insert(
+    module.add_named_function(
         "write".into(),
         NullaryNativeFnN::description_with_default_ty(
             || (),
@@ -88,7 +89,7 @@ fn test_effect_module() -> Module {
             effect(PrimitiveEffect::Write),
         ),
     );
-    module.functions.insert(
+    module.add_named_function(
         "read_write".into(),
         NullaryNativeFnN::description_with_default_ty(
             || (),
@@ -97,7 +98,7 @@ fn test_effect_module() -> Module {
             effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
         ),
     );
-    module.functions.insert(
+    module.add_named_function(
         "take_read".into(),
         UnaryNativeFnVN::description_with_in_ty(
             |_value: Value| 0,
@@ -138,7 +139,7 @@ pub fn get_array_property_value() -> Array {
 
 fn test_property_module() -> Module {
     let mut module: Module = Default::default();
-    module.functions.insert(
+    module.add_named_function(
         "@get my_scope.my_var".into(),
         NullaryNativeFnN::description_with_default_ty(
             get_property_value,
@@ -147,7 +148,7 @@ fn test_property_module() -> Module {
             effect(PrimitiveEffect::Read),
         ),
     );
-    module.functions.insert(
+    module.add_named_function(
         "@set my_scope.my_var".into(),
         UnaryNativeFnNN::description_with_default_ty(
             set_property_value,
@@ -156,7 +157,7 @@ fn test_property_module() -> Module {
             effect(PrimitiveEffect::Write),
         ),
     );
-    module.functions.insert(
+    module.add_named_function(
         "@get my_scope.my_array".into(),
         NullaryNativeFnN::description_with_ty(
             get_array_property_value,
@@ -166,7 +167,7 @@ fn test_property_module() -> Module {
             effect(PrimitiveEffect::Read),
         ),
     );
-    module.functions.insert(
+    module.add_named_function(
         "@set my_scope.my_array".into(),
         UnaryNativeFnNN::description_with_in_ty(
             set_array_property_value,
@@ -182,9 +183,9 @@ fn test_property_module() -> Module {
 /// Compile and run the src and return its module and expression
 pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationError> {
     let mut other_modules = new_std_modules();
-    other_modules.insert("testing".into(), Rc::new(testing_module()));
-    other_modules.insert("effects".into(), Rc::new(test_effect_module()));
-    other_modules.insert("props".into(), Rc::new(test_property_module()));
+    other_modules.register_module(ustr("testing"), testing_module());
+    other_modules.register_module(ustr("effects"), test_effect_module());
+    other_modules.register_module(ustr("props"), test_property_module());
     Ok((ferlium::compile(src, &other_modules, &[])?, other_modules))
 }
 
@@ -198,8 +199,7 @@ pub fn compile_and_get_fn_def(src: &str, fn_name: &str) -> FunctionDefinition {
     compile(src)
         .0
         .module
-        .functions
-        .get(&ustr(fn_name))
+        .get_own_function(ustr(fn_name))
         .expect("Function not found")
         .definition
         .clone()
@@ -208,15 +208,11 @@ pub fn compile_and_get_fn_def(src: &str, fn_name: &str) -> FunctionDefinition {
 /// Compile and run the src and return its execution result (either a value or an error)
 pub fn try_compile_and_run(src: &str) -> CompileRunResult {
     // Compile the source.
-    let (ModuleAndExpr { module, expr }, others) = try_compile(src).map_err(Error::Compilation)?;
+    let (ModuleAndExpr { module, expr }, ..) = try_compile(src).map_err(Error::Compilation)?;
 
     // Run the expression if any.
     if let Some(expr) = expr {
-        let result = expr.expr.eval().map_err(Error::Runtime)?;
-        // ensure that the modules will live during eval, as it holds the strong references to the functions referred in the expression
-        drop(module);
-        drop(others);
-        Ok(result)
+        expr.expr.eval(module).map_err(Error::Runtime)
     } else {
         Ok(Value::unit())
     }

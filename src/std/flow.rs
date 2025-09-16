@@ -31,7 +31,7 @@ fn panic(msg: Str) -> Result<(), RuntimeError> {
 pub fn add_to_module(to: &mut Module) {
     // Control flow operation
     // Note: we use no_effects() for now as non-termination is modelled purely in the return type
-    to.functions.insert(
+    to.add_named_function(
         ustr("abort"),
         NullaryNativeFnFN::description_with_ty_scheme(
             abort,
@@ -40,7 +40,7 @@ pub fn add_to_module(to: &mut Module) {
             TypeScheme::new_just_type(FnType::new_by_val([], Type::never(), no_effects())),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("panic"),
         UnaryNativeFnNFN::description_with_ty_scheme(
             panic,

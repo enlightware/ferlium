@@ -25,6 +25,7 @@ use std::sync::RwLock;
 use crate::ast::Attribute;
 use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
+use crate::format::FormatWith;
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
 use crate::mutability::FormatInFnArg;
@@ -34,6 +35,7 @@ use crate::type_mapper::TypeMapper;
 use crate::type_visitor::TypeInnerVisitor;
 use crate::value::Value;
 use crate::Location;
+use derive_new::new;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
@@ -49,7 +51,6 @@ use crate::effects::EffectVar;
 use crate::format::type_variable_index_to_string_greek;
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
-use crate::module::FmtWithModuleEnv;
 use crate::module::ModuleEnv;
 use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
@@ -72,16 +73,13 @@ macro_rules! cached_ty {
 }
 
 /// A generic variable for a type
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
 pub struct TypeVar {
     /// The name of this type variable, its identity in the context considered
     name: u32,
 }
 
 impl TypeVar {
-    pub fn new(name: u32) -> Self {
-        Self { name }
-    }
     pub fn name(&self) -> u32 {
         self.name
     }
@@ -123,8 +121,8 @@ pub trait BareNativeType: DynClone + DynEq + Send + Sync {
     }
 }
 
-impl FmtWithModuleEnv for B<dyn BareNativeType> {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for B<dyn BareNativeType> {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         match env.bare_native_name(self) {
             Some(name) => write!(f, "{name}"),
             None => write!(f, "{}", self.as_ref().type_name()),
@@ -199,16 +197,13 @@ impl Debug for dyn BareNativeType {
 
 /// A generic type implemented in Rust.
 /// If arguments is empty, we call it a primitive type.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
 pub struct NativeType {
     pub bare_ty: B<dyn BareNativeType>,
     pub arguments: Vec<Type>,
 }
 
 impl NativeType {
-    pub fn new(bare_ty: B<dyn BareNativeType>, arguments: Vec<Type>) -> Self {
-        Self { bare_ty, arguments }
-    }
     pub fn new_primitive<T: 'static>() -> Self {
         Self {
             bare_ty: bare_native_type::<T>(),
@@ -224,16 +219,16 @@ impl NativeType {
     }
 }
 
-impl FmtWithModuleEnv for NativeType {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        self.bare_ty.fmt_with_module_env(f, env)?;
+impl FormatWith<ModuleEnv<'_>> for NativeType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+        self.bare_ty.fmt_with(f, env)?;
         if !self.arguments.is_empty() {
             write!(f, "<")?;
             for (i, ty) in self.arguments.iter().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                ty.fmt_with_module_env(f, env)?;
+                ty.fmt_with(f, env)?;
             }
             write!(f, ">")?;
         }
@@ -241,15 +236,12 @@ impl FmtWithModuleEnv for NativeType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, new)]
 pub struct FnArgType {
     pub ty: Type,
     pub mut_ty: MutType,
 }
 impl FnArgType {
-    pub fn new(ty: Type, mut_ty: MutType) -> Self {
-        Self { ty, mut_ty }
-    }
     pub fn new_by_val(ty: Type) -> Self {
         Self {
             ty,
@@ -262,15 +254,15 @@ impl FnArgType {
             .then(self.mut_ty.cmp(&other.mut_ty))
     }
 }
-impl FmtWithModuleEnv for FnArgType {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for FnArgType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         self.mut_ty.format_in_fn_arg(f)?;
-        self.ty.fmt_with_module_env(f, env)
+        self.ty.fmt_with(f, env)
     }
 }
 
 /// The type of a function
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
 pub struct FnType {
     pub args: Vec<FnArgType>,
     pub ret: Type,
@@ -278,10 +270,6 @@ pub struct FnType {
 }
 
 impl FnType {
-    pub fn new(args: Vec<FnArgType>, ret: Type, effects: EffType) -> Self {
-        Self { args, ret, effects }
-    }
-
     pub fn new_mut_resolved(
         args: impl IntoIterator<Item = (Type, bool)>,
         ret: Type,
@@ -372,22 +360,45 @@ impl CastableToType for FnType {
     }
 }
 
-impl FmtWithModuleEnv for FnType {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for FnType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         write!(f, "(")?;
         for (i, arg) in self.args.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            arg.fmt_with_module_env(f, env)?;
+            arg.fmt_with(f, env)?;
         }
         write!(f, ") -> ")?;
-        self.ret.fmt_with_module_env(f, env)?;
+        self.ret.fmt_with(f, env)?;
         if self.effects.is_empty() {
             Ok(())
         } else {
             write!(f, " ! {}", self.effects)
         }
+    }
+}
+
+pub fn fmt_fn_type_with_arg_names(
+    fn_ty: &FnType,
+    arg_names: &[Ustr],
+    f: &mut fmt::Formatter,
+    env: &ModuleEnv<'_>,
+) -> fmt::Result {
+    write!(f, "(")?;
+    for (i, (arg_ty, arg_name)) in fn_ty.args.iter().zip(arg_names).enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{arg_name}: ")?;
+        arg_ty.fmt_with(f, env)?;
+    }
+    write!(f, ") -> ")?;
+    fn_ty.ret.fmt_with(f, env)?;
+    if fn_ty.effects.is_empty() {
+        Ok(())
+    } else {
+        write!(f, " ! {}", fn_ty.effects)
     }
 }
 
@@ -584,15 +595,15 @@ impl CastableToType for Type {
     }
 }
 
-impl FmtWithModuleEnv for Type {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for Type {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         // If we have a name for this type, use it
         if let Some(name) = env.type_alias_name(*self) {
             return write!(f, "{name}");
         }
 
         self.with_cycle_detection(
-            |ty, (f, env)| ty.data().fmt_with_module_env(f, env),
+            |ty, (f, env)| ty.data().fmt_with(f, env),
             |_, (f, _)| write!(f, "Self"),
             (f, env),
         )
@@ -1059,8 +1070,8 @@ impl TypeKind {
     }
 }
 
-impl FmtWithModuleEnv for TypeKind {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for TypeKind {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         use TypeKind::*;
         match self {
             Variable(var) => write!(f, "{var}"),
@@ -1068,10 +1079,10 @@ impl FmtWithModuleEnv for TypeKind {
                 use crate::std::array::Array;
                 if native.bare_ty == bare_native_type::<Array>() {
                     write!(f, "[")?;
-                    native.arguments[0].fmt_with_module_env(f, env)?;
+                    native.arguments[0].fmt_with(f, env)?;
                     write!(f, "]")
                 } else {
-                    native.fmt_with_module_env(f, env)
+                    native.fmt_with(f, env)
                 }
             }
             Variant(types) => {
@@ -1087,13 +1098,13 @@ impl FmtWithModuleEnv for TypeKind {
                         if let Tuple(tuple_ty) = &*ty_data {
                             if tuple_ty.len() == 1 {
                                 write!(f, "(")?;
-                                tuple_ty[0].fmt_with_module_env(f, env)?;
+                                tuple_ty[0].fmt_with(f, env)?;
                                 write!(f, ")")?;
                             } else {
-                                ty.fmt_with_module_env(f, env)?;
+                                ty.fmt_with(f, env)?;
                             }
                         } else {
-                            ty.fmt_with_module_env(f, env)?;
+                            ty.fmt_with(f, env)?;
                         }
                     }
                 }
@@ -1105,7 +1116,7 @@ impl FmtWithModuleEnv for TypeKind {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    ty.fmt_with_module_env(f, env)?;
+                    ty.fmt_with(f, env)?;
                     if elements.len() == 1 {
                         write!(f, ",")?;
                     }
@@ -1119,11 +1130,11 @@ impl FmtWithModuleEnv for TypeKind {
                         write!(f, ", ")?;
                     }
                     write!(f, "{name}: ")?;
-                    ty.fmt_with_module_env(f, env)?;
+                    ty.fmt_with(f, env)?;
                 }
                 write!(f, " }}")
             }
-            Function(function) => function.fmt_with_module_env(f, env),
+            Function(function) => function.fmt_with(f, env),
             Named(NamedType { def, params: args }) => {
                 if def.is_struct_like() {
                     write!(f, "struct")?;
@@ -1137,7 +1148,7 @@ impl FmtWithModuleEnv for TypeKind {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        ty.fmt_with_module_env(f, env)?;
+                        ty.fmt_with(f, env)?;
                     }
                     write!(f, ">")?;
                 }
@@ -1155,13 +1166,13 @@ impl FmtWithModuleEnv for TypeKind {
                                 write!(f, "{name}")?;
                             } else {
                                 write!(f, "{name} ")?;
-                                ty.fmt_with_module_env(f, env)?;
+                                ty.fmt_with(f, env)?;
                             }
                         }
                     }
                     write!(f, " }}")?;
                 } else {
-                    def.shape.fmt_with_module_env(f, env)?;
+                    def.shape.fmt_with(f, env)?;
                 }
                 Ok(())
             }
@@ -1212,7 +1223,7 @@ struct TypeUniverse {
 }
 
 impl TypeUniverse {
-    fn new() -> Self {
+    fn new_empty() -> Self {
         Self {
             worlds: vec![IndexSet::new()],
             local_to_world: HashMap::new(),
@@ -1390,7 +1401,7 @@ pub fn record_type<'s>(fields: impl IntoIterator<Item = (&'s str, Type)>) -> Typ
 
 fn types() -> &'static RwLock<TypeUniverse> {
     static TYPES: OnceLock<RwLock<TypeUniverse>> = OnceLock::new();
-    TYPES.get_or_init(|| RwLock::new(TypeUniverse::new()))
+    TYPES.get_or_init(|| RwLock::new(TypeUniverse::new_empty()))
 }
 
 /// Store a type in the type system and return a type identifier

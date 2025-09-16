@@ -24,18 +24,21 @@ use crate::{
     dictionary_passing::DictElaborationCtx,
     effects::EffType,
     error::InternalCompilationError,
+    format::FormatWith,
     function::{FunctionDefinition, ScriptFunction},
     internal_compilation_error,
     ir::{self, Immediate, Node},
-    module::{self, FmtWithModuleEnv, Module, ModuleEnv, Modules, Use},
+    module::{
+        ConcreteTraitImplKey, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, Modules,
+    },
     mutability::MutType,
     r#trait::TraitRef,
     r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
     std::{
         math::{float_type, int_type, NUM_TRAIT},
-        StdModuleEnv,
+        new_module_using_std,
     },
-    trait_solver::TraitImpls,
+    trait_solver::{trait_solver_from_module, TraitSolver},
     type_inference::{FreshVariableTypeMapper, TypeInference},
     type_like::{instantiate_types, TypeLike},
     type_mapper::TypeMapper,
@@ -70,14 +73,12 @@ pub fn emit_module(
     // Preliminary: Make sure no name is defined multiple times.
     validate_name_uniqueness(&source)?;
 
+    // TODO: import uses from source.
     // TODO: check that uses do not bring name conflicts.
 
     // First desugar the module.
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
     let (source, sorted_sccs) = source.desugar(others, &mut output)?;
-
-    // Prepare target module and list of all available trait implementations.
-    let mut trait_impls = ModuleEnv::new(&output, others).collect_trait_impls();
 
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
@@ -94,34 +95,37 @@ pub fn emit_module(
         }
 
         // Emit the corresponding functions.
-        emit_functions(&mut output, functions, others, &mut trait_impls, None)?;
+        emit_functions(&mut output, functions, others, None)?;
     }
 
     // Process trait implementations
-    let rc_output: Rc<Module> = output.clone().into(); // TODO: use Rc for module as well
     for imp in &source.impls {
-        // Build a module environment for the compiling the trait implementation.
-        // We create a standalone module, importing the current module as
-        // the "module" namespace, with a "use all" directive.
-        let mut trait_others = others.clone();
-        trait_others.insert(ustr("module"), rc_output.clone());
-        let mut trait_output = Module {
-            uses: output.uses.clone(),
-            ..Default::default()
-        };
-        trait_output.uses.push(Use::All(ustr("module")));
+        // // Build a module environment for the compiling the trait implementation.
+        // // We create a standalone module, importing the current module as
+        // // the "module" namespace, with a "use all" directive.
+        // let mut trait_others = others.clone();
+        // trait_others
+        //     .modules
+        //     .insert(ustr("@module"), rc_output.clone());
+        // let mut trait_output = Module {
+        //     uses: output.uses.clone(),
+        //     ..Default::default()
+        // };
+        // trait_output.uses.push(Use::All(ustr("@module")));
 
         // Validate the function mapping.
-        let module_env = ModuleEnv::new(&trait_output, &trait_others);
+        let module_env = ModuleEnv::new(&output, &others);
         let trait_ref = module_env
             .get_trait_ref(&imp.trait_name.0)
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
 
         // Collect references to the method definitions in the trait, and a map of their name to index.
-        let (fn_defs, fn_names, fn_indices): (Vec<_>, HashMap<_, _>, HashMap<_, _>) =
-            process_results(
-                imp.functions.iter().map(|func| {
-                    let (index, (fn_name, fn_def)) = &trait_ref
+        let (fn_defs, trait_fn_to_ast_fn_indices): (Vec<_>, HashMap<_, _>) = process_results(
+            imp.functions
+                .iter()
+                .enumerate()
+                .map(|(index_in_ast, func)| {
+                    let (index_in_trait, (_fn_name, fn_def)) = &trait_ref
                         .functions
                         .iter()
                         .find_position(|trait_func| trait_func.0 == func.name.0)
@@ -131,10 +135,10 @@ pub fn emit_module(
                                 fn_span: func.name.1
                             })
                         })?;
-                    Ok((fn_def, (*index, *fn_name), (*fn_name, *index)))
+                    Ok((fn_def, (*index_in_trait, index_in_ast)))
                 }),
-                |iter| iter.multiunzip(),
-            )?;
+            |iter| iter.multiunzip(),
+        )?;
 
         // Make sure all trait methods are present.
         if fn_defs.len() < trait_ref.functions.len() {
@@ -161,54 +165,54 @@ pub fn emit_module(
         let functions = || imp.functions.iter();
         let trait_ctx = EmitTraitCtx {
             trait_ref: trait_ref.clone(),
-            fn_indices,
         };
-        let emit_output = emit_functions(
-            &mut trait_output,
-            functions,
-            &trait_others,
-            &mut trait_impls,
-            Some(trait_ctx),
-        )?
-        .unwrap();
+        let emit_output =
+            emit_functions(&mut output, functions, &others, Some(trait_ctx))?.unwrap();
 
         // Build the implementations by extracting functions from the built module.
+        let trait_fn_count = trait_ref.functions.len();
+        let module_fn_count = output.functions.len();
+        let trait_fn_start = module_fn_count - trait_fn_count;
         let functions: Vec<_> = (0..trait_ref.functions.len())
-            .map(|index| {
-                let func = trait_output.functions.get(&fn_names[&index]).unwrap();
-                func.code.clone()
+            .map(|trait_fn_index| {
+                let ast_fn_index = trait_fn_to_ast_fn_indices[&trait_fn_index];
+                output.functions[trait_fn_start + ast_fn_index]
+                    .function
+                    .clone()
             })
             .collect();
-        drop(trait_output); // needed so that the try_unwrap below works
-        if emit_output.ty_var_count == 0 {
-            let functions: Vec<_> = functions
-                .into_iter()
-                .map(|f| Rc::try_unwrap(f).unwrap().into_inner())
-                .collect();
-            let key = (trait_ref.clone(), emit_output.input_tys.clone());
-            let imp = output.impls.add_concrete(
-                trait_ref,
+        output.functions.truncate(trait_fn_start);
+        // FIXME: do not truncate, just add the necessary meta information.
+        let impl_type;
+        let local_impl_id = if emit_output.ty_var_count == 0 {
+            impl_type = "concrete";
+            assert!(
+                emit_output.constraints.is_empty(),
+                "Concrete impl with constraints"
+            );
+            output.add_concrete_impl_module_functions(
+                trait_ref.clone(),
                 emit_output.input_tys,
                 emit_output.output_tys,
                 functions,
-            );
-            trait_impls.concrete.insert(key, imp);
+            )
         } else {
-            let input_tys = emit_output.input_tys.clone();
-            let imp = output.impls.add_blanket(
+            impl_type = "blanket";
+            output.add_blanket_impl_module_functions(
                 trait_ref.clone(),
                 emit_output.input_tys,
                 emit_output.output_tys,
                 emit_output.ty_var_count,
                 emit_output.constraints,
                 functions,
-            );
-            trait_impls
-                .blanket
-                .entry(trait_ref)
-                .or_default()
-                .push((input_tys, imp));
-        }
+            )
+        };
+        let module_env = ModuleEnv::new(&output, &others);
+        let header = output
+            .impls
+            .impl_header_to_string_by_id(local_impl_id, module_env);
+        let header = header.strip_suffix("\n").unwrap();
+        log::debug!("Emitted {impl_type} {header}");
     }
 
     Ok(output)
@@ -216,7 +220,6 @@ pub fn emit_module(
 
 struct EmitTraitCtx {
     trait_ref: TraitRef,
-    fn_indices: HashMap<Ustr, usize>,
 }
 
 struct EmitTraitOutput {
@@ -228,9 +231,8 @@ struct EmitTraitOutput {
 
 fn emit_functions<'a, F, I>(
     output: &mut Module,
-    functions: F,
+    ast_functions: F,
     others: &Modules,
-    trait_impls: &mut TraitImpls,
     trait_ctx: Option<EmitTraitCtx>,
 ) -> Result<Option<EmitTraitOutput>, InternalCompilationError>
 where
@@ -263,7 +265,8 @@ where
     };
 
     // Populate the function table
-    for ModuleFunction {
+    let mut local_fns = Vec::new();
+    for ast::ModuleFunction {
         name,
         args,
         args_span,
@@ -271,7 +274,7 @@ where
         span,
         doc,
         ..
-    } in functions()
+    } in ast_functions()
     {
         // Create type and mutability variables for the arguments.
         // Note: the type quantifiers and constraints are left empty.
@@ -303,7 +306,7 @@ where
 
         // If we are emitting a trait implementation, make sure this function conforms to it.
         if let Some(trait_ctx) = &trait_ctx {
-            let index = trait_ctx.fn_indices[&name.0];
+            let index = trait_ctx.trait_ref.method_index(name.0).unwrap();
             let fn_def = &trait_ctx.trait_ref.functions[index].1;
             if args.len() != fn_def.ty_scheme.ty.args.len() {
                 return Err(internal_compilation_error!(TraitMethodArgCountMismatch {
@@ -319,15 +322,19 @@ where
         }
 
         // Create dummy code.
-        let dummy_code = b(ScriptFunction::new(N::new(
-            K::Immediate(Immediate::new(Value::unit())),
-            Type::unit(),
-            effects,
-            *span,
-        )));
+        let arg_names: Vec<_> = args.iter().map(|arg| arg.name.0).collect();
+        let dummy_code = b(ScriptFunction::new(
+            N::new(
+                K::Immediate(Immediate::new(Value::unit())),
+                Type::unit(),
+                effects,
+                *span,
+            ),
+            arg_names.clone(),
+        ));
 
         // Assemble the spans and the description
-        let spans = module::ModuleFunctionSpans {
+        let spans = ModuleFunctionSpans {
             name: name.1,
             args: args
                 .iter()
@@ -338,23 +345,28 @@ where
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
-        let arg_names = args.iter().map(|arg| arg.name.0).collect();
-        let descr = module::ModuleFunction {
+        let descr = ModuleFunction {
             definition: FunctionDefinition::new(ty_scheme, arg_names, doc.clone()),
             code: Rc::new(RefCell::new(dummy_code)),
             spans: Some(spans),
         };
-        output.functions.insert(name.0, descr);
+        let name = if trait_ctx.is_some() {
+            None
+        } else {
+            Some(name.0)
+        };
+        local_fns.push(output.add_function(name, descr));
     }
 
     // Second pass, infer types and emit function bodies.
-    for function in functions() {
-        let name = function.name.0;
-        let descr = output.functions.get(&name).unwrap();
+    for (function, id) in ast_functions().zip(local_fns.iter()) {
+        let descr = &output.functions[id.as_index()].function;
         let module_env = ModuleEnv::new(output, others);
         let arg_names: Vec<_> = function.args.iter().map(|arg| arg.name).collect();
+        let mut new_import_slots = vec![];
         let mut ty_env = TypingEnv::new(
             descr.definition.ty_scheme.ty.as_locals_no_bound(&arg_names),
+            &mut new_import_slots,
             module_env,
         );
         let expected_span = descr.spans.as_ref().unwrap().args_span;
@@ -365,22 +377,29 @@ where
             MutType::constant(),
             expected_span,
         )?;
-        let descr = output.functions.get_mut(&name).unwrap();
+        let descr = &mut output.functions[id.as_index()].function;
         descr.definition.ty_scheme.ty.effects =
             ty_inf.unify_effects(&fn_node.effects, &descr.definition.ty_scheme.ty.effects);
-        *descr.code.borrow_mut() = b(ScriptFunction::new(fn_node));
+        *descr.code.borrow_mut() = b(ScriptFunction::new(
+            fn_node,
+            descr.definition.arg_names.clone(),
+        ));
+        output.import_fn_slots.extend(new_import_slots);
     }
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_constraints(module_env);
 
     // Third pass, perform the unification.
-    let mut ty_inf = ty_inf.unify(trait_impls)?;
+    let mut solver = trait_solver_from_module!(output, others);
+    let mut ty_inf = ty_inf.unify(&mut solver)?;
+    solver.commit(&mut output.functions);
+    let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
 
     // Fourth pass, substitute the mono type variables with the inferred types.
-    for ModuleFunction { name, .. } in functions() {
-        let descr = output.functions.get_mut(&name.0).unwrap();
+    for id in local_fns.iter() {
+        let descr = &mut output.functions[id.as_index()].function;
         ty_inf.substitute_in_module_function(descr);
 
         // Union duplicated effects from function arguments, and build a substitution for the
@@ -416,17 +435,20 @@ where
         // Validate and simplify constraints.
         let constraints = ty_inf.constraints();
         let input_quantifiers = collect_ty_vars(&trait_output.input_tys);
+        let mut solver = trait_solver_from_module!(output, others);
         let (mut quantifiers, mut subst) = validate_and_simplify_trait_imp_constraints(
             &input_quantifiers,
             &constraints,
-            trait_impls,
+            &mut solver,
         )?;
+        solver.commit(&mut output.functions);
 
         // Detect unbound type variables in the code and return error if not in unused variants only.
         // These are neither part of the function signature nor of the constraints.
         let bounds: Vec<_> = quantifiers.iter().chain(subst.keys()).cloned().collect();
-        for ModuleFunction { name, .. } in functions() {
-            let node = output.get_own_function_node_mut(name.0).unwrap();
+        for id in local_fns.iter() {
+            let descr = &mut output.functions[id.as_index()].function;
+            let node = descr.get_node_mut().unwrap();
             let unbound = node.all_unbound_ty_vars();
             let uninstantiated_unbound = check_unbounds(unbound, &bounds)?;
             subst.extend(
@@ -441,14 +463,16 @@ where
         trait_output.ty_var_count = quantifiers.len() as u32;
         let mut subst = (subst, HashMap::new());
         let subst_size = subst.0.len();
+        let mut solver = trait_solver_from_module!(output, others);
         trait_output.constraints = constraints
             .iter()
             .filter_map(|constraint| {
                 constraint
-                    .instantiate_and_drop_if_known_trait(&mut subst, trait_impls)
+                    .instantiate_and_drop_if_known_trait(&mut subst, &mut solver)
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
+        solver.commit(&mut output.functions);
         // Make sure substitution is not due to constraint processing.
         assert_eq!(subst_size, subst.0.len());
         let dicts = extra_parameters_from_constraints(&trait_output.constraints);
@@ -457,23 +481,38 @@ where
         trait_output.input_tys = instantiate_types(&trait_output.input_tys, &subst);
         trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
         let mut module_inst_data = HashMap::new();
-        for ModuleFunction { name, .. } in functions() {
-            let descr = output.functions.get_mut(&name.0).unwrap();
+        for id in local_fns.iter() {
+            let descr = &mut output.functions[id.as_index()].function;
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
             // type scheme quantifiers will be updated later on
             let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
             drop(node);
-            let fn_ptr = descr.code.as_ptr();
-            module_inst_data.insert(fn_ptr, dicts.clone());
+            module_inst_data.insert(*id, dicts.clone());
         }
 
         // Sixth pass, run the borrow checker and elaborate dictionaries.
-        for ModuleFunction { name, .. } in functions() {
-            let mut node = output.get_own_function_node_mut(name.0).unwrap();
+        for id in local_fns.iter() {
+            let mut solver = trait_solver_from_module!(output, &others);
+            let descr = &mut output.functions[id.as_index()].function;
+            let mut function = descr.code.borrow_mut();
+            let script_fn = function.as_script_mut().unwrap();
+            script_fn.arg_names.splice(
+                0..0,
+                dicts
+                    .requirements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| ustr(&r.to_dict_name(i))),
+            );
+            let node = &mut script_fn.code;
             node.check_borrows()?;
-            let ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), trait_impls);
-            node.elaborate_dictionaries(ctx)?;
+            let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
+            let result = node.elaborate_dictionaries(&mut ctx);
+            drop(ctx);
+            drop(function);
+            result?;
+            solver.commit(&mut output.functions);
         }
 
         // Seventh pass, normalize the input types, substitute the types in the functions and input/output types.
@@ -484,15 +523,16 @@ where
             .into_iter()
             .map(|c| c.instantiate(&subst))
             .collect();
-        for ModuleFunction { name, .. } in functions() {
-            let descr = output.functions.get_mut(&name.0).unwrap();
+        for id in local_fns.iter() {
+            let descr = &mut output.functions[id.as_index()].function;
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
             descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
             let eff_quantifiers = descr.definition.ty_scheme.ty.input_effect_vars();
             assert!(eff_quantifiers.is_empty());
             descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
             descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-            let mut node = output.get_own_function_node_mut(name.0).unwrap();
+            let descr = &mut output.functions[id.as_index()].function;
+            let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
         }
 
@@ -503,11 +543,12 @@ where
         // Limit each function to its own constants and type variables
         let all_constraints = ty_inf.constraints();
         let mut used_constraints: HashSet<PubTypeConstraintPtr> = HashSet::new();
-        for ModuleFunction { name, .. } in functions() {
-            let descr = output.functions.get(&name.0).unwrap();
+        for (function, id) in ast_functions().zip(local_fns.iter()) {
+            let descr = &output.functions[id.as_index()].function;
             let node = descr.get_node().unwrap();
 
             // Clean up constraints and validate them.
+            let mut solver = trait_solver_from_module!(output, others);
             let ConstraintValidationOutput {
                 mut quantifiers,
                 related_constraints,
@@ -518,7 +559,7 @@ where
                 &all_constraints,
                 &node,
                 false,
-                trait_impls,
+                &mut solver,
             )?;
             let mut constraints: Vec<_> = all_constraints
                 .iter()
@@ -533,19 +574,22 @@ where
                 .collect();
             assert_eq!(constraints.len(), retained_constraints.len());
             drop(node);
+            solver.commit(&mut output.functions);
 
             // Substitute the constraint-originating types in the node.
+            let mut solver = trait_solver_from_module!(output, others);
             let mut subst = (constraint_subst, HashMap::new());
             constraints = constraints
                 .iter()
                 .filter_map(|constraint| {
                     constraint
-                        .instantiate_and_drop_if_known_trait(&mut subst, trait_impls)
+                        .instantiate_and_drop_if_known_trait(&mut subst, &mut solver)
                         .transpose()
                 })
                 .collect::<Result<_, _>>()?;
             quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
-            let descr = output.functions.get_mut(&name.0).unwrap();
+            solver.commit(&mut output.functions);
+            let descr = &mut output.functions[id.as_index()].function;
             let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
             drop(node);
@@ -563,7 +607,7 @@ where
             // Log the dropped constraints.
             let module_env = ModuleEnv::new(output, others);
             log_dropped_constraints_module(
-                name.0,
+                function.name.0,
                 &all_constraints,
                 &related_constraints,
                 &retained_constraints,
@@ -590,26 +634,37 @@ where
 
         // Sixth pass, run the borrow checker and elaborate dictionaries.
         let mut module_inst_data = HashMap::new();
-        for ModuleFunction { name, .. } in functions() {
-            let descr = output.functions.get_mut(&name.0).unwrap();
-            let fn_ptr = descr.code.as_ptr();
+        for id in local_fns.iter() {
+            let descr = &output.functions[id.as_index()].function;
             let dicts = descr.definition.ty_scheme.extra_parameters();
-            module_inst_data.insert(fn_ptr, dicts);
+            module_inst_data.insert(*id, dicts);
         }
-        for ModuleFunction { name, .. } in functions() {
-            let descr = output.functions.get_mut(&name.0).unwrap();
-            let mut code = descr.code.borrow_mut();
-            let fn_ptr = descr.code.as_ptr();
-            let dicts = module_inst_data.get(&fn_ptr).unwrap();
-            let node = &mut code.as_script_mut().unwrap().code;
+        for id in local_fns.iter() {
+            let dicts = module_inst_data.get(&id).unwrap();
+            let mut solver = trait_solver_from_module!(output, &others);
+            let descr = &mut output.functions[id.as_index()].function;
+            let mut function = descr.code.borrow_mut();
+            let script_fn = function.as_script_mut().unwrap();
+            script_fn.arg_names.splice(
+                0..0,
+                dicts
+                    .requirements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| ustr(&r.to_dict_name(i))),
+            );
+            let node = &mut script_fn.code;
             node.check_borrows()?;
-            let ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), trait_impls);
-            node.elaborate_dictionaries(ctx)?;
+            let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
+            node.elaborate_dictionaries(&mut ctx)?;
+            drop(ctx);
+            drop(function);
+            solver.commit(&mut output.functions);
         }
 
         // Seventh pass, normalize the type schemes, substitute the types in the functions.
-        for ModuleFunction { name, .. } in functions() {
-            let descr = output.functions.get_mut(&name.0).unwrap();
+        for id in local_fns.iter() {
+            let descr = &mut output.functions[id.as_index()].function;
             // Note: after that normalization, the functions do not share the same
             // type variables anymore.
             let subst = descr.definition.ty_scheme.normalize();
@@ -659,7 +714,8 @@ pub struct CompiledExpr {
 /// Note: the expression might not be safe to use if it has unbound constraints or type variables.
 pub fn emit_expr_unsafe(
     source: ast::PExpr,
-    module_env: ModuleEnv,
+    module: &mut Module,
+    others: &Modules,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     // Make sure that the locals' types have no type variables in them
@@ -671,21 +727,26 @@ pub fn emit_expr_unsafe(
     );
 
     // Create a list of all available trait implementations.
-    let mut trait_impls = module_env.collect_trait_impls();
+    let module_env = ModuleEnv::new(module, others);
 
     // First desugar the expression.
     let source = source.desugar_with_empty_ctx(&module_env)?;
 
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
-    let mut ty_env = TypingEnv::new(locals, module_env);
-    let mut ty_inf = TypeInference::new();
+    let mut new_import_slots = vec![];
+    let mut ty_env = TypingEnv::new(locals, &mut new_import_slots, module_env);
+    let mut ty_inf = TypeInference::new_empty();
     let (mut node, _) = ty_inf.infer_expr(&mut ty_env, &source)?;
     let mut locals = ty_env.get_locals_and_drop();
     ty_inf.log_debug_constraints(module_env);
+    module.import_fn_slots.extend(new_import_slots);
 
     // Perform the unification.
-    let mut ty_inf = ty_inf.unify(&mut trait_impls)?;
+    let mut solver = trait_solver_from_module!(module, others);
+    let mut ty_inf = ty_inf.unify(&mut solver)?;
+    solver.commit(&mut module.functions);
+    let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
 
     // Substitute the result of the unification.
@@ -699,12 +760,15 @@ pub fn emit_expr_unsafe(
     let mut constraints = ty_inf.constraints();
 
     // Clean-up constraints and validate them.
+    let mut solver = trait_solver_from_module!(module, others);
     let ConstraintValidationOutput {
         mut quantifiers,
         retained_constraints,
         constraint_subst,
         ..
-    } = validate_and_cleanup_constraints(&node.ty, &constraints, &node, true, &trait_impls)?;
+    } = validate_and_cleanup_constraints(&node.ty, &constraints, &node, true, &mut solver)?;
+    solver.commit(&mut module.functions);
+    let module_env = ModuleEnv::new(module, others);
     log_dropped_constraints_expr(
         &constraints,
         &retained_constraints,
@@ -717,12 +781,13 @@ pub fn emit_expr_unsafe(
     // Apply the constraint-originating substitution.
     let mut subst = (constraint_subst, HashMap::new());
     let mut progress = true;
+    let mut solver = trait_solver_from_module!(module, others);
     while progress {
         progress = false;
         let mut new_constraints = Vec::new();
         for constraint in constraints.iter() {
             if let Some(new_constraint) =
-                constraint.instantiate_and_drop_if_known_trait(&mut subst, &mut trait_impls)?
+                constraint.instantiate_and_drop_if_known_trait(&mut subst, &mut solver)?
             {
                 new_constraints.push(new_constraint);
             } else {
@@ -736,6 +801,7 @@ pub fn emit_expr_unsafe(
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);
     }
+    solver.commit(&mut module.functions);
 
     // Normalize the type scheme
     let mut ty_scheme = TypeScheme {
@@ -765,8 +831,10 @@ pub fn emit_expr_unsafe(
     // Do borrow checking and dictionary elaboration.
     node.check_borrows()?;
     let dicts = ty_scheme.extra_parameters();
-    let ctx = DictElaborationCtx::new(&dicts, None, &mut trait_impls);
-    node.elaborate_dictionaries(ctx)?;
+    let mut solver = trait_solver_from_module!(module, &others);
+    let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+    node.elaborate_dictionaries(&mut ctx)?;
+    solver.commit(&mut module.functions);
 
     Ok(CompiledExpr {
         expr: node,
@@ -776,13 +844,15 @@ pub fn emit_expr_unsafe(
 }
 
 /// Emit IR for an expression, and fails if there are any unbound type variables or constraints.
+/// If the expression imports functions from the Program, module's imports will be updated.
 pub fn emit_expr(
     source: ast::PExpr,
-    module_env: ModuleEnv,
+    module: &mut Module,
+    others: &Modules,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     let span = source.span;
-    let CompiledExpr { ty, expr, locals } = emit_expr_unsafe(source, module_env, locals)?;
+    let CompiledExpr { ty, expr, locals } = emit_expr_unsafe(source, module, others, locals)?;
     let ty_vars = ty.ty.inner_ty_vars();
     if !ty_vars.is_empty() {
         return Err(internal_compilation_error!(UnboundTypeVar {
@@ -957,7 +1027,7 @@ fn validate_and_cleanup_constraints(
     constraints: &[PubTypeConstraint],
     node: &Node,
     is_expr: bool,
-    trait_impls: &TraitImpls,
+    trait_solver: &mut TraitSolver,
 ) -> Result<ConstraintValidationOutput, InternalCompilationError> {
     // Filter out constraints that have types not found in our code.
     let unbound = node.all_unbound_ty_vars();
@@ -990,11 +1060,19 @@ fn validate_and_cleanup_constraints(
             &orphan_constraints,
             &mut other_orphans,
             &mut subst,
-            trait_impls,
+            trait_solver,
         )?;
         if !other_orphans.is_empty() {
+            let orphans = orphan_constraints
+                .into_iter()
+                .filter(|c| other_orphans.contains(&constraint_ptr(c)))
+                .collect::<Vec<_>>();
+            let fake_current = new_module_using_std();
+            let env = ModuleEnv::new(&fake_current, trait_solver.others);
             return Err(internal_compilation_error!(Internal(format!(
-                "Orphan constraints found: {other_orphans:?}"
+                "Orphan constraints found in module fn: {}\nsubst: {}",
+                orphans.format_with(&env),
+                subst.format_with(&env)
             ))));
         }
         (constraints, subst)
@@ -1024,7 +1102,7 @@ fn validate_and_cleanup_constraints(
             &constraints,
             &mut retained_constraints,
             &mut constraint_subst,
-            trait_impls,
+            trait_solver,
         )?;
     }
 
@@ -1042,7 +1120,7 @@ fn validate_and_cleanup_constraints(
 fn validate_and_simplify_trait_imp_constraints(
     input_quantifiers: &[TypeVar],
     constraints: &Vec<PubTypeConstraint>,
-    trait_impls: &TraitImpls,
+    trait_solver: &mut TraitSolver,
 ) -> Result<(Vec<TypeVar>, TypeSubstitution), InternalCompilationError> {
     // Find constraints that are not transitively accessible from the trait signature.
     let (constraints, orphan_constraints) =
@@ -1056,11 +1134,11 @@ fn validate_and_simplify_trait_imp_constraints(
         &orphan_constraints,
         &mut other_orphans,
         &mut subst,
-        trait_impls,
+        trait_solver,
     )?;
     if !other_orphans.is_empty() {
         return Err(internal_compilation_error!(Internal(format!(
-            "Orphan constraints found: {other_orphans:?}"
+            "Orphan constraints found in trait impl: {other_orphans:?}"
         ))));
     }
 
@@ -1081,7 +1159,7 @@ fn compute_num_trait_default_types(
     all_constraints: &HashSet<&PubTypeConstraint>,
     selected_constraints: &mut HashSet<PubTypeConstraintPtr>,
     subst: &mut TypeSubstitution,
-    trait_impls: &TraitImpls,
+    trait_solver: &mut TraitSolver,
 ) -> Result<(), InternalCompilationError> {
     // In debug, check that all_constraints contains all selected_constraints.
     #[cfg(debug_assertions)]
@@ -1096,106 +1174,199 @@ fn compute_num_trait_default_types(
         }
     }
 
-    // First, collect the type variables that are invalid for defaulting.
-    // These include the ones that appear in non-trait constraints or in traits with
-    // more than one input types or having output types.
-    let mut invalid_ty_vars = HashSet::<TypeVar>::new();
-    let mut num_ty_vars = HashSet::<TypeVar>::new();
-    for constraint in all_constraints {
-        if !selected_constraints.contains(&constraint_ptr(constraint)) {
-            continue;
-        }
-        if let Some(have_trait) = constraint.as_have_trait() {
-            assert!(!have_trait.1.is_empty());
-            if have_trait.1.len() > 1 {
-                invalid_ty_vars.extend(have_trait.1.iter().flat_map(|ty| ty.inner_ty_vars()));
-            } else if have_trait.0 == &*NUM_TRAIT {
-                let maybe_ty_var = have_trait.1[0].data().as_variable().cloned();
-                if let Some(ty_var) = maybe_ty_var {
-                    num_ty_vars.insert(ty_var);
-                }
-            }
-            invalid_ty_vars.extend(have_trait.2.iter().flat_map(|ty| ty.inner_ty_vars()));
-        } else {
-            invalid_ty_vars.extend(constraint.inner_ty_vars());
-        }
-    }
-
     // Then, decide which type variables can be default and whether to int or float.
     // The value of the default_tys map holds the index of the type to default to.
     // If the index is default_tys.len(), there is no default.
     let default_tys = [int_type(), float_type()];
-    let mut defaulted_ty_vars = HashMap::<TypeVar, usize>::new();
-    // Process trait constraint type variables.
-    for constraint in all_constraints.iter() {
-        if !selected_constraints.contains(&constraint_ptr(constraint)) {
-            continue;
-        }
-        if let Some(have_trait) = constraint.as_have_trait() {
-            if have_trait.1.len() > 1 || !have_trait.2.is_empty() {
-                continue;
-            }
-            let maybe_ty_var = have_trait.1[0].data().as_variable().cloned();
-            if let Some(ty_var) = maybe_ty_var {
-                if invalid_ty_vars.contains(&ty_var) {
-                    continue;
-                }
-                if !num_ty_vars.contains(&ty_var) {
-                    continue;
-                }
-                let mut default_index = defaulted_ty_vars.get(&ty_var).copied().unwrap_or(0);
-                while default_index < default_tys.len() && {
-                    let key = (have_trait.0.clone(), vec![default_tys[default_index]]);
-                    !trait_impls.concrete().contains_key(&key)
-                } {
-                    default_index += 1;
-                    if default_index >= default_tys.len() {
-                        break;
-                    }
-                }
-                defaulted_ty_vars.insert(ty_var, default_index);
-            }
-        }
-    }
+    let mut progress = true;
+    while progress {
+        progress = false;
 
-    // Finally, remove the defaulted constraints and update the substitution with the valid default types.
-    for constraint in all_constraints.iter() {
-        if !selected_constraints.contains(&constraint_ptr(constraint)) {
-            continue;
-        }
-        if let Some(have_trait) = constraint.as_have_trait() {
-            if have_trait.1.len() > 1 || !have_trait.2.is_empty() {
+        // First, collect the type variables that are invalid for defaulting.
+        // These include the ones that appear in non-trait constraints or in traits with
+        // more than one input types or having output types.
+        let mut invalid_ty_vars = HashSet::<TypeVar>::new();
+        let mut num_ty_vars = HashSet::<TypeVar>::new();
+        for constraint in all_constraints {
+            if !selected_constraints.contains(&constraint_ptr(constraint)) {
                 continue;
             }
-            let maybe_ty_var = have_trait.1[0].data().as_variable().cloned();
-            if let Some(ty_var) = maybe_ty_var {
-                if let Some(default_index) = defaulted_ty_vars.get(&ty_var) {
-                    if *default_index < default_tys.len() {
-                        selected_constraints.remove(&constraint_ptr(constraint));
+            if let PubTypeConstraint::HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                ..
+            } = constraint
+            {
+                assert!(!input_tys.is_empty());
+                if input_tys.len() > 1 {
+                    invalid_ty_vars.extend(input_tys.iter().flat_map(|ty| ty.inner_ty_vars()));
+                } else if trait_ref == &*NUM_TRAIT {
+                    let maybe_ty_var = input_tys[0].data().as_variable().cloned();
+                    if let Some(ty_var) = maybe_ty_var {
+                        num_ty_vars.insert(ty_var);
+                    }
+                }
+                invalid_ty_vars.extend(output_tys.iter().flat_map(|ty| ty.inner_ty_vars()));
+            } else {
+                invalid_ty_vars.extend(constraint.inner_ty_vars());
+            }
+        }
+
+        let mut defaulted_ty_vars = HashMap::<TypeVar, usize>::new();
+        // Process trait constraint type variables.
+        for constraint in all_constraints.iter() {
+            if !selected_constraints.contains(&constraint_ptr(constraint))
+                || !constraint.is_have_trait()
+            {
+                continue;
+            }
+            if let PubTypeConstraint::HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                ..
+            } = constraint
+            {
+                if input_tys.len() > 1 || !output_tys.is_empty() {
+                    continue;
+                }
+                let maybe_ty_var = input_tys[0].data().as_variable().cloned();
+                if let Some(ty_var) = maybe_ty_var {
+                    if invalid_ty_vars.contains(&ty_var) {
+                        continue;
+                    }
+                    if !num_ty_vars.contains(&ty_var) {
+                        continue;
+                    }
+                    let mut default_index = defaulted_ty_vars.get(&ty_var).copied().unwrap_or(0);
+                    while default_index < default_tys.len() && {
+                        let key = ConcreteTraitImplKey::new(
+                            trait_ref.clone(),
+                            vec![default_tys[default_index]],
+                        );
+                        !trait_solver.has_concrete_impl(&key)
+                    } {
+                        default_index += 1;
+                        if default_index >= default_tys.len() {
+                            break;
+                        }
+                    }
+                    defaulted_ty_vars.insert(ty_var, default_index);
+                    progress = true;
+                }
+            }
+        }
+
+        // Finally, remove the defaulted constraints and update the substitution with the valid default types.
+        for constraint in all_constraints.iter() {
+            if !selected_constraints.contains(&constraint_ptr(constraint))
+                || !constraint.is_have_trait()
+            {
+                continue;
+            }
+            // FIXME: this is really inefficient.
+            let subst = (subst.clone(), HashMap::new());
+            let subst_constraint = constraint.instantiate(&subst);
+            if let PubTypeConstraint::HaveTrait {
+                input_tys,
+                output_tys,
+                ..
+            } = subst_constraint
+            {
+                if input_tys.len() > 1 || !output_tys.is_empty() {
+                    continue;
+                }
+                let maybe_ty_var = input_tys[0].data().as_variable().cloned();
+                if let Some(ty_var) = maybe_ty_var {
+                    if let Some(default_index) = defaulted_ty_vars.get(&ty_var) {
+                        if *default_index < default_tys.len() {
+                            selected_constraints.remove(&constraint_ptr(constraint));
+                        }
                     }
                 }
             }
         }
-    }
-    for (ty_var, default_ty_index) in defaulted_ty_vars {
-        let default_ty = default_tys.get(default_ty_index);
-        if let Some(default_ty) = default_ty {
-            let entry = subst.entry(ty_var);
-            use std::collections::hash_map::Entry;
-            match entry {
-                Entry::Occupied(entry) => {
-                    // FIXME: This is due lack of unification when doing this part, in a way that is a similar bug to
-                    // https://github.com/enlightware/ferlium/issues/59, a proper fix would likely solve both.
-                    let env = StdModuleEnv::new();
-                    let env = env.get();
-                    return Err(internal_compilation_error!(Internal(format!(
-                        "Type variable {ty_var} already exists in type substitution with type `{}`, but trying to use type `{}` instead",
-                        entry.get().format_with(&env),
-                        default_ty.format_with(&env)
-                    ))));
+        for (ty_var, default_ty_index) in defaulted_ty_vars {
+            let default_ty = default_tys.get(default_ty_index);
+            if let Some(default_ty) = default_ty {
+                let entry = subst.entry(ty_var);
+                use std::collections::hash_map::Entry;
+                match entry {
+                    Entry::Occupied(entry) => {
+                        let entry_ty = entry.get();
+                        if entry_ty != default_ty {
+                            // FIXME: This is due lack of unification when doing this part, in a way that is a similar bug to
+                            // https://github.com/enlightware/ferlium/issues/59, a proper fix would likely solve both.
+                            let fake_current = new_module_using_std();
+                            let env = ModuleEnv::new(&fake_current, trait_solver.others);
+                            return Err(internal_compilation_error!(Internal(format!(
+                                "Type variable {ty_var} already exists in type substitution with type `{}`, but trying to use type `{}` instead",
+                                entry_ty.format_with(&env),
+                                default_ty.format_with(&env)
+                            ))));
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(*default_ty);
+                    }
                 }
-                Entry::Vacant(entry) => {
-                    entry.insert(*default_ty);
+            }
+        }
+
+        // Finally, look if some constraints have become solved due to substitution.
+        for constraint in all_constraints.iter() {
+            if !selected_constraints.contains(&constraint_ptr(constraint))
+                || !constraint.is_have_trait()
+            {
+                continue;
+            }
+            // FIXME: this is inefficient.
+            // FIXME: Use real unification rather than this limited substitution-based approach.
+            let inst_subst = (subst.clone(), HashMap::new());
+            let subst_constraint = constraint.instantiate(&inst_subst);
+            if let PubTypeConstraint::HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                span,
+            } = subst_constraint
+            {
+                let resolved = input_tys.iter().all(Type::is_constant);
+                if resolved {
+                    let output_tys_all_vars = output_tys
+                        .iter()
+                        .all(|ty| ty.data().as_variable().is_some());
+                    if output_tys_all_vars {
+                        let solved_output_tys =
+                            trait_solver.solve_output_types(&trait_ref, &input_tys, span)?;
+                        for (output_ty, solved_ty) in
+                            output_tys.iter().zip(solved_output_tys.iter())
+                        {
+                            let ty_var = output_ty.data().as_variable().unwrap().clone();
+                            subst.insert(ty_var, *solved_ty);
+                        }
+                        selected_constraints.remove(&constraint_ptr(constraint));
+                        progress = true;
+                    }
+                    let output_tys_all_const = output_tys.iter().all(Type::is_constant);
+                    if output_tys_all_const {
+                        let solved_output_tys =
+                            trait_solver.solve_output_types(&trait_ref, &input_tys, span)?;
+                        if output_tys != solved_output_tys {
+                            let fake_current = new_module_using_std();
+                            let env = ModuleEnv::new(&fake_current, trait_solver.others);
+                            return Err(internal_compilation_error!(Internal(
+                                format!(
+                                    "While defaulting Num types, a constraint ended up having invalid output types [{}] while the correct ones are [{}].",
+                                    output_tys.format_with(&env),
+                                    solved_output_tys.format_with(&env)
+                                )
+                            )));
+                        }
+                        selected_constraints.remove(&constraint_ptr(constraint));
+                        progress = true;
+                    }
                 }
             }
         }

@@ -348,7 +348,7 @@ fn enum_projections() {
                 Move { y, x } => x - y,
             };
 
-            f(Action::Move { x: 30.0, y: 40.0 }) + f(Action::Jump(5.0))
+            f(Action::Move { x: 30.0, y: 40.0 }) + f(Action::Jump(5.0)) + f(Action::Quit)
         "# }),
         float(-5.0)
     );

@@ -7,11 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use crate::{
-    add_code_to_module,
-    format::FormatWith,
-    module::{Module, Modules},
-};
+use crate::{add_code_to_module, format::FormatWithData, module::Module, module::Modules};
 use indoc::indoc;
 
 pub fn add_to_module(to: &mut Module) {
@@ -77,6 +73,14 @@ pub fn add_to_module(to: &mut Module) {
         //         Some(array[sub(l, 1)])
         //     }
         // }
+
+        fn array_map(array: [_], f) {
+            let mut result = [];
+            for a in array {
+                array_append(result, f(a));
+            };
+            result
+        }
 
         // Iterator functions
 
@@ -307,10 +311,10 @@ pub fn add_to_module(to: &mut Module) {
             }
         }
     "# };
-    add_code_to_module(code, to, &Modules::new()).unwrap_or_else(|e| {
+    add_code_to_module(code, to, &Modules::new_empty()).unwrap_or_else(|e| {
         panic!(
             "Failed to add prelude to module: {}",
-            FormatWith::new(&e, &code)
+            FormatWithData::new(&e, &code)
         )
     });
 }

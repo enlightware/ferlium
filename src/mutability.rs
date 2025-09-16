@@ -8,6 +8,7 @@
 //
 use std::fmt::{self, Display};
 
+use derive_new::new;
 use enum_as_inner::EnumAsInner;
 
 use crate::format::type_variable_index_to_string_greek;
@@ -54,16 +55,13 @@ impl Display for MutVal {
 }
 
 /// A generic variable for mutability
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
 pub struct MutVar {
     /// The name of this mutability variable, its identity in the context considered
     name: u32,
 }
 
 impl MutVar {
-    pub fn new(name: u32) -> Self {
-        Self { name }
-    }
     pub fn name(&self) -> u32 {
         self.name
     }

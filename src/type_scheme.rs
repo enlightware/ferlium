@@ -13,10 +13,18 @@ use std::{
 };
 
 use crate::{
-    dictionary_passing::ExtraParameters, error::InternalCompilationError,
-    format::write_with_separator_and_format_fn, location::Span, r#trait::TraitRef,
-    std::core::REPR_TRAIT, trait_solver::TraitImpls, type_inference::UnifiedTypeInference,
-    type_like::TypeLike, type_mapper::TypeMapper, type_visitor::TypeInnerVisitor, Location,
+    dictionary_passing::ExtraParameters,
+    error::InternalCompilationError,
+    format::{write_with_separator_and_format_fn, FormatWith},
+    location::Span,
+    r#trait::TraitRef,
+    std::core::REPR_TRAIT,
+    trait_solver::TraitSolver,
+    type_inference::UnifiedTypeInference,
+    type_like::TypeLike,
+    type_mapper::TypeMapper,
+    type_visitor::TypeInnerVisitor,
+    Location,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
@@ -25,9 +33,9 @@ use ustr::Ustr;
 use crate::{
     dictionary_passing::{instantiate_dictionaries_req, DictionaryReq},
     effects::{EffType, EffectVar, EffectsSubstitution},
-    format::FormatWith,
+    format::FormatWithData,
     ir::FnInstData,
-    module::{FmtWithModuleEnv, FormatWithModuleEnv, ModuleEnv},
+    module::ModuleEnv,
     r#type::{Type, TypeSubstitution, TypeVar},
     type_inference::{InstSubstitution, TypeInference},
 };
@@ -176,7 +184,7 @@ impl PubTypeConstraint {
     pub fn instantiate_and_drop_if_known_trait(
         &self,
         subst: &mut InstSubstitution,
-        trait_impls: &mut TraitImpls,
+        trait_solver: &mut TraitSolver<'_>,
     ) -> Result<Option<Self>, InternalCompilationError> {
         let constraint = self.instantiate(subst);
         Ok(
@@ -189,7 +197,7 @@ impl PubTypeConstraint {
             {
                 if input_tys.iter().all(Type::is_constant) {
                     let got_output_tys =
-                        trait_impls.get_output_types(trait_ref, input_tys, *span)?;
+                        trait_solver.solve_output_types(trait_ref, input_tys, *span)?;
                     assert_eq!(got_output_tys.len(), output_tys.len());
                     for (got_output_ty, output_ty) in got_output_tys.iter().zip(output_tys.iter()) {
                         let inner_ty_vars = output_ty.inner_ty_vars();
@@ -327,6 +335,18 @@ impl TypeLike for PubTypeConstraint {
     }
 }
 
+impl TypeLike for Vec<PubTypeConstraint> {
+    fn map(&self, f: &mut impl TypeMapper) -> Self {
+        self.iter().map(|c| c.map(f)).collect()
+    }
+
+    fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+        for c in self {
+            c.visit(visitor);
+        }
+    }
+}
+
 impl PartialEq for PubTypeConstraint {
     fn eq(&self, other: &Self) -> bool {
         use PubTypeConstraint::*;
@@ -444,12 +464,8 @@ impl Hash for PubTypeConstraint {
     }
 }
 
-impl FmtWithModuleEnv for PubTypeConstraint {
-    fn fmt_with_module_env(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for PubTypeConstraint {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs {
@@ -561,7 +577,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         constraints: Vec<PubTypeConstraint>,
     ) -> Self {
         let ty_quantifiers = Self::list_ty_vars(&ty, constraints.iter());
-        let eff_quantifiers = ty.input_effect_vars();
+        let eff_quantifiers = Self::list_eff_vars(&ty, constraints.iter());
         Self {
             ty_quantifiers,
             eff_quantifiers,
@@ -639,6 +655,18 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             .collect()
     }
 
+    /// Helper function to list free effect variables in a type and its constraints.
+    pub(crate) fn list_eff_vars(
+        ty: &Ty,
+        constraints: impl Iterator<Item = impl Borrow<PubTypeConstraint>>,
+    ) -> HashSet<EffectVar> {
+        ty.inner_effect_vars()
+            .into_iter()
+            .chain(constraints.flat_map(|constraint| constraint.borrow().inner_effect_vars()))
+            .unique()
+            .collect()
+    }
+
     pub(crate) fn normalize(&mut self) -> InstSubstitution {
         // Build a substitution that maps each type quantifier to a fresh type variable from 0.
         let ty_subst = normalize_types(&mut self.ty_quantifiers);
@@ -675,6 +703,13 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
 
         // Return
         subst
+    }
+
+    /// Remove constant constraints and simplify the type scheme.
+    pub(crate) fn simplify(&mut self) {
+        self.constraints.retain(|c| !c.is_constant());
+        self.ty_quantifiers = Self::list_ty_vars(&self.ty, self.constraints.iter());
+        self.eff_quantifiers = Self::list_eff_vars(&self.ty, self.constraints.iter());
     }
 
     /// Extra functions parameters that must be passed to resolve polymorphism.
@@ -733,7 +768,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         &'m self,
         env: &'m ModuleEnv<'m>,
     ) -> FormatQuantifiersAndConstraintsMathStyle<'m, Self> {
-        FormatQuantifiersAndConstraintsMathStyle(FormatWithModuleEnv {
+        FormatQuantifiersAndConstraintsMathStyle(FormatWithData {
             value: self,
             data: env,
         })
@@ -763,7 +798,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     pub(crate) fn display_quantifiers_rust_style(&self) -> FormatQuantifiersRustStyle<'_, Self> {
-        FormatQuantifiersRustStyle(FormatWith {
+        FormatQuantifiersRustStyle(FormatWithData {
             value: self,
             data: &(),
         })
@@ -785,18 +820,18 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         &'m self,
         env: &'m ModuleEnv<'m>,
     ) -> FormatConstraintsRustStyle<'m, Self> {
-        FormatConstraintsRustStyle(FormatWithModuleEnv {
+        FormatConstraintsRustStyle(FormatWithData {
             value: self,
             data: env,
         })
     }
 }
 
-impl<Ty: TypeLike + FmtWithModuleEnv> TypeScheme<Ty> {
+impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> TypeScheme<Ty> {
     pub(crate) fn format_math_style(
         &self,
         f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
+        env: &ModuleEnv<'a>,
     ) -> std::fmt::Result {
         self.format_quantifiers_and_constraints_math_style(f, env)?;
         if !self.is_just_type_and_effects() {
@@ -806,7 +841,7 @@ impl<Ty: TypeLike + FmtWithModuleEnv> TypeScheme<Ty> {
     }
 
     pub fn display_math_style<'m>(&'m self, env: &'m ModuleEnv<'m>) -> FormatMathStyle<'m, Self> {
-        FormatMathStyle(FormatWithModuleEnv {
+        FormatMathStyle(FormatWithData {
             value: self,
             data: env,
         })
@@ -815,7 +850,7 @@ impl<Ty: TypeLike + FmtWithModuleEnv> TypeScheme<Ty> {
     pub(crate) fn format_rust_style(
         &self,
         f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
+        env: &ModuleEnv<'a>,
     ) -> std::fmt::Result {
         let has_constraints = !self.constraints.is_empty();
         // if has_constraints {
@@ -831,14 +866,44 @@ impl<Ty: TypeLike + FmtWithModuleEnv> TypeScheme<Ty> {
     }
 
     pub fn display_rust_style<'m>(&'m self, env: &'m ModuleEnv<'m>) -> FormatRustStyle<'m, Self> {
-        FormatRustStyle(FormatWithModuleEnv {
+        FormatRustStyle(FormatWithData {
             value: self,
             data: env,
         })
     }
 }
 
-fn format_have_trait(
+impl<Ty: TypeLike + Hash> Hash for TypeScheme<Ty> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ty_quantifiers.hash(state);
+        let eff_quantifiers: Vec<_> = self.eff_quantifiers.iter().sorted().collect();
+        eff_quantifiers.hash(state);
+        self.ty.hash(state);
+        self.constraints.hash(state);
+    }
+}
+
+impl<Ty: TypeLike> TypeLike for TypeScheme<Ty> {
+    fn map(&self, f: &mut impl TypeMapper) -> Self {
+        let ty = self.ty.map(f);
+        let constraints = self.constraints.map(f);
+        let ty_quantifiers = Self::list_ty_vars(&ty, constraints.iter());
+        let eff_quantifiers = Self::list_eff_vars(&ty, constraints.iter());
+        Self {
+            ty_quantifiers,
+            eff_quantifiers,
+            ty,
+            constraints,
+        }
+    }
+
+    fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+        self.ty.visit(visitor);
+        self.constraints.visit(visitor);
+    }
+}
+
+pub fn format_have_trait(
     trait_ref: &TraitRef,
     input_tys: &[Type],
     output_tys: &[Type],
@@ -946,14 +1011,14 @@ pub(crate) fn extra_parameters_from_constraints(
                 }
                 Some(DictionaryReq::new_field_index(*record_ty, *field))
             }
-            HaveTrait { trait_ref, input_tys, .. } => {
+            HaveTrait { trait_ref, input_tys, output_tys, .. } => {
                 if input_tys.iter().all(Type::is_constant) {
                     panic!("Type scheme with trait having only non-variable input types in constraints")
                 }
                 if trait_ref == &*REPR_TRAIT {
                     None // Repr is a special marker trait with an empty function dictionary.
                 } else {
-                    Some(DictionaryReq::new_trait_impl(trait_ref.clone(), input_tys.clone()))
+                    Some(DictionaryReq::new_trait_impl(trait_ref.clone(), input_tys.clone(), output_tys.clone()))
                 }
             }
             _ => None,
@@ -1108,7 +1173,9 @@ pub(crate) fn format_constraints_consolidated(
     Ok(())
 }
 
-pub(crate) struct FormatQuantifiersAndConstraintsMathStyle<'a, T>(FormatWithModuleEnv<'a, T>);
+pub(crate) struct FormatQuantifiersAndConstraintsMathStyle<'a, T>(
+    FormatWithData<'a, T, ModuleEnv<'a>>,
+);
 
 impl<Ty: TypeLike> std::fmt::Display
     for FormatQuantifiersAndConstraintsMathStyle<'_, TypeScheme<Ty>>
@@ -1120,15 +1187,17 @@ impl<Ty: TypeLike> std::fmt::Display
     }
 }
 
-pub struct FormatMathStyle<'a, T>(FormatWithModuleEnv<'a, T>);
+pub struct FormatMathStyle<'a, T>(FormatWithData<'a, T, ModuleEnv<'a>>);
 
-impl<Ty: TypeLike + FmtWithModuleEnv> std::fmt::Display for FormatMathStyle<'_, TypeScheme<Ty>> {
+impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> std::fmt::Display
+    for FormatMathStyle<'a, TypeScheme<Ty>>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.value.format_math_style(f, self.0.data)
     }
 }
 
-pub(crate) struct FormatQuantifiersRustStyle<'a, T>(FormatWith<'a, T, ()>);
+pub(crate) struct FormatQuantifiersRustStyle<'a, T>(FormatWithData<'a, T, ()>);
 
 impl<Ty: TypeLike> std::fmt::Display for FormatQuantifiersRustStyle<'_, TypeScheme<Ty>> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1136,7 +1205,7 @@ impl<Ty: TypeLike> std::fmt::Display for FormatQuantifiersRustStyle<'_, TypeSche
     }
 }
 
-pub(crate) struct FormatConstraintsRustStyle<'a, T>(FormatWithModuleEnv<'a, T>);
+pub(crate) struct FormatConstraintsRustStyle<'a, T>(FormatWithData<'a, T, ModuleEnv<'a>>);
 
 impl<Ty: TypeLike> std::fmt::Display for FormatConstraintsRustStyle<'_, TypeScheme<Ty>> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1144,9 +1213,11 @@ impl<Ty: TypeLike> std::fmt::Display for FormatConstraintsRustStyle<'_, TypeSche
     }
 }
 
-pub struct FormatRustStyle<'a, T>(FormatWithModuleEnv<'a, T>);
+pub struct FormatRustStyle<'a, T>(FormatWithData<'a, T, ModuleEnv<'a>>);
 
-impl<Ty: TypeLike + FmtWithModuleEnv> std::fmt::Display for FormatRustStyle<'_, TypeScheme<Ty>> {
+impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> std::fmt::Display
+    for FormatRustStyle<'a, TypeScheme<Ty>>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.value.format_rust_style(f, self.0.data)
     }

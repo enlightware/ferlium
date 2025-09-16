@@ -6,9 +6,10 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+
 use ferlium::{
     effects::EffType,
-    format::FormatWith,
+    format::FormatWithData,
     r#type::{record_type, tuple_type, variant_type, FnType, Type},
     resolve_concrete_type, resolve_generic_type,
     std::{
@@ -18,10 +19,15 @@ use ferlium::{
         string::string_type,
         StdModuleEnv,
     },
+    value::Value,
 };
+
+use indoc::indoc;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+use crate::common::{float, int, run};
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -300,7 +306,7 @@ fn fn_type() {
     assert_eq!(
         format!(
             "{}",
-            FormatWith::new(
+            FormatWithData::new(
                 &resolve_concrete_type("(&mut int)", &env.get()).unwrap_err(),
                 &"(&mut int)"
             )
@@ -310,7 +316,7 @@ fn fn_type() {
     assert_eq!(
         format!(
             "{}",
-            FormatWith::new(
+            FormatWithData::new(
                 &resolve_concrete_type("(&mut int,)", &env.get()).unwrap_err(),
                 &"(&mut int,)"
             )
@@ -320,7 +326,7 @@ fn fn_type() {
     assert_eq!(
         format!(
             "{}",
-            FormatWith::new(
+            FormatWithData::new(
                 &resolve_concrete_type("(bool, float, &mut int)", &env.get()).unwrap_err(),
                 &"(bool, float, &mut int)"
             )
@@ -376,5 +382,17 @@ fn complex_type() {
                 ])
             )
         ]))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ret_type_overloading() {
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() { let a = 0; a }
+            ((f(): int), (f(): float))
+        "# }),
+        tuple!(int(0), float(0.0)),
     );
 }

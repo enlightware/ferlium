@@ -11,8 +11,9 @@ use std::{collections::HashSet, sync::LazyLock};
 use heck::ToSnakeCase;
 
 use crate::{
+    format::FormatWith,
     ir::{Node, NodeKind},
-    module::{FmtWithModuleEnv, ModuleEnv, Modules},
+    module::{ModuleEnv, Modules},
     type_scheme::DisplayStyle,
     ModuleAndExpr,
 };
@@ -31,8 +32,8 @@ impl ModuleAndExpr {
         let mut annotations = vec![];
 
         // Let/var bindings just after the name.
-        for function in self.module.functions.values() {
-            let mut code = function.code.borrow_mut();
+        for local_fn in &self.module.functions {
+            let mut code = local_fn.function.code.borrow_mut();
             if let Some(script_fn) = code.as_script_mut() {
                 script_fn
                     .code
@@ -44,7 +45,8 @@ impl ModuleAndExpr {
         }
 
         // Function signatures.
-        for function in self.module.functions.values() {
+        for local_fn in &self.module.functions {
+            let function = &local_fn.function;
             if let Some(spans) = &function.spans {
                 if !function.definition.ty_scheme.is_just_type() {
                     match style {
@@ -238,6 +240,8 @@ impl Node {
                     arg.variable_type_annotations(result, env);
                 }
             }
+            GetFunction(_) => {}
+            GetDictionary(_) => {}
             EnvStore(node) => {
                 // Note: synthesized let nodes have empty name span, so we ignore these.
                 let is_synthesized = node.name_span.is_empty();
@@ -246,17 +250,17 @@ impl Node {
                         if !ty_constant {
                             result.push((
                                 ty_span.end(),
-                                format!(" ⇨ {}", node.node.ty.format_with(env)),
+                                format!(" ⇨ {}", node.value.ty.format_with(env)),
                             ));
                         }
                     } else {
                         result.push((
                             node.name_span.end(),
-                            format!(": {}", node.node.ty.format_with(env)),
+                            format!(": {}", node.value.ty.format_with(env)),
                         ));
                     }
                 }
-                node.node.variable_type_annotations(result, env);
+                node.value.variable_type_annotations(result, env);
             }
             EnvLoad(_) => {}
             Block(nodes) => nodes
@@ -368,10 +372,6 @@ fn is_argument_similar_to_arg_name(argument: &Node, arg_name: &str) -> bool {
         EnvLoad(ref load) => match load.name {
             Some(name) => name.as_str(),
             None => return false,
-        },
-        Immediate(ref value) => match value.value.as_function() {
-            Some((_, Some(name))) => name.split("::").last().unwrap_or(name),
-            _ => return false,
         },
         _ => return false,
     };

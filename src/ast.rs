@@ -1,3 +1,4 @@
+use derive_new::new;
 // Copyright 2025 Enlightware GmbH
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
@@ -18,9 +19,9 @@ use ustr::Ustr;
 use crate::{
     containers::{b, B},
     error::{InternalCompilationError, LocatedError},
-    format::write_with_separator,
+    format::{write_with_separator, FormatWith},
     internal_compilation_error,
-    module::{FmtWithModuleEnv, ModuleEnv},
+    module::ModuleEnv,
     mutability::{FormatInFnArg, MutType as IrMutType, MutVal},
     never::Never,
     r#type::Type as IrType,
@@ -48,7 +49,7 @@ pub type PMutTypeTypeSpan = MutTypeTypeSpan<Parsed>;
 pub trait Phase: Sized {
     type FormattedString: Debug + Clone + Display;
     type ForLoop: Debug + Clone + FormatWithIndent + VisitExpr<Self>;
-    type Type: Debug + Clone + FmtWithModuleEnv;
+    type Type: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
     type TypeAliasInModule: Debug + Clone;
@@ -106,40 +107,31 @@ impl FormatInFnArg for PMutType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, new)]
 pub struct PFnArgType {
     pub ty: TypeSpan<Parsed>,
     // TODO: currently we do not support generic mutability in type annotations
     pub mut_ty: Option<PMutType>,
     pub span: Location,
 }
-impl PFnArgType {
-    pub fn new(ty: TypeSpan<Parsed>, mut_ty: Option<PMutType>, span: Location) -> Self {
-        Self { ty, mut_ty, span }
-    }
-}
 
-impl FmtWithModuleEnv for PFnArgType {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for PFnArgType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         if let Some(mut_ty) = &self.mut_ty {
             write!(f, "&{mut_ty} ")?;
         }
-        self.ty.0.fmt_with_module_env(f, env)
+        self.ty.0.fmt_with(f, env)
     }
 }
 
 /// The type of a function
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, new)]
 pub struct PFnType {
     pub args: Vec<PFnArgType>,
     pub ret: TypeSpan<Parsed>,
     pub effects: bool, // true if this function should have generic effects
 }
 impl PFnType {
-    pub fn new(args: Vec<PFnArgType>, ret: TypeSpan<Parsed>, effects: bool) -> Self {
-        Self { args, ret, effects }
-    }
-
     /// Collect indices of types in ty_names that are referenced in this type.
     pub fn collect_refs(
         &self,
@@ -154,17 +146,17 @@ impl PFnType {
     }
 }
 
-impl FmtWithModuleEnv for PFnType {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for PFnType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         write!(f, "(")?;
         for (i, arg) in self.args.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            arg.fmt_with_module_env(f, env)?;
+            arg.fmt_with(f, env)?;
         }
         write!(f, ") -> ")?;
-        self.ret.0.fmt_with_module_env(f, env)
+        self.ret.0.fmt_with(f, env)
     }
 }
 
@@ -238,13 +230,13 @@ impl PType {
     }
 }
 
-impl FmtWithModuleEnv for PType {
-    fn fmt_with_module_env(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for PType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         use PType::*;
         match self {
             Never => write!(f, "never"),
             Unit => write!(f, "()"),
-            Resolved(ty) => ty.fmt_with_module_env(f, env),
+            Resolved(ty) => ty.fmt_with(f, env),
             Infer => write!(f, "_"),
             Path(items) => write!(f, "{}", items.iter().map(|(s, _)| s).join("::")),
             Variant(types) => {
@@ -256,7 +248,7 @@ impl FmtWithModuleEnv for PType {
                         write!(f, "{name}")?;
                     } else {
                         write!(f, "{name} ")?;
-                        ty.fmt_with_module_env(f, env)?;
+                        ty.fmt_with(f, env)?;
                     }
                 }
                 Ok(())
@@ -267,7 +259,7 @@ impl FmtWithModuleEnv for PType {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    ty.fmt_with_module_env(f, env)?;
+                    ty.fmt_with(f, env)?;
                     if elements.len() == 1 {
                         write!(f, ",")?;
                     }
@@ -281,16 +273,16 @@ impl FmtWithModuleEnv for PType {
                         write!(f, ", ")?;
                     }
                     write!(f, "{name}: ")?;
-                    ty.fmt_with_module_env(f, env)?;
+                    ty.fmt_with(f, env)?;
                 }
                 write!(f, " }}")
             }
             Array(inner) => {
                 write!(f, "[")?;
-                inner.0.fmt_with_module_env(f, env)?;
+                inner.0.fmt_with(f, env)?;
                 write!(f, "]")
             }
-            Function(fn_type) => fn_type.fmt_with_module_env(f, env),
+            Function(fn_type) => fn_type.fmt_with(f, env),
         }
     }
 }
@@ -300,7 +292,7 @@ pub trait FormatWithIndent {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        env: &crate::module::ModuleEnv,
+        env: &ModuleEnv,
         indent: usize,
     ) -> std::fmt::Result;
 }
@@ -309,7 +301,7 @@ impl FormatWithIndent for Never {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        _env: &crate::module::ModuleEnv,
+        _env: &ModuleEnv,
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
@@ -353,7 +345,7 @@ impl FormatWithIndent for ForLoop {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        env: &crate::module::ModuleEnv,
+        env: &ModuleEnv,
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
@@ -513,12 +505,8 @@ impl<P: Phase> VisitExpr<P> for Module<P> {
     }
 }
 
-impl FmtWithModuleEnv for Module<Parsed> {
-    fn fmt_with_module_env(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &crate::module::ModuleEnv,
-    ) -> std::fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for Module<Parsed> {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
         if !self.type_aliases.is_empty() {
             writeln!(f, "Types:")?;
             for (name, ty) in self.type_aliases.iter() {
@@ -658,22 +646,17 @@ pub enum ExprKind<P: Phase> {
 }
 
 /// An expression as an Abstract Syntax Tree
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
 pub struct Expr<P: Phase> {
     pub kind: ExprKind<P>,
     pub span: Location,
-}
-impl<P: Phase> Expr<P> {
-    pub fn new(kind: ExprKind<P>, span: Location) -> Self {
-        Self { kind, span }
-    }
 }
 
 impl<P: Phase> FormatWithIndent for Expr<P> {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
-        env: &crate::module::ModuleEnv<'_>,
+        env: &ModuleEnv<'_>,
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
@@ -844,12 +827,8 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
     // TODO: use the visitor to collect the dependency graph
 }
 
-impl<P: Phase> FmtWithModuleEnv for Expr<P> {
-    fn fmt_with_module_env(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &crate::module::ModuleEnv<'_>,
-    ) -> std::fmt::Result {
+impl<P: Phase> FormatWith<ModuleEnv<'_>> for Expr<P> {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         self.format_ind(f, env, 0)
     }
 }
@@ -974,17 +953,13 @@ impl PatternType {
 }
 
 /// An expression as an Abstract Syntax Tree
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
 pub struct Pattern {
     pub kind: PatternKind,
     pub span: Location,
 }
 
 impl Pattern {
-    pub fn new(kind: PatternKind, span: Location) -> Self {
-        Self { kind, span }
-    }
-
     pub fn format_ind(&self, f: &mut std::fmt::Formatter, indent: usize) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
         use PatternKind::*;

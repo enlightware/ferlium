@@ -1,0 +1,517 @@
+// Copyright 2025 Enlightware GmbH
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+//
+// Copyright 2025 Enlightware GmbH
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+
+//! Module bundle system for incremental rebuilds and leak-free hot reloads
+//!
+//! This module implements the following architecture where:
+//! - Each compiled module version is an Rc<Module>
+//! - Cross-module references go through import slots + a relink step
+//! - Call sites use local integer IDs for local calls or ImportFunctionSlotId/ImportTraitSlotId for external calls
+//! - Recompiling produces a new module; dependents are relinked only if interface hash changes
+
+pub mod function;
+pub mod id;
+pub mod module_env;
+pub mod modules;
+pub mod trait_impl;
+pub mod uses;
+
+pub use function::*;
+pub use module_env::*;
+pub use modules::*;
+pub use trait_impl::*;
+pub use uses::*;
+
+use std::{
+    cell::{Ref, RefMut},
+    collections::HashMap,
+    fmt,
+};
+
+use itertools::Itertools;
+use ustr::{ustr, Ustr};
+
+use crate::{
+    format::FormatWith,
+    function::Function,
+    ir::Node,
+    r#trait::TraitRef,
+    r#type::{Type, TypeAliases, TypeDefRef},
+    type_like::TypeLike,
+    type_scheme::PubTypeConstraint,
+};
+
+// Module itself
+
+/// Immutable module bundle containing all compiled module data
+#[derive(Debug, Clone)]
+pub struct Module {
+    pub import_fn_slots: Vec<ImportFunctionSlot>,
+    pub import_impl_slots: Vec<ImportImplSlot>,
+
+    pub uses: Uses,
+
+    // Functions, including methods of concrete trait
+    pub functions: Vec<LocalFunction>,
+    pub function_name_to_id: HashMap<Ustr, LocalFunctionId>,
+
+    // Type system content
+    pub type_aliases: TypeAliases,
+    pub type_defs: HashMap<Ustr, TypeDefRef>,
+    pub traits: Traits,
+    pub impls: TraitImpls,
+
+    // Source info for IDE support
+    pub source: Option<String>,
+}
+
+impl Module {
+    /// Add a named function to this module, returning its ID.
+    pub fn add_named_function(&mut self, name: Ustr, function: ModuleFunction) {
+        self.add_function(Some(name), function);
+    }
+
+    /// Add a function to this module, returning its ID.
+    pub fn add_function(
+        &mut self,
+        name: Option<Ustr>,
+        function: ModuleFunction,
+    ) -> LocalFunctionId {
+        if let Some(name) = name {
+            // FIXME: decide whether we want to allow that (useful for REPL?), but then we would leak
+            assert!(!self.function_name_to_id.contains_key(&name));
+        }
+        let id = LocalFunctionId::from_index(self.functions.len());
+        let interface_hash = function.definition.signature_hash();
+        self.functions.push(LocalFunction {
+            name,
+            function,
+            interface_hash,
+        });
+        if let Some(name) = name {
+            self.function_name_to_id.insert(name, id);
+        }
+        id
+    }
+
+    /// Add a concrete trait implementation to this module, with raw functions.
+    /// The definition will be retrieved by instantiating the trait method definitions with the given types.
+    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// and that the constraints are satisfied.
+    pub fn add_concrete_impl(
+        &mut self,
+        trait_ref: TraitRef,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        // Add the impl, collecting new functions
+        let mut fn_collector = FunctionCollector::new(self.functions.len());
+        self.impls.add_concrete_raw(
+            trait_ref,
+            input_tys,
+            output_tys,
+            functions,
+            &mut fn_collector,
+        );
+        self.functions.extend(fn_collector.new_elements);
+    }
+
+    /// Add a concrete trait implementation to this module, with module functions.
+    /// The definition will be retrieved by instantiating the trait method definitions with the given types.
+    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// and that the constraints are satisfied.
+    pub fn add_concrete_impl_module_functions(
+        &mut self,
+        trait_ref: TraitRef,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<ModuleFunction>>,
+    ) -> LocalImplId {
+        // Add the impl, collecting new functions
+        let mut fn_collector = FunctionCollector::new(self.functions.len());
+        let id = self.impls.add_concrete(
+            trait_ref,
+            input_tys,
+            output_tys,
+            functions,
+            &mut fn_collector,
+        );
+        self.functions.extend(fn_collector.new_elements);
+        id
+    }
+
+    /// Add a blanket trait implementation to this module, with module functions.
+    pub fn add_blanket_impl_module_functions(
+        &mut self,
+        trait_ref: TraitRef,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        ty_var_count: u32,
+        constraints: impl Into<Vec<PubTypeConstraint>>,
+        functions: impl Into<Vec<ModuleFunction>>,
+    ) -> LocalImplId {
+        // Add the impl, collecting new functions
+        let mut fn_collector = FunctionCollector::new(self.functions.len());
+        let id = self.impls.add_blanket(
+            trait_ref,
+            input_tys,
+            output_tys,
+            ty_var_count,
+            constraints,
+            functions,
+            &mut fn_collector,
+        );
+        self.functions.extend(fn_collector.new_elements);
+        id
+    }
+
+    /// Check if this module is "empty" (has no meaningful content)
+    pub fn is_empty(&self) -> bool {
+        self.functions.is_empty()
+            && self.import_fn_slots.is_empty()
+            && self.type_aliases.is_empty()
+            && self.type_defs.is_empty()
+            && self.traits.is_empty()
+            && self.impls.is_empty()
+    }
+
+    /// Return an iterator over the names of all own symbols (functions) in this module.
+    pub fn own_symbols(&self) -> impl Iterator<Item = Ustr> + use<'_> {
+        self.function_name_to_id
+            .keys()
+            .cloned()
+            .chain(self.type_defs.keys().cloned())
+            .chain(self.type_aliases.iter().map(|(name, _)| *name))
+    }
+
+    /// Return the type for the source pos, if any.
+    pub fn type_at(&self, pos: usize) -> Option<Type> {
+        for function in self.functions.iter() {
+            let mut code = function.function.code.borrow_mut();
+            let ty = code
+                .as_script_mut()
+                .and_then(|script_fn| script_fn.code.type_at(pos));
+            if ty.is_some() {
+                return ty;
+            }
+        }
+        None
+    }
+
+    /// Return whether this module uses sym_name from mod_name.
+    pub fn uses(&self, mod_name: Ustr, sym_name: Ustr) -> bool {
+        self.uses.iter().any(|u| match u {
+            Use::All(module) => *module == mod_name,
+            Use::Some(some) => some.module == mod_name && some.symbols.contains(&sym_name),
+        })
+    }
+
+    /// Look-up a function by name in this module or in any of the modules this module uses.
+    pub fn get_function<'a>(
+        &'a self,
+        name: &'a str,
+        others: &'a Modules,
+    ) -> Option<&'a ModuleFunction> {
+        self.get_member(name, others, &|name, module| {
+            module.get_own_function(ustr(name))
+        })
+        .map(|(_, f)| f)
+    }
+
+    /// Look-up a member by name in this module or in any of the modules this module uses.
+    /// Returns the module name if the member is from another module.
+    /// The getter function is used to get the member from a module.
+    pub fn get_member<'a, T>(
+        &'a self,
+        name: &'a str,
+        others: &'a Modules,
+        getter: &impl Fn(&'a str, &'a Self) -> Option<T>,
+    ) -> Option<(Option<Ustr>, T)> {
+        getter(name, self).map_or_else(
+            || {
+                self.uses.iter().find_map(|use_module| match use_module {
+                    Use::All(module) => {
+                        let module_ref = others.get(module)?;
+                        getter(name, module_ref).map(|t| (Some(*module), t))
+                    }
+                    Use::Some(use_some) => {
+                        if use_some.symbols.contains(&ustr(name)) {
+                            let module = use_some.module;
+                            let module_ref = others.get(&module)?;
+                            getter(name, module_ref).map(|t| (Some(module), t))
+                        } else {
+                            None
+                        }
+                    }
+                })
+            },
+            |t| Some((None, t)),
+        )
+    }
+
+    /// Get a local function and its data by name
+    pub fn get_local_function(&self, name: Ustr) -> Option<&LocalFunction> {
+        let id = self.function_name_to_id.get(&name)?;
+        self.functions.get(id.as_index())
+    }
+
+    /// Get a local function by name
+    pub fn get_own_function(&self, name: Ustr) -> Option<&ModuleFunction> {
+        self.get_local_function(name).map(|f| &f.function)
+    }
+
+    /// Get a mutable local function by name
+    pub fn get_own_function_mut(&mut self, name: Ustr) -> Option<&mut ModuleFunction> {
+        self.get_own_function_id_mut(name).map(|(_, f)| f)
+    }
+
+    /// Get a mutable local function and its ID by name
+    pub fn get_own_function_id_mut(
+        &mut self,
+        name: Ustr,
+    ) -> Option<(LocalFunctionId, &mut ModuleFunction)> {
+        let id = self.function_name_to_id.get(&name)?;
+        self.functions
+            .get_mut(id.as_index())
+            .map(|f| (*id, &mut f.function))
+    }
+
+    /// Look-up a function by name only in this module and return its script node, if it is a script function.
+    pub fn get_own_function_node(&mut self, name: Ustr) -> Option<Ref<'_, Node>> {
+        self.get_own_function(name)?.get_node()
+    }
+
+    /// Look-up a function by name only in this module and return its mutable script node, if it is a script function.
+    pub fn get_own_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<'_, Node>> {
+        self.get_own_function_mut(name)?.get_node_mut()
+    }
+
+    /// Get a local function by ID
+    pub fn get_own_function_by_id(&self, id: LocalFunctionId) -> Option<&ModuleFunction> {
+        self.functions.get(id.as_index()).map(|f| &f.function)
+    }
+
+    /// Get an import slot by ID
+    pub fn get_import_slot(&self, slot_id: ImportFunctionSlotId) -> Option<&ImportFunctionSlot> {
+        self.import_fn_slots.get(slot_id.as_index())
+    }
+
+    /*
+    /// Check if this module's interface is compatible with another (i.e., no dependents need recompilation).
+    /// Uses hash collision detection and looks up actual function data when hashes match.
+    pub fn is_interface_compatible_with(&self, other: &Self) -> bool {
+        // 1. Functions: Check if all functions that existed before are still compatible.
+        for other_fn in &other.functions {
+            match self
+                .functions
+                .iter()
+                .find(|this_fn| this_fn.name == other_fn.name)
+            {
+                Some(this_fn) => {
+                    if this_fn.interface_hash != other_fn.interface_hash {
+                        return false; // Interface definitely changed
+                    }
+                    // Hash collision detection: if hashes match, verify actual signatures
+                    if this_fn.function.definition.signature()
+                        != other_fn.function.definition.signature()
+                    {
+                        return false; // Hash collision - signatures actually differ
+                    }
+                }
+                None => return false, // Symbol was removed
+            }
+        }
+
+        // 2. Concrete trait implementations: ensure previously exported impls remain compatible.
+        for (other_key, other_impl_id) in other.impls.concrete().iter() {
+            // Find matching impl by trait name and TraitReq value, as currently it is stable.
+            let maybe_this = self
+                .impls
+                .concrete()
+                .iter()
+                .find(|(this_key, _)| *this_key == other_key);
+
+            let Some((_, this_impl_id)) = maybe_this else {
+                return false; // Previously available impl no longer exists
+            };
+
+            // Compare method interface hashes (same order as functions)
+            let this_impl = &self.impls.data[this_impl_id.as_index()];
+            let other_impl = &other.impls.data[other_impl_id.as_index()];
+            if this_impl.interface_hash != other_impl.interface_hash {
+                return false; // Method interfaces changed
+            }
+            // Has hash matches, verify actual signatures
+            for (this_f_id, other_f_id) in this_impl.methods.iter().zip(other_impl.methods.iter()) {
+                let this_f = &self.functions[this_f_id.as_index()];
+                let other_f = &other.functions[other_f_id.as_index()];
+                if this_f.function.definition.signature() != other_f.function.definition.signature()
+                {
+                    return false; // Hash collision - signatures actually differ
+                }
+            }
+
+            // Compare output types (associated/derived outputs)
+            if this_impl.output_tys != other_impl.output_tys {
+                return false; // Output types changed
+            }
+        }
+
+        // 3. Blanket trait implementations: ensure previously exported impls remain compatible.
+        todo!("check blanket impls");
+
+        true // All existing symbols and impls are compatible (new ones are OK)
+    }
+    */
+
+    fn format_with_modules(
+        &self,
+        f: &mut fmt::Formatter,
+        modules: &Modules,
+        show_details: bool,
+    ) -> fmt::Result {
+        let env = ModuleEnv::new(self, &modules);
+        if !self.uses.is_empty() {
+            writeln!(f, "Uses:")?;
+            for use_module in self.uses.iter() {
+                match use_module {
+                    Use::All(module) => writeln!(f, "  {module}: *")?,
+                    Use::Some(use_some) => {
+                        write!(f, "  {}:", use_some.module)?;
+                        for symbol in use_some.symbols.iter() {
+                            write!(f, " {symbol}")?;
+                        }
+                        writeln!(f)?;
+                    }
+                }
+            }
+            writeln!(f, "\n")?;
+        }
+        if !self.type_aliases.is_empty() {
+            writeln!(f, "Types:\n")?;
+            for (name, ty) in self.type_aliases.iter() {
+                writeln!(f, "{}: {}", name, ty.format_with(&env))?;
+            }
+            writeln!(f, "\n")?;
+        }
+        if !self.type_defs.is_empty() {
+            writeln!(f, "New types:")?;
+            for (_, decl) in self.type_defs.iter() {
+                // Rebuild the list of type arguments for the type declaration
+                let args = decl
+                    .shape
+                    .inner_ty_vars_iter()
+                    .sorted()
+                    .map(Type::variable)
+                    .collect::<Vec<_>>();
+                // Build a type to show
+                let ty = Type::named(decl.clone(), args);
+                writeln!(f, "  {}", ty.format_with(&env))?;
+            }
+            writeln!(f, "\n")?;
+        }
+        if !self.traits.is_empty() {
+            writeln!(f, "Traits:\n")?;
+            for trait_ref in self.traits.iter() {
+                writeln!(f, "{}", trait_ref.format_with(&env))?;
+            }
+            writeln!(f)?;
+        }
+        if !self.impls.is_empty() {
+            writeln!(f, "Trait implementations:\n")?;
+            let level = if show_details {
+                DisplayFilter::MethodCode
+            } else {
+                DisplayFilter::MethodDefinitions
+            };
+            let filter = |_: &TraitRef, _: LocalImplId| level;
+            self.impls.fmt_with_filter(f, &env, filter)?;
+        }
+        if !self.functions.is_empty() {
+            writeln!(f, "Named functions:\n")?;
+            for (i, LocalFunction { name, function, .. }) in self.functions.iter().enumerate() {
+                if name.is_none() {
+                    continue;
+                }
+                function
+                    .definition
+                    .fmt_with_name_and_module_env(f, name, "", &env)?;
+                writeln!(f, " (#{i})")?;
+                if show_details {
+                    function.fmt_code(f, &env)?;
+                    writeln!(f)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Finalize pending function values inside the module by attaching the module weak reference.
+pub fn finalize_module_pending_functions(module_rc: &ModuleRc) {
+    for local_fn in &module_rc.functions {
+        let mut fn_mut = local_fn.function.code.borrow_mut();
+        if let Some(script_fn) = fn_mut.as_script_mut() {
+            script_fn.code.finalize_pending_values(module_rc);
+        }
+    }
+    for imp in &module_rc.impls.data {
+        imp.dictionary_value
+            .borrow_mut()
+            .finalize_pending(module_rc);
+    }
+}
+
+impl FormatWith<Modules> for Module {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &Modules) -> fmt::Result {
+        self.format_with_modules(f, data, false)
+    }
+}
+
+pub struct ShowModuleDetails<'a>(pub &'a Modules);
+
+impl FormatWith<ShowModuleDetails<'_>> for Module {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &ShowModuleDetails) -> fmt::Result {
+        self.format_with_modules(f, &data.0, true)
+    }
+}
+
+impl FormatWith<ModuleEnv<'_>> for LocalFunction {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+        self.function
+            .definition
+            .fmt_with_name_and_module_env(f, &self.name, "", env)?;
+        self.function.code.borrow().format_ind(f, env, 1, 1)
+    }
+}
+
+impl Default for Module {
+    fn default() -> Self {
+        Self {
+            uses: vec![],
+            functions: vec![],
+            function_name_to_id: HashMap::new(),
+            import_fn_slots: vec![],
+            import_impl_slots: vec![],
+            type_aliases: TypeAliases::default(),
+            type_defs: HashMap::new(),
+            traits: Traits::default(),
+            impls: TraitImpls::default(),
+            source: None,
+        }
+    }
+}

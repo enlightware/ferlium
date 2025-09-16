@@ -159,8 +159,10 @@ impl Node {
                 }
                 check_arguments(&app.ty.args, &app.arguments, app.function_span)?;
             }
+            GetFunction(_) => {}
+            GetDictionary(_) => {}
             EnvStore(node) => {
-                node.node.check_borrows()?;
+                node.value.check_borrows()?;
             }
             EnvLoad(_) => {}
             Block(nodes) => {

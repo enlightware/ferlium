@@ -12,13 +12,9 @@ use ustr::ustr;
 
 use crate::{
     cached_ty,
-    effects::{no_effects, EffType},
-    error::RuntimeError,
-    eval::{EvalCtx, ValOrMut},
+    effects::no_effects,
     format::write_with_separator,
-    function::{
-        BinaryNativeFnMVN, BinaryNativeFnNNN, BinaryNativeFnNVFN, UnaryNativeFnMV, UnaryNativeFnNN,
-    },
+    function::{BinaryNativeFnMVN, BinaryNativeFnNNN, UnaryNativeFnMV, UnaryNativeFnNN},
     module::{Module, ModuleFunction},
     r#type::{bare_native_type, FnType, Type},
     type_scheme::TypeScheme,
@@ -226,41 +222,6 @@ impl Array {
         )
     }
 
-    pub fn map(self, f: Value) -> Result<Self, RuntimeError> {
-        let function = f.as_function().unwrap().0.get();
-        let mut ctx = EvalCtx::new();
-        Ok(Self(Rc::new(
-            self.0
-                .iter()
-                .map(|v| {
-                    function
-                        .borrow()
-                        .call(vec![ValOrMut::Val(v.clone())], &mut ctx)
-                })
-                .collect::<Result<_, _>>()?,
-        )))
-    }
-
-    fn map_descr() -> ModuleFunction {
-        let gen0 = Type::variable_id(0);
-        let gen1 = Type::variable_id(1);
-        let effects = EffType::single_variable_id(0);
-        let map_fn = Type::function_by_val_with_effects([gen0], gen1, effects.clone());
-        let array0 = Type::native::<Self>([gen0]);
-        let array1 = Type::native::<Self>([gen1]);
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-            [array0, map_fn],
-            array1,
-            effects,
-        ));
-        BinaryNativeFnNVFN::description_with_ty_scheme(
-            Self::map,
-            ["array", "function"],
-            None,
-            ty_scheme,
-        )
-    }
-
     pub fn iter(&self) -> ArrayIterator {
         ArrayIterator {
             array: self.0.clone(),
@@ -373,23 +334,17 @@ pub fn add_to_module(to: &mut Module) {
         .set_bare_native("array_iterator", bare_native_type::<ArrayIterator>());
 
     // TODO: use type classes to get rid of the array prefix
-    // to.functions
-    //     .insert(ustr("array_from_iterator"), Array::from_iterator_descr());
-    to.functions
-        .insert(ustr("array_append"), Array::append_descr());
-    to.functions
-        .insert(ustr("array_prepend"), Array::prepend_descr());
-    to.functions
-        .insert(ustr("array_pop_back"), Array::pop_back_desc());
-    to.functions
-        .insert(ustr("array_pop_front"), Array::pop_front_desc());
-    to.functions.insert(ustr("array_len"), Array::len_descr());
-    to.functions
-        .insert(ustr("array_concat"), Array::concat_descr());
-    to.functions.insert(ustr("array_map"), Array::map_descr());
-    to.functions.insert(ustr("array_iter"), Array::iter_descr());
+    // to.add_local_function(ustr("array_from_iterator"), Array::from_iterator_descr());
+    to.add_named_function(ustr("array_append"), Array::append_descr());
+    to.add_named_function(ustr("array_prepend"), Array::prepend_descr());
+    to.add_named_function(ustr("array_pop_back"), Array::pop_back_desc());
+    to.add_named_function(ustr("array_pop_front"), Array::pop_front_desc());
+    to.add_named_function(ustr("array_len"), Array::len_descr());
+    to.add_named_function(ustr("array_concat"), Array::concat_descr());
+    // to.add_local_function(ustr("array_map"), Array::map_descr());
+    to.add_named_function(ustr("array_iter"), Array::iter_descr());
 
-    to.functions.insert(
+    to.add_named_function(
         ustr("array_iterator_next"),
         ArrayIterator::next_value_descr(),
     );

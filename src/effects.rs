@@ -11,6 +11,7 @@ use std::{
     fmt::Display,
 };
 
+use derive_new::new;
 use enum_as_inner::EnumAsInner;
 
 use crate::format::{type_variable_subscript, write_with_separator};
@@ -33,16 +34,13 @@ impl Display for PrimitiveEffect {
 }
 
 /// A generic variable for effects
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
 pub struct EffectVar {
     /// The name of this effect variable, its identity in the context considered
     name: u32,
 }
 
 impl EffectVar {
-    pub fn new(name: u32) -> Self {
-        Self { name }
-    }
     pub fn name(&self) -> u32 {
         self.name
     }

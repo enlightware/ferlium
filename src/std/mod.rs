@@ -9,7 +9,7 @@
 use std::{cell::OnceCell, rc::Rc, str::FromStr};
 
 use crate::{
-    module::{Module, ModuleEnv, Modules, Use},
+    module::{finalize_module_pending_functions, Module, ModuleEnv, Modules, Use},
     r#type::{bare_native_type, Type, TypeKind},
     value::Value,
 };
@@ -41,7 +41,7 @@ thread_local! {
 pub fn std_module() -> Rc<Module> {
     STD_MODULE.with(|cell| {
         cell.get_or_init(|| {
-            Rc::new({
+            let module = Rc::new({
                 let mut module = Module::default();
                 core::add_to_module(&mut module);
                 flow::add_to_module(&mut module);
@@ -58,7 +58,10 @@ pub fn std_module() -> Rc<Module> {
                 serde::add_to_module(&mut module);
                 prelude::add_to_module(&mut module);
                 module
-            })
+            });
+            // No need to link because std has no imports.
+            finalize_module_pending_functions(&module);
+            module
         })
         .clone()
     })
@@ -66,7 +69,7 @@ pub fn std_module() -> Rc<Module> {
 
 pub fn new_std_modules() -> Modules {
     let mut modules: Modules = Default::default();
-    modules.insert(ustr("std"), std_module());
+    modules.modules.insert(ustr("std"), std_module());
     modules
 }
 

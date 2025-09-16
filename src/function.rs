@@ -9,10 +9,12 @@
 use std::{
     cell::RefCell,
     fmt::{self, Debug},
+    hash::DefaultHasher,
     marker::PhantomData,
     rc::{Rc, Weak},
 };
 
+use derive_new::new;
 use ustr::Ustr;
 
 use ferlium_macros::declare_native_fn_aliases;
@@ -23,14 +25,17 @@ use crate::{
     eval::{EvalCtx, EvalResult, ValOrMut},
     format::FormatWith,
     ir::{self},
-    module::{FmtWithModuleEnv, ModuleEnv, ModuleFunction},
-    r#type::{FnType, Type},
+    module::{ModuleEnv, ModuleFunction},
+    r#type::{fmt_fn_type_with_arg_names, FnType, Type},
+    type_like::TypeLike,
+    type_mapper::TypeMapper,
     type_scheme::{PubTypeConstraint, TypeScheme},
-    value::{NativeDisplay, Value},
+    type_visitor::TypeInnerVisitor,
+    value::{FunctionValue, NativeDisplay, Value},
 };
 
 /// The definition of a function, to be used in modules, traits and IDEs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
 pub struct FunctionDefinition {
     pub ty_scheme: TypeScheme<FnType>,
     pub arg_names: Vec<Ustr>,
@@ -38,14 +43,6 @@ pub struct FunctionDefinition {
 }
 
 impl FunctionDefinition {
-    pub fn new(ty_scheme: TypeScheme<FnType>, arg_names: Vec<Ustr>, doc: Option<String>) -> Self {
-        FunctionDefinition {
-            ty_scheme,
-            arg_names,
-            doc,
-        }
-    }
-
     pub fn new_infer_quantifiers<'s>(
         fn_ty: FnType,
         arg_names: impl IntoIterator<Item = &'s str>,
@@ -76,17 +73,32 @@ impl FunctionDefinition {
         }
     }
 
+    /// The signature of the function is the type scheme and the argument names.
+    /// Strictly speaking, the argument names are not part of the signature,
+    /// but we assume that the semantics of the function changes if they are changed.
+    pub fn signature(&self) -> (&TypeScheme<FnType>, &[Ustr]) {
+        (&self.ty_scheme, &self.arg_names)
+    }
+
+    /// Get a hash of the function signature for quick comparison of interfaces.
+    pub fn signature_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.signature().hash(&mut hasher);
+        hasher.finish()
+    }
+
     pub fn fmt_with_name_and_module_env(
         &self,
         f: &mut fmt::Formatter,
-        name: &str,
+        name: &Option<Ustr>,
         prefix: &str,
         env: &ModuleEnv<'_>,
     ) -> fmt::Result {
-        // function.ty_scheme.format_quantifiers(f)?; write!(f, ". ")?;
         if let Some(doc) = &self.doc {
             writeln!(f, "{prefix}/// {doc}")?;
         }
+        let name = name.as_ref().map_or("<anonymous>", |n| n.as_str());
         write!(f, "{prefix}fn {name}")?;
         let mut quantifiers = self
             .ty_scheme
@@ -103,12 +115,33 @@ impl FunctionDefinition {
         if quantifiers.peek().is_some() {
             write!(f, "<{}>", quantifiers.collect::<Vec<_>>().join(", "))?;
         }
-        write!(f, "{}", self.ty_scheme.ty.format_with(env))?;
+        fmt_fn_type_with_arg_names(&self.ty_scheme.ty, &self.arg_names, f, env)?;
         if !self.ty_scheme.is_just_type_and_effects() {
-            writeln!(f, " {}", self.ty_scheme.display_constraints_rust_style(env),)
+            write!(f, " {}", self.ty_scheme.display_constraints_rust_style(env),)
         } else {
-            writeln!(f)
+            Ok(())
         }
+    }
+}
+
+impl TypeLike for FunctionDefinition {
+    fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+        self.ty_scheme.visit(visitor);
+    }
+
+    fn map(&self, f: &mut impl TypeMapper) -> Self {
+        FunctionDefinition {
+            ty_scheme: self.ty_scheme.map(f),
+            arg_names: self.arg_names.clone(),
+            doc: self.doc.clone(),
+        }
+    }
+}
+
+impl FormatWith<ModuleEnv<'_>> for (&FunctionDefinition, Option<Ustr>) {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+        self.0.fmt_with_name_and_module_env(f, &self.1, "", env)?;
+        Ok(())
     }
 }
 
@@ -199,22 +232,32 @@ impl Eq for FunctionRef {}
 /// A function holding user-defined code.
 /// If captured is non-empty it is a closure, and these will be passed
 /// as extra first arguments to the environment of the function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
 pub struct ScriptFunction {
     pub code: ir::Node,
+    pub arg_names: Vec<Ustr>,
     // pub monomorphised: HashMap<Vec<Type>, ir::Node>,
-}
-impl ScriptFunction {
-    pub fn new(code: ir::Node) -> Self {
-        ScriptFunction { code }
-    }
 }
 
 impl Callable for ScriptFunction {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
+        let arg_count = args.len();
         let old_frame_base = ctx.frame_base;
         ctx.frame_base = ctx.environment.len();
+        #[cfg(debug_assertions)]
+        if args.len() != self.arg_names.len() {
+            eprintln!(
+                "BUG\ngot {} args: {:?}\nexpected {} from names: {:?}",
+                args.len(),
+                args,
+                self.arg_names.len(),
+                self.arg_names
+            );
+        }
+        assert_eq!(args.len(), self.arg_names.len());
         ctx.environment.extend(args);
+        #[cfg(debug_assertions)]
+        ctx.environment_names.extend(self.arg_names.iter().copied());
         ctx.recursion += 1;
         if ctx.recursion >= ctx.recursion_limit {
             return Err(RuntimeError::RecursionLimitExceeded {
@@ -223,7 +266,10 @@ impl Callable for ScriptFunction {
         }
         let ret = self.code.eval_with_ctx(ctx)?;
         ctx.recursion -= 1;
+        assert_eq!(ctx.environment.len(), ctx.frame_base + arg_count);
         ctx.environment.truncate(ctx.frame_base);
+        #[cfg(debug_assertions)]
+        ctx.environment_names.truncate(ctx.frame_base);
         ctx.frame_base = old_frame_base;
         Ok(ret)
     }
@@ -244,14 +290,18 @@ impl Callable for ScriptFunction {
     }
 }
 
-pub struct Closure {
-    pub function: FunctionRef,
-    pub captured: Vec<Value>,
-}
-impl Closure {
-    pub fn new(function: FunctionRef, captured: Vec<Value>) -> Self {
-        Closure { function, captured }
+impl PartialEq for Box<ScriptFunction> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.as_ref(), other.as_ref())
     }
+}
+
+impl Eq for Box<ScriptFunction> {}
+
+#[derive(new)]
+pub struct Closure {
+    pub function: FunctionValue,
+    pub captured: Vec<Value>,
 }
 impl Callable for Closure {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
@@ -262,7 +312,7 @@ impl Callable for Closure {
             .map(ValOrMut::Val)
             .chain(args)
             .collect();
-        self.function.get().borrow().call(args, ctx)
+        ctx.call_function_value(&self.function, args)
     }
 
     fn format_ind(
@@ -275,7 +325,7 @@ impl Callable for Closure {
         let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         writeln!(f, "{indent_str}closure of")?;
         self.function
-            .get()
+            .function
             .borrow()
             .format_ind(f, env, spacing, indent + 1)?;
         writeln!(f, "{indent_str}with captured [")?;
@@ -308,14 +358,14 @@ pub struct NatMut<T> {
 pub trait ArgExtractor {
     type Output<'a>;
     const MUTABLE: bool;
-    fn extract(arg: ValOrMut, ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError>;
+    fn extract<'m>(arg: ValOrMut, ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError>;
     fn default_ty() -> Type;
 }
 
 impl ArgExtractor for Value {
     type Output<'a> = Value;
     const MUTABLE: bool = false;
-    fn extract(arg: ValOrMut, _ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+    fn extract<'m>(arg: ValOrMut, _ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError> {
         Ok(arg.into_val().unwrap())
     }
     fn default_ty() -> Type {
@@ -326,7 +376,7 @@ impl ArgExtractor for Value {
 impl ArgExtractor for &'_ mut Value {
     type Output<'a> = &'a mut Value;
     const MUTABLE: bool = true;
-    fn extract(arg: ValOrMut, ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+    fn extract<'m>(arg: ValOrMut, ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError> {
         arg.as_place().target_mut(ctx)
     }
     fn default_ty() -> Type {
@@ -337,13 +387,13 @@ impl ArgExtractor for &'_ mut Value {
 impl<T: Clone + 'static> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
     const MUTABLE: bool = false;
-    fn extract(arg: ValOrMut, ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+    fn extract<'m>(arg: ValOrMut, ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError> {
         let arg2 = arg.clone();
         Ok(arg.into_primitive::<T>().unwrap_or_else(|| {
             panic!(
                 "Expected a primitive of type {}, found {}",
                 std::any::type_name::<T>(),
-                FormatWith::new(&arg2, ctx)
+                arg2.format_with(ctx)
             )
         }))
     }
@@ -355,7 +405,7 @@ impl<T: Clone + 'static> ArgExtractor for NatVal<T> {
 impl<T: Clone + 'static> ArgExtractor for NatMut<T> {
     type Output<'a> = &'a mut T;
     const MUTABLE: bool = true;
-    fn extract(arg: ValOrMut, ctx: &mut CallCtx) -> Result<Self::Output<'_>, RuntimeError> {
+    fn extract<'m>(arg: ValOrMut, ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError> {
         Ok(arg.as_mut_primitive::<T>(ctx)?.unwrap())
     }
     fn default_ty() -> Type {

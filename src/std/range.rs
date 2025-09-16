@@ -8,6 +8,7 @@
 //
 use std::fmt;
 
+use derive_new::new;
 use ustr::ustr;
 
 use crate::{
@@ -24,17 +25,13 @@ use super::{
     option::{none, option_type, some},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, new)]
 pub struct Range {
     start: isize,
     end: isize,
 }
 
 impl Range {
-    pub fn new(start: isize, end: isize) -> Self {
-        Self { start, end }
-    }
-
     pub fn iter(self) -> RangeIterator {
         RangeIterator {
             range: self,
@@ -133,7 +130,7 @@ pub fn add_to_module(to: &mut Module) {
     to.type_aliases.set("range_iterator", range_iterator_type());
 
     // Functions
-    to.functions.insert(
+    to.add_named_function(
         ustr("range"),
         BinaryNativeFnNNN::description_with_default_ty(
             Range::new,
@@ -142,15 +139,15 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("range_iter"),
         UnaryNativeFnNN::description_with_default_ty(Range::iter, ["range"], None, no_effects()),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("range_len"),
         UnaryNativeFnNN::description_with_default_ty(Range::len, ["range"], None, no_effects()),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("range_iterator_new"),
         BinaryNativeFnNNN::description_with_default_ty(
             RangeIterator::new,
@@ -159,7 +156,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("range_iterator_next"),
         RangeIterator::next_value_descr(),
     );

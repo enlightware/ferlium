@@ -6,15 +6,24 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+//! Use directives
 
-#[macro_use]
-mod common;
-mod algorithm;
-mod complex;
-mod effects;
-mod math;
-mod regression;
-mod simple;
-mod std;
-mod r#type;
-mod type_defs;
+use derive_new::new;
+use ustr::Ustr;
+
+#[derive(Debug, Clone, new)]
+pub struct UseSome {
+    pub module: Ustr,
+    pub symbols: Vec<Ustr>,
+}
+
+/// A use directive
+#[derive(Debug, Clone)]
+pub enum Use {
+    /// Use all symbols from a module
+    All(Ustr),
+    /// Use only some symbols from a module
+    Some(UseSome),
+}
+
+pub type Uses = Vec<Use>;

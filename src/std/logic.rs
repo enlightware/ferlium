@@ -34,7 +34,7 @@ pub fn add_to_module(to: &mut Module) {
     to.type_aliases.set("bool", bool_type());
 
     // Operations on booleans
-    to.functions.insert(
+    to.add_named_function(
         ustr("bitor"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::BitOr::bitor as fn(bool, bool) -> bool,
@@ -43,7 +43,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("bitand"),
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::BitAnd::bitand as fn(bool, bool) -> bool,
@@ -52,7 +52,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("not"),
         UnaryNativeFnNN::description_with_default_ty(
             std::ops::Not::not as fn(bool) -> bool,
@@ -63,7 +63,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // Generic equalities
-    to.functions.insert(
+    to.add_named_function(
         ustr("eq"),
         BinaryNativeFnVVN::description_with_default_ty(
             |a: Value, b: Value| a == b,
@@ -72,7 +72,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("ne"),
         BinaryNativeFnVVN::description_with_default_ty(
             |a: Value, b: Value| a != b,

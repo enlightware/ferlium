@@ -7,12 +7,14 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    function::Callable,
+    format::FormatWith,
+    module::{FunctionId, ModuleRc, TraitImplId},
     r#trait::TraitRef,
     r#type::TypeKind,
     type_like::{CastableToType, TypeLike},
     Location,
 };
+use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexMap;
 use ustr::Ustr;
@@ -21,22 +23,18 @@ use crate::{
     containers::{b, SVec2, B},
     dictionary_passing::DictionariesReq,
     effects::EffType,
-    function::FunctionRef,
-    module::{FmtWithModuleEnv, ModuleEnv},
+    module::ModuleEnv,
     r#type::{FnType, Type, TypeVar},
     type_inference::InstSubstitution,
     value::Value,
 };
 
 /// Function instantiation data that are needed to fill dictionaries
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
 pub struct FnInstData {
     pub dicts_req: DictionariesReq,
 }
 impl FnInstData {
-    pub fn new(dicts_req: DictionariesReq) -> Self {
-        Self { dicts_req }
-    }
     pub fn none() -> Self {
         Self { dicts_req: vec![] }
     }
@@ -84,16 +82,10 @@ pub(crate) type UnboundTyVars = IndexMap<TypeVar, UnboundTyCtxs>;
 #[derive(Debug, Clone)]
 pub struct Immediate {
     pub value: Value,
-    pub inst_data: FnInstData,
-    pub substitute_in_value_fn: bool,
 }
 impl Immediate {
     pub fn new(value: Value) -> B<Self> {
-        b(Self {
-            value,
-            inst_data: FnInstData::none(),
-            substitute_in_value_fn: true,
-        })
+        b(Self { value })
     }
 }
 
@@ -113,7 +105,7 @@ pub struct Application {
 
 #[derive(Debug, Clone)]
 pub struct StaticApplication {
-    pub function: FunctionRef,
+    pub function: FunctionId,
     pub function_path: Ustr,
     pub function_span: Location,
     pub arguments: Vec<Node>,
@@ -145,13 +137,15 @@ impl TraitFnApplication {
 
 #[derive(Debug, Clone)]
 pub struct EnvStore {
-    pub node: Node,
+    pub value: Node,
+    pub index: usize,
+    pub name: Ustr,
     pub name_span: Location,
     pub ty_span: Option<(Location, bool)>,
 }
 impl EnvStore {
     pub fn instantiate(&mut self, subst: &InstSubstitution) {
-        self.node.instantiate(subst);
+        self.value.instantiate(subst);
     }
 }
 
@@ -174,6 +168,19 @@ pub struct Case {
     pub default: Node,
 }
 
+#[derive(Debug, Clone)]
+pub struct GetFunction {
+    pub function: FunctionId,
+    pub function_path: Ustr,
+    pub function_span: Location,
+    pub inst_data: FnInstData,
+}
+
+#[derive(Debug, Clone)]
+pub struct GetDictionary {
+    pub dictionary: TraitImplId,
+}
+
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind {
@@ -183,6 +190,8 @@ pub enum NodeKind {
     StaticApply(B<StaticApplication>),
     /// Note: this should only exist transiently in the IR and never be executed
     TraitFnApply(B<TraitFnApplication>),
+    GetFunction(B<GetFunction>),
+    GetDictionary(GetDictionary),
     EnvStore(B<EnvStore>),
     EnvLoad(B<EnvLoad>),
     Block(B<SVec2<Node>>),
@@ -206,7 +215,7 @@ pub enum NodeKind {
 }
 
 /// A node of the expression-based execution tree
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
 pub struct Node {
     /// The actual content of this node
     pub kind: NodeKind,
@@ -219,15 +228,77 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(kind: NodeKind, ty: Type, effects: EffType, span: Location) -> Self {
-        Self {
-            kind,
-            ty,
-            effects,
-            span,
+    /// Recursively finalize any pending function values contained in this node.
+    pub fn finalize_pending_values(&mut self, module: &ModuleRc) {
+        use NodeKind::*;
+        match &mut self.kind {
+            Immediate(immediate) => immediate.value.finalize_pending(module),
+            BuildClosure(build_closure) => build_closure.function.finalize_pending_values(module),
+            Apply(app) => {
+                app.function.finalize_pending_values(module);
+                for arg in app.arguments.iter_mut() {
+                    arg.finalize_pending_values(module);
+                }
+            }
+            StaticApply(app) => {
+                for arg in app.arguments.iter_mut() {
+                    arg.finalize_pending_values(module);
+                }
+            }
+            TraitFnApply(app) => {
+                for arg in app.arguments.iter_mut() {
+                    arg.finalize_pending_values(module);
+                }
+            }
+            GetFunction(_) => {}
+            GetDictionary(_) => {}
+            EnvStore(node) => node.value.finalize_pending_values(module),
+            EnvLoad(_) => {}
+            Block(nodes) => {
+                for n in nodes.iter_mut() {
+                    n.finalize_pending_values(module);
+                }
+            }
+            Assign(assign) => {
+                assign.place.finalize_pending_values(module);
+                assign.value.finalize_pending_values(module);
+            }
+            Tuple(nodes) => {
+                for n in nodes.iter_mut() {
+                    n.finalize_pending_values(module);
+                }
+            }
+            Project(p) => p.0.finalize_pending_values(module),
+            Record(nodes) => {
+                for n in nodes.iter_mut() {
+                    n.finalize_pending_values(module);
+                }
+            }
+            FieldAccess(acc) => acc.0.finalize_pending_values(module),
+            ProjectAt(p) => p.0.finalize_pending_values(module),
+            Variant(v) => v.1.finalize_pending_values(module),
+            ExtractTag(n) => n.finalize_pending_values(module),
+            Array(nodes) => {
+                for n in nodes.iter_mut() {
+                    n.finalize_pending_values(module);
+                }
+            }
+            Index(array, index) => {
+                array.finalize_pending_values(module);
+                index.finalize_pending_values(module);
+            }
+            Case(case) => {
+                case.value.finalize_pending_values(module);
+                for (alt, node) in case.alternatives.iter_mut() {
+                    alt.finalize_pending(module);
+                    node.finalize_pending_values(module);
+                }
+                case.default.finalize_pending_values(module);
+            }
+            Loop(body) => body.finalize_pending_values(module),
+            SoftBreak => {}
         }
     }
-
     pub fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -268,25 +339,8 @@ impl Node {
             }
             StaticApply(app) => {
                 writeln!(f, "{indent_str}static apply")?;
-                let function = app.function.get();
-                let name = env.function_name(&function);
-                match function.try_borrow() {
-                    Ok(function) => {
-                        let ty = app.ty.format_with(env);
-                        match name {
-                            Some(name) => writeln!(f, "{indent_str}⎸ {name}: {ty}")?,
-                            None => {
-                                let ptr: *const Box<dyn Callable> = &*function;
-                                writeln!(
-                                    f,
-                                    "{indent_str}⎸ impl {} fn at {:p}: {ty}",
-                                    app.function_path, ptr
-                                )?
-                            }
-                        }
-                    }
-                    Err(_) => writeln!(f, "{indent_str}⎸ self")?,
-                }
+                let ty = app.ty.format_with(env);
+                writeln!(f, "{indent_str}  {}: {ty}", app.function.format_with(env))?;
                 if app.arguments.is_empty() {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
@@ -300,7 +354,7 @@ impl Node {
             TraitFnApply(app) => {
                 let fn_name = app.trait_ref.functions[app.function_index].0;
                 let trait_name = app.trait_ref.name;
-                write!(
+                writeln!(
                     f,
                     "{indent_str}trait fn apply {fn_name} (from {trait_name})"
                 )?;
@@ -314,9 +368,24 @@ impl Node {
                     writeln!(f, "{indent_str})")?;
                 }
             }
+            GetFunction(get_fn) => {
+                writeln!(f, "{indent_str}get {}", get_fn.function.format_with(env))?;
+            }
+            GetDictionary(get_dict) => {
+                writeln!(
+                    f,
+                    "{indent_str}get {}",
+                    get_dict.dictionary.format_with(env)
+                )?;
+            }
             EnvStore(node) => {
-                writeln!(f, "{indent_str}store")?;
-                node.node.format_ind(f, env, spacing, indent + 1)?;
+                writeln!(
+                    f,
+                    "{indent_str}store {} at {}",
+                    node.value.ty.format_with(env),
+                    node.index
+                )?;
+                node.value.format_ind(f, env, spacing, indent + 1)?;
             }
             EnvLoad(node) => writeln!(f, "{indent_str}load {}", node.index)?,
             Block(nodes) => {
@@ -458,8 +527,14 @@ impl Node {
                     }
                 }
             }
+            GetFunction(_) => {
+                // GetFunction nodes don't contain child expressions with types
+            }
+            GetDictionary(_) => {
+                // GetDictionary nodes don't contain child expressions with types
+            }
             EnvStore(node) => {
-                if let Some(ty) = node.node.type_at(pos) {
+                if let Some(ty) = node.value.type_at(pos) {
                     return Some(ty);
                 }
             }
@@ -592,7 +667,13 @@ impl Node {
                     arg.unbound_ty_vars(result, ignore);
                 }
             }
-            EnvStore(node) => node.node.unbound_ty_vars(result, ignore),
+            GetFunction(_) => {
+                // no need to look into the value's type as it is already in this node's type
+            }
+            GetDictionary(_) => {
+                // no need to look into the dictionary's type as it is already in this node's type
+            }
+            EnvStore(node) => node.value.unbound_ty_vars(result, ignore),
             EnvLoad(_) => {}
             Block(nodes) => nodes
                 .iter()
@@ -655,11 +736,7 @@ impl Node {
         use NodeKind::*;
         match &mut self.kind {
             Immediate(immediate) => {
-                // If the value is a top-level function, do not instantiate in its code.
-                if immediate.substitute_in_value_fn {
-                    immediate.value.instantiate(subst);
-                }
-                immediate.inst_data.instantiate(subst);
+                immediate.value.instantiate(subst);
             }
             BuildClosure(build_closure) => {
                 // Note: at the moment build closure is used only for dictionary
@@ -684,6 +761,12 @@ impl Node {
                     .collect();
                 app.inst_data.instantiate(subst);
                 instantiate_nodes(&mut app.arguments, subst);
+            }
+            GetFunction(get_fn) => {
+                get_fn.inst_data.instantiate(subst);
+            }
+            GetDictionary(_) => {
+                // nothing to instantiate
             }
             EnvStore(node) => node.instantiate(subst),
             EnvLoad(_) => {}
@@ -720,12 +803,8 @@ impl Node {
     }
 }
 
-impl FmtWithModuleEnv for Node {
-    fn fmt_with_module_env(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
+impl FormatWith<ModuleEnv<'_>> for Node {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         self.format_ind(f, env, 0, 0)
     }
 }

@@ -137,7 +137,7 @@ pub fn string_type() -> Type {
 pub fn add_to_module(to: &mut Module) {
     to.type_aliases.set("string", string_type());
 
-    to.functions.insert(
+    to.add_named_function(
         ustr("to_string"),
         UnaryNativeFnVN::description_with_default_ty(
             String::any_to_string,
@@ -146,7 +146,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("string_push_str"),
         BinaryNativeFnMNN::description_with_default_ty(
             String::push_str,
@@ -155,7 +155,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("string_concat"),
         BinaryNativeFnNNN::description_with_default_ty(
             |a: String, b: String| String::concat(&a, &b),
@@ -164,7 +164,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("string_len"),
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.len() as isize,
@@ -173,7 +173,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("string_is_empty"),
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.is_empty() as isize,
@@ -182,7 +182,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("string_replace"),
         TernaryNativeFnNNNN::description_with_default_ty(
             |s: String, from: String, to: String| {
@@ -195,7 +195,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.functions.insert(
+    to.add_named_function(
         ustr("string_sub_string"),
         TernaryNativeFnNNNN::description_with_default_ty(
             |s: String, start: isize, end: isize| s.sub_string(start, end),

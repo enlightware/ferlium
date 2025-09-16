@@ -31,7 +31,7 @@ fn log(value: Value) {
 }
 
 pub fn add_to_module(to: &mut Module) {
-    to.functions.insert(
+    to.add_named_function(
         ustr("log"),
         UnaryNativeFnVN::description_with_in_ty(
             log,

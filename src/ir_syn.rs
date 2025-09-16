@@ -1,8 +1,16 @@
+// Copyright 2025 Enlightware GmbH
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+//
 use crate::{
     containers::{b, IntoSVec2},
     effects::EffType,
-    function::FunctionRef,
     ir::{self, Node},
+    module::{FunctionId, TraitImplId},
     r#type::FnType,
     std::math::int_type,
     value::{NativeValue, Value},
@@ -22,7 +30,7 @@ pub fn immediate(value: Value) -> NodeKind {
 }
 
 pub fn static_apply(
-    function: FunctionRef,
+    function: FunctionId,
     ty: FnType,
     span: Location,
     arguments: Vec<Node>,
@@ -38,6 +46,10 @@ pub fn static_apply(
         ty,
         inst_data: ir::FnInstData::none(),
     }))
+}
+
+pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
+    K::GetDictionary(ir::GetDictionary { dictionary })
 }
 
 pub fn load(index: usize) -> NodeKind {

@@ -6,15 +6,37 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-mod common;
 
 use test_log::test;
 
-use common::run;
+use indoc::indoc;
+
+use crate::common::int;
+
+use super::common::run;
 use ferlium::value::Value;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn factorial() {
+    assert_eq!(
+        run(indoc! { r#"
+            fn factorial(n) {
+                if n <= 1 {
+                    1
+                } else {
+                    n * factorial(n - 1)
+                }
+            }
+
+            factorial(5)
+            "# }),
+        int(120),
+    );
+}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -28,7 +50,7 @@ fn quicksort() {
             }
 
             fn quicksort(a, lo, hi) {
-                if lo >= hi || lo < 0 {
+                if lo >= hi or lo < 0 {
                     ()
                 } else {
                     let p = partition(a, lo, hi);
@@ -55,8 +77,7 @@ fn quicksort() {
 
             let mut a = [5, 4, 11, 3, 2, 1, 0, 7];
             quicksort(a, 0, array_len(a) - 1);
-            a"# }
-        ),
+            a"# }),
         int_a![0, 1, 2, 3, 4, 5, 7, 11],
     );
 }

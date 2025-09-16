@@ -7,6 +7,7 @@
 		"caml",
 		"Castable",
 		"chumsky",
+		"dependee",
 		"deque",
 		"Derivator",
 		"derivators",
@@ -24,6 +25,7 @@
 		"itertools",
 		"lalrpop",
 		"missings",
+		"monomorphised",
 		"multiunzip",
 		"newtype",
 		"nonassoc",
@@ -34,6 +36,7 @@
 		"pscript",
 		"readline",
 		"reborrow",
+		"Relinker",
 		"repr",
 		"rfind",
 		"rsplit",
@@ -48,6 +51,7 @@
 		"svec",
 		"unbounds",
 		"unioned",
+		"unstables",
 		"usize"
 	],
 	"rust-analyzer.linkedProjects": [

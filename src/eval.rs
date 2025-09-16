@@ -6,20 +6,23 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{collections::VecDeque, fmt::Display};
+use std::{collections::VecDeque, mem, rc::Rc};
 
+use derive_new::new;
 use enum_as_inner::EnumAsInner;
+#[cfg(debug_assertions)]
+use ustr::{ustr, Ustr};
 
 use crate::{
     containers::{b, SVec2},
     error::RuntimeError,
     format::{write_with_separator, FormatWith},
-    function::Closure,
+    function::{Closure, FunctionRc},
     ir::{Node, NodeKind},
-    module::{FmtWithModuleEnv, ModuleEnv},
+    module::{FunctionId, ImportFunctionTarget, ModuleEnv, ModuleRc, TraitImplId},
     r#type::FnArgType,
     std::array,
-    value::{NativeValue, Value},
+    value::{FunctionValue, NativeValue, Value},
 };
 
 /// Either a value or a unique mutable reference to a value.
@@ -44,10 +47,10 @@ impl ValOrMut {
         }
     }
 
-    pub fn as_mut_primitive<T: 'static>(
+    pub fn as_mut_primitive<'m, T: 'static>(
         self,
-        ctx: &mut EvalCtx,
-    ) -> Result<Option<&mut T>, RuntimeError> {
+        ctx: &'m mut EvalCtx,
+    ) -> Result<Option<&'m mut T>, RuntimeError> {
         Ok(match self {
             ValOrMut::Val(_) => None,
             ValOrMut::Mut(place) => place.target_mut(ctx)?.as_primitive_ty_mut::<T>(),
@@ -69,13 +72,23 @@ impl ValOrMut {
     }
 }
 
-impl Display for FormatWithEvalCtx<'_, ValOrMut> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.value {
+impl FormatWith<EvalCtx> for ValOrMut {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx) -> std::fmt::Result {
+        match self {
             ValOrMut::Val(value) => write!(f, "value {value}"),
-            ValOrMut::Mut(place) => write!(f, "mut. ref. {}", FormatWith::new(place, self.data)),
+            ValOrMut::Mut(place) => {
+                write!(f, "mut. ref. {}", place.format_with(data))
+            }
         }
     }
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, new)]
+struct StackEntry {
+    fn_name: String,
+    mod_name: Ustr,
+    frame_base: usize,
 }
 
 /// Along with the Rust native stack, corresponds to the Zinc Abstract Machine of Caml language family
@@ -91,24 +104,217 @@ pub struct EvalCtx {
     pub recursion_limit: usize,
     /// a flag to break the evaluation
     pub break_loop: bool,
+    /// reference to the current module for import slot resolution
+    pub module: ModuleRc,
+    #[cfg(debug_assertions)]
+    stack_trace: Vec<StackEntry>,
+    #[cfg(debug_assertions)]
+    pub environment_names: Vec<Ustr>,
 }
 
 impl EvalCtx {
     const DEFAULT_RECURSION_LIMIT: usize = 100;
 
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> EvalCtx {
+    pub fn new(module: ModuleRc) -> EvalCtx {
         EvalCtx {
             environment: Vec::new(),
             frame_base: 0,
             recursion: 0,
             recursion_limit: Self::DEFAULT_RECURSION_LIMIT,
             break_loop: false,
+            module,
+            #[cfg(debug_assertions)]
+            stack_trace: Vec::new(),
+            #[cfg(debug_assertions)]
+            environment_names: Vec::new(),
         }
     }
-}
 
-type FormatWithEvalCtx<'a, T> = FormatWith<'a, T, EvalCtx>;
+    pub fn with_environment(module: ModuleRc, environment: Vec<ValOrMut>) -> EvalCtx {
+        #[cfg(debug_assertions)]
+        let environment_names = vec![ustr("<unknown>"); environment.len()];
+        EvalCtx {
+            environment,
+            frame_base: 0,
+            recursion: 0,
+            recursion_limit: Self::DEFAULT_RECURSION_LIMIT,
+            break_loop: false,
+            module,
+            #[cfg(debug_assertions)]
+            stack_trace: Vec::new(),
+            #[cfg(debug_assertions)]
+            environment_names,
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn print_environment(&self) {
+        assert_eq!(self.environment.len(), self.environment_names.len());
+        eprintln!(
+            "frame base: {}, fn stack depth: {}",
+            self.frame_base, self.recursion
+        );
+        eprintln!("Environment:");
+        let mut i = self.environment_names.len();
+        for entry in self.stack_trace.iter().rev() {
+            while i > entry.frame_base {
+                i -= 1;
+                eprintln!("  {}", self.environment_names[i]);
+            }
+            eprintln!("- {}", entry.fn_name);
+        }
+        while i > 0 {
+            i -= 1;
+            eprintln!("  {}", self.environment_names[i]);
+        }
+    }
+
+    /// Get the function code for a FunctionId at runtime using module.
+    pub fn get_function(&self, function: FunctionId) -> (FunctionRc, ModuleRc) {
+        use FunctionId::*;
+        match &function {
+            Local(id) => (
+                self.module.functions[id.as_index()].function.code.clone(),
+                self.module.clone(),
+            ),
+            Import(id) => {
+                let slot = &self.module.import_fn_slots[id.as_index()];
+                let resolved = slot.resolved.borrow();
+                let resolved = resolved.as_ref().unwrap_or_else(|| {
+                    panic!("Function import slot #{id} not resolved.\nSlot data: {slot:?}")
+                });
+                (resolved.0.clone(), resolved.1.clone())
+            }
+        }
+    }
+
+    fn get_last_module_name(&self) -> Ustr {
+        self.stack_trace
+            .last()
+            .map(|entry| entry.mod_name)
+            .unwrap_or(ustr("<current>"))
+    }
+
+    fn get_stack_entry_from_fn_and_mod(
+        &self,
+        function: &FunctionRc,
+        module: &ModuleRc,
+    ) -> StackEntry {
+        let fn_name = format!("value function {:p}::{:p}", module, function);
+        StackEntry::new(fn_name, ustr("<unknown>"), self.environment.len())
+    }
+
+    fn get_stack_entry_from_function_id(&self, function: FunctionId) -> StackEntry {
+        use FunctionId::*;
+        let module_name;
+        let fn_name = match &function {
+            Local(id) => {
+                let function = &self.module.functions[id.as_index()];
+                module_name = self.get_last_module_name();
+                format!(
+                    "{module_name}::{} (#{})",
+                    function.name.map_or("<anonymous>", |s| s.as_str()),
+                    id
+                )
+            }
+            Import(id) => {
+                let slot = &self.module.import_fn_slots[id.as_index()];
+                module_name = slot.module_name;
+                use ImportFunctionTarget::*;
+                match &slot.target {
+                    TraitImplMethod { key, index } => {
+                        let trait_ref = key.trait_ref();
+                        let fn_name = trait_ref.functions[*index as usize].0;
+                        format!(
+                            "{module_name}::impl {} for <…>::{}",
+                            trait_ref.name, fn_name
+                        )
+                    }
+                    NamedFunction(fn_name) => {
+                        format!("{module_name}::{fn_name}")
+                    }
+                }
+            }
+        };
+        StackEntry::new(fn_name, module_name, self.environment.len())
+    }
+
+    /// Get the dictionary value for a ImplId at runtime using module.
+    pub fn get_dictionary(&self, dictionary: TraitImplId) -> Value {
+        use TraitImplId::*;
+        match &dictionary {
+            Local(id) => self.module.impls.data[id.as_index()]
+                .dictionary_value
+                .borrow()
+                .clone(),
+            Import(id) => {
+                let slot = &self.module.import_impl_slots[id.as_index()];
+                slot.resolved
+                    .borrow()
+                    .as_ref()
+                    .unwrap_or_else(|| {
+                        panic!("Impl import slot #{id} not resolved.\nSlot data: {slot:?}")
+                    })
+                    .0
+                    .clone()
+            }
+        }
+    }
+
+    /// Call a function value along containing its module context.
+    pub fn call_function_value(
+        &mut self,
+        function_value: &FunctionValue,
+        arguments: Vec<ValOrMut>,
+    ) -> EvalResult {
+        let function = &function_value.function;
+        let module = function_value.upgrade_module();
+        if cfg!(debug_assertions) {
+            self.stack_trace
+                .push(self.get_stack_entry_from_fn_and_mod(function, &module));
+        }
+        let result = self.call_function(function, module, arguments)?;
+        if cfg!(debug_assertions) {
+            self.stack_trace.pop();
+        }
+        Ok(result)
+    }
+
+    /// Call a function by its id, this will look up the function and its module.
+    pub fn call_function_id(
+        &mut self,
+        function_id: FunctionId,
+        arguments: Vec<ValOrMut>,
+    ) -> EvalResult {
+        let (function, module) = self.get_function(function_id);
+        if cfg!(debug_assertions) {
+            self.stack_trace
+                .push(self.get_stack_entry_from_function_id(function_id));
+        }
+        let result = self.call_function(&function, module, arguments)?;
+        if cfg!(debug_assertions) {
+            self.stack_trace.pop();
+        }
+        Ok(result)
+    }
+
+    /// Call a function along with its correct module context.
+    fn call_function(
+        &mut self,
+        function: &FunctionRc,
+        mut module: ModuleRc,
+        arguments: Vec<ValOrMut>,
+    ) -> EvalResult {
+        // Use the new module for the duration of the function call.
+        mem::swap(&mut self.module, &mut module);
+        // Call the function.
+        let result = function.borrow().call(arguments, self);
+        // Restore the previous module.
+        mem::swap(&mut self.module, &mut module);
+        // Return the call result.
+        result
+    }
+}
 
 /// A place in the environment (absolute position), with a path to a compound value
 /// This behaves like a global address to a Value given our Mutable Value Semantics.
@@ -193,10 +399,10 @@ impl Place {
     }
 }
 
-impl Display for FormatWithEvalCtx<'_, Place> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Place { target, path } = self.value;
-        let ctx = self.data;
+impl FormatWith<EvalCtx> for Place {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx) -> std::fmt::Result {
+        let Place { target, path } = self;
+        let ctx = data;
         let relative_index = *target as isize - ctx.frame_base as isize;
         write!(f, "@{relative_index}")?;
         if !path.is_empty() {
@@ -215,8 +421,8 @@ pub type EvalResult = Result<Value, RuntimeError>;
 
 impl Node {
     /// Evaluate this node and return the result.
-    pub fn eval(&self) -> EvalResult {
-        let mut ctx = EvalCtx::new();
+    pub fn eval(&self, module: ModuleRc) -> EvalResult {
+        let mut ctx = EvalCtx::new(module);
         self.eval_with_ctx(&mut ctx)
     }
 
@@ -228,8 +434,12 @@ impl Node {
             BuildClosure(build_closure) => {
                 let captured = eval_nodes(&build_closure.captures, ctx)?;
                 let function_value = build_closure.function.eval_with_ctx(ctx)?;
-                let function = function_value.into_function().unwrap().0;
-                Ok(Value::function(b(Closure::new(function, captured))))
+                let function_value = function_value.into_function().unwrap().function;
+                let function_value = FunctionValue::new(function_value, Rc::downgrade(&ctx.module));
+                Ok(Value::function(
+                    b(Closure::new(function_value, captured)),
+                    Rc::downgrade(&ctx.module),
+                ))
             }
             Apply(app) => {
                 let args_ty = {
@@ -241,25 +451,31 @@ impl Node {
                         .args
                         .clone()
                 };
-                let function_value = app.function.eval_with_ctx(ctx)?;
-                let function = function_value.as_function().unwrap().0.get();
-                let function = function.borrow();
                 let arguments = eval_args(&app.arguments, &args_ty, ctx)?;
-                function.call(arguments, ctx)
+                let function_value = app.function.eval_with_ctx(ctx)?;
+                let function_value = function_value.as_function().unwrap();
+                ctx.call_function_value(&function_value, arguments)
             }
             StaticApply(app) => {
-                let args_ty = &app.ty.args;
-                let function = app.function.get();
-                let function = function.borrow();
-                let arguments = eval_args(&app.arguments, args_ty, ctx)?;
-                function.call(arguments, ctx)
+                let arguments = eval_args(&app.arguments, &app.ty.args, ctx)?;
+                ctx.call_function_id(app.function, arguments)
             }
             TraitFnApply(_) => {
                 panic!("Trait function application should not be executed, but transformed to StaticApply");
             }
+            GetFunction(get_fn) => {
+                let (function, module) = ctx.get_function(get_fn.function);
+                Ok(Value::function_rc(function, Rc::downgrade(&module)))
+            }
+            GetDictionary(get_dict) => {
+                let value = ctx.get_dictionary(get_dict.dictionary);
+                Ok(value)
+            }
             EnvStore(node) => {
-                let value = node.node.eval_with_ctx(ctx)?;
+                let value = node.value.eval_with_ctx(ctx)?;
                 ctx.environment.push(ValOrMut::Val(value));
+                #[cfg(debug_assertions)]
+                ctx.environment_names.push(node.name);
                 Ok(Value::unit())
             }
             EnvLoad(node) => {
@@ -273,6 +489,8 @@ impl Node {
                     .try_fold(None, |_, node| Ok(Some(node.eval_with_ctx(ctx)?)))?
                     .unwrap_or(Value::unit());
                 ctx.environment.truncate(env_size);
+                #[cfg(debug_assertions)]
+                ctx.environment_names.truncate(env_size);
                 Ok(return_value)
             }
             Assign(assignment) => {
