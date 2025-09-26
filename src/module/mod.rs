@@ -57,8 +57,7 @@ use crate::{
 // Module itself
 
 /// Immutable module bundle containing all compiled module data
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Module {
     pub import_fn_slots: Vec<ImportFunctionSlot>,
     pub import_impl_slots: Vec<ImportImplSlot>,

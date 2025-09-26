@@ -82,19 +82,15 @@ impl<'a> TraitSolver<'a> {
     /// Only public implementations from other modules are considered.
     pub fn has_concrete_impl(&self, key: &ConcreteTraitImplKey) -> bool {
         self.impls.concrete_key_to_id.contains_key(key)
-            || self
-                .others
-                .modules
-                .iter()
-                .any(|(_, m)| {
-                    let id = m.impls.concrete_key_to_id.get(key);
-                    if let Some(id) = id {
-                        let imp = &m.impls.data[id.as_index()];
-                        imp.public
-                    } else {
-                        false
-                    }
-                })
+            || self.others.modules.iter().any(|(_, m)| {
+                let id = m.impls.concrete_key_to_id.get(key);
+                if let Some(id) = id {
+                    let imp = &m.impls.data[id.as_index()];
+                    imp.public
+                } else {
+                    false
+                }
+            })
     }
 
     /// Get a concrete trait implementation by its key, without performing any solving.

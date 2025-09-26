@@ -166,8 +166,7 @@ pub fn emit_module(
         let trait_ctx = EmitTraitCtx {
             trait_ref: trait_ref.clone(),
         };
-        let emit_output =
-            emit_functions(&mut output, functions, others, Some(trait_ctx))?.unwrap();
+        let emit_output = emit_functions(&mut output, functions, others, Some(trait_ctx))?.unwrap();
 
         // Build the implementations by extracting functions from the built module.
         let trait_fn_count = trait_ref.functions.len();
