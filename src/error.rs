@@ -1774,6 +1774,9 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
     }
 
     // Extracting the arguments from the located position
+    if args_start == fn_text.len() {
+        return span;
+    }
     let args_section = &fn_text[args_start + 1..fn_text.len() - 1]; // Strip the outer parentheses
     let mut arg_count = 0;
     let mut start = 0;
