@@ -8,6 +8,7 @@
 //
 use std::{collections::VecDeque, mem, rc::Rc};
 
+#[cfg(debug_assertions)]
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 #[cfg(debug_assertions)]
@@ -188,6 +189,7 @@ impl EvalCtx {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn get_last_module_name(&self) -> Ustr {
         self.stack_trace
             .last()
@@ -195,6 +197,7 @@ impl EvalCtx {
             .unwrap_or(ustr("<current>"))
     }
 
+    #[cfg(debug_assertions)]
     fn get_stack_entry_from_fn_and_mod(
         &self,
         function: &FunctionRc,
@@ -204,6 +207,7 @@ impl EvalCtx {
         StackEntry::new(fn_name, ustr("<unknown>"), self.environment.len())
     }
 
+    #[cfg(debug_assertions)]
     fn get_stack_entry_from_function_id(&self, function: FunctionId) -> StackEntry {
         use FunctionId::*;
         let module_name;
@@ -269,14 +273,12 @@ impl EvalCtx {
     ) -> EvalResult {
         let function = &function_value.function;
         let module = function_value.upgrade_module();
-        if cfg!(debug_assertions) {
-            self.stack_trace
-                .push(self.get_stack_entry_from_fn_and_mod(function, &module));
-        }
+        #[cfg(debug_assertions)]
+        self.stack_trace
+            .push(self.get_stack_entry_from_fn_and_mod(function, &module));
         let result = self.call_function(function, module, arguments)?;
-        if cfg!(debug_assertions) {
-            self.stack_trace.pop();
-        }
+        #[cfg(debug_assertions)]
+        self.stack_trace.pop();
         Ok(result)
     }
 
@@ -287,14 +289,12 @@ impl EvalCtx {
         arguments: Vec<ValOrMut>,
     ) -> EvalResult {
         let (function, module) = self.get_function(function_id);
-        if cfg!(debug_assertions) {
-            self.stack_trace
-                .push(self.get_stack_entry_from_function_id(function_id));
-        }
+        #[cfg(debug_assertions)]
+        self.stack_trace
+            .push(self.get_stack_entry_from_function_id(function_id));
         let result = self.call_function(&function, module, arguments)?;
-        if cfg!(debug_assertions) {
-            self.stack_trace.pop();
-        }
+        #[cfg(debug_assertions)]
+        self.stack_trace.pop();
         Ok(result)
     }
 
