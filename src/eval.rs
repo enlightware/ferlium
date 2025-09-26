@@ -48,10 +48,10 @@ impl ValOrMut {
         }
     }
 
-    pub fn as_mut_primitive<'m, T: 'static>(
+    pub fn as_mut_primitive<T: 'static>(
         self,
-        ctx: &'m mut EvalCtx,
-    ) -> Result<Option<&'m mut T>, RuntimeError> {
+        ctx: &mut EvalCtx,
+    ) -> Result<Option<&mut T>, RuntimeError> {
         Ok(match self {
             ValOrMut::Val(_) => None,
             ValOrMut::Mut(place) => place.target_mut(ctx)?.as_primitive_ty_mut::<T>(),
@@ -454,7 +454,7 @@ impl Node {
                 let arguments = eval_args(&app.arguments, &args_ty, ctx)?;
                 let function_value = app.function.eval_with_ctx(ctx)?;
                 let function_value = function_value.as_function().unwrap();
-                ctx.call_function_value(&function_value, arguments)
+                ctx.call_function_value(function_value, arguments)
             }
             StaticApply(app) => {
                 let arguments = eval_args(&app.arguments, &app.ty.args, ctx)?;

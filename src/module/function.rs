@@ -186,7 +186,7 @@ impl FormatWith<ModuleEnv<'_>> for (&ModuleFunction, Option<Ustr>) {
         self.0
             .definition
             .fmt_with_name_and_module_env(f, &self.1, "", env)?;
-        write!(f, "\n")?;
+        writeln!(f)?;
         self.0.fmt_code(f, env)
     }
 }

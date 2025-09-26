@@ -227,7 +227,7 @@ impl TraitImpls {
         // Combine them into module functions.
         let functions: Vec<_> = definitions
             .into_iter()
-            .zip(functions.into().into_iter())
+            .zip(functions.into())
             .map(|(def, function)| {
                 ModuleFunction::new_without_spans(def, Rc::new(RefCell::new(function)))
             })
@@ -287,6 +287,7 @@ impl TraitImpls {
     }
 
     /// Add a blanket trait implementation, with module functions.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_blanket(
         &mut self,
         trait_ref: TraitRef,
@@ -428,7 +429,7 @@ impl TraitImpls {
             } else if level == DisplayFilter::MethodCode {
                 format_impl_fns(&key.trait_ref, subst, imp, true, f, env)?;
             }
-            write!(f, "\n")?;
+            writeln!(f)?;
         }
         for (trait_ref, impls) in &self.blanket_key_to_id {
             for (sub_key, id) in impls {
@@ -445,7 +446,7 @@ impl TraitImpls {
                 } else if level == DisplayFilter::MethodCode {
                     format_impl_fns(&key.trait_ref, subst, imp, true, f, env)?;
                 }
-                write!(f, "\n")?;
+                writeln!(f)?;
             }
         }
         Ok(())

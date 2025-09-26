@@ -58,6 +58,7 @@ use crate::{
 
 /// Immutable module bundle containing all compiled module data
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct Module {
     pub import_fn_slots: Vec<ImportFunctionSlot>,
     pub import_impl_slots: Vec<ImportImplSlot>,
@@ -384,7 +385,7 @@ impl Module {
         modules: &Modules,
         show_details: bool,
     ) -> fmt::Result {
-        let env = ModuleEnv::new(self, &modules);
+        let env = ModuleEnv::new(self, modules);
         if !self.uses.is_empty() {
             writeln!(f, "Uses:")?;
             for use_module in self.uses.iter() {
@@ -486,7 +487,7 @@ pub struct ShowModuleDetails<'a>(pub &'a Modules);
 
 impl FormatWith<ShowModuleDetails<'_>> for Module {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &ShowModuleDetails) -> fmt::Result {
-        self.format_with_modules(f, &data.0, true)
+        self.format_with_modules(f, data.0, true)
     }
 }
 
@@ -496,22 +497,5 @@ impl FormatWith<ModuleEnv<'_>> for LocalFunction {
             .definition
             .fmt_with_name_and_module_env(f, &self.name, "", env)?;
         self.function.code.borrow().format_ind(f, env, 1, 1)
-    }
-}
-
-impl Default for Module {
-    fn default() -> Self {
-        Self {
-            uses: vec![],
-            functions: vec![],
-            function_name_to_id: HashMap::new(),
-            import_fn_slots: vec![],
-            import_impl_slots: vec![],
-            type_aliases: TypeAliases::default(),
-            type_defs: HashMap::new(),
-            traits: Traits::default(),
-            impls: TraitImpls::default(),
-            source: None,
-        }
     }
 }

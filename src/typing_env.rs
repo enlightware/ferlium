@@ -152,7 +152,7 @@ impl<'m> TypingEnv<'m> {
                 .get(&module_name)?
                 .get_own_function(function_name)?
                 .definition;
-            (&definition, FunctionId::Import(id), Some(module_name))
+            (definition, FunctionId::Import(id), Some(module_name))
         } else {
             let id = *self
                 .module_env

@@ -155,7 +155,7 @@ impl PartialEq for Value {
             (Native(l0), Native(r0)) => l0 == r0,
             (Variant(l0), Variant(r0)) => l0 == r0,
             (Tuple(l0), Tuple(r0)) => l0 == r0,
-            (PendingFunction(l0), PendingFunction(r0)) => Rc::ptr_eq(&l0, &r0),
+            (PendingFunction(l0), PendingFunction(r0)) => Rc::ptr_eq(l0, r0),
             (Function(l0), Function(r0)) => l0 == r0,
             _ => false,
         }

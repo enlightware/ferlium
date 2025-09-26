@@ -32,7 +32,7 @@ impl<X, T: FormatWith<X>> Display for FormatWithData<'_, T, X> {
     }
 }
 
-impl<'a, X, U: ?Sized + FormatWith<X>> FormatWith<X> for &'a U {
+impl<X, U: ?Sized + FormatWith<X>> FormatWith<X> for &U {
     fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &X) -> std::fmt::Result {
         (**self).fmt_with(f, data)
     }

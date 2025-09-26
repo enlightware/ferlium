@@ -114,7 +114,7 @@ pub fn emit_module(
         // trait_output.uses.push(Use::All(ustr("@module")));
 
         // Validate the function mapping.
-        let module_env = ModuleEnv::new(&output, &others);
+        let module_env = ModuleEnv::new(&output, others);
         let trait_ref = module_env
             .get_trait_ref(&imp.trait_name.0)
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
@@ -167,7 +167,7 @@ pub fn emit_module(
             trait_ref: trait_ref.clone(),
         };
         let emit_output =
-            emit_functions(&mut output, functions, &others, Some(trait_ctx))?.unwrap();
+            emit_functions(&mut output, functions, others, Some(trait_ctx))?.unwrap();
 
         // Build the implementations by extracting functions from the built module.
         let trait_fn_count = trait_ref.functions.len();
@@ -207,7 +207,7 @@ pub fn emit_module(
                 functions,
             )
         };
-        let module_env = ModuleEnv::new(&output, &others);
+        let module_env = ModuleEnv::new(&output, others);
         let header = output
             .impls
             .impl_header_to_string_by_id(local_impl_id, module_env);
@@ -509,7 +509,6 @@ where
             node.check_borrows()?;
             let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
             let result = node.elaborate_dictionaries(&mut ctx);
-            drop(ctx);
             drop(function);
             result?;
             solver.commit(&mut output.functions);
@@ -640,7 +639,7 @@ where
             module_inst_data.insert(*id, dicts);
         }
         for id in local_fns.iter() {
-            let dicts = module_inst_data.get(&id).unwrap();
+            let dicts = module_inst_data.get(id).unwrap();
             let mut solver = trait_solver_from_module!(output, &others);
             let descr = &mut output.functions[id.as_index()].function;
             let mut function = descr.code.borrow_mut();
@@ -655,9 +654,8 @@ where
             );
             let node = &mut script_fn.code;
             node.check_borrows()?;
-            let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
+            let mut ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), &mut solver);
             node.elaborate_dictionaries(&mut ctx)?;
-            drop(ctx);
             drop(function);
             solver.commit(&mut output.functions);
         }
@@ -1343,7 +1341,7 @@ fn compute_num_trait_default_types(
                         for (output_ty, solved_ty) in
                             output_tys.iter().zip(solved_output_tys.iter())
                         {
-                            let ty_var = output_ty.data().as_variable().unwrap().clone();
+                            let ty_var = *output_ty.data().as_variable().unwrap();
                             subst.insert(ty_var, *solved_ty);
                         }
                         selected_constraints.remove(&constraint_ptr(constraint));

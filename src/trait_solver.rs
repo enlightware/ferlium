@@ -86,7 +86,7 @@ impl<'a> TraitSolver<'a> {
                 .others
                 .modules
                 .iter()
-                .find(|(_, m)| {
+                .any(|(_, m)| {
                     let id = m.impls.concrete_key_to_id.get(key);
                     if let Some(id) = id {
                         let imp = &m.impls.data[id.as_index()];
@@ -95,7 +95,6 @@ impl<'a> TraitSolver<'a> {
                         false
                     }
                 })
-                .is_some()
     }
 
     /// Get a concrete trait implementation by its key, without performing any solving.
@@ -150,7 +149,7 @@ impl<'a> TraitSolver<'a> {
         let env = ModuleEnv::new(&fake_current, self.others);
         self.impls.print_impls_headers(trait_ref, env);
         for (module_name, module) in &self.others.modules {
-            if let Some(_) = module.impls.blanket_key_to_id.get(trait_ref) {
+            if module.impls.blanket_key_to_id.contains_key(trait_ref) {
                 println!("In module {}:\n\n", module_name);
                 module.impls.print_impls_headers(trait_ref, env);
             }
@@ -302,6 +301,7 @@ impl<'a> TraitSolver<'a> {
                 let impls = if let Some(module_name) = imp_mod_name {
                     &self.others.modules[&module_name].impls
                 } else {
+                    #[allow(clippy::needless_borrow)] // clippy has a bug here as of Rust 1.90
                     &self.impls
                 };
                 let imp = &impls.data[impl_id.as_index()];
@@ -463,7 +463,7 @@ impl<'a> TraitSolver<'a> {
                     .impls;
                 let id = other_impls
                     .concrete_key_to_id
-                    .get(&key)
+                    .get(key)
                     .expect("imported trait impl not found");
                 &other_impls.data[id.as_index()]
             }
@@ -500,7 +500,7 @@ impl<'a> TraitSolver<'a> {
             .position(|slot| slot.module_name == module_name &&
                 matches!(&slot.target, ImportFunctionTarget::NamedFunction(name) if *name == function_name)
             )
-            .map(|index| ImportFunctionSlotId::from_index(index))
+            .map(ImportFunctionSlotId::from_index)
             .unwrap_or_else(|| {
                 let index = self.import_fn_slots.len();
                 self.import_fn_slots.push(ImportFunctionSlot {
@@ -525,13 +525,13 @@ impl<'a> TraitSolver<'a> {
             .position(|slot| slot.module_name == module_name &&
                 matches!(&slot.target, ImportFunctionTarget::TraitImplMethod { key: k, index: i } if k == &key && *i == method_index)
             )
-            .map(|index| ImportFunctionSlotId::from_index(index))
+            .map(ImportFunctionSlotId::from_index)
             .unwrap_or_else(|| {
                 let index = self.import_fn_slots.len();
                 self.import_fn_slots.push(ImportFunctionSlot {
                     module_name,
                     target: ImportFunctionTarget::TraitImplMethod {
-                        key: key,
+                        key,
                         index: method_index,
                     },
                     resolved: RefCell::new(None),
@@ -546,7 +546,7 @@ impl<'a> TraitSolver<'a> {
         self.import_impl_slots
             .iter()
             .position(|slot| slot.module_name == module_name && slot.key == key)
-            .map(|index| ImportImplSlotId::from_index(index))
+            .map(ImportImplSlotId::from_index)
             .unwrap_or_else(|| {
                 let index = self.import_impl_slots.len();
                 self.import_impl_slots.push(ImportImplSlot {
