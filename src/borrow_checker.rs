@@ -165,6 +165,9 @@ impl Node {
                 node.value.check_borrows()?;
             }
             EnvLoad(_) => {}
+            Return(node) => {
+                node.check_borrows()?;
+            }
             Block(nodes) => {
                 for node in nodes.iter() {
                     node.check_borrows()?;

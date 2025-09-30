@@ -194,6 +194,7 @@ pub enum NodeKind {
     GetDictionary(GetDictionary),
     EnvStore(B<EnvStore>),
     EnvLoad(B<EnvLoad>),
+    Return(B<Node>),
     Block(B<SVec2<Node>>),
     Assign(B<Assignment>),
     Tuple(B<SVec2<Node>>),
@@ -254,6 +255,7 @@ impl Node {
             GetDictionary(_) => {}
             EnvStore(node) => node.value.finalize_pending_values(module),
             EnvLoad(_) => {}
+            Return(node) => node.finalize_pending_values(module),
             Block(nodes) => {
                 for n in nodes.iter_mut() {
                     n.finalize_pending_values(module);
@@ -388,6 +390,10 @@ impl Node {
                 node.value.format_ind(f, env, spacing, indent + 1)?;
             }
             EnvLoad(node) => writeln!(f, "{indent_str}load {}", node.index)?,
+            Return(node) => {
+                writeln!(f, "{indent_str}return")?;
+                node.format_ind(f, env, spacing, indent + 1)?;
+            }
             Block(nodes) => {
                 writeln!(f, "{indent_str}block {{")?;
                 for node in nodes.iter() {
@@ -539,6 +545,11 @@ impl Node {
                 }
             }
             EnvLoad(_) => {}
+            Return(node) => {
+                if let Some(ty) = node.type_at(pos) {
+                    return Some(ty);
+                }
+            }
             Block(nodes) => {
                 for node in nodes.iter() {
                     if let Some(ty) = node.type_at(pos) {
@@ -675,6 +686,7 @@ impl Node {
             }
             EnvStore(node) => node.value.unbound_ty_vars(result, ignore),
             EnvLoad(_) => {}
+            Return(node) => node.unbound_ty_vars(result, ignore),
             Block(nodes) => nodes
                 .iter()
                 .for_each(|node| node.unbound_ty_vars(result, ignore)),
@@ -770,6 +782,7 @@ impl Node {
             }
             EnvStore(node) => node.instantiate(subst),
             EnvLoad(_) => {}
+            Return(node) => node.instantiate(subst),
             Block(nodes) => instantiate_nodes(nodes, subst),
             Assign(assignment) => {
                 assignment.place.instantiate(subst);

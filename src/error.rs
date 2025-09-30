@@ -308,6 +308,9 @@ pub enum InternalCompilationErrorImpl {
         span: Location,
         reason: String,
     },
+    ReturnOutsideFunction {
+        span: Location,
+    },
     /*UnresolvedImport {
         function_path: String,
         span: Location,
@@ -467,6 +470,9 @@ pub enum CompilationErrorImpl {
         ty: String,
     },
     InvalidVariantConstructor {
+        span: Location,
+    },
+    ReturnOutsideFunction {
         span: Location,
     },
     IsNotCorrectProductType {
@@ -842,6 +848,13 @@ impl FormatWith<&str> for CompilationError {
                 write!(
                     f,
                     "Variant constructor cannot be paths, but `{}` is",
+                    fmt_span(span)
+                )
+            }
+            ReturnOutsideFunction { span } => {
+                write!(
+                    f,
+                    "Return statement can only be used inside a function, but found in sub-expression `{}`",
                     fmt_span(span)
                 )
             }
@@ -1294,6 +1307,9 @@ impl CompilationError {
             InvalidVariantConstructor { span } => {
                 compilation_error!(InvalidVariantConstructor { span })
             }
+            ReturnOutsideFunction { span } => {
+                compilation_error!(ReturnOutsideFunction { span })
+            }
             IsNotCorrectProductType {
                 which,
                 type_def,
@@ -1691,6 +1707,16 @@ impl CompilationError {
             _ => {
                 panic!("expect_trait_impl_not_found called on non-TraitImplNotFound error {self:?}")
             }
+        }
+    }
+
+    pub fn expect_return_outside_function(&self) {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            ReturnOutsideFunction { .. } => (),
+            _ => panic!(
+                "expect_return_outside_function called on non-ReturnOutsideFunction error {self:?}"
+            ),
         }
     }
 }

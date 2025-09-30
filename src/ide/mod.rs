@@ -294,6 +294,12 @@ fn compilation_error_to_data(
                 "Variant constructor cannot be a path".to_string(),
             )]
         }
+        ReturnOutsideFunction { span } => {
+            vec![ErrorData::from_location(
+                span,
+                "Return statement can only be used inside a function, but found within an expression".to_string(),
+            )]
+        }
         IsNotCorrectProductType {
             which,
             type_def,
@@ -618,6 +624,7 @@ impl Compiler {
         if let Some(expr) = &self.user_module.expr {
             match expr.expr.eval(self.user_module.module.clone()) {
                 Ok(value) => {
+                    let value = value.into_value();
                     let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
                     let output = format!("{}: {}", value, expr.ty.display_rust_style(&module_env));
                     html_escape::encode_text(&output).to_string()
@@ -802,7 +809,8 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?;
+                    .map_err(|err| format!("Execution error: {err}"))?
+                    .into_value();
                 Ok(ret.into_primitive_ty::<O>().unwrap())
             }
         })
@@ -833,7 +841,8 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?;
+                    .map_err(|err| format!("Execution error: {err}"))?
+                    .into_value();
                 let ret_tuple = ret.into_tuple().unwrap();
                 let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
                 let oa = oa.into_primitive_ty::<OA>().unwrap();
@@ -876,7 +885,8 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?;
+                    .map_err(|err| format!("Execution error: {err}"))?
+                    .into_value();
                 let ret_tuple = ret.into_tuple().unwrap();
                 let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
                 let oa = oa.into_primitive_ty::<OA>().unwrap();
@@ -943,7 +953,8 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?;
+                    .map_err(|err| format!("Execution error: {err}"))?
+                    .into_value();
                 Ok(ret.into_primitive_ty::<O>().unwrap())
             }
         })

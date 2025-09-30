@@ -338,7 +338,7 @@ AssignExpr<NoStruct>: ExprKind = {
 }
 
 ReturnExpr<NoStruct>: ExprKind = {
-    <l:@L> "return" <r:@R> <e:Es<TopExpr<NoStruct>>> =>? error("return keyword is not implemented yet".to_string(), span(l, r)),
+    "return" <e:Es<TopExpr<NoStruct>>> => Return(boxed(e)),
 }
 
 AbstractExpr<NoStruct>: ExprKind = {

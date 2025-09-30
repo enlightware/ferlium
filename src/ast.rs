@@ -625,6 +625,7 @@ pub enum ExprKind<P: Phase> {
         B<Expr<P>>,
         Option<(Location, P::LetTyAscriptionComplete)>,
     ),
+    Return(B<Expr<P>>),
     Abstract(Vec<UstrSpan>, B<Expr<P>>),
     Apply(B<Expr<P>>, Vec<Expr<P>>, bool),
     Block(Vec<Expr<P>>),
@@ -668,6 +669,10 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
             Let((name, _), mutable, expr, _) => {
                 let kw = mutable.var_def_string();
                 writeln!(f, "{indent_str}{kw} {name} =")?;
+                expr.format_ind(f, env, indent + 1)
+            }
+            Return(expr) => {
+                writeln!(f, "{indent_str}return")?;
                 expr.format_ind(f, env, indent + 1)
             }
             Abstract(args, body) => {

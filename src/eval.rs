@@ -15,7 +15,7 @@ use enum_as_inner::EnumAsInner;
 use ustr::{ustr, Ustr};
 
 use crate::{
-    containers::{b, SVec2},
+    containers::b,
     error::RuntimeError,
     format::{write_with_separator, FormatWith},
     function::{Closure, FunctionRc},
@@ -270,16 +270,16 @@ impl EvalCtx {
         &mut self,
         function_value: &FunctionValue,
         arguments: Vec<ValOrMut>,
-    ) -> EvalResult {
+    ) -> EvalControlFlowResult {
         let function = &function_value.function;
         let module = function_value.upgrade_module();
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(self.get_stack_entry_from_fn_and_mod(function, &module));
-        let result = self.call_function(function, module, arguments)?;
+        let result = self.call_function(function, module, arguments);
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
-        Ok(result)
+        result
     }
 
     /// Call a function by its id, this will look up the function and its module.
@@ -287,15 +287,15 @@ impl EvalCtx {
         &mut self,
         function_id: FunctionId,
         arguments: Vec<ValOrMut>,
-    ) -> EvalResult {
+    ) -> EvalControlFlowResult {
         let (function, module) = self.get_function(function_id);
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(self.get_stack_entry_from_function_id(function_id));
-        let result = self.call_function(&function, module, arguments)?;
+        let result = self.call_function(&function, module, arguments);
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
-        Ok(result)
+        result
     }
 
     /// Call a function along with its correct module context.
@@ -304,7 +304,7 @@ impl EvalCtx {
         function: &FunctionRc,
         mut module: ModuleRc,
         arguments: Vec<ValOrMut>,
-    ) -> EvalResult {
+    ) -> EvalControlFlowResult {
         // Use the new module for the duration of the function call.
         mem::swap(&mut self.module, &mut module);
         // Call the function.
@@ -416,32 +416,73 @@ impl FormatWith<EvalCtx> for Place {
     }
 }
 
-/// The result of evaluating an IR node, either a Value or a runtime error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlFlow<V> {
+    Continue(V),
+    Return(Value),
+}
+impl ControlFlow<Value> {
+    pub fn into_value(self) -> Value {
+        match self {
+            ControlFlow::Continue(value) => value,
+            ControlFlow::Return(value) => value,
+        }
+    }
+}
+
+/// The result of evaluating an IR node, either a control flow action or a runtime error.
+pub type EvalControlFlowResult = Result<ControlFlow<Value>, RuntimeError>;
+
+/// The result of evaluating an IR node, either a value or a runtime error.
 pub type EvalResult = Result<Value, RuntimeError>;
+
+pub fn cont(value: Value) -> EvalControlFlowResult {
+    Ok(ControlFlow::Continue(value))
+}
+
+pub fn ret(value: Value) -> EvalControlFlowResult {
+    Ok(ControlFlow::Return(value))
+}
+
+/// Helper macro to evaluate a node and propagate Return, or extract Continue value.
+/// Usage: eval_or_return!(node.eval_with_ctx(ctx))
+/// Returns early with Return, or provides the unwrapped Value.
+macro_rules! eval_or_return {
+    ($expr:expr) => {
+        match $expr? {
+            ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
+            ControlFlow::Continue(val) => val,
+        }
+    };
+}
 
 impl Node {
     /// Evaluate this node and return the result.
-    pub fn eval(&self, module: ModuleRc) -> EvalResult {
+    pub fn eval(&self, module: ModuleRc) -> EvalControlFlowResult {
         let mut ctx = EvalCtx::new(module);
         self.eval_with_ctx(&mut ctx)
     }
 
     /// Evaluate this node given the environment and return the result.
-    pub fn eval_with_ctx(&self, ctx: &mut EvalCtx) -> EvalResult {
+    pub fn eval_with_ctx(&self, ctx: &mut EvalCtx) -> EvalControlFlowResult {
         use NodeKind::*;
         match &self.kind {
-            Immediate(immediate) => Ok(immediate.value.clone()),
+            Immediate(immediate) => cont(immediate.value.clone()),
             BuildClosure(build_closure) => {
-                let captured = eval_nodes(&build_closure.captures, ctx)?;
-                let function_value = build_closure.function.eval_with_ctx(ctx)?;
+                let captured = eval_or_return!(eval_nodes(&build_closure.captures, ctx));
+                // Note: function should be GetFunction or similar immediate - returns not allowed here
+                let function_value = build_closure.function.eval_with_ctx(ctx)?.into_value();
                 let function_value = function_value.into_function().unwrap().function;
                 let function_value = FunctionValue::new(function_value, Rc::downgrade(&ctx.module));
-                Ok(Value::function(
+                cont(Value::function(
                     b(Closure::new(function_value, captured)),
                     Rc::downgrade(&ctx.module),
                 ))
             }
             Apply(app) => {
+                // Evaluate left-to-right: function first, then arguments (matches Rust semantics)
+                let function_value = eval_or_return!(app.function.eval_with_ctx(ctx));
+                let function_value = function_value.as_function().unwrap();
                 let args_ty = {
                     app.function
                         .ty
@@ -451,13 +492,11 @@ impl Node {
                         .args
                         .clone()
                 };
-                let arguments = eval_args(&app.arguments, &args_ty, ctx)?;
-                let function_value = app.function.eval_with_ctx(ctx)?;
-                let function_value = function_value.as_function().unwrap();
+                let arguments = eval_or_return!(eval_args(&app.arguments, &args_ty, ctx));
                 ctx.call_function_value(function_value, arguments)
             }
             StaticApply(app) => {
-                let arguments = eval_args(&app.arguments, &app.ty.args, ctx)?;
+                let arguments = eval_or_return!(eval_args(&app.arguments, &app.ty.args, ctx));
                 ctx.call_function_id(app.function, arguments)
             }
             TraitFnApply(_) => {
@@ -465,102 +504,106 @@ impl Node {
             }
             GetFunction(get_fn) => {
                 let (function, module) = ctx.get_function(get_fn.function);
-                Ok(Value::function_rc(function, Rc::downgrade(&module)))
+                cont(Value::function_rc(function, Rc::downgrade(&module)))
             }
             GetDictionary(get_dict) => {
                 let value = ctx.get_dictionary(get_dict.dictionary);
-                Ok(value)
+                cont(value)
             }
             EnvStore(node) => {
-                let value = node.value.eval_with_ctx(ctx)?;
+                let value = eval_or_return!(node.value.eval_with_ctx(ctx));
                 ctx.environment.push(ValOrMut::Val(value));
                 #[cfg(debug_assertions)]
                 ctx.environment_names.push(node.name);
-                Ok(Value::unit())
+                cont(Value::unit())
             }
             EnvLoad(node) => {
                 let index = ctx.frame_base + node.index;
-                Ok(ctx.environment[index].as_value(ctx)?)
+                cont(ctx.environment[index].as_value(ctx)?)
             }
+            Return(node) => ret(node.eval_with_ctx(ctx)?.into_value()),
             Block(nodes) => {
                 let env_size = ctx.environment.len();
-                let return_value = nodes
-                    .iter()
-                    .try_fold(None, |_, node| Ok(Some(node.eval_with_ctx(ctx)?)))?
-                    .unwrap_or(Value::unit());
+                let mut last_value = Value::unit();
+                for node in nodes.iter() {
+                    match node.eval_with_ctx(ctx)? {
+                        ControlFlow::Return(val) => {
+                            // Early return: clean up environment and propagate
+                            ctx.environment.truncate(env_size);
+                            #[cfg(debug_assertions)]
+                            ctx.environment_names.truncate(env_size);
+                            return Ok(ControlFlow::Return(val));
+                        }
+                        ControlFlow::Continue(val) => {
+                            last_value = val;
+                        }
+                    }
+                }
+                // Normal block completion
                 ctx.environment.truncate(env_size);
                 #[cfg(debug_assertions)]
                 ctx.environment_names.truncate(env_size);
-                Ok(return_value)
+                cont(last_value)
             }
             Assign(assignment) => {
-                let value = assignment.value.eval_with_ctx(ctx)?;
-                let target_ref = assignment.place.as_place(ctx)?.target_mut(ctx)?;
+                // Evaluate left-to-right: place first, then value (matches Rust semantics)
+                let place = eval_or_return!(assignment.place.as_place(ctx));
+                let value = eval_or_return!(assignment.value.eval_with_ctx(ctx));
+                let target_ref = place.target_mut(ctx)?;
                 *target_ref = value;
-                Ok(Value::unit())
+                cont(Value::unit())
             }
-            Tuple(nodes) => {
-                let values = nodes.iter().try_fold(SVec2::new(), |mut nodes, node| {
-                    nodes.push(node.eval_with_ctx(ctx)?);
-                    Ok(nodes)
-                })?;
-                Ok(Value::Tuple(b(values)))
+            Tuple(nodes) | Record(nodes) => {
+                // Note: record values are stored as tuples
+                let values = eval_or_return!(eval_nodes(nodes, ctx));
+                cont(Value::Tuple(b(values.into())))
             }
             Project(projection) => {
-                let value = projection.0.eval_with_ctx(ctx)?;
-                Ok(match value {
+                let value = eval_or_return!(projection.0.eval_with_ctx(ctx));
+                cont(match value {
                     Value::Tuple(tuple) => tuple.into_iter().nth(projection.1).unwrap(),
                     Value::Variant(variant) => variant.value,
                     _ => panic!("Cannot project from a non-compound value"),
                 })
             }
-            Record(nodes) => {
-                let values = nodes.iter().try_fold(SVec2::new(), |mut nodes, node| {
-                    nodes.push(node.eval_with_ctx(ctx)?);
-                    Ok(nodes)
-                })?;
-                // Note: record values are stored as tuples
-                Ok(Value::Tuple(b(values)))
-            }
             FieldAccess(_) => {
                 panic!("String projection should not be executed, but transformed to ProjectLocal");
             }
             ProjectAt(access) => {
-                let value = access.0.eval_with_ctx(ctx)?;
+                let value = eval_or_return!(access.0.eval_with_ctx(ctx));
                 let index = ctx.frame_base + access.1;
                 let index = ctx.environment[index]
                     .as_value(ctx)?
                     .into_primitive_ty::<isize>()
                     .unwrap();
-                Ok(match value {
+                cont(match value {
                     Value::Tuple(tuple) => tuple.into_iter().nth(index as usize).unwrap(),
                     _ => panic!("Cannot access field from a non-compound value"),
                 })
             }
             Variant(variant) => {
-                let value = variant.1.eval_with_ctx(ctx)?;
-                Ok(Value::raw_variant(variant.0, value))
+                let value = eval_or_return!(variant.1.eval_with_ctx(ctx));
+                cont(Value::raw_variant(variant.0, value))
             }
             ExtractTag(node) => {
-                let value = node.eval_with_ctx(ctx)?;
+                let value = eval_or_return!(node.eval_with_ctx(ctx));
                 let variant = value.into_variant().unwrap();
-                Ok(Value::native(variant.tag_as_isize()))
+                cont(Value::native(variant.tag_as_isize()))
             }
             Array(nodes) => {
-                let values = eval_nodes(nodes, ctx)?;
-                Ok(Value::native(array::Array::from_vec(values)))
+                let values = eval_or_return!(eval_nodes(nodes, ctx));
+                cont(Value::native(array::Array::from_vec(values)))
             }
             Index(array, index) => {
-                let index = index
-                    .eval_with_ctx(ctx)?
-                    .into_primitive_ty::<isize>()
-                    .unwrap();
-                let mut array = array
-                    .eval_with_ctx(ctx)?
+                // Evaluate left-to-right: array first, then index (matches Rust semantics)
+                let mut array = eval_or_return!(array.eval_with_ctx(ctx))
                     .into_primitive_ty::<array::Array>()
                     .unwrap();
+                let index = eval_or_return!(index.eval_with_ctx(ctx))
+                    .into_primitive_ty::<isize>()
+                    .unwrap();
                 match array.get_mut_signed(index) {
-                    Some(value) => Ok(value.clone()),
+                    Some(value) => cont(value.clone()),
                     None => {
                         let len = array.len();
                         Err(RuntimeError::ArrayAccessOutOfBounds { index, len })
@@ -568,7 +611,7 @@ impl Node {
                 }
             }
             Case(case) => {
-                let value = case.value.eval_with_ctx(ctx)?;
+                let value = eval_or_return!(case.value.eval_with_ctx(ctx));
                 for (alternative, node) in &case.alternatives {
                     if value == *alternative {
                         return node.eval_with_ctx(ctx);
@@ -580,14 +623,14 @@ impl Node {
                 let break_loop = ctx.break_loop;
                 ctx.break_loop = false;
                 while !ctx.break_loop {
-                    body.eval_with_ctx(ctx)?;
+                    eval_or_return!(body.eval_with_ctx(ctx));
                 }
                 ctx.break_loop = break_loop;
-                Ok(Value::unit())
+                cont(Value::unit())
             }
             SoftBreak => {
                 ctx.break_loop = true;
-                Ok(Value::unit())
+                cont(Value::unit())
             }
         }
     }
@@ -595,25 +638,28 @@ impl Node {
     /// Evaluate this node given the environment and print the result.
     pub fn eval_and_print(&self, ctx: &mut EvalCtx, env: &ModuleEnv) {
         match self.eval_with_ctx(ctx) {
-            Ok(value) => println!("{value}: {}", self.ty.format_with(env)),
+            Ok(value) => println!("{}: {}", value.into_value(), self.ty.format_with(env)),
             Err(error) => println!("Runtime error: {error:?}"),
         }
     }
 
     /// Return this node as a place in the environment.
-    pub fn as_place(&self, ctx: &mut EvalCtx) -> Result<Place, RuntimeError> {
-        fn resolve_node(node: &Node, ctx: &mut EvalCtx) -> Result<Place, RuntimeError> {
+    pub fn as_place(&self, ctx: &mut EvalCtx) -> Result<ControlFlow<Place>, RuntimeError> {
+        fn resolve_node(
+            node: &Node,
+            ctx: &mut EvalCtx,
+        ) -> Result<ControlFlow<Place>, RuntimeError> {
             use NodeKind::*;
-            Ok(match &node.kind {
+            Ok(ControlFlow::Continue(match &node.kind {
                 Project(projection) => {
                     let (ref node, index) = **projection;
-                    let mut place = resolve_node(node, ctx)?;
+                    let mut place = eval_or_return!(resolve_node(node, ctx));
                     place.path.push(index as isize);
                     place
                 }
                 ProjectAt(projection) => {
                     let (ref node, index) = **projection;
-                    let mut place = resolve_node(node, ctx)?;
+                    let mut place = eval_or_return!(resolve_node(node, ctx));
                     let index = ctx.frame_base + index;
                     let index_value = ctx.environment[index].as_value(ctx)?;
                     let index = index_value.into_primitive_ty::<isize>().unwrap();
@@ -621,8 +667,8 @@ impl Node {
                     place
                 }
                 Index(array, index) => {
-                    let mut place = resolve_node(array, ctx)?;
-                    let index_value = index.eval_with_ctx(ctx)?;
+                    let mut place = eval_or_return!(resolve_node(array, ctx));
+                    let index_value = eval_or_return!(index.eval_with_ctx(ctx));
                     let index = index_value.into_primitive_ty::<isize>().unwrap();
                     place.path.push(index);
                     place
@@ -634,48 +680,39 @@ impl Node {
                     path: Vec::new(),
                 },
                 _ => panic!("Cannot resolve a non-place node"),
-            })
+            }))
         }
         resolve_node(self, ctx)
     }
 }
 
-fn eval_nodes(nodes: &[Node], ctx: &mut EvalCtx) -> Result<Vec<Value>, RuntimeError> {
-    eval_nodes_with(nodes.iter(), |node, ctx| node.eval_with_ctx(ctx), ctx)
+fn eval_nodes(nodes: &[Node], ctx: &mut EvalCtx) -> Result<ControlFlow<Vec<Value>>, RuntimeError> {
+    let mut results = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        results.push(eval_or_return!(node.eval_with_ctx(ctx)));
+    }
+    Ok(ControlFlow::Continue(results))
 }
 
 fn eval_args(
     args: &[Node],
     args_ty: &[FnArgType],
     ctx: &mut EvalCtx,
-) -> Result<Vec<ValOrMut>, RuntimeError> {
+) -> Result<ControlFlow<Vec<ValOrMut>>, RuntimeError> {
     // Automatically cast mutable references to values if the function expects values.
-    let f = |(arg, ty): &(&Node, &FnArgType), ctx: &mut EvalCtx| {
+    let mut results = Vec::with_capacity(args.len());
+    assert_eq!(args.len(), args_ty.len());
+    for (arg, ty) in args.iter().zip(args_ty) {
         let is_mutable = ty
             .mut_ty
             .as_resolved()
             .expect("Unresolved mutability variable found during execution")
             .is_mutable();
-        Ok(if is_mutable {
-            ValOrMut::Mut(arg.as_place(ctx)?)
+        results.push(if is_mutable {
+            ValOrMut::Mut(eval_or_return!(arg.as_place(ctx)))
         } else {
-            ValOrMut::Val(arg.eval_with_ctx(ctx)?)
-        })
-    };
-    eval_nodes_with(args.iter().zip(args_ty), f, ctx)
-}
-
-fn eval_nodes_with<F, I, O, It>(
-    mut inputs: It,
-    f: F,
-    ctx: &mut EvalCtx,
-) -> Result<Vec<O>, RuntimeError>
-where
-    It: Iterator<Item = I>,
-    F: Fn(&I, &mut EvalCtx) -> Result<O, RuntimeError>,
-{
-    inputs.try_fold(vec![], |mut output, input| {
-        output.push(f(&input, ctx)?);
-        Ok(output)
-    })
+            ValOrMut::Val(eval_or_return!(arg.eval_with_ctx(ctx)))
+        });
+    }
+    Ok(ControlFlow::Continue(results))
 }

@@ -363,12 +363,14 @@ where
         let module_env = ModuleEnv::new(output, others);
         let arg_names: Vec<_> = function.args.iter().map(|arg| arg.name).collect();
         let mut new_import_slots = vec![];
+        let expected_ret_ty = descr.definition.ty_scheme.ty.ret;
+        let expected_span = descr.spans.as_ref().unwrap().args_span;
         let mut ty_env = TypingEnv::new(
             descr.definition.ty_scheme.ty.as_locals_no_bound(&arg_names),
             &mut new_import_slots,
             module_env,
+            Some((expected_ret_ty, expected_span)),
         );
-        let expected_span = descr.spans.as_ref().unwrap().args_span;
         let fn_node = ty_inf.check_expr(
             &mut ty_env,
             &function.body,
@@ -732,7 +734,7 @@ pub fn emit_expr_unsafe(
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
     let mut new_import_slots = vec![];
-    let mut ty_env = TypingEnv::new(locals, &mut new_import_slots, module_env);
+    let mut ty_env = TypingEnv::new(locals, &mut new_import_slots, module_env, None);
     let mut ty_inf = TypeInference::new_empty();
     let (mut node, _) = ty_inf.infer_expr(&mut ty_env, &source)?;
     let mut locals = ty_env.get_locals_and_drop();

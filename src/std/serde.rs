@@ -347,7 +347,7 @@ impl Deriver for ProductTypeDeserializeDeriver {
                             deserialize(arr[0]),
                             deserialize(arr[1]),
                         ),
-                        _ => panic!("Expected array variant"),
+                        _ => panic!("Expected Array variant"),
                     }
                 }
             }
@@ -360,11 +360,7 @@ impl Deriver for ProductTypeDeserializeDeriver {
                 .map(|(i, ty_i)| build_deserialize_i(i, ty_i))
                 .collect::<Result<SVec2<_>, _>>()?;
             let build_tuple = n(tuple(build_elements), ty);
-            // let panic_message = n(
-            //     native(Str::from_str("Expected Array variant").unwrap()),
-            //     string_type(),
-            // );
-            let panic = panic_node(solver, span)?;
+            let panic = panic_node(solver, span, "Expected Array variant")?;
             let case = n(
                 case(
                     extract_tag,
@@ -430,14 +426,23 @@ pub fn add_to_module(to: &mut Module) {
 }
 
 // Fetch the panic function node from the trait solver, importing it if necessary.
-fn panic_node(solver: &mut TraitSolver, span: Location) -> Result<Node, InternalCompilationError> {
+fn panic_node(
+    solver: &mut TraitSolver,
+    span: Location,
+    message: &str,
+) -> Result<Node, InternalCompilationError> {
     let function = solver.get_function(ustr("std"), ustr("panic"))?;
     Ok(Node::new(
         ir_syn::static_apply(
             function,
             FnType::new_by_val([], Type::never(), EffType::empty()),
             span,
-            vec![],
+            vec![Node::new(
+                ir_syn::native(Str::from_str(message).unwrap()),
+                string_type(),
+                EffType::empty(),
+                span,
+            )],
         ),
         Type::never(),
         EffType::empty(),

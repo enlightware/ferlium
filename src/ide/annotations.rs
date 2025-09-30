@@ -263,6 +263,7 @@ impl Node {
                 node.value.variable_type_annotations(result, env);
             }
             EnvLoad(_) => {}
+            Return(node) => node.variable_type_annotations(result, env),
             Block(nodes) => nodes
                 .iter()
                 .for_each(|node| node.variable_type_annotations(result, env)),

@@ -10,13 +10,12 @@ use ferlium::{
     containers::IntoSVec2,
     effects::{effect, effects, no_effects, PrimitiveEffect},
     error::{CompilationError, RuntimeError},
-    eval::EvalResult,
+    eval::{ControlFlow, EvalResult},
     function::{
         BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnVN,
     },
-    module::Module,
-    module::Modules,
+    module::{Module, Modules},
     r#type::{variant_type, FnType, Type},
     std::{
         array::{array_type, Array},
@@ -212,7 +211,10 @@ pub fn try_compile_and_run(src: &str) -> CompileRunResult {
 
     // Run the expression if any.
     if let Some(expr) = expr {
-        expr.expr.eval(module).map_err(Error::Runtime)
+        expr.expr
+            .eval(module)
+            .map(ControlFlow::into_value)
+            .map_err(Error::Runtime)
     } else {
         Ok(Value::unit())
     }

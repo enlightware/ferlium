@@ -422,6 +422,22 @@ impl TypeInference {
                 }));
                 (node, Type::unit(), MutType::constant(), effects)
             }
+            Return(expr) => {
+                let (outer_ty, outer_span) = match env.expected_return_ty {
+                    Some(ret_ty) => ret_ty,
+                    None => {
+                        return Err(internal_compilation_error!(ReturnOutsideFunction {
+                            span: expr.span,
+                        }))
+                    }
+                };
+                let node = self.infer_expr_drop_mut(env, expr)?;
+                let ty = node.ty;
+                self.add_same_type_constraint(ty, expr.span, outer_ty, outer_span);
+                let effects = node.effects.clone();
+                let node = K::Return(b(node));
+                (node, Type::never(), MutType::constant(), effects)
+            }
             Abstract(args, body) => {
                 // Allocate fresh type and mutability variables for the arguments in the function's scope
                 let locals = args
@@ -437,11 +453,18 @@ impl TypeInference {
                     .collect::<Vec<_>>();
                 let args_ty = locals.iter().map(Local::as_fn_arg_type).collect();
                 // Build environment for typing the function's body
-                let mut env = TypingEnv::new(locals, env.new_import_slots, env.module_env);
+                let ret_ty = self.fresh_type_var_ty();
+                let mut env = TypingEnv::new(
+                    locals,
+                    env.new_import_slots,
+                    env.module_env,
+                    Some((ret_ty, body.span)),
+                );
                 // Infer the body's type
-                let code = self.infer_expr_drop_mut(&mut env, body)?;
+                let code =
+                    self.check_expr(&mut env, body, ret_ty, MutType::constant(), body.span)?;
                 // Store and return the function's type
-                let fn_ty = FnType::new(args_ty, code.ty, code.effects.clone());
+                let fn_ty = FnType::new(args_ty, ret_ty, code.effects.clone());
                 let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
                 let value_fn = Value::pending_function(b(ScriptFunction::new(code, arg_names)));
                 let node = K::Immediate(Immediate::new(value_fn));
@@ -1234,7 +1257,12 @@ impl TypeInference {
                     })
                     .collect::<Vec<_>>();
                 // Build environment for typing the function's body
-                let mut env = TypingEnv::new(locals, env.new_import_slots, env.module_env);
+                let mut env = TypingEnv::new(
+                    locals,
+                    env.new_import_slots,
+                    env.module_env,
+                    Some((fn_ty.ret, expected_span)),
+                );
                 // Recursively check the function's body
                 let code =
                     self.check_expr(&mut env, body, fn_ty.ret, MutType::constant(), body.span)?;
@@ -2820,6 +2848,9 @@ impl UnifiedTypeInference {
                 self.substitute_in_node(&mut node.value);
             }
             EnvLoad(_) => {}
+            Return(node) => {
+                self.substitute_in_node(node);
+            }
             Block(nodes) => self.substitute_in_nodes(nodes),
             Assign(assignment) => {
                 self.substitute_in_node(&mut assignment.place);

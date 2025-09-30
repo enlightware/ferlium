@@ -69,6 +69,8 @@ pub struct TypingEnv<'m> {
     pub(crate) new_import_slots: &'m mut Vec<ImportFunctionSlot>,
     /// The program and the module we are currently compiling.
     pub(crate) module_env: ModuleEnv<'m>,
+    /// The expected return type of the enclosing function (for type-checking `return` statements).
+    pub(crate) expected_return_ty: Option<(Type, Location)>,
 }
 
 impl<'m> TypingEnv<'m> {

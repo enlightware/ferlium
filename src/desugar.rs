@@ -494,6 +494,7 @@ impl PExpr {
                 ctx.locals.push(name.0);
                 expr
             }
+            Return(expr) => Return(expr.desugar_boxed(ctx)?),
             Abstract(args, expr) => {
                 // we swap the locals with the lambda arguments, as we do not capture the outer scope
                 let mut other_vars = args.iter().map(|(name, _)| *name).collect::<Vec<_>>();

@@ -443,6 +443,7 @@ fn process_input(
         let result = compiled_expr.expr.eval_with_ctx(&mut eval_ctx);
         match result {
             Ok(value) => {
+                let value = value.into_value();
                 let module_env = ModuleEnv::new(&module, other_modules);
                 println!(
                     "{value}: {}",

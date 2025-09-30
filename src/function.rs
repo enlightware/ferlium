@@ -22,7 +22,7 @@ use ferlium_macros::declare_native_fn_aliases;
 use crate::{
     effects::EffType,
     error::RuntimeError,
-    eval::{EvalCtx, EvalResult, ValOrMut},
+    eval::{cont, ControlFlow, EvalControlFlowResult, EvalCtx, ValOrMut},
     format::FormatWith,
     ir::{self},
     module::{ModuleEnv, ModuleFunction},
@@ -149,7 +149,7 @@ type CallCtx = EvalCtx;
 
 /// A function that can be called
 pub trait Callable {
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult;
+    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult;
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
@@ -240,7 +240,7 @@ pub struct ScriptFunction {
 }
 
 impl Callable for ScriptFunction {
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
+    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult {
         let arg_count = args.len();
         let old_frame_base = ctx.frame_base;
         ctx.frame_base = ctx.environment.len();
@@ -271,7 +271,9 @@ impl Callable for ScriptFunction {
         #[cfg(debug_assertions)]
         ctx.environment_names.truncate(ctx.frame_base);
         ctx.frame_base = old_frame_base;
-        Ok(ret)
+        // Convert Return to Continue at function boundary
+        // (return statements should only escape the current function, not propagate to callers)
+        Ok(ControlFlow::Continue(ret.into_value()))
     }
     fn as_script(&self) -> Option<&ScriptFunction> {
         Some(self)
@@ -304,7 +306,7 @@ pub struct Closure {
     pub captured: Vec<Value>,
 }
 impl Callable for Closure {
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
+    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult {
         let args = self
             .captured
             .iter()
@@ -421,14 +423,14 @@ pub struct Fallible<T> {
 /// A trait to dispatch over the fallibility of a native function
 pub trait OutputBuilder {
     type Input;
-    fn build(result: Self::Input) -> EvalResult;
+    fn build(result: Self::Input) -> EvalControlFlowResult;
     fn default_ty() -> Type;
 }
 
 impl<O: NativeOutput> OutputBuilder for NatVal<O> {
     type Input = O;
-    fn build(result: Self::Input) -> EvalResult {
-        Ok(Value::Native(Box::new(result)))
+    fn build(result: Self::Input) -> EvalControlFlowResult {
+        cont(Value::Native(Box::new(result)))
     }
     fn default_ty() -> Type {
         Type::primitive::<O>()
@@ -437,8 +439,8 @@ impl<O: NativeOutput> OutputBuilder for NatVal<O> {
 
 impl<O: NativeOutput> OutputBuilder for Fallible<NatVal<O>> {
     type Input = Result<O, RuntimeError>;
-    fn build(result: Self::Input) -> EvalResult {
-        result.map(|o| Value::Native(Box::new(o)))
+    fn build(result: Self::Input) -> EvalControlFlowResult {
+        cont(Value::Native(Box::new(result?)))
     }
     fn default_ty() -> Type {
         Type::primitive::<O>()
@@ -447,8 +449,8 @@ impl<O: NativeOutput> OutputBuilder for Fallible<NatVal<O>> {
 
 impl OutputBuilder for Value {
     type Input = Value;
-    fn build(result: Self::Input) -> EvalResult {
-        Ok(result)
+    fn build(result: Self::Input) -> EvalControlFlowResult {
+        cont(result)
     }
     fn default_ty() -> Type {
         Type::variable_id(0)
@@ -457,8 +459,8 @@ impl OutputBuilder for Value {
 
 impl OutputBuilder for Fallible<Value> {
     type Input = Result<Value, RuntimeError>;
-    fn build(result: Self::Input) -> EvalResult {
-        result
+    fn build(result: Self::Input) -> EvalControlFlowResult {
+        cont(result?)
     }
     fn default_ty() -> Type {
         Type::variable_id(0)
@@ -537,7 +539,7 @@ macro_rules! n_ary_native_fn {
         {
             paste::paste! {
             #[allow(unused_variables)]
-            fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalResult {
+            fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult {
                 // Extract arguments by applying repetition for each ArgExtractor
                 #[allow(unused_variables, unused_mut)]
                 let mut args_iter = args.into_iter();

@@ -195,3 +195,298 @@ fn double_loop() {
         int(18)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn early_returns_in_unexpected_places() {
+    // Test evaluation order: function application should evaluate function before arguments
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                (if true { return 42 } else { |x| x })(1)
+            }
+            f()
+        "# }),
+        int(42)
+    );
+
+    // Test evaluation order: arguments evaluated left-to-right, return in first arg
+    assert_eq!(
+        run(indoc! { r#"
+            fn add(a, b) { a + b }
+            fn f() {
+                add({ return 100 }, { panic("should not reach") })
+            }
+            f()
+        "# }),
+        int(100)
+    );
+
+    // Test return in nested blocks with environment cleanup
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let a = 1;
+                {
+                    let b = 2;
+                    {
+                        let c = 3;
+                        return a + b + c;
+                        let d = 4;
+                    };
+                    let e = 5;
+                };
+                let f = 6;
+                99
+            }
+            f()
+        "# }),
+        int(6)
+    );
+
+    // Test return in array literal construction
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                [1, 2, { return 42 }, 4][0]
+            }
+            f()
+        "# }),
+        int(42)
+    );
+
+    // Test return in tuple construction
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                (1, { return 42 }, 3).0
+            }
+            f()
+        "# }),
+        int(42)
+    );
+
+    // Test return in record construction
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                { x: 1, y: { return 42 }, z: 3 }.x
+            }
+            f()
+        "# }),
+        int(42)
+    );
+
+    // Test return in variant construction
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                Some({ return 42 }); 1
+            }
+            f()
+        "# }),
+        int(42)
+    );
+
+    // Test return in match with early exit in condition
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                match { return 42 } {
+                    0 => 1,
+                    _ => 2
+                }
+            }
+            f()
+        "# }),
+        int(42)
+    );
+
+    // Test return in closure capture
+    // TODO: use once closures are implemented
+    // assert_eq!(
+    //     run(indoc! { r#"
+    //         fn f() {
+    //             let x = { return 42 };
+    //             || x
+    //         }
+    //         f()
+    //     "# }),
+    //     int(42)
+    // );
+
+    // Test multiple returns in sequence (first one wins)
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                return 1;
+                return 2;
+                return 3;
+                99
+            }
+            f()
+        "# }),
+        int(1)
+    );
+
+    // Test return doesn't leak from nested function
+    assert_eq!(
+        run(indoc! { r#"
+            fn outer() {
+                let inner = || { return 42 };
+                let result = inner();
+                result + 1
+            }
+            outer()
+        "# }),
+        int(43)
+    );
+
+    // Test return in deeply nested loops
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                for i in 0..5 {
+                    for j in 0..5 {
+                        for k in 0..5 {
+                            if i == 2 and j == 3 and k == 4 {
+                                return i * 100 + j * 10 + k
+                            }
+                        }
+                    }
+                };
+                999
+            }
+            f()
+        "# }),
+        int(234)
+    );
+
+    // Test return in loop with side effects before return
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let mut sum = 0;
+                for i in 0..10 {
+                    sum = sum + i;
+                    if i == 5 {
+                        return sum
+                    }
+                };
+                999
+            }
+            f()
+        "# }),
+        int(15) // 0+1+2+3+4+5 = 15
+    );
+
+    // Test that return type checking works with complex expressions
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() -> (int, bool) {
+                if true {
+                    return (1, true)
+                };
+                (2, false)
+            }
+            f()
+        "# }),
+        Value::tuple([int(1), bool(true)])
+    );
+
+    // Test return in array index evaluation
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let arr = [10, 20, 30];
+                arr[{ return 42 }]
+            }
+            f()
+        "# }),
+        int(42)
+    );
+
+    // Test return in lambda used in higher-order function
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let arr = [1, 2, 3];
+                array_map(arr, |x| { if x == 2 { return 42 } else { x } })
+            }
+            f()
+        "# }),
+        int_a!(1, 42, 3)
+    );
+
+    // Test return in field access on tuple
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let t = (1, 2, 3);
+                ({ return 42 }, t.1).1
+            }
+            f()
+        "# }),
+        int(42)
+    );
+
+    // Test return with arithmetic operations
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let x = 5;
+                return x * 2 + 3;
+                99
+            }
+            f()
+        "# }),
+        int(13)
+    );
+
+    // Test return inside match arm with computation
+    assert_eq!(
+        run(indoc! { r#"
+            fn f(x) {
+                match x {
+                    0 => 1,
+                    1 => { return 10 + 5 },
+                    _ => 2
+                }
+            }
+            f(1)
+        "# }),
+        int(15)
+    );
+
+    // Test return array indexing
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let a = [1, 2, 3];
+                (if true { return 42 } else { a })[0]
+            }
+            f()
+        "# }),
+        int(42)
+    );
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let a = [1, 2, 3];
+                a[(if true { return 42 } else { 0 })]
+            }
+            f()
+        "# }),
+        int(42)
+    );
+    assert_eq!(
+        run(indoc! { r#"
+            fn f() {
+                let a = [1, 2, 3];
+                a[(if false { return 42 } else { 0 })]
+            }
+            f()
+        "# }),
+        int(1)
+    );
+}

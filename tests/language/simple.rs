@@ -1290,3 +1290,93 @@ fn type_ascription() {
     assert!(compile_expr("1").kind.is_static_apply());
     assert!(compile_expr("(1: int)").kind.is_immediate());
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn early_returns() {
+    // Basic return in function
+    assert_eq!(run("fn f() { return 42 } f()"), int(42));
+    assert_eq!(run("fn f() { return 42; 1 } f()"), int(42));
+
+    // Return with different types
+    assert_eq!(run("fn f() { return true } f()"), bool(true));
+    assert_eq!(run("fn f() { return (1, 2) } f()"), int_tuple!(1, 2));
+    assert_eq!(run("fn f() { return [1, 2, 3] } f()"), int_a![1, 2, 3]);
+
+    // Return in if expression
+    assert_eq!(run("fn f(x) { if x { return 1 }; 2 } f(true)"), int(1));
+    assert_eq!(run("fn f(x) { if x { return 1 }; 2 } f(false)"), int(2));
+    assert_eq!(
+        run("fn f(x) { if x { return 1 } else { return 2 } } f(true)"),
+        int(1)
+    );
+    assert_eq!(
+        run("fn f(x) { if x { return 1 } else { return 2 } } f(false)"),
+        int(2)
+    );
+
+    // Return in block
+    assert_eq!(run("fn f() { { return 1 }; 2 } f()"), int(1));
+    assert_eq!(run("fn f() { { { return 1 } }; 2 } f()"), int(1));
+
+    // Return in loop
+    assert_eq!(
+        run("fn f() { for i in 0..10 { if i == 5 { return i } }; 99 } f()"),
+        int(5)
+    );
+    assert_eq!(
+        run("fn f() { for i in 0..10 { if i > 100 { return i } }; 99 } f()"),
+        int(99)
+    );
+
+    // Return in match expression
+    assert_eq!(
+        run("fn f(x) { match x { true => return 1, false => 2 } } f(true)"),
+        int(1)
+    );
+    assert_eq!(
+        run("fn f(x) { match x { true => return 1, false => 2 } } f(false)"),
+        int(2)
+    );
+    assert_eq!(
+        run("fn f(x) { match x { true => 1, false => return 2 } } f(false)"),
+        int(2)
+    );
+
+    // Multiple return paths
+    assert_eq!(
+        run("fn f(x) { if x < 0 { return 0 }; if x > 10 { return 10 }; x } f(-5)"),
+        int(0)
+    );
+    assert_eq!(
+        run("fn f(x) { if x < 0 { return 0 }; if x > 10 { return 10 }; x } f(5)"),
+        int(5)
+    );
+    assert_eq!(
+        run("fn f(x) { if x < 0 { return 0 }; if x > 10 { return 10 }; x } f(15)"),
+        int(10)
+    );
+
+    // Return with computation
+    assert_eq!(run("fn f(x) { return x * 2 + 1 } f(5)"), int(11));
+    assert_eq!(run("fn f(x, y) { return x + y } f(3, 4)"), int(7));
+
+    // Return in closure
+    assert_eq!(run("let f = || { return 42 }; f()"), int(42));
+    assert_eq!(run("let f = |x| { if x { return 1 }; 2 }; f(true)"), int(1));
+    assert_eq!(
+        run("let f = |x| { if x { return 1 }; 2 }; f(false)"),
+        int(2)
+    );
+
+    // Return without value (unit)
+    assert_eq!(run("fn f() { return () } f()"), unit());
+    // Note: this creates a compilation error because the compiler is not able to infer
+    // that the last expression is dead.
+    //assert_eq!(run("fn f() { return (); 1 } f()"), unit());
+
+    // Error: return outside function
+    fail_compilation("return 1").expect_return_outside_function();
+    fail_compilation("let x = return 1; x").expect_return_outside_function();
+    fail_compilation("if true { return 1 }").expect_return_outside_function();
+}

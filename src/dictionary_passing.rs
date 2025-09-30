@@ -552,6 +552,9 @@ impl Node {
             EnvLoad(load) => {
                 load.index += ctx.dicts.len();
             }
+            Return(node) => {
+                node.elaborate_dictionaries(ctx)?;
+            }
             Block(nodes) => {
                 for node in nodes.iter_mut() {
                     node.elaborate_dictionaries(ctx)?;
