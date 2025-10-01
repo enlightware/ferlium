@@ -450,6 +450,10 @@ impl Deriver for ProductTypeDeserializeDeriver {
             );
             // assemble the final node
             Some(n(block([store_object, match_type]), ty))
+        } else if let TypeKind::Named(named) = ty_data {
+            let ty_def = named.def;
+            // deserialize the inner type
+            return Ok(Some(solver.solve_impl(trait_ref, &[ty_def.shape], span)?));
         } else {
             None // deserialization of rest not yet supported
         };

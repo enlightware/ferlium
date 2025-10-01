@@ -439,7 +439,7 @@ fn serde_serialize() {
         run("serialize({name: \"Alice\", age: 30.0})")
     );
     assert_eq!(
-        run("enum SimpleColor { Red, Green, Blue } serialize(Blue)"),
+        run("enum SimpleColor { Red, Green, Blue } serialize(SimpleColor::Blue)"),
         run("serialize(Blue)")
     )
 }
@@ -504,6 +504,20 @@ fn serde_deserialize() {
     assert_eq!(
         run("(deserialize(serialize( { b: true, a: 1 } )): {a: int, b: bool})"),
         tuple!(int(1), bool(true))
+    );
+
+    // named types, by default de-serialize as their inner type
+    assert_eq!(
+        run("struct Age(float) (deserialize(serialize(Age(1.0))): Age)"),
+        run("struct Age(float) (deserialize(serialize((1.0, ))): Age)")
+    );
+    assert_eq!(
+        run("struct Person { name: string, age: float } (deserialize(serialize( Person { name: \"Alice\", age: 30.0 })): Person)"),
+        run("struct Person { name: string, age: float } (deserialize(serialize({name: \"Alice\", age: 30.0})): Person)")
+    );
+    assert_eq!(
+        run("enum SimpleColor { Red, Green, Blue } (deserialize(serialize(SimpleColor::Blue)): SimpleColor)"),
+        run("enum SimpleColor { Red, Green, Blue } (deserialize(serialize(Blue)): SimpleColor)")
     );
 
     // errors
