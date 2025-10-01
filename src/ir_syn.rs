@@ -82,6 +82,10 @@ pub fn tuple(values: impl IntoSVec2<Node>) -> NodeKind {
     K::Tuple(b(values.into_svec2()))
 }
 
+pub fn record(values: impl IntoSVec2<Node>) -> NodeKind {
+    K::Record(b(values.into_svec2()))
+}
+
 pub fn array(values: impl IntoSVec2<Node>) -> NodeKind {
     K::Array(b(values.into_svec2()))
 }

@@ -475,6 +475,24 @@ fn serde_deserialize() {
         tuple!(int(1), float(1.0), bool(true))
     );
 
+    // records
+    assert_eq!(
+        run("(deserialize(serialize( {a: 1, } )): {a: int})"),
+        tuple!(int(1))
+    );
+    assert_eq!(
+        run("(deserialize(serialize( {a: 1, } )): {a: float})"),
+        tuple!(float(1.0))
+    );
+    assert_eq!(
+        run("(deserialize(serialize( { b: true, a: 1 } )): {a: int, b: bool})"),
+        tuple!(int(1), bool(true))
+    );
+    assert_eq!(
+        run("(deserialize(serialize( { b: true, a: 1 } )): {a: int, b: bool})"),
+        tuple!(int(1), bool(true))
+    );
+
     // errors
     fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
         "Num",

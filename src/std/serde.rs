@@ -337,7 +337,7 @@ impl Deriver for ProductTypeDeserializeDeriver {
 
         // derive tuple, record, variant serialization
         let ty_data = ty.data().clone();
-        if let TypeKind::Tuple(tys) = ty_data {
+        let node = if let TypeKind::Tuple(tys) = ty_data {
             /*
             Example source code for deserialization of a tuple:
             impl Deserialize {
@@ -361,19 +361,97 @@ impl Deriver for ProductTypeDeserializeDeriver {
                 .collect::<Result<SVec2<_>, _>>()?;
             let build_tuple = n(tuple(build_elements), ty);
             let panic = panic_node(solver, span, "Expected Array variant")?;
-            let case = n(
+            Some(n(
                 case(
                     extract_tag,
                     vec![(Value::native(ustr_to_isize(ustr("Array"))), build_tuple)],
                     panic,
                 ),
                 ty,
-            );
-            let local_impl_id = add_concrete_impl_from_code(case, trait_ref, input_types, solver);
-            Ok(Some(TraitImplId::Local(local_impl_id)))
+            ))
+        } else if let TypeKind::Record(fields) = ty_data {
+            /*
+            Example source code for deserialization of a record:
+            impl Deserialize {
+                fn deserialize(v: Variant) -> {a: _, b: _} {
+                    match v {
+                        Object(arr) => {
+                            a: deserialize(std::_get_variant_object_entry(arr, "a")),
+                            b: deserialize(std::_get_variant_object_entry(arr, "b")),
+                        },
+                        _ => panic!("Expected Object variant"),
+                    }
+                }
+            }
+            */
+            let load = n(load(0), variant_type());
+            let extract_tag = n(extract_tag(load.clone()), int_type());
+            let object_element_ty = tuple_type([string_type(), variant_type()]);
+            let object_ty = array_type(object_element_ty);
+            let variant_value_ty = tuple_type([object_ty]);
+            // build deserialization of each field
+            let build_elements = fields
+                .into_iter()
+                .map(|(name, ty)| {
+                    // get the value, note: we expect a (object variant, ) as we have guard on the level above
+                    let project_from_variant = n(project(load.clone(), 0), variant_value_ty);
+                    // get the object array variant out of the tuple
+                    let project_from_tuple = n(project(project_from_variant, 0), object_ty);
+                    // immediate name
+                    let name = n(native(Str::from_str(&name).unwrap()), string_type());
+                    // get the name-th element out of the object array
+                    let function =
+                        solver.get_function(ustr("std"), ustr("_get_variant_object_entry"))?;
+                    let get_entry = n(
+                        ir_syn::static_apply(
+                            function,
+                            FnType::new_by_val(
+                                [object_ty, string_type()],
+                                variant_type(),
+                                EffType::empty(),
+                            ),
+                            span,
+                            vec![project_from_tuple, name],
+                        ),
+                        variant_type(),
+                    );
+                    // deserialize the name-th element
+                    let function = solver.solve_impl_method(trait_ref, &[ty], 0, span)?;
+                    Ok(n(
+                        ir_syn::static_apply(
+                            function,
+                            FnType::new_by_val([variant_type()], ty, EffType::empty()),
+                            span,
+                            vec![get_entry],
+                        ),
+                        ty,
+                    ))
+                })
+                .collect::<Result<SVec2<_>, _>>()?;
+            // build the record node
+            let build_record = n(record(build_elements), ty);
+            // panic if variant tag doesn't match
+            let panic = panic_node(solver, span, "Expected Object variant")?;
+            // assemble match node
+            Some(n(
+                case(
+                    extract_tag,
+                    vec![(Value::native(ustr_to_isize(ustr("Object"))), build_record)],
+                    panic,
+                ),
+                ty,
+            ))
         } else {
-            Ok(None) // deserialization of rest not yet supported
-        }
+            None // deserialization of rest not yet supported
+        };
+        Ok(node.map(|n| {
+            TraitImplId::Local(add_concrete_impl_from_code(
+                n,
+                trait_ref,
+                input_types,
+                solver,
+            ))
+        }))
     }
 }
 

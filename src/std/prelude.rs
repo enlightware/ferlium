@@ -11,7 +11,10 @@ use crate::{add_code_to_module, format::FormatWithData, module::Module, module::
 use indoc::indoc;
 
 pub fn add_to_module(to: &mut Module) {
-    let code = indoc! { r#"
+    // The prelude code is split into multiple parts
+    // to allow dependencies betwen trait implementations.
+    let codes = [
+        indoc! { r#"
         fn lt(lhs, rhs) {
             match cmp(lhs, rhs) {
                 Less => true,
@@ -310,11 +313,28 @@ pub fn add_to_module(to: &mut Module) {
                 }
             }
         }
-    "# };
-    add_code_to_module(code, to, &Modules::new_empty()).unwrap_or_else(|e| {
-        panic!(
-            "Failed to add prelude to module: {}",
-            FormatWithData::new(&e, &code)
-        )
-    });
+
+
+    "# },
+        indoc! { r#"
+        // Serde derive helper
+        fn _get_variant_object_entry(entries: [(string, Variant)], name: string) -> Variant {
+            for entry in entries {
+                if eq(entry.0, name) {
+                    return entry.1;
+                }
+            };
+            let error_msg = "Object variant key \"" |> string_concat(name) |> string_concat("\" not found");
+            panic(error_msg)
+        }
+    "# },
+    ];
+    for code in codes {
+        add_code_to_module(code, to, &Modules::new_empty()).unwrap_or_else(|e| {
+            panic!(
+                "Failed to add prelude to module: {}",
+                FormatWithData::new(&e, &code)
+            )
+        });
+    }
 }
