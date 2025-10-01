@@ -244,8 +244,7 @@ impl Node {
             GetDictionary(_) => {}
             EnvStore(node) => {
                 // Note: synthesized let nodes have empty name span, so we ignore these.
-                let is_synthesized = node.name_span.is_empty();
-                if !is_synthesized {
+                if let Some(name_span) = node.name_span {
                     if let Some((ty_span, ty_constant)) = node.ty_span {
                         if !ty_constant {
                             result.push((
@@ -255,7 +254,7 @@ impl Node {
                         }
                     } else {
                         result.push((
-                            node.name_span.end(),
+                            name_span.end(),
                             format!(": {}", node.value.ty.format_with(env)),
                         ));
                     }

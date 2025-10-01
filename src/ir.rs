@@ -140,7 +140,7 @@ pub struct EnvStore {
     pub value: Node,
     pub index: usize,
     pub name: Ustr,
-    pub name_span: Location,
+    pub name_span: Option<Location>,
     pub ty_span: Option<(Location, bool)>,
 }
 impl EnvStore {

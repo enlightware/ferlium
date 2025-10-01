@@ -417,7 +417,7 @@ impl TypeInference {
                     value: node,
                     index,
                     name: *name,
-                    name_span: *name_span,
+                    name_span: Some(*name_span),
                     ty_span: *ty_span,
                 }));
                 (node, Type::unit(), MutType::constant(), effects)

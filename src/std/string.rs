@@ -134,6 +134,10 @@ pub fn string_type() -> Type {
     cached_primitive_ty!(String)
 }
 
+pub fn string_value(s: &str) -> Value {
+    Value::native(String::from_str(s).unwrap())
+}
+
 pub fn add_to_module(to: &mut Module) {
     to.type_aliases.set("string", string_type());
 

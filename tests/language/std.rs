@@ -465,6 +465,19 @@ fn serde_deserialize() {
         array![float(1.0), float(1.0)]
     );
 
+    // variants
+    // TODO: once https://github.com/enlightware/ferlium/issues/75 is fixed
+    // add (deserialize(serialize(None)): None)
+    assert_eq!(
+        run("(deserialize(serialize(None)): None | Some(int))"),
+        none()
+    );
+    // TODO: once https://github.com/enlightware/ferlium/issues/59 is fixed, remove (int) ascription
+    assert_eq!(
+        run("(deserialize(serialize(Some((1: int)))): None | Some(int))"),
+        some(int(1))
+    );
+
     // tuples
     assert_eq!(
         run("(deserialize(serialize( (1, ) )): (int, ))"),

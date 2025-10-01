@@ -151,7 +151,7 @@ impl TypeInference {
                 value: condition_node,
                 index: initial_env_size,
                 name: match_condition_name,
-                name_span: cond_expr.span,
+                name_span: None,
                 ty_span: None,
             }));
             let store_variant_node = N::new(
@@ -255,7 +255,7 @@ impl TypeInference {
                                         value: project_tuple_inner,
                                         index: alt_start_env_size + i,
                                         name: bind_var_names[i].0,
-                                        name_span: bind_var_names[i].1,
+                                        name_span: Some(bind_var_names[i].1),
                                         ty_span: None,
                                     })),
                                     Type::unit(),

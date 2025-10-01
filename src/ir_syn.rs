@@ -11,18 +11,23 @@ use crate::{
     effects::EffType,
     ir::{self, Node},
     module::{FunctionId, TraitImplId},
-    r#type::FnType,
-    std::math::int_type,
+    r#type::{FnType, Type},
+    std::{math::int_type, string::string_value},
     value::{NativeValue, Value},
     Location,
 };
-use ustr::ustr;
+use ustr::{ustr, Ustr};
 
 use ir::NodeKind;
 use NodeKind as K;
 
+#[allow(dead_code)]
 pub fn native<T: NativeValue + 'static>(value: T) -> NodeKind {
     immediate(Value::native(value))
+}
+
+pub fn native_str(value: &str) -> NodeKind {
+    immediate(string_value(value))
 }
 
 pub fn immediate(value: Value) -> NodeKind {
@@ -32,9 +37,10 @@ pub fn immediate(value: Value) -> NodeKind {
 pub fn static_apply(
     function: FunctionId,
     ty: FnType,
+    arguments: impl Into<Vec<Node>>,
     span: Location,
-    arguments: Vec<Node>,
 ) -> NodeKind {
+    let arguments = arguments.into();
     K::StaticApply(b(ir::StaticApplication {
         function,
         function_path: ustr("synthesized"),
@@ -45,6 +51,31 @@ pub fn static_apply(
         arguments,
         ty,
         inst_data: ir::FnInstData::none(),
+    }))
+}
+
+pub fn static_apply_pure(
+    function: FunctionId,
+    arguments: impl IntoIterator<Item = (Node, Type)>,
+    ret_ty: Type,
+    span: Location,
+) -> NodeKind {
+    let (arguments, args_tys): (Vec<_>, Vec<_>) = arguments.into_iter().unzip();
+    static_apply(
+        function,
+        FnType::new_by_val(args_tys, ret_ty, EffType::empty()),
+        arguments,
+        span,
+    )
+}
+
+pub fn store(value: Node, index: usize, name: Ustr) -> NodeKind {
+    K::EnvStore(b(ir::EnvStore {
+        value,
+        index,
+        name,
+        name_span: None,
+        ty_span: None,
     }))
 }
 
@@ -74,8 +105,12 @@ pub fn extract_tag(variant: Node) -> NodeKind {
     K::ExtractTag(b(variant))
 }
 
-pub fn variant(tag: &str, payload: Node) -> NodeKind {
-    K::Variant(b((ustr(tag), payload)))
+pub fn variant(tag: Ustr, payload: Node) -> NodeKind {
+    K::Variant(b((tag, payload)))
+}
+
+pub fn unit_variant(tag: Ustr) -> NodeKind {
+    immediate(Value::unit_variant(tag))
 }
 
 pub fn tuple(values: impl IntoSVec2<Node>) -> NodeKind {
@@ -108,4 +143,8 @@ pub fn case_from_complete_alternatives(
         alternatives,
         default,
     }))
+}
+
+pub fn block(statements: impl IntoSVec2<Node>) -> NodeKind {
+    K::Block(b(statements.into_svec2()))
 }

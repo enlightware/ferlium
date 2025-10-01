@@ -340,7 +340,7 @@ impl<'a> TraitSolver<'a> {
                         // TODO: only build the thunk if there are constraint dictionaries.
 
                         // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
-                        let arguments = constraint_dict_nodes
+                        let arguments: Vec<_> = constraint_dict_nodes
                             .iter()
                             .cloned()
                             .chain(def.ty_scheme.ty.args.iter().enumerate().map(
@@ -358,7 +358,7 @@ impl<'a> TraitSolver<'a> {
                                 .iter()
                                 .map(|n| FnArgType::new(n.ty, MutType::constant())),
                         );
-                        let apply = static_apply(function_id, fn_ty, fn_span, arguments);
+                        let apply = static_apply(function_id, fn_ty, arguments, fn_span);
                         let code = b(ScriptFunction::new(
                             Node::new(apply, def.ty_scheme.ty.ret, EffType::empty(), fn_span),
                             def.arg_names.clone(),
