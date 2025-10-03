@@ -603,7 +603,7 @@ impl Compiler {
 
     pub fn fn_signature(&self, name: &str) -> Option<String> {
         if let Some(func) = self.user_module.module.get_function(name, &self.modules) {
-            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules, false);
             Some(format!(
                 "{}",
                 func.definition.ty_scheme.display_rust_style(&module_env)
@@ -625,7 +625,7 @@ impl Compiler {
             match expr.expr.eval(self.user_module.module.clone()) {
                 Ok(value) => {
                     let value = value.into_value();
-                    let module_env = ModuleEnv::new(&self.user_module.module, &self.modules);
+                    let module_env = ModuleEnv::new(&self.user_module.module, &self.modules, false);
                     let output = format!("{}: {}", value, expr.ty.display_rust_style(&module_env));
                     html_escape::encode_text(&output).to_string()
                 }
@@ -772,7 +772,7 @@ impl Compiler {
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != Type::unit()
             {
-                let module_env = ModuleEnv::new(current, others);
+                let module_env = ModuleEnv::new(current, others, false);
                 Err(format!(
                     "Function {name} does not have type \"() -> ()\", it has \"{}\" instead",
                     func.definition.ty_scheme.display_rust_style(&module_env)
@@ -796,7 +796,7 @@ impl Compiler {
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
-                let module_env = ModuleEnv::new(current, others);
+                let module_env = ModuleEnv::new(current, others, false);
                 let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
@@ -828,7 +828,7 @@ impl Compiler {
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
-                let module_env = ModuleEnv::new(current, others);
+                let module_env = ModuleEnv::new(current, others, false);
                 let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
@@ -870,7 +870,7 @@ impl Compiler {
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
-                let module_env = ModuleEnv::new(current, others);
+                let module_env = ModuleEnv::new(current, others, false);
                 let i_ty_fmt = i_ty.format_with(&module_env);
                 let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
@@ -907,7 +907,7 @@ impl Compiler {
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != Type::unit()
             {
-                let module_env = ModuleEnv::new(current, others);
+                let module_env = ModuleEnv::new(current, others, false);
                 let i_ty_fmt = i_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"({}) -> ()\", it has \"{}\" instead",
@@ -938,7 +938,7 @@ impl Compiler {
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
-                let module_env = ModuleEnv::new(current, others);
+                let module_env = ModuleEnv::new(current, others, false);
                 let i_ty_fmt = i_ty.format_with(&module_env);
                 let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(

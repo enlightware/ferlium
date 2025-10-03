@@ -36,6 +36,19 @@ pub type UstrSpan = (Ustr, Location);
 /// A spanned Type
 pub type TypeSpan<P> = (<P as Phase>::Type, Location);
 
+/// A spanned type alias during parsing
+#[derive(Debug, Clone, new)]
+pub struct TypeAlias {
+    pub name: UstrSpan,
+    pub ty: TypeSpan<Parsed>,
+}
+impl FormatWith<ModuleEnv<'_>> for TypeAlias {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
+        write!(f, "{}: {}", self.name.0, self.ty.0.format_with(env))?;
+        self.ty.0.fmt_with(f, env)
+    }
+}
+
 /// A spanned Type during parsing
 pub type PTypeSpan = TypeSpan<Parsed>;
 
@@ -52,7 +65,7 @@ pub trait Phase: Sized {
     type Type: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
-    type TypeAliasInModule: Debug + Clone;
+    type TypeAliasInModule: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TypeDefInModule: Debug + Clone;
 }
 
@@ -71,7 +84,7 @@ impl Phase for Parsed {
     type Type = PType;
     type MutType = PMutType;
     type LetTyAscriptionComplete = ();
-    type TypeAliasInModule = (UstrSpan, TypeSpan<Self>);
+    type TypeAliasInModule = TypeAlias;
     type TypeDefInModule = TypeDef<Self>;
 }
 
@@ -476,7 +489,7 @@ impl Module<Parsed> {
         self.functions
             .iter()
             .map(|f| f.name)
-            .chain(self.type_aliases.iter().map(|(name, _)| *name))
+            .chain(self.type_aliases.iter().map(|alias| alias.name))
             .chain(self.type_defs.iter().map(|def| def.name))
     }
 }
@@ -505,12 +518,12 @@ impl<P: Phase> VisitExpr<P> for Module<P> {
     }
 }
 
-impl FormatWith<ModuleEnv<'_>> for Module<Parsed> {
+impl<P: Phase> FormatWith<ModuleEnv<'_>> for Module<P> {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
         if !self.type_aliases.is_empty() {
             writeln!(f, "Types:")?;
-            for (name, ty) in self.type_aliases.iter() {
-                writeln!(f, "  {}: {}", name.0, ty.0.format_with(env))?;
+            for alias in self.type_aliases.iter() {
+                writeln!(f, "  {}", alias.format_with(env))?;
             }
         }
         if !self.impls.is_empty() {

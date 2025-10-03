@@ -142,7 +142,7 @@ impl<'a> TraitSolver<'a> {
     fn print_impls(&self, trait_ref: &TraitRef) {
         println!("In current module:\n\n");
         let fake_current = new_module_using_std();
-        let env = ModuleEnv::new(&fake_current, self.others);
+        let env = ModuleEnv::new(&fake_current, self.others, false);
         self.impls.print_impls_headers(trait_ref, env);
         for (module_name, module) in &self.others.modules {
             if module.impls.blanket_key_to_id.contains_key(trait_ref) {

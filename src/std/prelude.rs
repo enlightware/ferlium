@@ -56,9 +56,10 @@ pub fn add_to_module(to: &mut Module) {
                 _ => rhs,
             }
         }
-
+        "# },
+        indoc! { r#"
         fn clamp(value, min_bound, max_bound) {
-            if gt(min_bound, max_bound) {
+            if min_bound > max_bound {
                 panic("min_bound must be less than or equal to max_bound")
             } else {
                 max(min_bound, min(value, max_bound))
@@ -89,7 +90,7 @@ pub fn add_to_module(to: &mut Module) {
 
         /// Returns true if the collection contains no elements.
         fn is_empty(seq) {
-            eq(len(seq), 0)
+            len(seq) == 0
         }
 
         /*
@@ -313,19 +314,16 @@ pub fn add_to_module(to: &mut Module) {
                 }
             }
         }
-
-
-    "# },
+        "# },
         indoc! { r#"
         // Serde derive helper
         fn _get_variant_object_entry(entries: [(string, Variant)], name: string) -> Variant {
             for entry in entries {
-                if eq(entry.0, name) {
+                if entry.0 == name {
                     return entry.1;
                 }
             };
-            let error_msg = "Object variant key \"" |> string_concat(name) |> string_concat("\" not found");
-            panic(error_msg)
+            panic(f"Object variant key {name} not found")
         }
 
         /// Downcast a variant to None, panicking if the variant is not None.
@@ -379,10 +377,10 @@ pub fn add_to_module(to: &mut Module) {
                 _ => panic("Expected Object variant")
             }
         }
-    "# },
+        "# },
     ];
     for code in codes {
-        add_code_to_module(code, to, &Modules::new_empty()).unwrap_or_else(|e| {
+        add_code_to_module(code, to, &Modules::new_empty(), true).unwrap_or_else(|e| {
             panic!(
                 "Failed to add prelude to module: {}",
                 FormatWithData::new(&e, &code)

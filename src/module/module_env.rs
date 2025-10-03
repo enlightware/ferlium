@@ -46,6 +46,7 @@ impl TypeDefLookupResult {
 pub struct ModuleEnv<'m> {
     pub(crate) current: &'m Module,
     pub(crate) others: &'m Modules,
+    pub(crate) within_std: bool,
 }
 
 impl<'m> ModuleEnv<'m> {
@@ -232,6 +233,9 @@ impl<'m> ModuleEnv<'m> {
                 let path = path.split("::").next_tuple();
                 if let Some(path) = path {
                     let (module_name, function_name) = path;
+                    if module_name == "std" && self.within_std {
+                        return self.current.get_member(function_name, self.others, getter);
+                    }
                     let module_name = ustr(module_name);
                     self.others
                         .get(&module_name)

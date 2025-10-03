@@ -11,6 +11,8 @@ use std::ops::Range;
 
 use ustr::{ustr, Ustr};
 
+use crate::{format::FormatWith, module::ModuleEnv};
+
 /// A range of bytes in the user's input.
 /// It only contains the start and end byte offsets, not the actual input string.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -159,5 +161,40 @@ impl Location {
         }
         // Note: if the location was already external, just overwrite the instantiation point
         self.span = span; // The span of the instantiation point in the current module
+    }
+}
+
+impl FormatWith<ModuleEnv<'_>> for Location {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> std::fmt::Result {
+        if let Some(location) = self.module {
+            match env.others.get(&location.module_name) {
+                None => {
+                    write!(
+                        f,
+                        "{}..{} in unknown imported module \"{}\"",
+                        location.span.start(),
+                        location.span.end(),
+                        location.module_name
+                    )
+                }
+                Some(module) => {
+                    if let Some(source) = module.source.as_ref() {
+                        write!(f, "{}", &source[location.span.as_range()])
+                    } else {
+                        write!(
+                            f,
+                            "{}..{} in imported module \"{}\"",
+                            location.span.start(),
+                            location.span.end(),
+                            location.module_name
+                        )
+                    }
+                }
+            }
+        } else if let Some(source) = env.current.source.as_ref() {
+            write!(f, "{}", &source[self.span.as_range()])
+        } else {
+            write!(f, "{}..{} in current module", self.start(), self.end())
+        }
     }
 }

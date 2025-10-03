@@ -276,15 +276,16 @@ impl PModule {
     /// function dependency graph, sorted topologically.
     pub fn desugar(
         self,
-        others: &Modules,
         output: &mut Module,
+        others: &Modules,
+        within_std: bool,
     ) -> Result<(DModule, FnSccs), InternalCompilationError> {
         // Build a map of type names to their location and definitions or aliases.
         // The ty_names map holds indices to the ty_refs vector, which contains the data.
         let (ty_names, ty_refs): (HashMap<_, _>, Vec<_>) = self
             .type_aliases
             .into_iter()
-            .map(|(name, alias)| (name.0, NamedTypeData::Alias(name, alias)))
+            .map(|alias| (alias.name.0, NamedTypeData::Alias(alias.name, alias.ty)))
             .chain(
                 self.type_defs
                     .into_iter()
@@ -320,7 +321,7 @@ impl PModule {
         }
 
         // Build a module environment with the current module and the others.
-        let mut env = ModuleEnv::new(output, others);
+        let mut env = ModuleEnv::new(output, others, within_std);
 
         // Process types in order of their dependencies and resolve type aliases and type definitions.
         // Directly insert them into the output module once they are resolved.
@@ -337,7 +338,7 @@ impl PModule {
                     output.type_defs.insert(def.name.0, def.desugar(&env)?);
                 }
             }
-            env = ModuleEnv::new(output, others);
+            env = ModuleEnv::new(output, others, within_std);
         }
 
         // Desugar functions

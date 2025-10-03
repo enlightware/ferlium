@@ -384,7 +384,7 @@ impl Module {
         modules: &Modules,
         show_details: bool,
     ) -> fmt::Result {
-        let env = ModuleEnv::new(self, modules);
+        let env = ModuleEnv::new(self, modules, false);
         if !self.uses.is_empty() {
             writeln!(f, "Uses:")?;
             for use_module in self.uses.iter() {

@@ -213,7 +213,7 @@ pub fn compile(
     let output = if log::log_enabled!(log::Level::Debug) {
         let dbg_module = module.clone();
         let ast_inspector = |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>| {
-            let env = ModuleEnv::new(&dbg_module, other_modules);
+            let env = ModuleEnv::new(&dbg_module, other_modules, false);
             log::debug!("Module AST\n{}", module_ast.format_with(&env));
             if let Some(expr_ast) = expr_ast {
                 log::debug!("Expr AST\n{}", expr_ast.format_with(&env));
@@ -231,7 +231,7 @@ pub fn compile(
             log::debug!("Module IR\n{}", module.format_with(other_modules));
         }
         if let Some(expr) = output.expr.as_ref() {
-            let env = ModuleEnv::new(&output.module, other_modules);
+            let env = ModuleEnv::new(&output.module, other_modules, false);
             log::debug!("Expr IR\n{}", expr.expr.format_with(&env));
         }
     }
@@ -258,17 +258,18 @@ pub fn compile_to(
     }
 
     // Emit IR for the module.
-    let mut module = emit_module(module_ast, other_modules, Some(&module)).map_err(|error| {
-        let env = ModuleEnv::new(&module, other_modules);
-        CompilationError::from_internal(error, &env, src)
-    })?;
+    let mut module =
+        emit_module(module_ast, other_modules, Some(&module), false).map_err(|error| {
+            let env = ModuleEnv::new(&module, other_modules, false);
+            CompilationError::from_internal(error, &env, src)
+        })?;
     module.source = Some(src.to_string());
 
     // Emit IR for the expression, if any.
     let mut expr = if let Some(expr_ast) = expr_ast {
         let compiled_expr =
             emit_expr(expr_ast, &mut module, other_modules, vec![]).map_err(|error| {
-                let env = ModuleEnv::new(&module, other_modules);
+                let env = ModuleEnv::new(&module, other_modules, false);
                 CompilationError::from_internal(error, &env, src)
             })?;
         Some(compiled_expr)
@@ -296,19 +297,20 @@ pub fn add_code_to_module(
     code: &str,
     to: &mut Module,
     other_modules: &Modules,
+    within_std: bool,
 ) -> Result<(), CompilationError> {
     // Parse the source code.
     let module_ast =
         parse_module(code, true).map_err(|error| compilation_error!(ParsingFailed(error)))?;
     assert_eq!(module_ast.errors(), &[]);
     {
-        let env = ModuleEnv::new(to, other_modules);
+        let env = ModuleEnv::new(to, other_modules, within_std);
         log::debug!("Module AST\n{}", module_ast.format_with(&env));
     }
 
     // Emit IR for the module.
-    let module = emit_module(module_ast, other_modules, Some(to)).map_err(|error| {
-        let env = ModuleEnv::new(to, other_modules);
+    let module = emit_module(module_ast, other_modules, Some(to), within_std).map_err(|error| {
+        let env = ModuleEnv::new(to, other_modules, within_std);
         CompilationError::from_internal(error, &env, code)
     })?;
 

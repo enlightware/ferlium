@@ -28,7 +28,7 @@ impl ModuleAndExpr {
         style: DisplayStyle,
     ) -> Vec<(usize, String)> {
         use DisplayStyle::*;
-        let env = ModuleEnv::new(&self.module, other_modules);
+        let env = ModuleEnv::new(&self.module, other_modules, false);
         let mut annotations = vec![];
 
         // Let/var bindings just after the name.

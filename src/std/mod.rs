@@ -101,6 +101,7 @@ impl StdModuleEnv {
         ModuleEnv {
             others: &self.others,
             current: &self.current,
+            within_std: false,
         }
     }
 }

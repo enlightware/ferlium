@@ -114,9 +114,15 @@ impl<'m> TypingEnv<'m> {
         &mut self,
         path: &str,
     ) -> Option<(&FunctionDefinition, FunctionId, Option<Ustr>)> {
+        if path.is_empty() {
+            return None;
+        }
         // Resolve the symbol in the module environment, to (Option<module name>, function name)
         let split_path = path.split("::").collect_vec();
-        let key = if split_path.len() == 1 {
+        let fn_name = split_path.last().unwrap();
+        let is_local = split_path.len() == 1
+            || (split_path.len() == 2 && self.module_env.within_std && split_path[0] == "std");
+        let key = if is_local {
             let get_fn = |name: &str, m: &Module| {
                 let name = ustr(name);
                 if m.function_name_to_id.contains_key(&name) {
@@ -127,19 +133,20 @@ impl<'m> TypingEnv<'m> {
             };
             self.module_env
                 .current
-                .get_member(path, self.module_env.others, &get_fn)
+                .get_member(fn_name, self.module_env.others, &get_fn)
         } else if split_path.len() == 2 {
+            let module_name = ustr(split_path[0]);
             self.module_env
                 .others
-                .get(&ustr(split_path[0]))
+                .get(&module_name)
                 .and_then(|m| {
-                    if m.function_name_to_id.contains_key(&ustr(split_path[1])) {
-                        Some(ustr(split_path[1]))
+                    if m.function_name_to_id.contains_key(&ustr(fn_name)) {
+                        Some(ustr(fn_name))
                     } else {
                         None
                     }
                 })
-                .map(|function_name| (Some(ustr(split_path[0])), function_name))
+                .map(|function_name| (Some(module_name), function_name))
         } else {
             None
         };

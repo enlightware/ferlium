@@ -403,7 +403,7 @@ fn process_input(
     // AST debug output for REPL
     let dbg_module = module.clone();
     let ast_inspector = |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>| {
-        let module_env = ModuleEnv::new(&dbg_module, other_modules);
+        let module_env = ModuleEnv::new(&dbg_module, other_modules, false);
         if !module_ast.is_empty() {
             println!("Module AST:\n{}", module_ast.format_with(&module_env));
         }
@@ -428,7 +428,7 @@ fn process_input(
             module.format_with(&ShowModuleDetails(other_modules))
         );
         if let Some(expr) = expr.as_ref() {
-            let module_env = ModuleEnv::new(&module, other_modules);
+            let module_env = ModuleEnv::new(&module, other_modules, false);
             println!("Expr IR:\n{}", expr.expr.format_with(&module_env));
         }
     }
@@ -444,7 +444,7 @@ fn process_input(
         match result {
             Ok(value) => {
                 let value = value.into_value();
-                let module_env = ModuleEnv::new(&module, other_modules);
+                let module_env = ModuleEnv::new(&module, other_modules, false);
                 println!(
                     "{value}: {}",
                     compiled_expr.ty.display_rust_style(&module_env)
@@ -561,7 +561,7 @@ fn run_interactive_repl() {
             println!("No locals.");
         } else {
             println!("Locals:");
-            let env = ModuleEnv::new(&last_module, &other_modules);
+            let env = ModuleEnv::new(&last_module, &other_modules, false);
             for (i, local) in locals.iter().enumerate() {
                 println!(
                     "{} {}: {} = {}",
@@ -639,7 +639,7 @@ fn run_interactive_repl() {
                                 println!("Function id {index} not found in module {module_name}.");
                                 continue;
                             };
-                            let env = ModuleEnv::new(&module, &other_modules);
+                            let env = ModuleEnv::new(&module, &other_modules, false);
                             println!("{}", (&local_fn.function, local_fn.name).format_with(&env));
                             true
                         }

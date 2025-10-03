@@ -11,6 +11,8 @@ use std::fmt::{self, Display};
 
 use derive_new::new;
 
+use crate::never::Never;
+
 /// A wrapper to fmt::Display types that depend on third-party data
 #[derive(new)]
 pub struct FormatWithData<'a, T: ?Sized + 'a, D: ?Sized + 'a> {
@@ -35,6 +37,21 @@ impl<X, T: FormatWith<X>> Display for FormatWithData<'_, T, X> {
 impl<X, U: ?Sized + FormatWith<X>> FormatWith<X> for &U {
     fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &X) -> std::fmt::Result {
         (**self).fmt_with(f, data)
+    }
+}
+
+impl<A, B, X> FormatWith<X> for (A, B)
+where
+    A: FormatWith<X>,
+    B: FormatWith<X>,
+{
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &X) -> fmt::Result {
+        f.write_str("(")?;
+        self.0.fmt_with(f, data)?;
+        f.write_str(", ")?;
+        self.1.fmt_with(f, data)?;
+        f.write_str(")")?;
+        Ok(())
     }
 }
 
@@ -74,6 +91,12 @@ where
             f.write_str(", ")?;
         }
         Ok(())
+    }
+}
+
+impl<X> FormatWith<X> for Never {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, _data: &X) -> std::fmt::Result {
+        write!(f, "Never")
     }
 }
 
