@@ -13,7 +13,7 @@ use crate::{
     containers::b,
     effects::EffType,
     mutability::MutType,
-    r#type::{store_types, FnArgType, FnType, NamedType, NativeType, Type, TypeKind},
+    r#type::{FnArgType, FnType, NamedType, NativeType, Type, TypeKind, store_types},
 };
 
 /// A struct that can substitute types, possibly mutating itself in the process.

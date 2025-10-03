@@ -18,10 +18,10 @@ use ferlium::format::FormatWith;
 use ferlium::module::{Module, ModuleEnv, ModuleRc, Modules, ShowModuleDetails, Use, UseSome};
 use ferlium::std::{new_module_using_std, new_std_modules};
 use ferlium::typing_env::Local;
-use ferlium::{ast, compile_to, Location, ModuleAndExpr, SubOrSameType};
+use ferlium::{Location, ModuleAndExpr, SubOrSameType, ast, compile_to};
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use ferlium::eval::{EvalCtx, ValOrMut};
 
@@ -47,8 +47,8 @@ fn pretty_print_parse_errors(src: &str, errors: &[LocatedError]) {
 }
 
 fn pretty_print_checking_error(error: &CompilationError, src: &str) {
-    use ariadne::{Color, Fmt, Report, ReportKind, Source};
     use CompilationErrorImpl::*;
+    use ariadne::{Color, Fmt, Report, ReportKind, Source};
     match error.deref() {
         ParsingFailed(errors) => {
             pretty_print_parse_errors(src, errors);
@@ -377,7 +377,9 @@ fn print_help() {
     println!(
         "\\module MOD_NAME?: Show a module by name, or the current module if no name is given."
     );
-    println!("\\function FN_ID MOD_NAME?: Shows the code of a function given by its identifier, in a given module.");
+    println!(
+        "\\function FN_ID MOD_NAME?: Shows the code of a function given by its identifier, in a given module."
+    );
     println!("CTRL-D: Exit the REPL.");
 }
 

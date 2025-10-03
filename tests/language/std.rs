@@ -12,7 +12,7 @@ use crate::{common::variant_0, effects::test_mod as test_mod_for_effects};
 
 use super::common::{bool, fail_compilation, float, int, run, string, variant_t1};
 use ferlium::{
-    effects::{effect, no_effects, PrimitiveEffect},
+    effects::{PrimitiveEffect, effect, no_effects},
     std::option::{none, some},
     value::Value,
 };
@@ -435,7 +435,9 @@ fn serde_serialize() {
         run("serialize((1.0, ))")
     );
     assert_eq!(
-        run("struct Person { name: string, age: float } serialize( Person { name: \"Alice\", age: 30.0 })"),
+        run(
+            "struct Person { name: string, age: float } serialize( Person { name: \"Alice\", age: 30.0 })"
+        ),
         run("serialize({name: \"Alice\", age: 30.0})")
     );
     assert_eq!(
@@ -512,11 +514,17 @@ fn serde_deserialize() {
         run("struct Age(float) (deserialize(serialize((1.0, ))): Age)")
     );
     assert_eq!(
-        run("struct Person { name: string, age: float } (deserialize(serialize( Person { name: \"Alice\", age: 30.0 })): Person)"),
-        run("struct Person { name: string, age: float } (deserialize(serialize({name: \"Alice\", age: 30.0})): Person)")
+        run(
+            "struct Person { name: string, age: float } (deserialize(serialize( Person { name: \"Alice\", age: 30.0 })): Person)"
+        ),
+        run(
+            "struct Person { name: string, age: float } (deserialize(serialize({name: \"Alice\", age: 30.0})): Person)"
+        )
     );
     assert_eq!(
-        run("enum SimpleColor { Red, Green, Blue } (deserialize(serialize(SimpleColor::Blue)): SimpleColor)"),
+        run(
+            "enum SimpleColor { Red, Green, Blue } (deserialize(serialize(SimpleColor::Blue)): SimpleColor)"
+        ),
         run("enum SimpleColor { Red, Green, Blue } (deserialize(serialize(Blue)): SimpleColor)")
     );
 

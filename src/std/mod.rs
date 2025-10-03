@@ -9,8 +9,8 @@
 use std::{cell::OnceCell, rc::Rc, str::FromStr};
 
 use crate::{
-    module::{finalize_module_pending_functions, Module, ModuleEnv, Modules, Use},
-    r#type::{bare_native_type, Type, TypeKind},
+    module::{Module, ModuleEnv, Modules, Use, finalize_module_pending_functions},
+    r#type::{Type, TypeKind, bare_native_type},
     value::Value,
 };
 
@@ -23,6 +23,7 @@ pub mod core;
 pub mod flow;
 pub mod io;
 pub mod iterator;
+mod json;
 pub mod logic;
 pub mod math;
 pub mod mem;
@@ -56,6 +57,7 @@ pub fn std_module() -> Rc<Module> {
                 variant::add_to_module(&mut module);
                 iterator::add_to_module(&mut module);
                 serde::add_to_module(&mut module);
+                json::add_to_module(&mut module);
                 prelude::add_to_module(&mut module);
                 module
             });
@@ -149,13 +151,13 @@ mod tests {
     use ordered_float::NotNan;
 
     use crate::{
-        r#type::{tuple_type, Type},
         std::{
-            array::{array_type, Array},
+            array::{Array, array_type},
             logic::bool_type,
             math::{float_type, int_type},
             string::{self, string_type},
         },
+        r#type::{Type, tuple_type},
         value::Value,
     };
 

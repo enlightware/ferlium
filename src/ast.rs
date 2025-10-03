@@ -17,9 +17,10 @@ use std::{
 use ustr::Ustr;
 
 use crate::{
-    containers::{b, B},
+    Location,
+    containers::{B, b},
     error::{InternalCompilationError, LocatedError},
-    format::{write_with_separator, FormatWith},
+    format::{FormatWith, write_with_separator},
     internal_compilation_error,
     module::ModuleEnv,
     mutability::{FormatInFnArg, MutType as IrMutType, MutVal},
@@ -27,7 +28,6 @@ use crate::{
     r#type::Type as IrType,
     type_like::TypeLike,
     value::{LiteralValue, Value},
-    Location,
 };
 
 /// A spanned Ustr
@@ -217,7 +217,9 @@ impl PType {
                     let ty_name = items[0].0;
                     if ty_name == name {
                         return Err(internal_compilation_error!(Unsupported {
-                            reason: format!("Self-referential type paths are not supported, but `{ty_name}` refers to itself"),
+                            reason: format!(
+                                "Self-referential type paths are not supported, but `{ty_name}` refers to itself"
+                            ),
                             span: items[0].1,
                         }));
                     }
@@ -391,7 +393,7 @@ impl DModuleFunctionArg {
         (
             self.name.1,
             self.ty.map(|(mut_ty, ty, span)| {
-                let mut_concrete = mut_ty.map_or(true, |m| !m.is_variable());
+                let mut_concrete = mut_ty.is_none_or(|m| !m.is_variable());
                 let ty_concrete = ty.is_constant();
                 (span, mut_concrete && ty_concrete)
             }),

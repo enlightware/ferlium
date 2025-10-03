@@ -9,21 +9,21 @@
 use std::collections::HashMap;
 
 use crate::{
-    error::DuplicatedVariantContext, internal_compilation_error, r#type::TypeKind,
-    std::core::REPR_TRAIT, Location,
+    Location, error::DuplicatedVariantContext, internal_compilation_error, std::core::REPR_TRAIT,
+    r#type::TypeKind,
 };
-use itertools::{multiunzip, Itertools};
+use itertools::{Itertools, multiunzip};
 use ustr::ustr;
 
 use crate::{
     ast::{DExpr, Pattern, PatternKind, PatternType},
-    containers::{b, SVec2},
-    effects::{no_effects, EffType},
+    containers::{SVec2, b},
+    effects::{EffType, no_effects},
     error::InternalCompilationError,
     ir::{self, EnvLoad, EnvStore, NodeKind},
     mutability::MutType,
-    r#type::Type,
     std::math::int_type,
+    r#type::Type,
     type_inference::TypeInference,
     type_scheme::PubTypeConstraint,
     typing_env::{Local, TypingEnv},

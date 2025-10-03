@@ -10,7 +10,7 @@ use ::std::rc::Rc;
 use std::new_module_using_std;
 
 use ast::{UnstableCollector, VisitExpr};
-use emit_ir::{emit_expr, emit_module, CompiledExpr};
+use emit_ir::{CompiledExpr, emit_expr, emit_module};
 use error::{CompilationError, LocatedError};
 use itertools::Itertools;
 use lalrpop_util::lalrpop_mod;
@@ -60,7 +60,7 @@ pub use location::Location;
 pub use type_inference::SubOrSameType;
 
 use type_scheme::DisplayStyle;
-pub use ustr::{ustr, Ustr};
+pub use ustr::{Ustr, ustr};
 
 use crate::{
     format::FormatWith,

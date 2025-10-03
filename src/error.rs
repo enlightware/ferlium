@@ -18,7 +18,7 @@ use crate::{
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{
     ast::{PatternType, PropertyAccess},
@@ -654,14 +654,8 @@ impl FormatWith<&str> for CompilationError {
                 }
                 Ok(())
             }
-            NameDefinedMultipleTimes {
-                name,
-                ..
-            } => {
-                write!(
-                    f,
-                    "Name `{name}` defined multiple times"
-                )
+            NameDefinedMultipleTimes { name, .. } => {
+                write!(f, "Name `{name}` defined multiple times")
             }
             TypeNotFound(span) => {
                 write!(f, "Cannot find type `{}` in this scope", fmt_span(span))
@@ -827,7 +821,11 @@ impl FormatWith<&str> for CompilationError {
                     fmt_span(record_span)
                 )
             }
-            InvalidVariantName { name, ty, valid: valids } => {
+            InvalidVariantName {
+                name,
+                ty,
+                valid: valids,
+            } => {
                 write!(
                     f,
                     "Variant name `{}` does not exist for variant type `{}`, valid names are `{}`",
@@ -1037,7 +1035,8 @@ impl FormatWith<&str> for CompilationError {
                 write!(
                     f,
                     "Non-exhaustive patterns for type `{}`, all possible values must be covered in `{}`",
-                    ty, fmt_span(span)
+                    ty,
+                    fmt_span(span)
                 )
             }
             TypeValuesCannotBeEnumerated { span, ty } => {
@@ -1517,7 +1516,9 @@ impl CompilationError {
                     name, n
                 );
             }
-            _ => panic!("expect_name_defined_multiple_times called on non-NameDefinedMultipleTimes error {self:?}"),
+            _ => panic!(
+                "expect_name_defined_multiple_times called on non-NameDefinedMultipleTimes error {self:?}"
+            ),
         }
     }
 
@@ -1537,7 +1538,9 @@ impl CompilationError {
                     exp, g, expected, got
                 );
             }
-            _ => panic!("expect_wrong_number_of_arguments called on non-WrongNumberOfArguments error {self:?}"),
+            _ => panic!(
+                "expect_wrong_number_of_arguments called on non-WrongNumberOfArguments error {self:?}"
+            ),
         }
     }
 
@@ -1658,7 +1661,7 @@ impl CompilationError {
                         exp_name, var_name
                     );
                 }
-            },
+            }
             _ => panic!(
                 "expect_undefined_var_in_string_formatting called on non-UndefinedVarInStringFormatting error {self:?}"
             ),
@@ -1676,7 +1679,7 @@ impl CompilationError {
                     "expect_invalid_effect_dependency failed: expected {} ≰ {}, got {} ≰ {}",
                     cur_eff, target_eff, source, target
                 );
-            },
+            }
             _ => panic!(
                 "expect_invalid_effect_dependency called on non-InvalidEffectDependency error {self:?}"
             ),

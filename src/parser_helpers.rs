@@ -6,6 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use crate::Location;
 use crate::ast::Expr;
 use crate::ast::ExprKind;
 use crate::ast::PExpr;
@@ -14,19 +15,18 @@ use crate::ast::Pattern;
 use crate::ast::PatternKind;
 use crate::ast::Phase;
 use crate::ast::UstrSpan;
-use crate::containers::b;
 use crate::containers::SVec2;
+use crate::containers::b;
 use crate::error::LocatedError;
 use crate::escapes::apply_string_escapes;
-use crate::r#type::Type;
 use crate::std::string::String as MyString;
+use crate::r#type::Type;
 use crate::value::LiteralValue;
 use crate::value::NativeDisplay;
 use crate::value::Value;
-use crate::Location;
 use core::str::FromStr;
-use lalrpop_util::lexer::Token;
 use lalrpop_util::ParseError;
+use lalrpop_util::lexer::Token;
 use num_traits::bounds::Bounded;
 use ordered_float::NotNan;
 use std::any::Any;
@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 use std::sync::LazyLock;
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 /// Create a span from two numbers
 pub(crate) fn span(l: usize, r: usize) -> Location {

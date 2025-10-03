@@ -12,15 +12,14 @@
 use std::cell::{Ref, RefCell, RefMut};
 
 use crate::{
-    define_id_type,
+    Location, define_id_type,
     format::FormatWith,
     function::{FunctionDefinition, FunctionRc},
     ir::Node,
-    module::{format_impl_header_by_key, ModuleEnv, ModuleRc, TraitKey},
-    Location,
+    module::{ModuleEnv, ModuleRc, TraitKey, format_impl_header_by_key},
 };
 
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 define_id_type!(
     /// Local function ID within a module

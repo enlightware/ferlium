@@ -13,8 +13,8 @@ use crate::{
     error::RuntimeError,
     function::{NullaryNativeFnFN, UnaryNativeFnNFN},
     module::Module,
-    r#type::{FnType, Type},
     std::string::String as Str,
+    r#type::{FnType, Type},
     type_scheme::TypeScheme,
 };
 

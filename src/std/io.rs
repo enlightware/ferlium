@@ -9,7 +9,7 @@
 use std::sync::{LazyLock, RwLock};
 
 use crate::{
-    effects::{effect, PrimitiveEffect},
+    effects::{PrimitiveEffect, effect},
     function::UnaryNativeFnVN,
     module::Module,
     r#type::Type,

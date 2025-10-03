@@ -6,8 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::any::type_name;
 use std::any::TypeId;
+use std::any::type_name;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use crate::Location;
 use crate::ast::Attribute;
 use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
@@ -34,18 +35,17 @@ use crate::type_like::TypeLike;
 use crate::type_mapper::TypeMapper;
 use crate::type_visitor::TypeInnerVisitor;
 use crate::value::Value;
-use crate::Location;
 use derive_new::new;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
 use nonmax::NonMaxU32;
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
-use crate::containers::{b, B};
+use crate::containers::{B, b};
 use crate::effects::EffType;
 use crate::effects::EffectVar;
 use crate::format::type_variable_index_to_string_greek;
@@ -59,9 +59,7 @@ use crate::typing_env::Local;
 
 #[macro_export]
 macro_rules! cached_primitive_ty {
-    ($ty:ty) => {{
-        $crate::cached_ty!(Type::primitive::<$ty>)
-    }};
+    ($ty:ty) => {{ $crate::cached_ty!(Type::primitive::<$ty>) }};
 }
 
 #[macro_export]
@@ -1304,10 +1302,11 @@ impl TypeUniverse {
                         kind
                     })
                     .collect();
-                assert!(local_world.iter().all(|kind| kind
-                    .inner_types()
-                    .filter(|ty| ty.is_local())
-                    .all(|ty| (ty.index as usize) < local_world.len())));
+                assert!(local_world.iter().all(|kind| {
+                    kind.inner_types()
+                        .filter(|ty| ty.is_local())
+                        .all(|ty| (ty.index as usize) < local_world.len())
+                }));
 
                 // Some helper functions to get the global indices from the local input indices.
                 let global_world_indices = |worlds: &Vec<TypeWorld>, world_index| {
@@ -1448,9 +1447,9 @@ mod tests {
     use crate::{
         resolve_concrete_type,
         std::{
-            logic::bool_type,
-            math::{int_type, Int},
             StdModuleEnv,
+            logic::bool_type,
+            math::{Int, int_type},
         },
     };
 

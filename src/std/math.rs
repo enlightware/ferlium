@@ -15,21 +15,25 @@ use ustr::ustr;
 use crate::{
     cached_primitive_ty,
     containers::b,
-    effects::{no_effects, EffType},
+    effects::{EffType, no_effects},
     error::RuntimeError,
     function::{
         BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, FunctionDefinition,
         UnaryNativeFnNN,
     },
     module::Module,
+    std::ordering::{ORD_TRAIT, ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS},
     r#trait::TraitRef,
     r#type::{FnType, Type},
-    std::ordering::{ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS, ORD_TRAIT},
     value::{NativeDisplay, Value},
 };
 
 pub fn int_type() -> Type {
     cached_primitive_ty!(isize)
+}
+
+pub fn int_value(i: isize) -> Value {
+    Value::native(i)
 }
 
 pub type Int = isize;
@@ -42,6 +46,10 @@ impl NativeDisplay for isize {
 
 pub fn float_type() -> Type {
     cached_primitive_ty!(NotNan<f64>)
+}
+
+pub fn float_value(value: f64) -> Value {
+    Value::native(NotNan::new(value).unwrap())
 }
 
 pub type Float = NotNan<f64>;
@@ -160,9 +168,9 @@ pub fn add_to_module(to: &mut Module) {
     to.traits.push(DIV_TRAIT.clone());
 
     // Trait implementations
-    use std::ops;
     use BinaryNativeFnNNN as BinaryFn;
     use UnaryNativeFnNN as UnaryFn;
+    use std::ops;
 
     // int
     to.add_concrete_impl(

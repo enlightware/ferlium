@@ -22,11 +22,11 @@ use ferlium_macros::declare_native_fn_aliases;
 use crate::{
     effects::EffType,
     error::RuntimeError,
-    eval::{cont, ControlFlow, EvalControlFlowResult, EvalCtx, ValOrMut},
+    eval::{ControlFlow, EvalControlFlowResult, EvalCtx, ValOrMut, cont},
     format::FormatWith,
     ir::{self},
     module::{ModuleEnv, ModuleFunction},
-    r#type::{fmt_fn_type_with_arg_names, FnType, Type},
+    r#type::{FnType, Type, fmt_fn_type_with_arg_names},
     type_like::TypeLike,
     type_mapper::TypeMapper,
     type_scheme::{PubTypeConstraint, TypeScheme},

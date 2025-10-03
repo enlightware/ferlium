@@ -141,7 +141,9 @@ fn recursive_mutable_references() {
         int(1)
     );
     assert_eq!(
-        run("fn set_1(a) { a = 1 } fn call_set_1(a) { a = 2; set_1(a) } let mut a = 0; call_set_1(a); a"),
+        run(
+            "fn set_1(a) { a = 1 } fn call_set_1(a) { a = 2; set_1(a) } let mut a = 0; call_set_1(a); a"
+        ),
         int(1)
     );
 }

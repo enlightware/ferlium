@@ -16,7 +16,7 @@ use crate::{
 };
 use derive_new::new;
 use itertools::Itertools;
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{
     containers::B,

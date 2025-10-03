@@ -5,11 +5,11 @@ members = [ ".", "ferlium_macros", "playground/script-api" ]
 name = "ferlium"
 version = "0.1.0"
 publish = false
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 description = "Our mission: To bring the power of Haskell to the users of Python and Javascript."
 authors = ["Enlightware GmbH"]
-rust-version = "1.80"
+rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -48,6 +48,7 @@ paste = "1"
 heck = "0.5.0"
 lalrpop-util = { version = "0.22.2", features = ["lexer"] }
 indoc = "2"
+json-event-parser = "0.2.2"
 ferlium_macros = { path = "ferlium_macros" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

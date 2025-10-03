@@ -23,7 +23,7 @@ use std::{
 use ustr::Ustr;
 
 use crate::{
-    containers::{b, IntoSVec2, SVec2, B},
+    containers::{B, IntoSVec2, SVec2, b},
     format::{write_with_separator, write_with_separator_and_format_fn},
     function::{Function, FunctionPtr, FunctionRc},
     module::{ModuleEnv, ModuleRc, ModuleWeak},

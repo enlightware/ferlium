@@ -15,17 +15,16 @@ use std::{
 };
 
 use crate::{
-    compile,
+    CompilationError, DisplayStyle, Location, ModuleAndExpr, ModuleEnv, compile,
     error::{
         CompilationErrorImpl, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     eval::{EvalCtx, ValOrMut},
     format::FormatWith,
     module::{ModuleFunction, ModuleRc, Modules, Uses},
-    r#type::{tuple_type, FnArgType, Type},
     std::{new_module_using_std, new_std_modules},
+    r#type::{FnArgType, Type, tuple_type},
     value::{NativeValue, Value},
-    CompilationError, DisplayStyle, Location, ModuleAndExpr, ModuleEnv,
 };
 use itertools::Itertools;
 use regex::Regex;
@@ -34,7 +33,7 @@ use wasm_bindgen::prelude::*;
 
 mod annotations;
 mod char_index_lookup;
-use char_index_lookup::{get_line_column, CharIndexLookup};
+use char_index_lookup::{CharIndexLookup, get_line_column};
 
 /// An error-data structure to be used in IDEs
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
@@ -231,7 +230,9 @@ fn compilation_error_to_data(
             let index_name = fmt_span(index_span);
             vec![ErrorData::from_location(
                 expr_span,
-                format!("Expected tuple because of `.{index_name}`, but `{expr_ty}` was provided instead"),
+                format!(
+                    "Expected tuple because of `.{index_name}`, but `{expr_ty}` was provided instead"
+                ),
             )]
         }
         DuplicatedField {
@@ -265,7 +266,9 @@ fn compilation_error_to_data(
             let field_name = fmt_span(field_span);
             vec![ErrorData::from_location(
                 field_span,
-                format!("Expected record because of `.{field_name}`, but `{record_ty}` was provided instead"),
+                format!(
+                    "Expected record because of `.{field_name}`, but `{record_ty}` was provided instead"
+                ),
             )]
         }
         InvalidVariantName {
@@ -276,7 +279,10 @@ fn compilation_error_to_data(
             let name_text = fmt_span(name);
             vec![ErrorData::from_location(
                 name,
-                format!("Variant name `{name_text}` does not exist for variant type `{ty}`, valid names are `{}`", valids.join(", ")),
+                format!(
+                    "Variant name `{name_text}` does not exist for variant type `{ty}`, valid names are `{}`",
+                    valids.join(", ")
+                ),
             )]
         }
         InvalidVariantType { name, ty } => {
@@ -486,7 +492,9 @@ fn compilation_error_to_data(
         TypeValuesCannotBeEnumerated { span, ty } => {
             vec![ErrorData::from_location(
                 span,
-                format!("Values of type `{ty}` cannot be enumerated, but all possible values must be known for exhaustive match coverage analysis"),
+                format!(
+                    "Values of type `{ty}` cannot be enumerated, but all possible values must be known for exhaustive match coverage analysis"
+                ),
             )]
         }
         MutablePathsOverlap {
@@ -498,9 +506,24 @@ fn compilation_error_to_data(
             let b_name = fmt_span(b_span);
             let fn_name = fmt_span(fn_span);
             vec![
-                ErrorData::from_location(a_span, format!("Mutable path `{a_name}` (here) overlaps with `{b_name}` when calling function `{fn_name}`")),
-                ErrorData::from_location(b_span, format!("Mutable path `{a_name}` overlaps with `{b_name}` (here) when calling function `{fn_name}`")),
-                ErrorData::from_location(fn_span, format!("When calling function `{fn_name}`: mutable path `{a_name}` overlaps with `{b_name}`")),
+                ErrorData::from_location(
+                    a_span,
+                    format!(
+                        "Mutable path `{a_name}` (here) overlaps with `{b_name}` when calling function `{fn_name}`"
+                    ),
+                ),
+                ErrorData::from_location(
+                    b_span,
+                    format!(
+                        "Mutable path `{a_name}` overlaps with `{b_name}` (here) when calling function `{fn_name}`"
+                    ),
+                ),
+                ErrorData::from_location(
+                    fn_span,
+                    format!(
+                        "When calling function `{fn_name}`: mutable path `{a_name}` overlaps with `{b_name}`"
+                    ),
+                ),
             ]
         }
         UndefinedVarInStringFormatting {

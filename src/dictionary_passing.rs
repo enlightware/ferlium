@@ -10,29 +10,29 @@
 use std::{collections::HashMap, mem};
 
 use crate::{
+    Location,
     error::InternalCompilationError,
     format::FormatWith,
     ir_syn,
     module::{FunctionId, LocalFunctionId, ModuleEnv},
     parser_helpers::EMPTY_USTR,
     r#trait::TraitRef,
-    r#type::TypeVar,
     trait_solver::TraitSolver,
+    r#type::TypeVar,
     type_like::TypeLike,
     type_scheme::format_have_trait,
-    Location,
 };
 use derive_new::new;
 use itertools::process_results;
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{
     containers::b,
     effects::no_effects,
     ir::{self, Node, NodeKind},
     mutability::MutType,
-    r#type::{FnArgType, Type, TypeKind},
     std::math::int_type,
+    r#type::{FnArgType, Type, TypeKind},
     type_inference::InstSubstitution,
     value::Value,
 };

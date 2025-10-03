@@ -10,13 +10,13 @@ use crate::{
     cached_ty,
     containers::b,
     module::Module,
-    r#type::{bare_native_type, store_types, NativeType, Type, TypeKind},
     std::{
         array::Array,
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
     },
+    r#type::{NativeType, Type, TypeKind, bare_native_type, store_types},
 };
 use ustr::ustr;
 

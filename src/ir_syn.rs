@@ -7,19 +7,19 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    containers::{b, IntoSVec2},
+    Location,
+    containers::{IntoSVec2, b},
     effects::EffType,
     ir::{self, Node},
     module::{FunctionId, TraitImplId},
-    r#type::{FnType, Type},
     std::{math::int_type, string::string_value},
+    r#type::{FnType, Type},
     value::{NativeValue, Value},
-    Location,
 };
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
-use ir::NodeKind;
 use NodeKind as K;
+use ir::NodeKind;
 
 #[allow(dead_code)]
 pub fn native<T: NativeValue + 'static>(value: T) -> NodeKind {

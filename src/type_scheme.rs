@@ -13,25 +13,25 @@ use std::{
 };
 
 use crate::{
+    Location,
     dictionary_passing::ExtraParameters,
     error::InternalCompilationError,
-    format::{write_with_separator_and_format_fn, FormatWith},
+    format::{FormatWith, write_with_separator_and_format_fn},
     location::Span,
-    r#trait::TraitRef,
     std::core::REPR_TRAIT,
+    r#trait::TraitRef,
     trait_solver::TraitSolver,
     type_inference::UnifiedTypeInference,
     type_like::TypeLike,
     type_mapper::TypeMapper,
     type_visitor::TypeInnerVisitor,
-    Location,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
-    dictionary_passing::{instantiate_dictionaries_req, DictionaryReq},
+    dictionary_passing::{DictionaryReq, instantiate_dictionaries_req},
     effects::{EffType, EffectVar, EffectsSubstitution},
     format::FormatWithData,
     ir::FnInstData,
@@ -1011,14 +1011,25 @@ pub(crate) fn extra_parameters_from_constraints(
                 }
                 Some(DictionaryReq::new_field_index(*record_ty, *field))
             }
-            HaveTrait { trait_ref, input_tys, output_tys, .. } => {
+            HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                ..
+            } => {
                 if input_tys.iter().all(Type::is_constant) {
-                    panic!("Type scheme with trait having only non-variable input types in constraints")
+                    panic!(
+                        "Type scheme with trait having only non-variable input types in constraints"
+                    )
                 }
                 if trait_ref == &*REPR_TRAIT {
                     None // Repr is a special marker trait with an empty function dictionary.
                 } else {
-                    Some(DictionaryReq::new_trait_impl(trait_ref.clone(), input_tys.clone(), output_tys.clone()))
+                    Some(DictionaryReq::new_trait_impl(
+                        trait_ref.clone(),
+                        input_tys.clone(),
+                        output_tys.clone(),
+                    ))
                 }
             }
             _ => None,

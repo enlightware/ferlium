@@ -9,9 +9,9 @@
 use std::{str::FromStr, sync::LazyLock};
 
 use crate::parser_helpers::static_apply;
-use crate::{internal_compilation_error, Location};
+use crate::{Location, internal_compilation_error};
 use regex::Regex;
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::containers::b;
 use crate::mutability::MutVal;

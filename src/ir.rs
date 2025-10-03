@@ -7,12 +7,12 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
+    Location,
     format::FormatWith,
     module::{FunctionId, ModuleRc, TraitImplId},
     r#trait::TraitRef,
     r#type::TypeKind,
     type_like::{CastableToType, TypeLike},
-    Location,
 };
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -20,7 +20,7 @@ use indexmap::IndexMap;
 use ustr::Ustr;
 
 use crate::{
-    containers::{b, SVec2, B},
+    containers::{B, SVec2, b},
     dictionary_passing::DictionariesReq,
     effects::EffType,
     module::ModuleEnv,

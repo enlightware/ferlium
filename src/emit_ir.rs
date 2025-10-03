@@ -14,9 +14,9 @@ use std::{
 };
 
 use indexmap::IndexMap;
-use itertools::{process_results, Itertools};
+use itertools::{Itertools, process_results};
 use log::log_enabled;
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{
     ast::{self, *},
@@ -32,21 +32,21 @@ use crate::{
         ConcreteTraitImplKey, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, Modules,
     },
     mutability::MutType,
-    r#trait::TraitRef,
-    r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
     std::{
-        math::{float_type, int_type, NUM_TRAIT},
+        math::{NUM_TRAIT, float_type, int_type},
         new_module_using_std,
     },
-    trait_solver::{trait_solver_from_module, TraitSolver},
+    r#trait::TraitRef,
+    trait_solver::{TraitSolver, trait_solver_from_module},
+    r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
     type_inference::{FreshVariableTypeMapper, TypeInference},
-    type_like::{instantiate_types, TypeLike},
+    type_like::{TypeLike, instantiate_types},
     type_mapper::TypeMapper,
     type_scheme::{
-        extra_parameters_from_constraints, normalize_types, PubTypeConstraint, TypeScheme,
-        VariantConstraint,
+        PubTypeConstraint, TypeScheme, VariantConstraint, extra_parameters_from_constraints,
+        normalize_types,
     },
-    type_visitor::{collect_ty_vars, TyVarsCollector},
+    type_visitor::{TyVarsCollector, collect_ty_vars},
     typing_env::{Local, TypingEnv},
     value::Value,
 };
@@ -1358,13 +1358,11 @@ fn compute_num_trait_default_types(
                         if output_tys != solved_output_tys {
                             let fake_current = new_module_using_std();
                             let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
-                            return Err(internal_compilation_error!(Internal(
-                                format!(
-                                    "While defaulting Num types, a constraint ended up having invalid output types [{}] while the correct ones are [{}].",
-                                    output_tys.format_with(&env),
-                                    solved_output_tys.format_with(&env)
-                                )
-                            )));
+                            return Err(internal_compilation_error!(Internal(format!(
+                                "While defaulting Num types, a constraint ended up having invalid output types [{}] while the correct ones are [{}].",
+                                output_tys.format_with(&env),
+                                solved_output_tys.format_with(&env)
+                            ))));
                         }
                         selected_constraints.remove(&constraint_ptr(constraint));
                         progress = true;

@@ -9,11 +9,11 @@
 use ustr::Ustr;
 
 use crate::{
+    Location,
     error::InternalCompilationError,
     internal_compilation_error,
     ir::{Node, NodeKind},
     r#type::FnArgType,
-    Location,
 };
 
 enum PathPart {

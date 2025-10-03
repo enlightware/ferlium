@@ -9,7 +9,7 @@
 
 use std::ops::Range;
 
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{format::FormatWith, module::ModuleEnv};
 
@@ -101,7 +101,11 @@ impl Location {
                 if self_name != other_name {
                     let self_name = self_name.unwrap_or(ustr("<current module>"));
                     let other_name = other_name.unwrap_or(ustr("<current module>"));
-                    panic!("Cannot fuse locations from different modules: {self_name}:{:?} with {other_name}:{:?}", start..end, other.span.as_range());
+                    panic!(
+                        "Cannot fuse locations from different modules: {self_name}:{:?} with {other_name}:{:?}",
+                        start..end,
+                        other.span.as_range()
+                    );
                 }
             } else {
                 module = Some(other.module);

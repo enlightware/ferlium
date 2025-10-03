@@ -11,11 +11,11 @@ use std::{collections::HashSet, sync::LazyLock};
 use heck::ToSnakeCase;
 
 use crate::{
+    ModuleAndExpr,
     format::FormatWith,
     ir::{Node, NodeKind},
     module::{ModuleEnv, Modules},
     type_scheme::DisplayStyle,
-    ModuleAndExpr,
 };
 
 impl ModuleAndExpr {

@@ -28,30 +28,30 @@ use crate::{
     location::Location,
     module::ModuleFunction,
     parser_helpers::EMPTY_USTR,
-    r#trait::TraitRef,
     std::core::REPR_TRAIT,
+    r#trait::TraitRef,
     trait_solver::TraitSolver,
     type_like::TypeLike,
     type_mapper::TypeMapper,
-    type_substitution::{substitute_fn_type, substitute_type, substitute_types, TypeSubstituer},
+    type_substitution::{TypeSubstituer, substitute_fn_type, substitute_type, substitute_types},
 };
 use derive_new::new;
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
-use itertools::{multiunzip, Itertools};
-use ustr::{ustr, Ustr};
+use itertools::{Itertools, multiunzip};
+use ustr::{Ustr, ustr};
 
 use crate::{
     ast::{ExprKind, PropertyAccess},
-    containers::{b, SVec2},
+    containers::{SVec2, b},
     dictionary_passing::DictionaryReq,
-    effects::{no_effects, EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution},
+    effects::{EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution, no_effects},
     error::{ADTAccessType, InternalCompilationError, MutabilityMustBeContext},
     function::ScriptFunction,
     ir::{self, EnvStore, FnInstData, Immediate, Node, NodeKind},
     module::ModuleEnv,
     mutability::{MutType, MutVal, MutVar, MutVarKey},
-    r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
     std::{array::array_type, math::int_type},
+    r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
     type_scheme::PubTypeConstraint,
     typing_env::{Local, TypingEnv},
     value::Value,
@@ -305,9 +305,9 @@ impl TypeInference {
         env: &mut TypingEnv,
         expr: &DExpr,
     ) -> Result<(Node, MutType), InternalCompilationError> {
+        use ExprKind::*;
         use ir::Node as N;
         use ir::NodeKind as K;
-        use ExprKind::*;
         let (node, ty, mut_ty, effects) = match &expr.kind {
             Literal(value, ty) => (
                 K::Immediate(Immediate::new(value.clone())),
@@ -338,7 +338,9 @@ impl TypeInference {
                     };
                     return Err(internal_compilation_error!(Unsupported {
                         span: expr.span,
-                        reason: format!("First-class trait method is unsupported: method {path} in {module_text} cannot be used")
+                        reason: format!(
+                            "First-class trait method is unsupported: method {path} in {module_text} cannot be used"
+                        )
                     }));
                 }
                 // Retrieve the function from the environment, if it exists
@@ -428,7 +430,7 @@ impl TypeInference {
                     None => {
                         return Err(internal_compilation_error!(ReturnOutsideFunction {
                             span: expr.span,
-                        }))
+                        }));
                     }
                 };
                 let node = self.infer_expr_drop_mut(env, expr)?;
@@ -658,7 +660,7 @@ impl TypeInference {
                         let field = fields[layout_size];
                         return Err(internal_compilation_error!(InvalidStructField {
                             type_def,
-                            field_span: field.0 .1,
+                            field_span: field.0.1,
                             instantiation_span: expr.span,
                         }));
                     }
@@ -669,7 +671,7 @@ impl TypeInference {
                         .zip(fields.iter())
                         .map(|(layout_field, field)| {
                             assert_eq!(
-                                layout_field.0, field.0 .0,
+                                layout_field.0, field.0.0,
                                 "Record field names should match the layout",
                             );
                             let node = self.check_expr(
@@ -1232,9 +1234,9 @@ impl TypeInference {
         expected_mut: MutType,
         expected_span: Location,
     ) -> Result<Node, InternalCompilationError> {
+        use ExprKind::*;
         use ir::Node as N;
         use ir::NodeKind as K;
-        use ExprKind::*;
 
         // Literal of correct type, we are good
         if let Literal(value, ty) = &expr.kind {
@@ -1738,7 +1740,7 @@ impl UnifiedTypeInference {
                             // tuple_span and index_span *must* originate from the same module
                             let span = Location::fuse_range([*tuple_span, *index_span]).unwrap();
                             if let Some(variant) = variants_are.get(&tuple_ty) {
-                                let variant_span = variant.iter().next().unwrap().1 .1;
+                                let variant_span = variant.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::Variant,
                                     variant_span,
@@ -1746,7 +1748,7 @@ impl UnifiedTypeInference {
                                     span,
                                 ));
                             } else if let Some(record) = records_field_is.get(&tuple_ty) {
-                                let record_span = record.iter().next().unwrap().1 .1;
+                                let record_span = record.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::RecordAccess,
                                     record_span,
@@ -1781,7 +1783,7 @@ impl UnifiedTypeInference {
                             // record_span and field_span *must* originate from the same module
                             let span = Location::fuse_range([*record_span, *field_span]).unwrap();
                             if let Some(variant) = variants_are.get(&record_ty) {
-                                let variant_span = variant.iter().next().unwrap().1 .1;
+                                let variant_span = variant.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::Variant,
                                     variant_span,
@@ -1789,7 +1791,7 @@ impl UnifiedTypeInference {
                                     span,
                                 ));
                             } else if let Some(tuple) = tuples_at_index_is.get(&record_ty) {
-                                let tuple_span = tuple.iter().next().unwrap().1 .1;
+                                let tuple_span = tuple.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::TupleProject,
                                     tuple_span,
@@ -1825,7 +1827,7 @@ impl UnifiedTypeInference {
                             // So we just use variant_span here.
                             let span = *variant_span;
                             if let Some(tuple) = tuples_at_index_is.get(&variant_ty) {
-                                let index_span = tuple.iter().next().unwrap().1 .1;
+                                let index_span = tuple.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::TupleProject,
                                     index_span,
@@ -1833,7 +1835,7 @@ impl UnifiedTypeInference {
                                     span,
                                 ));
                             } else if let Some(record) = records_field_is.get(&variant_ty) {
-                                let record_span = record.iter().next().unwrap().1 .1;
+                                let record_span = record.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
                                     ADTAccessType::RecordAccess,
                                     record_span,
@@ -2009,11 +2011,7 @@ impl UnifiedTypeInference {
 
     pub fn effect_unioned(&mut self, var: EffectVar) -> Option<EffectVar> {
         let root = self.effect_unification_table.find(var);
-        if root != var {
-            Some(root)
-        } else {
-            None
-        }
+        if root != var { Some(root) } else { None }
     }
 
     pub fn unify_sub_type(
@@ -2389,10 +2387,9 @@ impl UnifiedTypeInference {
             ))),
             // A variant, verify payload type
             TypeKind::Variant(variants) => {
-                if let Some(ty) =
-                    variants
-                        .iter()
-                        .find_map(|(name, ty)| if *name == tag { Some(ty) } else { None })
+                if let Some(ty) = variants
+                    .iter()
+                    .find_map(|(name, ty)| if *name == tag { Some(ty) } else { None })
                 {
                     self.unify_same_type(*ty, payload_span, payload_ty, payload_span)?;
                     Ok(None)
@@ -3090,7 +3087,7 @@ impl TypeSubstituer for SubstituteTypes<'_> {
             static VAR_VISITED: RefCell<HashSet<EffectVar>> = RefCell::new(HashSet::new());
         }
 
-        let res = EffType::from_iter(eff_ty.iter().flat_map(|eff| {
+        EffType::from_iter(eff_ty.iter().flat_map(|eff| {
             EffType::into_iter(match eff {
                 Primitive(effect) => EffType::single_primitive(*effect),
                 Variable(var) => {
@@ -3122,8 +3119,7 @@ impl TypeSubstituer for SubstituteTypes<'_> {
                     effects
                 }
             } as EffType)
-        }));
-        res
+        }))
     }
 }
 
@@ -3175,7 +3171,7 @@ fn fields_to_record_type<P: crate::ast::Phase>(
     Type::record(
         fields
             .iter()
-            .map(|field| field.0 .0)
+            .map(|field| field.0.0)
             .zip(types)
             .collect::<Vec<_>>(),
     )

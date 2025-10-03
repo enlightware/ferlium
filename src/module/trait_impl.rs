@@ -22,14 +22,14 @@ use ustr::Ustr;
 
 use crate::{
     define_id_type,
-    format::{write_with_separator_and_format_fn, FormatWith},
+    format::{FormatWith, write_with_separator_and_format_fn},
     function::{Function, FunctionDefinition, FunctionRc},
     module::{LocalFunction, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc},
     r#trait::TraitRef,
-    r#type::{fmt_fn_type_with_arg_names, Type, TypeSubstitution, TypeVar},
+    r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     type_inference::InstSubstitution,
     type_like::TypeLike,
-    type_scheme::{format_constraints_consolidated, PubTypeConstraint},
+    type_scheme::{PubTypeConstraint, format_constraints_consolidated},
     value::Value,
 };
 

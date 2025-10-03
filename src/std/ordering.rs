@@ -15,7 +15,7 @@ use crate::{
     function::FunctionDefinition,
     module::Module,
     r#trait::TraitRef,
-    r#type::{variant_type, FnType, Type},
+    r#type::{FnType, Type, variant_type},
 };
 
 pub const ORDERING_LESS: &str = "Less";

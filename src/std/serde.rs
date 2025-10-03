@@ -12,26 +12,25 @@ use ustr::ustr;
 use std::sync::Arc;
 
 use crate::{
-    cached_ty,
-    containers::{b, SVec2},
+    Location, cached_ty,
+    containers::{SVec2, b},
     effects::EffType,
     error::InternalCompilationError,
     function::{Function, FunctionDefinition, ScriptFunction},
     ir::{self, Node},
     ir_syn,
     module::{LocalImplId, Module, TraitImplId},
-    r#trait::{Deriver, TraitRef},
-    r#type::{tuple_type, FnType, Type, TypeKind},
     std::{
         array::array_type,
         math::int_type,
         string::{string_type, string_value},
         variant::variant_object_entry_type,
     },
+    r#trait::{Deriver, TraitRef},
     trait_solver::TraitSolver,
+    r#type::{FnType, Type, TypeKind, tuple_type},
     type_like::TypeLike,
-    value::{ustr_to_isize, Value},
-    Location,
+    value::{Value, ustr_to_isize},
 };
 
 use super::variant::variant_type;

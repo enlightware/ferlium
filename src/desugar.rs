@@ -11,15 +11,16 @@ use std::{
     collections::{HashMap, HashSet},
     mem,
 };
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{
+    Location,
     ast::{
         self, DExpr, DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, Expr, ExprKind,
         ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction, PModuleFunctionArg,
         PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, UstrSpan,
     },
-    containers::{b, B},
+    containers::{B, b},
     effects::EffType,
     error::{DuplicatedFieldContext, DuplicatedVariantContext, InternalCompilationError},
     format_string::emit_format_string_ast,
@@ -30,10 +31,9 @@ use crate::{
     module::Modules,
     mutability::{MutType, MutVal},
     parser_helpers::static_apply,
-    r#type::{FnArgType, FnType, Type, TypeDefRef},
     std::{array::array_type, math::int_type},
+    r#type::{FnArgType, FnType, Type, TypeDefRef},
     type_like::TypeLike,
-    Location,
 };
 
 /// A node of a function dependency graph

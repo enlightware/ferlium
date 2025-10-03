@@ -16,21 +16,21 @@ use std::{
 };
 
 use dyn_clone::DynClone;
-use ustr::ustr;
 use ustr::Ustr;
+use ustr::ustr;
 
 use crate::{
+    Location,
     containers::iterable_to_string,
     error::InternalCompilationError,
-    format::{write_with_separator_and_format_fn, FormatWith},
+    format::{FormatWith, write_with_separator_and_format_fn},
     function::FunctionDefinition,
     module::{ModuleEnv, TraitImplId},
-    r#type::{Type, TypeSubstitution, TypeVar},
     trait_solver::TraitSolver,
+    r#type::{Type, TypeSubstitution, TypeVar},
     type_like::TypeLike,
     type_scheme::PubTypeConstraint,
     type_visitor::TyVarsCollector,
-    Location,
 };
 
 /// Help deriving implementations of traits.
@@ -99,14 +99,27 @@ impl Trait {
         for (name, function) in &self.functions {
             for quantifier in &function.ty_scheme.ty_quantifiers {
                 if quantifier.name() >= trait_type_count {
-                    panic!("Generic trait functions are not supported yet, but function {} of trait {} has a quantifier {}.", name, self.name, quantifier);
+                    panic!(
+                        "Generic trait functions are not supported yet, but function {} of trait {} has a quantifier {}.",
+                        name, self.name, quantifier
+                    );
                 }
             }
             if !function.ty_scheme.eff_quantifiers.is_empty() {
-                panic!("Generic effects are not supported in trait functions yet, but function {} of trait {} has generic effects {}.", name, self.name, iterable_to_string(&function.ty_scheme.eff_quantifiers, ", "));
+                panic!(
+                    "Generic effects are not supported in trait functions yet, but function {} of trait {} has generic effects {}.",
+                    name,
+                    self.name,
+                    iterable_to_string(&function.ty_scheme.eff_quantifiers, ", ")
+                );
             }
             if !function.ty_scheme.constraints.is_empty() {
-                panic!("Generic constraints are not supported in trait functions yet, but function {} of trait {} has {} generic constraints.", name, self.name, function.ty_scheme.constraints.len());
+                panic!(
+                    "Generic constraints are not supported in trait functions yet, but function {} of trait {} has {} generic constraints.",
+                    name,
+                    self.name,
+                    function.ty_scheme.constraints.len()
+                );
             }
             for input_ty_var in 0..self.input_type_count.get() {
                 let ty_var = TypeVar::new(input_ty_var);
@@ -127,10 +140,16 @@ impl Trait {
                 let (_, input_tys, output_tys, _) = constraint
                     .as_have_trait()
                     .expect("Only HaveTrait constraints are supported in traits.");
-                assert!(input_tys
-                    .iter()
-                    .flat_map(TypeLike::inner_ty_vars)
-                    .all(|ty_var| quantifiers.contains(&ty_var)), "In trait {}, constraint #{} has unreachable input type variable in function {}.", self.name, i, name);
+                assert!(
+                    input_tys
+                        .iter()
+                        .flat_map(TypeLike::inner_ty_vars)
+                        .all(|ty_var| quantifiers.contains(&ty_var)),
+                    "In trait {}, constraint #{} has unreachable input type variable in function {}.",
+                    self.name,
+                    i,
+                    name
+                );
                 let mut additional_ty_vars = HashSet::new();
                 let mut collector = TyVarsCollector(&mut additional_ty_vars);
                 output_tys.iter().for_each(|ty| ty.visit(&mut collector));

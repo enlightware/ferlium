@@ -10,9 +10,10 @@ use itertools::Itertools;
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{
+    Location,
     function::FunctionDefinition,
     module::FunctionId,
     module::ModuleEnv,
@@ -20,7 +21,6 @@ use crate::{
     mutability::MutType,
     r#trait::TraitRef,
     r#type::{FnArgType, Type},
-    Location,
 };
 
 /// A trait function description as result of a lookup in the typing environment.

@@ -7,8 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
+    ModuleAndExpr,
     containers::IntoSVec2,
-    effects::{effect, effects, no_effects, PrimitiveEffect},
+    effects::{PrimitiveEffect, effect, effects, no_effects},
     error::{CompilationError, RuntimeError},
     eval::{ControlFlow, EvalResult},
     function::{
@@ -16,15 +17,14 @@ use ferlium::{
         UnaryNativeFnVN,
     },
     module::{Module, Modules},
-    r#type::{variant_type, FnType, Type},
     std::{
-        array::{array_type, Array},
+        array::{Array, array_type},
         math::int_type,
         new_std_modules,
         option::option_type,
     },
+    r#type::{FnType, Type, variant_type},
     value::Value,
-    ModuleAndExpr,
 };
 use std::{cell::RefCell, sync::atomic::AtomicIsize};
 use ustr::ustr;

@@ -21,11 +21,11 @@ use super::common::{
 use ferlium::{
     error::{DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeError},
     mutability::MutType,
-    r#type::{tuple_type, Type},
     std::{
-        array::{array_type_generic, Array},
+        array::{Array, array_type_generic},
         math::{float_type, int_type},
     },
+    r#type::{Type, tuple_type},
     value::Value,
 };
 
@@ -725,7 +725,9 @@ fn records() {
         int(5)
     );
     assert_eq!(
-        run("let l = |v| { let ex = |v| v.x; let ey = |v| v.y; ex(v) + ey(v) }; l({a: true, x:1, x_n: \"hi\", y:2, y_n: false})"),
+        run(
+            "let l = |v| { let ex = |v| v.x; let ey = |v| v.y; ex(v) + ey(v) }; l({a: true, x:1, x_n: \"hi\", y:2, y_n: false})"
+        ),
         int(3)
     );
     assert_eq!(run("(|v| v.x + v.y)({x:1, y:2})"), int(3));

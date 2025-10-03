@@ -12,17 +12,17 @@ use std::{collections::VecDeque, mem, rc::Rc};
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 #[cfg(debug_assertions)]
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{
     containers::b,
     error::RuntimeError,
-    format::{write_with_separator, FormatWith},
+    format::{FormatWith, write_with_separator},
     function::{Closure, FunctionRc},
     ir::{Node, NodeKind},
     module::{FunctionId, ImportFunctionTarget, ModuleEnv, ModuleRc, TraitImplId},
-    r#type::FnArgType,
     std::array,
+    r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},
 };
 
@@ -500,7 +500,9 @@ impl Node {
                 ctx.call_function_id(app.function, arguments)
             }
             TraitFnApply(_) => {
-                panic!("Trait function application should not be executed, but transformed to StaticApply");
+                panic!(
+                    "Trait function application should not be executed, but transformed to StaticApply"
+                );
             }
             GetFunction(get_fn) => {
                 let (function, module) = ctx.get_function(get_fn.function);

@@ -42,7 +42,7 @@ use std::{
 };
 
 use itertools::Itertools;
-use ustr::{ustr, Ustr};
+use ustr::{Ustr, ustr};
 
 use crate::{
     format::FormatWith,

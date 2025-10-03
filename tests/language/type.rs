@@ -10,15 +10,15 @@
 use ferlium::{
     effects::EffType,
     format::FormatWithData,
-    r#type::{record_type, tuple_type, variant_type, FnType, Type},
     resolve_concrete_type, resolve_generic_type,
     std::{
+        StdModuleEnv,
         array::array_type,
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
-        StdModuleEnv,
     },
+    r#type::{FnType, Type, record_type, tuple_type, variant_type},
     value::Value,
 };
 

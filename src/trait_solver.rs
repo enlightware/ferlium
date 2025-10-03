@@ -13,6 +13,7 @@ use derive_new::new;
 use ustr::Ustr;
 
 use crate::{
+    Location,
     containers::b,
     effects::EffType,
     error::InternalCompilationError,
@@ -27,14 +28,13 @@ use crate::{
         TraitImplId, TraitImpls, TraitKey,
     },
     mutability::MutType,
+    std::{core::REPR_TRAIT, new_module_using_std},
     r#trait::TraitRef,
     r#type::{FnArgType, Type},
-    std::{core::REPR_TRAIT, new_module_using_std},
     type_inference::UnifiedTypeInference,
     type_like::TypeLike,
     type_visitor::AllVarsCollector,
     value::Value,
-    Location,
 };
 
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.

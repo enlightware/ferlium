@@ -16,7 +16,7 @@ use crate::{
     format::write_with_separator,
     function::{BinaryNativeFnMVN, BinaryNativeFnNNN, UnaryNativeFnMV, UnaryNativeFnNN},
     module::{Module, ModuleFunction},
-    r#type::{bare_native_type, FnType, Type},
+    r#type::{FnType, Type, bare_native_type},
     type_scheme::TypeScheme,
     value::{NativeDisplay, NativeValue, Value},
 };

@@ -8,10 +8,10 @@
 //
 
 use ferlium::error::{DuplicatedFieldContext, DuplicatedVariantContext};
-use ferlium::r#type::Type;
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
 use ferlium::std::string::string_type;
+use ferlium::r#type::Type;
 use ferlium::value::Value;
 use test_log::test;
 
@@ -717,21 +717,21 @@ fn attributes() {
     assert_eq!(attributes[1].path.0, ustr("path"));
     assert_eq!(attributes[1].items.len(), 1);
     assert_eq!(
-        attributes[1].items[0].as_name_value().unwrap().0 .0,
+        attributes[1].items[0].as_name_value().unwrap().0.0,
         ustr("name")
     );
     assert_eq!(
-        attributes[1].items[0].as_name_value().unwrap().1 .0,
+        attributes[1].items[0].as_name_value().unwrap().1.0,
         ustr("value")
     );
     assert_eq!(attributes[2].path.0, ustr("multi"));
     assert_eq!(attributes[2].items.len(), 2);
     let item1 = attributes[2].items[0].as_name_value().unwrap();
-    assert_eq!(item1.0 .0, ustr("name1"));
-    assert_eq!(item1.1 .0, ustr("value1"));
+    assert_eq!(item1.0.0, ustr("name1"));
+    assert_eq!(item1.1.0, ustr("value1"));
     let item2 = attributes[2].items[1].as_name_value().unwrap();
-    assert_eq!(item2.0 .0, ustr("name2"));
-    assert_eq!(item2.1 .0, ustr("value2"));
+    assert_eq!(item2.0.0, ustr("name2"));
+    assert_eq!(item2.1.0, ustr("value2"));
 
     // Also works on structs
     let attributes = attrs(
@@ -752,19 +752,19 @@ fn attributes() {
     assert_eq!(attributes[1].path.0, ustr("path"));
     assert_eq!(attributes[1].items.len(), 1);
     assert_eq!(
-        attributes[1].items[0].as_name_value().unwrap().0 .0,
+        attributes[1].items[0].as_name_value().unwrap().0.0,
         ustr("name")
     );
     assert_eq!(
-        attributes[1].items[0].as_name_value().unwrap().1 .0,
+        attributes[1].items[0].as_name_value().unwrap().1.0,
         ustr("value")
     );
     assert_eq!(attributes[2].path.0, ustr("multi"));
     assert_eq!(attributes[2].items.len(), 2);
     let item1 = attributes[2].items[0].as_name_value().unwrap();
-    assert_eq!(item1.0 .0, ustr("name1"));
-    assert_eq!(item1.1 .0, ustr("value1"));
+    assert_eq!(item1.0.0, ustr("name1"));
+    assert_eq!(item1.1.0, ustr("value1"));
     let item2 = attributes[2].items[1].as_name_value().unwrap();
-    assert_eq!(item2.0 .0, ustr("name2"));
-    assert_eq!(item2.1 .0, ustr("value2"));
+    assert_eq!(item2.0.0, ustr("name2"));
+    assert_eq!(item2.1.0, ustr("value2"));
 }
