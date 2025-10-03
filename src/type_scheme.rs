@@ -382,17 +382,17 @@ impl PartialEq for PubTypeConstraint {
             (
                 TypeHasVariant {
                     variant_ty: v_ty1,
-                    tag: v1,
+                    tag: tag1,
                     payload_ty: p_ty1,
                     ..
                 },
                 TypeHasVariant {
                     variant_ty: v_ty2,
-                    tag: v2,
+                    tag: tag2,
                     payload_ty: p_ty2,
                     ..
                 },
-            ) => v_ty1 == v_ty2 && v1 == v2 && p_ty1 == p_ty2,
+            ) => v_ty1 == v_ty2 && tag1 == tag2 && p_ty1 == p_ty2,
             (
                 HaveTrait {
                     trait_ref: t1,
@@ -438,12 +438,12 @@ impl Hash for PubTypeConstraint {
             }
             TypeHasVariant {
                 variant_ty,
-                tag: variant,
+                tag,
                 payload_ty,
                 ..
             } => {
                 variant_ty.hash(state);
-                variant.hash(state);
+                tag.hash(state);
                 payload_ty.hash(state);
             }
             HaveTrait {
@@ -498,18 +498,18 @@ impl FormatWith<ModuleEnv<'_>> for PubTypeConstraint {
             }
             TypeHasVariant {
                 variant_ty,
-                tag: variant,
+                tag,
                 payload_ty,
                 ..
             } => {
                 if *payload_ty == Type::unit() {
-                    write!(f, "{} ⊇ {}", variant_ty.format_with(env), variant,)
+                    write!(f, "{} ⊇ {}", variant_ty.format_with(env), tag,)
                 } else {
                     write!(
                         f,
                         "{} ⊇ {} {}",
                         variant_ty.format_with(env),
-                        variant,
+                        tag,
                         payload_ty.format_with(env)
                     )
                 }

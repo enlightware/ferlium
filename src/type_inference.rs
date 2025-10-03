@@ -1821,9 +1821,9 @@ impl UnifiedTypeInference {
                         } => {
                             let variant_ty = unified_ty_inf.normalize_type(*variant_ty);
                             let payload_ty = unified_ty_inf.normalize_type(*payload_ty);
-                            // record_span and field_span *must* originate from the same module
-                            let span =
-                                Location::fuse_range([*variant_span, *payload_span]).unwrap();
+                            // We observed that sometimes variant_span and payload_span come from different modules.
+                            // So we just use variant_span here.
+                            let span = *variant_span;
                             if let Some(tuple) = tuples_at_index_is.get(&variant_ty) {
                                 let index_span = tuple.iter().next().unwrap().1 .1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
