@@ -109,6 +109,8 @@ impl ast::PType {
                     ty
                 } else if let Some(ty) = env.type_def_type(&path) {
                     ty
+                } else if items.len() == 1 {
+                    Type::variant([(items[0].0, Type::unit())])
                 } else {
                     return Err(internal_compilation_error!(TypeNotFound(span)));
                 }
