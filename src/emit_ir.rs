@@ -80,13 +80,6 @@ pub fn emit_module(
     // First desugar the module.
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
     let (source, sorted_sccs) = source.desugar(&mut output, others, within_std)?;
-    println!(
-        "Desugared module:\n{}",
-        crate::format::FormatWith::format_with(
-            &source,
-            &ModuleEnv::new(&output, others, within_std)
-        )
-    );
 
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
