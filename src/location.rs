@@ -96,15 +96,12 @@ impl Location {
         let mut end = 0;
         for other in others {
             if let Some(module) = module {
-                if module != other.module {
-                    let self_name = module
-                        .map(|m| m.module_name)
-                        .unwrap_or(ustr("<current module>"));
-                    let other_name = other
-                        .module
-                        .map(|m| m.module_name)
-                        .unwrap_or(ustr("<current module>"));
-                    panic!("Cannot fuse locations from different modules: {self_name}:{:?} with {other_name}: {:?}", start..end, other.span.as_range());
+                let self_name = module.map(|m| m.module_name);
+                let other_name = other.module.map(|m| m.module_name);
+                if self_name != other_name {
+                    let self_name = self_name.unwrap_or(ustr("<current module>"));
+                    let other_name = other_name.unwrap_or(ustr("<current module>"));
+                    panic!("Cannot fuse locations from different modules: {self_name}:{:?} with {other_name}:{:?}", start..end, other.span.as_range());
                 }
             } else {
                 module = Some(other.module);
