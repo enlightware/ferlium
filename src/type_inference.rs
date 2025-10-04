@@ -19,8 +19,7 @@ use crate::{
     ast::{DExpr, Desugared, RecordField, RecordFields},
     containers::continuous_hashmap_to_vec,
     error::{
-        DuplicatedFieldContext, InternalWhatIsNotAProductType, MutabilityMustBeWhat,
-        WhichProductTypeIsNot,
+        DuplicatedFieldContext, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     format::FormatWith,
     function::FunctionRc,
@@ -369,7 +368,7 @@ impl TypeInference {
                         return Err(internal_compilation_error!(IsNotCorrectProductType {
                             which: WhichProductTypeIsNot::Unit,
                             type_def: type_def.clone(),
-                            what: InternalWhatIsNotAProductType::from_tag(tag),
+                            what: WhatIsNotAProductType::from_tag(tag),
                             instantiation_span: expr.span,
                         }));
                     }
@@ -618,7 +617,7 @@ impl TypeInference {
                         return Err(internal_compilation_error!(IsNotCorrectProductType {
                             which: WhichProductTypeIsNot::Record,
                             type_def: type_def.clone(),
-                            what: InternalWhatIsNotAProductType::from_tag(tag),
+                            what: WhatIsNotAProductType::from_tag(tag),
                             instantiation_span: expr.span,
                         }));
                     }
@@ -642,6 +641,7 @@ impl TypeInference {
                             // Extra record entry
                             return Err(internal_compilation_error!(InvalidStructField {
                                 type_def,
+                                field_name: *field_name,
                                 field_span: *field_span,
                                 instantiation_span: expr.span,
                             }));
@@ -660,6 +660,7 @@ impl TypeInference {
                         let field = fields[layout_size];
                         return Err(internal_compilation_error!(InvalidStructField {
                             type_def,
+                            field_name: field.0.0,
                             field_span: field.0.1,
                             instantiation_span: expr.span,
                         }));
@@ -995,7 +996,7 @@ impl TypeInference {
                             return Err(internal_compilation_error!(IsNotCorrectProductType {
                                 which: WhichProductTypeIsNot::Tuple,
                                 type_def: type_def.clone(),
-                                what: InternalWhatIsNotAProductType::from_tag(tag),
+                                what: WhatIsNotAProductType::from_tag(tag),
                                 instantiation_span: expr_span,
                             }));
                         }
@@ -2397,6 +2398,7 @@ impl UnifiedTypeInference {
                     Err(internal_compilation_error!(InvalidVariantName {
                         name: payload_span,
                         ty,
+                        valid: ()
                     }))
                 }
             }

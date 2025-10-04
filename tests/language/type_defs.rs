@@ -651,7 +651,10 @@ fn type_annotations() {
         .into_inner()
         .into_named_type_mismatch()
         .unwrap();
-    assert_eq!((error.0.as_str(), error.3.as_str()), ("Person2", "Person1"));
+    assert_eq!(
+        (error.0.0.as_str(), error.2.0.as_str()),
+        ("Person2", "Person1")
+    );
 }
 
 #[test]

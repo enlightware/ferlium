@@ -89,6 +89,7 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             source_span,
             reason_span,
             what,
+            ..
         } => {
             let source_span = *source_span;
             let reason_span = *reason_span;

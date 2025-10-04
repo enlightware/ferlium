@@ -103,7 +103,7 @@ pub fn resolve_concrete_type(src: &str, env: &ModuleEnv<'_>) -> Result<Type, Com
         parse_concrete_type(src).map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
     let span = Location::new_local(0, src.len());
     ast.desugar(span, false, env)
-        .map_err(|error| CompilationError::from_internal(error, env, src))
+        .map_err(|error| CompilationError::resolve_types(error, env, src))
 }
 
 /// Parse a type from a source code and return the corresponding Type,
@@ -122,7 +122,7 @@ pub fn resolve_generic_type(src: &str, env: &ModuleEnv<'_>) -> Result<Type, Comp
         parse_generic_type(src).map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
     let span = Location::new_local(0, src.len());
     ast.desugar(span, false, env)
-        .map_err(|error| CompilationError::from_internal(error, env, src))
+        .map_err(|error| CompilationError::resolve_types(error, env, src))
 }
 
 /// Parse a module from a source code and return the corresponding ASTs.
@@ -261,7 +261,7 @@ pub fn compile_to(
     let mut module =
         emit_module(module_ast, other_modules, Some(&module), false).map_err(|error| {
             let env = ModuleEnv::new(&module, other_modules, false);
-            CompilationError::from_internal(error, &env, src)
+            CompilationError::resolve_types(error, &env, src)
         })?;
     module.source = Some(src.to_string());
 
@@ -270,7 +270,7 @@ pub fn compile_to(
         let compiled_expr =
             emit_expr(expr_ast, &mut module, other_modules, vec![]).map_err(|error| {
                 let env = ModuleEnv::new(&module, other_modules, false);
-                CompilationError::from_internal(error, &env, src)
+                CompilationError::resolve_types(error, &env, src)
             })?;
         Some(compiled_expr)
     } else {
@@ -311,7 +311,7 @@ pub fn add_code_to_module(
     // Emit IR for the module.
     let module = emit_module(module_ast, other_modules, Some(to), within_std).map_err(|error| {
         let env = ModuleEnv::new(to, other_modules, within_std);
-        CompilationError::from_internal(error, &env, code)
+        CompilationError::resolve_types(error, &env, code)
     })?;
 
     // Swap the new module with the old one.

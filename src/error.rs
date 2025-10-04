@@ -8,7 +8,7 @@
 //
 use core::panic;
 use std::{
-    fmt::{self, Display},
+    fmt::{self, Debug, Display},
     ops::Deref,
 };
 
@@ -18,7 +18,7 @@ use crate::{
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
-use ustr::{Ustr, ustr};
+use ustr::Ustr;
 
 use crate::{
     ast::{PatternType, PropertyAccess},
@@ -98,35 +98,61 @@ pub enum WhichProductTypeIsNot {
     Tuple,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InternalWhatIsNotAProductType {
-    EnumVariant(Ustr),
-    Struct,
-}
-impl InternalWhatIsNotAProductType {
-    pub fn from_tag(tag: Option<Ustr>) -> Self {
-        tag.map_or(Self::Struct, Self::EnumVariant)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WhatIsNotAProductType {
     EnumVariant(Ustr),
     Struct,
 }
 impl WhatIsNotAProductType {
-    pub fn from_internal(what: InternalWhatIsNotAProductType) -> Self {
-        match what {
-            InternalWhatIsNotAProductType::EnumVariant(tag) => Self::EnumVariant(tag),
-            InternalWhatIsNotAProductType::Struct => Self::Struct,
-        }
+    pub fn from_tag(tag: Option<Ustr>) -> Self {
+        tag.map_or(Self::Struct, Self::EnumVariant)
     }
 }
 
-/// Compilation error, for internal use
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InternalCompilationErrorImpl {
+/// A scope of error messages, either internal within the compiler, or external for users.
+pub trait Scope: Sized {
+    type Type: Debug + Clone;
+    type TypeVar: Debug + Clone;
+    type TypeDefRef: Debug + Clone;
+    type PubTypeConstraint: Debug + Clone;
+    type TraitRef: Debug + Clone;
+    type ValidVariant: Debug + Clone;
+}
+
+/// Internal scope, using internal compiler representations.
+/// Types are complete internal types.
+#[derive(Debug, Clone)]
+pub struct Internal;
+impl Scope for Internal {
+    type Type = Type;
+    type TypeVar = TypeVar;
+    type TypeDefRef = TypeDefRef;
+    type PubTypeConstraint = PubTypeConstraint;
+    type TraitRef = TraitRef;
+    type ValidVariant = ();
+}
+
+/// External scope, using user-facing representations.
+/// Types are strings suitable for display.
+#[derive(Debug, Clone)]
+pub struct External;
+impl Scope for External {
+    type Type = String;
+    type TypeVar = String;
+    type TypeDefRef = (String, Location);
+    type PubTypeConstraint = String;
+    type TraitRef = String;
+    type ValidVariant = Vec<String>;
+}
+
+/// Compilation error implementation.
+/// Uses the tree-that-grows pattern to be generic over
+/// the scope of error message use.
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum CompilationErrorImpl<S: Scope> {
+    ParsingFailed(Vec<LocatedError>),
     NameDefinedMultipleTimes {
+        name: Ustr,
         first_occurrence: Location,
         second_occurrence: Location,
     },
@@ -145,26 +171,26 @@ pub enum InternalCompilationErrorImpl {
         ctx: MutabilityMustBeContext,
     },
     TypeMismatch {
-        current_ty: Type,
+        current_ty: S::Type,
         current_span: Location,
-        expected_ty: Type,
+        expected_ty: S::Type,
         expected_span: Location,
         sub_or_same: SubOrSameType,
     },
     NamedTypeMismatch {
-        current_decl: TypeDefRef,
+        current_decl: S::TypeDefRef,
         current_span: Location,
-        expected_decl: TypeDefRef,
+        expected_decl: S::TypeDefRef,
         expected_span: Location,
     },
-    InfiniteType(TypeVar, Type, Location),
+    InfiniteType(S::TypeVar, S::Type, Location),
     UnboundTypeVar {
-        ty_var: TypeVar,
-        ty: Type,
+        ty_var: S::TypeVar,
+        ty: S::Type,
         span: Location,
     },
     UnresolvedConstraints {
-        constraints: Vec<PubTypeConstraint>,
+        constraints: Vec<S::PubTypeConstraint>,
         span: Location,
     },
     InvalidTupleIndex {
@@ -174,7 +200,7 @@ pub enum InternalCompilationErrorImpl {
         tuple_span: Location,
     },
     InvalidTupleProjection {
-        expr_ty: Type,
+        expr_ty: S::Type,
         expr_span: Location,
         index_span: Location,
     },
@@ -186,21 +212,22 @@ pub enum InternalCompilationErrorImpl {
     },
     InvalidRecordField {
         field_span: Location,
-        record_ty: Type,
+        record_ty: S::Type,
         record_span: Location,
     },
     InvalidRecordFieldAccess {
         field_span: Location,
-        record_ty: Type,
+        record_ty: S::Type,
         record_span: Location,
     },
     InvalidVariantName {
         name: Location,
-        ty: Type,
+        ty: S::Type,
+        valid: S::ValidVariant,
     },
     InvalidVariantType {
         name: Location,
-        ty: Type,
+        ty: S::Type,
     },
     InvalidVariantConstructor {
         span: Location,
@@ -208,17 +235,18 @@ pub enum InternalCompilationErrorImpl {
     },
     IsNotCorrectProductType {
         which: WhichProductTypeIsNot,
-        type_def: TypeDefRef,
-        what: InternalWhatIsNotAProductType,
+        type_def: S::TypeDefRef,
+        what: WhatIsNotAProductType,
         instantiation_span: Location,
     },
     InvalidStructField {
-        type_def: TypeDefRef,
+        type_def: S::TypeDefRef,
+        field_name: Ustr,
         field_span: Location,
         instantiation_span: Location,
     },
     MissingStructField {
-        type_def: TypeDefRef,
+        type_def: S::TypeDefRef,
         field_name: Ustr,
         instantiation_span: Location,
     },
@@ -244,22 +272,23 @@ pub enum InternalCompilationErrorImpl {
         ctx: DuplicatedVariantContext,
     },
     TraitImplNotFound {
-        trait_ref: TraitRef,
-        input_tys: Vec<Type>,
+        trait_ref: S::TraitRef,
+        input_tys: Vec<S::Type>,
         fn_span: Location,
     },
     MethodNotPartOfTrait {
-        trait_ref: TraitRef,
+        trait_ref: S::TraitRef,
         fn_span: Location,
     },
     TraitMethodImplMissing {
-        trait_ref: TraitRef,
+        trait_ref: S::TraitRef,
         impl_span: Location,
         missings: Vec<Ustr>,
     },
     TraitMethodArgCountMismatch {
-        trait_ref: TraitRef,
-        index: usize,
+        trait_ref: S::TraitRef,
+        method_index: usize,
+        method_name: Ustr,
         expected: usize,
         got: usize,
         args_span: Location,
@@ -276,12 +305,12 @@ pub enum InternalCompilationErrorImpl {
     },
     NonExhaustivePattern {
         span: Location,
-        ty: Type,
+        ty: S::Type,
         // TODO: have a generic way to talk about the non-covered values
     },
     TypeValuesCannotBeEnumerated {
         span: Location,
-        ty: Type,
+        ty: S::Type,
     },
     MutablePathsOverlap {
         a_span: Location,
@@ -328,32 +357,32 @@ pub enum InternalCompilationErrorImpl {
     Internal(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InternalCompilationError(Box<InternalCompilationErrorImpl>);
-
-impl InternalCompilationError {
-    pub fn new(error: InternalCompilationErrorImpl) -> Self {
+#[derive(Debug, Clone)]
+pub struct BoxedCompilationError<S: Scope>(Box<CompilationErrorImpl<S>>);
+impl<S: Scope> BoxedCompilationError<S> {
+    pub fn new(error: CompilationErrorImpl<S>) -> Self {
         Self(Box::new(error))
     }
-
-    pub fn into_inner(self) -> InternalCompilationErrorImpl {
+    pub fn into_inner(self) -> CompilationErrorImpl<S> {
         *self.0
     }
 }
 
-impl Deref for InternalCompilationError {
-    type Target = InternalCompilationErrorImpl;
+impl<S: Scope> Deref for BoxedCompilationError<S> {
+    type Target = CompilationErrorImpl<S>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
+pub type InternalCompilationError = BoxedCompilationError<Internal>;
+
 #[macro_export]
 macro_rules! internal_compilation_error {
     ($($ctor:tt)*) => {
         InternalCompilationError::new(
-            $crate::error::InternalCompilationErrorImpl::$($ctor)*
+            $crate::error::CompilationErrorImpl::$($ctor)*
         )
     };
 }
@@ -381,217 +410,9 @@ impl InternalCompilationError {
 impl FormatWith<(ModuleEnv<'_>, &str)> for InternalCompilationError {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &(ModuleEnv<'_>, &str)) -> fmt::Result {
         let (env, source) = data;
-        let error = CompilationError::from_internal(self.clone(), env, source);
+        let error = CompilationError::resolve_types(self.clone(), env, source);
         write!(f, "{}", error.format_with(source))
     }
-}
-
-/// Compilation error, for external use
-#[derive(Debug, EnumAsInner)]
-pub enum CompilationErrorImpl {
-    ParsingFailed(Vec<LocatedError>),
-    NameDefinedMultipleTimes {
-        name: Ustr,
-        first_occurrence: Location,
-        second_occurrence: Location,
-    },
-    TypeNotFound(Location),
-    TraitNotFound(Location),
-    WrongNumberOfArguments {
-        expected: usize,
-        expected_span: Location,
-        got: usize,
-        got_span: Location,
-    },
-    MutabilityMustBe {
-        source_span: Location,
-        reason_span: Location,
-        what: MutabilityMustBeWhat,
-    },
-    TypeMismatch {
-        current_ty: String,
-        current_span: Location,
-        expected_ty: String,
-        expected_span: Location,
-        sub_or_same: SubOrSameType,
-    },
-    NamedTypeMismatch {
-        current_decl: String,
-        current_decl_location: Location,
-        current_span: Location,
-        expected_decl: String,
-        expected_span: Location,
-        expected_decl_location: Location,
-    },
-    InfiniteType(String, String, Location),
-    UnboundTypeVar {
-        ty_var: String,
-        ty: String,
-        span: Location,
-    },
-    UnresolvedConstraints {
-        constraints: Vec<String>,
-        span: Location,
-    },
-    InvalidTupleIndex {
-        index: usize,
-        index_span: Location,
-        tuple_length: usize,
-        tuple_span: Location,
-    },
-    InvalidTupleProjection {
-        expr_ty: String,
-        expr_span: Location,
-        index_span: Location,
-    },
-    DuplicatedField {
-        first_occurrence: Location,
-        second_occurrence: Location,
-        constructor_span: Location,
-        ctx: DuplicatedFieldContext,
-    },
-    InvalidRecordField {
-        field_span: Location,
-        record_ty: String,
-        record_span: Location,
-    },
-    InvalidRecordFieldAccess {
-        field_span: Location,
-        record_ty: String,
-        record_span: Location,
-    },
-    InvalidVariantName {
-        name: Location,
-        ty: String,
-        valid: Vec<String>,
-    },
-    InvalidVariantType {
-        name: Location,
-        ty: String,
-    },
-    InvalidVariantConstructor {
-        span: Location,
-    },
-    ReturnOutsideFunction {
-        span: Location,
-    },
-    IsNotCorrectProductType {
-        which: WhichProductTypeIsNot,
-        type_def: String,
-        what: WhatIsNotAProductType,
-        instantiation_span: Location,
-    },
-    InvalidStructField {
-        type_def: String,
-        field_name: Ustr,
-        field_span: Location,
-        instantiation_span: Location,
-    },
-    MissingStructField {
-        type_def: String,
-        field_name: Ustr,
-        instantiation_span: Location,
-    },
-    InconsistentADT {
-        a_type: ADTAccessType,
-        a_span: Location,
-        b_type: ADTAccessType,
-        b_span: Location,
-    },
-    InconsistentPattern {
-        a_type: PatternType,
-        a_span: Location,
-        b_type: PatternType,
-        b_span: Location,
-    },
-    DuplicatedVariant {
-        first_occurrence: Location,
-        second_occurrence: Location,
-        ctx_span: Location,
-        ctx: DuplicatedVariantContext,
-    },
-    TraitImplNotFound {
-        trait_name: String,
-        input_tys: Vec<String>,
-        fn_span: Location,
-    },
-    MethodNotPartOfTrait {
-        trait_ref: TraitRef,
-        fn_span: Location,
-    },
-    TraitMethodImplMissing {
-        trait_ref: TraitRef,
-        missings: Vec<Ustr>,
-        impl_span: Location,
-    },
-    TraitMethodArgCountMismatch {
-        trait_ref: TraitRef,
-        index: usize,
-        expected: usize,
-        got: usize,
-        args_span: Location,
-    },
-    IdentifierBoundMoreThanOnceInAPattern {
-        first_occurrence: Location,
-        second_occurrence: Location,
-        pattern_span: Location,
-    },
-    DuplicatedLiteralPattern {
-        first_occurrence: Location,
-        second_occurrence: Location,
-        match_span: Location,
-    },
-    EmptyMatchBody {
-        span: Location,
-    },
-    NonExhaustivePattern {
-        span: Location,
-        ty: String,
-    },
-    TypeValuesCannotBeEnumerated {
-        span: Location,
-        ty: String,
-    },
-    MutablePathsOverlap {
-        a_span: Location,
-        b_span: Location,
-        fn_span: Location,
-    },
-    UndefinedVarInStringFormatting {
-        var_span: Location,
-        string_span: Location,
-    },
-    InvalidEffectDependency {
-        source: EffType,
-        source_span: Location,
-        target: EffType,
-        target_span: Location,
-    },
-    UnknownProperty {
-        scope: Ustr,
-        variable: Ustr,
-        cause: PropertyAccess,
-        span: Location,
-    },
-    Unsupported {
-        span: Location,
-        reason: String,
-    },
-    /*UnresolvedImport {
-        function_path: String,
-        span: Location,
-    },
-    ImportSignatureMismatch {
-        function_path: String,
-        expected_signature: String,
-        got_signature: String,
-        span: Location,
-    },
-    CircularImportDependency {
-        import_chain: Vec<String>,
-        span: Location,
-    },*/
-    Internal(String),
 }
 
 fn span_to_string(loc: &Location, source: &str) -> String {
@@ -617,26 +438,7 @@ fn span_to_string(loc: &Location, source: &str) -> String {
     }
 }
 
-#[derive(Debug)]
-pub struct CompilationError(Box<CompilationErrorImpl>);
-
-impl CompilationError {
-    pub fn new(error: CompilationErrorImpl) -> Self {
-        Self(Box::new(error))
-    }
-
-    pub fn into_inner(self) -> CompilationErrorImpl {
-        *self.0
-    }
-}
-
-impl Deref for CompilationError {
-    type Target = CompilationErrorImpl;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+pub type CompilationError = BoxedCompilationError<External>;
 
 impl FormatWith<&str> for CompilationError {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &&'_ str) -> fmt::Result {
@@ -682,6 +484,7 @@ impl FormatWith<&str> for CompilationError {
                 source_span,
                 reason_span,
                 what,
+                ..
             } => {
                 let source_name = fmt_span(source_span);
                 let reason_name = fmt_span(reason_span);
@@ -716,20 +519,18 @@ impl FormatWith<&str> for CompilationError {
             ),
             NamedTypeMismatch {
                 current_decl,
-                current_decl_location,
                 current_span,
                 expected_decl,
                 expected_span,
-                expected_decl_location,
             } => write!(
                 f,
                 "Named type `{}` in `{}` (from `{}`) is different than named type `{}` in `{}` (from `{}`)",
-                current_decl,
+                current_decl.0,
                 fmt_span(current_span),
-                fmt_span(current_decl_location),
-                expected_decl,
+                fmt_span(&current_decl.1),
+                expected_decl.0,
                 fmt_span(expected_span),
-                fmt_span(expected_decl_location),
+                fmt_span(&expected_decl.1),
             ),
             InfiniteType(ty_var, ty, span) => {
                 write!(
@@ -821,17 +622,13 @@ impl FormatWith<&str> for CompilationError {
                     fmt_span(record_span)
                 )
             }
-            InvalidVariantName {
-                name,
-                ty,
-                valid: valids,
-            } => {
+            InvalidVariantName { name, ty, valid } => {
                 write!(
                     f,
                     "Variant name `{}` does not exist for variant type `{}`, valid names are `{}`",
                     fmt_span(name),
                     ty,
-                    valids.join(", ")
+                    valid.join(", ")
                 )
             }
             InvalidVariantType { name, ty } => {
@@ -870,9 +667,9 @@ impl FormatWith<&str> for CompilationError {
                 };
                 let what = match what {
                     WhatIsNotAProductType::EnumVariant(tag) => {
-                        format!("Variant `{tag}` of `{type_def}`")
+                        format!("Variant `{tag}` of `{}`", type_def.0)
                     }
-                    WhatIsNotAProductType::Struct => format!("`{type_def}`"),
+                    WhatIsNotAProductType::Struct => format!("`{}`", type_def.0),
                 };
                 write!(
                     f,
@@ -892,7 +689,7 @@ impl FormatWith<&str> for CompilationError {
                     f,
                     "Field `{}` does not exists in `{}`, but is present in `{}`",
                     field_name,
-                    type_def,
+                    type_def.0,
                     fmt_span(instantiation_span)
                 )
             }
@@ -905,7 +702,7 @@ impl FormatWith<&str> for CompilationError {
                     f,
                     "Field `{}` from `{}` is missing in `{}`",
                     field_name,
-                    type_def,
+                    type_def.0,
                     fmt_span(instantiation_span)
                 )
             }
@@ -954,14 +751,14 @@ impl FormatWith<&str> for CompilationError {
                 )
             }
             TraitImplNotFound {
-                trait_name,
+                trait_ref,
                 input_tys,
                 fn_span,
             } => {
                 write!(
                     f,
                     "Implementation of trait `{}` over types `{}` not found (when calling `{}`)",
-                    trait_name,
+                    trait_ref,
                     input_tys.join(", "),
                     fmt_span(fn_span)
                 )
@@ -971,7 +768,7 @@ impl FormatWith<&str> for CompilationError {
                     f,
                     "Method `{}` is not part of trait `{}`",
                     fmt_span(fn_span),
-                    trait_ref.name
+                    trait_ref
                 )
             }
             TraitMethodImplMissing {
@@ -982,23 +779,24 @@ impl FormatWith<&str> for CompilationError {
                 write!(
                     f,
                     "Implementation of trait `{}` is missing methods `{}` in `{}`",
-                    trait_ref.name,
+                    trait_ref,
                     missings.iter().join(", "),
                     fmt_span(impl_span)
                 )
             }
             TraitMethodArgCountMismatch {
                 trait_ref,
-                index,
+                method_name,
                 expected,
                 got,
                 args_span,
+                ..
             } => {
                 write!(
                     f,
                     "Method `{}` of trait `{}` expects {} arguments, but {} are provided in `{}`",
-                    trait_ref.functions[*index].0,
-                    trait_ref.name,
+                    method_name,
+                    trait_ref,
                     expected,
                     got,
                     fmt_span(args_span)
@@ -1150,18 +948,20 @@ macro_rules! compilation_error {
 }
 
 impl CompilationError {
-    pub fn from_internal(
+    pub fn resolve_types(
         error: InternalCompilationError,
         env: &ModuleEnv<'_>,
         source: &str,
     ) -> Self {
-        use InternalCompilationErrorImpl::*;
+        use CompilationErrorImpl::*;
         match error.into_inner() {
+            ParsingFailed(errors) => compilation_error!(ParsingFailed(errors)),
             NameDefinedMultipleTimes {
+                name,
                 first_occurrence,
                 second_occurrence,
             } => compilation_error!(NameDefinedMultipleTimes {
-                name: ustr(&span_to_string(&first_occurrence, source)),
+                name,
                 first_occurrence,
                 second_occurrence,
             }),
@@ -1189,7 +989,8 @@ impl CompilationError {
                 compilation_error!(MutabilityMustBe {
                     source_span,
                     reason_span,
-                    what
+                    what,
+                    ctx
                 })
             }
             TypeMismatch {
@@ -1211,11 +1012,9 @@ impl CompilationError {
                 expected_decl,
                 expected_span,
             } => compilation_error!(NamedTypeMismatch {
-                current_decl: current_decl.name.to_string(),
-                current_decl_location: current_decl.span,
+                current_decl: (current_decl.name.to_string(), current_decl.span),
                 current_span,
-                expected_decl: expected_decl.name.to_string(),
-                expected_decl_location: expected_decl.span,
+                expected_decl: (expected_decl.name.to_string(), expected_decl.span),
                 expected_span,
             }),
             InfiniteType(ty_var, ty, span) => {
@@ -1288,7 +1087,7 @@ impl CompilationError {
                 record_ty: record_ty.format_with(env).to_string(),
                 record_span,
             }),
-            InvalidVariantName { name, ty } => compilation_error!(InvalidVariantName {
+            InvalidVariantName { name, ty, .. } => compilation_error!(InvalidVariantName {
                 name,
                 ty: ty.format_with(env).to_string(),
                 valid: ty
@@ -1316,18 +1115,19 @@ impl CompilationError {
                 instantiation_span,
             } => compilation_error!(IsNotCorrectProductType {
                 which,
-                type_def: Type::named(type_def, []).format_with(env).to_string(),
-                what: WhatIsNotAProductType::from_internal(what),
+                type_def: (type_def.name.to_string(), type_def.span),
+                what,
                 instantiation_span,
             }),
             InvalidStructField {
                 type_def,
+                field_name,
                 field_span,
                 instantiation_span,
             } => compilation_error!(InvalidStructField {
-                type_def: Type::named(type_def, []).format_with(env).to_string(),
+                type_def: (type_def.name.to_string(), type_def.span),
+                field_name,
                 field_span,
-                field_name: ustr(&span_to_string(&field_span, source)),
                 instantiation_span,
             }),
             MissingStructField {
@@ -1335,7 +1135,7 @@ impl CompilationError {
                 field_name,
                 instantiation_span,
             } => compilation_error!(MissingStructField {
-                type_def: Type::named(type_def, []).format_with(env).to_string(),
+                type_def: (type_def.name.to_string(), type_def.span),
                 field_name,
                 instantiation_span,
             }),
@@ -1377,7 +1177,7 @@ impl CompilationError {
                 input_tys,
                 fn_span,
             } => compilation_error!(TraitImplNotFound {
-                trait_name: trait_ref.name.to_string(),
+                trait_ref: trait_ref.name.to_string(),
                 input_tys: input_tys
                     .iter()
                     .map(|ty| ty.format_with(env).to_string())
@@ -1385,26 +1185,31 @@ impl CompilationError {
                 fn_span,
             }),
             MethodNotPartOfTrait { trait_ref, fn_span } => {
-                compilation_error!(MethodNotPartOfTrait { trait_ref, fn_span })
+                compilation_error!(MethodNotPartOfTrait {
+                    trait_ref: trait_ref.name.to_string(),
+                    fn_span
+                })
             }
             TraitMethodImplMissing {
                 trait_ref,
                 missings,
                 impl_span,
             } => compilation_error!(TraitMethodImplMissing {
-                trait_ref,
+                trait_ref: trait_ref.name.to_string(),
                 missings,
                 impl_span,
             }),
             TraitMethodArgCountMismatch {
                 trait_ref,
-                index,
+                method_name,
+                method_index,
                 expected,
                 got,
                 args_span,
             } => compilation_error!(TraitMethodArgCountMismatch {
-                trait_ref,
-                index,
+                trait_ref: trait_ref.name.to_string(),
+                method_name,
+                method_index,
                 expected,
                 got,
                 args_span,
@@ -1690,7 +1495,7 @@ impl CompilationError {
         use CompilationErrorImpl::*;
         match self.deref() {
             TraitImplNotFound {
-                trait_name: name,
+                trait_ref: name,
                 input_tys,
                 ..
             } => {

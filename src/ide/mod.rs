@@ -186,19 +186,17 @@ fn compilation_error_to_data(
         )],
         NamedTypeMismatch {
             current_decl,
-            current_decl_location,
             current_span,
             expected_decl,
-            expected_decl_location,
             ..
         } => vec![ErrorData::from_location(
             current_span,
             format!(
                 "Named type `{}` from `{}` is different from named type `{}` from `{}`",
-                current_decl,
-                fmt_span(current_decl_location),
-                expected_decl,
-                fmt_span(expected_decl_location),
+                current_decl.0,
+                fmt_span(&current_decl.1),
+                expected_decl.0,
+                fmt_span(&expected_decl.1),
             ),
         )],
         InfiniteType(ty_var, ty, span) => vec![ErrorData::from_location(
@@ -320,9 +318,9 @@ fn compilation_error_to_data(
             };
             let what = match what {
                 WhatIsNotAProductType::EnumVariant(tag) => {
-                    format!("Variant `{tag}` of `{type_def}`")
+                    format!("Variant `{tag}` of `{}`", type_def.0)
                 }
-                WhatIsNotAProductType::Struct => format!("`{type_def}`"),
+                WhatIsNotAProductType::Struct => format!("`{}`", type_def.0),
             };
             vec![ErrorData::from_location(
                 instantiation_span,
@@ -337,7 +335,7 @@ fn compilation_error_to_data(
             let field_name = fmt_span(field_span);
             vec![ErrorData::from_location(
                 field_span,
-                format!("Field `{field_name}` does not exists in `{type_def}`"),
+                format!("Field `{field_name}` does not exists in `{}`", type_def.0),
             )]
         }
         MissingStructField {
@@ -347,7 +345,7 @@ fn compilation_error_to_data(
         } => {
             vec![ErrorData::from_location(
                 instantiation_span,
-                format!("Field `{field_name}` from `{type_def}` is missing here"),
+                format!("Field `{field_name}` from `{}` is missing here", type_def.0),
             )]
         }
         InconsistentADT {
@@ -401,14 +399,14 @@ fn compilation_error_to_data(
             ]
         }
         TraitImplNotFound {
-            trait_name,
+            trait_ref,
             input_tys,
             fn_span,
         } => {
             vec![ErrorData::from_location(
                 fn_span,
                 format!(
-                    "Implementation of trait `{trait_name}` over types `{}` not found",
+                    "Implementation of trait `{trait_ref}` over types `{}` not found",
                     input_tys.join(", ")
                 ),
             )]
@@ -419,7 +417,7 @@ fn compilation_error_to_data(
                 format!(
                     "Method `{}` is not part of trait `{}`",
                     fmt_span(fn_span),
-                    trait_ref.name
+                    trait_ref
                 ),
             )]
         }
@@ -432,24 +430,24 @@ fn compilation_error_to_data(
                 impl_span,
                 format!(
                     "Implementation of trait `{}` is missing methods: `{}`",
-                    trait_ref.name,
+                    trait_ref,
                     missings.iter().map(|m| m.as_ref()).join(", "),
                 ),
             )]
         }
         TraitMethodArgCountMismatch {
             trait_ref,
-            index,
+            method_name,
             expected,
             got,
             args_span,
+            ..
         } => {
-            let method_name = trait_ref.functions[*index].0;
             vec![ErrorData::from_location(
                 args_span,
                 format!(
                     "Method `{}` of trait `{}` expects {} arguments, got {}",
-                    method_name, trait_ref.name, expected, got
+                    method_name, trait_ref, expected, got
                 ),
             )]
         }

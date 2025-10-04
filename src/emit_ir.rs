@@ -56,6 +56,7 @@ fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompila
     for (name, span) in source.name_iter() {
         if let Some(first_occurrence) = names.insert(name, span) {
             return Err(internal_compilation_error!(NameDefinedMultipleTimes {
+                name,
                 first_occurrence,
                 second_occurrence: span,
             }));
@@ -309,11 +310,12 @@ where
         // If we are emitting a trait implementation, make sure this function conforms to it.
         if let Some(trait_ctx) = &trait_ctx {
             let index = trait_ctx.trait_ref.method_index(name.0).unwrap();
-            let fn_def = &trait_ctx.trait_ref.functions[index].1;
+            let (fn_name, fn_def) = &trait_ctx.trait_ref.functions[index];
             if args.len() != fn_def.ty_scheme.ty.args.len() {
                 return Err(internal_compilation_error!(TraitMethodArgCountMismatch {
                     trait_ref: trait_ctx.trait_ref.clone(),
-                    index,
+                    method_index: index,
+                    method_name: *fn_name,
                     expected: fn_def.ty_scheme.ty.args.len(),
                     got: args.len(),
                     args_span: *args_span,
