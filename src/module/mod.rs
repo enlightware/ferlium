@@ -41,7 +41,6 @@ use std::{
     fmt,
 };
 
-use itertools::Itertools;
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -50,7 +49,6 @@ use crate::{
     ir::Node,
     r#trait::TraitRef,
     r#type::{Type, TypeAliases, TypeDefRef},
-    type_like::TypeLike,
     type_scheme::PubTypeConstraint,
 };
 
@@ -411,16 +409,9 @@ impl Module {
         if !self.type_defs.is_empty() {
             writeln!(f, "New types:")?;
             for (_, decl) in self.type_defs.iter() {
-                // Rebuild the list of type arguments for the type declaration
-                let args = decl
-                    .shape
-                    .inner_ty_vars_iter()
-                    .sorted()
-                    .map(Type::variable)
-                    .collect::<Vec<_>>();
-                // Build a type to show
-                let ty = Type::named(decl.clone(), args);
-                writeln!(f, "  {}", ty.format_with(&env))?;
+                write!(f, "  ")?;
+                decl.format_details(&env, f)?;
+                writeln!(f)?;
             }
             writeln!(f, "\n")?;
         }

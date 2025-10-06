@@ -40,6 +40,7 @@ use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
+use itertools::Itertools;
 use nonmax::NonMaxU32;
 use ustr::{Ustr, ustr};
 
@@ -711,6 +712,53 @@ impl TypeDef {
     pub fn is_struct_like(&self) -> bool {
         self.is_record_struct() || self.is_tuple_struct() || self.is_unit_struct()
     }
+
+    pub fn format_details(&self, env: &ModuleEnv<'_>, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.is_struct_like() {
+            write!(f, "struct")?;
+        } else {
+            write!(f, "enum")?;
+        }
+        write!(f, " {}", self.name)?;
+        // Rebuild the list of type arguments for the type declaration
+        let args = self
+            .shape
+            .inner_ty_vars_iter()
+            .sorted()
+            .map(Type::variable)
+            .collect::<Vec<_>>();
+        if !args.is_empty() {
+            write!(f, "<")?;
+            for (i, ty) in args.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                ty.fmt_with(f, env)?;
+            }
+            write!(f, ">")?;
+        }
+        write!(f, " ")?;
+        if self.is_enum() {
+            write!(f, "{{ ")?;
+            if self.shape != Type::never() {
+                for (i, (name, ty)) in self.shape.data().as_variant().unwrap().iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if *ty == Type::unit() {
+                        write!(f, "{name}")?;
+                    } else {
+                        write!(f, "{name} ")?;
+                        ty.fmt_with(f, env)?;
+                    }
+                }
+            }
+            write!(f, " }}")?;
+        } else {
+            self.shape.fmt_with(f, env)?;
+        }
+        Ok(())
+    }
 }
 
 /// A handle to a type declaration.
@@ -1134,12 +1182,7 @@ impl FormatWith<ModuleEnv<'_>> for TypeKind {
             }
             Function(function) => function.fmt_with(f, env),
             Named(NamedType { def, params: args }) => {
-                if def.is_struct_like() {
-                    write!(f, "struct")?;
-                } else {
-                    write!(f, "enum")?;
-                }
-                write!(f, " {}", def.name)?;
+                write!(f, "{}", def.name)?;
                 if !args.is_empty() {
                     write!(f, "<")?;
                     for (i, ty) in args.iter().enumerate() {
@@ -1149,28 +1192,6 @@ impl FormatWith<ModuleEnv<'_>> for TypeKind {
                         ty.fmt_with(f, env)?;
                     }
                     write!(f, ">")?;
-                }
-                write!(f, " ")?;
-                if def.is_enum() {
-                    write!(f, "{{ ")?;
-                    if def.shape != Type::never() {
-                        for (i, (name, ty)) in
-                            def.shape.data().as_variant().unwrap().iter().enumerate()
-                        {
-                            if i > 0 {
-                                write!(f, ", ")?;
-                            }
-                            if *ty == Type::unit() {
-                                write!(f, "{name}")?;
-                            } else {
-                                write!(f, "{name} ")?;
-                                ty.fmt_with(f, env)?;
-                            }
-                        }
-                    }
-                    write!(f, " }}")?;
-                } else {
-                    def.shape.fmt_with(f, env)?;
                 }
                 Ok(())
             }
