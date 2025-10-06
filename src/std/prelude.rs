@@ -323,7 +323,7 @@ pub fn add_to_module(to: &mut Module) {
                     return entry.1;
                 }
             };
-            panic(f"Object variant key {name} not found")
+            panic(f"Object variant key \"{name}\" not found")
         }
 
         /// Downcast a variant to None, panicking if the variant is not None.
