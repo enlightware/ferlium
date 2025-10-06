@@ -424,3 +424,89 @@ fn returning_variant_is_properly_unified() {
         );
     }
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn variant_type_alias_in_function_signature() {
+    // Test that the Variant type alias is preserved in function signatures
+    // This reproduces the issue where Variant appears unfolded in function types
+    let (module_and_expr, modules) = compile(indoc! { r#"
+        fn process_variant(v: Variant) -> Variant {
+            v
+        }
+        
+        fn process_variant_array(entries: [(string, Variant)]) -> Variant {
+            entries[0].1
+        }
+    "# });
+    let module = module_and_expr.module;
+    let module_env = ModuleEnv::new(&module, &modules, false);
+
+    // Check first function
+    let fn_def1 = &module
+        .get_own_function(ustr("process_variant"))
+        .unwrap()
+        .definition;
+    let sig1 = fn_def1.ty_scheme.ty().format_with(&module_env).to_string();
+    println!("process_variant signature: {}", sig1);
+
+    // The signature should contain "Variant", not the unfolded type
+    assert!(
+        sig1.contains("Variant"),
+        "Expected 'Variant' in signature, got: {}",
+        sig1
+    );
+    assert!(
+        !sig1.contains("Array ([Self])"),
+        "Type alias should not be unfolded, got: {}",
+        sig1
+    );
+
+    // Check second function
+    let fn_def2 = &module
+        .get_own_function(ustr("process_variant_array"))
+        .unwrap()
+        .definition;
+    let sig2 = fn_def2.ty_scheme.ty().format_with(&module_env).to_string();
+    println!("process_variant_array signature: {}", sig2);
+
+    // Debug: Check what type is actually in the tuple
+    let arg_ty = fn_def2.ty_scheme.ty().args[0].ty;
+    println!("Argument type: {:?}", arg_ty);
+    let arg_ty_data = arg_ty.data();
+    if let Some(arr) = arg_ty_data.as_native() {
+        println!("Array element type: {:?}", arr.arguments[0]);
+        let elem_data = arr.arguments[0].data();
+        if let Some(tup) = elem_data.as_tuple() {
+            println!("Tuple element 0 (string): {:?}", tup[0]);
+            println!("Tuple element 1 (should be Variant): {:?}", tup[1]);
+            println!("Canonical variant_type(): {:?}", variant::variant_type());
+            println!("Are they equal? {}", tup[1] == variant::variant_type());
+
+            // Verify that the Variant type is correctly identified as world 1
+            assert_eq!(
+                tup[1],
+                variant::variant_type(),
+                "Tuple element should be the canonical Variant type from world 1"
+            );
+
+            // Dump world 1 to show the canonical Variant
+            println!("\n=== Dumping world 1 (canonical Variant) ===");
+            ferlium::r#type::dump_type_world(1, &module_env);
+        } else {
+            panic!("Expected array element to be a tuple");
+        }
+    }
+
+    // The signature should contain "Variant", not the unfolded type
+    assert!(
+        sig2.contains("Variant"),
+        "Expected 'Variant' in signature, got: {}",
+        sig2
+    );
+    assert!(
+        !sig2.contains("Array ([Self])"),
+        "Type alias should not be unfolded, got: {}",
+        sig2
+    );
+}

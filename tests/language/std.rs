@@ -529,10 +529,7 @@ fn serde_deserialize() {
     );
 
     // errors
-    fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found(
-        "Num",
-        &["Array ([Variant]) | Bool (bool) | Float (float) | Int (int) | None | Object ([(string, Variant)]) | String (string)"],
-    );
+    fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found("Num", &["Variant"]);
 }
 
 #[test]

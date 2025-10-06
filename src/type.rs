@@ -511,6 +511,10 @@ impl Type {
         self.index
     }
 
+    pub fn is_global_recursive(&self) -> bool {
+        self.world.is_some_and(|w| w.get() > 0)
+    }
+
     pub fn data<'t>(self) -> TypeDataRef<'t> {
         let guard = types().read().unwrap();
         TypeDataRef { ty: self, guard }
@@ -596,11 +600,11 @@ impl CastableToType for Type {
 
 impl FormatWith<ModuleEnv<'_>> for Type {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        // If we have a name for this type, use it
+        // If we have a name for this type, use it.
         if let Some(name) = env.type_alias_name(*self) {
             return write!(f, "{name}");
         }
-
+        // Otherwise, format the type data, with cycle detection.
         self.with_cycle_detection(
             |ty, (f, env)| ty.data().fmt_with(f, env),
             |_, (f, _)| write!(f, "Self"),
@@ -1143,6 +1147,7 @@ impl FormatWith<ModuleEnv<'_>> for TypeKind {
                         let ty_data = ty.data();
                         if let Tuple(tuple_ty) = &*ty_data {
                             if tuple_ty.len() == 1 {
+                                // Special case to avoid the (X,) syntax for single-element tuples.
                                 write!(f, "(")?;
                                 tuple_ty[0].fmt_with(f, env)?;
                                 write!(f, ")")?;
@@ -1236,6 +1241,173 @@ impl graph::Node for TypeKind {
 
 type TypeWorld = IndexSet<TypeKind>;
 
+/// Attempts to find an isomorphism (bijection) between local_world and existing_world.
+/// Returns a Vec where result[local_idx] = global_idx in existing_world, if an isomorphism exists.
+///
+/// Two worlds are isomorphic if there exists a bijection f: local → existing such that
+/// when we remap all local type references in local_world[i] using f, we get existing_world[f(i)].
+fn find_world_isomorphism(
+    local_world: &[TypeKind],
+    existing_world: &TypeWorld,
+    world_idx: usize,
+) -> Option<Vec<usize>> {
+    let n = local_world.len();
+    assert_eq!(n, existing_world.len());
+
+    // Try to build mapping greedily by matching types
+    // Start with types that have the fewest candidates
+    let mut mapping: Vec<Option<usize>> = vec![None; n];
+    let mut reverse_mapping: HashMap<usize, usize> = HashMap::new();
+
+    // For each local type, find all possible matches in existing_world
+    let mut candidates: Vec<(usize, Vec<usize>)> = (0..n)
+        .map(|local_idx| {
+            let local_kind = &local_world[local_idx];
+            // Find all indices in existing_world that could potentially match
+            let possible: Vec<usize> = (0..n)
+                .filter(|&existing_idx| {
+                    // Quick structural check: compare ignoring type references
+                    types_could_match(local_kind, &existing_world[existing_idx])
+                })
+                .collect();
+            (local_idx, possible)
+        })
+        .collect();
+
+    // Sort by number of candidates (fewest first for constraint propagation)
+    candidates.sort_by_key(|(_, poss)| poss.len());
+
+    // Recursive backtracking search
+    fn search(
+        local_world: &[TypeKind],
+        existing_world: &TypeWorld,
+        world_idx: usize,
+        candidates: &[(usize, Vec<usize>)],
+        mapping: &mut Vec<Option<usize>>,
+        reverse_mapping: &mut HashMap<usize, usize>,
+        depth: usize,
+    ) -> bool {
+        if depth == candidates.len() {
+            // Check if complete mapping is valid
+            let complete_mapping: Vec<usize> = mapping.iter().map(|opt| opt.unwrap()).collect();
+            return verify_mapping(local_world, existing_world, world_idx, &complete_mapping);
+        }
+
+        let (local_idx, possible) = &candidates[depth];
+        for &existing_idx in possible {
+            if reverse_mapping.contains_key(&existing_idx) {
+                continue; // Already mapped
+            }
+
+            // Try this mapping
+            mapping[*local_idx] = Some(existing_idx);
+            reverse_mapping.insert(existing_idx, *local_idx);
+
+            if search(
+                local_world,
+                existing_world,
+                world_idx,
+                candidates,
+                mapping,
+                reverse_mapping,
+                depth + 1,
+            ) {
+                return true;
+            }
+
+            // Backtrack
+            mapping[*local_idx] = None;
+            reverse_mapping.remove(&existing_idx);
+        }
+
+        false
+    }
+
+    if search(
+        local_world,
+        existing_world,
+        world_idx,
+        &candidates,
+        &mut mapping,
+        &mut reverse_mapping,
+        0,
+    ) {
+        Some(mapping.into_iter().map(|opt| opt.unwrap()).collect())
+    } else {
+        None
+    }
+}
+
+/// Quick structural check to see if two TypeKinds could potentially match
+/// (ignoring the actual type indices they reference)
+fn types_could_match(a: &TypeKind, b: &TypeKind) -> bool {
+    match (a, b) {
+        (TypeKind::Never, TypeKind::Never) => true,
+        (TypeKind::Variable(_), TypeKind::Variable(_)) => true,
+        (TypeKind::Tuple(a), TypeKind::Tuple(b)) => a.len() == b.len(),
+        (TypeKind::Record(a), TypeKind::Record(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.0 == y.0)
+        }
+        (TypeKind::Variant(a), TypeKind::Variant(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.0 == y.0)
+        }
+        (TypeKind::Function(_), TypeKind::Function(_)) => true, // Could compare arity, but skip for now
+        (TypeKind::Native(a), TypeKind::Native(b)) => {
+            a.bare_ty == b.bare_ty && a.arguments.len() == b.arguments.len()
+        }
+        (TypeKind::Named(a), TypeKind::Named(b)) => a.def == b.def,
+        _ => false,
+    }
+}
+
+/// Verify that a complete mapping is valid by checking that when we remap
+/// local_world using the mapping, it exactly matches existing_world
+fn verify_mapping(
+    local_world: &[TypeKind],
+    existing_world: &TypeWorld,
+    world_idx: usize,
+    mapping: &[usize],
+) -> bool {
+    // Check that the mapping is complete (bijective)
+    if mapping.len() != local_world.len() {
+        return false;
+    }
+
+    for (local_idx, &existing_idx) in mapping.iter().enumerate() {
+        let local_kind = &local_world[local_idx];
+        let existing_kind = &existing_world[existing_idx];
+
+        // Remap local_kind by replacing local references with world_idx references using mapping
+        let mut remapped = local_kind.clone();
+        let mut valid = true;
+        remapped.inner_types_mut().for_each(|ty| {
+            if ty.is_local() {
+                let local_ref = ty.index as usize;
+                if local_ref < mapping.len() {
+                    let mapped_idx = mapping[local_ref];
+                    *ty = Type {
+                        world: Some(NonMaxU32::new(world_idx as u32).unwrap()),
+                        index: mapped_idx as u32,
+                    };
+                } else {
+                    // Reference to unmapped local type - invalid
+                    valid = false;
+                }
+            }
+        });
+
+        if !valid {
+            return false;
+        }
+
+        if &remapped != existing_kind {
+            return false;
+        }
+    }
+
+    true
+}
+
 struct TypeUniverse {
     worlds: Vec<TypeWorld>,
     local_to_world: HashMap<Vec<TypeKind>, usize>,
@@ -1288,6 +1460,30 @@ impl TypeUniverse {
                     let kind = &kinds[input_index];
                     let inner_all_global = kind.inner_types().all(|ty| !ty.is_local());
                     if inner_all_global {
+                        // Before adding to world 0, check if this matches an existing recursive type
+                        // by checking if any recursive type's world contains this exact TypeKind.
+                        // This handles equirecursive types where an "unfolded" variant equals
+                        // a canonical recursive type.
+                        let global_recursive_types: Vec<_> = kind
+                            .inner_types()
+                            .filter(|ty| ty.is_global_recursive())
+                            .collect();
+
+                        for recursive_ty in global_recursive_types {
+                            let world_idx = recursive_ty.world().unwrap().get() as usize;
+                            let recursive_world = &self.worlds[world_idx];
+
+                            // Check if kind matches any TypeKind in this recursive world
+                            if let Some((idx, _)) = recursive_world.get_full(kind) {
+                                // Found a match! Return the type from that recursive world
+                                let resolved_ty = Type::new_global(world_idx as u32, idx as u32);
+                                resolved.insert(input_index, resolved_ty);
+                                assert!(!resolved_ty.is_local());
+                                return vec![(input_index, resolved_ty)];
+                            }
+                        }
+
+                        // No match in recursive worlds, add to world 0
                         let first_world = &mut self.worlds[0];
                         // Is it already present?
                         let index = if let Some((index, _)) = first_world.get_full(kind) {
@@ -1302,11 +1498,10 @@ impl TypeUniverse {
                     }
                 }
 
-                // Sort each sub-graph.
+                // Sort each sub-graph, for early existing world matching.
                 input_indices.sort_by(|&a, &b| {
                     // Note: ignore local types while sorting.
                     kinds[a].local_cmp(&kinds[b])
-                    // TODO: look at permutations for the secondary sorting.
                 });
 
                 // Renormalize local indices and store into local world.
@@ -1333,11 +1528,11 @@ impl TypeUniverse {
                 let global_world_indices = |worlds: &Vec<TypeWorld>, world_index| {
                     let global_world: &TypeWorld = &worlds[world_index];
                     let global_world_size = global_world.len() as u32;
-                    b((0..global_world_size)
-                        .zip(input_indices)
-                        .map(move |(index, input_index)| {
+                    b((0..global_world_size).zip(&input_indices).map(
+                        move |(index, &input_index)| {
                             (input_index, Type::new_global(world_index as u32, index))
-                        }))
+                        },
+                    ))
                 };
                 let mut mark_indices_as_resolved = |indices_and_tys: &[(usize, Type)]| {
                     indices_and_tys
@@ -1357,6 +1552,45 @@ impl TypeUniverse {
                     mark_indices_as_resolved(&indices_and_tys);
                     return indices_and_tys;
                 }
+
+                // Before creating a new world, check if any existing recursive world
+                // (world index > 0) is structurally equivalent to local_world.
+                // This catches cases where type inference creates a new SCC that's
+                // equivalent to an existing canonical recursive type.
+                // We need permutation-invariant matching because the internal ordering
+                // within worlds may differ due to sorting.
+
+                for (world_idx, existing_world) in self.worlds.iter().enumerate().skip(1) {
+                    if existing_world.len() == local_world.len() {
+                        // Try to find a bijection (permutation) from local indices to existing world indices
+                        // such that when we remap local_world using this bijection, it matches existing_world
+                        if let Some(local_to_global_map) =
+                            find_world_isomorphism(&local_world, existing_world, world_idx)
+                        {
+                            // Found an equivalent world! Return types from that world using the mapping
+                            // Build the result by mapping each local index (0..n) to its corresponding global type
+                            // local_to_global_map[local_idx] gives the corresponding index in existing_world
+
+                            let indices_and_tys: Vec<_> = input_indices
+                                .iter()
+                                .enumerate()
+                                .map(|(local_idx, &input_idx)| {
+                                    let global_idx = local_to_global_map[local_idx];
+                                    let ty = Type {
+                                        world: Some(NonMaxU32::new(world_idx as u32).unwrap()),
+                                        index: global_idx as u32,
+                                    };
+                                    (input_idx, ty)
+                                })
+                                .collect();
+                            mark_indices_as_resolved(&indices_and_tys);
+                            // Cache this for future lookups
+                            // self.local_to_world.insert(local_world.clone(), world_idx);
+                            return indices_and_tys;
+                        }
+                    }
+                }
+
                 // If not, create a new one.
                 let global_world_index = self.worlds.len() as u32;
                 self.local_to_world
@@ -1471,7 +1705,7 @@ mod tests {
             StdModuleEnv,
             array::Array,
             logic::bool_type,
-            math::{Int, int_type},
+            math::{Int, float_type, int_type},
             string::string_type,
         },
     };
@@ -1812,6 +2046,64 @@ mod tests {
     }
 
     #[test]
+    fn variant_unfolding_interning() {
+        // This is the CRITICAL test for the equirecursive type bug
+        // We manually construct an "unfolded" version of the Variant type
+        // and verify it interns to the same canonical Variant type
+
+        use crate::std::variant::variant_type;
+
+        let canonical_variant = variant_type();
+
+        // Now manually construct what looks like an "unfolded" Variant
+        // This simulates what happens during type unification when we have:
+        //   B ⊇ Array([A])
+        //   B ≤ Variant
+        // After unifying A → Variant, we get B as an unfolded structure
+
+        let int = int_type();
+        let float = float_type();
+        let bool = bool_type();
+        let string = string_type();
+
+        // Manually build: Array([Variant]) | Bool(bool) | Float(float) | Int(int) | None | Object(...) | String(string)
+        let unfolded = TypeKind::Variant(vec![
+            (
+                ustr("Array"),
+                Type::tuple([Type::native::<Array>(vec![canonical_variant])]),
+            ),
+            (ustr("Bool"), Type::tuple([bool])),
+            (ustr("Float"), Type::tuple([float])),
+            (ustr("Int"), Type::tuple([int])),
+            (ustr("None"), Type::unit()),
+            (
+                ustr("Object"),
+                Type::tuple([Type::native::<Array>(vec![Type::tuple([
+                    string,
+                    canonical_variant,
+                ])])]),
+            ),
+            (ustr("String"), Type::tuple([string])),
+        ]);
+
+        let unfolded_type = store_type(unfolded);
+
+        println!("Canonical Variant: {:?}", canonical_variant);
+        println!("Unfolded type:     {:?}", unfolded_type);
+        println!("Are they equal?    {}", canonical_variant == unfolded_type);
+
+        // THIS IS THE KEY ASSERTION
+        // The interning system should recognize that unfolded_type is structurally
+        // equivalent to canonical_variant (they represent the same equirecursive type)
+        // and return the same Type reference
+        assert_eq!(
+            canonical_variant, unfolded_type,
+            "Unfolded Variant should intern to the same canonical Variant type. \
+             This is the core issue with equirecursive type handling."
+        );
+    }
+
+    #[test]
     fn recursive_variant_unfolding_equivalence() {
         // This test demonstrates the key issue: when a recursive variant is "unfolded"
         // during unification, does it create an equivalent type?
@@ -1856,5 +2148,145 @@ mod tests {
 
         // The REAL fix would make this assertion pass:
         // assert_eq!(v, v_unfolded, "Equirecursive types should be recognized as equal");
+    }
+
+    #[test]
+    fn test_find_world_isomorphism_recursive() {
+        // Test recursive references
+        // Local: [Array([local[0]]), Tuple([int, local[0]])]
+        // Existing: [Array([global[1, 0]]), Tuple([int, global[1, 0]])]
+        let int = int_type();
+
+        let local_world = vec![
+            TypeKind::Native(b(NativeType::new(
+                bare_native_type::<Array>(),
+                vec![Type::new_local(0)],
+            ))),
+            TypeKind::Tuple(vec![int, Type::new_local(0)]),
+        ];
+
+        let mut existing_world = IndexSet::new();
+        existing_world.insert(TypeKind::Native(b(NativeType::new(
+            bare_native_type::<Array>(),
+            vec![Type::new_global(1, 0)],
+        ))));
+        existing_world.insert(TypeKind::Tuple(vec![int, Type::new_global(1, 0)]));
+
+        let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
+
+        assert!(
+            mapping.is_some(),
+            "Should find isomorphism for recursive worlds"
+        );
+        let mapping = mapping.unwrap();
+
+        assert_eq!(mapping.len(), 2);
+        assert_eq!(mapping[0], 0);
+        assert_eq!(mapping[1], 1);
+    }
+
+    #[test]
+    fn test_find_world_isomorphism_variant_case() {
+        // THIS IS THE KEY TEST - simulates the real Variant case
+        // Simplified: two mutually recursive types where order matters
+
+        // Local: [Array([local[1]]), Variant{V(local[0]), Tuple(local[0], )}]
+        let local_world = vec![
+            // local[0] = Array([local[1]])
+            TypeKind::Native(b(NativeType::new(
+                bare_native_type::<Array>(),
+                vec![Type::new_local(1)],
+            ))),
+            // local[1] = Variant with field referencing local[0]
+            TypeKind::Variant(vec![(ustr("V"), Type::new_local(2))]),
+            TypeKind::Tuple(vec![Type::new_local(0)]), // local[2] = Tuple([local[0]])
+        ];
+
+        // Existing: [Variant{V(global[1,1])}, Array([global[1,0]])]
+        // Same types but REVERSED order
+        let mut existing_world = IndexSet::new();
+        existing_world.insert(TypeKind::Variant(vec![(ustr("V"), Type::new_global(1, 2))]));
+        existing_world.insert(TypeKind::Native(b(NativeType::new(
+            bare_native_type::<Array>(),
+            vec![Type::new_global(1, 0)],
+        ))));
+        existing_world.insert(TypeKind::Tuple(vec![Type::new_global(1, 1)]));
+
+        let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
+
+        assert!(mapping.is_some(), "Should find isomorphism");
+        let mapping = mapping.unwrap();
+
+        eprintln!("=== Variant case mapping ===");
+        eprintln!("Mapping: {:?}", mapping);
+
+        assert_eq!(mapping.len(), 3);
+
+        // After remapping:
+        // local[0] = Array([local[1]]) -> Array([global[1,?]])
+        //   where local[1] maps to some global index
+        // local[1] = Variant{V(local[0])} -> Variant{V(global[1,?])}
+        //   where local[0] maps to some global index
+
+        // For this to be valid:
+        // - local[0] must map to existing[1] (the Array)
+        // - local[1] must map to existing[0] (the Variant)
+
+        assert_eq!(mapping[0], 1, "local[0] (Array) should map to existing[1]");
+        assert_eq!(
+            mapping[1], 0,
+            "local[1] (Variant) should map to existing[0]"
+        );
+        assert_eq!(mapping[2], 2, "local[2] (Tuple) should map to existing[2]");
+    }
+
+    #[test]
+    fn test_find_world_isomorphism_ambiguous() {
+        // Test case with ambiguous matching - two structurally similar types
+        // This is the REAL bug case: when there are multiple valid isomorphisms
+
+        // Both types are self-referential in structurally similar ways
+        // Local: [Array([local[0]]), Array([local[1]])]
+        let local_world = vec![
+            TypeKind::Native(b(NativeType::new(
+                bare_native_type::<Array>(),
+                vec![Type::new_local(0)],
+            ))),
+            TypeKind::Native(b(NativeType::new(
+                bare_native_type::<Array>(),
+                vec![Type::new_local(1)],
+            ))),
+        ];
+
+        // Existing: [Array([global[1,0]]), Array([global[1,1]])]
+        let mut existing_world = IndexSet::new();
+        existing_world.insert(TypeKind::Native(b(NativeType::new(
+            bare_native_type::<Array>(),
+            vec![Type::new_global(1, 0)],
+        ))));
+        existing_world.insert(TypeKind::Native(b(NativeType::new(
+            bare_native_type::<Array>(),
+            vec![Type::new_global(1, 1)],
+        ))));
+
+        let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
+
+        // There are two valid isomorphisms:
+        // 1. [0->0, 1->1] (identity)
+        // 2. [0->1, 1->0] (swap)
+        // Both are structurally valid!
+
+        assert!(mapping.is_some(), "Should find an isomorphism");
+        let mapping = mapping.unwrap();
+
+        eprintln!("=== Ambiguous case mapping ===");
+        eprintln!("Mapping: {:?}", mapping);
+
+        // The algorithm should pick one consistently, but which one?
+        // The identity mapping [0->0, 1->1] is semantically correct
+        assert_eq!(mapping.len(), 2);
+
+        // Ideally we want identity mapping, but the algorithm might find either
+        // This test documents the ambiguity problem
     }
 }
