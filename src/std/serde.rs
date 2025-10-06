@@ -357,8 +357,8 @@ impl Deriver for ProductTypeDeserializeDeriver {
                 fn deserialize(v: Variant) -> {a: _, b: _} {
                     let o = std::variant_to_object(v);
                     {
-                        a: deserialize(std::_get_variant_object_entry(arr, "a")),
-                        b: deserialize(std::_get_variant_object_entry(arr, "b")),
+                        a: deserialize(std::expect_variant_object_entry(arr, "a")),
+                        b: deserialize(std::expect_variant_object_entry(arr, "b")),
                     }
                 }
             }
@@ -376,7 +376,7 @@ impl Deriver for ProductTypeDeserializeDeriver {
                     let load_object = n(load(1), object_payload_type());
                     // get the name-th element out of the object array
                     let get_entry =
-                        build_get_variant_object_entry(solver, load_object, &name, span)?;
+                        build_expect_variant_object_entry(solver, load_object, &name, span)?;
                     // deserialize the name-th element
                     let function = solver.solve_impl_method(trait_ref, &[ty], 0, span)?;
                     Ok(n(
@@ -395,10 +395,10 @@ impl Deriver for ProductTypeDeserializeDeriver {
             impl Deserialize {
                 fn deserialize(v: Variant) -> Variant1 | Variant2(x) {
                     let variant_object = std::variant_to_object(v);
-                    match std::variant_to_string(std::_get_variant_object_entry(variant_object, "type")) {
+                    match std::variant_to_string(std::expect_variant_object_entry(variant_object, "type")) {
                         "Variant1" => Variant1,
                         "Variant2" => {
-                            Variant2(deserialize(std::_get_variant_object_entry(variant_object, "data")))
+                            Variant2(deserialize(std::expect_variant_object_entry(variant_object, "data")))
                         },
                         _ => panic!("Unknown variant tag type")
                     }
@@ -414,7 +414,7 @@ impl Deriver for ProductTypeDeserializeDeriver {
             let load_object = n(load(1), object_payload_type());
             // build the type string extraction
             let get_type =
-                build_get_variant_object_entry(solver, load_object.clone(), "type", span)?;
+                build_expect_variant_object_entry(solver, load_object.clone(), "type", span)?;
             let get_string_type = build_variant_to_string(solver, get_type, span)?;
             // build the data extraction for each variant.
             let variant_cases = variants
@@ -423,7 +423,7 @@ impl Deriver for ProductTypeDeserializeDeriver {
                     let tag_value = string_value(&tag);
                     let build_variant = if payload_ty != Type::unit() {
                         // variant with payload
-                        let get_data = build_get_variant_object_entry(
+                        let get_data = build_expect_variant_object_entry(
                             solver,
                             load_object.clone(),
                             "data",
@@ -587,7 +587,7 @@ fn build_variant_to_x(
 }
 
 // Build a node that gets an entry from a variant object payload [(string, Variant)].
-fn build_get_variant_object_entry(
+fn build_expect_variant_object_entry(
     solver: &mut TraitSolver,
     fields: Node,
     name: &str,
@@ -603,7 +603,7 @@ fn build_get_variant_object_entry(
     let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
     let name = n(native_str(name), string_type());
-    let function = solver.get_function(ustr("std"), ustr("_get_variant_object_entry"))?;
+    let function = solver.get_function(ustr("std"), ustr("expect_variant_object_entry"))?;
     Ok(n(
         static_apply_pure(
             function,

@@ -317,7 +317,16 @@ pub fn add_to_module(to: &mut Module) {
         "# },
         indoc! { r#"
         // Serde derive helper
-        fn _get_variant_object_entry(entries: [(string, Variant)], name: string) -> Variant {
+        fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Some(Variant) | None {
+            for entry in entries {
+                if entry.0 == name {
+                    return Some(entry.1);
+                }
+            };
+            None
+        }
+
+        fn expect_variant_object_entry(entries: [(string, Variant)], name: string) -> Variant {
             for entry in entries {
                 if entry.0 == name {
                     return entry.1;
