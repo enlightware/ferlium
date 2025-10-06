@@ -86,6 +86,7 @@ pub fn collect_effect_vars(tys: &[impl TypeLike]) -> Vec<EffectVar> {
 }
 
 /// Collect all type, mutability, and effect variables from a type
+#[allow(dead_code)]
 pub(crate) struct AllVarsCollector<'a, CT, CM, CE>
 where
     CT: Extend<TypeVar>,

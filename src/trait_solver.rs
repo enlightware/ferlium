@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use derive_new::new;
 use ustr::Ustr;
@@ -33,9 +33,13 @@ use crate::{
     r#type::{FnArgType, Type},
     type_inference::UnifiedTypeInference,
     type_like::TypeLike,
-    type_visitor::AllVarsCollector,
     value::Value,
 };
+
+#[cfg(debug_assertions)]
+use crate::type_visitor::AllVarsCollector;
+#[cfg(debug_assertions)]
+use std::collections::HashSet;
 
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.
 #[derive(Debug, new)]

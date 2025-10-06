@@ -20,11 +20,14 @@ use crate::{
     format::{FormatWith, write_with_separator},
     function::{Closure, FunctionRc},
     ir::{Node, NodeKind},
-    module::{FunctionId, ImportFunctionTarget, ModuleEnv, ModuleRc, TraitImplId},
+    module::{FunctionId, ModuleEnv, ModuleRc, TraitImplId},
     std::array,
     r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},
 };
+
+#[cfg(debug_assertions)]
+use crate::module::ImportFunctionTarget;
 
 /// Either a value or a unique mutable reference to a value.
 /// This allows to implement the mutable value semantics.
