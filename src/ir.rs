@@ -106,7 +106,7 @@ pub struct Application {
 #[derive(Debug, Clone)]
 pub struct StaticApplication {
     pub function: FunctionId,
-    pub function_path: Ustr,
+    pub function_path: Option<Ustr>,
     pub function_span: Location,
     pub arguments: Vec<Node>,
     pub argument_names: Vec<Ustr>,
@@ -347,14 +347,17 @@ impl Node {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for arg in &app.arguments {
+                    for (name, arg) in app.argument_names.iter().zip(app.arguments.iter()) {
+                        writeln!(f, "{indent_str}  {name}:")?;
                         arg.format_ind(f, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
             }
             TraitFnApply(app) => {
-                let fn_name = app.trait_ref.functions[app.function_index].0;
+                let fn_data = &app.trait_ref.functions[app.function_index];
+                let fn_name = fn_data.0;
+                let fn_def = &fn_data.1;
                 let trait_name = app.trait_ref.name;
                 writeln!(
                     f,
@@ -364,7 +367,8 @@ impl Node {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for arg in &app.arguments {
+                    for (name, arg) in fn_def.arg_names.iter().zip(app.arguments.iter()) {
+                        writeln!(f, "{indent_str}  {name}:")?;
                         arg.format_ind(f, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;

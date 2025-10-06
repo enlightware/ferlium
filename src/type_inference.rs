@@ -975,7 +975,7 @@ impl TypeInference {
                     self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
                 let node = K::StaticApply(b(ir::StaticApplication {
                     function,
-                    function_path: ustr(path),
+                    function_path: Some(ustr(path)),
                     function_span: path_span,
                     arguments: args_nodes,
                     argument_names,

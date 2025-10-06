@@ -43,7 +43,7 @@ pub fn static_apply(
     let arguments = arguments.into();
     K::StaticApply(b(ir::StaticApplication {
         function,
-        function_path: ustr("synthesized"),
+        function_path: None,
         function_span: span,
         argument_names: (0..arguments.len())
             .map(|i| ustr(&format!("arg{i}")))

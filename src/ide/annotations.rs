@@ -33,6 +33,10 @@ impl ModuleAndExpr {
 
         // Let/var bindings just after the name.
         for local_fn in &self.module.functions {
+            if local_fn.name.is_none() {
+                // Do not annotate unnamed, generated functions.
+                continue;
+            }
             let mut code = local_fn.function.code.borrow_mut();
             if let Some(script_fn) = code.as_script_mut() {
                 script_fn
@@ -46,6 +50,10 @@ impl ModuleAndExpr {
 
         // Function signatures.
         for local_fn in &self.module.functions {
+            if local_fn.name.is_none() {
+                // Do not annotate unnamed, generated functions.
+                continue;
+            }
             let function = &local_fn.function;
             if let Some(spans) = &function.spans {
                 if !function.definition.ty_scheme.is_just_type() {
@@ -217,13 +225,13 @@ impl Node {
             StaticApply(app) => {
                 let arity = app.argument_names.len();
                 let is_synthesized = app.function_span.is_empty();
-                for (arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
-                    if !is_synthesized
-                        && !should_hide_arg_name_hint(&app.function_path, arity, arg_name, arg)
-                    {
-                        result.push((arg.span.start(), format!("{arg_name}: ")));
+                if !is_synthesized && let Some(path) = &app.function_path {
+                    for (arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
+                        if !should_hide_arg_name_hint(path, arity, arg_name, arg) {
+                            result.push((arg.span.start(), format!("{arg_name}: ")));
+                        }
+                        arg.variable_type_annotations(result, env);
                     }
-                    arg.variable_type_annotations(result, env);
                 }
             }
             TraitFnApply(app) => {

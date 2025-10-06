@@ -305,7 +305,7 @@ pub fn add_code_to_module(
     assert_eq!(module_ast.errors(), &[]);
     {
         let env = ModuleEnv::new(to, other_modules, within_std);
-        log::debug!("Module AST\n{}", module_ast.format_with(&env));
+        log::debug!("Added module AST\n{}", module_ast.format_with(&env));
     }
 
     // Emit IR for the module.
