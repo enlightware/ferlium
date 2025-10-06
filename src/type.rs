@@ -1482,19 +1482,25 @@ impl TypeUniverse {
                         // by checking if any recursive type's world contains this exact TypeKind.
                         // This handles equirecursive types where an "unfolded" variant equals
                         // a canonical recursive type.
-                        let global_recursive_types: Vec<_> = kind
+                        let worlds_to_check: Vec<_> = kind
                             .inner_types()
-                            .filter(|ty| ty.is_global_recursive())
+                            .filter_map(|ty| {
+                                if ty.is_global_recursive() {
+                                    Some(ty.world().unwrap())
+                                } else {
+                                    None
+                                }
+                            })
+                            .dedup()
                             .collect();
+                        for world_idx in worlds_to_check {
+                            let world_idx = world_idx.get();
+                            let world = &self.worlds[world_idx as usize];
 
-                        for recursive_ty in global_recursive_types {
-                            let world_idx = recursive_ty.world().unwrap().get() as usize;
-                            let recursive_world = &self.worlds[world_idx];
-
-                            // Check if kind matches any TypeKind in this recursive world
-                            if let Some((idx, _)) = recursive_world.get_full(kind) {
-                                // Found a match! Return the type from that recursive world
-                                let resolved_ty = Type::new_global(world_idx as u32, idx as u32);
+                            // Check if kind matches any TypeKind in this world
+                            if let Some((idx, _)) = world.get_full(kind) {
+                                // Found a match! Return the type from that world
+                                let resolved_ty = Type::new_global(world_idx, idx as u32);
                                 resolved.insert(input_index, resolved_ty);
                                 assert!(!resolved_ty.is_local());
                                 return vec![(input_index, resolved_ty)];
