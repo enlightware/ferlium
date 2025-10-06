@@ -9,7 +9,8 @@
 
 use ferlium::{
     effects::EffType,
-    format::FormatWithData,
+    format::{FormatWith, FormatWithData},
+    module::ModuleEnv,
     resolve_concrete_type, resolve_generic_type,
     std::{
         StdModuleEnv,
@@ -17,6 +18,7 @@ use ferlium::{
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
+        variant,
     },
     r#type::{FnType, Type, record_type, tuple_type, variant_type},
     value::Value,
@@ -24,10 +26,12 @@ use ferlium::{
 
 use indoc::indoc;
 
+use ustr::ustr;
+
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
-use crate::common::{float, int, run};
+use crate::common::{compile, float, int, run};
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -395,4 +399,28 @@ fn ret_type_overloading() {
         "# }),
         tuple!(int(0), float(0.0)),
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn returning_variant_is_properly_unified() {
+    // Test the Variant type which had the original issue
+    // This tests deeply nested recursive variant structures
+    let (module_and_expr, modules) = compile(indoc! { r#"
+        fn make_variant_array() -> Variant {
+            Array([])
+        }
+    "# });
+    let module = module_and_expr.module;
+    let fn_def = &module
+        .get_own_function(ustr("make_variant_array"))
+        .unwrap()
+        .definition;
+    if fn_def.ty_scheme.ty().ret != variant::variant_type() {
+        let module_env = ModuleEnv::new(&module, &modules, false);
+        panic!(
+            "Expected return type to be Variant, got {}",
+            fn_def.ty_scheme.ty().ret.format_with(&module_env)
+        );
+    }
 }
