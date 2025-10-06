@@ -1587,7 +1587,6 @@ impl TypeUniverse {
                 // equivalent to an existing canonical recursive type.
                 // We need permutation-invariant matching because the internal ordering
                 // within worlds may differ due to sorting.
-
                 for (world_idx, existing_world) in self.worlds.iter().enumerate().skip(1) {
                     if existing_world.len() == local_world.len() {
                         // Try to find a bijection (permutation) from local indices to existing world indices
@@ -1596,9 +1595,8 @@ impl TypeUniverse {
                             find_world_isomorphism(&local_world, existing_world, world_idx)
                         {
                             // Found an equivalent world! Return types from that world using the mapping
-                            // Build the result by mapping each local index (0..n) to its corresponding global type
-                            // local_to_global_map[local_idx] gives the corresponding index in existing_world
-
+                            // Build the result by mapping each local index (0..n) to its corresponding global type,
+                            // local_to_global_map[local_idx] gives the corresponding index in existing_world.
                             let indices_and_tys: Vec<_> = input_indices
                                 .iter()
                                 .enumerate()
@@ -1612,7 +1610,7 @@ impl TypeUniverse {
                                 })
                                 .collect();
                             mark_indices_as_resolved(&indices_and_tys);
-                            // Cache this for future lookups
+                            // Cache this for future lookups.
                             let mapping = WorldMapping {
                                 world_idx,
                                 local_to_global_map,
