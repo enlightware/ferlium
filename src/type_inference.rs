@@ -2060,7 +2060,7 @@ impl UnifiedTypeInference {
         }
         let current_ty = self.normalize_type(current);
         let expected_ty = self.normalize_type(expected);
-        if current == expected {
+        if current_ty == expected_ty {
             return Ok(());
         }
         let cur_data = { current_ty.data().clone() };
