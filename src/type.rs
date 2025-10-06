@@ -1239,6 +1239,8 @@ impl graph::Node for TypeKind {
     }
 }
 
+/// A set of types representing a "world" of types,
+/// i.e. a collection of types that can reference each other.
 type TypeWorld = IndexSet<TypeKind>;
 
 /// Attempts to find an isomorphism (bijection) between local_world and existing_world.
@@ -1250,7 +1252,7 @@ fn find_world_isomorphism(
     local_world: &[TypeKind],
     existing_world: &TypeWorld,
     world_idx: usize,
-) -> Option<Vec<usize>> {
+) -> Option<Vec<u32>> {
     let n = local_world.len();
     assert_eq!(n, existing_world.len());
 
@@ -1332,7 +1334,7 @@ fn find_world_isomorphism(
         &mut reverse_mapping,
         0,
     ) {
-        Some(mapping.into_iter().map(|opt| opt.unwrap()).collect())
+        Some(mapping.into_iter().map(|opt| opt.unwrap() as u32).collect())
     } else {
         None
     }
@@ -1408,9 +1410,25 @@ fn verify_mapping(
     true
 }
 
+/// A mapping from a local world to a global world
+#[derive(Debug, Clone)]
+struct WorldMapping {
+    /// The index of the global world
+    world_idx: usize,
+    /// The mapping from local indices to global indices in the global world
+    local_to_global_map: Vec<u32>,
+}
+
+/// The type universe, containing all known types organized in worlds.
+#[derive(Debug)]
 struct TypeUniverse {
+    /// The list of worlds, each being a set of types.
+    /// The first world (index 0) is the global non-recursive world.
+    /// Subsequent worlds contain SCC of recursive types.
     worlds: Vec<TypeWorld>,
-    local_to_world: HashMap<Vec<TypeKind>, usize>,
+    /// A cache mapping local worlds to their corresponding global world and index mapping.
+    /// This is used to intern types efficiently.
+    local_to_world: HashMap<Vec<TypeKind>, WorldMapping>,
 }
 
 impl TypeUniverse {
@@ -1525,14 +1543,19 @@ impl TypeUniverse {
                 }));
 
                 // Some helper functions to get the global indices from the local input indices.
-                let global_world_indices = |worlds: &Vec<TypeWorld>, world_index| {
-                    let global_world: &TypeWorld = &worlds[world_index];
-                    let global_world_size = global_world.len() as u32;
-                    b((0..global_world_size).zip(&input_indices).map(
-                        move |(index, &input_index)| {
-                            (input_index, Type::new_global(world_index as u32, index))
-                        },
-                    ))
+                let global_world_indices = |mapping: &WorldMapping| -> Vec<(usize, Type)> {
+                    let world_index = mapping.world_idx;
+                    input_indices
+                        .iter()
+                        .enumerate()
+                        .map(|(local_idx, &input_index)| {
+                            let global_idx = mapping.local_to_global_map[local_idx];
+                            (
+                                input_index,
+                                Type::new_global(world_index as u32, global_idx),
+                            )
+                        })
+                        .collect()
                 };
                 let mut mark_indices_as_resolved = |indices_and_tys: &[(usize, Type)]| {
                     indices_and_tys
@@ -1545,10 +1568,9 @@ impl TypeUniverse {
                 };
 
                 // Local world is now a key, is it a known global world?
-                if let Some(&index) = self.local_to_world.get(&local_world) {
+                if let Some(mapping) = self.local_to_world.get(&local_world) {
                     // If so, store processed and return.
-                    let indices_and_tys: Vec<_> =
-                        global_world_indices(&self.worlds, index).collect();
+                    let indices_and_tys = global_world_indices(mapping);
                     mark_indices_as_resolved(&indices_and_tys);
                     return indices_and_tys;
                 }
@@ -1578,14 +1600,18 @@ impl TypeUniverse {
                                     let global_idx = local_to_global_map[local_idx];
                                     let ty = Type {
                                         world: Some(NonMaxU32::new(world_idx as u32).unwrap()),
-                                        index: global_idx as u32,
+                                        index: global_idx,
                                     };
                                     (input_idx, ty)
                                 })
                                 .collect();
                             mark_indices_as_resolved(&indices_and_tys);
                             // Cache this for future lookups
-                            // self.local_to_world.insert(local_world.clone(), world_idx);
+                            let mapping = WorldMapping {
+                                world_idx,
+                                local_to_global_map,
+                            };
+                            self.local_to_world.insert(local_world.clone(), mapping);
                             return indices_and_tys;
                         }
                     }
@@ -1593,8 +1619,12 @@ impl TypeUniverse {
 
                 // If not, create a new one.
                 let global_world_index = self.worlds.len() as u32;
+                let mapping = WorldMapping {
+                    world_idx: global_world_index as usize,
+                    local_to_global_map: (0..local_world.len() as u32).collect(),
+                };
                 self.local_to_world
-                    .insert(local_world.clone(), global_world_index as usize);
+                    .insert(local_world.clone(), mapping.clone());
 
                 // Renormalize local indices to global indices and store into global world.
                 let global_world: IndexSet<_> = local_world
@@ -1611,8 +1641,7 @@ impl TypeUniverse {
                 self.worlds.push(global_world);
 
                 // Collect indices, store processed and return.
-                let indices_and_tys: Vec<_> =
-                    global_world_indices(&self.worlds, global_world_index as usize).collect();
+                let indices_and_tys = global_world_indices(&mapping);
                 mark_indices_as_resolved(&indices_and_tys);
                 indices_and_tys
             })
