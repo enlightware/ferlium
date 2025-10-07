@@ -279,10 +279,10 @@ impl EvalCtx {
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(self.get_stack_entry_from_fn_and_mod(function, &module));
-        let result = self.call_function(function, module, arguments);
+        let result = self.call_function(function, module, arguments)?;
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
-        result
+        Ok(result)
     }
 
     /// Call a function by its id, this will look up the function and its module.
@@ -295,10 +295,10 @@ impl EvalCtx {
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(self.get_stack_entry_from_function_id(function_id));
-        let result = self.call_function(&function, module, arguments);
+        let result = self.call_function(&function, module, arguments)?;
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
-        result
+        Ok(result)
     }
 
     /// Call a function along with its correct module context.
