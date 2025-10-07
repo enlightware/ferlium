@@ -181,20 +181,72 @@ impl PubTypeConstraint {
         }
     }
 
-    pub fn instantiate_and_drop_if_known_trait(
+    pub fn instantiate_and_drop_if_solved(
         &self,
         subst: &mut InstSubstitution,
         trait_solver: &mut TraitSolver<'_>,
     ) -> Result<Option<Self>, InternalCompilationError> {
         let constraint = self.instantiate(subst);
-        Ok(
-            if let PubTypeConstraint::HaveTrait {
+        use PubTypeConstraint::*;
+        Ok(match &constraint {
+            TupleAtIndexIs {
+                tuple_ty,
+                index,
+                element_ty,
+                ..
+            } => {
+                if tuple_ty.is_constant() && element_ty.is_constant() {
+                    let tuple_ty_data = tuple_ty.data();
+                    let tuple_data = tuple_ty_data.as_tuple().unwrap();
+                    assert!(tuple_data.get(*index).unwrap() == element_ty);
+                    None
+                } else {
+                    Some(constraint)
+                }
+            }
+            RecordFieldIs {
+                record_ty,
+                field,
+                element_ty,
+                ..
+            } => {
+                if record_ty.is_constant() && element_ty.is_constant() {
+                    let record_ty_data = record_ty.data();
+                    let record_data = record_ty_data.as_record().unwrap();
+                    assert!(record_data.iter().find(|t| t.0 == *field).unwrap().1 == *element_ty);
+                    None
+                } else {
+                    Some(constraint)
+                }
+            }
+            TypeHasVariant {
+                variant_ty,
+                tag,
+                payload_ty,
+                ..
+            } => {
+                let fake_current = crate::std::new_module_using_std();
+                let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
+                eprint!(
+                    "Checking variant constraint: {}",
+                    constraint.format_with(&env)
+                );
+                if variant_ty.is_constant() && payload_ty.is_constant() {
+                    eprintln!(" -- both sides constant, checking");
+                    let variant_ty_data = variant_ty.data();
+                    let variant_data = variant_ty_data.as_variant().unwrap();
+                    assert!(variant_data.iter().find(|t| t.0 == *tag).unwrap().1 == *payload_ty);
+                    None
+                } else {
+                    Some(constraint)
+                }
+            }
+            HaveTrait {
                 trait_ref,
                 input_tys,
                 output_tys,
                 span,
-            } = &constraint
-            {
+            } => {
                 if input_tys.iter().all(Type::is_constant) {
                     let got_output_tys =
                         trait_solver.solve_output_types(trait_ref, input_tys, *span)?;
@@ -228,10 +280,8 @@ impl PubTypeConstraint {
                 } else {
                     Some(constraint)
                 }
-            } else {
-                Some(constraint)
-            },
-        )
+            }
+        })
     }
 }
 

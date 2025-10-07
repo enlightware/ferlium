@@ -190,7 +190,11 @@ pub fn emit_module(
             impl_type = "concrete";
             assert!(
                 emit_output.constraints.is_empty(),
-                "Concrete impl with constraints"
+                "Concrete impl with constraints for {}: {}",
+                trait_ref.name,
+                emit_output
+                    .constraints
+                    .format_with(&ModuleEnv::new(&output, others, within_std))
             );
             output.add_concrete_impl_module_functions(
                 trait_ref.clone(),
@@ -474,7 +478,7 @@ where
             .iter()
             .filter_map(|constraint| {
                 constraint
-                    .instantiate_and_drop_if_known_trait(&mut subst, &mut solver)
+                    .instantiate_and_drop_if_solved(&mut subst, &mut solver)
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
@@ -524,7 +528,8 @@ where
         let subst = (normalize_types(&mut quantifiers), HashMap::new());
         trait_output.input_tys = instantiate_types(&trait_output.input_tys, &subst);
         trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
-        trait_output.constraints = constraints
+        trait_output.constraints = trait_output
+            .constraints
             .into_iter()
             .map(|c| c.instantiate(&subst))
             .collect();
@@ -588,7 +593,7 @@ where
                 .iter()
                 .filter_map(|constraint| {
                     constraint
-                        .instantiate_and_drop_if_known_trait(&mut subst, &mut solver)
+                        .instantiate_and_drop_if_solved(&mut subst, &mut solver)
                         .transpose()
                 })
                 .collect::<Result<_, _>>()?;
@@ -791,7 +796,7 @@ pub fn emit_expr_unsafe(
         let mut new_constraints = Vec::new();
         for constraint in constraints.iter() {
             if let Some(new_constraint) =
-                constraint.instantiate_and_drop_if_known_trait(&mut subst, &mut solver)?
+                constraint.instantiate_and_drop_if_solved(&mut subst, &mut solver)?
             {
                 new_constraints.push(new_constraint);
             } else {
