@@ -14,7 +14,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
-use itertools::{Itertools, process_results};
+use itertools::Itertools;
 use log::log_enabled;
 use ustr::{Ustr, ustr};
 
@@ -29,7 +29,8 @@ use crate::{
     internal_compilation_error,
     ir::{self, Immediate, Node},
     module::{
-        ConcreteTraitImplKey, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, Modules,
+        ConcreteTraitImplKey, LocalFunctionId, Module, ModuleEnv, ModuleFunction,
+        ModuleFunctionSpans, Modules,
     },
     mutability::MutType,
     std::{
@@ -102,69 +103,56 @@ pub fn emit_module(
 
     // Process trait implementations
     for imp in &source.impls {
-        // // Build a module environment for the compiling the trait implementation.
-        // // We create a standalone module, importing the current module as
-        // // the "module" namespace, with a "use all" directive.
-        // let mut trait_others = others.clone();
-        // trait_others
-        //     .modules
-        //     .insert(ustr("@module"), rc_output.clone());
-        // let mut trait_output = Module {
-        //     uses: output.uses.clone(),
-        //     ..Default::default()
-        // };
-        // trait_output.uses.push(Use::All(ustr("@module")));
-
         // Validate the function mapping.
         let module_env = ModuleEnv::new(&output, others, within_std);
         let trait_ref = module_env
             .get_trait_ref(&imp.trait_name.0)
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
 
-        // Collect references to the method definitions in the trait, and a map of their name to index.
-        let (fn_defs, trait_fn_to_ast_fn_indices): (Vec<_>, HashMap<_, _>) = process_results(
-            imp.functions
-                .iter()
-                .enumerate()
-                .map(|(index_in_ast, func)| {
-                    let (index_in_trait, (_fn_name, fn_def)) = &trait_ref
-                        .functions
-                        .iter()
-                        .find_position(|trait_func| trait_func.0 == func.name.0)
-                        .ok_or_else(|| {
-                            internal_compilation_error!(MethodNotPartOfTrait {
-                                trait_ref: trait_ref.clone(),
-                                fn_span: func.name.1
-                            })
-                        })?;
-                    Ok((fn_def, (*index_in_trait, index_in_ast)))
-                }),
-            |iter| iter.multiunzip(),
-        )?;
-
-        // Make sure all trait methods are present.
-        if fn_defs.len() < trait_ref.functions.len() {
-            let missings = trait_ref
+        // Check that all functions in the impl are part of the trait.
+        let mut extra_spans = vec![];
+        for func in imp.functions.iter() {
+            if !trait_ref
                 .functions
                 .iter()
-                .filter_map(|(name, _)| {
-                    let name = *name;
-                    if imp.functions.iter().any(|func| func.name.0 == name) {
-                        None
-                    } else {
-                        Some(name)
-                    }
-                })
-                .collect::<Vec<_>>();
-            return Err(internal_compilation_error!(TraitMethodImplMissing {
-                impl_span: imp.span,
+                .any(|(trait_func_name, _)| *trait_func_name == func.name.0)
+            {
+                extra_spans.push(func.name.1);
+            }
+        }
+        if !extra_spans.is_empty() {
+            return Err(internal_compilation_error!(MethodsNotPartOfTrait {
                 trait_ref: trait_ref.clone(),
+                spans: extra_spans,
+            }));
+        }
+
+        // Collect references to functions in the impl, in the order of the trait methods.
+        let mut missings = vec![];
+        let functions: Vec<_> = trait_ref
+            .functions
+            .iter()
+            .filter_map(|(name, _)| {
+                imp.functions
+                    .iter()
+                    .find(|func| func.name.0 == *name)
+                    .or_else(|| {
+                        missings.push(*name);
+                        None
+                    })
+            })
+            .collect();
+        if !missings.is_empty() {
+            return Err(internal_compilation_error!(TraitMethodImplsMissing {
+                trait_ref: trait_ref.clone(),
+                impl_span: imp.span,
                 missings,
             }));
         }
 
         // Emit the functions.
-        let functions = || imp.functions.iter();
+        debug_assert_eq!(functions.len(), trait_ref.functions.len());
+        let functions = || functions.iter().copied();
         let trait_ctx = EmitTraitCtx {
             trait_ref: trait_ref.clone(),
         };
@@ -172,19 +160,12 @@ pub fn emit_module(
             emit_functions(&mut output, functions, others, within_std, Some(trait_ctx))?.unwrap();
 
         // Build the implementations by extracting functions from the built module.
-        let trait_fn_count = trait_ref.functions.len();
-        let module_fn_count = output.functions.len();
-        let trait_fn_start = module_fn_count - trait_fn_count;
-        let functions: Vec<_> = (0..trait_ref.functions.len())
-            .map(|trait_fn_index| {
-                let ast_fn_index = trait_fn_to_ast_fn_indices[&trait_fn_index];
-                output.functions[trait_fn_start + ast_fn_index]
-                    .function
-                    .clone()
-            })
+        // FIXME: Avoid the back and forth with ModuleFunction here.
+        let functions: Vec<_> = emit_output
+            .functions
+            .iter()
+            .map(|id| output.functions[id.as_index()].function.clone())
             .collect();
-        output.functions.truncate(trait_fn_start);
-        // FIXME: do not truncate, just add the necessary meta information.
         let impl_type;
         let local_impl_id = if emit_output.ty_var_count == 0 {
             impl_type = "concrete";
@@ -233,6 +214,7 @@ struct EmitTraitOutput {
     output_tys: Vec<Type>,
     ty_var_count: u32,
     constraints: Vec<PubTypeConstraint>,
+    functions: Vec<LocalFunctionId>,
 }
 
 fn emit_functions<'a, F, I>(
@@ -266,6 +248,7 @@ where
             output_tys,
             ty_var_count: 0,
             constraints: vec![],
+            functions: vec![],
         })
     } else {
         None
@@ -437,6 +420,7 @@ where
     // Fifth pass, get the remaining constraints and collect the free type variables.
     if let Some(mut trait_output) = trait_output {
         // We are emitting a trait.
+        trait_output.functions = local_fns.clone();
 
         // Resolve input and output types.
         trait_output.input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);

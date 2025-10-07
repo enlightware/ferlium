@@ -77,8 +77,8 @@ impl<'a> TraitSolver<'a> {
     /// Commit the newly created functions to the module.
     /// This must be called after trait solving is done,
     /// otherwise the created functions will be lost.
-    pub fn commit(self, functions: &mut Vec<LocalFunction>) {
-        functions.extend(self.fn_collector.new_elements);
+    pub fn commit(mut self, functions: &mut Vec<LocalFunction>) {
+        functions.append(&mut self.fn_collector.new_elements);
     }
 
     /// Check if a concrete trait implementation exists, without performing any solving.
@@ -556,5 +556,15 @@ impl<'a> TraitSolver<'a> {
                 });
                 ImportImplSlotId::from_index(index)
             })
+    }
+}
+
+impl<'a> Drop for TraitSolver<'a> {
+    fn drop(&mut self) {
+        if !self.fn_collector.new_elements.is_empty() {
+            panic!(
+                "TraitSolver dropped without committing the created functions. Call .commit() to store them in the module."
+            );
+        }
     }
 }

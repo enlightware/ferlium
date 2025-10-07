@@ -276,11 +276,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         input_tys: Vec<S::Type>,
         fn_span: Location,
     },
-    MethodNotPartOfTrait {
+    MethodsNotPartOfTrait {
         trait_ref: S::TraitRef,
-        fn_span: Location,
+        spans: Vec<Location>,
     },
-    TraitMethodImplMissing {
+    TraitMethodImplsMissing {
         trait_ref: S::TraitRef,
         impl_span: Location,
         missings: Vec<Ustr>,
@@ -763,15 +763,15 @@ impl FormatWith<&str> for CompilationError {
                     fmt_span(fn_span)
                 )
             }
-            MethodNotPartOfTrait { trait_ref, fn_span } => {
+            MethodsNotPartOfTrait { trait_ref, spans } => {
                 write!(
                     f,
-                    "Method `{}` is not part of trait `{}`",
-                    fmt_span(fn_span),
+                    "Methods `{}` are not part of trait `{}`",
+                    spans.iter().map(fmt_span).join(", "),
                     trait_ref
                 )
             }
-            TraitMethodImplMissing {
+            TraitMethodImplsMissing {
                 trait_ref,
                 missings,
                 impl_span,
@@ -1184,17 +1184,17 @@ impl CompilationError {
                     .collect(),
                 fn_span,
             }),
-            MethodNotPartOfTrait { trait_ref, fn_span } => {
-                compilation_error!(MethodNotPartOfTrait {
+            MethodsNotPartOfTrait { trait_ref, spans } => {
+                compilation_error!(MethodsNotPartOfTrait {
                     trait_ref: trait_ref.name.to_string(),
-                    fn_span
+                    spans
                 })
             }
-            TraitMethodImplMissing {
+            TraitMethodImplsMissing {
                 trait_ref,
                 missings,
                 impl_span,
-            } => compilation_error!(TraitMethodImplMissing {
+            } => compilation_error!(TraitMethodImplsMissing {
                 trait_ref: trait_ref.name.to_string(),
                 missings,
                 impl_span,

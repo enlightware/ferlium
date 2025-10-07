@@ -411,17 +411,20 @@ fn compilation_error_to_data(
                 ),
             )]
         }
-        MethodNotPartOfTrait { trait_ref, fn_span } => {
-            vec![ErrorData::from_location(
-                fn_span,
-                format!(
-                    "Method `{}` is not part of trait `{}`",
-                    fmt_span(fn_span),
-                    trait_ref
-                ),
-            )]
-        }
-        TraitMethodImplMissing {
+        MethodsNotPartOfTrait { trait_ref, spans } => spans
+            .iter()
+            .map(|span| {
+                ErrorData::from_location(
+                    span,
+                    format!(
+                        "Method `{}` is not part of trait `{}`",
+                        fmt_span(span),
+                        trait_ref
+                    ),
+                )
+            })
+            .collect(),
+        TraitMethodImplsMissing {
             trait_ref,
             missings,
             impl_span,
