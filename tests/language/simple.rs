@@ -1295,6 +1295,44 @@ fn type_ascription() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn cast_as_syntax() {
+    // Basic case
+    assert_eq!(run("let x: int = 5; x as float"), float(5.0));
+    assert_eq!(run("let x = 5.3; x as int"), int(5));
+    assert_eq!(run("(5: int) as float"), float(5.0));
+    assert_eq!(run("5.3 as int"), int(5));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn cast_as_precedence() {
+    // FIXME: once bug https://github.com/enlightware/ferlium/issues/59
+    // remove the int type ascription in the following tests.
+
+    // as binds tighter than multiplication (a * b as T) = (a * (b as T))
+    assert_eq!(run("2 * (3: int) as float"), float(6.0));
+    assert_eq!(run("10 / (2: int) as float"), float(5.0));
+
+    // as binds looser than unary operators (-a as T) = ((-a) as T)
+    assert_eq!(run("-((5: int) as float)"), float(-5.0));
+    assert_eq!(run("let x: int = -3; x as float"), float(-3.0));
+
+    // as is left-associative (a as B as C) = ((a as B) as C)
+    assert_eq!(run("(5: int) as float as int"), int(5));
+
+    // as binds looser than field access and indexing
+    assert_eq!(run("let a: [int] = [1, 2, 3]; a[0] as float"), float(1.0));
+
+    // as binds tighter than comparison
+    assert_eq!(run("let x = (3: int) as float; x == 3.0"), bool(true));
+    assert_eq!(run("(5: int) as float < 6.0"), bool(true));
+
+    // as binds tighter than addition
+    assert_eq!(run("2 + (3: int) as float"), float(5.0)); // (2.0 + 3.0)
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn early_returns() {
     // Basic return in function
     assert_eq!(run("fn f() { return 42 } f()"), int(42));
