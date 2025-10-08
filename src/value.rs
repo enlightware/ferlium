@@ -408,6 +408,8 @@ impl Display for Value {
             Variant(variant) => {
                 if variant.value.is_tuple() {
                     write!(f, "{}{}", variant.tag, variant.value)
+                } else if variant.value == Value::unit() {
+                    write!(f, "{}", variant.tag)
                 } else {
                     write!(f, "{}({})", variant.tag, variant.value)
                 }
