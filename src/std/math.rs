@@ -8,8 +8,8 @@
 //
 use std::{convert::identity, fmt, sync::LazyLock};
 
-use num_traits::Signed;
-use ordered_float::NotNan;
+use num_traits::{Bounded, NumCast, PrimInt, Signed, Zero};
+use ordered_float::{FloatCore, NotNan};
 use ustr::ustr;
 
 use crate::{
@@ -22,7 +22,10 @@ use crate::{
         UnaryNativeFnNN,
     },
     module::Module,
-    std::ordering::{ORD_TRAIT, ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS},
+    std::{
+        cast::CAST_TRAIT,
+        ordering::{ORD_TRAIT, ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS},
+    },
     r#trait::TraitRef,
     r#type::{FnType, Type},
     value::{NativeDisplay, Value},
@@ -74,6 +77,51 @@ where
         Less => Value::unit_variant(ustr(ORDERING_LESS)),
         Equal => Value::unit_variant(ustr(ORDERING_EQUAL)),
         Greater => Value::unit_variant(ustr(ORDERING_GREATER)),
+    }
+}
+
+/// Integer → float with finite saturation, wrapped in NotNan.
+pub fn saturating_cast_int_to_notnan<I, F>(x: I) -> NotNan<F>
+where
+    I: NumCast + PrimInt + Zero,
+    F: NumCast + FloatCore + Bounded,
+{
+    // First, try the straightforward numeric cast.
+    let mut v: F = NumCast::from(x).unwrap_or_else(|| {
+        // If the integer can't be represented at all (e.g., very wide int),
+        // pick an extreme based on the sign of x.
+        if x < I::zero() {
+            <F as Bounded>::min_value()
+        } else {
+            <F as Bounded>::max_value()
+        }
+    });
+
+    // Avoid infinities that some int→float casts can produce.
+    if v.is_infinite() {
+        v = if x < I::zero() {
+            <F as Bounded>::min_value()
+        } else {
+            <F as Bounded>::max_value()
+        };
+    }
+
+    // y is finite and not NaN by construction.
+    NotNan::new(v).unwrap()
+}
+
+/// Float → integer with saturation.
+fn saturating_trunc<F, I>(x: NotNan<F>) -> I
+where
+    F: NumCast + FloatCore,
+    I: NumCast + Bounded,
+{
+    if let Some(v) = NumCast::from(x.trunc()) {
+        v
+    } else if x.is_sign_negative() {
+        I::min_value()
+    } else {
+        I::max_value()
     }
 }
 
@@ -293,5 +341,21 @@ pub fn add_to_module(to: &mut Module) {
             Some("Rounds a number to the nearest integer."),
             no_effects(),
         ),
+    );
+
+    // conversions
+    to.add_concrete_impl(
+        CAST_TRAIT.clone(),
+        [int_type(), float_type()],
+        [],
+        [b(UnaryNativeFnNN::new(
+            saturating_cast_int_to_notnan::<Int, f64>,
+        )) as Function],
+    );
+    to.add_concrete_impl(
+        CAST_TRAIT.clone(),
+        [float_type(), int_type()],
+        [],
+        [b(UnaryNativeFnNN::new(saturating_trunc::<f64, Int>)) as Function],
     );
 }
