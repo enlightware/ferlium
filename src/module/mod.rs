@@ -20,7 +20,6 @@
 //! - Each compiled module version is an Rc<Module>
 //! - Cross-module references go through import slots + a relink step
 //! - Call sites use local integer IDs for local calls or ImportFunctionSlotId/ImportTraitSlotId for external calls
-//! - Recompiling produces a new module; dependents are relinked only if interface hash changes
 
 pub mod function;
 pub mod id;
@@ -30,26 +29,29 @@ pub mod trait_impl;
 pub mod uses;
 
 pub use function::*;
+use itertools::MultiUnzip;
 pub use module_env::*;
 pub use modules::*;
 pub use trait_impl::*;
 pub use uses::*;
 
 use std::{
-    cell::{Ref, RefMut},
+    cell::{Ref, RefCell, RefMut},
     collections::HashMap,
     fmt,
+    hash::{DefaultHasher, Hash, Hasher},
 };
 
 use ustr::{Ustr, ustr};
 
 use crate::{
+    emit_ir::EmitTraitOutput,
     format::FormatWith,
     function::Function,
     ir::Node,
     r#trait::TraitRef,
     r#type::{Type, TypeAliases, TypeDefRef},
-    type_scheme::PubTypeConstraint,
+    value::Value,
 };
 
 // Module itself
@@ -128,53 +130,63 @@ impl Module {
         self.functions.extend(fn_collector.new_elements);
     }
 
-    /// Add a concrete trait implementation to this module, with module functions.
-    /// The definition will be retrieved by instantiating the trait method definitions with the given types.
-    /// The caller is responsible to ensure that the input and output types match the trait reference
-    /// and that the constraints are satisfied.
-    pub fn add_concrete_impl_module_functions(
+    /// Add a concrete or blanket trait implementation to this module, using already-added local functions.
+    pub(crate) fn add_emitted_impl(
         &mut self,
         trait_ref: TraitRef,
-        input_tys: impl Into<Vec<Type>>,
-        output_tys: impl Into<Vec<Type>>,
-        functions: impl Into<Vec<ModuleFunction>>,
+        emit_output: EmitTraitOutput,
     ) -> LocalImplId {
-        // Add the impl, collecting new functions
-        let mut fn_collector = FunctionCollector::new(self.functions.len());
-        let id = self.impls.add_concrete(
-            trait_ref,
-            input_tys,
-            output_tys,
-            functions,
-            &mut fn_collector,
+        // TODO: ensure coherence
+
+        // let dictionary_ty = trait_ref.get_dictionary_type_for_tys(&input_tys, &output_tys);
+        let (dictionary_value, dictionary_ty, interface_hash) =
+            self.computer_dictionary_and_interface_hash(&emit_output.functions);
+        // Build and insert the implementation.
+        let imp = TraitImpl::new(
+            emit_output.output_tys,
+            emit_output.functions,
+            interface_hash,
+            RefCell::new(dictionary_value),
+            dictionary_ty,
+            true,
         );
-        self.functions.extend(fn_collector.new_elements);
-        id
+        if emit_output.ty_var_count == 0 {
+            let key = ConcreteTraitImplKey::new(trait_ref, emit_output.input_tys);
+            self.impls.add_concrete_struct(key, imp)
+        } else {
+            let sub_key = BlanketTraitImplSubKey::new(
+                emit_output.input_tys,
+                emit_output.ty_var_count,
+                emit_output.constraints,
+            );
+            self.impls
+                .add_blanket_struct(BlanketTraitImplKey::new(trait_ref, sub_key), imp)
+        }
     }
 
-    /// Add a blanket trait implementation to this module, with module functions.
-    pub fn add_blanket_impl_module_functions(
-        &mut self,
-        trait_ref: TraitRef,
-        input_tys: impl Into<Vec<Type>>,
-        output_tys: impl Into<Vec<Type>>,
-        ty_var_count: u32,
-        constraints: impl Into<Vec<PubTypeConstraint>>,
-        functions: impl Into<Vec<ModuleFunction>>,
-    ) -> LocalImplId {
-        // Add the impl, collecting new functions
-        let mut fn_collector = FunctionCollector::new(self.functions.len());
-        let id = self.impls.add_blanket(
-            trait_ref,
-            input_tys,
-            output_tys,
-            ty_var_count,
-            constraints,
-            functions,
-            &mut fn_collector,
-        );
-        self.functions.extend(fn_collector.new_elements);
-        id
+    fn computer_dictionary_and_interface_hash(
+        &self,
+        function_ids: &[LocalFunctionId],
+    ) -> (Value, Type, u64) {
+        let mut interface_hasher = DefaultHasher::new();
+        let (values, tys): (Vec<_>, Vec<_>) = function_ids
+            .iter()
+            .map(|id| {
+                let local_fn = &self
+                    .functions
+                    .get(id.as_index())
+                    .expect("Invalid function ID");
+                local_fn.interface_hash.hash(&mut interface_hasher);
+                let function = &local_fn.function;
+                let value = Value::PendingFunction(function.code.clone());
+                let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
+                (value, fn_ty)
+            })
+            .multiunzip();
+        let hash = interface_hasher.finish();
+        let dictionary_value = Value::tuple(values);
+        let dictionary_ty = Type::tuple(tys);
+        (dictionary_value, dictionary_ty, hash)
     }
 
     /// Check if this module is "empty" (has no meaningful content)

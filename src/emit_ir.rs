@@ -159,46 +159,15 @@ pub fn emit_module(
         let emit_output =
             emit_functions(&mut output, functions, others, within_std, Some(trait_ctx))?.unwrap();
 
-        // Build the implementations by extracting functions from the built module.
-        // FIXME: Avoid the back and forth with ModuleFunction here.
-        let functions: Vec<_> = emit_output
-            .functions
-            .iter()
-            .map(|id| output.functions[id.as_index()].function.clone())
-            .collect();
-        let impl_type;
-        let local_impl_id = if emit_output.ty_var_count == 0 {
-            impl_type = "concrete";
-            assert!(
-                emit_output.constraints.is_empty(),
-                "Concrete impl with constraints for {}: {}",
-                trait_ref.name,
-                emit_output
-                    .constraints
-                    .format_with(&ModuleEnv::new(&output, others, within_std))
-            );
-            output.add_concrete_impl_module_functions(
-                trait_ref.clone(),
-                emit_output.input_tys,
-                emit_output.output_tys,
-                functions,
-            )
-        } else {
-            impl_type = "blanket";
-            output.add_blanket_impl_module_functions(
-                trait_ref.clone(),
-                emit_output.input_tys,
-                emit_output.output_tys,
-                emit_output.ty_var_count,
-                emit_output.constraints,
-                functions,
-            )
-        };
+        // Add the implementation using the just emitted local functions.
+        let is_concrete = emit_output.ty_var_count == 0;
+        let local_impl_id = output.add_emitted_impl(trait_ref, emit_output);
         let module_env = ModuleEnv::new(&output, others, within_std);
         let header = output
             .impls
             .impl_header_to_string_by_id(local_impl_id, module_env);
         let header = header.strip_suffix("\n").unwrap();
+        let impl_type = if is_concrete { "Concrete" } else { "Blanket" };
         log::debug!("Emitted {impl_type} {header}");
     }
 
@@ -209,12 +178,12 @@ struct EmitTraitCtx {
     trait_ref: TraitRef,
 }
 
-struct EmitTraitOutput {
-    input_tys: Vec<Type>,
-    output_tys: Vec<Type>,
-    ty_var_count: u32,
-    constraints: Vec<PubTypeConstraint>,
-    functions: Vec<LocalFunctionId>,
+pub(crate) struct EmitTraitOutput {
+    pub(crate) input_tys: Vec<Type>,
+    pub(crate) output_tys: Vec<Type>,
+    pub(crate) ty_var_count: u32,
+    pub(crate) constraints: Vec<PubTypeConstraint>,
+    pub(crate) functions: Vec<LocalFunctionId>,
 }
 
 fn emit_functions<'a, F, I>(

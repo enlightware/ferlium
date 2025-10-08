@@ -243,17 +243,11 @@ impl TraitImpls {
     pub fn add_concrete(
         &mut self,
         trait_ref: TraitRef,
-        input_tys: impl Into<Vec<Type>>,
-        output_tys: impl Into<Vec<Type>>,
-        functions: impl Into<Vec<ModuleFunction>>,
+        input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
+        functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
-        let input_tys = input_tys.into();
-        let output_tys = output_tys.into();
-        let functions = functions.into();
-
-        // TODO: ensure coherence
-
         // Minimal validation
         trait_ref.validate_impl_size(&input_tys, &output_tys, functions.len());
 
@@ -286,48 +280,14 @@ impl TraitImpls {
         id
     }
 
-    /// Add a blanket trait implementation, with module functions.
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_blanket(
-        &mut self,
-        trait_ref: TraitRef,
-        input_tys: impl Into<Vec<Type>>,
-        output_tys: impl Into<Vec<Type>>,
-        ty_var_count: u32,
-        constraints: impl Into<Vec<PubTypeConstraint>>,
-        functions: impl Into<Vec<ModuleFunction>>,
-        fn_collector: &mut FunctionCollector,
-    ) -> LocalImplId {
-        let input_tys = input_tys.into();
-        let output_tys = output_tys.into();
-        let constraints = constraints.into();
-        let functions = functions.into();
-
-        // TODO: ensure coherence
-
-        // Minimal validation
-        trait_ref.validate_impl_size(&input_tys, &output_tys, functions.len());
-
-        // Add to local functions, collect their IDs and build the overall interface hash.
-        let (methods, dictionary_value, dictionary_type, interface_hash) =
-            Self::bundle_module_functions(functions, fn_collector);
-
-        // Build and insert the implementation.
-        let sub_key = BlanketTraitImplSubKey::new(input_tys, ty_var_count, constraints);
-        let imp = TraitImpl::new(
-            output_tys,
-            methods,
-            interface_hash,
-            RefCell::new(dictionary_value),
-            dictionary_type,
-            true,
-        );
+    /// Add a blanket trait implementation structure, returning its local id.
+    pub fn add_blanket_struct(&mut self, key: BlanketTraitImplKey, imp: TraitImpl) -> LocalImplId {
         let id = LocalImplId::from_index(self.data.len());
         self.data.push(imp);
         self.blanket_key_to_id
-            .entry(trait_ref)
+            .entry(key.trait_ref)
             .or_default()
-            .insert(sub_key, id);
+            .insert(key.sub_key, id);
         id
     }
 
