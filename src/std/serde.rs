@@ -67,8 +67,8 @@ fn object_payload_type() -> Type {
 }
 
 #[derive(Debug, Clone)]
-struct ProductTypeSerializeDeriver;
-impl Deriver for ProductTypeSerializeDeriver {
+struct AlgebraicTypeSerializeDeriver;
+impl Deriver for AlgebraicTypeSerializeDeriver {
     fn derive_impl(
         &self,
         trait_ref: &TraitRef,
@@ -284,8 +284,8 @@ impl Deriver for ProductTypeSerializeDeriver {
 }
 
 #[derive(Debug, Clone)]
-struct ProductTypeDeserializeDeriver;
-impl Deriver for ProductTypeDeserializeDeriver {
+struct AlgebraicTypeDeserializeDeriver;
+impl Deriver for AlgebraicTypeDeserializeDeriver {
     fn derive_impl(
         &self,
         trait_ref: &TraitRef,
@@ -489,7 +489,7 @@ pub fn add_to_module(to: &mut Module) {
     Arc::get_mut(&mut serialize_trait.0)
         .unwrap()
         .derives
-        .push(Box::new(ProductTypeSerializeDeriver));
+        .push(Box::new(AlgebraicTypeSerializeDeriver));
     to.traits.push(serialize_trait);
 
     // Deserialize trait
@@ -509,7 +509,7 @@ pub fn add_to_module(to: &mut Module) {
     Arc::get_mut(&mut deserialize_trait.0)
         .unwrap()
         .derives
-        .push(Box::new(ProductTypeDeserializeDeriver));
+        .push(Box::new(AlgebraicTypeDeserializeDeriver));
     to.traits.push(deserialize_trait);
 
     // Trait implementations for basic types are in the prelude.
