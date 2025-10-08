@@ -924,7 +924,7 @@ impl TypeInference {
                     self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
                 let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
                 assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
-                let output_tys = trait_tys.split_off(trait_ref.input_type_count.get() as usize);
+                let output_tys = trait_tys.split_off(trait_ref.input_type_count() as usize);
                 let input_tys = trait_tys;
                 self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                     trait_ref.clone(),

@@ -141,7 +141,7 @@ impl PubTypeConstraint {
         output_tys: Vec<Type>,
         span: Location,
     ) -> Self {
-        assert_eq!(input_tys.len(), trait_ref.input_type_count.get() as usize);
+        assert_eq!(input_tys.len(), trait_ref.input_type_count() as usize);
         assert_eq!(output_tys.len(), trait_ref.output_type_count() as usize);
         Self::HaveTrait {
             trait_ref,
@@ -970,9 +970,16 @@ pub fn format_have_trait(
     } else {
         write!(f, "{trait_name} <")?;
         write_with_separator_and_format_fn(
-            input_tys.iter(),
+            input_tys.iter().enumerate(),
             ", ",
-            |ty, f| write!(f, "{}", ty.format_with(env)),
+            |(index, ty), f| {
+                write!(
+                    f,
+                    "{} = {}",
+                    trait_ref.input_type_names[index],
+                    ty.format_with(env)
+                )
+            },
             f,
         )?;
     }

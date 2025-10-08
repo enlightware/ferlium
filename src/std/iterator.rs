@@ -25,9 +25,8 @@ pub const SIZED_SEQ_TRAIT_NAME: &str = "SizedSeq";
 pub fn add_to_module(to: &mut Module) {
     // Traits
     use FunctionDefinition as Def;
-    let iterator_trait = TraitRef::new(
+    let iterator_trait = TraitRef::new_with_self_input_type(
         ITERATOR_TRAIT_NAME,
-        1,
         ["Item"],
         [(
             "next",
@@ -52,7 +51,7 @@ pub fn add_to_module(to: &mut Module) {
     };
     let seq_trait = TraitRef::new_with_constraints(
         SEQ_TRAIT_NAME,
-        1,
+        ["Self"],
         ["Item", "Iter"],
         [iter_item_constraint.clone()],
         [(
@@ -91,9 +90,8 @@ pub fn add_to_module(to: &mut Module) {
     // );
     // to.traits.push(from_iter_trait);
 
-    let sized_seq_trait = TraitRef::new(
+    let sized_seq_trait = TraitRef::new_with_self_input_type(
         SIZED_SEQ_TRAIT_NAME,
-        1,
         [],
         [(
             "len",

@@ -10,7 +10,6 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Debug},
     hash::{Hash, Hasher},
-    num::NonZero,
     ops::Deref,
     sync::Arc,
 };
@@ -53,7 +52,7 @@ pub struct Trait {
     /// Name of the trait, for debugging purposes.
     pub name: Ustr,
     /// Number of input types, by convention, the first type variables correspond to input types.
-    pub input_type_count: NonZero<u32>,
+    pub input_type_names: Vec<Ustr>,
     /// Name of the output types.
     /// By convention, the type variables just after input types correspond to output types.
     pub output_type_names: Vec<Ustr>,
@@ -67,6 +66,10 @@ pub struct Trait {
 }
 
 impl Trait {
+    /// Return the number of input types in this trait.
+    pub fn input_type_count(&self) -> u32 {
+        self.input_type_names.len() as u32
+    }
     /// Return the number of output types in this trait.
     pub fn output_type_count(&self) -> u32 {
         self.output_type_names.len() as u32
@@ -74,7 +77,7 @@ impl Trait {
 
     /// Return the number of type variables in this trait.
     pub fn type_var_count(&self) -> u32 {
-        self.input_type_count.get() + self.output_type_count()
+        self.input_type_count() + self.output_type_count()
     }
 
     pub fn method_index(&self, name: Ustr) -> Option<usize> {
@@ -121,7 +124,7 @@ impl Trait {
                     function.ty_scheme.constraints.len()
                 );
             }
-            for input_ty_var in 0..self.input_type_count.get() {
+            for input_ty_var in 0..self.input_type_count() {
                 let ty_var = TypeVar::new(input_ty_var);
                 if !function.ty_scheme.ty_quantifiers.contains(&ty_var) {
                     panic!(
@@ -194,7 +197,7 @@ impl Trait {
         input_tys: &[Type],
         output_tys: &[Type],
     ) -> TypeSubstitution {
-        assert!(input_tys.len() == self.input_type_count.get() as usize);
+        assert!(input_tys.len() == self.input_type_count() as usize);
         assert!(output_tys.len() == self.output_type_count() as usize);
         input_tys
             .iter()
@@ -208,11 +211,18 @@ impl Trait {
 impl FormatWith<ModuleEnv<'_>> for Trait {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
         write!(f, "trait {} <", self.name)?;
-        let input_ty_count = self.input_type_count.get();
+        let input_ty_count = self.input_type_count();
         write_with_separator_and_format_fn(
             0..input_ty_count,
             ", ",
-            |index, f| write!(f, "{}", TypeVar::new(index)),
+            |index, f| {
+                write!(
+                    f,
+                    "{} = {}",
+                    self.input_type_names[index as usize],
+                    TypeVar::new(index)
+                )
+            },
             f,
         )?;
         if self.output_type_count() > 0 {
@@ -261,10 +271,15 @@ pub struct TraitRef(pub(crate) Arc<Trait>);
 impl TraitRef {
     pub fn new<'a>(
         name: &str,
-        input_type_count: u32,
+        input_type_names: impl Into<Vec<&'a str>>,
         output_type_names: impl Into<Vec<&'a str>>,
         functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
     ) -> Self {
+        let input_type_names = input_type_names.into();
+        assert!(
+            !input_type_names.is_empty(),
+            "A trait must have at least one input type."
+        );
         let functions = functions
             .into()
             .into_iter()
@@ -272,7 +287,7 @@ impl TraitRef {
             .collect();
         let trait_data = Trait {
             name: ustr(name),
-            input_type_count: NonZero::new(input_type_count).unwrap(),
+            input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: Vec::new(),
             functions,
@@ -282,13 +297,26 @@ impl TraitRef {
         Self(Arc::new(trait_data))
     }
 
+    pub fn new_with_self_input_type<'a>(
+        name: &str,
+        output_type_names: impl Into<Vec<&'a str>>,
+        functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+    ) -> Self {
+        Self::new(name, ["Self"], output_type_names, functions)
+    }
+
     pub fn new_with_constraints<'a>(
         name: &str,
-        input_type_count: u32,
+        input_type_names: impl Into<Vec<&'a str>>,
         output_type_names: impl Into<Vec<&'a str>>,
         constraints: impl Into<Vec<PubTypeConstraint>>,
         functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
     ) -> Self {
+        let input_type_names = input_type_names.into();
+        assert!(
+            !input_type_names.is_empty(),
+            "A trait must have at least one input type."
+        );
         let functions = functions
             .into()
             .into_iter()
@@ -296,7 +324,7 @@ impl TraitRef {
             .collect();
         let trait_data = Trait {
             name: ustr(name),
-            input_type_count: NonZero::new(input_type_count).unwrap(),
+            input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: constraints.into(),
             functions,
@@ -308,7 +336,7 @@ impl TraitRef {
 
     pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], fn_count: usize) {
         assert_eq!(
-            self.input_type_count.get(),
+            self.input_type_count(),
             input_tys.len() as u32,
             "Mismatched input type count when implementing trait {}.",
             self.name,

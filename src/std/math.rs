@@ -84,9 +84,8 @@ pub static NUM_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let unary_fn_ty = FnType::new_by_val([var0_ty], var0_ty, EffType::empty());
     let binary_fn_ty = FnType::new_by_val([var0_ty, var0_ty], var0_ty, EffType::empty());
 
-    TraitRef::new(
+    TraitRef::new_with_self_input_type(
         "Num",
-        1,
         [],
         [
             (
@@ -145,9 +144,8 @@ pub static DIV_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var0_ty = Type::variable_id(0);
     let binary_fn_ty = FnType::new_by_val([var0_ty, var0_ty], var0_ty, EffType::empty());
 
-    TraitRef::new(
+    TraitRef::new_with_self_input_type(
         "Div",
-        1,
         [],
         [(
             "div",

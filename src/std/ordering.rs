@@ -36,9 +36,8 @@ pub static ORD_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var0_ty = Type::variable_id(0);
     let binary_fn_ty = FnType::new_by_val([var0_ty, var0_ty], ordering_type(), EffType::empty());
 
-    TraitRef::new(
+    TraitRef::new_with_self_input_type(
         "Ord",
-        1,
         [],
         [(
             "cmp",

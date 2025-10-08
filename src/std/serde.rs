@@ -473,9 +473,8 @@ pub fn add_to_module(to: &mut Module) {
     use FunctionDefinition as Def;
 
     // Serialize trait
-    let mut serialize_trait = TraitRef::new(
+    let mut serialize_trait = TraitRef::new_with_self_input_type(
         SERIALIZE_TRAIT_NAME,
-        1,
         [],
         [(
             SERIALIZE_FN_NAME,
@@ -493,9 +492,8 @@ pub fn add_to_module(to: &mut Module) {
     to.traits.push(serialize_trait);
 
     // Deserialize trait
-    let mut deserialize_trait = TraitRef::new(
+    let mut deserialize_trait = TraitRef::new_with_self_input_type(
         DESERIALIZE_TRAIT_NAME,
-        1,
         [],
         [(
             DESERIALIZE_FN_NAME,

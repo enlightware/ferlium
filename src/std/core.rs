@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use crate::{module::Module, r#trait::TraitRef, r#type::Type};
 
 pub static REPR_TRAIT: LazyLock<TraitRef> =
-    LazyLock::new(|| TraitRef::new("Repr", 1, vec!["Is"], []));
+    LazyLock::new(|| TraitRef::new_with_self_input_type("Repr", ["Is"], []));
 
 pub fn add_to_module(to: &mut Module) {
     // Add the unit type `()`
