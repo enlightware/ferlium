@@ -14,6 +14,7 @@ pub fn add_to_module(to: &mut Module) {
     // The prelude code is split into multiple parts
     // to allow dependencies betwen trait implementations.
     let codes = [
+        // First compiles basic comparison functions.
         indoc! { r#"
         fn lt(lhs, rhs) {
             match cmp(lhs, rhs) {
@@ -57,6 +58,7 @@ pub fn add_to_module(to: &mut Module) {
             }
         }
         "# },
+        // Then most of the core traits.
         indoc! { r#"
         fn clamp(value, min_bound, max_bound) {
             if min_bound > max_bound {
@@ -216,6 +218,66 @@ pub fn add_to_module(to: &mut Module) {
         }
 
         // Serde for basic types
+
+        /// Downcast a variant to None, panicking if the variant is not None.
+        fn variant_to_none(v: Variant) -> () {
+            match (v) {
+                None => (),
+                Array(a) => {
+                    if array_len(a) == 0 {
+                        ()
+                    } else {
+                        panic("Expected array of size 0")
+                    }
+                },
+                _ => panic(f"Expected None variant or Array variant of size 0, got \"{v}\"")
+            }
+        }
+        /// Downcast a variant to a bool, panicking if the variant is not a bool.
+        fn variant_to_bool(v: Variant) {
+            match (v) {
+                Bool(b) => b,
+                _ => panic(f"Expected Bool variant, got \"{v}\"")
+            }
+        }
+        /// Downcast a variant to an int, panicking if the variant is not an int or a float.
+        fn variant_to_int(v: Variant) {
+            match (v) {
+                Int(i) => i,
+                Float(f) => round(f),
+                _ => panic(f"Expected Int variant, got \"{v}\"")
+            }
+        }
+        /// Downcast a variant to a float, panicking if the variant is not a float or int.
+        fn variant_to_float(v: Variant) {
+            match (v) {
+                Float(f) => f,
+                Int(i) => from_int(i),
+                _ => panic(f"Expected Float or Int variant, got \"{v}\"")
+            }
+        }
+        /// Downcast a variant to a string, panicking if the variant is not a string.
+        fn variant_to_string(v: Variant) {
+            match (v) {
+                String(s) => s,
+                _ => panic(f"Expected String variant, got \"{v}\"")
+            }
+        }
+        /// Downcast a variant to an array, panicking if the variant is not an array.
+        fn variant_to_array(v: Variant) {
+            match (v) {
+                Array(a) => a,
+                _ => panic(f"Expected Array variant, got \"{v}\"")
+            }
+        }
+        /// Downcast a variant to an object payload, panicking if the variant is not an object.
+        fn variant_to_object(v: Variant) {
+            match (v) {
+                Object(o) => o,
+                _ => panic(f"Expected Object variant, got \"{v}\"")
+            }
+        }
+
         impl Serialize {
             fn serialize(v: ()) {
                 None
@@ -223,17 +285,7 @@ pub fn add_to_module(to: &mut Module) {
         }
         impl Deserialize {
             fn deserialize(v) -> () {
-                match (v) {
-                    None => (),
-                    Array(a) => {
-                        if eq(array_len(a), 0) {
-                            ()
-                        } else {
-                            panic("Expected array of size 0")
-                        }
-                    },
-                    _ => panic("Expected None variant or Array variant of size 0")
-                }
+                variant_to_none(v)
             }
         }
         impl Serialize {
@@ -243,10 +295,7 @@ pub fn add_to_module(to: &mut Module) {
         }
         impl Deserialize {
             fn deserialize(v) -> bool {
-                match (v) {
-                    Bool(v) => v,
-                    _ => panic("Expected Bool variant")
-                }
+                variant_to_bool(v)
             }
         }
         impl Serialize {
@@ -256,10 +305,7 @@ pub fn add_to_module(to: &mut Module) {
         }
         impl Deserialize {
             fn deserialize(v) -> int {
-                match (v) {
-                    Int(v) => v,
-                    _ => panic("Expected Int variant")
-                }
+                variant_to_int(v)
             }
         }
         impl Serialize {
@@ -269,11 +315,7 @@ pub fn add_to_module(to: &mut Module) {
         }
         impl Deserialize {
             fn deserialize(v) -> float {
-                match (v) {
-                    Float(v) => v,
-                    Int(v) => from_int(v),
-                    _ => panic("Expected Float or Int variant")
-                }
+                variant_to_float(v)
             }
         }
         impl Serialize {
@@ -283,10 +325,7 @@ pub fn add_to_module(to: &mut Module) {
         }
         impl Deserialize {
             fn deserialize(v) -> string {
-                match (v) {
-                    String(v) => v,
-                    _ => panic("Expected String variant")
-                }
+                variant_to_string(v)
             }
         }
 
@@ -310,11 +349,13 @@ pub fn add_to_module(to: &mut Module) {
                         };
                         result
                     },
-                    _ => panic("Expected Array variant")
+                    _ => panic(f"Expected Array variant, got \"{a}\"")
                 }
             }
         }
         "# },
+        // These functions depend on array iterator being available,
+        // so they are compiled in a next batch.
         indoc! { r#"
         // Serde derive helper
         fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Some(Variant) | None {
@@ -333,58 +374,6 @@ pub fn add_to_module(to: &mut Module) {
                 }
             };
             panic(f"Object variant key \"{name}\" not found in {entries}")
-        }
-
-        /// Downcast a variant to None, panicking if the variant is not None.
-        fn variant_to_none(v: Variant) {
-            match (v) {
-                None => (),
-                _ => panic(f"Expected None variant, get \"{v}\"")
-            }
-        }
-        /// Downcast a variant to a bool, panicking if the variant is not a bool.
-        fn variant_to_bool(v: Variant) {
-            match (v) {
-                Bool(b) => b,
-                _ => panic(f"Expected Bool variant, get \"{v}\"")
-            }
-        }
-        /// Downcast a variant to an int, panicking if the variant is not an int or a float.
-        fn variant_to_int(v: Variant) {
-            match (v) {
-                Int(i) => i,
-                Float(f) => round(f),
-                _ => panic(f"Expected Int variant, get \"{v}\"")
-            }
-        }
-        /// Downcast a variant to a float, panicking if the variant is not a float or int.
-        fn variant_to_float(v: Variant) {
-            match (v) {
-                Float(f) => f,
-                Int(i) => from_int(i),
-                _ => panic(f"Expected Float or Int variant, get \"{v}\"")
-            }
-        }
-        /// Downcast a variant to a string, panicking if the variant is not a string.
-        fn variant_to_string(v: Variant) {
-            match (v) {
-                String(s) => s,
-                _ => panic(f"Expected String variant, get \"{v}\"")
-            }
-        }
-        /// Downcast a variant to an array, panicking if the variant is not an array.
-        fn variant_to_array(v: Variant) {
-            match (v) {
-                Array(a) => a,
-                _ => panic(f"Expected Array variant, get \"{v}\"")
-            }
-        }
-        /// Downcast a variant to an object payload, panicking if the variant is not an object.
-        fn variant_to_object(v: Variant) {
-            match (v) {
-                Object(o) => o,
-                _ => panic(f"Expected Object variant, got \"{v}\"")
-            }
         }
         "# },
     ];
