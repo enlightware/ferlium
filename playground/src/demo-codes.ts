@@ -190,6 +190,11 @@ fn ty_fn_arg_fn(f: () -> ()) {
 
 ((1: int), (1: float))
 `],
+['Type casting', `let a: int = 5;
+let b = a as float;
+let c = 5.7 as int;
+(a, b, c)
+`],
 ['Iterators',`fn sum2(seq) {
 	let mut sum = 0;
 	for i in seq {
