@@ -19,6 +19,7 @@ use math::{Float, Int};
 use ustr::ustr;
 
 pub mod array;
+pub mod cast;
 pub mod core;
 pub mod flow;
 pub mod io;
@@ -46,6 +47,7 @@ pub fn std_module() -> Rc<Module> {
                 let mut module = Module::default();
                 core::add_to_module(&mut module);
                 flow::add_to_module(&mut module);
+                cast::add_to_module(&mut module);
                 // mem::add_to_module(&mut module);
                 logic::add_to_module(&mut module);
                 ordering::add_to_module(&mut module);
