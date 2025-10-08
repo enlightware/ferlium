@@ -339,14 +339,14 @@ pub fn add_to_module(to: &mut Module) {
         fn variant_to_none(v: Variant) {
             match (v) {
                 None => (),
-                _ => panic("Expected None variant")
+                _ => panic(f"Expected None variant, get \"{v}\"")
             }
         }
         /// Downcast a variant to a bool, panicking if the variant is not a bool.
         fn variant_to_bool(v: Variant) {
             match (v) {
                 Bool(b) => b,
-                _ => panic("Expected Bool variant")
+                _ => panic(f"Expected Bool variant, get \"{v}\"")
             }
         }
         /// Downcast a variant to an int, panicking if the variant is not an int or a float.
@@ -354,7 +354,7 @@ pub fn add_to_module(to: &mut Module) {
             match (v) {
                 Int(i) => i,
                 Float(f) => round(f),
-                _ => panic("Expected Int variant")
+                _ => panic(f"Expected Int variant, get \"{v}\"")
             }
         }
         /// Downcast a variant to a float, panicking if the variant is not a float or int.
@@ -362,28 +362,28 @@ pub fn add_to_module(to: &mut Module) {
             match (v) {
                 Float(f) => f,
                 Int(i) => from_int(i),
-                _ => panic("Expected Float or Int variant")
+                _ => panic(f"Expected Float or Int variant, get \"{v}\"")
             }
         }
         /// Downcast a variant to a string, panicking if the variant is not a string.
         fn variant_to_string(v: Variant) {
             match (v) {
                 String(s) => s,
-                _ => panic("Expected String variant")
+                _ => panic(f"Expected String variant, get \"{v}\"")
             }
         }
         /// Downcast a variant to an array, panicking if the variant is not an array.
         fn variant_to_array(v: Variant) {
             match (v) {
                 Array(a) => a,
-                _ => panic("Expected Array variant")
+                _ => panic(f"Expected Array variant, get \"{v}\"")
             }
         }
         /// Downcast a variant to an object payload, panicking if the variant is not an object.
         fn variant_to_object(v: Variant) {
             match (v) {
                 Object(o) => o,
-                _ => panic("Expected Object variant")
+                _ => panic(f"Expected Object variant, got \"{v}\"")
             }
         }
         "# },
