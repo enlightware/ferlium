@@ -203,8 +203,19 @@ addExpr {
 }
 
 mulExpr {
+    castExpr
+    | mulExpr ArithOp { '*' | '/' | '%'} castExpr
+}
+
+castExpr {
     unaryExpr
-    | mulExpr ArithOp { '*' | '/' | '%'} unaryExpr
+    | castExpr kw<'as'> castTargetType
+}
+
+castTargetType {
+    Path
+    | arrayType
+    | recordType
 }
 
 unaryExpr {
