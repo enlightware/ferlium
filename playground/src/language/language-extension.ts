@@ -8,7 +8,7 @@
 //
 import { parser } from "./language.grammar";
 import { LRLanguage, LanguageSupport, continuedIndent, flatIndent, indentNodeProp } from "@codemirror/language";
-import { styleTags, tags as t, Tag } from "@lezer/highlight";
+import { styleTags, tags as t } from "@lezer/highlight";
 
 // Note: test grammar here: https://lezer-playground.vercel.app/
 
@@ -16,8 +16,9 @@ import { styleTags, tags as t, Tag } from "@lezer/highlight";
 const highlight = styleTags({
 	"fn let mut impl struct enum": t.definitionKeyword,
 	"if else match for return": t.controlKeyword,
-	"in": t.operatorKeyword,
+	"in as": t.operatorKeyword,
 	"Type/...": t.typeName,
+	"CastTargetType/...": t.typeName,
 	MutTyOrInfer: t.typeName,
 	Identifier: t.name,
 	"TypeName/...": t.typeName,

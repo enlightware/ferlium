@@ -209,11 +209,12 @@ mulExpr {
 
 castExpr {
     unaryExpr
-    | castExpr kw<'as'> castTargetType
+    | castExpr kw<'as'> CastTargetType
 }
 
-castTargetType {
+CastTargetType {
     Path
+    | '(' Type ')'
     | arrayType
     | recordType
 }
