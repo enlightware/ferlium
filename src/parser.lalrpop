@@ -370,7 +370,39 @@ CompExpr<NoStruct> = BinOpLeftAssoc<CompOp, AddExpr<NoStruct>>;
 
 AddExpr<NoStruct> = BinOpLeftAssoc<AddOp, MulExpr<NoStruct>>;
 
-MulExpr<NoStruct> = BinOpLeftAssoc<MulOp, UnaryExpr<NoStruct>>;
+MulExpr<NoStruct> = BinOpLeftAssoc<MulOp, CastExpr<NoStruct>>;
+
+CastExpr<NoStruct>: ExprKind = {
+    <e:Es<CastExpr<NoStruct>>> "as" <ty:Sp<CastTargetType>> => {
+        let span = e.span;
+        let cast_expr = Expr::new(
+            Identifier(ustr("cast")),
+            ty.1
+        );
+        TypeAscription(
+            boxed(Expr::new(
+                Apply(boxed(cast_expr), vec![e], false),
+                span
+            )),
+            ty.0,
+            ty.1
+        )
+    },
+    UnaryExpr<NoStruct>,
+}
+
+// Cast target types: only allow simple, unambiguous types
+// For complex types like tuples or functions, use parentheses: (value as (A, B))
+CastTargetType: Type = {
+    PathType,
+    CastTargetTypeParens,
+    ArrayType<"">,
+    RecordType<"">,
+}
+
+CastTargetTypeParens: Type = {
+    "(" <ty:Type<"">> ")" => ty
+}
 
 UnaryExpr<NoStruct> = {
     SuffixExpr<NoStruct>,
