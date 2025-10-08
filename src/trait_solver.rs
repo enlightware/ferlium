@@ -341,8 +341,6 @@ impl<'a> TraitSolver<'a> {
                             None => FunctionId::Local(*fn_id),
                         };
 
-                        // TODO: only build the thunk if there are constraint dictionaries.
-
                         // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
                         let arguments: Vec<_> = constraint_dict_nodes
                             .iter()
