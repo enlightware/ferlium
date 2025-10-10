@@ -13,7 +13,7 @@ use ast::{UnstableCollector, VisitExpr};
 use emit_ir::{CompiledExpr, emit_expr, emit_module};
 use error::{CompilationError, LocatedError};
 use itertools::Itertools;
-use lalrpop_util::lalrpop_mod;
+use lalrpop_util::{ErrorRecovery, lalrpop_mod};
 use module::ModuleEnv;
 use parser_helpers::describe_parse_error;
 
@@ -160,20 +160,29 @@ pub fn parse_module_and_expr(
     accept_unstable: bool,
 ) -> Result<(ast::PModule, Option<ast::PExpr>), Vec<LocatedError>> {
     let mut errors = Vec::new();
-    let module_and_expr = parser::ModuleAndExprParser::new()
+    let module_and_expr = parser::ModuleAndBlockContentParser::new()
         .parse(&mut errors, src)
         .map_err(|error| vec![describe_parse_error(error)])?;
-    // TODO: change the last line to an unwrap once the grammar is fully error-tolerant.
+    describe_recovered_errors(errors)?;
+    // TODO: revisit once the grammar is fully error-tolerant.
+    if !accept_unstable {
+        validate_no_unstable(&module_and_expr.0, module_and_expr.1.iter())?;
+    }
+    Ok(module_and_expr)
+}
+
+fn describe_recovered_errors(
+    errors: Vec<ErrorRecovery<usize, crate::parser::Token<'_>, LocatedError>>,
+) -> Result<(), Vec<LocatedError>> {
     if !errors.is_empty() {
         let errors = errors
             .into_iter()
             .map(|error| describe_parse_error(error.error))
             .collect();
-        return Err(errors);
-    } else if !accept_unstable {
-        validate_no_unstable(&module_and_expr.0, module_and_expr.1.iter())?;
+        Err(errors)
+    } else {
+        Ok(())
     }
-    Ok(module_and_expr)
 }
 
 /// Validate that a module and some expressions do not use unstable features.

@@ -21,6 +21,19 @@ pub ModuleAndExpr: (Module, Option<Expr>) = {
     <m:Module> <e:Es<ExtraExpr>?> => (m, e),
 }
 
+pub ModuleAndBlockContent: (Module, Option<Expr>) = {
+    <m:Module> <l:@L> <s:Stmts> <r:@R> => {
+        if s.is_empty() {
+            (m, None)
+        } else {
+            (m, Some(Expr::new(Block(s), span(l, r))))
+        }
+    },
+    <m:Module> <l:@L> <s:Stmts> <e:Expr> <r:@R> => {
+        (m, Some(Expr::new(Block(ext_b(s, e)), span(l, r))))
+    },
+}
+
 ExtraExpr: ExprKind = {
     <e:Stmts> <r:Expr> => Block(ext_b(e, r)),
 }
