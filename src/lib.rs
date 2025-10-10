@@ -169,23 +169,30 @@ pub fn parse_module_and_expr(
             .into_iter()
             .map(|error| describe_parse_error(error.error))
             .collect();
-        Err(errors)
+        return Err(errors);
     } else if !accept_unstable {
-        let mut unstables = module_and_expr.0.visit_with(UnstableCollector::default());
-        if let Some(expr) = module_and_expr.1.as_ref() {
-            unstables = expr.visit_with(unstables);
-        }
-        if unstables.0.is_empty() {
-            Ok(module_and_expr)
-        } else {
-            Err(unstables
-                .0
-                .into_iter()
-                .map(|span| ("Unstable feature not allowed".into(), span))
-                .collect())
-        }
+        validate_no_unstable(&module_and_expr.0, module_and_expr.1.iter())?;
+    }
+    Ok(module_and_expr)
+}
+
+/// Validate that a module and some expressions do not use unstable features.
+fn validate_no_unstable<'a>(
+    module: &ast::PModule,
+    exprs: impl Iterator<Item = &'a ast::PExpr>,
+) -> Result<(), Vec<LocatedError>> {
+    let mut unstables = module.visit_with(UnstableCollector::default());
+    for expr in exprs {
+        unstables = expr.visit_with(unstables);
+    }
+    if unstables.0.is_empty() {
+        Ok(())
     } else {
-        Ok(module_and_expr)
+        Err(unstables
+            .0
+            .into_iter()
+            .map(|span| ("Unstable feature not allowed".into(), span))
+            .collect())
     }
 }
 
