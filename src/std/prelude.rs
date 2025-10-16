@@ -12,7 +12,7 @@ use indoc::indoc;
 
 pub fn add_to_module(to: &mut Module) {
     // The prelude code is split into multiple parts
-    // to allow dependencies betwen trait implementations.
+    // to allow dependencies between trait implementations.
     let codes = [
         // First compiles basic comparison functions.
         indoc! { r#"

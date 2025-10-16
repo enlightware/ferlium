@@ -560,7 +560,7 @@ impl<'a> TraitSolver<'a> {
 impl<'a> Drop for TraitSolver<'a> {
     fn drop(&mut self) {
         if !self.fn_collector.new_elements.is_empty() {
-            panic!(
+            log::warn!(
                 "TraitSolver dropped without committing the created functions. Call .commit() to store them in the module."
             );
         }
