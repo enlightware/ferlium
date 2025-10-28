@@ -1,5 +1,5 @@
 use crate::{Location, LocatedError};
-use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem};
+use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -517,11 +517,11 @@ NullaryVariantPattern: PatK = {
 }
 
 NAryVariantPattern: PatK = {
-    <tag:Sp<UIdentifier>> "(" <vars:StrArgs> ")" => PatK::tuple_variant(tag, vars),
+    <tag:Sp<UIdentifier>> "(" <vars:StrOrMoreArgs> ")" => PatK::tuple_variant(tag, vars),
 }
 
 StructVariantPattern: PatK = {
-    <tag:Sp<UIdentifier>> "{" <vars:StrArgs> "}" => PatK::struct_variant(tag, vars),
+    <tag:Sp<UIdentifier>> "{" <vars:StrOrMoreArgs> "}" => PatK::struct_variant(tag, vars),
 }
 
 LiteralPatternKind: PatK = {
@@ -674,6 +674,15 @@ StrWithOptTypeArgs = {
 
 StrWithOptType: (UstrSpan, Option<MutTypeTypeSpan>) = {
     <id:Sp<UIdentifier>> <ty:RefMutTypeAscription?> => (id, ty),
+}
+
+StrOrMoreArgs = {
+    Sep<StrOrMore, ",">,
+}
+
+StrOrMore: PatternVar = {
+    <id:Sp<UIdentifier>> => PatternVar::Named(id),
+    <l:@L> ".." <r:@R> => PatternVar::Wildcard(span(l, r)),
 }
 
 // Terminals

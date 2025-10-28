@@ -271,6 +271,10 @@ pub enum CompilationErrorImpl<S: Scope> {
         ctx_span: Location,
         ctx: DuplicatedVariantContext,
     },
+    RecordWildcardPatternNotAtEnd {
+        pattern_span: Location,
+        wildcard_span: Location,
+    },
     TraitImplNotFound {
         trait_ref: S::TraitRef,
         input_tys: Vec<S::Type>,
@@ -750,6 +754,13 @@ impl FormatWith<&str> for CompilationError {
                     fmt_span(ctx_span)
                 )
             }
+            RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
+                write!(
+                    f,
+                    "Record wildcard pattern .. must be at the end of the pattern in `{}`",
+                    fmt_span(pattern_span)
+                )
+            }
             TraitImplNotFound {
                 trait_ref,
                 input_tys,
@@ -1172,6 +1183,15 @@ impl CompilationError {
                 ctx_span,
                 ctx
             }),
+            RecordWildcardPatternNotAtEnd {
+                pattern_span,
+                wildcard_span,
+            } => {
+                compilation_error!(RecordWildcardPatternNotAtEnd {
+                    pattern_span,
+                    wildcard_span
+                })
+            }
             TraitImplNotFound {
                 trait_ref,
                 input_tys,

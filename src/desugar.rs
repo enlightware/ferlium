@@ -18,7 +18,7 @@ use crate::{
     ast::{
         self, DExpr, DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, Expr, ExprKind,
         ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction, PModuleFunctionArg,
-        PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, UstrSpan,
+        PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, PatternVar, UstrSpan,
     },
     containers::{B, b},
     effects::EffType,
@@ -26,9 +26,7 @@ use crate::{
     format_string::emit_format_string_ast,
     graph::{find_strongly_connected_components, topological_sort_sccs},
     internal_compilation_error,
-    module::Module,
-    module::ModuleEnv,
-    module::Modules,
+    module::{Module, ModuleEnv, Modules},
     mutability::{MutType, MutVal},
     parser_helpers::static_apply,
     std::{array::array_type, math::int_type},
@@ -597,7 +595,9 @@ impl PExpr {
                         let env_size = ctx.locals.len();
                         if let Some((_tag, _kind, vars)) = pat.kind.as_variant() {
                             for var in vars {
-                                ctx.locals.push(var.0);
+                                if let Some(name) = var.as_named() {
+                                    ctx.locals.push(name.0);
+                                }
                             }
                         }
                         let expr = expr.desugar(ctx)?;
@@ -642,7 +642,7 @@ impl PExpr {
                                 Pattern::new(
                                     PatternKind::tuple_variant(
                                         (ustr("Some"), body_start_span),
-                                        vec![var_name],
+                                        vec![PatternVar::Named(var_name)],
                                     ),
                                     var_name.1,
                                 ),

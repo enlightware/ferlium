@@ -317,6 +317,14 @@ identifierWithOptTypeArg {
     Identifier RefMutTypeAscription?
 }
 
+identifiersOrMoreOptComma {
+    (identifierOrMore ',')* identifierOrMore?
+}
+
+identifierOrMore {
+    Identifier | '..'
+}
+
 exprArgsOptComma {
     (expr ',')* expr?
 }
@@ -338,8 +346,8 @@ MatchBranch {
 Pattern {
     literalPattern
     | TagName { Identifier }
-    | TagName { Identifier } '(' identifiersOptComma ')'
-    | TagName { Identifier } '{' identifiersOptComma '}'
+    | TagName { Identifier } '(' identifiersOrMoreOptComma ')'
+    | TagName { Identifier } '{' identifiersOrMoreOptComma '}'
 }
 
 PropertyPath {

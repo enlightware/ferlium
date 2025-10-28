@@ -10,6 +10,8 @@ use test_log::test;
 
 use indoc::indoc;
 
+use crate::common::float;
+
 use super::common::{bool, fail_compilation, int, run, unit};
 use ferlium::{error::MutabilityMustBeWhat, value::Value};
 
@@ -87,6 +89,48 @@ fn exprs_in_match() {
     );
     assert_eq!(run("match 0 { 0 => (1,2), _ => (2,3) }"), int_tuple!(1, 2));
     assert_eq!(run("match 1 { 0 => (1,2), _ => (2,3) }"), int_tuple!(2, 3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn record_wildcards_in_match() {
+    assert_eq!(
+        run("match (Some { x: 1, y: 2, z: 3 }) { Some { x, .. } => x + 10 }"),
+        int(11)
+    );
+    assert_eq!(
+        run("match (Some { a: 5, b: 6, c: 7, d: 8 }) { Some { b, d, .. } => b * d }"),
+        int(48)
+    );
+    assert_eq!(
+        run(indoc! { "
+            enum Action {
+                Move { x: float, y: float }
+            }
+            match (Action::Move { x: 5, y: 6 }) {
+                Move { x, .. } => x
+            }
+        "}),
+        float(5.0)
+    );
+    // errors
+    fail_compilation("match (Some { x: 1, y: 2, z: 3 }) { Some { .., x } => x + 10 }")
+        .into_inner()
+        .as_record_wildcard_pattern_not_at_end()
+        .unwrap();
+    fail_compilation("match (Some { x: 1, y: 2, z: 3 }) { Some { .., x, .. } => x + 10 }")
+        .into_inner()
+        .as_record_wildcard_pattern_not_at_end()
+        .unwrap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn tuple_wildcards_in_match_is_unsupported() {
+    fail_compilation("match Some(1, 2, 3) { Some(x, .., z) => x + z }")
+        .into_inner()
+        .as_unsupported()
+        .unwrap();
 }
 
 #[test]

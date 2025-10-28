@@ -398,6 +398,12 @@ fn compilation_error_to_data(
                 ErrorData::from_location(second_occurrence, text),
             ]
         }
+        RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
+            vec![ErrorData::from_location(
+                &pattern_span,
+                "Record wildcard pattern .. must be at the end of the pattern".to_string(),
+            )]
+        }
         TraitImplNotFound {
             trait_ref,
             input_tys,

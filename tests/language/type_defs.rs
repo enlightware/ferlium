@@ -352,6 +352,22 @@ fn enum_projections() {
         "# }),
         float(-5.0)
     );
+    assert_eq!(
+        run(indoc! { r#"
+            enum Action {
+                Move1 { x: float, y: float },
+                Move2 { x: float, y: float },
+            }
+
+            let f = |a| match a {
+                Move1 { x, .. } => x,
+                Move2 { y, .. } => -y,
+            };
+
+            f(Action::Move1 { x: 30.0, y: 40.0 }) + f(Action::Move2 { x: 30.0, y: 40.0 })
+        "# }),
+        float(-10.0)
+    );
 }
 
 #[test]

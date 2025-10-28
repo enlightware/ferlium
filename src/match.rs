@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    Location, error::DuplicatedVariantContext, internal_compilation_error, std::core::REPR_TRAIT,
-    r#type::TypeKind,
+    Location, ast::PatternVar, error::DuplicatedVariantContext, internal_compilation_error,
+    std::core::REPR_TRAIT, r#type::TypeKind,
 };
 use itertools::{Itertools, multiunzip};
 use ustr::ustr;
@@ -85,7 +85,9 @@ impl TypeInference {
             let (types, exprs): (Vec<_>, Vec<_>) = alternatives
                 .iter()
                 .map(|(pattern, expr)| {
-                    if let Some(((tag, tag_span), kind, vars)) = pattern.kind.as_variant() {
+                    if let Some(variant) = pattern.kind.as_variant() {
+                        let ((tag, tag_span), kind, vars) = variant;
+                        // Detect duplicate variant tags.
                         if let Some(old_tag_span) = seen_tags.insert(tag, tag_span) {
                             return Err(internal_compilation_error!(DuplicatedVariant {
                                 first_occurrence: *old_tag_span,
@@ -94,46 +96,88 @@ impl TypeInference {
                                 ctx: DuplicatedVariantContext::Match,
                             }));
                         }
+                        // Detect invalid wildcard and duplicate variable names in the pattern.
                         let mut seen_identifier = HashMap::new();
-                        for (var, span) in vars {
-                            if let Some(old_span) = seen_identifier.insert(*var, *span) {
-                                return Err(internal_compilation_error!(
-                                    IdentifierBoundMoreThanOnceInAPattern {
-                                        first_occurrence: old_span,
-                                        second_occurrence: *span,
-                                        pattern_span: pattern.span,
+                        let mut has_wildcard = false;
+                        let named_vars = vars
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, var)| {
+                                use PatternVar::*;
+                                let (var, span) = match var {
+                                    Named(named) => named,
+                                    Wildcard(span) => {
+                                        if kind.is_tuple() {
+                                            return Some(Err(
+                                                internal_compilation_error!(Unsupported {
+                                            reason: "Wildcard .. not supported in tuple patterns"
+                                                .into(),
+                                            span: *span,
+                                        }),
+                                            ));
+                                        }
+                                        if i != vars.len() - 1 {
+                                            return Some(Err(internal_compilation_error!(
+                                                RecordWildcardPatternNotAtEnd {
+                                                    pattern_span: pattern.span,
+                                                    wildcard_span: *span
+                                                }
+                                            )));
+                                        }
+                                        has_wildcard = true;
+                                        return None;
                                     }
-                                ));
-                            }
-                        }
-                        let (inner_tys, variant_inner_ty) = match vars.len() {
+                                };
+                                if let Some(old_span) = seen_identifier.insert(*var, *span) {
+                                    return Some(Err(internal_compilation_error!(
+                                        IdentifierBoundMoreThanOnceInAPattern {
+                                            first_occurrence: old_span,
+                                            second_occurrence: *span,
+                                            pattern_span: pattern.span,
+                                        }
+                                    )));
+                                }
+                                return Some(Ok((*var, *span)));
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        // Process the inner types
+                        let (inner_tys, variant_inner_ty) = match named_vars.len() {
                             0 => (vec![], Type::unit()),
                             n => {
                                 let inner_tys = self.fresh_type_var_tys(n);
                                 let variant_inner_ty = if kind.is_tuple() {
                                     Type::tuple(inner_tys.clone())
                                 } else {
-                                    let fields = vars
-                                        .iter()
-                                        .zip(inner_tys.iter())
-                                        .map(|((name, _), ty)| {
-                                            // TODO: later, for partial support (allow to omit fields)
-                                            // self.add_pub_constraint(PubTypeConstraint::new_type_has_field(
-                                            //     pattern_ty,
-                                            //     pattern.span,
-                                            //     *name,
-                                            //     *ty,
-                                            //     alternatives_span,
-                                            // ));
-                                            (*name, *ty)
-                                        })
-                                        .collect::<Vec<_>>();
-                                    Type::record(fields)
+                                    if has_wildcard {
+                                        // Note: having a type variable as inner type will mark that we have an incomplete record.
+                                        let variant_inner_ty = self.fresh_type_var_ty();
+                                        for ((name, span), ty) in
+                                            named_vars.iter().zip(inner_tys.iter())
+                                        {
+                                            self.add_pub_constraint(
+                                                PubTypeConstraint::new_record_field_is(
+                                                    variant_inner_ty,
+                                                    pattern.span,
+                                                    *name,
+                                                    *span,
+                                                    *ty,
+                                                ),
+                                            );
+                                        }
+                                        variant_inner_ty
+                                    } else {
+                                        let fields = named_vars
+                                            .iter()
+                                            .zip(inner_tys.iter())
+                                            .map(|((name, _), ty)| (*name, *ty))
+                                            .collect::<Vec<_>>();
+                                        Type::record(fields)
+                                    }
                                 };
                                 (inner_tys, variant_inner_ty)
                             }
                         };
-                        Ok(((*tag, inner_tys, variant_inner_ty), (expr, vars)))
+                        Ok(((*tag, inner_tys, variant_inner_ty), (expr, named_vars)))
                     } else {
                         Err(internal_compilation_error!(InconsistentPattern {
                             a_type: PatternType::Variant,
@@ -235,24 +279,27 @@ impl TypeInference {
                                 );
                                 let inner_ty = inner_tys[i];
                                 let project_index = if variant_inner_ty.data().is_tuple() {
-                                    i
+                                    Some(i)
                                 } else if let TypeKind::Record(record) = &*variant_inner_ty.data() {
-                                    record
+                                    let index = record
                                         .iter()
                                         .position(|(name, _)| *name == bind_var_names[i].0)
-                                        .expect("Expected record field to be present")
+                                        .expect("Expected record field to be present");
+                                    Some(index)
                                 } else {
-                                    panic!("Expected variant inner type to be tuple or record");
+                                    // If it is a variable type, we have no index and will emit FieldAccess instead
+                                    None
                                 };
-                                let project_tuple_inner = N::new(
-                                    K::Project(b((project_variant_inner, project_index))),
-                                    inner_ty,
-                                    no_effects(),
-                                    expr.span,
-                                );
+                                let project_inner_kind = if let Some(index) = project_index {
+                                    K::Project(b((project_variant_inner, index)))
+                                } else {
+                                    K::FieldAccess(b((project_variant_inner, bind_var_names[i].0)))
+                                };
+                                let project_inner =
+                                    N::new(project_inner_kind, inner_ty, no_effects(), expr.span);
                                 let store_projected_inner = N::new(
                                     K::EnvStore(b(EnvStore {
-                                        value: project_tuple_inner,
+                                        value: project_inner,
                                         index: alt_start_env_size + i,
                                         name: bind_var_names[i].0,
                                         name_span: Some(bind_var_names[i].1),

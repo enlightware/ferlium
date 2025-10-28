@@ -909,6 +909,21 @@ pub enum PatternVariantKind {
     Record,
 }
 
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum PatternVar {
+    Named(UstrSpan),
+    Wildcard(Location),
+}
+impl Display for PatternVar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+        use PatternVar::*;
+        match self {
+            Named((name, _)) => write!(f, "{name}"),
+            Wildcard(_) => write!(f, ".."),
+        }
+    }
+}
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum PatternKind {
@@ -916,12 +931,12 @@ pub enum PatternKind {
     Variant {
         tag: UstrSpan,
         kind: PatternVariantKind,
-        vars: Vec<UstrSpan>,
+        vars: Vec<PatternVar>,
     },
     Error(String),
 }
 impl PatternKind {
-    pub fn tuple_variant(tag: UstrSpan, vars: Vec<UstrSpan>) -> Self {
+    pub fn tuple_variant(tag: UstrSpan, vars: Vec<PatternVar>) -> Self {
         PatternKind::Variant {
             tag,
             kind: PatternVariantKind::Tuple,
@@ -929,7 +944,7 @@ impl PatternKind {
         }
     }
 
-    pub fn struct_variant(tag: UstrSpan, vars: Vec<UstrSpan>) -> Self {
+    pub fn struct_variant(tag: UstrSpan, vars: Vec<PatternVar>) -> Self {
         PatternKind::Variant {
             tag,
             kind: PatternVariantKind::Record,
@@ -989,7 +1004,7 @@ impl Pattern {
                 write!(f, "{indent_str}{} ", tag.0)?;
                 if !vars.is_empty() {
                     write!(f, "(")?;
-                    write_with_separator(vars.iter().map(|(var, _)| var), ", ", f)?;
+                    write_with_separator(vars.iter(), ", ", f)?;
                     writeln!(f, ")")
                 } else {
                     writeln!(f)
