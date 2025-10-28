@@ -400,7 +400,7 @@ fn compilation_error_to_data(
         }
         RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
             vec![ErrorData::from_location(
-                &pattern_span,
+                pattern_span,
                 "Record wildcard pattern .. must be at the end of the pattern".to_string(),
             )]
         }

@@ -137,7 +137,7 @@ impl TypeInference {
                                         }
                                     )));
                                 }
-                                return Some(Ok((*var, *span)));
+                                Some(Ok((*var, *span)))
                             })
                             .collect::<Result<Vec<_>, _>>()?;
                         // Process the inner types
@@ -147,32 +147,30 @@ impl TypeInference {
                                 let inner_tys = self.fresh_type_var_tys(n);
                                 let variant_inner_ty = if kind.is_tuple() {
                                     Type::tuple(inner_tys.clone())
-                                } else {
-                                    if has_wildcard {
-                                        // Note: having a type variable as inner type will mark that we have an incomplete record.
-                                        let variant_inner_ty = self.fresh_type_var_ty();
-                                        for ((name, span), ty) in
-                                            named_vars.iter().zip(inner_tys.iter())
-                                        {
-                                            self.add_pub_constraint(
-                                                PubTypeConstraint::new_record_field_is(
-                                                    variant_inner_ty,
-                                                    pattern.span,
-                                                    *name,
-                                                    *span,
-                                                    *ty,
-                                                ),
-                                            );
-                                        }
-                                        variant_inner_ty
-                                    } else {
-                                        let fields = named_vars
-                                            .iter()
-                                            .zip(inner_tys.iter())
-                                            .map(|((name, _), ty)| (*name, *ty))
-                                            .collect::<Vec<_>>();
-                                        Type::record(fields)
+                                } else if has_wildcard {
+                                    // Note: having a type variable as inner type will mark that we have an incomplete record.
+                                    let variant_inner_ty = self.fresh_type_var_ty();
+                                    for ((name, span), ty) in
+                                        named_vars.iter().zip(inner_tys.iter())
+                                    {
+                                        self.add_pub_constraint(
+                                            PubTypeConstraint::new_record_field_is(
+                                                variant_inner_ty,
+                                                pattern.span,
+                                                *name,
+                                                *span,
+                                                *ty,
+                                            ),
+                                        );
                                     }
+                                    variant_inner_ty
+                                } else {
+                                    let fields = named_vars
+                                        .iter()
+                                        .zip(inner_tys.iter())
+                                        .map(|((name, _), ty)| (*name, *ty))
+                                        .collect::<Vec<_>>();
+                                    Type::record(fields)
                                 };
                                 (inner_tys, variant_inner_ty)
                             }
