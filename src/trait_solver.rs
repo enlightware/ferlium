@@ -7,9 +7,14 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    hash::{DefaultHasher, Hash, Hasher},
+    rc::Rc,
+};
 
 use derive_new::new;
+use itertools::MultiUnzip;
 use ustr::Ustr;
 
 use crate::{
@@ -17,7 +22,7 @@ use crate::{
     containers::b,
     effects::EffType,
     error::InternalCompilationError,
-    function::ScriptFunction,
+    function::{FunctionRc, ScriptFunction},
     internal_compilation_error,
     ir::Node,
     ir_syn::{get_dictionary, load, static_apply},
@@ -322,37 +327,14 @@ impl<'a> TraitSolver<'a> {
                 let trait_key =
                     TraitKey::Blanket(BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone()));
                 let definitions = trait_ref.instantiate_for_tys(input_tys, &output_tys);
-                let functions = imp.methods.clone(); // clone to avoid borrowing issues
-                let functions = functions
+                let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
+                let mut interface_hasher = DefaultHasher::new();
+                let (methods, tys): (Vec<_>, Vec<_>) = gen_functions
                     .iter()
                     .zip(definitions.into_iter())
                     .enumerate()
                     .map(|(method_index, (fn_id, def))| {
-                        // Get the function id for doing the call to the generic function.
-                        let function_id = match imp_mod_name {
-                            Some(module_name) => {
-                                let slot_id = self.import_impl_method(
-                                    module_name,
-                                    trait_key.clone(),
-                                    method_index as u32,
-                                );
-                                FunctionId::Import(slot_id)
-                            }
-                            None => FunctionId::Local(*fn_id),
-                        };
-
-                        // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
-                        let arguments: Vec<_> = constraint_dict_nodes
-                            .iter()
-                            .cloned()
-                            .chain(def.ty_scheme.ty.args.iter().enumerate().map(
-                                |(arg_i, arg_ty)| {
-                                    Node::new(load(arg_i), arg_ty.ty, EffType::empty(), fn_span)
-                                },
-                            ))
-                            .collect();
-
-                        // Build the application node.
+                        // Build the function type
                         let mut fn_ty = def.ty_scheme.ty.clone();
                         fn_ty.args.splice(
                             0..0,
@@ -360,23 +342,70 @@ impl<'a> TraitSolver<'a> {
                                 .iter()
                                 .map(|n| FnArgType::new(n.ty, MutType::constant())),
                         );
-                        let apply = static_apply(function_id, fn_ty, arguments, fn_span);
-                        let code = b(ScriptFunction::new(
-                            Node::new(apply, def.ty_scheme.ty.ret, EffType::empty(), fn_span),
-                            def.arg_names.clone(),
-                        ));
-                        ModuleFunction::new_without_spans(def, Rc::new(RefCell::new(code)))
-                    })
-                    .collect::<Vec<_>>();
+                        let fn_ty_ty = Type::function_type(fn_ty.clone());
 
-                // Store the functions as a new concrete implementation, and return its id.
-                let local_impl_id = self.impls.add_concrete(
-                    trait_ref.clone(),
-                    input_tys.to_vec(),
+                        // Do we need to pass any constraint dictionaries?
+                        let id = if constraint_dict_nodes.is_empty() && imp_mod_name.is_none() {
+                            // No, we can just use the original function as is.
+                            *fn_id
+                        } else {
+                            // Get the function id for doing the call to the generic function.
+                            let function_id = match imp_mod_name {
+                                Some(module_name) => {
+                                    let slot_id = self.import_impl_method(
+                                        module_name,
+                                        trait_key.clone(),
+                                        method_index as u32,
+                                    );
+                                    FunctionId::Import(slot_id)
+                                }
+                                None => FunctionId::Local(*fn_id),
+                            };
+
+                            // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
+                            let arguments: Vec<_> = constraint_dict_nodes
+                                .iter()
+                                .cloned()
+                                .chain(def.ty_scheme.ty.args.iter().enumerate().map(
+                                    |(arg_i, arg_ty)| {
+                                        Node::new(load(arg_i), arg_ty.ty, EffType::empty(), fn_span)
+                                    },
+                                ))
+                                .collect();
+
+                            // Build the application node.
+                            let apply = static_apply(function_id, fn_ty, arguments, fn_span);
+                            let code = b(ScriptFunction::new(
+                                Node::new(apply, def.ty_scheme.ty.ret, EffType::empty(), fn_span),
+                                def.arg_names.clone(),
+                            ));
+                            let code: FunctionRc = Rc::new(RefCell::new(code));
+                            let function = ModuleFunction::new_without_spans(def, code);
+                            let local_fn = LocalFunction::new_anonymous(function);
+                            local_fn.interface_hash.hash(&mut interface_hasher);
+                            let id = self.fn_collector.next_id();
+                            self.fn_collector.push(local_fn);
+                            id
+                        };
+                        (id, fn_ty_ty)
+                    })
+                    .multiunzip();
+
+                // Build and insert the implementation.
+                let interface_hash = interface_hasher.finish();
+                let dictionary_ty = Type::tuple(tys);
+                let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
+                let imp = TraitImpl::new(
                     output_tys,
-                    functions,
-                    &mut self.fn_collector,
+                    methods,
+                    interface_hash,
+                    dictionary_value,
+                    dictionary_ty,
+                    true,
                 );
+                let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+                let local_impl_id = self.impls.add_concrete_struct(key, imp);
+
                 return Ok(TraitImplId::Local(local_impl_id));
             }
         }

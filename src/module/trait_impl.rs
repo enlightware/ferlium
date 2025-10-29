@@ -170,10 +170,10 @@ pub struct FunctionCollector {
     pub new_elements: Vec<LocalFunction>,
 }
 impl FunctionCollector {
-    fn next_id(&self) -> LocalFunctionId {
+    pub fn next_id(&self) -> LocalFunctionId {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
-    fn push(&mut self, function: LocalFunction) {
+    pub fn push(&mut self, function: LocalFunction) {
         self.new_elements.push(function);
     }
 
@@ -252,15 +252,16 @@ impl TraitImpls {
         trait_ref.validate_impl_size(&input_tys, &output_tys, functions.len());
 
         // Add to local functions, collect their IDs and build the overall interface hash.
-        let (methods, dictionary_value, dictionary_type, interface_hash) =
+        let (methods, dictionary_type, interface_hash) =
             Self::bundle_module_functions(functions, fn_collector);
 
         // Build and insert the implementation.
+        let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
         let imp = TraitImpl::new(
             output_tys,
             methods,
             interface_hash,
-            RefCell::new(dictionary_value),
+            dictionary_value,
             dictionary_type,
             true,
         );
@@ -296,24 +297,22 @@ impl TraitImpls {
     fn bundle_module_functions(
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
-    ) -> (Vec<LocalFunctionId>, Value, Type, u64) {
+    ) -> (Vec<LocalFunctionId>, Type, u64) {
         let mut interface_hasher = DefaultHasher::new();
-        let (methods, values, tys): (Vec<_>, Vec<_>, Vec<_>) = functions
+        let (methods, tys): (Vec<_>, Vec<_>) = functions
             .into_iter()
             .map(|function| {
                 let id = fn_collector.next_id();
-                let value = Value::PendingFunction(function.code.clone());
                 let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
                 let local_fn = LocalFunction::new_anonymous(function);
                 local_fn.interface_hash.hash(&mut interface_hasher);
                 fn_collector.push(local_fn);
-                (id, value, fn_ty)
+                (id, fn_ty)
             })
             .multiunzip();
         let hash = interface_hasher.finish();
-        let dictionary_value = Value::tuple(values);
         let dictionary_ty = Type::tuple(tys);
-        (methods, dictionary_value, dictionary_ty, hash)
+        (methods, dictionary_ty, hash)
     }
 
     pub fn concrete(&self) -> &ConcreteImpls {

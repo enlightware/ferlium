@@ -293,9 +293,9 @@ pub fn compile_to(
         None
     };
 
-    // Finalize pending function values inside the module by attaching the module weak reference.
+    // Finalize the module and the expression.
     let module = Rc::new(module);
-    module::finalize_module_pending_functions(&module);
+    module::finalize_module(&module);
     if let Some(expr) = expr.as_mut() {
         expr.expr.finalize_pending_values(&module);
     }

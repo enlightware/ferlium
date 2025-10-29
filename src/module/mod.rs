@@ -29,7 +29,6 @@ pub mod trait_impl;
 pub mod uses;
 
 pub use function::*;
-use itertools::MultiUnzip;
 pub use module_env::*;
 pub use modules::*;
 pub use trait_impl::*;
@@ -45,6 +44,7 @@ use std::{
 use ustr::{Ustr, ustr};
 
 use crate::{
+    containers::SVec2,
     emit_ir::EmitTraitOutput,
     format::FormatWith,
     function::Function,
@@ -138,15 +138,14 @@ impl Module {
     ) -> LocalImplId {
         // TODO: ensure coherence
 
-        // let dictionary_ty = trait_ref.get_dictionary_type_for_tys(&input_tys, &output_tys);
-        let (dictionary_value, dictionary_ty, interface_hash) =
-            self.computer_dictionary_and_interface_hash(&emit_output.functions);
+        let (dictionary_ty, interface_hash) = self.computer_interface_hash(&emit_output.functions);
         // Build and insert the implementation.
+        let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
         let imp = TraitImpl::new(
             emit_output.output_tys,
             emit_output.functions,
             interface_hash,
-            RefCell::new(dictionary_value),
+            dictionary_value,
             dictionary_ty,
             true,
         );
@@ -164,12 +163,9 @@ impl Module {
         }
     }
 
-    fn computer_dictionary_and_interface_hash(
-        &self,
-        function_ids: &[LocalFunctionId],
-    ) -> (Value, Type, u64) {
+    fn computer_interface_hash(&self, function_ids: &[LocalFunctionId]) -> (Type, u64) {
         let mut interface_hasher = DefaultHasher::new();
-        let (values, tys): (Vec<_>, Vec<_>) = function_ids
+        let tys: Vec<_> = function_ids
             .iter()
             .map(|id| {
                 let local_fn = &self
@@ -178,15 +174,12 @@ impl Module {
                     .expect("Invalid function ID");
                 local_fn.interface_hash.hash(&mut interface_hasher);
                 let function = &local_fn.function;
-                let value = Value::PendingFunction(function.code.clone());
-                let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
-                (value, fn_ty)
+                Type::function_type(function.definition.ty_scheme.ty.clone())
             })
-            .multiunzip();
+            .collect();
         let hash = interface_hasher.finish();
-        let dictionary_value = Value::tuple(values);
         let dictionary_ty = Type::tuple(tys);
-        (dictionary_value, dictionary_ty, hash)
+        (dictionary_ty, hash)
     }
 
     /// Check if this module is "empty" (has no meaningful content)
@@ -470,8 +463,10 @@ impl Module {
     }
 }
 
-/// Finalize pending function values inside the module by attaching the module weak reference.
-pub fn finalize_module_pending_functions(module_rc: &ModuleRc) {
+/// Finalize the module:
+/// - Build dictionary values for trait implementations.
+/// - Resolve pending function values inside the module by attaching the module's weak reference.
+pub fn finalize_module(module_rc: &ModuleRc) {
     for local_fn in &module_rc.functions {
         let mut fn_mut = local_fn.function.code.borrow_mut();
         if let Some(script_fn) = fn_mut.as_script_mut() {
@@ -479,9 +474,18 @@ pub fn finalize_module_pending_functions(module_rc: &ModuleRc) {
         }
     }
     for imp in &module_rc.impls.data {
-        imp.dictionary_value
-            .borrow_mut()
-            .finalize_pending(module_rc);
+        let mut value = imp.dictionary_value.borrow_mut();
+        let values = imp
+            .methods
+            .iter()
+            .map(|fn_id| {
+                let local_fn = &module_rc.functions[fn_id.as_index()];
+                let code = local_fn.function.code.clone();
+                Value::PendingFunction(code.clone())
+            })
+            .collect::<SVec2<_>>();
+        *value = Value::tuple(values);
+        value.finalize_pending(module_rc);
     }
 }
 

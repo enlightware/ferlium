@@ -9,7 +9,7 @@
 use std::{cell::OnceCell, rc::Rc, str::FromStr};
 
 use crate::{
-    module::{Module, ModuleEnv, Modules, Use, finalize_module_pending_functions},
+    module::{Module, ModuleEnv, Modules, Use, finalize_module},
     r#type::{Type, TypeKind, bare_native_type},
     value::Value,
 };
@@ -64,7 +64,7 @@ pub fn std_module() -> Rc<Module> {
                 module
             });
             // No need to link because std has no imports.
-            finalize_module_pending_functions(&module);
+            finalize_module(&module);
             module
         })
         .clone()
