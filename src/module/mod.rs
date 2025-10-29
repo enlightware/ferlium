@@ -389,7 +389,7 @@ impl Module {
     ) -> fmt::Result {
         let env = ModuleEnv::new(self, modules, false);
         if !self.uses.is_empty() {
-            writeln!(f, "Uses ({}):", self.uses.len())?;
+            writeln!(f, "Use directives ({}):", self.uses.len())?;
             for use_module in self.uses.iter() {
                 match use_module {
                     Use::All(module) => writeln!(f, "  {module}: *")?,
@@ -438,8 +438,8 @@ impl Module {
             self.impls.fmt_with_filter(f, &env, filter)?;
         }
         if !self.functions.is_empty() {
-            let named_function_count = self.functions.iter().filter(|f| f.name.is_some()).count();
-            writeln!(f, "Named functions ({}):\n", named_function_count)?;
+            let named_count = self.functions.iter().filter(|f| f.name.is_some()).count();
+            writeln!(f, "Named functions ({}):\n", named_count)?;
             for (i, LocalFunction { name, function, .. }) in self.functions.iter().enumerate() {
                 if name.is_none() {
                     continue;
@@ -453,13 +453,57 @@ impl Module {
                     writeln!(f)?;
                 }
             }
-            writeln!(
-                f,
-                "\nNot showing {} unnamed functions.",
-                self.functions.len() - named_function_count
-            )?;
+            let unnamed_count = self.functions.len() - named_count;
+            if unnamed_count > 0 {
+                writeln!(f, "\nNot showing {} unnamed functions.", unnamed_count)?;
+            }
         }
         Ok(())
+    }
+
+    pub fn list_stats(&self) -> String {
+        let mut stats = String::new();
+        if !self.uses.is_empty() {
+            stats.push_str(&format!("use directives: {}", self.uses.len()));
+        }
+        if !self.type_aliases.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            stats.push_str(&format!("type aliases: {}", self.type_aliases.len()));
+        }
+        if !self.type_defs.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            stats.push_str(&format!("new types: {}", self.type_defs.len()));
+        }
+        if !self.traits.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            stats.push_str(&format!("traits: {}", self.traits.len()));
+        }
+        if !self.impls.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            stats.push_str(&format!("trait implementations: {}", self.impls.len()));
+        }
+        if !self.functions.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            let named_function_count = self.functions.iter().filter(|f| f.name.is_some()).count();
+            stats.push_str(&format!("named functions: {}", named_function_count));
+            if self.functions.len() > named_function_count {
+                stats.push_str(&format!(
+                    ", unnamed functions: {}",
+                    self.functions.len() - named_function_count
+                ));
+            }
+        }
+        stats
     }
 }
 

@@ -381,6 +381,7 @@ fn print_help() {
     println!(
         "\\function FN_ID MOD_NAME?: Shows the code of a function given by its identifier, in a given module."
     );
+    println!("\\history: Show the modules in this session's history.");
     println!("CTRL-D: Exit the REPL.");
 }
 
@@ -644,6 +645,15 @@ fn run_interactive_repl() {
                             };
                             let env = ModuleEnv::new(&module, &other_modules, false);
                             println!("{}", (&local_fn.function, local_fn.name).format_with(&env));
+                            true
+                        }
+                        "history" => {
+                            for i in 0..counter {
+                                let name = ustr(&format!("repl{i}"));
+                                if let Some(module) = other_modules.get(&name) {
+                                    println!("{}: {}", name, module.list_stats());
+                                }
+                            }
                             true
                         }
                         _ => {
