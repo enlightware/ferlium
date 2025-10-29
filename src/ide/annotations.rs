@@ -31,7 +31,7 @@ impl ModuleAndExpr {
         let env = ModuleEnv::new(&self.module, other_modules, false);
         let mut annotations = vec![];
 
-        // Let/var bindings just after the name.
+        // Function and expression bodies.
         for local_fn in &self.module.functions {
             if local_fn.name.is_none() {
                 // Do not annotate unnamed, generated functions.
@@ -251,8 +251,11 @@ impl Node {
             GetFunction(_) => {}
             GetDictionary(_) => {}
             EnvStore(node) => {
+                // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.
                 // Note: synthesized let nodes have empty name span, so we ignore these.
-                if let Some(name_span) = node.name_span {
+                if !node.name.starts_with("@")
+                    && let Some(name_span) = node.name_span
+                {
                     if let Some((ty_span, ty_constant)) = node.ty_span {
                         if !ty_constant {
                             result.push((

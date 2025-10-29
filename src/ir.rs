@@ -387,9 +387,10 @@ impl Node {
             EnvStore(node) => {
                 writeln!(
                     f,
-                    "{indent_str}store {} at {}",
+                    "{indent_str}store {} at {} as \"{}\"",
                     node.value.ty.format_with(env),
-                    node.index
+                    node.index,
+                    node.name
                 )?;
                 node.value.format_ind(f, env, spacing, indent + 1)?;
             }
