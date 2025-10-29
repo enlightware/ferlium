@@ -322,8 +322,8 @@ impl<'a> TraitSolver<'a> {
                     })
                     .collect::<Vec<_>>();
 
-                // Then, for every function in the implementation, create a thunk function closing over
-                // the constraint dictionaries.
+                // Then, for every function in the blanket implementation, if needed create a thunk function
+                // importing it and closing over the constraint dictionaries.
                 let trait_key =
                     TraitKey::Blanket(BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone()));
                 let definitions = trait_ref.instantiate_for_tys(input_tys, &output_tys);
@@ -334,22 +334,16 @@ impl<'a> TraitSolver<'a> {
                     .zip(definitions.into_iter())
                     .enumerate()
                     .map(|(method_index, (fn_id, def))| {
-                        // Build the function type
-                        let mut fn_ty = def.ty_scheme.ty.clone();
-                        fn_ty.args.splice(
-                            0..0,
-                            constraint_dict_nodes
-                                .iter()
-                                .map(|n| FnArgType::new(n.ty, MutType::constant())),
-                        );
-                        let fn_ty_ty = Type::function_type(fn_ty.clone());
+                        // Build the concrete function type and hash its signature.
+                        let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
+                        def.signature_hash().hash(&mut interface_hasher);
 
-                        // Do we need to pass any constraint dictionaries?
+                        // Is the generic function from another module, or do we need to pass constraint dictionaries?
                         let id = if constraint_dict_nodes.is_empty() && imp_mod_name.is_none() {
-                            // No, we can just use the original function as is.
+                            // No, so we can just use the generic function as is.
                             *fn_id
                         } else {
-                            // Get the function id for doing the call to the generic function.
+                            // Yes, get the function id for doing the call to the generic function.
                             let function_id = match imp_mod_name {
                                 Some(module_name) => {
                                     let slot_id = self.import_impl_method(
@@ -373,8 +367,17 @@ impl<'a> TraitSolver<'a> {
                                 ))
                                 .collect();
 
+                            // Build the function type with added constraint dictionary arguments.
+                            let mut ext_fn_ty = def.ty_scheme.ty.clone();
+                            ext_fn_ty.args.splice(
+                                0..0,
+                                constraint_dict_nodes
+                                    .iter()
+                                    .map(|n| FnArgType::new(n.ty, MutType::constant())),
+                            );
+
                             // Build the application node.
-                            let apply = static_apply(function_id, fn_ty, arguments, fn_span);
+                            let apply = static_apply(function_id, ext_fn_ty, arguments, fn_span);
                             let code = b(ScriptFunction::new(
                                 Node::new(apply, def.ty_scheme.ty.ret, EffType::empty(), fn_span),
                                 def.arg_names.clone(),
@@ -382,12 +385,12 @@ impl<'a> TraitSolver<'a> {
                             let code: FunctionRc = Rc::new(RefCell::new(code));
                             let function = ModuleFunction::new_without_spans(def, code);
                             let local_fn = LocalFunction::new_anonymous(function);
-                            local_fn.interface_hash.hash(&mut interface_hasher);
                             let id = self.fn_collector.next_id();
                             self.fn_collector.push(local_fn);
                             id
                         };
-                        (id, fn_ty_ty)
+
+                        (id, fn_ty)
                     })
                     .multiunzip();
 
