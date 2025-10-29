@@ -370,6 +370,10 @@ impl TraitImpls {
         self.concrete_key_to_id.is_empty() && self.blanket_key_to_id.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
     pub(crate) fn fmt_with_filter(
         &self,
         f: &mut std::fmt::Formatter,

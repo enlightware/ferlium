@@ -396,7 +396,7 @@ impl Module {
     ) -> fmt::Result {
         let env = ModuleEnv::new(self, modules, false);
         if !self.uses.is_empty() {
-            writeln!(f, "Uses:")?;
+            writeln!(f, "Uses ({}):", self.uses.len())?;
             for use_module in self.uses.iter() {
                 match use_module {
                     Use::All(module) => writeln!(f, "  {module}: *")?,
@@ -412,14 +412,14 @@ impl Module {
             writeln!(f, "\n")?;
         }
         if !self.type_aliases.is_empty() {
-            writeln!(f, "Types:\n")?;
+            writeln!(f, "Type aliases ({}):\n", self.type_aliases.len())?;
             for (name, ty) in self.type_aliases.iter() {
                 writeln!(f, "{}: {}", name, ty.format_with(&env))?;
             }
             writeln!(f, "\n")?;
         }
         if !self.type_defs.is_empty() {
-            writeln!(f, "New types:")?;
+            writeln!(f, "New types ({}):\n", self.type_defs.len())?;
             for (_, decl) in self.type_defs.iter() {
                 write!(f, "  ")?;
                 decl.format_details(&env, f)?;
@@ -428,14 +428,14 @@ impl Module {
             writeln!(f, "\n")?;
         }
         if !self.traits.is_empty() {
-            writeln!(f, "Traits:\n")?;
+            writeln!(f, "Traits ({}):\n", self.traits.len())?;
             for trait_ref in self.traits.iter() {
                 writeln!(f, "{}", trait_ref.format_with(&env))?;
             }
             writeln!(f)?;
         }
         if !self.impls.is_empty() {
-            writeln!(f, "Trait implementations:\n")?;
+            writeln!(f, "Trait implementations ({}):\n", self.impls.len())?;
             let level = if show_details {
                 DisplayFilter::MethodCode
             } else {
@@ -445,7 +445,8 @@ impl Module {
             self.impls.fmt_with_filter(f, &env, filter)?;
         }
         if !self.functions.is_empty() {
-            writeln!(f, "Named functions:\n")?;
+            let named_function_count = self.functions.iter().filter(|f| f.name.is_some()).count();
+            writeln!(f, "Named functions ({}):\n", named_function_count)?;
             for (i, LocalFunction { name, function, .. }) in self.functions.iter().enumerate() {
                 if name.is_none() {
                     continue;
@@ -459,6 +460,11 @@ impl Module {
                     writeln!(f)?;
                 }
             }
+            writeln!(
+                f,
+                "\nNot showing {} unnamed functions.",
+                self.functions.len() - named_function_count
+            )?;
         }
         Ok(())
     }

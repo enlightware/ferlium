@@ -665,6 +665,10 @@ impl TypeAliases {
         self.bare_native_to_name.get(bare).copied()
     }
 
+    pub fn len(&self) -> usize {
+        self.name_to_type.len()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&Ustr, &Type)> {
         self.name_to_type.iter()
     }
