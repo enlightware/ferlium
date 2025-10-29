@@ -494,13 +494,11 @@ impl Module {
             if !stats.is_empty() {
                 stats.push_str(", ");
             }
-            let named_function_count = self.functions.iter().filter(|f| f.name.is_some()).count();
-            stats.push_str(&format!("named functions: {}", named_function_count));
-            if self.functions.len() > named_function_count {
-                stats.push_str(&format!(
-                    ", unnamed functions: {}",
-                    self.functions.len() - named_function_count
-                ));
+            let named_count = self.functions.iter().filter(|f| f.name.is_some()).count();
+            stats.push_str(&format!("named functions: {}", named_count));
+            if self.functions.len() > named_count {
+                let unnamed_count = self.functions.len() - named_count;
+                stats.push_str(&format!(", unnamed functions: {}", unnamed_count));
             }
         }
         stats
