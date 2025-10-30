@@ -313,7 +313,9 @@ impl Node {
         match &self.kind {
             Immediate(immediate) => {
                 writeln!(f, "{indent_str}immediate")?;
-                immediate.value.format_ind(f, env, spacing, indent + 1)?
+                immediate
+                    .value
+                    .format_ind_repr(f, env, spacing, indent + 1)?
             }
             BuildClosure(build_closure) => {
                 writeln!(f, "{indent_str}build closure of")?;
@@ -477,7 +479,8 @@ impl Node {
                 writeln!(f, "{indent_str}match")?;
                 case.value.format_ind(f, env, spacing, indent + 1)?;
                 for (alternative, node) in &case.alternatives {
-                    writeln!(f, "{indent_str}case {alternative}",)?;
+                    writeln!(f, "{indent_str}case ",)?;
+                    alternative.format_as_string_repr(f)?;
                     node.format_ind(f, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}default")?;

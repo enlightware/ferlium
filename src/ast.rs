@@ -678,7 +678,7 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
         let indent_str = "  ".repeat(indent);
         use ExprKind::*;
         match &self.kind {
-            Literal(value, _) => writeln!(f, "{indent_str}{value}"),
+            Literal(value, ty) => writeln!(f, "{indent_str}{}", value.display_pretty(ty)),
             FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
             Identifier(name) => writeln!(f, "{indent_str}{name} (local)"),
             Let((name, _), mutable, expr, _) => {

@@ -35,14 +35,7 @@ impl String {
     }
 
     pub fn any_to_string(value: Value) -> Self {
-        struct FormatInToString<'a>(pub &'a Value);
-        impl fmt::Display for FormatInToString<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                self.0.format_as_string(f)
-            }
-        }
-        let string = format!("{}", FormatInToString(&value));
-        Self(Rc::new(string))
+        Self(Rc::new(value.to_string_repr()))
     }
 
     pub fn push_str(&mut self, value: Self) {

@@ -592,10 +592,10 @@ enum AggregatedConstraint {
 pub struct TypeScheme<Ty: TypeLike> {
     // for a compiled module, quantifiers should be equal to the type variables in the type
     // and the constraints.
-    pub(crate) ty_quantifiers: Vec<TypeVar>,
-    pub(crate) eff_quantifiers: HashSet<EffectVar>,
-    pub(crate) ty: Ty,
-    pub(crate) constraints: Vec<PubTypeConstraint>,
+    pub ty_quantifiers: Vec<TypeVar>,
+    pub eff_quantifiers: HashSet<EffectVar>,
+    pub ty: Ty,
+    pub constraints: Vec<PubTypeConstraint>,
 }
 
 impl<Ty: TypeLike> TypeScheme<Ty> {

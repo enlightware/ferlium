@@ -20,7 +20,7 @@ use crate::{
     format::{FormatWith, write_with_separator},
     function::{Closure, FunctionRc},
     ir::{Node, NodeKind},
-    module::{FunctionId, ModuleEnv, ModuleRc, TraitImplId},
+    module::{FunctionId, ModuleRc, TraitImplId},
     std::array,
     r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},
@@ -79,7 +79,10 @@ impl ValOrMut {
 impl FormatWith<EvalCtx> for ValOrMut {
     fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx) -> std::fmt::Result {
         match self {
-            ValOrMut::Val(value) => write!(f, "value {value}"),
+            ValOrMut::Val(value) => {
+                write!(f, "value ")?;
+                value.format_as_string_repr(f)
+            }
             ValOrMut::Mut(place) => {
                 write!(f, "mut. ref. {}", place.format_with(data))
             }
@@ -637,14 +640,6 @@ impl Node {
                 ctx.break_loop = true;
                 cont(Value::unit())
             }
-        }
-    }
-
-    /// Evaluate this node given the environment and print the result.
-    pub fn eval_and_print(&self, ctx: &mut EvalCtx, env: &ModuleEnv) {
-        match self.eval_with_ctx(ctx) {
-            Ok(value) => println!("{}: {}", value.into_value(), self.ty.format_with(env)),
-            Err(error) => println!("Runtime error: {error:?}"),
         }
     }
 

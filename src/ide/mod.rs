@@ -656,7 +656,11 @@ impl Compiler {
                 Ok(value) => {
                     let value = value.into_value();
                     let module_env = ModuleEnv::new(&self.user_module.module, &self.modules, false);
-                    let output = format!("{}: {}", value, expr.ty.display_rust_style(&module_env));
+                    let output = format!(
+                        "{}: {}",
+                        value.display_pretty(&expr.ty.ty),
+                        expr.ty.display_rust_style(&module_env)
+                    );
                     html_escape::encode_text(&output).to_string()
                 }
                 Err(err) => {

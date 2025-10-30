@@ -332,7 +332,7 @@ impl Callable for Closure {
             .format_ind(f, env, spacing, indent + 1)?;
         writeln!(f, "{indent_str}with captured [")?;
         for captured in &self.captured {
-            captured.format_ind(f, env, spacing, indent + 1)?;
+            captured.format_ind_repr(f, env, spacing, indent + 1)?;
         }
         writeln!(f, "{indent_str}]")
     }

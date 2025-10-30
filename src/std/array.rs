@@ -13,7 +13,7 @@ use ustr::ustr;
 use crate::{
     cached_ty,
     effects::no_effects,
-    format::write_with_separator,
+    format::{write_with_separator, write_with_separator_and_format_fn},
     function::{BinaryNativeFnMVN, BinaryNativeFnNNN, UnaryNativeFnMV, UnaryNativeFnNN},
     module::{Module, ModuleFunction},
     r#type::{FnType, Type, bare_native_type},
@@ -249,7 +249,17 @@ impl Default for Array {
 impl NativeDisplay for Array {
     fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[")?;
-        write_with_separator(self.0.iter(), ", ", f)?;
+        write_with_separator_and_format_fn(self.0.iter(), ", ", Value::format_as_string_repr, f)?;
+        write!(f, "]")
+    }
+    fn fmt_as_literal_with_ty(&self, f: &mut fmt::Formatter, ty: Type) -> fmt::Result {
+        write!(f, "[")?;
+        let inner_ty = ty.data().as_native().unwrap().arguments[0];
+        write_with_separator(
+            self.0.iter().map(|item| item.display_pretty(&inner_ty)),
+            ", ",
+            f,
+        )?;
         write!(f, "]")
     }
 }
@@ -301,7 +311,22 @@ impl Iterator for ArrayIterator {
 impl NativeDisplay for ArrayIterator {
     fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ArrayIterator on [")?;
-        write_with_separator(self.array.iter(), ", ", f)?;
+        write_with_separator_and_format_fn(
+            self.array.iter(),
+            ", ",
+            Value::format_as_string_repr,
+            f,
+        )?;
+        write!(f, "] @ {}", self.index)
+    }
+    fn fmt_as_literal_with_ty(&self, f: &mut fmt::Formatter, ty: Type) -> fmt::Result {
+        write!(f, "ArrayIterator on [")?;
+        let inner_ty = ty.data().as_native().unwrap().arguments[0];
+        write_with_separator(
+            self.array.iter().map(|item| item.display_pretty(&inner_ty)),
+            ", ",
+            f,
+        )?;
         write!(f, "] @ {}", self.index)
     }
 }

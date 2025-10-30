@@ -27,7 +27,7 @@ pub fn set_log_ctx(new_ctx: &str) {
 
 fn log(value: Value) {
     let ctx = (*LOG_CTX).read().unwrap();
-    log::info!("{}{}", *ctx, value);
+    log::info!("{}{}", *ctx, value.to_string_repr());
 }
 
 pub fn add_to_module(to: &mut Module) {

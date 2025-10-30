@@ -450,7 +450,8 @@ fn process_input(
                 let value = value.into_value();
                 let module_env = ModuleEnv::new(&module, other_modules, false);
                 println!(
-                    "{value}: {}",
+                    "{}: {}",
+                    value.display_pretty(&compiled_expr.ty.ty),
                     compiled_expr.ty.display_rust_style(&module_env)
                 );
             }
@@ -578,7 +579,8 @@ fn run_interactive_repl() {
                     local.ty.format_with(&env),
                     environment[i]
                         .as_val()
-                        .expect("reference found in REPL locals"),
+                        .expect("reference found in REPL locals")
+                        .to_string_repr(),
                 );
             }
         }

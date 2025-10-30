@@ -236,7 +236,10 @@ pub fn run(src: &str) -> Value {
 /// Compile and run the src and expect a runtime error
 pub fn fail_run(src: &str) -> RuntimeError {
     match try_run(src) {
-        Ok(value) => panic!("Expected runtime error, got value: {value}"),
+        Ok(value) => panic!(
+            "Expected runtime error, got value: {}",
+            value.to_string_repr()
+        ),
         Err(error) => error,
     }
 }
@@ -244,7 +247,10 @@ pub fn fail_run(src: &str) -> RuntimeError {
 /// Compile and expect a check error
 pub fn fail_compilation(src: &str) -> CompilationError {
     match try_compile_and_run(src) {
-        Ok(value) => panic!("Expected compilation error, got value: {value}"),
+        Ok(value) => panic!(
+            "Expected compilation error, got value: {}",
+            value.to_string_repr()
+        ),
         Err(error) => match error {
             Error::Compilation(error) => error,
             _ => panic!("Expected compilation error, got {error:?}"),
