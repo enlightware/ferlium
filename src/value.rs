@@ -27,7 +27,7 @@ use crate::{
     format::{FormatWithData, write_with_separator, write_with_separator_and_format_fn},
     function::{Function, FunctionPtr, FunctionRc},
     module::{ModuleEnv, ModuleRc, ModuleWeak},
-    r#type::{Type, TypeKind},
+    r#type::{NativeType, Type, TypeKind},
     type_inference::InstSubstitution,
 };
 
@@ -35,21 +35,21 @@ use crate::{
 
 /// Native types must implement this so that they can be displayed.
 pub trait NativeDisplay {
-    /// Format the native value as it would be written in the language.
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter) -> fmt::Result;
+    /// Format the native value, without type information.
+    fn fmt_repr(&self, f: &mut fmt::Formatter) -> fmt::Result;
 
-    /// Format the native value as it would be written in the language, given its type.
-    fn fmt_as_literal_with_ty(&self, f: &mut fmt::Formatter, _ty: Type) -> fmt::Result {
-        self.fmt_as_literal(f)
+    /// Format the native value, given its type information.
+    fn fmt_pretty(&self, f: &mut fmt::Formatter, _ty: &NativeType) -> fmt::Result {
+        self.fmt_repr(f)
     }
     /// Format the native value when converted to a string.
     fn fmt_in_to_string(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.fmt_as_literal(f)
+        self.fmt_repr(f)
     }
 }
 
 impl NativeDisplay for () {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "()")
     }
 }
@@ -361,7 +361,7 @@ impl Value {
         match self {
             Native(value) => {
                 write!(f, "{indent_str}")?;
-                value.fmt_as_literal(f)?;
+                value.fmt_repr(f)?;
                 writeln!(f)
             }
             Variant(variant) => {
@@ -440,7 +440,7 @@ impl Value {
                 "Cannot pretty-print value with uninstantiated type variable: {:?}",
                 type_var
             ),
-            Native(_) => self.as_native().unwrap().fmt_as_literal_with_ty(f, ty),
+            Native(ty) => self.as_native().unwrap().fmt_pretty(f, ty),
             Variant(types) => {
                 let variant = self.as_variant().unwrap();
                 let inner_ty = types.iter().find(|(tag, _)| *tag == variant.tag).unwrap().1;
@@ -555,7 +555,7 @@ impl Display for LiteralValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use LiteralValue::*;
         match self {
-            Native(value) => value.fmt_as_literal(f),
+            Native(value) => value.fmt_repr(f),
             Tuple(tuple) => {
                 write!(f, "(")?;
                 write_with_separator(tuple.iter(), ", ", f)?;

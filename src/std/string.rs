@@ -115,7 +115,7 @@ impl Default for String {
 }
 
 impl NativeDisplay for String {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "\"{}\"", self.0)
     }
     fn fmt_in_to_string(&self, f: &mut fmt::Formatter) -> fmt::Result {

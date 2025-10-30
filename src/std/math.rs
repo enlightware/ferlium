@@ -42,7 +42,7 @@ pub fn int_value(i: isize) -> Value {
 pub type Int = isize;
 
 impl NativeDisplay for isize {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
     }
 }
@@ -58,7 +58,7 @@ pub fn float_value(value: f64) -> Value {
 pub type Float = NotNan<f64>;
 
 impl NativeDisplay for NotNan<f64> {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.into_inner())
     }
 }

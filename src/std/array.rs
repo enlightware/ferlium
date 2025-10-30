@@ -16,7 +16,7 @@ use crate::{
     format::{write_with_separator, write_with_separator_and_format_fn},
     function::{BinaryNativeFnMVN, BinaryNativeFnNNN, UnaryNativeFnMV, UnaryNativeFnNN},
     module::{Module, ModuleFunction},
-    r#type::{FnType, Type, bare_native_type},
+    r#type::{FnType, NativeType, Type, bare_native_type},
     type_scheme::TypeScheme,
     value::{NativeDisplay, NativeValue, Value},
 };
@@ -247,14 +247,14 @@ impl Default for Array {
 }
 
 impl NativeDisplay for Array {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[")?;
         write_with_separator_and_format_fn(self.0.iter(), ", ", Value::format_as_string_repr, f)?;
         write!(f, "]")
     }
-    fn fmt_as_literal_with_ty(&self, f: &mut fmt::Formatter, ty: Type) -> fmt::Result {
+    fn fmt_pretty(&self, f: &mut fmt::Formatter, ty: &NativeType) -> fmt::Result {
         write!(f, "[")?;
-        let inner_ty = ty.data().as_native().unwrap().arguments[0];
+        let inner_ty = ty.arguments[0];
         write_with_separator(
             self.0.iter().map(|item| item.display_pretty(&inner_ty)),
             ", ",
@@ -309,7 +309,7 @@ impl Iterator for ArrayIterator {
 }
 
 impl NativeDisplay for ArrayIterator {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ArrayIterator on [")?;
         write_with_separator_and_format_fn(
             self.array.iter(),
@@ -319,9 +319,9 @@ impl NativeDisplay for ArrayIterator {
         )?;
         write!(f, "] @ {}", self.index)
     }
-    fn fmt_as_literal_with_ty(&self, f: &mut fmt::Formatter, ty: Type) -> fmt::Result {
+    fn fmt_pretty(&self, f: &mut fmt::Formatter, ty: &NativeType) -> fmt::Result {
         write!(f, "ArrayIterator on [")?;
-        let inner_ty = ty.data().as_native().unwrap().arguments[0];
+        let inner_ty = ty.arguments[0];
         write_with_separator(
             self.array.iter().map(|item| item.display_pretty(&inner_ty)),
             ", ",

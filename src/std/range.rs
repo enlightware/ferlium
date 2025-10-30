@@ -49,7 +49,7 @@ impl Range {
 }
 
 impl NativeDisplay for Range {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}‥{}", self.start, self.end)
     }
 }
@@ -111,7 +111,7 @@ impl Iterator for RangeIterator {
 }
 
 impl NativeDisplay for RangeIterator {
-    fn fmt_as_literal(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt_repr(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "{} in {}‥{}",
