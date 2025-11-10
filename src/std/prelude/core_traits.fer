@@ -1,0 +1,293 @@
+fn clamp(value, min_bound, max_bound) {
+	if min_bound > max_bound {
+		panic("min_bound must be less than or equal to max_bound")
+	} else {
+		max(min_bound, min(value, max_bound))
+	}
+}
+
+// Arrays
+
+// Blocked due to issue: https://github.com/enlightware/ferlium/issues/59
+// fn array_peek_back(array) {
+//     let l = array_len(array);
+//     if le(l, 0) {
+//         None
+//     } else {
+//         Some(array[sub(l, 1)])
+//     }
+// }
+
+fn array_map(array: [_], f) {
+	let mut result = [];
+	for a in array {
+		array_append(result, f(a));
+	};
+	result
+}
+
+// Iterator functions
+
+/// Returns true if the collection contains no elements.
+fn is_empty(seq) {
+	len(seq) == 0
+}
+
+/*
+// This requires capture to be of realistic use
+fn try_fold(it, init, f) {
+	let mut accum = init;
+	loop {
+		match next(it) {
+			Some(x) => {
+				match f(accum, x) {
+					Continue(v) => {
+						accum = v;
+					},
+					Break => {
+						soft_break
+					}
+				}
+			},
+			None => soft_break,
+		}
+	};
+	accum
+}
+*/
+
+/// Tests if every element of the iterator matches a predicate.
+fn all(it, f) {
+	// When capture is available, do:
+	// try_fold(it, (), |_accum, x| if f(x) { Continue(()) } else { Break })
+	let mut it = it;
+	let mut result = true;
+	loop {
+		match next(it) {
+			Some(x) => {
+				if f(x) {
+					() // not is currently not available in the prelude
+				} else {
+					result = false;
+					soft_break;
+				}
+			},
+			None => soft_break,
+		}
+	};
+	result
+}
+
+/// Tests if any element of the iterator matches a predicate.
+fn any(it, f) {
+	// When capture is available, build on try_fold (see fn all)
+	let mut it = it;
+	let mut result = false;
+	loop {
+		match next(it) {
+			Some(x) => {
+				if f(x) {
+					result = true;
+					soft_break;
+				}
+			},
+			None => soft_break,
+		}
+	};
+	result
+}
+
+// Compatibility, mark as deprecated when supported
+fn array_all(array: [_], f) {
+	all(array_iter(array), f)
+}
+fn array_any(array: [_], f) {
+	any(array_iter(array), f)
+}
+
+// Iterator and Seq for ranges
+impl Iterator {
+	fn next(a) {
+		range_iterator_next(a)
+	}
+}
+impl Seq {
+	fn iter(a) {
+		range_iter(a)
+	}
+}
+impl SizedSeq {
+	fn len(a) {
+		range_len(a)
+	}
+}
+
+// Iterator and Seq for array
+impl Iterator {
+	fn next(a) {
+		array_iterator_next(a)
+	}
+}
+impl Seq {
+	fn iter(a) {
+		array_iter(a)
+	}
+}
+// Requires per trait method generics
+// impl FromIterator {
+//     fn from_iter(it) {
+//         let mut it = it;
+//         let mut a = [];
+//         loop {
+//             match next(it) {
+//                 Some(x) => {
+//                     array_append(a, x);
+//                 },
+//                 None => soft_break,
+//             }
+//         };
+//         a
+//     }
+// }
+impl SizedSeq {
+	fn len(a) {
+		array_len(a)
+	}
+}
+
+// Serde for basic types
+
+/// Downcast a variant to None, panicking if the variant is not None.
+fn variant_to_none(v: Variant) -> () {
+	match (v) {
+		None => (),
+		Array(a) => {
+			if array_len(a) == 0 {
+				()
+			} else {
+				panic("Expected array of size 0")
+			}
+		},
+		_ => panic(f"Expected None variant or Array variant of size 0, got \"{v}\"")
+	}
+}
+/// Downcast a variant to a bool, panicking if the variant is not a bool.
+fn variant_to_bool(v: Variant) {
+	match (v) {
+		Bool(b) => b,
+		_ => panic(f"Expected Bool variant, got \"{v}\"")
+	}
+}
+/// Downcast a variant to an int, panicking if the variant is not an int or a float.
+fn variant_to_int(v: Variant) {
+	match (v) {
+		Int(i) => i,
+		Float(f) => round(f),
+		_ => panic(f"Expected Int variant, got \"{v}\"")
+	}
+}
+/// Downcast a variant to a float, panicking if the variant is not a float or int.
+fn variant_to_float(v: Variant) {
+	match (v) {
+		Float(f) => f,
+		Int(i) => from_int(i),
+		_ => panic(f"Expected Float or Int variant, got \"{v}\"")
+	}
+}
+/// Downcast a variant to a string, panicking if the variant is not a string.
+fn variant_to_string(v: Variant) {
+	match (v) {
+		String(s) => s,
+		_ => panic(f"Expected String variant, got \"{v}\"")
+	}
+}
+/// Downcast a variant to an array, panicking if the variant is not an array.
+fn variant_to_array(v: Variant) {
+	match (v) {
+		Array(a) => a,
+		_ => panic(f"Expected Array variant, got \"{v}\"")
+	}
+}
+/// Downcast a variant to an object payload, panicking if the variant is not an object.
+fn variant_to_object(v: Variant) {
+	match (v) {
+		Object(o) => o,
+		_ => panic(f"Expected Object variant, got \"{v}\"")
+	}
+}
+
+impl Serialize {
+	fn serialize(v: ()) {
+		None
+	}
+}
+impl Deserialize {
+	fn deserialize(v) -> () {
+		variant_to_none(v)
+	}
+}
+impl Serialize {
+	fn serialize(v: bool) {
+		Bool(v)
+	}
+}
+impl Deserialize {
+	fn deserialize(v) -> bool {
+		variant_to_bool(v)
+	}
+}
+impl Serialize {
+	fn serialize(v: int) {
+		Int(v)
+	}
+}
+impl Deserialize {
+	fn deserialize(v) -> int {
+		variant_to_int(v)
+	}
+}
+impl Serialize {
+	fn serialize(v: float) {
+		Float(v)
+	}
+}
+impl Deserialize {
+	fn deserialize(v) -> float {
+		variant_to_float(v)
+	}
+}
+impl Serialize {
+	fn serialize(v: string) {
+		String(v)
+	}
+}
+impl Deserialize {
+	fn deserialize(v) -> string {
+		variant_to_string(v)
+	}
+}
+
+// Serde for arrays
+impl Serialize {
+	fn serialize(a) {
+		let mut result = [];
+		for i in range(0, array_len(a)) {
+			array_append(result, serialize(a[i]));
+		};
+		Array(result)
+	}
+}
+impl Deserialize {
+	fn deserialize(a) {
+		match (a) {
+			Array(a) => {
+				let mut result = [];
+				for i in range(0, array_len(a)) {
+					array_append(result, deserialize(a[i]));
+				};
+				result
+			},
+			_ => panic(f"Expected Array variant, got \"{a}\"")
+		}
+	}
+}

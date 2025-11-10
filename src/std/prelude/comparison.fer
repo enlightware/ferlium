@@ -1,0 +1,41 @@
+fn lt(lhs, rhs) {
+	match cmp(lhs, rhs) {
+		Less => true,
+		_ => false,
+	}
+}
+
+fn le(lhs, rhs) {
+	match cmp(lhs, rhs) {
+		Greater => false,
+		_ => true,
+	}
+}
+
+fn gt(lhs, rhs) {
+	match cmp(lhs, rhs) {
+		Greater => true,
+		_ => false,
+	}
+}
+
+fn ge(lhs, rhs) {
+	match cmp(lhs, rhs) {
+		Less => false,
+		_ => true,
+	}
+}
+
+fn min(lhs, rhs) {
+	match cmp(lhs, rhs) {
+		Less => lhs,
+		_ => rhs,
+	}
+}
+
+fn max(lhs, rhs) {
+	match cmp(lhs, rhs) {
+		Greater => lhs,
+		_ => rhs,
+	}
+}
