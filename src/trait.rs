@@ -51,6 +51,8 @@ dyn_clone::clone_trait_object!(Deriver);
 pub struct Trait {
     /// Name of the trait, for debugging purposes.
     pub name: Ustr,
+    /// Optional documentation for the trait.
+    pub doc: Option<String>,
     /// Number of input types, by convention, the first type variables correspond to input types.
     pub input_type_names: Vec<Ustr>,
     /// Name of the output types.
@@ -210,6 +212,9 @@ impl Trait {
 
 impl FormatWith<ModuleEnv<'_>> for Trait {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
+        if let Some(doc) = &self.doc {
+            writeln!(f, "/// {doc}")?;
+        }
         write!(f, "trait {} <", self.name)?;
         let input_ty_count = self.input_type_count();
         write_with_separator_and_format_fn(
@@ -271,6 +276,7 @@ pub struct TraitRef(pub(crate) Arc<Trait>);
 impl TraitRef {
     pub fn new<'a>(
         name: &str,
+        doc: &str,
         input_type_names: impl Into<Vec<&'a str>>,
         output_type_names: impl Into<Vec<&'a str>>,
         functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
@@ -287,6 +293,7 @@ impl TraitRef {
             .collect();
         let trait_data = Trait {
             name: ustr(name),
+            doc: Some(doc.to_string()),
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: Vec::new(),
@@ -299,14 +306,16 @@ impl TraitRef {
 
     pub fn new_with_self_input_type<'a>(
         name: &str,
+        doc: &str,
         output_type_names: impl Into<Vec<&'a str>>,
         functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
     ) -> Self {
-        Self::new(name, ["Self"], output_type_names, functions)
+        Self::new(name, doc, ["Self"], output_type_names, functions)
     }
 
     pub fn new_with_constraints<'a>(
         name: &str,
+        doc: &str,
         input_type_names: impl Into<Vec<&'a str>>,
         output_type_names: impl Into<Vec<&'a str>>,
         constraints: impl Into<Vec<PubTypeConstraint>>,
@@ -324,6 +333,7 @@ impl TraitRef {
             .collect();
         let trait_data = Trait {
             name: ustr(name),
+            doc: Some(doc.to_string()),
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: constraints.into(),

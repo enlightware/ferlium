@@ -11,8 +11,14 @@ use std::sync::LazyLock;
 
 use crate::{module::Module, r#trait::TraitRef, r#type::Type};
 
-pub static REPR_TRAIT: LazyLock<TraitRef> =
-    LazyLock::new(|| TraitRef::new_with_self_input_type("Repr", ["Is"], []));
+pub static REPR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
+    TraitRef::new_with_self_input_type(
+        "Repr",
+        "Marker trait for types whose value is the same representation as one of another type. Used in Rust-style struct and enums (new types) to allow matches and projections on the underlying representation.",
+        ["Is"],
+        [],
+    )
+});
 
 pub fn add_to_module(to: &mut Module) {
     // Add the unit type `()`

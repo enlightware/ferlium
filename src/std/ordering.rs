@@ -38,6 +38,7 @@ pub static ORD_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
     TraitRef::new_with_self_input_type(
         "Ord",
+        "A type that has a total ordering.",
         [],
         [(
             "cmp",

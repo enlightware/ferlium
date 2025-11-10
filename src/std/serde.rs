@@ -475,6 +475,7 @@ pub fn add_to_module(to: &mut Module) {
     // Serialize trait
     let mut serialize_trait = TraitRef::new_with_self_input_type(
         SERIALIZE_TRAIT_NAME,
+        "A type that can be serialized into a variant.",
         [],
         [(
             SERIALIZE_FN_NAME,
@@ -494,6 +495,7 @@ pub fn add_to_module(to: &mut Module) {
     // Deserialize trait
     let mut deserialize_trait = TraitRef::new_with_self_input_type(
         DESERIALIZE_TRAIT_NAME,
+        "A type that can be deserialized from a variant.",
         [],
         [(
             DESERIALIZE_FN_NAME,

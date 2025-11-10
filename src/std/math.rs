@@ -134,6 +134,7 @@ pub static NUM_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
     TraitRef::new_with_self_input_type(
         "Num",
+        "A numeric type supporting basic arithmetic operations.",
         [],
         [
             (
@@ -194,6 +195,7 @@ pub static DIV_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
     TraitRef::new_with_self_input_type(
         "Div",
+        "A type that supports division.",
         [],
         [(
             "div",

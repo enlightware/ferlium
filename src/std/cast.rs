@@ -25,6 +25,7 @@ pub static CAST_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let unary_fn_ty = FnType::new_by_val([var0_ty], var1_ty, EffType::empty());
     TraitRef::new(
         "Cast",
+        "Conversion of a value from one type to another.",
         ["From", "To"],
         [],
         [(

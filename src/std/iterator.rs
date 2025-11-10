@@ -27,6 +27,7 @@ pub fn add_to_module(to: &mut Module) {
     use FunctionDefinition as Def;
     let iterator_trait = TraitRef::new_with_self_input_type(
         ITERATOR_TRAIT_NAME,
+        "An iterator that can produce a sequence of values.",
         ["Item"],
         [(
             "next",
@@ -51,6 +52,7 @@ pub fn add_to_module(to: &mut Module) {
     };
     let seq_trait = TraitRef::new_with_constraints(
         SEQ_TRAIT_NAME,
+        "A sequence of elements that can produce an iterator over its elements.",
         ["Self"],
         ["Item", "Iter"],
         [iter_item_constraint.clone()],
@@ -92,6 +94,7 @@ pub fn add_to_module(to: &mut Module) {
 
     let sized_seq_trait = TraitRef::new_with_self_input_type(
         SIZED_SEQ_TRAIT_NAME,
+        "A sequence with a known, fixed size.",
         [],
         [(
             "len",
