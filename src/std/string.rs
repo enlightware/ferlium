@@ -57,8 +57,8 @@ impl String {
     }
 
     pub fn sub_string(&self, start: isize, end: isize) -> Self {
-        let start = self.to_unsigned_index(start).min(self.len());
-        let end = self.to_unsigned_index(end).min(self.len());
+        let start = self.index_to_unsigned(start).min(self.len());
+        let end = self.index_to_unsigned(end).min(self.len());
         if end <= start {
             Self::new()
         } else {
@@ -67,7 +67,15 @@ impl String {
         }
     }
 
-    fn to_unsigned_index(&self, index: isize) -> usize {
+    pub fn uppercase(&self) -> Self {
+        Self(Rc::new(self.0.to_uppercase()))
+    }
+
+    pub fn lowercase(&self) -> Self {
+        Self(Rc::new(self.0.to_lowercase()))
+    }
+
+    fn index_to_unsigned(&self, index: isize) -> usize {
         if index < 0 {
             (self.len() as isize + index) as usize
         } else {
@@ -198,6 +206,24 @@ pub fn add_to_module(to: &mut Module) {
             |s: String, start: isize, end: isize| s.sub_string(start, end),
             ["string", "start", "end"],
             None,
+            no_effects(),
+        ),
+    );
+    to.add_named_function(
+        ustr("uppercase"),
+        UnaryNativeFnNN::description_with_default_ty(
+            |s: String| s.uppercase(),
+            ["string"],
+            Some("Returns the uppercase equivalent of this string."),
+            no_effects(),
+        ),
+    );
+    to.add_named_function(
+        ustr("lowercase"),
+        UnaryNativeFnNN::description_with_default_ty(
+            |s: String| s.lowercase(),
+            ["string"],
+            Some("Returns the lowercase equivalent of this string."),
             no_effects(),
         ),
     );

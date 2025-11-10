@@ -334,6 +334,17 @@ fn string_sub_string() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_case_conversion() {
+    assert_eq!(run(r#"uppercase("hello World!")"#), string("HELLO WORLD!"));
+    // cspell:disable-next-line
+    assert_eq!(run(r#"uppercase("tschüß")"#), string("TSCHÜSS"));
+    assert_eq!(run(r#"lowercase("hello World!")"#), string("hello world!"));
+    assert_eq!(run(r#"uppercase("农历新年")"#), string("农历新年"));
+    assert_eq!(run(r#"lowercase("农历新年")"#), string("农历新年"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn serde_serialize() {
     // basic types
     assert_eq!(run("serialize(())"), variant_0("None"));
