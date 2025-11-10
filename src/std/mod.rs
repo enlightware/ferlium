@@ -20,6 +20,7 @@ use ustr::ustr;
 
 pub mod array;
 pub mod cast;
+pub mod contains;
 pub mod core;
 pub mod flow;
 pub mod io;
@@ -51,6 +52,7 @@ pub fn std_module() -> Rc<Module> {
                 // mem::add_to_module(&mut module);
                 logic::add_to_module(&mut module);
                 ordering::add_to_module(&mut module);
+                contains::add_to_module(&mut module);
                 math::add_to_module(&mut module);
                 range::add_to_module(&mut module);
                 array::add_to_module(&mut module);

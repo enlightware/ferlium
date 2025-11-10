@@ -226,7 +226,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // int
     to.add_concrete_impl(
-        NUM_TRAIT.clone().clone(),
+        NUM_TRAIT.clone(),
         [int_type()],
         [],
         [

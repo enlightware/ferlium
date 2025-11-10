@@ -17,11 +17,14 @@ use ustr::ustr;
 
 use crate::{
     cached_primitive_ty,
+    containers::b,
     effects::no_effects,
     function::{
-        BinaryNativeFnMNN, BinaryNativeFnNNN, TernaryNativeFnNNNN, UnaryNativeFnNN, UnaryNativeFnVN,
+        BinaryNativeFnMNN, BinaryNativeFnNNN, Function, TernaryNativeFnNNNN, UnaryNativeFnNN,
+        UnaryNativeFnVN,
     },
     module::Module,
+    std::contains::CONTAINS_TRAIT,
     r#type::Type,
     value::{NativeDisplay, Value},
 };
@@ -82,6 +85,10 @@ impl String {
             index as usize
         }
     }
+
+    fn contains(s: Self, substring: Self) -> bool {
+        s.as_ref().contains(substring.as_ref())
+    }
 }
 
 impl FromStr for String {
@@ -141,6 +148,13 @@ pub fn string_value(s: &str) -> Value {
 
 pub fn add_to_module(to: &mut Module) {
     to.type_aliases.set("string", string_type());
+
+    to.add_concrete_impl(
+        CONTAINS_TRAIT.clone(),
+        [string_type()],
+        [string_type()],
+        [b(BinaryNativeFnNNN::new(String::contains)) as Function],
+    );
 
     to.add_named_function(
         ustr("to_string"),

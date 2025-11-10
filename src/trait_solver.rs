@@ -277,7 +277,11 @@ impl<'a> TraitSolver<'a> {
                         .substitute_in_constraint(constraint)
                         .into_have_trait()
                         .expect("Non trait constraint in blanket impl");
-                    assert!(input_tys.iter().all(Type::is_constant));
+                    // If some input types are not constant, we cannot solve this constraint now.
+                    // FIXME: This looks like a bug and needs investigation.
+                    if !input_tys.iter().all(Type::is_constant) {
+                        continue 'impl_loop;
+                    }
                     let new_output_tys =
                         self.solve_output_types(&trait_ref, &input_tys, fn_span)?;
                     for (new_output_ty, output_ty) in new_output_tys.iter().zip(output_tys.iter()) {

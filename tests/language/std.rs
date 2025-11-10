@@ -247,6 +247,26 @@ fn iterator_fns() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn contains() {
+    // strings
+    assert_eq!(run("contains(\"hello world\", \"world\")"), bool(true));
+    assert_eq!(run("contains(\"hello world\", \"world!\")"), bool(false));
+    assert_eq!(run("contains(\"hello world\", \"\")"), bool(true));
+    assert_eq!(run("contains(\"\", \"\")"), bool(true));
+    assert_eq!(run("contains(\"\", \"a\")"), bool(false));
+    // arrays
+    assert_eq!(run("contains([1, 2, 3], 2)"), bool(true));
+    assert_eq!(run("contains([1, 2, 3], 4)"), bool(false));
+    fail_compilation("contains([], 1)")
+        .into_inner()
+        .into_unresolved_constraints()
+        .unwrap();
+    assert_eq!(run("contains([-3.0], 1.0)"), bool(false));
+    assert_eq!(run("contains([-3.0, 3.0, 1.0], 1.0)"), bool(true));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_concat() {
     assert_eq!(run(r#"string_concat("", "")"#), string(""));
     assert_eq!(

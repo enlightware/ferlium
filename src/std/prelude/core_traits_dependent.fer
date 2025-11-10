@@ -19,3 +19,14 @@ fn expect_variant_object_entry(entries: [(string, Variant)], name: string) -> Va
 	};
 	panic(f"Object variant key \"{name}\" not found in {entries}")
 }
+
+impl Contains {
+	fn contains(seq, element) -> bool {
+		for item in seq {
+			if item == element {
+				return true;
+			}
+		};
+		false
+	}
+}
