@@ -100,9 +100,13 @@ fn any(it, f) {
 }
 
 // Compatibility, mark as deprecated when supported
+
+/// Deprecated, use `all` instead.
 fn array_all(array: [_], f) {
 	all(array_iter(array), f)
 }
+
+/// Deprecated, use `any` instead.
 fn array_any(array: [_], f) {
 	any(array_iter(array), f)
 }

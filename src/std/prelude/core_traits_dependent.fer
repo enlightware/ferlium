@@ -1,4 +1,6 @@
 // Serde derive helper
+
+/// Gets an entry from a Variant Object by name, returning None if not found.
 fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Some(Variant) | None {
 	for entry in entries {
 		if entry.0 == name {
@@ -8,6 +10,7 @@ fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Some(
 	None
 }
 
+/// Gets an entry from a Variant Object by name, panicking if not found.
 fn expect_variant_object_entry(entries: [(string, Variant)], name: string) -> Variant {
 	for entry in entries {
 		if entry.0 == name {

@@ -1,3 +1,4 @@
+/// Tests less than (for `left` and `right`) and is used by the < operator.
 fn lt(left, right) {
 	match cmp(left, right) {
 		Less => true,
@@ -5,6 +6,7 @@ fn lt(left, right) {
 	}
 }
 
+/// Tests less than or equal to (for `left` and `right`) and is used by the <= operator.
 fn le(left, right) {
 	match cmp(left, right) {
 		Greater => false,
@@ -12,6 +14,7 @@ fn le(left, right) {
 	}
 }
 
+/// Tests greater than (for `left` and `right`) and is used by the > operator.
 fn gt(left, right) {
 	match cmp(left, right) {
 		Greater => true,
@@ -19,6 +22,7 @@ fn gt(left, right) {
 	}
 }
 
+/// Tests greater than or equal to (for `left` and `right`) and is used by the >= operator.
 fn ge(left, right) {
 	match cmp(left, right) {
 		Less => false,
