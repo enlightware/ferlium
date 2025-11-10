@@ -407,6 +407,9 @@ fn process_input(
     // AST debug output for REPL
     let dbg_module = module.clone();
     let ast_inspector = |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>| {
+        if !is_repl {
+            return;
+        }
         let module_env = ModuleEnv::new(&dbg_module, other_modules, false);
         if !module_ast.is_empty() {
             println!("Module AST:\n{}", module_ast.format_with(&module_env));
