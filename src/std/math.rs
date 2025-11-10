@@ -141,7 +141,7 @@ pub static NUM_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                 "add",
                 Def::new_infer_quantifiers(
                     binary_fn_ty.clone(),
-                    ["lhs", "rhs"],
+                    ["left", "right"],
                     "Adds two numbers.",
                 ),
             ),
@@ -149,15 +149,15 @@ pub static NUM_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                 "sub",
                 Def::new_infer_quantifiers(
                     binary_fn_ty.clone(),
-                    ["lhs", "rhs"],
-                    "Subtracts `rhs` from `lhs`.",
+                    ["left", "right"],
+                    "Subtracts `right` from `left`.",
                 ),
             ),
             (
                 "mul",
                 Def::new_infer_quantifiers(
                     binary_fn_ty.clone(),
-                    ["lhs", "rhs"],
+                    ["left", "right"],
                     "Multiplies two numbers.",
                 ),
             ),
@@ -199,7 +199,11 @@ pub static DIV_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
         [],
         [(
             "div",
-            Def::new_infer_quantifiers(binary_fn_ty, ["lhs", "rhs"], "Divides `lhs` by `rhs`."),
+            Def::new_infer_quantifiers(
+                binary_fn_ty,
+                ["left", "right"],
+                "Divides `left` by `right`.",
+            ),
         )],
     )
 });
@@ -251,8 +255,8 @@ pub fn add_to_module(to: &mut Module) {
                     Ok(lhs / rhs)
                 }
             },
-            ["lhs", "rhs"],
-            Some("Divides `lhs` by `rhs` and truncates the result."),
+            ["left", "right"],
+            Some("Divides `left` by `right` and truncates the result."),
             no_effects(),
         ),
     );
@@ -266,8 +270,8 @@ pub fn add_to_module(to: &mut Module) {
                     Ok(lhs.div_euclid(rhs))
                 }
             },
-            ["lhs", "rhs"],
-            Some("Calculates the quotient of Euclidean division of `lhs` by `rhs`."),
+            ["left", "right"],
+            Some("Calculates the quotient of Euclidean division of `left` by `right`."),
             no_effects(),
         ),
     );
@@ -281,8 +285,8 @@ pub fn add_to_module(to: &mut Module) {
                     Ok(ops::Rem::rem(lhs, rhs))
                 }
             },
-            ["lhs", "rhs"],
-            Some("Calculates the remainder of the division of `lhs` by `rhs`."),
+            ["left", "right"],
+            Some("Calculates the remainder of the division of `left` by `right`."),
             no_effects(),
         ),
     );
@@ -296,8 +300,8 @@ pub fn add_to_module(to: &mut Module) {
                     Ok(lhs.rem_euclid(rhs))
                 }
             },
-            ["lhs", "rhs"],
-            Some("Calculates the modulo of the division of `lhs` by `rhs`."),
+            ["left", "right"],
+            Some("Calculates the modulo of the division of `left` by `right`."),
             no_effects(),
         ),
     );

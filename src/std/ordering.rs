@@ -44,8 +44,8 @@ pub static ORD_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
             "cmp",
             Def::new_infer_quantifiers(
                 binary_fn_ty.clone(),
-                ["lhs", "rhs"],
-                "Returns an `Ordering` between `lhs` and `rhs`.",
+                ["left", "right"],
+                "Returns an `Ordering` between `left` and `right`.",
             ),
         )],
     )

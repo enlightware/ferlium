@@ -1,41 +1,43 @@
-fn lt(lhs, rhs) {
-	match cmp(lhs, rhs) {
+fn lt(left, right) {
+	match cmp(left, right) {
 		Less => true,
 		_ => false,
 	}
 }
 
-fn le(lhs, rhs) {
-	match cmp(lhs, rhs) {
+fn le(left, right) {
+	match cmp(left, right) {
 		Greater => false,
 		_ => true,
 	}
 }
 
-fn gt(lhs, rhs) {
-	match cmp(lhs, rhs) {
+fn gt(left, right) {
+	match cmp(left, right) {
 		Greater => true,
 		_ => false,
 	}
 }
 
-fn ge(lhs, rhs) {
-	match cmp(lhs, rhs) {
+fn ge(left, right) {
+	match cmp(left, right) {
 		Less => false,
 		_ => true,
 	}
 }
 
-fn min(lhs, rhs) {
-	match cmp(lhs, rhs) {
-		Less => lhs,
-		_ => rhs,
+/// Returns the minimum of two values.
+fn min(left, right) {
+	match cmp(left, right) {
+		Less => left,
+		_ => right,
 	}
 }
 
-fn max(lhs, rhs) {
-	match cmp(lhs, rhs) {
-		Greater => lhs,
-		_ => rhs,
+/// Returns the maximum of two values.
+fn max(left, right) {
+	match cmp(left, right) {
+		Greater => left,
+		_ => right,
 	}
 }
