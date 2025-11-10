@@ -116,7 +116,7 @@ impl Array {
         BinaryNativeFnMVN::description_with_ty_scheme(
             Self::append,
             ["array", "value"],
-            None,
+            Some("Appends an element to the back of the array."),
             ty_scheme,
         )
     }
@@ -137,7 +137,7 @@ impl Array {
         BinaryNativeFnMVN::description_with_ty_scheme(
             Self::prepend,
             ["array", "value"],
-            None,
+            Some("Prepends an element to the front of the array."),
             ty_scheme,
         )
     }
@@ -157,7 +157,12 @@ impl Array {
             option_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnMV::description_with_ty_scheme(Self::pop_back, ["array"], None, ty_scheme)
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::pop_back,
+            ["array"],
+            Some("Removes the last element of the array and returns it, or `None` if it is empty."),
+            ty_scheme,
+        )
     }
 
     pub fn pop_front(&mut self) -> Value {
@@ -175,7 +180,14 @@ impl Array {
             option_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnMV::description_with_ty_scheme(Self::pop_front, ["array"], None, ty_scheme)
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::pop_front,
+            ["array"],
+            Some(
+                "Removes the first element of the array and returns it, or `None` if it is empty.",
+            ),
+            ty_scheme,
+        )
     }
 
     pub fn is_empty(&self) -> bool {
@@ -196,7 +208,7 @@ impl Array {
         UnaryNativeFnNN::description_with_ty_scheme(
             |a: Self| a.len() as isize,
             ["array"],
-            None,
+            Some("Returns the length of the array."),
             ty_scheme,
         )
     }
@@ -217,7 +229,7 @@ impl Array {
         BinaryNativeFnNNN::description_with_ty_scheme(
             |a: Self, b: Self| Self::concat(&a, &b),
             ["left", "right"],
-            None,
+            Some("Concatenates two arrays and returns the result."),
             ty_scheme,
         )
     }
@@ -236,7 +248,12 @@ impl Array {
             array_iter_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnNN::description_with_ty_scheme(|a: Self| a.iter(), ["array"], None, ty_scheme)
+        UnaryNativeFnNN::description_with_ty_scheme(
+            |a: Self| a.iter(),
+            ["array"],
+            Some("Creates an iterator over the array."),
+            ty_scheme,
+        )
     }
 }
 
@@ -290,7 +307,12 @@ impl ArrayIterator {
             option_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnMV::description_with_ty_scheme(Self::next_value, ["iterator"], None, ty_scheme)
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::next_value,
+            ["iterator"],
+            Some("Gets the next value of the array."),
+            ty_scheme,
+        )
     }
 }
 

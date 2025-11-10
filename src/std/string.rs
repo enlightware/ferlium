@@ -147,7 +147,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnVN::description_with_default_ty(
             String::any_to_string,
             ["value"],
-            None,
+            Some("Converts any value to its string representation."),
             no_effects(),
         ),
     );
@@ -156,7 +156,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnMNN::description_with_default_ty(
             String::push_str,
             ["target", "suffix"],
-            None,
+            Some("Appends `suffix` to the end of `target`."),
             no_effects(),
         ),
     );
@@ -165,7 +165,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             |a: String, b: String| String::concat(&a, &b),
             ["left", "right"],
-            None,
+            Some("Concatenates `left` and `right` strings."),
             no_effects(),
         ),
     );
@@ -174,7 +174,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.len() as isize,
             ["string"],
-            None,
+            Some("Returns the length of the string, in bytes."),
             no_effects(),
         ),
     );
@@ -183,7 +183,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.is_empty() as isize,
             ["string"],
-            None,
+            Some("Returns `true` if the string is empty, otherwise `false`."),
             no_effects(),
         ),
     );
@@ -196,7 +196,7 @@ pub fn add_to_module(to: &mut Module) {
                 new
             },
             ["string", "from", "to"],
-            None,
+            Some("Returns a new string with all occurrences of `from` replaced by `to`."),
             no_effects(),
         ),
     );
@@ -205,7 +205,7 @@ pub fn add_to_module(to: &mut Module) {
         TernaryNativeFnNNNN::description_with_default_ty(
             |s: String, start: isize, end: isize| s.sub_string(start, end),
             ["string", "start", "end"],
-            None,
+            Some("Returns the substring of `string` from index `start` to index `end`."),
             no_effects(),
         ),
     );

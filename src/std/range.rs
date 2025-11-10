@@ -85,7 +85,12 @@ impl RangeIterator {
             option_type(int_type()),
             no_effects(),
         ));
-        UnaryNativeFnMV::description_with_ty_scheme(Self::next_value, ["iterator"], None, ty_scheme)
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::next_value,
+            ["iterator"],
+            Some("Gets the next value within a range."),
+            ty_scheme,
+        )
     }
 }
 
@@ -135,24 +140,34 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             Range::new,
             ["start", "end"],
-            None,
+            Some("Creates a range from `start` to `end`."),
             no_effects(),
         ),
     );
     to.add_named_function(
         ustr("range_iter"),
-        UnaryNativeFnNN::description_with_default_ty(Range::iter, ["range"], None, no_effects()),
+        UnaryNativeFnNN::description_with_default_ty(
+            Range::iter,
+            ["range"],
+            Some("Creates an iterator over the range."),
+            no_effects(),
+        ),
     );
     to.add_named_function(
         ustr("range_len"),
-        UnaryNativeFnNN::description_with_default_ty(Range::len, ["range"], None, no_effects()),
+        UnaryNativeFnNN::description_with_default_ty(
+            Range::len,
+            ["range"],
+            Some("Returns the length of the range."),
+            no_effects(),
+        ),
     );
     to.add_named_function(
         ustr("range_iterator_new"),
         BinaryNativeFnNNN::description_with_default_ty(
             RangeIterator::new,
             ["start", "end"],
-            None,
+            Some("Creates a new range iterator from `start` to `end`."),
             no_effects(),
         ),
     );

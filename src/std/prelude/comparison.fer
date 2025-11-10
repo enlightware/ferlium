@@ -1,3 +1,8 @@
+/// Returns `true` if `left` is NOT equal to `right`, otherwise `false`.
+fn ne(left, right) {
+	not eq(left, right)
+}
+
 /// Tests less than (for `left` and `right`) and is used by the < operator.
 fn lt(left, right) {
 	match cmp(left, right) {

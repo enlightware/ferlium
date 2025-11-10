@@ -271,7 +271,7 @@ pub fn add_to_module(to: &mut Module) {
                 }
             },
             ["left", "right"],
-            Some("Calculates the quotient of Euclidean division of `left` by `right`."),
+            Some("Calculates the quotient of the Euclidean division of `left` by `right`."),
             no_effects(),
         ),
     );
