@@ -88,7 +88,7 @@ impl RangeIterator {
         UnaryNativeFnMV::description_with_ty_scheme(
             Self::next_value,
             ["iterator"],
-            Some("Gets the next value within a range."),
+            "Gets the next value within a range.",
             ty_scheme,
         )
     }
@@ -140,7 +140,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             Range::new,
             ["start", "end"],
-            Some("Creates a range from `start` to `end`."),
+            "Creates a range from `start` to `end`.",
             no_effects(),
         ),
     );
@@ -149,7 +149,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             Range::iter,
             ["range"],
-            Some("Creates an iterator over the range."),
+            "Creates an iterator over the range.",
             no_effects(),
         ),
     );
@@ -158,7 +158,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             Range::len,
             ["range"],
-            Some("Returns the length of the range."),
+            "Returns the length of the range.",
             no_effects(),
         ),
     );
@@ -167,7 +167,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             RangeIterator::new,
             ["start", "end"],
-            Some("Creates a new range iterator from `start` to `end`."),
+            "Creates a new range iterator from `start` to `end`.",
             no_effects(),
         ),
     );

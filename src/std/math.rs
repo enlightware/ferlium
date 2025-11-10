@@ -256,7 +256,7 @@ pub fn add_to_module(to: &mut Module) {
                 }
             },
             ["left", "right"],
-            Some("Divides `left` by `right` and truncates the result."),
+            "Divides `left` by `right` and truncates the result.",
             no_effects(),
         ),
     );
@@ -271,7 +271,7 @@ pub fn add_to_module(to: &mut Module) {
                 }
             },
             ["left", "right"],
-            Some("Calculates the quotient of the Euclidean division of `left` by `right`."),
+            "Calculates the quotient of the Euclidean division of `left` by `right`.",
             no_effects(),
         ),
     );
@@ -286,7 +286,7 @@ pub fn add_to_module(to: &mut Module) {
                 }
             },
             ["left", "right"],
-            Some("Calculates the remainder of the division of `left` by `right`."),
+            "Calculates the remainder of the division of `left` by `right`.",
             no_effects(),
         ),
     );
@@ -301,7 +301,7 @@ pub fn add_to_module(to: &mut Module) {
                 }
             },
             ["left", "right"],
-            Some("Calculates the modulo of the division of `left` by `right`."),
+            "Calculates the modulo of the division of `left` by `right`.",
             no_effects(),
         ),
     );
@@ -344,7 +344,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |value: Float| value.round() as Int,
             ["value"],
-            Some("Rounds a number to the nearest integer."),
+            "Rounds a number to the nearest integer.",
             no_effects(),
         ),
     );

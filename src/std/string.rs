@@ -147,7 +147,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnVN::description_with_default_ty(
             String::any_to_string,
             ["value"],
-            Some("Converts any value to its string representation."),
+            "Converts any value to its string representation.",
             no_effects(),
         ),
     );
@@ -156,7 +156,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnMNN::description_with_default_ty(
             String::push_str,
             ["target", "suffix"],
-            Some("Appends `suffix` to the end of `target`."),
+            "Appends `suffix` to the end of `target`.",
             no_effects(),
         ),
     );
@@ -165,7 +165,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             |a: String, b: String| String::concat(&a, &b),
             ["left", "right"],
-            Some("Concatenates `left` and `right` strings."),
+            "Concatenates `left` and `right` strings.",
             no_effects(),
         ),
     );
@@ -174,7 +174,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.len() as isize,
             ["string"],
-            Some("Returns the length of the string, in bytes."),
+            "Returns the length of the string, in bytes.",
             no_effects(),
         ),
     );
@@ -183,7 +183,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.is_empty() as isize,
             ["string"],
-            Some("Returns `true` if the string is empty, otherwise `false`."),
+            "Returns `true` if the string is empty, otherwise `false`.",
             no_effects(),
         ),
     );
@@ -196,7 +196,7 @@ pub fn add_to_module(to: &mut Module) {
                 new
             },
             ["string", "from", "to"],
-            Some("Returns a new string with all occurrences of `from` replaced by `to`."),
+            "Returns a new string with all occurrences of `from` replaced by `to`.",
             no_effects(),
         ),
     );
@@ -205,7 +205,7 @@ pub fn add_to_module(to: &mut Module) {
         TernaryNativeFnNNNN::description_with_default_ty(
             |s: String, start: isize, end: isize| s.sub_string(start, end),
             ["string", "start", "end"],
-            Some("Returns the substring of `string` from index `start` to index `end`."),
+            "Returns the substring of `string` from index `start` to index `end`.",
             no_effects(),
         ),
     );
@@ -214,7 +214,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |s: String| s.uppercase(),
             ["string"],
-            Some("Returns the uppercase equivalent of this string."),
+            "Returns the uppercase equivalent of this string.",
             no_effects(),
         ),
     );
@@ -223,7 +223,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             |s: String| s.lowercase(),
             ["string"],
-            Some("Returns the lowercase equivalent of this string."),
+            "Returns the lowercase equivalent of this string.",
             no_effects(),
         ),
     );

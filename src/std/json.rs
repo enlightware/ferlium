@@ -129,7 +129,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNFV::description_with_ty(
             parse_json,
             ["json"],
-            Some("Parses a JSON into a variant."),
+            "Parses a JSON into a variant.",
             string_type(),
             variant_type(),
             no_effects(),

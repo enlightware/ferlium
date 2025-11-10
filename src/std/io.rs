@@ -36,7 +36,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnVN::description_with_in_ty(
             log,
             ["message"],
-            Some("Logs a message to the standard logging output."),
+            "Logs a message to the standard logging output.",
             Type::variable_id(0),
             effect(PrimitiveEffect::Write),
         ),

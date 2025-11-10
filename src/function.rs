@@ -494,12 +494,12 @@ macro_rules! n_ary_native_fn {
                 $struct_name(f, PhantomData)
             }
 
-            pub fn description_with_ty_scheme(f: F, arg_names: [&'static str; count!($($arg)*)], doc: Option<&'static str>, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
+            pub fn description_with_ty_scheme(f: F, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
                 ModuleFunction {
                     definition: FunctionDefinition::new(
                         ty_scheme,
                         arg_names.into_iter().map(Ustr::from).collect(),
-                        doc.map(String::from),
+                        Some(String::from(doc)),
                     ),
                     code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
                     spans: None,
@@ -508,7 +508,7 @@ macro_rules! n_ary_native_fn {
 
             paste::paste! {
             #[allow(clippy::too_many_arguments)]
-            pub fn description_with_ty(f: F, arg_names: [&'static str; count!($($arg)*)], doc: Option<&'static str>, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
+            pub fn description_with_ty(f: F, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
                     [$(([<$arg:lower _ty>], $arg::MUTABLE)), *],
                     o_ty,
@@ -520,13 +520,13 @@ macro_rules! n_ary_native_fn {
 
             paste::paste! {
                 #[allow(clippy::too_many_arguments)]
-                pub fn description_with_in_ty(f: F, arg_names: [&'static str; count!($($arg)*)], doc: Option<&'static str>, $([<$arg:lower _ty>]: Type,)* effects: EffType) -> ModuleFunction {
+                pub fn description_with_in_ty(f: F, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, $([<$arg:lower _ty>]: Type,)* effects: EffType) -> ModuleFunction {
                     let o_ty = O::default_ty();
                     Self::description_with_ty(f, arg_names, doc, $([<$arg:lower _ty>],)* o_ty, effects)
                 }
                 }
 
-            pub fn description_with_default_ty(f: F, arg_names: [&'static str; count!($($arg)*)], doc: Option<&'static str>, effects: EffType) -> ModuleFunction {
+            pub fn description_with_default_ty(f: F, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, effects: EffType) -> ModuleFunction {
                 Self::description_with_in_ty(f, arg_names, doc, $($arg::default_ty(),)* effects)
             }
         }
@@ -590,7 +590,7 @@ n_ary_native_fn!(NullaryNativeFn);
 declare_native_fn_aliases!(0);
 
 impl<O: OutputBuilder + 'static, F: Fn() -> O::Input + 'static> NullaryNativeFn<O, F> {
-    pub fn description(f: F, doc: Option<&'static str>, effects: EffType) -> ModuleFunction {
+    pub fn description(f: F, doc: &'static str, effects: EffType) -> ModuleFunction {
         Self::description_with_in_ty(f, [], doc, effects)
     }
 }

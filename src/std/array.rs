@@ -116,7 +116,7 @@ impl Array {
         BinaryNativeFnMVN::description_with_ty_scheme(
             Self::append,
             ["array", "value"],
-            Some("Appends an element to the back of the array."),
+            "Appends an element to the back of the array.",
             ty_scheme,
         )
     }
@@ -137,7 +137,7 @@ impl Array {
         BinaryNativeFnMVN::description_with_ty_scheme(
             Self::prepend,
             ["array", "value"],
-            Some("Prepends an element to the front of the array."),
+            "Prepends an element to the front of the array.",
             ty_scheme,
         )
     }
@@ -160,7 +160,7 @@ impl Array {
         UnaryNativeFnMV::description_with_ty_scheme(
             Self::pop_back,
             ["array"],
-            Some("Removes the last element of the array and returns it, or `None` if it is empty."),
+            "Removes the last element of the array and returns it, or `None` if it is empty.",
             ty_scheme,
         )
     }
@@ -183,9 +183,7 @@ impl Array {
         UnaryNativeFnMV::description_with_ty_scheme(
             Self::pop_front,
             ["array"],
-            Some(
-                "Removes the first element of the array and returns it, or `None` if it is empty.",
-            ),
+            "Removes the first element of the array and returns it, or `None` if it is empty.",
             ty_scheme,
         )
     }
@@ -208,7 +206,7 @@ impl Array {
         UnaryNativeFnNN::description_with_ty_scheme(
             |a: Self| a.len() as isize,
             ["array"],
-            Some("Returns the length of the array."),
+            "Returns the length of the array.",
             ty_scheme,
         )
     }
@@ -229,7 +227,7 @@ impl Array {
         BinaryNativeFnNNN::description_with_ty_scheme(
             |a: Self, b: Self| Self::concat(&a, &b),
             ["left", "right"],
-            Some("Concatenates two arrays and returns the result."),
+            "Concatenates two arrays and returns the result.",
             ty_scheme,
         )
     }
@@ -251,7 +249,7 @@ impl Array {
         UnaryNativeFnNN::description_with_ty_scheme(
             |a: Self| a.iter(),
             ["array"],
-            Some("Creates an iterator over the array."),
+            "Creates an iterator over the array.",
             ty_scheme,
         )
     }
@@ -310,7 +308,7 @@ impl ArrayIterator {
         UnaryNativeFnMV::description_with_ty_scheme(
             Self::next_value,
             ["iterator"],
-            Some("Gets the next value of the array."),
+            "Gets the next value of the array.",
             ty_scheme,
         )
     }

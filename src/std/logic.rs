@@ -39,7 +39,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::BitOr::bitor as fn(bool, bool) -> bool,
             ["left", "right"],
-            Some("Performs a binary OR operation on each corresponding bit of `left` and `right`."),
+            "Performs a binary OR operation on each corresponding bit of `left` and `right`.",
             no_effects(),
         ),
     );
@@ -48,9 +48,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnNNN::description_with_default_ty(
             std::ops::BitAnd::bitand as fn(bool, bool) -> bool,
             ["left", "right"],
-            Some(
-                "Performs a binary AND operation on each corresponding bit of `left` and `right`.",
-            ),
+            "Performs a binary AND operation on each corresponding bit of `left` and `right`.",
             no_effects(),
         ),
     );
@@ -59,7 +57,7 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnNN::description_with_default_ty(
             std::ops::Not::not as fn(bool) -> bool,
             ["value"],
-            Some("Performs a logical NOT operation."),
+            "Performs a logical NOT operation.",
             no_effects(),
         ),
     );
@@ -70,7 +68,7 @@ pub fn add_to_module(to: &mut Module) {
         BinaryNativeFnVVN::description_with_default_ty(
             |a: Value, b: Value| a == b,
             ["left", "right"],
-            Some("Returns `true` if `left` is equal to `right`, otherwise `false`."),
+            "Returns `true` if `left` is equal to `right`, otherwise `false`.",
             no_effects(),
         ),
     );

@@ -44,7 +44,7 @@ fn testing_module() -> Module {
         UnaryNativeFnNV::description_with_ty(
             |v: isize| Value::tuple_variant(ustr("Some"), [Value::native(v)]),
             ["option"],
-            None,
+            "Wraps an integer into an Option variant.",
             int_type(),
             option_type(int_type()),
             no_effects(),
@@ -58,7 +58,7 @@ fn testing_module() -> Module {
                 Value::tuple_variant(ustr("Pair"), [Value::native(a), Value::native(b)])
             },
             ["first", "second"],
-            None,
+            "Creates a Pair variant from two integers.",
             int_type(),
             int_type(),
             pair_variant_type,
@@ -75,7 +75,7 @@ fn test_effect_module() -> Module {
         NullaryNativeFnN::description_with_default_ty(
             || (),
             [],
-            None,
+            "Performs a read effect.",
             effect(PrimitiveEffect::Read),
         ),
     );
@@ -84,7 +84,7 @@ fn test_effect_module() -> Module {
         NullaryNativeFnN::description_with_default_ty(
             || (),
             [],
-            None,
+            "Performs a write effect.",
             effect(PrimitiveEffect::Write),
         ),
     );
@@ -93,16 +93,16 @@ fn test_effect_module() -> Module {
         NullaryNativeFnN::description_with_default_ty(
             || (),
             [],
-            None,
+            "Performs both read and write effects.",
             effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
         ),
     );
     module.add_named_function(
         "take_read".into(),
         UnaryNativeFnVN::description_with_in_ty(
-            |_value: Value| 0,
+            |_value: Value| (),
             ["value"],
-            None,
+            "Takes a first-class function that performs a read effect, and fake call it.",
             Type::function_type(FnType::new(
                 vec![],
                 Type::unit(),
@@ -143,7 +143,7 @@ fn test_property_module() -> Module {
         NullaryNativeFnN::description_with_default_ty(
             get_property_value,
             [],
-            None,
+            "Gets the value of my_scope.my_var.",
             effect(PrimitiveEffect::Read),
         ),
     );
@@ -152,7 +152,7 @@ fn test_property_module() -> Module {
         UnaryNativeFnNN::description_with_default_ty(
             set_property_value,
             ["value"],
-            None,
+            "Sets the value of my_scope.my_var.",
             effect(PrimitiveEffect::Write),
         ),
     );
@@ -161,7 +161,7 @@ fn test_property_module() -> Module {
         NullaryNativeFnN::description_with_ty(
             get_array_property_value,
             [],
-            None,
+            "Gets the value of my_scope.my_array.",
             array_type(int_type()),
             effect(PrimitiveEffect::Read),
         ),
@@ -171,7 +171,7 @@ fn test_property_module() -> Module {
         UnaryNativeFnNN::description_with_in_ty(
             set_array_property_value,
             ["value"],
-            None,
+            "Sets the value of my_scope.my_array.",
             array_type(int_type()),
             effect(PrimitiveEffect::Write),
         ),
