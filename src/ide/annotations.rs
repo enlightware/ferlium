@@ -330,21 +330,8 @@ fn should_hide_arg_name_hint(
 
     static PATHS_TO_HIDE: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         [
-            "std::eq",
-            "std::ne",
-            "std::le",
-            "std::lt",
-            "std::ge",
-            "std::gt",
-            "std::not",
-            "std::bitand",
-            "std::bitor",
-            "std::neg",
-            "std::add",
-            "std::sub",
-            "std::mul",
-            "std::div",
-            "std::rem",
+            "std::eq", "std::ne", "std::le", "std::lt", "std::ge", "std::gt", "std::not",
+            "std::neg", "std::add", "std::sub", "std::mul", "std::div", "std::rem",
         ]
         .into_iter()
         .collect()

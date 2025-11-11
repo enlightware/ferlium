@@ -716,13 +716,13 @@ CompOp: Ustr = {
     ">" => ustr("std::gt"),
 }
 
-LogicalAndOp: Ustr = {
-    "and" => ustr("std::bitand"),
+LogicalAndOp: () = {
+    "and" => (),
     <l:@L> "&&" <r:@R> =>? error("for readability, use the \"and\" keyword instead of the C-style && operator".into(), span(l, r)),
 }
 
-LogicalOrOp: Ustr = {
-    "or" => ustr("std::bitor"),
+LogicalOrOp: () = {
+    "or" => (),
     <l:@L> "||" <r:@R> =>? error("for readability, use the \"or\" keyword instead of the C-style || operator".into(), span(l, r)),
 }
 
