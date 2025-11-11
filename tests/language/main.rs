@@ -10,6 +10,7 @@
 #[macro_use]
 mod common;
 mod algorithm;
+mod bits;
 mod complex;
 mod effects;
 mod math;

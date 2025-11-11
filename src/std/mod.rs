@@ -19,6 +19,7 @@ use math::{Float, Int};
 use ustr::ustr;
 
 pub mod array;
+pub mod bits;
 pub mod cast;
 pub mod contains;
 pub mod core;
@@ -50,6 +51,7 @@ pub fn std_module() -> Rc<Module> {
                 flow::add_to_module(&mut module);
                 cast::add_to_module(&mut module);
                 // mem::add_to_module(&mut module);
+                bits::add_to_module(&mut module);
                 logic::add_to_module(&mut module);
                 ordering::add_to_module(&mut module);
                 contains::add_to_module(&mut module);

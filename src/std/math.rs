@@ -8,7 +8,7 @@
 //
 use std::{convert::identity, fmt, sync::LazyLock};
 
-use num_traits::{Bounded, NumCast, PrimInt, Signed, Zero};
+use num_traits::{Bounded, NumCast, PrimInt, Signed, Zero, clamp};
 use ordered_float::{FloatCore, NotNan};
 use ustr::ustr;
 
@@ -23,6 +23,7 @@ use crate::{
     },
     module::Module,
     std::{
+        bits::BITS_TRAIT,
         cast::CAST_TRAIT,
         ordering::{ORD_TRAIT, ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS},
     },
@@ -123,6 +124,59 @@ where
     } else {
         I::max_value()
     }
+}
+
+fn clamp_to_u32(value: Int) -> u32 {
+    clamp(value, 0, (u32::MAX as Int).max(Int::MAX)) as u32
+}
+
+fn clamped_negated_shift_to_u32(shift: Int) -> u32 {
+    let shift = if shift == Int::MIN { Int::MAX } else { -shift };
+    clamp_to_u32(shift)
+}
+
+fn rotate_left(value: Int, shift: Int) -> Int {
+    if shift < 0 {
+        let shift = clamped_negated_shift_to_u32(shift);
+        value.rotate_right(shift)
+    } else {
+        let shift = clamp_to_u32(shift);
+        value.rotate_left(shift)
+    }
+}
+
+fn rotate_right(value: Int, shift: Int) -> Int {
+    if shift < 0 {
+        let shift = clamped_negated_shift_to_u32(shift);
+        value.rotate_left(shift)
+    } else {
+        let shift = clamp_to_u32(shift);
+        value.rotate_right(shift)
+    }
+}
+
+fn count_ones(value: Int) -> Int {
+    value.count_ones() as Int
+}
+
+fn count_zeros(value: Int) -> Int {
+    value.count_zeros() as Int
+}
+
+fn bit(position: Int) -> Int {
+    1 << position
+}
+
+fn set_bit(value: Int, position: Int) -> Int {
+    value | (1 << position)
+}
+
+fn clear_bit(value: Int, position: Int) -> Int {
+    value & !(1 << position)
+}
+
+fn test_bit(value: Int, position: Int) -> bool {
+    (value & (1 << position)) != 0
 }
 
 use FunctionDefinition as Def;
@@ -237,6 +291,27 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(Int::abs)) as Function,
             b(UnaryFn::new(Int::signum)) as Function,
             b(UnaryFn::new(identity::<Int>)) as Function,
+        ],
+    );
+    to.add_concrete_impl(
+        BITS_TRAIT.clone(),
+        [int_type()],
+        [],
+        [
+            b(BinaryFn::new(<Int as ops::BitAnd>::bitand)) as Function,
+            b(BinaryFn::new(<Int as ops::BitOr>::bitor)) as Function,
+            b(BinaryFn::new(<Int as ops::BitXor>::bitxor)) as Function,
+            b(UnaryFn::new(<Int as ops::Not>::not)) as Function,
+            b(BinaryFn::new(<Int as ops::Shl>::shl)) as Function,
+            b(BinaryFn::new(<Int as ops::Shr>::shr)) as Function,
+            b(BinaryFn::new(rotate_left)) as Function,
+            b(BinaryFn::new(rotate_right)) as Function,
+            b(UnaryFn::new(count_ones)) as Function,
+            b(UnaryFn::new(count_zeros)) as Function,
+            b(UnaryFn::new(bit)) as Function,
+            b(BinaryFn::new(set_bit)) as Function,
+            b(BinaryFn::new(clear_bit)) as Function,
+            b(BinaryFn::new(test_bit)) as Function,
         ],
     );
     to.add_concrete_impl(
