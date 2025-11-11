@@ -350,7 +350,9 @@ impl Node {
                 } else {
                     writeln!(f, "{indent_str}to (")?;
                     for (name, arg) in app.argument_names.iter().zip(app.arguments.iter()) {
-                        writeln!(f, "{indent_str}  {name}:")?;
+                        if !name.is_empty() {
+                            writeln!(f, "{indent_str}  {name}:")?;
+                        }
                         arg.format_ind(f, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
@@ -479,8 +481,9 @@ impl Node {
                 writeln!(f, "{indent_str}match")?;
                 case.value.format_ind(f, env, spacing, indent + 1)?;
                 for (alternative, node) in &case.alternatives {
-                    writeln!(f, "{indent_str}case ",)?;
+                    write!(f, "{indent_str}case ",)?;
                     alternative.format_as_string_repr(f)?;
+                    writeln!(f)?;
                     node.format_ind(f, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}default")?;
