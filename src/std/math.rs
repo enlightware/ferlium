@@ -8,7 +8,7 @@
 //
 use std::{convert::identity, fmt, sync::LazyLock};
 
-use num_traits::{Bounded, NumCast, PrimInt, Signed, Zero, clamp};
+use num_traits::{Bounded, NumCast, PrimInt, Signed, Zero};
 use ordered_float::{FloatCore, NotNan};
 use ustr::ustr;
 
@@ -127,7 +127,17 @@ where
 }
 
 fn clamp_to_u32(value: Int) -> u32 {
-    clamp(value, 0, (u32::MAX as Int).max(Int::MAX)) as u32
+    if value <= 0 {
+        return 0;
+    }
+    #[cfg(any(target_pointer_width = "16", target_pointer_width = "32"))]
+    {
+        value as u32
+    }
+    #[cfg(target_pointer_width = "64")]
+    {
+        (value as u64).min(u32::MAX as u64) as u32
+    }
 }
 
 fn clamped_negated_shift_to_u32(shift: Int) -> u32 {
