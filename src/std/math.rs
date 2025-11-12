@@ -135,6 +135,26 @@ fn clamped_negated_shift_to_u32(shift: Int) -> u32 {
     clamp_to_u32(shift)
 }
 
+fn shift_left(value: Int, shift: Int) -> Int {
+    if shift < 0 {
+        let shift = clamped_negated_shift_to_u32(shift);
+        value.wrapping_shr(shift)
+    } else {
+        let shift = clamp_to_u32(shift);
+        value.wrapping_shl(shift)
+    }
+}
+
+fn shift_right(value: Int, shift: Int) -> Int {
+    if shift < 0 {
+        let shift = clamped_negated_shift_to_u32(shift);
+        value.wrapping_shl(shift)
+    } else {
+        let shift = clamp_to_u32(shift);
+        value.wrapping_shr(shift)
+    }
+}
+
 fn rotate_left(value: Int, shift: Int) -> Int {
     if shift < 0 {
         let shift = clamped_negated_shift_to_u32(shift);
@@ -164,19 +184,23 @@ fn count_zeros(value: Int) -> Int {
 }
 
 fn bit(position: Int) -> Int {
-    1 << position
+    if position < 0 {
+        return 0;
+    }
+    let position = clamp_to_u32(position);
+    (1 as Int).checked_shl(position).unwrap_or(0)
 }
 
 fn set_bit(value: Int, position: Int) -> Int {
-    value | (1 << position)
+    value | bit(position)
 }
 
 fn clear_bit(value: Int, position: Int) -> Int {
-    value & !(1 << position)
+    value & !bit(position)
 }
 
 fn test_bit(value: Int, position: Int) -> bool {
-    (value & (1 << position)) != 0
+    (value & bit(position)) != 0
 }
 
 use FunctionDefinition as Def;
@@ -302,8 +326,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(<Int as ops::BitOr>::bitor)) as Function,
             b(BinaryFn::new(<Int as ops::BitXor>::bitxor)) as Function,
             b(UnaryFn::new(<Int as ops::Not>::not)) as Function,
-            b(BinaryFn::new(<Int as ops::Shl>::shl)) as Function,
-            b(BinaryFn::new(<Int as ops::Shr>::shr)) as Function,
+            b(BinaryFn::new(shift_left)) as Function,
+            b(BinaryFn::new(shift_right)) as Function,
             b(BinaryFn::new(rotate_left)) as Function,
             b(BinaryFn::new(rotate_right)) as Function,
             b(UnaryFn::new(count_ones)) as Function,
