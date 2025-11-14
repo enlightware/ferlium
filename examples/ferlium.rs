@@ -379,7 +379,7 @@ fn print_help() {
         "\\module MOD_NAME?: Show a module by name, or the current module if no name is given."
     );
     println!(
-        "\\function FN_ID MOD_NAME?: Shows the code of a function given by its identifier, in a given module."
+        "\\function FN_NAME_OR_INDEX MOD_NAME?: Shows the code of a function given by its name or index, in a given module."
     );
     println!("\\history: Show the modules in this session's history.");
     println!("CTRL-D: Exit the REPL.");
@@ -619,18 +619,6 @@ fn run_interactive_repl() {
                             true
                         }
                         "function" => {
-                            let index = if let Some(arg) = args.get(1) {
-                                match arg.parse::<usize>() {
-                                    Ok(id) => id,
-                                    Err(_) => {
-                                        println!("Invalid function id {arg}.");
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                println!("Function id is required.");
-                                continue;
-                            };
                             let (module, module_name): (&Module, &str) =
                                 if let Some(arg) = args.get(2) {
                                     let name = *arg;
@@ -643,6 +631,26 @@ fn run_interactive_repl() {
                                 } else {
                                     (&last_module, "current")
                                 };
+                            let index = if let Some(arg) = args.get(1) {
+                                match arg.parse::<usize>() {
+                                    Ok(id) => id,
+                                    Err(_) => {
+                                        // not a number, attempt to find by name
+                                        match module.function_name_to_id.get(&ustr(arg)) {
+                                            Some(id) => id.as_index(),
+                                            None => {
+                                                println!(
+                                                    "Function name {arg} not found in module {module_name}."
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                println!("Function id is required.");
+                                continue;
+                            };
                             let local_fn = if let Some(local_fn) = module.functions.get(index) {
                                 local_fn
                             } else {
