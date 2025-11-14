@@ -58,7 +58,7 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 
 ### Scope and non-scope
 
-The [issues](https://github.com/enlightware/ferlium/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement) list the planned features.
+The [issues](https://github.com/enlightware/ferlium/issues?q=is%3Aissue+is%3Aopen+type%3AFeature) list the planned features.
 
 The following features are out of scope:
 * Dynamic dispatch
