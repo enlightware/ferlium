@@ -374,15 +374,15 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
 
 fn print_help() {
     println!("Available commands:");
-    println!("\\help: Show this help message.");
+    println!("\\help: Shows this help message.");
     println!(
-        "\\module MOD_NAME?: Show a module by name, or the current module if no name is given."
+        "\\module MOD_NAME?: Shows a module by name, or the current module if no name is given."
     );
     println!(
         "\\function FN_NAME_OR_INDEX MOD_NAME?: Shows the code of a function given by its name or index, in a given module."
     );
-    println!("\\history: Show the modules in this session's history.");
-    println!("CTRL-D: Exit the REPL.");
+    println!("\\history: Shows the modules in this session's history.");
+    println!("CTRL-D: Exits the REPL.");
 }
 
 /// Process a single input: parse, compile module, and evaluate expression if present.
