@@ -556,6 +556,7 @@ fn run_interactive_repl() {
     let mut counter: usize = 0;
 
     // REPL loop
+    println!("Ferlium REPL - Type \\help for help.");
     let mut rl = DefaultEditor::new().unwrap();
     rl.set_max_history_size(256).unwrap();
     let history_filename = "ferlium_history.txt";
