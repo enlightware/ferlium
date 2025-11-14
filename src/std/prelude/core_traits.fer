@@ -99,6 +99,20 @@ fn any(it, f) {
 	result
 }
 
+/// Counts the number of elements in the iterator.
+fn count(it) -> int {
+	// When capture is available, build on try_fold (see fn all)
+	let mut it = it;
+	let mut count = 0;
+	loop {
+		match next(it) {
+			Some(x) => count += 1,
+			None => soft_break,
+		}
+	};
+	count
+}
+
 // Compatibility, mark as deprecated when supported
 
 /// Deprecated, use `all` instead.
