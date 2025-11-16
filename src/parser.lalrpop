@@ -97,6 +97,8 @@ Type<P>: Type = {
     PlaceholderType if P != "",
     PathType,
     ArrayType<P>,
+    SetType<P>,
+    MapType<P>,
     RecordType<P>,
     VariantType<P>,
     TupleOrFnType<P>,
@@ -153,6 +155,14 @@ PathType: Type = {
 
 ArrayType<P>: Type = {
     "[" <t:Sp<Type<P>>> "]" => Type::Array(boxed(t))
+}
+
+SetType<P>: Type = {
+    "{" <t:Sp<Type<P>>> "}" =>? error("set types not implemented yet".into(), t.1)
+}
+
+MapType<P>: Type = {
+    "{" <k:Sp<Type<P>>> "=>" <v:Sp<Type<P>>> "}" =>? error("map types not implemented yet".into(), span(k.1.start(), v.1.end()))
 }
 
 RecordType<P>: Type = {
