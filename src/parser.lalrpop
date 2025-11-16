@@ -438,6 +438,8 @@ AtomExpr<NoStruct> = {
     FormattedString,
     TupleExpr,
     ArrayExpr,
+    SetExpr,
+    MapExpr,
     RecordExpr,
     SoftBreakExpr,
     StmtLikeExpr,
@@ -575,6 +577,33 @@ TupleArgs: Vec<Expr> = {
 
 ArrayExpr: ExprKind = {
     "[" <a:Sep<Expr, ",">> "]" => Array(a),
+}
+
+SetExpr: ExprKind = {
+    <l:@L> "{" <items:SetLiteralElements> "}" <r:@R> =>? {
+        let _ = items;
+        error("set literals not implemented yet".into(), span(l, r))
+    },
+}
+
+SetLiteralElements: Vec<Expr> = {
+    <f:Expr> "," <r:Sep<Expr, ",">> => ext_f(f, r),
+}
+
+MapExpr: ExprKind = {
+    <l:@L> "{" <entries:MapLiteralEntries> "}" <r:@R> =>? {
+        let _ = entries;
+        error("map literals not implemented yet".into(), span(l, r))
+    },
+}
+
+MapLiteralEntries: Vec<(Expr, Expr)> = {
+    <f:MapEntry> "," <r:Sep<MapEntry, ",">> => ext_f(f, r),
+    <f:MapEntry> => vec![f],
+}
+
+MapEntry: (Expr, Expr) = {
+    <key:Expr> "=>" <value:Expr> => (key, value),
 }
 
 RecordExpr: ExprKind = {
