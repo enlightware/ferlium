@@ -359,16 +359,29 @@ impl Node {
                     drop(function);
                     // Build closure to capture the dictionaries of this function, if any.
                     if !ctx.dicts.is_empty() {
-                        let captures = (0..ctx.dicts.len())
-                            .map(|index| {
-                                Node::new(
-                                    EnvLoad(b(ir::EnvLoad { index, name: None })),
-                                    int_type(),
-                                    no_effects(),
-                                    self.span,
-                                )
-                            })
-                            .collect();
+                        let captures =
+                            ctx.dicts
+                                .requirements
+                                .iter()
+                                .enumerate()
+                                .map(|(index, req)| {
+                                    let ty = match req {
+                                        DictionaryReq::FieldIndex { .. } => int_type(),
+                                        DictionaryReq::TraitImpl {
+                                            trait_ref,
+                                            input_tys,
+                                            output_tys,
+                                        } => trait_ref
+                                            .get_dictionary_type_for_tys(input_tys, output_tys),
+                                    };
+                                    Node::new(
+                                        EnvLoad(b(ir::EnvLoad { index, name: None })),
+                                        ty,
+                                        no_effects(),
+                                        self.span,
+                                    )
+                                })
+                                .collect();
                         self.kind = BuildClosure(b(ir::BuildClosure {
                             function: self.clone(),
                             captures,
@@ -376,8 +389,43 @@ impl Node {
                     }
                 }
             }
-            BuildClosure(_) => {
-                panic!("BuildClosure should not be present at this stage");
+            BuildClosure(build_closure) => {
+                // Elaborate captures first (they are in outer scope).
+                for capture in &mut build_closure.captures {
+                    capture.elaborate_dictionaries(ctx)?;
+                }
+
+                // Elaborate the function (it is the closure body/value).
+                build_closure.function.elaborate_dictionaries(ctx)?;
+
+                // Optimization: flatten nested BuildClosure
+                // Check if the function is a BuildClosure itself (due to dictionary capturing).
+                let is_nested = matches!(build_closure.function.kind, NodeKind::BuildClosure(_));
+
+                if is_nested {
+                    // Extract the inner BuildClosure.
+                    let inner_node = mem::replace(
+                        &mut build_closure.function,
+                        Node::new(
+                            NodeKind::SoftBreak, // dummy
+                            Type::unit(),
+                            no_effects(),
+                            self.span,
+                        ),
+                    );
+
+                    let inner_build = inner_node
+                        .kind
+                        .into_build_closure()
+                        .expect("is_nested check failed");
+                    // inner_build.captures are the dictionary captures (should be first)
+                    // build_closure.captures are the variable captures (should be second)
+                    let inner_build = *inner_build;
+                    let mut new_captures = inner_build.captures;
+                    new_captures.append(&mut build_closure.captures);
+                    build_closure.captures = new_captures;
+                    build_closure.function = inner_build.function;
+                }
             }
             Apply(app) => {
                 app.function.elaborate_dictionaries(ctx)?;

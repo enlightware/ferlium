@@ -669,7 +669,7 @@ impl Node {
         match &self.kind {
             Immediate(_) => {} // no need to look into the value's type as it is already in this node's type
             BuildClosure(_) => {
-                panic!("BuildClosure should not be in the IR at this point");
+                // no need to look into the value's type as it is already in this node's type
             }
             Apply(app) => {
                 app.function.unbound_ty_vars(result, ignore);
@@ -762,9 +762,8 @@ impl Node {
                 immediate.value.instantiate(subst);
             }
             BuildClosure(build_closure) => {
-                // Note: at the moment build closure is used only for dictionary
-                // passing so we can ignore the substitution of the captures
                 build_closure.function.instantiate(subst);
+                instantiate_nodes(&mut build_closure.captures, subst);
             }
             Apply(app) => {
                 app.function.instantiate(subst);

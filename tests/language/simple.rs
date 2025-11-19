@@ -587,6 +587,72 @@ fn lambda() {
         run("let f = |x| x[0] = 1; let mut a = [0]; f(a); a"),
         int_a!(1)
     );
+    assert_eq!(run("fn a() { |x| x + x } a()((1: int))"), int(2));
+    assert_eq!(run("fn a() { |x| x + x } a()((1: float))"), float(2.0));
+    fail_compilation(indoc! {"
+            fn swap(a, b) {
+            let t = a;
+            a = b;
+            b = t;
+        }
+
+        let a = || {
+            let mut r = [1, 2];
+            swap(r[0], r[0])
+        };
+        a()"})
+    .as_mutable_paths_overlap()
+    .unwrap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn closures() {
+    // Basic capture.
+    assert_eq!(run("let a = 3.3; let f = || a; f()"), float(3.3));
+    assert_eq!(run("let a = 3; let f = || a; (f(): int)"), int(3));
+    assert_eq!(run("let a = 3; let f = || a; (f(): float)"), float(3.0));
+    // Capture in functions.
+    assert_eq!(run("fn f() { let b = 1; |x| x + b } f()(1.0)"), float(2.0));
+    assert_eq!(run("fn f() { let b = 1; |x| x + b } (f()(1): int)"), int(2));
+    // Independence from outer mutation.
+    assert_eq!(run("let mut a = 1; let f = || a; a = 2; f()"), int(1));
+    // Independence of outer from inner mutation.
+    assert_eq!(
+        run("let mut a = 1; let f = || { a = 2; a }; f(); a"),
+        int(1)
+    );
+    // Statelessness of closures.
+    assert_eq!(
+        run("let mut a = 1; let f = || { a = a + 1; a }; f() + f()"),
+        int(4)
+    );
+    // Deep copy of mutable structures (arrays)
+    assert_eq!(
+        run("let mut a = [1]; let f = || a[0]; a[0] = 2; f()"),
+        int(1)
+    );
+    // Capture in nested scopes.
+    assert_eq!(
+        run("let f = || { let mut a = 1; let g = || a; a = 2; g() }; f()"),
+        int(1)
+    );
+    assert_eq!(
+        run("let a = 3.3; let f = || { let b = 1.2; || a + b }; f()()"),
+        float(4.5)
+    );
+    assert_eq!(
+        run("let a = 3; let f = || { let b = 1; || a + b }; (f()(): int)"),
+        int(4)
+    );
+    assert_eq!(
+        run("let a = 3; let f = || { let b: int = 1; || a + b }; f()()"),
+        int(4)
+    );
+    assert_eq!(
+        run("let a = \"hi\"; let f = || { let a = 3; let b: int = 1; || a + b }; f()()"),
+        int(4)
+    );
 }
 
 #[test]
@@ -1401,7 +1467,7 @@ fn early_returns() {
     assert_eq!(run("fn f(x) { return x * 2 + 1 } f(5)"), int(11));
     assert_eq!(run("fn f(x, y) { return x + y } f(3, 4)"), int(7));
 
-    // Return in closure
+    // Return in lambdas
     assert_eq!(run("let f = || { return 42 }; f()"), int(42));
     assert_eq!(run("let f = |x| { if x { return 1 }; 2 }; f(true)"), int(1));
     assert_eq!(

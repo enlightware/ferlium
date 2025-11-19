@@ -16,7 +16,9 @@ use std::{
 };
 
 use crate::{
-    ast::{DExpr, Desugared, RecordField, RecordFields},
+    ast::{
+        DExpr, Desugared, ExprKind, Pattern, PatternKind, PatternVar, RecordField, RecordFields,
+    },
     containers::continuous_hashmap_to_vec,
     error::{
         DuplicatedFieldContext, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
@@ -40,7 +42,7 @@ use itertools::{Itertools, multiunzip};
 use ustr::{Ustr, ustr};
 
 use crate::{
-    ast::{ExprKind, PropertyAccess},
+    ast::PropertyAccess,
     containers::{SVec2, b},
     dictionary_passing::DictionaryReq,
     effects::{EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution, no_effects},
@@ -440,8 +442,42 @@ impl TypeInference {
                 (node, Type::never(), MutType::constant(), effects)
             }
             Abstract(args, body) => {
-                // Allocate fresh type and mutability variables for the arguments in the function's scope
-                let locals = args
+                // 1. Collect free variables in the body.
+                let mut free_vars = HashSet::new();
+                let mut bound_vars = vec![HashSet::new()];
+                for (arg, _) in args {
+                    bound_vars[0].insert(*arg);
+                }
+                collect_free_variables(body, &mut bound_vars, &mut free_vars);
+
+                // 2. Identify captures from the current environment.
+                let mut captures = Vec::new();
+                let mut capture_args = Vec::new();
+
+                // Sort for deterministic order.
+                let mut sorted_free_vars: Vec<_> = free_vars.into_iter().collect();
+                sorted_free_vars.sort();
+
+                for var_name in sorted_free_vars {
+                    if let Some((index, ty, mut_ty)) =
+                        env.get_variable_index_and_type_scheme(&var_name)
+                    {
+                        // It is a local variable in the current environment, capture it.
+                        captures.push(N::new(
+                            K::EnvLoad(b(ir::EnvLoad {
+                                index,
+                                name: Some(var_name),
+                            })),
+                            ty,
+                            no_effects(),
+                            expr.span,
+                        ));
+                        capture_args.push(Local::new(var_name, mut_ty, ty, expr.span));
+                    }
+                }
+
+                // 3. Allocate fresh type and mutability variables for the explicit arguments.
+                let explicit_locals = args
                     .iter()
                     .map(|(name, span)| {
                         Local::new(
@@ -452,29 +488,66 @@ impl TypeInference {
                         )
                     })
                     .collect::<Vec<_>>();
-                let args_ty = locals.iter().map(Local::as_fn_arg_type).collect();
-                // Build environment for typing the function's body
+                let args_ty = explicit_locals.iter().map(Local::as_fn_arg_type).collect();
+
+                // 4. Build environment for typing the function's body.
+                // The environment must include captured variables first, then explicit arguments.
+                let all_locals = capture_args
+                    .iter()
+                    .cloned()
+                    .chain(explicit_locals)
+                    .collect();
+
                 let ret_ty = self.fresh_type_var_ty();
-                let mut env = TypingEnv::new(
-                    locals,
+                let mut inner_env = TypingEnv::new(
+                    all_locals,
                     env.new_import_slots,
                     env.module_env,
                     Some((ret_ty, body.span)),
                 );
-                // Infer the body's type
+
+                // 5. Infer the body's type.
                 let code =
-                    self.check_expr(&mut env, body, ret_ty, MutType::constant(), body.span)?;
-                // Store and return the function's type
+                    self.check_expr(&mut inner_env, body, ret_ty, MutType::constant(), body.span)?;
+
+                // 6. Store and return the function's type.
+                // The function type seen from outside only includes explicit arguments.
                 let fn_ty = FnType::new(args_ty, ret_ty, code.effects.clone());
-                let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
+
+                // The script function includes captured arguments in its name list.
+                let arg_names: Vec<_> = capture_args
+                    .iter()
+                    .map(|l| l.name)
+                    .chain(args.iter().map(|(name, _)| *name))
+                    .collect();
+
                 let value_fn = Value::pending_function(b(ScriptFunction::new(code, arg_names)));
-                let node = K::Immediate(Immediate::new(value_fn));
-                (
-                    node,
-                    Type::function_type(fn_ty),
-                    MutType::constant(),
+                let fn_node = N::new(
+                    K::Immediate(Immediate::new(value_fn)),
+                    Type::function_type(fn_ty.clone()), // This type is technically not fully correct for the inner function if we consider arity, but it's wrapped in a closure
                     no_effects(),
-                )
+                    expr.span,
+                );
+
+                if captures.is_empty() {
+                    (
+                        fn_node.kind,
+                        Type::function_type(fn_ty),
+                        MutType::constant(),
+                        no_effects(),
+                    )
+                } else {
+                    let node = K::BuildClosure(b(ir::BuildClosure {
+                        function: fn_node,
+                        captures,
+                    }));
+                    (
+                        node,
+                        Type::function_type(fn_ty),
+                        MutType::constant(),
+                        no_effects(),
+                    )
+                }
             }
             Apply(func, args, synthesized) => {
                 // Do we have a global function or variant?
@@ -2823,7 +2896,10 @@ impl UnifiedTypeInference {
             Immediate(immediate) => {
                 self.substitute_in_value(&mut immediate.value);
             }
-            BuildClosure(_) => panic!("BuildClosure should not be present at this stage"),
+            BuildClosure(build_closure) => {
+                self.substitute_in_node(&mut build_closure.function);
+                self.substitute_in_nodes(&mut build_closure.captures);
+            }
             Apply(app) => {
                 self.substitute_in_node(&mut app.function);
                 self.substitute_in_nodes(&mut app.arguments);
@@ -3138,6 +3214,104 @@ impl TypeSubstituer for NormalizeTypes<'_> {
 
     fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
         eff_ty.clone()
+    }
+}
+
+fn collect_free_variables(
+    expr: &DExpr,
+    bound: &mut Vec<HashSet<ustr::Ustr>>,
+    free: &mut HashSet<ustr::Ustr>,
+) {
+    use ExprKind::*;
+    match &expr.kind {
+        Identifier(name) => {
+            let is_bound = bound.iter().rev().any(|scope| scope.contains(name));
+            if !is_bound {
+                free.insert(*name);
+            }
+        }
+        Let((name, _), _, init, _) => {
+            collect_free_variables(init, bound, free);
+            if let Some(scope) = bound.last_mut() {
+                scope.insert(*name);
+            }
+        }
+        Abstract(args, body) => {
+            let mut scope = HashSet::new();
+            for (arg, _) in args {
+                scope.insert(*arg);
+            }
+            bound.push(scope);
+            collect_free_variables(body, bound, free);
+            bound.pop();
+        }
+        Block(exprs) => {
+            bound.push(HashSet::new());
+            for expr in exprs {
+                collect_free_variables(expr, bound, free);
+            }
+            bound.pop();
+        }
+        Match(cond, cases, default) => {
+            collect_free_variables(cond, bound, free);
+            for (pattern, body) in cases {
+                let mut scope = HashSet::new();
+                collect_pattern_vars(pattern, &mut scope);
+                bound.push(scope);
+                collect_free_variables(body, bound, free);
+                bound.pop();
+            }
+            if let Some(default) = default {
+                collect_free_variables(default, bound, free);
+            }
+        }
+        ForLoop(_) => {
+            // For loops are desugared before type inference
+            unreachable!("ForLoop should be desugared")
+        }
+        Apply(func, args, _) => {
+            collect_free_variables(func, bound, free);
+            for arg in args {
+                collect_free_variables(arg, bound, free);
+            }
+        }
+        Assign(place, _, value) => {
+            collect_free_variables(place, bound, free);
+            collect_free_variables(value, bound, free);
+        }
+        Tuple(args) | Array(args) => {
+            for arg in args {
+                collect_free_variables(arg, bound, free);
+            }
+        }
+        Project(expr, _)
+        | FieldAccess(expr, _)
+        | TypeAscription(expr, _, _)
+        | Return(expr)
+        | Loop(expr) => {
+            collect_free_variables(expr, bound, free);
+        }
+        Record(fields) | StructLiteral(_, fields) => {
+            for (_, expr) in fields {
+                collect_free_variables(expr, bound, free);
+            }
+        }
+        Index(arr, idx) => {
+            collect_free_variables(arr, bound, free);
+            collect_free_variables(idx, bound, free);
+        }
+        Literal(_, _) | FormattedString(_) | PropertyPath(_, _) | SoftBreak | Error => {}
+    }
+}
+
+fn collect_pattern_vars(pattern: &Pattern, bound: &mut HashSet<ustr::Ustr>) {
+    use PatternKind::*;
+    if let Variant { vars, .. } = &pattern.kind {
+        for var in vars {
+            if let PatternVar::Named((name, _)) = var {
+                bound.insert(*name);
+            }
+        }
     }
 }
 
