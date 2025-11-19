@@ -42,7 +42,7 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 * Ad hoc polymorphism through type classes (traits), with support for multi-parameter traits and associated types
 * Row polymorphism (for algebraic data types)
 * Optional type annotations, including `_` placeholders for type inference
-* First-class and anonymous functions
+* First-class and anonymous functions, including capture of outer variables by value (closures)
 * Pattern matching
 * Function pipelining with the `|>` operator
 * Mutable value semantics (a simplified version of Rust's ownership system)
