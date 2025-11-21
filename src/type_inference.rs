@@ -301,6 +301,130 @@ impl TypeInference {
         self.ty_coverage_constraints.push((span, ty, values));
     }
 
+    fn infer_abstract(
+        &mut self,
+        env: &mut TypingEnv,
+        args: &[(Ustr, Location)],
+        body: &DExpr,
+        expected_fn_ty: Option<FnType>,
+        span: Location,
+    ) -> Result<(ir::Node, Type, MutType, EffType), InternalCompilationError> {
+        use ir::Node as N;
+        use ir::NodeKind as K;
+
+        // 1. Collect free variables in the body.
+        let mut free_vars = HashSet::new();
+        let mut bound_vars = vec![HashSet::new()];
+        for (arg, _) in args {
+            bound_vars[0].insert(*arg);
+        }
+        collect_free_variables(body, &mut bound_vars, &mut free_vars);
+
+        // 2. Identify captures from the current environment.
+        let mut captures = Vec::new();
+        let mut capture_args = Vec::new();
+
+        // Sort for deterministic order.
+        let mut sorted_free_vars: Vec<_> = free_vars.into_iter().collect();
+        sorted_free_vars.sort();
+
+        for var_name in sorted_free_vars {
+            let found = env.get_variable_index_and_type_scheme(&var_name);
+            if let Some((index, ty, mut_ty)) = found {
+                // It is a local variable in the current environment, capture it.
+                captures.push(N::new(
+                    K::EnvLoad(b(ir::EnvLoad {
+                        index,
+                        name: Some(var_name),
+                    })),
+                    ty,
+                    no_effects(),
+                    span,
+                ));
+                capture_args.push(Local::new(var_name, mut_ty, ty, span));
+            }
+        }
+
+        // 3. Determine explicit arguments types and return type.
+        let (explicit_locals, ret_ty, expected_effects) = if let Some(fn_ty) = &expected_fn_ty {
+            let explicit_locals = args
+                .iter()
+                .zip(&fn_ty.args)
+                .map(|((name, span), arg_ty)| Local::new(*name, arg_ty.mut_ty, arg_ty.ty, *span))
+                .collect::<Vec<_>>();
+            (explicit_locals, fn_ty.ret, Some(fn_ty.effects.clone()))
+        } else {
+            let explicit_locals = args
+                .iter()
+                .map(|(name, span)| {
+                    Local::new(
+                        *name,
+                        self.fresh_mut_var_ty(),
+                        self.fresh_type_var_ty(),
+                        *span,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (explicit_locals, self.fresh_type_var_ty(), None)
+        };
+
+        let args_ty = explicit_locals.iter().map(Local::as_fn_arg_type).collect();
+
+        // 4. Build environment for typing the function's body.
+        let all_locals = capture_args
+            .iter()
+            .cloned()
+            .chain(explicit_locals)
+            .collect();
+
+        let mut inner_env = TypingEnv::new(
+            all_locals,
+            env.new_import_slots,
+            env.module_env,
+            Some((ret_ty, body.span)),
+        );
+
+        // 5. Infer the body's type.
+        let code = self.check_expr(&mut inner_env, body, ret_ty, MutType::constant(), body.span)?;
+
+        // Unify effects if expected
+        let effects = if let Some(expected_effects) = expected_effects {
+            self.unify_effects(&code.effects, &expected_effects)
+        } else {
+            code.effects.clone()
+        };
+
+        // 6. Store and return the function's type.
+        let fn_ty = FnType::new(args_ty, ret_ty, effects);
+        let fn_ty_wrapper = Type::function_type(fn_ty.clone());
+
+        let arg_names: Vec<_> = capture_args
+            .iter()
+            .map(|l| l.name)
+            .chain(args.iter().map(|(name, _)| *name))
+            .collect();
+
+        let value_fn = Value::pending_function(b(ScriptFunction::new(code, arg_names)));
+        let fn_node = N::new(
+            K::Immediate(Immediate::new(value_fn)),
+            fn_ty_wrapper,
+            no_effects(),
+            span,
+        );
+
+        let node = if captures.is_empty() {
+            fn_node
+        } else {
+            let node = K::BuildClosure(b(ir::BuildClosure {
+                function: fn_node,
+                captures,
+            }));
+            N::new(node, fn_ty_wrapper, no_effects(), span)
+        };
+
+        Ok((node, fn_ty_wrapper, MutType::constant(), no_effects()))
+    }
+
     pub fn infer_expr(
         &mut self,
         env: &mut TypingEnv,
@@ -442,112 +566,9 @@ impl TypeInference {
                 (node, Type::never(), MutType::constant(), effects)
             }
             Abstract(args, body) => {
-                // 1. Collect free variables in the body.
-                let mut free_vars = HashSet::new();
-                let mut bound_vars = vec![HashSet::new()];
-                for (arg, _) in args {
-                    bound_vars[0].insert(*arg);
-                }
-                collect_free_variables(body, &mut bound_vars, &mut free_vars);
-
-                // 2. Identify captures from the current environment.
-                let mut captures = Vec::new();
-                let mut capture_args = Vec::new();
-
-                // Sort for deterministic order.
-                let mut sorted_free_vars: Vec<_> = free_vars.into_iter().collect();
-                sorted_free_vars.sort();
-
-                for var_name in sorted_free_vars {
-                    if let Some((index, ty, mut_ty)) =
-                        env.get_variable_index_and_type_scheme(&var_name)
-                    {
-                        // It is a local variable in the current environment, capture it.
-                        captures.push(N::new(
-                            K::EnvLoad(b(ir::EnvLoad {
-                                index,
-                                name: Some(var_name),
-                            })),
-                            ty,
-                            no_effects(),
-                            expr.span,
-                        ));
-                        capture_args.push(Local::new(var_name, mut_ty, ty, expr.span));
-                    }
-                }
-
-                // 3. Allocate fresh type and mutability variables for the explicit arguments.
-                let explicit_locals = args
-                    .iter()
-                    .map(|(name, span)| {
-                        Local::new(
-                            *name,
-                            self.fresh_mut_var_ty(),
-                            self.fresh_type_var_ty(),
-                            *span,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let args_ty = explicit_locals.iter().map(Local::as_fn_arg_type).collect();
-
-                // 4. Build environment for typing the function's body.
-                // The environment must include captured variables first, then explicit arguments.
-                let all_locals = capture_args
-                    .iter()
-                    .cloned()
-                    .chain(explicit_locals)
-                    .collect();
-
-                let ret_ty = self.fresh_type_var_ty();
-                let mut inner_env = TypingEnv::new(
-                    all_locals,
-                    env.new_import_slots,
-                    env.module_env,
-                    Some((ret_ty, body.span)),
-                );
-
-                // 5. Infer the body's type.
-                let code =
-                    self.check_expr(&mut inner_env, body, ret_ty, MutType::constant(), body.span)?;
-
-                // 6. Store and return the function's type.
-                // The function type seen from outside only includes explicit arguments.
-                let fn_ty = FnType::new(args_ty, ret_ty, code.effects.clone());
-
-                // The script function includes captured arguments in its name list.
-                let arg_names: Vec<_> = capture_args
-                    .iter()
-                    .map(|l| l.name)
-                    .chain(args.iter().map(|(name, _)| *name))
-                    .collect();
-
-                let value_fn = Value::pending_function(b(ScriptFunction::new(code, arg_names)));
-                let fn_node = N::new(
-                    K::Immediate(Immediate::new(value_fn)),
-                    Type::function_type(fn_ty.clone()), // This type is technically not fully correct for the inner function if we consider arity, but it's wrapped in a closure
-                    no_effects(),
-                    expr.span,
-                );
-
-                if captures.is_empty() {
-                    (
-                        fn_node.kind,
-                        Type::function_type(fn_ty),
-                        MutType::constant(),
-                        no_effects(),
-                    )
-                } else {
-                    let node = K::BuildClosure(b(ir::BuildClosure {
-                        function: fn_node,
-                        captures,
-                    }));
-                    (
-                        node,
-                        Type::function_type(fn_ty),
-                        MutType::constant(),
-                        no_effects(),
-                    )
-                }
+                let (node, ty, mut_ty, effects) =
+                    self.infer_abstract(env, args, body, None, expr.span)?;
+                (node.kind, ty, mut_ty, effects)
             }
             Apply(func, args, synthesized) => {
                 // Do we have a global function or variant?
@@ -1324,30 +1345,9 @@ impl TypeInference {
         if let Abstract(args, body) = &expr.kind {
             let ty_data = { expected_ty.data().clone() };
             if let TypeKind::Function(fn_ty) = ty_data {
-                // Build environment for typing the function's body
-                let locals = args
-                    .iter()
-                    .zip(&fn_ty.args)
-                    .map(|((name, span), arg_ty)| {
-                        Local::new(*name, arg_ty.mut_ty, arg_ty.ty, *span)
-                    })
-                    .collect::<Vec<_>>();
-                // Build environment for typing the function's body
-                let mut env = TypingEnv::new(
-                    locals,
-                    env.new_import_slots,
-                    env.module_env,
-                    Some((fn_ty.ret, expected_span)),
-                );
-                // Recursively check the function's body
-                let code =
-                    self.check_expr(&mut env, body, fn_ty.ret, MutType::constant(), body.span)?;
-                self.unify_effects(&code.effects, &fn_ty.effects);
-                // Store and return the function's type
-                let arg_names = args.iter().map(|(name, _)| *name).collect();
-                let value_fn = Value::pending_function(b(ScriptFunction::new(code, arg_names)));
-                let node = K::Immediate(Immediate::new(value_fn));
-                return Ok(N::new(node, expected_ty, no_effects(), expr.span));
+                let (node, _, _, _) =
+                    self.infer_abstract(env, args, body, Some(*fn_ty), expr.span)?;
+                return Ok(node);
             }
         }
 

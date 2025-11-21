@@ -653,6 +653,11 @@ fn closures() {
         run("let a = \"hi\"; let f = || { let a = 3; let b: int = 1; || a + b }; f()()"),
         int(4)
     );
+    // Capture in function calls.
+    assert_eq!(
+        run("fn plus0(f) { f() + 0.0 } let x = 2.0; plus0(|| x)"),
+        float(2.0)
+    );
 }
 
 #[test]
