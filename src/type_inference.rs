@@ -931,6 +931,8 @@ impl TypeInference {
                 let body =
                     self.check_expr(env, body, Type::unit(), MutType::constant(), body.span)?;
                 let effects = body.effects.clone();
+                // FIXME: The type of the loop actually depends on whether there is a soft break inside
+                // If so, the type should be unit, otherwise it should be never.
                 (K::Loop(b(body)), Type::unit(), MutType::constant(), effects)
             }
             SoftBreak => (
