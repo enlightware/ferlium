@@ -35,82 +35,59 @@ fn is_empty(seq) {
 	len(seq) == 0
 }
 
-/*
-// This requires capture to be of realistic use
-fn try_fold(it, init, f) {
-	let mut accum = init;
+/// Reduces the iterator it to a single value by repeatedly applying f.
+fn fold(it, init, f) {
+	let mut acc = init;
 	loop {
 		match next(it) {
-			Some(x) => {
-				match f(accum, x) {
-					Continue(v) => {
-						accum = v;
+			Some(element) => {
+				acc = f(acc, element);
+			},
+			None => soft_break,
+		}
+	};
+	acc
+}
+
+/// Reduces the iterator it to a single value by repeatedly applying f, as long as f returns Continue.
+fn try_fold(it, init, f) {
+	let mut acc = init;
+	loop {
+		match next(it) {
+			Some(element) => {
+				match f(acc, element) {
+					Continue(value) => {
+						acc = value;
 					},
+					// Note: we do not have residuals here because it would result in an unbound generic.
+					// If we had a ControlFlow enum newtype with default generics, we could have residuals.
 					Break => {
-						soft_break
+						return Break;
 					}
 				}
 			},
 			None => soft_break,
 		}
 	};
-	accum
+	Continue(acc)
 }
-*/
 
 /// Tests if every element of the iterator matches a predicate.
 fn all(it, f) {
-	// When capture is available, do:
-	// try_fold(it, (), |_accum, x| if f(x) { Continue(()) } else { Break })
 	let mut it = it;
-	let mut result = true;
-	loop {
-		match next(it) {
-			Some(x) => {
-				if f(x) {
-					() // not is currently not available in the prelude
-				} else {
-					result = false;
-					soft_break;
-				}
-			},
-			None => soft_break,
-		}
-	};
-	result
+	try_fold(it, (), |_acc, element| if f(element) { Continue(()) } else { Break }) == Continue(())
 }
 
 /// Tests if any element of the iterator matches a predicate.
 fn any(it, f) {
-	// When capture is available, build on try_fold (see fn all)
 	let mut it = it;
-	let mut result = false;
-	loop {
-		match next(it) {
-			Some(x) => {
-				if f(x) {
-					result = true;
-					soft_break;
-				}
-			},
-			None => soft_break,
-		}
-	};
-	result
+	try_fold(it, (), |_acc, element| if f(element) { Break } else { Continue(()) }) == Break
 }
 
 /// Counts the number of elements in the iterator.
-fn count(it) -> int {
-	// When capture is available, build on try_fold (see fn all)
+fn count(it) {
 	let mut it = it;
-	let mut count = 0;
-	loop {
-		match next(it) {
-			Some(x) => count += 1,
-			None => soft_break,
-		}
-	};
-	count
+	fold(it, 0, |sum, _element| sum + 1)
 }
 
 // Compatibility, mark as deprecated when supported
