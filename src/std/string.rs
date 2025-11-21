@@ -62,12 +62,24 @@ impl String {
     pub fn sub_string(&self, start: isize, end: isize) -> Self {
         let start = self.index_to_unsigned(start).min(self.len());
         let end = self.index_to_unsigned(end).min(self.len());
+
+        let start = self.floor_char_boundary(start);
+        let end = self.floor_char_boundary(end);
+
         if end <= start {
             Self::new()
         } else {
             let new = self.0[start..end].to_string();
             Self(Rc::new(new))
         }
+    }
+
+    fn floor_char_boundary(&self, index: usize) -> usize {
+        let mut index = index;
+        while index > 0 && !self.0.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
     }
 
     pub fn uppercase(&self) -> Self {

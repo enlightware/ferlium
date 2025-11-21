@@ -355,6 +355,15 @@ fn string_sub_string() {
     assert_eq!(run(r#"string_sub_string("hello", 1, 4)"#), string("ell"));
     assert_eq!(run(r#"string_sub_string("hello", 1, -1)"#), string("ell"));
     assert_eq!(run(r#"string_sub_string("hello", -4, -2)"#), string("el"));
+
+    // unicode robustness
+    // "农" takes 3 bytes
+    assert_eq!(run(r#"string_sub_string("农", 0, 3)"#), string("农"));
+    assert_eq!(run(r#"string_sub_string("农", 0, 1)"#), string(""));
+    assert_eq!(run(r#"string_sub_string("农", 1, 3)"#), string("农"));
+    assert_eq!(run(r#"string_sub_string("农", 2, 3)"#), string("农"));
+    assert_eq!(run(r#"string_sub_string("a农", 1, 4)"#), string("农"));
+    assert_eq!(run(r#"string_sub_string("a农", 2, 4)"#), string("农"));
 }
 
 #[test]
