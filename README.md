@@ -52,8 +52,8 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 ### For developers and integrators
 
 * A pragmatic language: e.g. provides a mutable value semantics
-* Avoid re-implementing native types in the IR (i.e., no int, bool, etc. explicit there)
-* Smooth binding with native Rust code
+* Avoid re-implementing native types in the HIR (i.e., no int, bool, etc. explicit there),
+* Smooth binding with native Rust code (currently as interpreted code, later through a simple [ABI](doc/abi.md))
 * Rich integration possibilities with the native platform (e.g. for platform-managed values)
 
 ### Scope and non-scope

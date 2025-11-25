@@ -4,10 +4,9 @@ version = "0.1.0"
 publish = false
 edition = "2021"
 license = "Apache-2.0"
-description = "Procmacro for ferlium."
+description = "Proc-macro for Ferlium."
 authors = ["Enlightware GmbH"]
 rust-version = "1.80"
-
 
 [lib]
 proc-macro = true
@@ -15,3 +14,7 @@ proc-macro = true
 [dependencies]
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
+
+[features]
+ferlium_abi_32 = []
+ferlium_abi_64 = []

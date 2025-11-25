@@ -8,11 +8,18 @@
 //
 // src/lib.rs
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{parse_macro_input, LitInt};
+use quote::quote;
+
+use crate::ptr::FERLIUM_PTR_SIZE;
+
+mod native_fn_aliases;
+mod ptr;
 
 #[proc_macro]
 pub fn declare_native_fn_aliases(input: TokenStream) -> TokenStream {
+    use native_fn_aliases::*;
+    use syn::*;
+
     let n = parse_macro_input!(input as LitInt);
     let arity = n.base10_parse::<usize>().unwrap();
 
@@ -46,94 +53,93 @@ pub fn declare_native_fn_aliases(input: TokenStream) -> TokenStream {
     generated.into()
 }
 
-fn generate_combinations<'a>(codes: &'a [&'a str], arity: usize) -> Vec<Vec<&'a str>> {
-    if arity == 0 {
-        return vec![vec![]];
-    }
+/// Attribute macro for Ferlium FFI record layout.
+/// Usage:
+/// #[ferlium_record]
+/// pub struct MyRecord {
+///     a: i8,
+///     b: i64,
+///     c: i32,
+/// }
+///
+/// This will emit:
+/// #[repr(C)]
+/// pub struct MyRecord {
+///     b: i64, // align 8
+///     c: i32, // align 4
+///     a: i8,  // align 1
+/// }
+#[proc_macro_attribute]
+pub fn ferlium_record(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    use syn::*;
 
-    let mut result = vec![];
-    let smaller_combinations = generate_combinations(codes, arity - 1);
+    let mut input = parse_macro_input!(item as ItemStruct);
 
-    for combo in smaller_combinations {
-        for &code in codes {
-            let mut new_combo = combo.clone();
-            new_combo.push(code);
-            result.push(new_combo);
+    let fields = match &mut input.fields {
+        Fields::Named(named) => &mut named.named,
+        _ => {
+            return syn::Error::new_spanned(
+                &input,
+                "#[ferlium_record] only supports structs with named fields",
+            )
+            .to_compile_error()
+            .into();
         }
-    }
-    result
-}
+    };
 
-fn fn_name(arity: usize) -> String {
-    match arity {
-        0 => "NullaryNativeFn".into(),
-        1 => "UnaryNativeFn".into(),
-        2 => "BinaryNativeFn".into(),
-        3 => "TernaryNativeFn".into(),
-        _ => format!("Fn{arity}Ary"),
-    }
-}
-
-fn generate_alias_name(arity: usize, arg_codes: &[&str], output_code: &str) -> syn::Ident {
-    let name = format!("{}{}{}", fn_name(arity), arg_codes.join(""), output_code);
-    format_ident!("{}", name)
-}
-
-fn generate_fn_type(arity: usize, arg_codes: &[&str], output_code: &str) -> (syn::Type, bool) {
-    let fn_type_name = format_ident!("{}", fn_name(arity));
-    let mut need_lifetime = false;
-    let arg_types = arg_codes
+    // Extract fields into a vector we can sort.
+    let mut field_infos: Vec<(usize, Ident, Type, Field)> = fields
         .iter()
         .enumerate()
-        .map(|(i, &code)| {
-            let (ty, lifetime) = map_arg_code(code, i);
-            need_lifetime |= lifetime;
-            ty
+        .map(|(idx, f)| {
+            let ident = f.ident.clone().expect("named field");
+            let ty = f.ty.clone();
+            (idx, ident, ty, f.clone())
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    let output_type = map_output_code(output_code);
-
-    (
-        syn::parse_quote! {
-            #fn_type_name<#(#arg_types,)* #output_type, F>
-        },
-        need_lifetime,
-    )
-}
-
-fn map_arg_code(code: &str, index: usize) -> (syn::Type, bool) {
-    let generic = format_ident!("A{}", index);
-    match code {
-        "N" => (syn::parse_quote! { NatVal<#generic> }, false),
-        "M" => (syn::parse_quote! { NatMut<#generic> }, false),
-        "V" => (syn::parse_quote! { Value }, false),
-        "W" => (syn::parse_quote! { &'a mut Value }, true),
-        _ => unreachable!(),
-    }
-}
-
-fn map_output_code(code: &str) -> syn::Type {
-    let output_generic = format_ident!("O");
-    match code {
-        "N" => syn::parse_quote! { NatVal<#output_generic> },
-        "V" => syn::parse_quote! { Value },
-        "FN" => syn::parse_quote! { Fallible<NatVal<#output_generic>> },
-        "FV" => syn::parse_quote! { Fallible<Value> },
-        _ => unreachable!(),
-    }
-}
-
-fn generate_generic_params(arg_codes: &[&str], output_code: &str) -> Vec<syn::Ident> {
-    let mut params = vec![];
-    for (i, &code) in arg_codes.iter().enumerate() {
-        if code == "N" || code == "M" {
-            params.push(format_ident!("A{}", i));
+    let field_size = |ty: &Type| {
+        if let Type::Path(tp) = ty {
+            if let Some(ident) = tp.path.segments.last().map(|s| &s.ident) {
+                match ident.to_string().as_str() {
+                    "i64" | "u64" | "f64" => return 8,
+                    "i32" | "u32" | "f32" => return 4,
+                    "i16" | "u16" => return 2,
+                    "i8" | "u8" | "bool" => return 1,
+                    "isize" | "usize" => return FERLIUM_PTR_SIZE,
+                    _ => {}
+                }
+            }
         }
+        // Pointers or unknown types: assume 4
+        FERLIUM_PTR_SIZE
+    };
+
+    // Sort by decreasing alignment score, then by field name.
+    field_infos.sort_by(|(_, name_a, ty_a, _), (_, name_b, ty_b, _)| {
+        let aa = field_size(ty_a);
+        let ab = field_size(ty_b);
+
+        aa.cmp(&ab)
+            .reverse()
+            .then_with(|| name_a.to_string().cmp(&name_b.to_string()))
+    });
+
+    // Replace fields with sorted copies.
+    fields.clear();
+    for (_, _, _, field) in field_infos {
+        fields.push(field);
     }
-    if output_code == "N" || output_code == "FN" {
-        params.push(format_ident!("O"));
+
+    // Add #[repr(C)] if not already present.
+    let mut attrs = input.attrs.clone();
+    let has_repr_c = attrs.iter().any(|attr| attr.path().is_ident("repr"));
+
+    if !has_repr_c {
+        let repr_attr: syn::Attribute = syn::parse_quote!(#[repr(C)]);
+        attrs.push(repr_attr);
+        input.attrs = attrs;
     }
-    params.push(format_ident!("F"));
-    params
+
+    TokenStream::from(quote! { #input })
 }
