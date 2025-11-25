@@ -184,19 +184,35 @@ This leads to:
 
 # 7. Strings
 
-Strings in Ferlium are UTF-8 encoded byte arrays:
+Strings in Ferlium are UTF-8 encoded byte arrays with capacity:
 
 ```
 struct String {
-   ptr : *u8,    // pointer to the first byte
-   len : usize,  // number of bytes in use
+   ptr : *u8,    // pointer to buffer of cap bytes
+   len : usize,  // number of bytes currently used (0 <= len <= cap)
+   cap : usize,  // total capacity in bytes
 }
 ```
 
 This leads to:
 
 * alignment = 4 (32 bit targets) or 8 (64 bit targets)
-* size = 8 (32 bit targets) or 16 (64 bit targets)
+* size = 12 (32 bit targets) or 24 (64 bit targets)
+
+## 7.1 Strings invariants
+
+For any valid string value:
+
+- `ptr` is either:
+   - a valid pointer to a buffer of at least `cap` bytes, or
+   - an undefined pointer if `cap` == 0.
+- The inequality `0 <= len <= cap` holds.
+- The first `len` bytes at `ptr` are a well-formed UTF-8 sequence.
+- Bytes in the range `[len, cap)` are unspecified and may be uninitialized.
+- The string is not NUL-terminated by convention; a '\0' byte is allowed and is treated like any other byte.
+- The string is logically mutable:
+   - Operations may modify bytes in `[0, len)` or change `len` (within `cap`).
+   - If an operation needs more space than `cap`, it may allocate a new buffer, copy contents, free the old one, and update `ptr`, `len`, `cap`.
 
 # 8. Rust FFI Guidelines
 
