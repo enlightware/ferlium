@@ -53,15 +53,6 @@ Same rules as ABI‑32 except:
 
 Scalars follow the same C/Rust alignment rules across mainstream platforms.
 
-# Scalar Representation
-
-This section applies once the backend profile is selected.
-
-- All scalars are stored in **little‑endian** format.
-- Alignment must be respected.
-- Memory is byte-addressable.
-- Floating-point values are forbidden to be NaN. 
-
 # Calling conventions
 
 ## WASM
@@ -96,13 +87,24 @@ The calling convention for return values depends both on the effects and on the 
 | ✔️ **Yes** | **Scalar value**           | Returns **(status, scalar)** via multi-value                       | ❌ No               |
 | ✔️ **Yes** | **Caller-allocated value** | Returns **status**; callee **writes result to out-ptr** on success | ✔️ Yes              |
 
-When a function may panic, success is 0 on success, and non-zero on panic, and hold the error code.
+When a function may panic, success is 0 on success, and non-zero on panic, and holds the error code.
 
 ## Native
 
 To be defined later, possibly per platform.
 
+# Scalar Representation
+
+This section applies once the backend profile is selected.
+
+- All scalars are stored in **little‑endian** format.
+- Alignment must be respected.
+- Memory is byte-addressable.
+- Floating-point values are forbidden to be NaN.
+
 # Records
+
+Records are laid out linearly in memory without boxing.
 
 ## Type-level equality
 
@@ -146,6 +148,7 @@ Equivalent to Rust's `#[repr(C)]` after canonical ordering.
 
 # Tuples
 
+Tuples are laid out linearly in memory without boxing.
 Tuples are **positional**:
 
 - Order = declared order `(T₀, T₁, …)`
@@ -156,7 +159,9 @@ Equivalent to a C struct with fields in positional order.
 
 # Tagged unions
 
-Tagged unions (sum types) can be named:
+Tagged unions (sum types) box their payloads to allow for recursive types.
+
+Tagged unions can be named:
 
 ```
 enum V {
@@ -204,6 +209,7 @@ This leads to:
 
 # Arrays
 
+Arrays store their elements linearly in memory without boxing.
 Arrays in Ferlium are actually double-ended queues (deques) to allow efficient appends at both ends:
 
 ```
