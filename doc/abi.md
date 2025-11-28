@@ -55,11 +55,11 @@ Scalars follow the same C/Rust alignment rules across mainstream platforms.
 
 # Calling conventions
 
-## WASM
+## Wasm
 
 ### Parameters
 
-Parameters are passed to WASM functions in the order of their definitions.
+Parameters are passed to Wasm functions in the order of their definitions.
 Scalars are passed directly, while other types are passed as pointers to their data.
 
 ### Return values and panic
@@ -260,6 +260,35 @@ For any valid string value:
    - Operations may modify bytes in `[0, len)` or change `len` (within `cap`).
    - If an operation needs more space than `cap`, it may allocate a new buffer, copy contents, free the old one, and update `ptr`, `len`, `cap`.
 
+# Closures
+
+## Wasm32
+
+Ferlium represents all first-class functions uniformly as closures.
+A closure is a two-word record:
+```
+{
+   code_index: u32,
+   env_ptr: u32
+}
+```
+
+where `code_index` refers to an entry in the module’s function table and `env_ptr` points into linear memory to the closure’s environment.
+
+The environment is a compiler-generated tuple containing the runtime representations of all variables captured by the function (including dictionaries for typeclass operations).
+Each closure’s compiled code always takes the environment pointer as its first argument, followed by the function’s user-level arguments, and returns values using the standard ABI.
+
+The environment’s layout is fully determined at the closure’s definition site and is opaque to callers; invoking a closure is always performed via `call_indirect` using `code_index` and passing `env_ptr` as the first parameter.
+An empty environment is represented by setting `env_ptr` to zero.
+Hence, when compiling a lambda that is a closure, the compiled code first extracts the values out of the environment, before executing the actual user-written code.
+If the lambda is not a closure, the first argument is simply ignored.
+
+Closures may be represented and passed as a single 64-bit word (`i64`), with `code_index` and `env_ptr` packed into the low and high 32 bits respectively, in order to treat closures as scalar values for parameter and return conventions.
+
+## Native
+
+To be defined later, possibly per platform.
+
 # Rust FFI Guidelines
 
 - Use `#[repr(C)]` for structs matching Ferlium records.
@@ -267,7 +296,3 @@ For any valid string value:
 - Use macros like `#[ferlium_record]` to avoid mistakes.
 - Use only backend-supported scalar sizes/alignments.
 - Variants must use Ferlium tag numbers and payload layout.
-
-# Future Work
-
-- Closure representations
