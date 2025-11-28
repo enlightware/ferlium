@@ -21,11 +21,11 @@ This separation allows Ferlium to target:
 
 The ABI presented here is stable across modules and compilation units.
 
-# 1. Backend Profiles
+# Backend Profiles
 
 A *backend profile* defines the fundamental sizes and alignments for a Ferlium target.
 
-## 1.1 ABI‑32 profile
+## ABI‑32 profile
 
 This profile is used by wasm32, native‑32, or any backend with 32‑bit pointers.
 
@@ -40,7 +40,7 @@ This profile is used by wasm32, native‑32, or any backend with 32‑bit pointe
 | `int`, `isize`, `usize` | 4 | 4 | same size as pointer size |
 | Pointer (`*T`) | 4 | 4 | 32‑bit offset in linear memory or native pointer |
 
-## 1.2 ABI‑64 profile
+## ABI‑64 profile
 
 This profile is used by wasm64, native‑64, or any backend with 64‑bit pointers.
 
@@ -53,7 +53,7 @@ Same rules as ABI‑32 except:
 
 Scalars follow the same C/Rust alignment rules across mainstream platforms.
 
-# 2. Scalar Representation
+# Scalar Representation
 
 This section applies once the backend profile is selected.
 
@@ -62,9 +62,49 @@ This section applies once the backend profile is selected.
 - Memory is byte-addressable.
 - Floating-point values are forbidden to be NaN. 
 
-# 3. Records
+# Calling conventions
 
-## 3.1 Type-level equality
+## WASM
+
+### Parameters
+
+Parameters are passed to WASM functions in the order of their definitions.
+Scalars are passed directly, while other types are passed as pointers to their data.
+
+### Return values and panic
+
+Each function can have effects, which might be polymorphic and represented by effect variables.
+There are two cases:
+
+- **No panic**: function’s effects contain no `Fallible` and no effect variables
+- **May panic**: function’s effects contain `Fallible` or some effect variables
+
+Also, functions can return different kinds of values:
+
+- **No value**: `()`
+- **Scalar value**: e.g., `Int`, `Float`
+- **Caller-allocated value**: bigger types, polymorphic result
+
+The calling convention for return values depends both on the effects and on the representation of the result type:
+
+| May panic? | Return value kind          | ABI return form                                                    | Out-pointer needed? |
+| ---------- | -------------------------- | ------------------------------------------------------------------ | ------------------- |
+| ❌ **No**  | **No value**               | Returns **`()`** (no wasm result)                                  | ❌ No               |
+| ❌ **No**  | **Scalar value**           | Returns the **scalar** directly as a wasm result                   | ❌ No               |
+| ❌ **No**  | **Caller-allocated value** | Returns **`()`**; callee **writes result to out-ptr**              | ✔️ Yes              |
+| ✔️ **Yes** | **No value**               | Returns **status**                                                 | ❌ No               |
+| ✔️ **Yes** | **Scalar value**           | Returns **(status, scalar)** via multi-value                       | ❌ No               |
+| ✔️ **Yes** | **Caller-allocated value** | Returns **status**; callee **writes result to out-ptr** on success | ✔️ Yes              |
+
+When a function may panic, success is 0 on success, and non-zero on panic, and hold the error code.
+
+## Native
+
+To be defined later, possibly per platform.
+
+# Records
+
+## Type-level equality
 
 Ferlium records are **structural**:
 
@@ -74,7 +114,7 @@ Ferlium records are **structural**:
 
 Type equality ignores field order.
 
-## 3.2 Canonical field order
+## Canonical field order
 
 Fields are canonicalised to produce a stable layout:
 
@@ -89,7 +129,7 @@ fields(record) = sort_by( (-align(type(field)), field.name) )
 
 Whether a record is named (`struct`) does not affect layout.
 
-## 3.3 Layout Algorithm
+## Layout Algorithm
 
 Given canonical ordered fields `f₁, f₂, …`:
 
@@ -104,7 +144,7 @@ Given canonical ordered fields `f₁, f₂, …`:
 
 Equivalent to Rust's `#[repr(C)]` after canonical ordering.
 
-# 4. Tuples
+# Tuples
 
 Tuples are **positional**:
 
@@ -114,7 +154,7 @@ Tuples are **positional**:
 
 Equivalent to a C struct with fields in positional order.
 
-# 5. Tagged unions
+# Tagged unions
 
 Tagged unions (sum types) can be named:
 
@@ -134,19 +174,19 @@ A (T_a) | B (T_b) | C
 
 This does not affect their layout.
 
-## 5.1 Tag representation
+## Tag representation
 
 Tags are stored as `u32` referring to interned strings within one compilation session.
 Binary modules are not compatible across compilation sessions. 
 
-## 5.2 Payload layout
+## Payload layout
 
 For each case:
 
 - No payload is treated as unit: size 0, alignment 1
 - Payload type follows record/tuple rules
 
-## 5.3 Variant representation
+## Variant representation
 
 Payloads are boxed, to allow for recursive types.
 
@@ -162,7 +202,7 @@ This leads to:
 * alignment = `max(4, align(void*))`
 * size = 8 (32 bit targets) or 16 (64 bit targets)
 
-# 6. Arrays
+# Arrays
 
 Arrays in Ferlium are actually double-ended queues (deques) to allow efficient appends at both ends:
 
@@ -182,7 +222,7 @@ This leads to:
 * alignment = 4 (32 bit targets) or 8 (64 bit targets)
 * size = 16 (32 bit targets) or 32 (64 bit targets)
 
-# 7. Strings
+# Strings
 
 Strings in Ferlium are UTF-8 encoded byte arrays with capacity:
 
@@ -199,7 +239,7 @@ This leads to:
 * alignment = 4 (32 bit targets) or 8 (64 bit targets)
 * size = 12 (32 bit targets) or 24 (64 bit targets)
 
-## 7.1 Strings invariants
+## Strings invariants
 
 For any valid string value:
 
@@ -214,7 +254,7 @@ For any valid string value:
    - Operations may modify bytes in `[0, len)` or change `len` (within `cap`).
    - If an operation needs more space than `cap`, it may allocate a new buffer, copy contents, free the old one, and update `ptr`, `len`, `cap`.
 
-# 8. Rust FFI Guidelines
+# Rust FFI Guidelines
 
 - Use `#[repr(C)]` for structs matching Ferlium records.
 - Declare fields in Ferlium canonical order.
@@ -222,6 +262,6 @@ For any valid string value:
 - Use only backend-supported scalar sizes/alignments.
 - Variants must use Ferlium tag numbers and payload layout.
 
-# 9. Future Work
+# Future Work
 
 - Closure representations
