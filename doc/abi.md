@@ -285,6 +285,14 @@ If the lambda is not a closure, the first argument is simply ignored.
 
 Closures may be represented and passed as a single 64-bit word (`i64`), with `code_index` and `env_ptr` packed into the low and high 32 bits respectively, in order to treat closures as scalar values for parameter and return conventions.
 
+In wasm modules, all exported named functions must have two versions:
+
+- a `direct` version, that corresponds to the normal Ferlium function.
+- a `closure`-compatible version, that drops their environment pointer argument, and calls the direct version internally.
+
+When using a first-class function locally, if that function does not capture any variables, the compiler may optimise away the environment pointer argument.
+When private functions will be added, espace analysis will be used to decide whether they too need the closure-compatible version.
+
 ## Native
 
 To be defined later, possibly per platform.
