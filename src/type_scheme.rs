@@ -225,14 +225,7 @@ impl PubTypeConstraint {
                 payload_ty,
                 ..
             } => {
-                let fake_current = crate::std::new_module_using_std();
-                let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
-                eprint!(
-                    "Checking variant constraint: {}",
-                    constraint.format_with(&env)
-                );
                 if variant_ty.is_constant() && payload_ty.is_constant() {
-                    eprintln!(" -- both sides constant, checking");
                     let variant_ty_data = variant_ty.data();
                     let variant_data = variant_ty_data.as_variant().unwrap();
                     assert!(variant_data.iter().find(|t| t.0 == *tag).unwrap().1 == *payload_ty);
