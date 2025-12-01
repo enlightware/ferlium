@@ -13,6 +13,7 @@ use std::{
     str::FromStr,
 };
 
+use unicode_segmentation::UnicodeSegmentation;
 use ustr::ustr;
 
 use crate::{
@@ -51,17 +52,50 @@ impl String {
         new
     }
 
-    pub fn len(&self) -> usize {
+    /// Returns the number of grapheme clusters (user-perceived characters) in the string.
+    /// This is O(n) as it requires iterating through the string.
+    pub fn grapheme_count(&self) -> usize {
+        self.0.graphemes(true).count()
+    }
+
+    /// Returns the byte length of the string. This is O(1).
+    pub fn byte_len(&self) -> usize {
         self.0.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.0.is_empty()
+    }
+
+    /// Returns a substring from grapheme index `start` to grapheme index `end`.
+    /// Indices are grapheme-based (user-perceived characters), not byte-based.
+    /// Negative indices count from the end of the string.
+    pub fn slice(&self, start: isize, end: isize) -> Self {
+        let graphemes: Vec<&str> = self.0.graphemes(true).collect();
+        let len = graphemes.len() as isize;
+
+        let start = Self::normalize_index(start, len);
+        let end = Self::normalize_index(end, len);
+
+        if end <= start {
+            Self::new()
+        } else {
+            let result: std::string::String = graphemes[start..end].concat();
+            Self(Rc::new(result))
+        }
+    }
+
+    fn normalize_index(index: isize, len: isize) -> usize {
+        if index < 0 {
+            (len + index).max(0) as usize
+        } else {
+            (index as usize).min(len as usize)
+        }
     }
 
     pub fn sub_string(&self, start: isize, end: isize) -> Self {
-        let start = self.index_to_unsigned(start).min(self.len());
-        let end = self.index_to_unsigned(end).min(self.len());
+        let start = self.index_to_unsigned(start).min(self.byte_len());
+        let end = self.index_to_unsigned(end).min(self.byte_len());
 
         let start = self.floor_char_boundary(start);
         let end = self.floor_char_boundary(end);
@@ -92,7 +126,7 @@ impl String {
 
     fn index_to_unsigned(&self, index: isize) -> usize {
         if index < 0 {
-            (self.len() as isize + index) as usize
+            (self.grapheme_count() as isize + index) as usize
         } else {
             index as usize
         }
@@ -198,9 +232,18 @@ pub fn add_to_module(to: &mut Module) {
     to.add_named_function(
         ustr("string_len"),
         UnaryNativeFnNN::description_with_default_ty(
-            |a: String| a.len() as isize,
+            |a: String| a.grapheme_count() as isize,
             ["string"],
-            "Returns the length of the string, in bytes.",
+            "Returns the number of characters in the string.",
+            no_effects(),
+        ),
+    );
+    to.add_named_function(
+        ustr("string_byte_len"),
+        UnaryNativeFnNN::description_with_default_ty(
+            |a: String| a.byte_len() as isize,
+            ["string"],
+            "Returns the length of the string in bytes.",
             no_effects(),
         ),
     );
@@ -227,11 +270,11 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.add_named_function(
-        ustr("string_sub_string"),
+        ustr("string_slice"),
         TernaryNativeFnNNNN::description_with_default_ty(
-            |s: String, start: isize, end: isize| s.sub_string(start, end),
+            |s: String, start: isize, end: isize| s.slice(start, end),
             ["string", "start", "end"],
-            "Returns the substring of `string` from index `start` to index `end`.",
+            "Returns the slice of `string` from character index `start` to index `end`. Negative indices count from the end.",
             no_effects(),
         ),
     );

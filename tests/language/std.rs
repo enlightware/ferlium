@@ -344,26 +344,63 @@ fn string_replace() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn string_sub_string() {
-    assert_eq!(run(r#"string_sub_string("hello", 0, 0)"#), string(""));
-    assert_eq!(run(r#"string_sub_string("hello", 3, 0)"#), string(""));
-    assert_eq!(run(r#"string_sub_string("hello", 0, 5)"#), string("hello"));
-    assert_eq!(run(r#"string_sub_string("hello", 0, 15)"#), string("hello"));
-    assert_eq!(run(r#"string_sub_string("hello", -5, 5)"#), string("hello"));
-    assert_eq!(run(r#"string_sub_string("hello", 0, 4)"#), string("hell"));
-    assert_eq!(run(r#"string_sub_string("hello", 0, -1)"#), string("hell"));
-    assert_eq!(run(r#"string_sub_string("hello", 1, 4)"#), string("ell"));
-    assert_eq!(run(r#"string_sub_string("hello", 1, -1)"#), string("ell"));
-    assert_eq!(run(r#"string_sub_string("hello", -4, -2)"#), string("el"));
+fn string_slice() {
+    assert_eq!(run(r#"string_slice("hello", 0, 0)"#), string(""));
+    assert_eq!(run(r#"string_slice("hello", 3, 0)"#), string(""));
+    assert_eq!(run(r#"string_slice("hello", 0, 5)"#), string("hello"));
+    assert_eq!(run(r#"string_slice("hello", 0, 15)"#), string("hello"));
+    assert_eq!(run(r#"string_slice("hello", -5, 5)"#), string("hello"));
+    assert_eq!(run(r#"string_slice("hello", 0, 4)"#), string("hell"));
+    assert_eq!(run(r#"string_slice("hello", 0, -1)"#), string("hell"));
+    assert_eq!(run(r#"string_slice("hello", 1, 4)"#), string("ell"));
+    assert_eq!(run(r#"string_slice("hello", 1, -1)"#), string("ell"));
+    assert_eq!(run(r#"string_slice("hello", -4, -2)"#), string("el"));
 
-    // unicode robustness
-    // "农" takes 3 bytes
-    assert_eq!(run(r#"string_sub_string("农", 0, 3)"#), string("农"));
-    assert_eq!(run(r#"string_sub_string("农", 0, 1)"#), string(""));
-    assert_eq!(run(r#"string_sub_string("农", 1, 3)"#), string("农"));
-    assert_eq!(run(r#"string_sub_string("农", 2, 3)"#), string("农"));
-    assert_eq!(run(r#"string_sub_string("a农", 1, 4)"#), string("农"));
-    assert_eq!(run(r#"string_sub_string("a农", 2, 4)"#), string("农"));
+    // unicode - now using grapheme-based indices (character positions)
+    // "农" is 1 grapheme cluster (1 character)
+    assert_eq!(run(r#"string_slice("农", 0, 1)"#), string("农"));
+    assert_eq!(run(r#"string_slice("农", 0, 10)"#), string("农")); // clamps to length
+    assert_eq!(run(r#"string_slice("农", 1, 2)"#), string("")); // past end
+    // "a农" is 2 grapheme clusters
+    assert_eq!(run(r#"string_slice("a农", 0, 1)"#), string("a"));
+    assert_eq!(run(r#"string_slice("a农", 1, 2)"#), string("农"));
+    assert_eq!(run(r#"string_slice("a农", 0, 2)"#), string("a农"));
+    // "café" with combining accent (e + combining acute) is 4 graphemes
+    assert_eq!(
+        run("string_slice(\"cafe\\u{0301}\", 0, 4)"),
+        string("cafe\u{0301}")
+    );
+    assert_eq!(
+        run("string_slice(\"cafe\\u{0301}\", 3, 4)"),
+        string("e\u{0301}")
+    );
+    // flag emoji (2 regional indicators = 1 grapheme)
+    assert_eq!(run(r#"string_slice("🇫🇷", 0, 1)"#), string("🇫🇷"));
+    assert_eq!(run(r#"string_slice("a🇫🇷b", 1, 2)"#), string("🇫🇷"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_len() {
+    assert_eq!(run(r#"string_len("")"#), int(0));
+    assert_eq!(run(r#"string_len("hello")"#), int(5));
+    // unicode - grapheme-based counting
+    assert_eq!(run(r#"string_len("农")"#), int(1)); // 1 grapheme, 3 bytes
+    assert_eq!(run(r#"string_len("农历新年")"#), int(4)); // 4 graphemes
+    assert_eq!(run("string_len(\"cafe\\u{0301}\")"), int(4)); // e + combining accent = 1 grapheme
+    assert_eq!(run(r#"string_len("🇫🇷")"#), int(1)); // flag = 1 grapheme, 2 code points, 8 bytes
+    assert_eq!(run(r#"string_len("a🇫🇷b")"#), int(3)); // a + flag + b = 3 graphemes
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_byte_len() {
+    assert_eq!(run(r#"string_byte_len("")"#), int(0));
+    assert_eq!(run(r#"string_byte_len("hello")"#), int(5));
+    // unicode - byte counting
+    assert_eq!(run(r#"string_byte_len("农")"#), int(3)); // 1 grapheme, 3 bytes
+    assert_eq!(run(r#"string_byte_len("农历新年")"#), int(12)); // 4 graphemes, 12 bytes
+    assert_eq!(run(r#"string_byte_len("🇫🇷")"#), int(8)); // flag = 1 grapheme, 8 bytes
 }
 
 #[test]
