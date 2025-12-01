@@ -17,18 +17,21 @@ use unicode_segmentation::UnicodeSegmentation;
 use ustr::ustr;
 
 use crate::{
-    cached_primitive_ty,
+    cached_primitive_ty, cached_ty,
     containers::b,
     effects::no_effects,
     function::{
-        BinaryNativeFnMNN, BinaryNativeFnNNN, Function, TernaryNativeFnNNNN, UnaryNativeFnNN,
-        UnaryNativeFnVN,
+        BinaryNativeFnMNN, BinaryNativeFnNNN, Function, TernaryNativeFnNNNN, UnaryNativeFnMV,
+        UnaryNativeFnNN, UnaryNativeFnVN,
     },
-    module::Module,
+    module::{Module, ModuleFunction},
     std::contains::CONTAINS_TRAIT,
-    r#type::Type,
+    r#type::{FnType, Type},
+    type_scheme::TypeScheme,
     value::{NativeDisplay, Value},
 };
+
+use super::option::{none, option_type, some};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct String(Rc<std::string::String>);
@@ -135,6 +138,31 @@ impl String {
     fn contains(s: Self, substring: Self) -> bool {
         s.as_ref().contains(substring.as_ref())
     }
+
+    /// Creates an iterator over the grapheme clusters of the string.
+    pub fn iter(&self) -> StringIterator {
+        // Collect byte offsets of each grapheme cluster
+        let indices: Vec<usize> = self.0.grapheme_indices(true).map(|(idx, _)| idx).collect();
+        StringIterator {
+            string: self.0.clone(),
+            indices,
+            position: 0,
+        }
+    }
+
+    fn iter_descr() -> ModuleFunction {
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            [string_type()],
+            string_iter_type(),
+            no_effects(),
+        ));
+        UnaryNativeFnNN::description_with_ty_scheme(
+            |s: Self| s.iter(),
+            ["string"],
+            "Creates an iterator over the characters of the string.",
+            ty_scheme,
+        )
+    }
 }
 
 impl FromStr for String {
@@ -184,8 +212,73 @@ impl NativeDisplay for String {
     }
 }
 
+/// An iterator over the grapheme clusters of a string.
+/// Stores the original string and byte indices of each grapheme cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringIterator {
+    string: Rc<std::string::String>,
+    indices: Vec<usize>,
+    position: usize,
+}
+
+impl StringIterator {
+    pub fn next_value(&mut self) -> Value {
+        match self.next() {
+            Some(value) => some(Value::native(value)),
+            None => none(),
+        }
+    }
+
+    fn next_value_descr() -> ModuleFunction {
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            [(string_iter_type(), true)],
+            option_type(string_type()),
+            no_effects(),
+        ));
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::next_value,
+            ["iterator"],
+            "Gets the next character of the string iterator.",
+            ty_scheme,
+        )
+    }
+}
+
+impl Iterator for StringIterator {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.position < self.indices.len() {
+            let start = self.indices[self.position];
+            let end = if self.position + 1 < self.indices.len() {
+                self.indices[self.position + 1]
+            } else {
+                self.string.len()
+            };
+            self.position += 1;
+            Some(String::from(self.string[start..end].to_string()))
+        } else {
+            None
+        }
+    }
+}
+
+impl NativeDisplay for StringIterator {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "StringIterator on \"{}\" @ {}",
+            self.string, self.position
+        )
+    }
+}
+
 pub fn string_type() -> Type {
     cached_primitive_ty!(String)
+}
+
+pub fn string_iter_type() -> Type {
+    cached_ty!(|| Type::native::<StringIterator>([]))
 }
 
 pub fn string_value(s: &str) -> Value {
@@ -295,5 +388,14 @@ pub fn add_to_module(to: &mut Module) {
             "Returns the lowercase equivalent of this string.",
             no_effects(),
         ),
+    );
+
+    // Iterator
+    to.type_aliases
+        .set_with_ustr(ustr("string_iterator"), string_iter_type());
+    to.add_named_function(ustr("string_iter"), String::iter_descr());
+    to.add_named_function(
+        ustr("string_iterator_next"),
+        StringIterator::next_value_descr(),
     );
 }

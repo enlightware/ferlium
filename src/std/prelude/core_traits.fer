@@ -102,6 +102,24 @@ fn array_any(array: [_], f) {
 	any(array_iter(array), f)
 }
 
+// Iterator and Seq for string
+
+impl Iterator {
+	fn next(s) {
+		string_iterator_next(s)
+	}
+}
+impl Seq {
+	fn iter(s) {
+		string_iter(s)
+	}
+}
+impl SizedSeq {
+	fn len(s) {
+		string_len(s)
+	}
+}
+
 // Iterator and Seq for ranges
 impl Iterator {
 	fn next(a) {

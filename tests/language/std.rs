@@ -405,6 +405,58 @@ fn string_byte_len() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_iter() {
+    // Basic iteration
+    assert_eq!(
+        run(
+            r#"let s = "abc"; let mut it = string_iter(s); (string_iterator_next(it), string_iterator_next(it), string_iterator_next(it))"#
+        ),
+        tuple!(
+            variant_t1("Some", string("a")),
+            variant_t1("Some", string("b")),
+            variant_t1("Some", string("c"))
+        )
+    );
+    // Exhausted iterator
+    assert_eq!(
+        run(
+            r#"let s = "ab"; let mut it = string_iter(s); (string_iterator_next(it), string_iterator_next(it), string_iterator_next(it))"#
+        ),
+        tuple!(
+            variant_t1("Some", string("a")),
+            variant_t1("Some", string("b")),
+            variant_0("None")
+        )
+    );
+    // Unicode - grapheme clusters
+    assert_eq!(
+        run(
+            r#"let s = "a农b"; let mut it = string_iter(s); (string_iterator_next(it), string_iterator_next(it), string_iterator_next(it))"#
+        ),
+        tuple!(
+            variant_t1("Some", string("a")),
+            variant_t1("Some", string("农")),
+            variant_t1("Some", string("b"))
+        )
+    );
+    // Flag emoji as single grapheme
+    assert_eq!(
+        run(r#"let mut it = string_iter("🇫🇷"); string_iterator_next(it)"#),
+        variant_t1("Some", string("🇫🇷"))
+    );
+    // Empty string
+    assert_eq!(
+        run(r#"let mut it = string_iter(""); string_iterator_next(it)"#),
+        variant_0("None")
+    );
+    // Through Seq/SizedSeq traits
+    assert_eq!(run(r#"len("")"#), int(0));
+    assert_eq!(run(r#"len("hello")"#), int(5));
+    assert_eq!(run(r#"len("héllo 🇫🇷, 农")"#), int(10));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_case_conversion() {
     assert_eq!(run(r#"uppercase("hello World!")"#), string("HELLO WORLD!"));
     // cspell:disable-next-line
