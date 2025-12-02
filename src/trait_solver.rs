@@ -294,7 +294,11 @@ impl<'a> TraitSolver<'a> {
                             continue;
                         }
                         let new_output_tys =
-                            self.solve_output_types(&trait_ref, &input_tys, fn_span)?;
+                            match self.solve_output_types(&trait_ref, &input_tys, fn_span) {
+                                Ok(tys) => tys,
+                                // Constraint not satisfied, try next implementation.
+                                Err(_) => continue 'impl_loop,
+                            };
                         for (new_output_ty, output_ty) in
                             new_output_tys.iter().zip(output_tys.iter())
                         {
