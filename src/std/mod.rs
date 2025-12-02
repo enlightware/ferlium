@@ -21,6 +21,7 @@ use ustr::ustr;
 pub mod array;
 pub mod bits;
 pub mod cast;
+pub mod concat;
 pub mod contains;
 pub mod core;
 pub mod flow;
@@ -54,6 +55,7 @@ pub fn std_module() -> Rc<Module> {
                 bits::add_to_module(&mut module);
                 logic::add_to_module(&mut module);
                 ordering::add_to_module(&mut module);
+                concat::add_to_module(&mut module);
                 contains::add_to_module(&mut module);
                 math::add_to_module(&mut module);
                 range::add_to_module(&mut module);

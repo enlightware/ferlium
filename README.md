@@ -74,7 +74,7 @@ The following features are out of scope:
 
 ## Limitations
 
-Currently the compiler can only be used from a single thread to avoid deadlocks when accessing the internized type universe.
+Currently the compiler can only be used from a single thread to avoid deadlocks when accessing the interned type universe.
 Currently the compiler will panic if the corresponding lock is held when being accessed in write.
 
 ## License

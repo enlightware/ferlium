@@ -272,6 +272,25 @@ fn contains() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn concat() {
+    // strings
+    assert_eq!(run(r#"concat("hello", "world")"#), string("helloworld"));
+    assert_eq!(run(r#"concat("foo", " bar")"#), string("foo bar"));
+    assert_eq!(run(r#"concat("", "")"#), string(""));
+    assert_eq!(run(r#"concat("a", "")"#), string("a"));
+    assert_eq!(run(r#"concat("", "b")"#), string("b"));
+    // arrays
+    assert_eq!(run("concat([1, 2], [3, 4])"), int_a![1, 2, 3, 4]);
+    // FIXME: Broken due to limitations in type defaulting, tang related
+    // to https://github.com/enlightware/ferlium/issues/59
+    //assert_eq!(run("concat([], [])"), int_a![]);
+    assert_eq!(run("(concat([], []): [int])"), int_a![]);
+    assert_eq!(run("concat([1, 2], [])"), int_a![1, 2]);
+    assert_eq!(run("concat([], [3, 4])"), int_a![3, 4]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn string_concat() {
     assert_eq!(run(r#"string_concat("", "")"#), string(""));
     assert_eq!(

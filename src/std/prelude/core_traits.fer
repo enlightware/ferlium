@@ -28,6 +28,20 @@ fn array_map(array: [_], f) {
 	result
 }
 
+impl Concat {
+	fn concat(left, right) {
+		array_concat(left, right)
+	}
+}
+
+// Strings
+
+impl Concat {
+	fn concat(left, right) {
+		string_concat(left, right)
+	}
+}
+
 // Iterator functions
 
 /// Returns true if the collection contains no elements.
