@@ -269,42 +269,73 @@ impl<'a> TraitSolver<'a> {
 
                 // Yes, instantiate the constraints and get the corresponding function dictionaries
                 // (as Value containing a tuple of first-class functions).
-                let mut constraint_dict_ids = Vec::new();
-                // Note: we assume the constraints are ordered by dependency so that the output types
-                // of one are the input types of the next.
-                for constraint in imp_constraints.iter() {
-                    let (trait_ref, input_tys, output_tys, _span) = ty_inf
-                        .substitute_in_constraint(constraint)
-                        .into_have_trait()
-                        .expect("Non trait constraint in blanket impl");
-                    // If some input types are not constant, we cannot solve this constraint now.
-                    // FIXME: This looks like a bug and needs investigation.
-                    if !input_tys.iter().all(Type::is_constant) {
-                        continue 'impl_loop;
-                    }
-                    let new_output_tys =
-                        self.solve_output_types(&trait_ref, &input_tys, fn_span)?;
-                    for (new_output_ty, output_ty) in new_output_tys.iter().zip(output_tys.iter()) {
-                        assert!(new_output_ty.is_constant());
-                        // Note: expected_span is wrong in unify_same_type, but it doesn't matter because
-                        // this error is not reported to the user.
-                        if ty_inf
-                            .unify_same_type(*new_output_ty, fn_span, *output_ty, fn_span)
-                            .is_err()
-                        {
-                            // No, try next implementation.
-                            continue 'impl_loop;
+                // We process constraints iteratively because constraints may not be ordered by
+                // dependency. After solving a constraint and unifying its output types, those
+                // types become available for subsequent constraints that depend on them.
+                // We maintain a map from constraint index to dict_id to preserve the original order.
+                let mut constraint_dict_ids: Vec<Option<TraitImplId>> =
+                    vec![None; imp_constraints.len()];
+                let mut remaining_indices: Vec<_> = (0..imp_constraints.len()).collect();
+                loop {
+                    let initial_count = remaining_indices.len();
+                    let mut still_remaining = Vec::new();
+
+                    for constraint_idx in remaining_indices {
+                        let constraint = &imp_constraints[constraint_idx];
+                        let (trait_ref, input_tys, output_tys, _span) = ty_inf
+                            .substitute_in_constraint(constraint)
+                            .into_have_trait()
+                            .expect("Non trait constraint in blanket impl");
+                        // If some input types are not constant, we cannot solve this constraint yet.
+                        // Defer it and try again after solving other constraints that may provide
+                        // the missing type information.
+                        if !input_tys.iter().all(Type::is_constant) {
+                            still_remaining.push(constraint_idx);
+                            continue;
                         }
+                        let new_output_tys =
+                            self.solve_output_types(&trait_ref, &input_tys, fn_span)?;
+                        for (new_output_ty, output_ty) in
+                            new_output_tys.iter().zip(output_tys.iter())
+                        {
+                            assert!(new_output_ty.is_constant());
+                            // Note: expected_span is wrong in unify_same_type, but it doesn't matter because
+                            // this error is not reported to the user.
+                            if ty_inf
+                                .unify_same_type(*new_output_ty, fn_span, *output_ty, fn_span)
+                                .is_err()
+                            {
+                                // No, try next implementation.
+                                continue 'impl_loop;
+                            }
+                        }
+
+                        let dict_id = self.solve_impl(&trait_ref, &input_tys, fn_span);
+                        let dict_id = match dict_id {
+                            Ok(functions) => functions,
+                            // Failed? Try next implementation.
+                            Err(_) => continue 'impl_loop,
+                        };
+                        constraint_dict_ids[constraint_idx] = Some(dict_id);
                     }
 
-                    let dict_id = self.solve_impl(&trait_ref, &input_tys, fn_span);
-                    let dict_id = match dict_id {
-                        Ok(functions) => functions,
-                        // Failed? Try next implementation.
-                        Err(_) => continue 'impl_loop,
-                    };
-                    constraint_dict_ids.push(dict_id);
+                    // If all constraints are solved, we're done.
+                    if still_remaining.is_empty() {
+                        break;
+                    }
+
+                    // If no progress was made, this implementation doesn't work.
+                    if still_remaining.len() == initial_count {
+                        continue 'impl_loop;
+                    }
+
+                    remaining_indices = still_remaining;
                 }
+                // Unwrap all the dict_ids - they should all be Some by now.
+                let constraint_dict_ids: Vec<_> = constraint_dict_ids
+                    .into_iter()
+                    .map(|opt| opt.expect("All constraints should be solved"))
+                    .collect();
 
                 // Succeeded? First get the blanket implementation data and compute the output types.
                 let impls = if let Some(module_name) = imp_mod_name {
