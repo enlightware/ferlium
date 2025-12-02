@@ -525,6 +525,7 @@ fn main() {
         println!();
         println!("Usage:");
         println!("  {} [--help|-h]", args[0]);
+        println!("  {} [--print-std]", args[0]);
         println!("  echo 'code' | {}", args[0]);
         println!();
         println!("Modes:");
@@ -537,6 +538,17 @@ fn main() {
             "  echo '1 + 2' | {}      # Evaluate expression from pipe",
             args[0]
         );
+        return;
+    }
+
+    // Check for print-std flag
+    if args.len() > 1 && args[1] == "--print-std" {
+        let other_modules = new_std_modules();
+        if let Some(module) = other_modules.get(&ustr("std")) {
+            println!("{}", module.format_with(&other_modules));
+        } else {
+            eprintln!("Module std not found.");
+        }
         return;
     }
 
