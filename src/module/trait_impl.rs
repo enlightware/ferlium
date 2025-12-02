@@ -402,12 +402,14 @@ impl TraitImpls {
                 }
                 let imp = self.get_impl_by_local_id(*id);
                 let key = BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone());
-                let subst = format_blanket_impl_header(&key, &imp.output_tys, f, env)?;
+                format_blanket_impl_header(&key, &imp.output_tys, f, env)?;
                 write!(f, " (#{id})")?;
+                // For blanket impls, the function types already use the correct type variables,
+                // so we don't need to apply any substitution.
                 if level == DisplayFilter::MethodDefinitions {
-                    format_impl_fns(&key.trait_ref, subst, imp, false, f, env)?;
+                    format_impl_fns(&key.trait_ref, TypeSubstitution::new(), imp, false, f, env)?;
                 } else if level == DisplayFilter::MethodCode {
-                    format_impl_fns(&key.trait_ref, subst, imp, true, f, env)?;
+                    format_impl_fns(&key.trait_ref, TypeSubstitution::new(), imp, true, f, env)?;
                 }
                 writeln!(f)?;
             }
@@ -487,8 +489,10 @@ pub fn format_blanket_impl(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
-    let subst = format_blanket_impl_header(key, &imp.output_tys, f, env)?;
-    format_impl_fns(&key.trait_ref, subst, imp, false, f, env)
+    format_blanket_impl_header(key, &imp.output_tys, f, env)?;
+    // For blanket impls, the function types already use the correct type variables,
+    // so we don't need to apply any substitution.
+    format_impl_fns(&key.trait_ref, TypeSubstitution::new(), imp, false, f, env)
 }
 
 pub fn format_impl_header_by_key(
