@@ -505,15 +505,14 @@ impl Node {
                         app.function_index,
                         app.function_span,
                     )?;
+                    let definition = &app.trait_ref.functions[app.function_index].1;
+                    let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
                     self.kind = StaticApply(b(ir::StaticApplication {
                         function,
                         function_path: Some(app.function_path),
                         function_span: app.function_span,
                         arguments: mem::take(&mut app.arguments),
-                        argument_names: app.trait_ref.functions[app.function_index]
-                            .1
-                            .arg_names
-                            .clone(),
+                        argument_names,
                         ty: app.ty.clone(),
                         inst_data: ir::FnInstData::none(),
                     }));

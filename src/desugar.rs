@@ -18,7 +18,7 @@ use crate::{
     ast::{
         self, DExpr, DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, Expr, ExprKind,
         ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction, PModuleFunctionArg,
-        PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, PatternVar, UstrSpan,
+        PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, PatternVar, UnnamedArg, UstrSpan,
     },
     containers::{B, b},
     effects::EffType,
@@ -28,7 +28,7 @@ use crate::{
     internal_compilation_error,
     module::{Module, ModuleEnv, Modules},
     mutability::{MutType, MutVal},
-    parser_helpers::static_apply,
+    parser_helpers::syn_static_apply,
     std::{array::array_type, math::int_type},
     r#type::{FnArgType, FnType, Type, TypeDefRef},
     type_like::TypeLike,
@@ -462,7 +462,7 @@ impl PExpr {
                     Apply(
                         b(DExpr::new(Identifier(ustr("from_int")), self.span)),
                         vec![DExpr::new(Literal(value, ty), self.span)],
-                        false,
+                        UnnamedArg::All,
                     )
                 } else {
                     Literal(value, ty)
@@ -628,7 +628,7 @@ impl PExpr {
                     iterator_start_span,
                 );
                 let it_next = Expr::new(
-                    static_apply(
+                    syn_static_apply(
                         (ustr("next"), body_start_span),
                         vec![Expr::new(Identifier(ustr("@it")), body_start_span)],
                     ),

@@ -14,6 +14,7 @@ use crate::ast::PExprKind;
 use crate::ast::Pattern;
 use crate::ast::PatternKind;
 use crate::ast::Phase;
+use crate::ast::UnnamedArg;
 use crate::ast::UstrSpan;
 use crate::containers::SVec2;
 use crate::containers::b;
@@ -160,14 +161,14 @@ pub(crate) fn proj_or_float<L, T>(
     Ok(Project(b(lhs), rhs))
 }
 
-pub(crate) fn static_apply<P: Phase>(identifier: UstrSpan, args: Vec<Expr<P>>) -> ExprKind<P> {
+pub(crate) fn syn_static_apply<P: Phase>(identifier: UstrSpan, args: Vec<Expr<P>>) -> ExprKind<P> {
     let identifier = Expr::<P>::new(ExprKind::Identifier(identifier.0), identifier.1);
-    ExprKind::Apply(b(identifier), args, true)
+    ExprKind::Apply(b(identifier), args, UnnamedArg::All)
 }
 
 pub(crate) fn assign_op(op: UstrSpan, lhs: PExpr, rhs: PExpr) -> PExprKind {
     let span = span(lhs.span.start(), rhs.span.end());
-    let apply = Expr::new(static_apply(op, vec![lhs.clone(), rhs]), span);
+    let apply = Expr::new(syn_static_apply(op, vec![lhs.clone(), rhs]), span);
     ExprKind::Assign(b(lhs), op.1, b(apply))
 }
 
@@ -215,7 +216,7 @@ pub(crate) fn for_loop(var_name: UstrSpan, seq: PExpr, body: PExpr) -> PExprKind
     let seq_span = seq.span;
     let seq_span_start = Location::new_local(seq.span.start(), seq.span.start());
     let iterator = PExpr::new(
-        static_apply((ustr("iter"), seq_span_start), vec![seq]),
+        syn_static_apply((ustr("iter"), seq_span_start), vec![seq]),
         seq_span,
     );
     ExprKind::ForLoop(crate::ast::ForLoop::new(var_name, iterator, body))

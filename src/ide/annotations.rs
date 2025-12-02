@@ -234,19 +234,8 @@ impl Node {
                     }
                 }
             }
-            TraitFnApply(app) => {
-                let function_data = &app.trait_ref.functions[app.function_index];
-                let argument_names = &function_data.1.arg_names;
-                let arity = argument_names.len();
-                let is_synthesized = app.function_span.is_empty();
-                for (arg, arg_name) in app.arguments.iter().zip(argument_names.iter()) {
-                    if !is_synthesized
-                        && !should_hide_arg_name_hint(&app.function_path, arity, arg_name, arg)
-                    {
-                        result.push((arg.span.start(), format!("{arg_name}: ")));
-                    }
-                    arg.variable_type_annotations(result, env);
-                }
+            TraitFnApply(_) => {
+                // There is no TraitFnApply left in the final IR.
             }
             GetFunction(_) => {}
             GetDictionary(_) => {}

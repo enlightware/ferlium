@@ -25,6 +25,7 @@ use crate::{
     module::ModuleEnv,
     mutability::{FormatInFnArg, MutType as IrMutType, MutVal},
     never::Never,
+    parser_helpers::EMPTY_USTR,
     r#type::Type as IrType,
     type_like::TypeLike,
     value::{LiteralValue, Value},
@@ -627,6 +628,28 @@ pub type RecordField<P> = (UstrSpan, Expr<P>);
 /// A collection of record fields in an expression
 pub type RecordFields<P> = Vec<RecordField<P>>;
 
+/// Whether some arguments of an apply node should be hidden in the IDE
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnnamedArg {
+    All,
+    None,
+    First,
+}
+impl UnnamedArg {
+    pub fn filter_args(&self, args: &[Ustr]) -> Vec<Ustr> {
+        use UnnamedArg::*;
+        match self {
+            All => args.iter().map(|_| *EMPTY_USTR).collect(),
+            None => args.to_vec(),
+            First => args
+                .iter()
+                .enumerate()
+                .map(|(i, name)| if i == 0 { *EMPTY_USTR } else { *name })
+                .collect(),
+        }
+    }
+}
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum ExprKind<P: Phase> {
@@ -642,7 +665,7 @@ pub enum ExprKind<P: Phase> {
     ),
     Return(B<Expr<P>>),
     Abstract(Vec<UstrSpan>, B<Expr<P>>),
-    Apply(B<Expr<P>>, Vec<Expr<P>>, bool),
+    Apply(B<Expr<P>>, Vec<Expr<P>>, UnnamedArg),
     Block(Vec<Expr<P>>),
     Assign(B<Expr<P>>, Location, B<Expr<P>>),
     PropertyPath(Ustr, Ustr),

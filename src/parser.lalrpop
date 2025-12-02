@@ -1,5 +1,5 @@
 use crate::{Location, LocatedError};
-use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem};
+use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -370,12 +370,12 @@ AbstractExpr<NoStruct>: ExprKind = {
 }
 
 PipeExpr<NoStruct>: ExprKind = {
-    <l:Es<PipeExpr<NoStruct>>> "|>" <e:Es<SuffixExpr<"">>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), ext_f(l, a), false),
+    <l:Es<PipeExpr<NoStruct>>> "|>" <e:Es<SuffixExpr<"">>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), ext_f(l, a), UnnamedArg::First),
     RangeExpr<NoStruct>,
 }
 
 RangeExpr<NoStruct>: ExprKind = {
-    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => static_apply(o, vec![l, r]),
+    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => syn_static_apply(o, vec![l, r]),
     LogicOrExpr<NoStruct>,
 }
 
@@ -404,7 +404,7 @@ CastExpr<NoStruct>: ExprKind = {
         );
         TypeAscription(
             boxed(Expr::new(
-                Apply(boxed(cast_expr), vec![e], false),
+                Apply(boxed(cast_expr), vec![e], UnnamedArg::All),
                 span
             )),
             ty.0,
@@ -429,7 +429,7 @@ CastTargetTypeParens: Type = {
 
 UnaryExpr<NoStruct> = {
     SuffixExpr<NoStruct>,
-    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => static_apply(o, vec![e]),
+    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => syn_static_apply(o, vec![e]),
 }
 
 SuffixExpr<NoStruct> = {
@@ -437,7 +437,7 @@ SuffixExpr<NoStruct> = {
     <e:Es<SuffixExpr<NoStruct>>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
     <e:Es<SuffixExpr<NoStruct>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
     <e:Es<SuffixExpr<NoStruct>>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
-    <e:Es<SuffixExpr<NoStruct>>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), a, false),
+    <e:Es<SuffixExpr<NoStruct>>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), a, UnnamedArg::None),
 }
 
 AtomExpr<NoStruct> = {
@@ -847,7 +847,7 @@ Sep<T, S>: Vec<T> = {
 // A tier of expression, for a binary operation, left-associative
 #[inline]
 BinOpLeftAssoc<Op, NextTier>: ExprKind = {
-    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => static_apply(o, vec![l, r]),
+    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => syn_static_apply(o, vec![l, r]),
     NextTier
 };
 

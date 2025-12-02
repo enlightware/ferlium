@@ -8,6 +8,7 @@
 //
 use crate::{
     Location,
+    ast::UnnamedArg,
     format::FormatWith,
     module::{FunctionId, ModuleRc, TraitImplId},
     r#trait::TraitRef,
@@ -121,6 +122,7 @@ pub struct TraitFnApplication {
     pub function_path: Ustr,
     pub function_span: Location,
     pub arguments: Vec<Node>,
+    pub arguments_unnamed: UnnamedArg,
     pub ty: FnType,
     pub input_tys: Vec<Type>,
     pub inst_data: FnInstData,

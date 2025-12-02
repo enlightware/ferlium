@@ -18,6 +18,7 @@ use std::{
 use crate::{
     ast::{
         DExpr, Desugared, ExprKind, Pattern, PatternKind, PatternVar, RecordField, RecordFields,
+        UnnamedArg,
     },
     containers::continuous_hashmap_to_vec,
     error::{
@@ -28,7 +29,6 @@ use crate::{
     internal_compilation_error,
     location::Location,
     module::ModuleFunction,
-    parser_helpers::EMPTY_USTR,
     std::core::REPR_TRAIT,
     r#trait::TraitRef,
     trait_solver::TraitSolver,
@@ -570,7 +570,7 @@ impl TypeInference {
                     self.infer_abstract(env, args, body, None, expr.span)?;
                 (node.kind, ty, mut_ty, effects)
             }
-            Apply(func, args, synthesized) => {
+            Apply(func, args, arguments_unnamed) => {
                 // Do we have a global function or variant?
                 if let Identifier(path) = func.kind {
                     if !env.has_variable_name(path) {
@@ -580,7 +580,7 @@ impl TypeInference {
                             func.span,
                             args,
                             expr.span,
-                            *synthesized,
+                            *arguments_unnamed,
                         )?;
                         return Ok((N::new(node, ty, effects, expr.span), mut_ty));
                     }
@@ -632,7 +632,7 @@ impl TypeInference {
                         place.span,
                         &[value.as_ref()],
                         expr.span,
-                        true,
+                        UnnamedArg::All,
                     )?;
                     return Ok((N::new(node, ty, effects, expr.span), mut_ty));
                 }
@@ -944,7 +944,14 @@ impl TypeInference {
             PropertyPath(scope, variable) => {
                 let fn_name =
                     property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
-                self.infer_static_apply(env, &fn_name, expr.span, &[] as &[DExpr], expr.span, true)?
+                self.infer_static_apply(
+                    env,
+                    &fn_name,
+                    expr.span,
+                    &[] as &[DExpr],
+                    expr.span,
+                    UnnamedArg::All,
+                )?
             }
             TypeAscription(expr, ty, span) => {
                 let (node, mut_type) = self.infer_expr(env, expr)?;
@@ -974,7 +981,7 @@ impl TypeInference {
         path_span: Location,
         args: &[impl Borrow<DExpr>],
         expr_span: Location,
-        synthesized: bool,
+        arguments_unnamed: UnnamedArg,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
@@ -1038,6 +1045,7 @@ impl TypeInference {
                     function_path: ustr(path),
                     function_span: path_span,
                     arguments: args_nodes,
+                    arguments_unnamed,
                     ty: inst_fn_ty,
                     input_tys,
                     inst_data,
@@ -1057,11 +1065,7 @@ impl TypeInference {
                     .ty_scheme
                     .instantiate_with_fresh_vars(self, module_name, path_span.span(), None);
                 // Get argument names if any
-                let argument_names = if synthesized {
-                    definition.arg_names.iter().map(|_| *EMPTY_USTR).collect()
-                } else {
-                    definition.arg_names.clone()
-                };
+                let argument_names = arguments_unnamed.filter_args(&definition.arg_names);
                 // Get the code and make sure the types of its arguments match the expected types
                 let (args_nodes, args_effects) =
                     self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
