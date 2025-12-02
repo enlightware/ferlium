@@ -9,15 +9,15 @@ fn clamp(value, min_bound, max_bound) {
 
 // Arrays
 
-// Blocked due to issue: https://github.com/enlightware/ferlium/issues/59
-// fn array_peek_back(array) {
-//     let l = array_len(array);
-//     if le(l, 0) {
-//         None
-//     } else {
-//         Some(array[sub(l, 1)])
-//     }
-// }
+/// Return the last element of an array, or None if the array is empty.
+fn array_peek_back(array) -> None | Some(_) {
+    let l = array_len(array);
+    if l <= 0 {
+        None
+    } else {
+        Some(array[l - 1])
+    }
+}
 
 /// Maps a function over an array, returning a new array with the results.
 fn array_map(array: [_], f) {
@@ -42,7 +42,7 @@ impl Concat {
 	}
 }
 
-// Sequence/iterator functions
+// Sequence and reduction functions
 
 /// Returns true if the collection contains no elements.
 fn is_empty(seq) {
@@ -106,6 +106,67 @@ fn count(seq) {
 /// Sums the elements in the sequence.
 fn sum(seq) {
 	fold(seq, 0, |acc, element| acc + element)
+}
+
+/// Averages the elements in the sequence.
+fn average(seq) {
+	sum(seq) / count(seq)
+}
+
+/// Returns the minimum element in the sequence.
+fn minimum(seq) {
+	let mut it = iter(seq);
+	match next(it) {
+		Some(first) => {
+			fold(it, first, |min_so_far, element| min(min_so_far, element))
+		},
+		None => panic("minimum of empty sequence"),
+	}
+}
+
+/// Returns the maximum element in the sequence.
+fn maximum(seq) {
+	let mut it = iter(seq);
+	match next(it) {
+		Some(first) => {
+			fold(it, first, |max_so_far, element| max(max_so_far, element))
+		},
+		None => panic("maximum of empty sequence"),
+	}
+}
+
+/// Finds the first element in the sequence that matches a predicate, returning None if not found.
+fn find(seq, predicate) -> None | Some(_) {
+	let mut it = iter(seq);
+	loop {
+		match next(it) {
+			Some(element) => {
+				if predicate(element) {
+					return Some(element);
+				}
+			},
+			None => soft_break,
+		}
+	};
+	None
+}
+
+/// Finds the position of the first element in the sequence that matches a predicate, returning None if not found.
+fn position(seq, predicate) -> None | Some(int) {
+	let mut it = iter(seq);
+	let mut index = 0;
+	loop {
+		match next(it) {
+			Some(element) => {
+				if predicate(element) {
+					return Some(index);
+				};
+				index = index + 1;
+			},
+			None => soft_break,
+		}
+	};
+	None
 }
 
 // Compatibility, mark as deprecated when supported

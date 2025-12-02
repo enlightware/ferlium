@@ -110,6 +110,7 @@ pub fn add_to_module(to: &mut Module) {
     to.traits.push(sized_seq_trait);
 
     // Implementation of Seq trait for Iterator
+    // TODO: implement in Ferlium itself once we have constraint parsing in blanket implementations.
     to.add_blanket_impl(
         seq_trait,
         BlanketTraitImplSubKey {

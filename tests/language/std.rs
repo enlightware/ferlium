@@ -234,7 +234,7 @@ fn array_iterators() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn iterator_fns() {
+fn reducing_fns() {
     assert_eq!(run("0..2 |> iter() |> any(|x| x > 1)"), bool(false));
     assert_eq!(run("0..2 |> iter() |> any(|x| x >= 1)"), bool(true));
     assert_eq!(run("[0, 1] |> iter() |> any(|x| x > 1)"), bool(false));
@@ -248,6 +248,18 @@ fn iterator_fns() {
     assert_eq!(run("[2, 5] |> iter() |> iter() |> count()"), int(2));
     assert_eq!(run("2..5 |> iter() |> sum()"), int(9));
     assert_eq!(run("[2, 5] |> iter() |> sum()"), int(7));
+    assert_eq!(run("[2.5, 5] |> iter() |> sum()"), float(7.5));
+    assert_eq!(run("[0, 1, 3] |> iter() |> find(|x| x > 1)"), some(int(3)));
+    assert_eq!(run("[0, 1, 3] |> iter() |> find(|x| x < 0)"), none());
+    assert_eq!(
+        run("[0, 1, 3] |> iter() |> position(|x| x > 1)"),
+        some(int(2))
+    );
+    assert_eq!(run("[0, 1, 3] |> iter() |> position(|x| x < 0)"), none());
+    assert_eq!(run("[3, 1, 2] |> iter() |> minimum()"), int(1));
+    assert_eq!(run("[3.0, 1.0, 2.0] |> iter() |> minimum()"), float(1.0));
+    assert_eq!(run("[3, 1, 2] |> iter() |> maximum()"), int(3));
+    assert_eq!(run("[3.0, 1.0, 2.0] |> iter() |> maximum()"), float(3.0));
 }
 
 #[test]
