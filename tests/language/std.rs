@@ -246,6 +246,8 @@ fn iterator_fns() {
     assert_eq!(run("2..5 |> iter() |> count()"), int(3));
     assert_eq!(run("[2, 5] |> iter() |> count()"), int(2));
     assert_eq!(run("[2, 5] |> iter() |> iter() |> count()"), int(2));
+    assert_eq!(run("2..5 |> iter() |> sum()"), int(9));
+    assert_eq!(run("[2, 5] |> iter() |> sum()"), int(7));
 }
 
 #[test]

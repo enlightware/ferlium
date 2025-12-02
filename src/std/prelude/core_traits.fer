@@ -42,15 +42,16 @@ impl Concat {
 	}
 }
 
-// Iterator functions
+// Sequence/iterator functions
 
 /// Returns true if the collection contains no elements.
 fn is_empty(seq) {
 	len(seq) == 0
 }
 
-/// Reduces the iterator it to a single value by repeatedly applying f.
-fn fold(it, init, f) {
+/// Reduces the sequence seq to a single value by repeatedly applying f, left to right.
+fn fold(seq, init, f) {
+	let mut it = iter(seq);
 	let mut acc = init;
 	loop {
 		match next(it) {
@@ -63,8 +64,9 @@ fn fold(it, init, f) {
 	acc
 }
 
-/// Reduces the iterator it to a single value by repeatedly applying f, as long as f returns Continue.
-fn try_fold(it, init, f) {
+/// Reduces the sequence seq to a single value by repeatedly applying f, left to right, as long as f returns Continue.
+fn try_fold(seq, init, f) {
+	let mut it = iter(seq);
 	let mut acc = init;
 	loop {
 		match next(it) {
@@ -86,34 +88,36 @@ fn try_fold(it, init, f) {
 	Continue(acc)
 }
 
-/// Tests if every element of the iterator matches a predicate.
-fn all(it, f) {
-	let mut it = it;
-	try_fold(it, (), |_acc, element| if f(element) { Continue(()) } else { Break }) == Continue(())
+/// Tests if every element of the sequence matches a predicate.
+fn all(seq, f) {
+	try_fold(seq, (), |_acc, element| if f(element) { Continue(()) } else { Break }) == Continue(())
 }
 
-/// Tests if any element of the iterator matches a predicate.
-fn any(it, f) {
-	let mut it = it;
-	try_fold(it, (), |_acc, element| if f(element) { Break } else { Continue(()) }) == Break
+/// Tests if any element of the sequence matches a predicate.
+fn any(seq, f) {
+	try_fold(seq, (), |_acc, element| if f(element) { Break } else { Continue(()) }) == Break
 }
 
-/// Counts the number of elements in the iterator.
-fn count(it) {
-	let mut it = it;
-	fold(it, 0, |sum, _element| sum + 1)
+/// Counts the number of elements in the sequence.
+fn count(seq) {
+	fold(seq, 0, |sum, _element| sum + 1)
+}
+
+/// Sums the elements in the sequence.
+fn sum(seq) {
+	fold(seq, 0, |acc, element| acc + element)
 }
 
 // Compatibility, mark as deprecated when supported
 
 /// Deprecated, use `all` instead.
 fn array_all(array: [_], f) {
-	all(array_iter(array), f)
+	all(array, f)
 }
 
 /// Deprecated, use `any` instead.
 fn array_any(array: [_], f) {
-	any(array_iter(array), f)
+	any(array, f)
 }
 
 // Iterator and Seq for string
