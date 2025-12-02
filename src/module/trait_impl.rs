@@ -281,6 +281,61 @@ impl TraitImpls {
         id
     }
 
+    pub fn add_blanket_raw(
+        &mut self,
+        trait_ref: TraitRef,
+        sub_key: BlanketTraitImplSubKey,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<Function>>,
+        fn_collector: &mut FunctionCollector,
+    ) -> LocalImplId {
+        let output_tys = output_tys.into();
+
+        // Recover the definitions from the trait reference by instantiating the trait method definitions with the given types.
+        let definitions = trait_ref.instantiate_for_tys(&sub_key.input_tys, &output_tys);
+
+        // Combine them into module functions.
+        let functions: Vec<_> = definitions
+            .into_iter()
+            .zip(functions.into())
+            .map(|(def, function)| {
+                ModuleFunction::new_without_spans(def, Rc::new(RefCell::new(function)))
+            })
+            .collect();
+
+        // Add the impl, collecting new functions.
+        self.add_blanket(trait_ref, sub_key, output_tys, functions, fn_collector)
+    }
+
+    pub fn add_blanket(
+        &mut self,
+        trait_ref: TraitRef,
+        sub_key: BlanketTraitImplSubKey,
+        output_tys: Vec<Type>,
+        functions: Vec<ModuleFunction>,
+        fn_collector: &mut FunctionCollector,
+    ) -> LocalImplId {
+        // Minimal validation
+        trait_ref.validate_impl_size(&sub_key.input_tys, &output_tys, functions.len());
+
+        // Add to local functions, collect their IDs and build the overall interface hash.
+        let (methods, dictionary_type, interface_hash) =
+            Self::bundle_module_functions(functions, fn_collector);
+
+        // Build and insert the implementation.
+        let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
+        let imp = TraitImpl::new(
+            output_tys,
+            methods,
+            interface_hash,
+            dictionary_value,
+            dictionary_type,
+            true,
+        );
+        let key = BlanketTraitImplKey::new(trait_ref, sub_key);
+        self.add_blanket_struct(key, imp)
+    }
+
     /// Add a blanket trait implementation structure, returning its local id.
     pub fn add_blanket_struct(&mut self, key: BlanketTraitImplKey, imp: TraitImpl) -> LocalImplId {
         let id = LocalImplId::from_index(self.data.len());
@@ -431,7 +486,7 @@ impl TraitImpls {
         Ok(())
     }
 
-    pub fn print_impls_headers(&self, trait_ref: &TraitRef, module_env: ModuleEnv<'_>) {
+    pub fn log_debug_impls_headers(&self, trait_ref: &TraitRef, module_env: ModuleEnv<'_>) {
         let filter = |tr: &TraitRef, _| {
             if tr.name == trait_ref.name {
                 DisplayFilter::ImplSignature
@@ -439,7 +494,7 @@ impl TraitImpls {
                 DisplayFilter::Hide
             }
         };
-        println!("{}", self.format_with(&(module_env, filter)));
+        log::debug!("{}", self.format_with(&(module_env, filter)));
     }
 
     pub fn impl_header_to_string_by_id(

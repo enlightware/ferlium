@@ -148,15 +148,15 @@ impl<'a> TraitSolver<'a> {
     }
 
     /// Print all known implementations for the given trait reference.
-    fn print_impls(&self, trait_ref: &TraitRef) {
-        println!("In current module:\n\n");
+    fn log_debug_impls(&self, trait_ref: &TraitRef) {
+        log::debug!("In current module:");
         let fake_current = new_module_using_std();
         let env = ModuleEnv::new(&fake_current, self.others, false);
-        self.impls.print_impls_headers(trait_ref, env);
+        self.impls.log_debug_impls_headers(trait_ref, env);
         for (module_name, module) in &self.others.modules {
             if module.impls.blanket_key_to_id.contains_key(trait_ref) {
-                println!("In module {}:\n\n", module_name);
-                module.impls.print_impls_headers(trait_ref, env);
+                log::debug!("In module {}:", module_name);
+                module.impls.log_debug_impls_headers(trait_ref, env);
             }
         }
     }
@@ -457,16 +457,20 @@ impl<'a> TraitSolver<'a> {
             if let Some(impl_id) = derive.derive_impl(trait_ref, input_tys, fn_span, self)? {
                 return Ok(impl_id);
             } else {
-                println!(
+                log::debug!(
                     "Tried derivation for trait {} with input types {:?}, but failed.",
-                    trait_ref.name, input_tys
+                    trait_ref.name,
+                    input_tys
                 );
             }
         }
 
         // No matching implementation found.
-        println!("Existing impls for {}:\n", trait_ref.name);
-        self.print_impls(trait_ref);
+        log::debug!(
+            "No matching impl for trait \"{}\" found. Existing impls:",
+            trait_ref.name
+        );
+        self.log_debug_impls(trait_ref);
         Err(internal_compilation_error!(TraitImplNotFound {
             trait_ref: trait_ref.clone(),
             input_tys: input_tys.to_vec(),

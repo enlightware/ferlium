@@ -8,13 +8,15 @@
 //
 use crate::{
     Location,
+    containers::b,
     effects::EffType,
-    function::FunctionDefinition,
-    module::Module,
+    function::{BinaryNativeFnVVV, FunctionDefinition},
+    module::{BlanketTraitImplSubKey, Module},
     std::{math::int_type, option::option_type},
     r#trait::TraitRef,
     r#type::{FnType, Type},
     type_scheme::PubTypeConstraint,
+    value::Value,
 };
 
 pub const ITERATOR_TRAIT_NAME: &str = "Iterator";
@@ -45,7 +47,7 @@ pub fn add_to_module(to: &mut Module) {
     to.traits.push(iterator_trait.clone());
 
     let iter_item_constraint = PubTypeConstraint::HaveTrait {
-        trait_ref: iterator_trait,
+        trait_ref: iterator_trait.clone(),
         input_tys: vec![Type::variable_id(2)],
         output_tys: vec![Type::variable_id(1)],
         span: Location::new_local(0, 0), // FIXME: we should not have a location here.
@@ -69,7 +71,7 @@ pub fn add_to_module(to: &mut Module) {
             ),
         )],
     );
-    to.traits.push(seq_trait);
+    to.traits.push(seq_trait.clone());
 
     // Requires per trait method generics
     // let from_iter_trait = TraitRef::new_with_constraints(
@@ -106,6 +108,28 @@ pub fn add_to_module(to: &mut Module) {
         )],
     );
     to.traits.push(sized_seq_trait);
+
+    // Implementation of Seq trait for Iterator
+    to.add_blanket_impl(
+        seq_trait,
+        BlanketTraitImplSubKey {
+            input_tys: vec![Type::variable_id(0)],
+            ty_var_count: 2,
+            constraints: vec![PubTypeConstraint::HaveTrait {
+                trait_ref: iterator_trait,
+                input_tys: vec![Type::variable_id(0)],
+                output_tys: vec![Type::variable_id(1)],
+                span: Location::new_local(0, 0), // FIXME: we should not have a location here.
+            }],
+        },
+        vec![Type::variable_id(1), Type::variable_id(0)],
+        vec![
+            // As we have one HaveTrait constraint, we need to add one extra argument
+            // for the constraint dictionary, even if it is not used.
+            b(BinaryNativeFnVVV::new(|_dict: Value, v: Value| v))
+                as Box<dyn crate::function::Callable>,
+        ],
+    );
 
     // Trait implementations are in the prelude.
 }

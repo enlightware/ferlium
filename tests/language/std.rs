@@ -245,6 +245,7 @@ fn iterator_fns() {
     assert_eq!(run("[0, 1] |> iter() |> all(|x| x >= 0)"), bool(true));
     assert_eq!(run("2..5 |> iter() |> count()"), int(3));
     assert_eq!(run("[2, 5] |> iter() |> count()"), int(2));
+    assert_eq!(run("[2, 5] |> iter() |> iter() |> count()"), int(2));
 }
 
 #[test]

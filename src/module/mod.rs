@@ -130,6 +130,24 @@ impl Module {
         self.functions.extend(fn_collector.new_elements);
     }
 
+    /// Add a blanket trait implementation to this module, with raw functions.
+    /// The definition will be retrieved by instantiating the trait method definitions with the given types.
+    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// and that the provided constraints are consistent with the trait definition.
+    pub fn add_blanket_impl(
+        &mut self,
+        trait_ref: TraitRef,
+        sub_key: BlanketTraitImplSubKey,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        // Add the impl, collecting new functions
+        let mut fn_collector = FunctionCollector::new(self.functions.len());
+        self.impls
+            .add_blanket_raw(trait_ref, sub_key, output_tys, functions, &mut fn_collector);
+        self.functions.extend(fn_collector.new_elements);
+    }
+
     /// Add a concrete or blanket trait implementation to this module, using already-added local functions.
     pub(crate) fn add_emitted_impl(
         &mut self,
