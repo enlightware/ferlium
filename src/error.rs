@@ -1200,7 +1200,8 @@ impl CompilationError {
                 trait_ref: trait_ref.name.to_string(),
                 input_tys: input_tys
                     .iter()
-                    .map(|ty| ty.format_with(env).to_string())
+                    .zip(trait_ref.input_type_names.iter())
+                    .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
                 fn_span,
             }),
