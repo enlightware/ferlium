@@ -27,7 +27,7 @@ pub static CONTAINS_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
     TraitRef::new_with_self_input_type(
         "Contains",
-        "A type that has a total ordering.",
+        "A type that can be checked for the presence of an element.",
         ["Element"],
         [(
             "contains",
