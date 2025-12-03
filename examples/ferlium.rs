@@ -481,7 +481,7 @@ fn process_input(
     Ok(module)
 }
 
-fn process_pipe_input() -> i32 {
+fn process_pipe_input(print_module: bool) -> i32 {
     // Read all input from stdin
     let mut input = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut input) {
@@ -508,14 +508,23 @@ fn process_pipe_input() -> i32 {
         &mut environment,
         false,
     )
-    .map_or_else(|code| code, |_| 0)
+    .map_or_else(
+        |code| code,
+        |module| {
+            if print_module {
+                println!("{}", module.format_with(&other_modules));
+            }
+            0
+        },
+    )
 }
 
 fn main() {
     // Check if we're being used in pipe mode (stdin is not a terminal)
     if !io::stdin().is_terminal() {
         // Pipe mode: read from stdin, process, and exit
-        std::process::exit(process_pipe_input());
+        let print_module = env::args().any(|arg| arg == "--print-module");
+        std::process::exit(process_pipe_input(print_module));
     }
 
     // Check for help flag
@@ -524,8 +533,15 @@ fn main() {
         println!("Ferlium REPL - A functional programming language interpreter");
         println!();
         println!("Usage:");
-        println!("  {} [--help|-h]", args[0]);
-        println!("  {} [--print-std]", args[0]);
+        println!("  {} [--help|-h]      Show the help.", args[0]);
+        println!(
+            "  {} [--print-std]    Print the standard library module (interactive mode only).",
+            args[0]
+        );
+        println!(
+            "  {} [--print-module] Print the provided-code module (pipe mode only).",
+            args[0]
+        );
         println!("  echo 'code' | {}", args[0]);
         println!();
         println!("Modes:");
