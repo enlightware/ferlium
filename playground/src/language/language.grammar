@@ -292,12 +292,27 @@ Array {
 }
 
 Record {
-    '{' RecordField '}'
-    | '{' RecordField ',' (RecordField ',')* RecordField? '}'
+    // Single explicit field: {a: 1}
+    '{' recordExplicitField '}'
+    // Single abbreviated field with trailing comma: {a,}
+    | '{' recordAbbrevField ',' '}'
+    // Multiple fields starting with explicit: {a: 1, ...}
+    | '{' recordExplicitField ',' (RecordField ',')* RecordField? '}'
+    // Multiple fields starting with abbreviated: {a, b, ...}
+    | '{' recordAbbrevField ',' RecordField (','  RecordField)* ','? '}'
 }
 
 RecordField {
+    recordExplicitField
+    | recordAbbrevField
+}
+
+recordExplicitField {
     FieldName { Identifier } ':' expr
+}
+
+recordAbbrevField {
+    FieldName { Identifier }
 }
 
 exprOptComma {
