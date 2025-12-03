@@ -136,9 +136,9 @@ fn effects_from_fn_value() {
     test_mod(code2, "b", effect(Write).union(&effect_var(0)));
 
     // FIXME: this is buggy, as the function order should have no effect
-    // let code2 = "fn b(f) { a(f, || effects::write()) } fn a(f, g) { b(f); f(); g(); () } ";
-    // test_mod(code2, "a", effect(Write).union(&effect_vars(&[0, 1])));
-    // test_mod(code2, "b", effect(Write).union(&effect_var(0)));
+    let code3 = "fn b(f) { a(f, || effects::write()) } fn a(f, g) { b(f); f(); g(); () } ";
+    test_mod(code3, "a", effect(Write).union(&effect_vars(&[0, 1])));
+    test_mod(code3, "b", effect(Write).union(&effect_var(0)));
 }
 
 #[test]
