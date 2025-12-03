@@ -843,6 +843,46 @@ fn records() {
         "fn swap(a,b) { let mut temp = a; a = b; b = temp } let mut v = { x:1, y:2 }; swap(v.x, v.x)",
     )
     .expect_mutable_paths_overlap();
+
+    // Record field abbreviation syntax tests
+    // Single abbreviated field requires trailing comma to distinguish from block
+    assert_eq!(run("let a = 1; {a,}.a"), int(1));
+    // Two abbreviated fields
+    assert_eq!(run("let a = 1; let b = 2; {a, b}.a"), int(1));
+    assert_eq!(run("let a = 1; let b = 2; {a, b}.b"), int(2));
+    // Mixed: explicit first, then abbreviated
+    assert_eq!(run("let b = 2; {a: 1, b}.a"), int(1));
+    assert_eq!(run("let b = 2; {a: 1, b}.b"), int(2));
+    // Mixed: abbreviated first, then explicit
+    assert_eq!(run("let a = 1; {a, b: 2}.a"), int(1));
+    assert_eq!(run("let a = 1; {a, b: 2}.b"), int(2));
+    // Trailing comma after single explicit field is optional
+    assert_eq!(run("{a: 1}.a"), int(1));
+    assert_eq!(run("{a: 1,}.a"), int(1));
+    // Trailing comma with multiple fields
+    assert_eq!(run("let a = 1; let b = 2; {a, b,}.a"), int(1));
+    assert_eq!(run("{a: 1, b: 2,}.b"), int(2));
+    // Abbreviated with more complex expressions
+    assert_eq!(
+        run("fn make_rec() { let x = 10; let y = 20; {x, y} } make_rec().x"),
+        int(10)
+    );
+    assert_eq!(
+        run("fn make_rec() { let x = 10; let y = 20; {x, y} } make_rec().y"),
+        int(20)
+    );
+    // Using abbreviated in function arguments
+    assert_eq!(
+        run("fn s(v) { v.x + v.y } let x = 1; let y = 2; s({x, y})"),
+        int(3)
+    );
+    // Three or more abbreviated fields
+    assert_eq!(run("let a = 1; let b = 2; let c = 3; {a, b, c}.c"), int(3));
+    // Deeply nested with abbreviation
+    assert_eq!(
+        run("let inner = 5; let outer = {inner,}; outer.inner"),
+        int(5)
+    );
 }
 
 #[test]

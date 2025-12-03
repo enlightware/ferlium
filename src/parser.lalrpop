@@ -448,8 +448,6 @@ AtomExpr<NoStruct> = {
     FormattedString,
     TupleExpr,
     ArrayExpr,
-    SetExpr,
-    MapExpr,
     RecordExpr,
     SoftBreakExpr,
     StmtLikeExpr,
@@ -589,47 +587,36 @@ ArrayExpr: ExprKind = {
     "[" <a:Sep<Expr, ",">> "]" => Array(a),
 }
 
-SetExpr: ExprKind = {
-    <l:@L> "{" <items:SetLiteralElements> "}" <r:@R> =>? {
-        let _ = items;
-        error("set literals not implemented yet".into(), span(l, r))
-    },
-}
-
-SetLiteralElements: Vec<Expr> = {
-    <f:Expr> "," <r:Sep<Expr, ",">> => ext_f(f, r),
-}
-
-MapExpr: ExprKind = {
-    <l:@L> "{" <entries:MapLiteralEntries> "}" <r:@R> =>? {
-        let _ = entries;
-        error("map literals not implemented yet".into(), span(l, r))
-    },
-}
-
-MapLiteralEntries: Vec<(Expr, Expr)> = {
-    <f:MapEntry> "," <r:Sep<MapEntry, ",">> => ext_f(f, r),
-    <f:MapEntry> => vec![f],
-}
-
-MapEntry: (Expr, Expr) = {
-    <key:Expr> "=>" <value:Expr> => (key, value),
-}
-
 RecordExpr: ExprKind = {
     <r:RecordExprImpl> => Record(r),
 }
 
-// Note: we need this to make the difference between an empty block
-// and a record, disallowing records with no elements
+// Records with support for field abbreviation syntax.
+// For a single abbreviated field (e.g., {a}), a trailing comma is required ({a,})
+// to distinguish from a block returning a value.
+// For explicit field syntax (e.g., {a: 1}), no trailing comma is needed.
 RecordExprImpl: Vec<(UstrSpan, Expr)> = {
-    "{" <f:RecordField> "}" => vec![f],
-    "{" <f:RecordField> "," <r:Sep<RecordField, ",">> "}" => ext_f(f, r),
+    // Single explicit field: {a: 1}
+    "{" <f:RecordExplicitField> "}" => vec![f],
+    // Single abbreviated field with trailing comma: {a,}
+    "{" <f:RecordAbbrevField> "," "}" => vec![f],
+    // Multiple fields starting with explicit: {a: 1, ...}
+    "{" <f:RecordExplicitField> "," <r:Sep<RecordField, ",">> "}" => ext_f(f, r),
+    // Multiple fields starting with abbreviated: {a, ...} (at least one more field required)
+    "{" <f:RecordAbbrevField> "," <s:RecordField> <r:("," <RecordField>)*> ","? "}" => ext_f(f, ext_f(s, r)),
 }
 
-
 RecordField: (UstrSpan, Expr) = {
+    RecordExplicitField,
+    RecordAbbrevField,
+}
+
+RecordExplicitField: (UstrSpan, Expr) = {
     <n:Sp<UIdentifier>> ":" <e:Expr> => (n, e),
+}
+
+RecordAbbrevField: (UstrSpan, Expr) = {
+    <n:Sp<UIdentifier>> => (n, Expr::new(Identifier(n.0), n.1)),
 }
 
 // Struct literals support both explicit and shorthand field syntax
