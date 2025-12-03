@@ -328,6 +328,19 @@ macro_rules! int_a {
     };
 }
 
+/// An array of float values
+#[macro_export]
+macro_rules! float_a {
+    [] => {
+        Value::native(ferlium::std::array::Array::new())
+    };
+    [$($elem:expr),+ $(,)?] => {
+        Value::native(ferlium::std::array::Array::from_vec(vec![
+            $(Value::native::<ferlium::std::math::Float>(ferlium::std::math::Float::new($elem).unwrap())),+
+        ]))
+    };
+}
+
 /// A tuple of integer values
 #[macro_export]
 macro_rules! int_tuple {

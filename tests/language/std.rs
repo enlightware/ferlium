@@ -234,6 +234,32 @@ fn array_iterators() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_casts() {
+    // Identity casts
+    assert_eq!(run("([1, 2, 3]: [int]) as [int]"), int_a![1, 2, 3]);
+    assert_eq!(
+        run("([1.0, 2.4, 3.0]: [float]) as [float]"),
+        float_a![1.0, 2.4, 3.0]
+    );
+    // Inner type casts
+    assert_eq!(
+        run("([1, 2, 3]: [int]) as [float]"),
+        float_a![1.0, 2.0, 3.0]
+    );
+    assert_eq!(run("([1.0, 2.4, 3.0]: [float]) as [int]"), int_a![1, 2, 3]);
+    // In functions
+    assert_eq!(
+        run("fn f(v) { v as [float] } f([1.0, 2.4, 3.0])"),
+        float_a![1.0, 2.4, 3.0]
+    );
+    assert_eq!(
+        run("fn f(v) { v as [int] } f([1.0, 2.4, 3.0])"),
+        int_a![1, 2, 3]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn reducing_fns() {
     assert_eq!(run("0..2 |> iter() |> any(|x| x > 1)"), bool(false));
     assert_eq!(run("0..2 |> iter() |> any(|x| x >= 1)"), bool(true));

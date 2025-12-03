@@ -3,6 +3,7 @@
                 "contravariance",
                 "optimisation",
                 "sccs",
+                "serde",
                 "uninstantiated",
                 "ustr"
         ]

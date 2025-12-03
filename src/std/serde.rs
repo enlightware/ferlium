@@ -13,13 +13,13 @@ use std::sync::Arc;
 
 use crate::{
     Location, cached_ty,
-    containers::{SVec2, b},
+    containers::SVec2,
     effects::EffType,
     error::InternalCompilationError,
-    function::{Function, FunctionDefinition, ScriptFunction},
+    function::FunctionDefinition,
     ir::{self, Node},
     ir_syn,
-    module::{LocalImplId, Module, TraitImplId},
+    module::{Module, TraitImplId},
     std::{
         array::array_type,
         math::int_type,
@@ -40,24 +40,6 @@ pub const DESERIALIZE_TRAIT_NAME: &str = "Deserialize";
 
 pub const SERIALIZE_FN_NAME: &str = "serialize";
 pub const DESERIALIZE_FN_NAME: &str = "deserialize";
-
-// helper to create a concrete trait implementation from a single function defined by code
-fn add_concrete_impl_from_code(
-    code: Node,
-    trait_ref: &TraitRef,
-    input_types: &[Type],
-    solver: &mut TraitSolver,
-) -> LocalImplId {
-    let arg_names = trait_ref.functions[0].1.arg_names.clone();
-    let function: Function = b(ScriptFunction::new(code, arg_names));
-    solver.impls.add_concrete_raw(
-        trait_ref.clone(),
-        input_types.to_vec(),
-        [],
-        [function],
-        &mut solver.fn_collector,
-    )
-}
 
 fn object_payload_type() -> Type {
     cached_ty!(|| {
@@ -87,18 +69,13 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
         // helper to create the concrete trait implementation for sequences
-        let build_serialize_to_seq = |nodes, tag, solver| {
+        let build_serialize_to_seq = |nodes, tag, solver: &mut TraitSolver| {
             let array_ty = array_type(variant_type());
             let array = n(array(nodes), array_ty);
             let payload_ty = tuple_type([array_ty]);
             let payload = n(tuple([array]), payload_ty);
             let code = n(variant(ustr(tag), payload), variant_type());
-            TraitImplId::Local(add_concrete_impl_from_code(
-                code,
-                trait_ref,
-                input_types,
-                solver,
-            ))
+            TraitImplId::Local(solver.add_concrete_impl_from_code(code, trait_ref, input_types, []))
         };
 
         // helper to build the serialization of a member of a tuple
@@ -250,7 +227,8 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 case_from_complete_alternatives(extract_tag, alternatives),
                 variant_type(),
             );
-            let local_impl_id = add_concrete_impl_from_code(code, trait_ref, input_types, solver);
+            let local_impl_id =
+                solver.add_concrete_impl_from_code(code, trait_ref, input_types, []);
             Ok(Some(TraitImplId::Local(local_impl_id)))
         } else if let TypeKind::Named(named) = ty_data {
             let ty_def = named.def;
@@ -457,12 +435,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             None // deserialization of rest not yet supported
         };
         Ok(node.map(|n| {
-            TraitImplId::Local(add_concrete_impl_from_code(
-                n,
-                trait_ref,
-                input_types,
-                solver,
-            ))
+            TraitImplId::Local(solver.add_concrete_impl_from_code(n, trait_ref, input_types, []))
         }))
     }
 }

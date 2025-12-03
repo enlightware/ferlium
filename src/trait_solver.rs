@@ -22,15 +22,15 @@ use crate::{
     containers::b,
     effects::EffType,
     error::InternalCompilationError,
-    function::{FunctionRc, ScriptFunction},
+    function::{Function, FunctionRc, ScriptFunction},
     internal_compilation_error,
     ir::Node,
     ir_syn::{get_dictionary, load, static_apply},
     module::{
         BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, FunctionCollector,
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, ImportImplSlot,
-        ImportImplSlotId, LocalFunction, ModuleEnv, ModuleFunction, Modules, TraitImpl,
-        TraitImplId, TraitImpls, TraitKey,
+        ImportImplSlotId, LocalFunction, LocalImplId, ModuleEnv, ModuleFunction, Modules,
+        TraitImpl, TraitImplId, TraitImpls, TraitKey,
     },
     mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},
@@ -84,6 +84,25 @@ impl<'a> TraitSolver<'a> {
     /// otherwise the created functions will be lost.
     pub fn commit(mut self, functions: &mut Vec<LocalFunction>) {
         functions.append(&mut self.fn_collector.new_elements);
+    }
+
+    /// Add a concrete trait implementation from the given code node, for single-function traits.
+    pub fn add_concrete_impl_from_code(
+        &mut self,
+        code: Node,
+        trait_ref: &TraitRef,
+        input_types: impl Into<Vec<Type>>,
+        output_types: impl Into<Vec<Type>>,
+    ) -> LocalImplId {
+        let arg_names = trait_ref.functions[0].1.arg_names.clone();
+        let function: Function = b(ScriptFunction::new(code, arg_names));
+        self.impls.add_concrete_raw(
+            trait_ref.clone(),
+            input_types.into(),
+            output_types.into(),
+            [function],
+            &mut self.fn_collector,
+        )
     }
 
     /// Check if a concrete trait implementation exists, without performing any solving.

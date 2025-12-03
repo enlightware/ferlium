@@ -34,6 +34,12 @@ impl Concat {
 	}
 }
 
+impl Cast {
+	fn cast(array) {
+		array_map(array, |element| cast(element))
+	}
+}
+
 // Strings
 
 impl Concat {

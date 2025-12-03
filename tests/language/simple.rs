@@ -1367,6 +1367,10 @@ fn type_ascription() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn cast_as_syntax() {
+    // Identity casts
+    assert_eq!(run("(5: int) as int"), int(5));
+    assert_eq!(run("(5.3: float) as float"), float(5.3));
+    assert_eq!(run("fn f(v) { v as float } f(5.3)"), float(5.3));
     // Basic case
     assert_eq!(run("let x: int = 5; x as float"), float(5.0));
     assert_eq!(run("let x = 5.3; x as int"), int(5));
