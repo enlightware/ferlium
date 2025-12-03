@@ -569,8 +569,9 @@ pub fn format_blanket_impl_header(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> Result<TypeSubstitution, std::fmt::Error> {
-    let subst = format_concrete_impl_header_expanded(
+    let subst = format_impl_header_expanded(
         &key.trait_ref,
+        key.sub_key.ty_var_count,
         &key.sub_key.input_tys,
         output_tys,
         f,
@@ -590,29 +591,41 @@ pub fn format_concrete_impl_header(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> Result<TypeSubstitution, std::fmt::Error> {
-    format_concrete_impl_header_expanded(&key.trait_ref, &key.input_tys, output_tys, f, env)
+    format_impl_header_expanded(&key.trait_ref, 0, &key.input_tys, output_tys, f, env)
 }
 
-fn format_concrete_impl_header_expanded(
+fn format_impl_header_expanded(
     trait_ref: &TraitRef,
+    ty_var_count: u32,
     input_tys: &[Type],
     output_tys: &[Type],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> Result<TypeSubstitution, std::fmt::Error> {
-    write!(f, "impl {} for <", trait_ref.name)?;
+    write!(f, "impl")?;
+    if ty_var_count > 0 {
+        write!(f, "<")?;
+        for i in 0..ty_var_count {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", TypeVar::new(i))?;
+        }
+        write!(f, ">")?;
+    }
+    write!(f, " {} for <", trait_ref.name)?;
     write_with_separator_and_format_fn(
-        input_tys.iter(),
+        input_tys.iter().zip(trait_ref.input_type_names.iter()),
         ", ",
-        |ty, f| write!(f, "{}", ty.format_with(env)),
+        |(ty, name), f| write!(f, "{} = {}", name, ty.format_with(env)),
         f,
     )?;
     if !output_tys.is_empty() {
         write!(f, " ↦ ")?;
         write_with_separator_and_format_fn(
-            output_tys.iter(),
+            output_tys.iter().zip(trait_ref.output_type_names.iter()),
             ", ",
-            |ty, f| write!(f, "{}", ty.format_with(env)),
+            |(ty, name), f| write!(f, "{} = {}", name, ty.format_with(env)),
             f,
         )?;
     }
