@@ -396,16 +396,16 @@ AddExpr<NoStruct> = BinOpLeftAssoc<AddOp, MulExpr<NoStruct>>;
 MulExpr<NoStruct> = BinOpLeftAssoc<MulOp, CastExpr<NoStruct>>;
 
 CastExpr<NoStruct>: ExprKind = {
-    <e:Es<CastExpr<NoStruct>>> "as" <ty:Sp<CastTargetType>> => {
-        let span = e.span;
+    <e:Es<CastExpr<NoStruct>>> <l:@L> "as" <ty:Sp<CastTargetType>> <r:@R> => {
+        let e_span = e.span;
         let cast_expr = Expr::new(
             Identifier(ustr("cast")),
-            ty.1
+            span(l, r)
         );
         TypeAscription(
             boxed(Expr::new(
                 Apply(boxed(cast_expr), vec![e], UnnamedArg::All),
-                span
+                e_span
             )),
             ty.0,
             ty.1

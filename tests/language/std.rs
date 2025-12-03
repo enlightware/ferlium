@@ -720,7 +720,7 @@ fn serde_deserialize() {
     );
 
     // errors
-    fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found("Num", &["Variant"]);
+    fail_compilation(r#"deserialize(1)"#).expect_trait_impl_not_found("Num", &["Self = Variant"]);
 }
 
 #[test]

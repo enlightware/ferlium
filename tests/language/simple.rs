@@ -93,7 +93,7 @@ fn equalities() {
     assert_eq!(run("41 == 42"), bool(false));
     assert_eq!(run("42 != 42"), bool(false));
     assert_eq!(run("41 != 42"), bool(true));
-    fail_compilation("1 == true").expect_trait_impl_not_found("Num", &["bool"]);
+    fail_compilation("1 == true").expect_trait_impl_not_found("Num", &["Self = bool"]);
     assert_eq!(run("true == true"), bool(true));
     assert_eq!(run("true == false"), bool(false));
     assert_eq!(run("true != true"), bool(false));
@@ -384,7 +384,7 @@ fn if_expr() {
         run("let mut a = 0; if false { a = 1 } else if true { a = 2 }; a"),
         int(2)
     );
-    fail_compilation("fn a() { if true { 1 } }").expect_trait_impl_not_found("Num", &["()"]);
+    fail_compilation("fn a() { if true { 1 } }").expect_trait_impl_not_found("Num", &["Self = ()"]);
 }
 
 #[test]
@@ -578,9 +578,9 @@ fn lambda() {
         int(16)
     );
     fail_compilation("let id = |x| x; id(1); id(true)")
-        .expect_trait_impl_not_found("Num", &["bool"]);
+        .expect_trait_impl_not_found("Num", &["Self = bool"]);
     fail_compilation("let d = |x, y| (x, y + 1); d(true, 1); d(1, 2)")
-        .expect_trait_impl_not_found("Num", &["bool"]);
+        .expect_trait_impl_not_found("Num", &["Self = bool"]);
     assert_eq!(run("(||1)()"), int(1));
     assert_eq!(run("(|x| x.1)((1,2))"), int(2));
     assert_eq!(
