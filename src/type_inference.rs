@@ -2347,6 +2347,11 @@ impl UnifiedTypeInference {
         if ty.contains_any_type_var(var) {
             Err(internal_compilation_error!(InfiniteType(var, ty, ty_span)))
         } else {
+            // If the type is a function type with concrete (non-variable) effects,
+            // we need to generalize those effects to preserve effect polymorphism.
+            // Otherwise, the concrete effects would be "baked in" and the function
+            // parameter couldn't contribute its effect variable to the parent function.
+            let ty = self.generalize_function_effects(ty);
             self.ty_unification_table
                 .unify_var_value(var, Some(ty))
                 .map_err(|(l, r)| {
@@ -2358,6 +2363,45 @@ impl UnifiedTypeInference {
                         sub_or_same: SubOrSameType::SameType
                     })
                 })
+        }
+    }
+
+    /// Generalize concrete effects in a function type to effect variables.
+    /// This is needed when unifying a type variable with a function type,
+    /// to preserve effect polymorphism.
+    fn generalize_function_effects(&mut self, ty: Type) -> Type {
+        use TypeKind::*;
+        let ty_data = { ty.data().clone() };
+        match ty_data {
+            Function(fn_ty) => {
+                // Check if the function has any non-variable effects
+                let has_primitive_effects = fn_ty.effects.iter().any(|e| e.is_primitive());
+                if has_primitive_effects && !fn_ty.effects.is_empty() {
+                    // Create a fresh effect variable
+                    let fresh_eff_var = self.effect_unification_table.new_key(None);
+                    // Add the concrete effects as dependencies to this fresh variable
+                    // This is done through the inverted constraints mechanism
+                    for eff in fn_ty.effects.iter() {
+                        if eff.is_primitive() {
+                            self.effect_constraints_inv
+                                .insert(EffType::single(*eff), fresh_eff_var);
+                        } else if let Some(var) = eff.as_variable() {
+                            // Also union any existing effect variables
+                            self.effect_unification_table.union(fresh_eff_var, *var);
+                        }
+                    }
+                    // Create a new function type with the fresh effect variable
+                    let new_fn_ty = FnType::new(
+                        fn_ty.args.clone(),
+                        fn_ty.ret,
+                        EffType::single_variable(fresh_eff_var),
+                    );
+                    Type::function_type(new_fn_ty)
+                } else {
+                    ty
+                }
+            }
+            _ => ty,
         }
     }
 
