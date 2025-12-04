@@ -37,8 +37,13 @@ use std::hash::Hash;
 use std::sync::LazyLock;
 use ustr::{Ustr, ustr};
 
-/// Create a span from two numbers
+/// Create a span from two numbers (used by lalrpop with @L/@R positions)
 pub(crate) fn span(l: usize, r: usize) -> Location {
+    Location::new_local_usize(l, r)
+}
+
+/// Create a span from two u32 values (used when combining locations)
+pub(crate) fn span_u32(l: u32, r: u32) -> Location {
     Location::new_local(l, r)
 }
 
@@ -167,7 +172,7 @@ pub(crate) fn syn_static_apply<P: Phase>(identifier: UstrSpan, args: Vec<Expr<P>
 }
 
 pub(crate) fn assign_op(op: UstrSpan, lhs: PExpr, rhs: PExpr) -> PExprKind {
-    let span = span(lhs.span.start(), rhs.span.end());
+    let span = Location::new_local(lhs.span.start(), rhs.span.end());
     let apply = Expr::new(syn_static_apply(op, vec![lhs.clone(), rhs]), span);
     ExprKind::Assign(b(lhs), op.1, b(apply))
 }

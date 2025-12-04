@@ -38,15 +38,15 @@ use char_index_lookup::{CharIndexLookup, get_line_column};
 /// An error-data structure to be used in IDEs
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 pub struct ErrorData {
-    pub from: usize,
-    pub to: usize,
+    pub from: u32,
+    pub to: u32,
     pub text: String,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl ErrorData {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
-    pub fn new(from: usize, to: usize, text: String) -> Self {
+    pub fn new(from: u32, to: u32, text: String) -> Self {
         Self { from, to, text }
     }
     fn from_location(loc: &Location, text: String) -> Self {
@@ -56,7 +56,7 @@ impl ErrorData {
             text,
         }
     }
-    pub(crate) fn map(self, f: impl Fn(usize) -> usize) -> Self {
+    pub(crate) fn map(self, f: impl Fn(u32) -> u32) -> Self {
         Self {
             from: f(self.from),
             to: f(self.to),
@@ -85,17 +85,17 @@ fn compilation_error_to_data(
     modules: &Modules,
 ) -> Vec<ErrorData> {
     let fmt_span = |span: &Location| match span.module() {
-        None => Cow::from(&src[span.start()..span.end()]),
+        None => Cow::from(&src[span.as_range()]),
         Some(module) => Cow::from(
             match modules
                 .get(&module.module_name())
                 .and_then(|module| module.source.as_deref())
             {
                 Some(src) => {
-                    let position = get_line_column(src, module.span().start());
+                    let position = get_line_column(src, module.span().start_usize());
                     format!(
                         "{} (in {}:{}:{})",
-                        &src[module.span().start()..module.span().end()],
+                        &src[module.span().as_range()],
                         module.module_name(),
                         position.0,
                         position.1,
@@ -625,7 +625,9 @@ impl Compiler {
             Err(err) => Some(
                 compilation_error_to_data(&err, src, &self.modules)
                     .into_iter()
-                    .map(|data| data.map(|pos| char_indices.byte_to_char_position(pos)))
+                    .map(|data| {
+                        data.map(|pos| char_indices.byte_to_char_position(pos as usize) as u32)
+                    })
                     .collect(),
             ),
         }

@@ -101,7 +101,7 @@ pub fn parse_concrete_type(src: &str) -> Result<ast::PType, LocatedError> {
 pub fn resolve_concrete_type(src: &str, env: &ModuleEnv<'_>) -> Result<Type, CompilationError> {
     let ast =
         parse_concrete_type(src).map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
-    let span = Location::new_local(0, src.len());
+    let span = Location::new_local_usize(0, src.len());
     ast.desugar(span, false, env)
         .map_err(|error| CompilationError::resolve_types(error, env, src))
 }
@@ -120,7 +120,7 @@ pub fn parse_generic_type(src: &str) -> Result<ast::PType, LocatedError> {
 pub fn resolve_generic_type(src: &str, env: &ModuleEnv<'_>) -> Result<Type, CompilationError> {
     let ast =
         parse_generic_type(src).map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
-    let span = Location::new_local(0, src.len());
+    let span = Location::new_local_usize(0, src.len());
     ast.desugar(span, false, env)
         .map_err(|error| CompilationError::resolve_types(error, env, src))
 }

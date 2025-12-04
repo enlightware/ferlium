@@ -60,7 +60,7 @@ impl ModuleAndExpr {
                     match style {
                         Mathematical => {
                             annotations.push((
-                                spans.span.start(),
+                                spans.span.start_usize(),
                                 format!(
                                     "{} ",
                                     function
@@ -72,7 +72,7 @@ impl ModuleAndExpr {
                         }
                         Rust => {
                             annotations.push((
-                                spans.name.end(),
+                                spans.name.end_usize(),
                                 format!(
                                     "{}",
                                     function
@@ -91,16 +91,20 @@ impl ModuleAndExpr {
                 {
                     if let Some((ty_span, ty_constant)) = ty_span {
                         if !ty_constant {
-                            annotations
-                                .push((ty_span.end(), format!(" ⇨ {}", arg_ty.format_with(&env))));
+                            annotations.push((
+                                ty_span.end_usize(),
+                                format!(" ⇨ {}", arg_ty.format_with(&env)),
+                            ));
                         }
                     } else {
-                        annotations
-                            .push((name_span.end(), format!(": {}", arg_ty.format_with(&env))));
+                        annotations.push((
+                            name_span.end_usize(),
+                            format!(": {}", arg_ty.format_with(&env)),
+                        ));
                     }
                 }
                 let byte_src = src.as_bytes();
-                let past_args_index = spans.args_span.end();
+                let past_args_index = spans.args_span.end_usize();
                 let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
                     ""
                 } else {
@@ -169,7 +173,7 @@ impl ModuleAndExpr {
         // Return type of the expression, if any.
         if let Some(expr) = &self.expr {
             annotations.push((
-                expr.expr.span.end(),
+                expr.expr.span.end_usize(),
                 match style {
                     Mathematical => format!(": {}", expr.ty.display_math_style(&env)),
                     Rust => format!(": {}", expr.ty.display_rust_style(&env)),
@@ -228,7 +232,7 @@ impl Node {
                 if !is_synthesized && let Some(path) = &app.function_path {
                     for (arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
                         if !should_hide_arg_name_hint(path, arity, arg_name, arg) {
-                            result.push((arg.span.start(), format!("{arg_name}: ")));
+                            result.push((arg.span.start_usize(), format!("{arg_name}: ")));
                         }
                         arg.variable_type_annotations(result, env);
                     }
@@ -248,13 +252,13 @@ impl Node {
                     if let Some((ty_span, ty_constant)) = node.ty_span {
                         if !ty_constant {
                             result.push((
-                                ty_span.end(),
+                                ty_span.end_usize(),
                                 format!(" ⇨ {}", node.value.ty.format_with(env)),
                             ));
                         }
                     } else {
                         result.push((
-                            name_span.end(),
+                            name_span.end_usize(),
                             format!(": {}", node.value.ty.format_with(env)),
                         ));
                     }

@@ -508,7 +508,7 @@ impl Node {
 
     pub fn type_at(&self, pos: usize) -> Option<Type> {
         // Early exit if the position is outside the node's span.
-        if pos < self.span.start() || pos >= self.span.end() {
+        if pos < self.span.start_usize() || pos >= self.span.end_usize() {
             return None;
         }
 
