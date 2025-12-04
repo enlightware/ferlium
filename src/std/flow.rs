@@ -9,7 +9,7 @@
 use ustr::ustr;
 
 use crate::{
-    effects::no_effects,
+    effects::{PrimitiveEffect, effect},
     error::RuntimeError,
     function::{NullaryNativeFnFN, UnaryNativeFnNFN},
     module::Module,
@@ -37,7 +37,11 @@ pub fn add_to_module(to: &mut Module) {
             abort,
             [],
             "Aborts the program.",
-            TypeScheme::new_just_type(FnType::new_by_val([], Type::never(), no_effects())),
+            TypeScheme::new_just_type(FnType::new_by_val(
+                [],
+                Type::never(),
+                effect(PrimitiveEffect::Fallible),
+            )),
         ),
     );
     to.add_named_function(
@@ -49,7 +53,7 @@ pub fn add_to_module(to: &mut Module) {
             TypeScheme::new_just_type(FnType::new_by_val(
                 [string_type()],
                 Type::never(),
-                no_effects(),
+                effect(PrimitiveEffect::Fallible),
             )),
         ),
     );
