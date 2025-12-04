@@ -2371,12 +2371,12 @@ impl UnifiedTypeInference {
     /// to preserve effect polymorphism.
     fn generalize_function_effects(&mut self, ty: Type) -> Type {
         use TypeKind::*;
-        let ty_data = { ty.data().clone() };
+        let ty_data = ty.data().clone();
         match ty_data {
             Function(fn_ty) => {
                 // Check if the function has any non-variable effects
                 let has_primitive_effects = fn_ty.effects.iter().any(|e| e.is_primitive());
-                if has_primitive_effects && !fn_ty.effects.is_empty() {
+                if has_primitive_effects {
                     // Create a fresh effect variable
                     let fresh_eff_var = self.effect_unification_table.new_key(None);
                     // Add the concrete effects as dependencies to this fresh variable
