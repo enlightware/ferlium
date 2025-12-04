@@ -16,7 +16,7 @@ use std::{
 
 use super::string::String as Str;
 use crate::{
-    effects::no_effects,
+    effects::{PrimitiveEffect, effect},
     error::RuntimeError,
     function::UnaryNativeFnNFV,
     module::Module,
@@ -132,7 +132,7 @@ pub fn add_to_module(to: &mut Module) {
             "Parses a JSON into a variant.",
             string_type(),
             variant_type(),
-            no_effects(),
+            effect(PrimitiveEffect::Fallible),
         ),
     );
 }

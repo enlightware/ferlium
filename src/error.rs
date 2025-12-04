@@ -297,6 +297,13 @@ pub enum CompilationErrorImpl<S: Scope> {
         got: usize,
         args_span: Location,
     },
+    TraitMethodEffectMismatch {
+        trait_ref: S::TraitRef,
+        method_name: Ustr,
+        expected: EffType,
+        got: EffType,
+        span: Location,
+    },
     IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Location,
         second_occurrence: Location,
@@ -813,6 +820,31 @@ impl FormatWith<&str> for CompilationError {
                     fmt_span(args_span)
                 )
             }
+            TraitMethodEffectMismatch {
+                trait_ref,
+                method_name,
+                expected,
+                got,
+                span,
+            } => {
+                write!(
+                    f,
+                    "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}` in `{}`",
+                    method_name,
+                    trait_ref,
+                    if expected.is_empty() {
+                        "none".to_string()
+                    } else {
+                        expected.to_string()
+                    },
+                    if got.is_empty() {
+                        "none".to_string()
+                    } else {
+                        got.to_string()
+                    },
+                    fmt_span(span)
+                )
+            }
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 pattern_span,
@@ -1235,6 +1267,19 @@ impl CompilationError {
                 got,
                 args_span,
             }),
+            TraitMethodEffectMismatch {
+                trait_ref,
+                method_name,
+                expected,
+                got,
+                span,
+            } => compilation_error!(TraitMethodEffectMismatch {
+                trait_ref: trait_ref.name.to_string(),
+                method_name,
+                expected,
+                got,
+                span,
+            }),
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,
@@ -1534,6 +1579,49 @@ impl CompilationError {
             }
             _ => {
                 panic!("expect_trait_impl_not_found called on non-TraitImplNotFound error {self:?}")
+            }
+        }
+    }
+
+    pub fn expect_trait_method_effect_mismatch(
+        &self,
+        expected_trait: &str,
+        method: &str,
+        expected_effects: &EffType,
+        got_effects: &EffType,
+    ) {
+        use CompilationErrorImpl::*;
+        match self.deref() {
+            TraitMethodEffectMismatch {
+                trait_ref,
+                method_name,
+                expected,
+                got,
+                ..
+            } => {
+                if trait_ref == expected_trait
+                    && method_name.as_str() == method
+                    && expected == expected_effects
+                    && got == got_effects
+                {
+                    return;
+                }
+                panic!(
+                    "expect_trait_method_effect_mismatch failed: expected trait {} method {} with effects {} but got {}, actual was trait {} method {} with effects {} but got {}",
+                    expected_trait,
+                    method,
+                    expected_effects,
+                    got_effects,
+                    trait_ref,
+                    method_name,
+                    expected,
+                    got
+                );
+            }
+            _ => {
+                panic!(
+                    "expect_trait_method_effect_mismatch called on non-TraitMethodEffectMismatch error {self:?}"
+                )
             }
         }
     }

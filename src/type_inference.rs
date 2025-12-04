@@ -1495,12 +1495,44 @@ impl TypeInference {
 
     /// Add a constraint that the two function types must be equal.
     /// They must have the same number of arguments.
+    #[allow(dead_code)]
     pub(crate) fn add_same_fn_type_constraint(
         &mut self,
         current: &FnType,
         current_span: Location,
         expected: &FnType,
         expected_span: Location,
+    ) {
+        self.add_same_fn_type_constraint_impl(current, current_span, expected, expected_span, true);
+    }
+
+    /// Add a constraint that the two function types must be equal, optionally skipping effects.
+    /// They must have the same number of arguments.
+    /// When `include_effects` is false, the effect constraint is not added. This is used for
+    /// trait implementations where effects are validated separately.
+    pub(crate) fn add_same_fn_type_constraint_without_effects(
+        &mut self,
+        current: &FnType,
+        current_span: Location,
+        expected: &FnType,
+        expected_span: Location,
+    ) {
+        self.add_same_fn_type_constraint_impl(
+            current,
+            current_span,
+            expected,
+            expected_span,
+            false,
+        );
+    }
+
+    fn add_same_fn_type_constraint_impl(
+        &mut self,
+        current: &FnType,
+        current_span: Location,
+        expected: &FnType,
+        expected_span: Location,
+        include_effects: bool,
     ) {
         for (current_arg, expected_arg) in current.args.iter().zip(expected.args.iter()) {
             self.add_same_type_constraint(
@@ -1517,12 +1549,14 @@ impl TypeInference {
             );
         }
         self.add_same_type_constraint(current.ret, current_span, expected.ret, expected_span);
-        self.add_same_effect_constraint(
-            &current.effects,
-            current_span,
-            &expected.effects,
-            expected_span,
-        );
+        if include_effects {
+            self.add_same_effect_constraint(
+                &current.effects,
+                current_span,
+                &expected.effects,
+                expected_span,
+            );
+        }
     }
 
     /// Make a new effect depending on the given effects

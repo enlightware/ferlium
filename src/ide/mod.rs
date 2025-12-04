@@ -460,6 +460,32 @@ fn compilation_error_to_data(
                 ),
             )]
         }
+        TraitMethodEffectMismatch {
+            trait_ref,
+            method_name,
+            expected,
+            got,
+            span,
+        } => {
+            vec![ErrorData::from_location(
+                span,
+                format!(
+                    "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}`",
+                    method_name,
+                    trait_ref,
+                    if expected.is_empty() {
+                        "none".to_string()
+                    } else {
+                        expected.to_string()
+                    },
+                    if got.is_empty() {
+                        "none".to_string()
+                    } else {
+                        got.to_string()
+                    },
+                ),
+            )]
+        }
         IdentifierBoundMoreThanOnceInAPattern {
             first_occurrence,
             second_occurrence,

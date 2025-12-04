@@ -278,7 +278,14 @@ where
                 }));
             }
             // TODO: get span from the trait method definition, when available
-            ty_inf.add_same_fn_type_constraint(&fn_type, *span, &fn_def.ty_scheme.ty, *span);
+            // Note: we use the variant without effects because trait impl effects are validated
+            // separately after type inference (they must be a subset of trait definition effects).
+            ty_inf.add_same_fn_type_constraint_without_effects(
+                &fn_type,
+                *span,
+                &fn_def.ty_scheme.ty,
+                *span,
+            );
         }
 
         // Create dummy code.
@@ -388,6 +395,32 @@ where
 
     // Fifth pass, get the remaining constraints and collect the free type variables.
     if let Some(mut trait_output) = trait_output {
+        // Validate that each method's effects are a subset of the trait definition's effects,
+        // and override them with the trait's effects.
+        // This ensures ABI consistency: the calling convention is determined by the trait definition.
+        let trait_ref = &trait_ctx.unwrap().trait_ref;
+        for (i, id) in local_fns.iter().enumerate() {
+            let descr = &mut output.functions[id.as_index()].function;
+            let (method_name, trait_fn_def) = &trait_ref.functions[i];
+            let trait_effects = &trait_fn_def.ty_scheme.ty.effects;
+            let impl_effects = &descr.definition.ty_scheme.ty.effects;
+
+            // Check that impl effects are a subset of trait effects.
+            if !impl_effects.is_subset_of(trait_effects) {
+                let span = descr.spans.as_ref().unwrap().span;
+                return Err(internal_compilation_error!(TraitMethodEffectMismatch {
+                    trait_ref: trait_ref.clone(),
+                    method_name: *method_name,
+                    expected: trait_effects.clone(),
+                    got: impl_effects.clone(),
+                    span,
+                }));
+            }
+
+            // Override the function's effects with the trait's effects for ABI consistency.
+            descr.definition.ty_scheme.ty.effects = trait_effects.clone();
+        }
+
         // We are emitting a trait.
         trait_output.functions = local_fns.clone();
 

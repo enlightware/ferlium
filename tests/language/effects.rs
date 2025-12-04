@@ -11,7 +11,7 @@ use test_log::test;
 use ustr::ustr;
 
 use super::common::{compile, fail_compilation};
-use ferlium::effects::*;
+use ferlium::{effects::*, module::LocalImplId};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -172,4 +172,60 @@ fn effects_in_fn_type_ascription() {
         "g",
         effect_vars(&[0, 1]),
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impl_effect_must_not_have_more_than_def_effects() {
+    use PrimitiveEffect::*;
+
+    // Serialize trait method is not fallible, but implementation calls panic which is fallible.
+    fail_compilation(
+        r#"
+        struct S;
+        impl Serialize {
+            fn serialize(x: S) {
+                if true { std::panic("cannot serialize!") } else { None }
+            }
+        }
+        "#,
+    )
+    .expect_trait_method_effect_mismatch(
+        "Serialize",
+        "serialize",
+        &EffType::empty(),
+        &effect(Fallible),
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impl_effect_must_have_at_least_def_effects() {
+    use PrimitiveEffect::*;
+
+    // Deserialize trait method is fallible, pure implementation is OK (subset).
+    let module = compile(
+        r#"
+        struct S;
+        impl Deserialize {
+            fn deserialize(v) {
+                S
+            }
+        }
+        "#,
+    )
+    .0
+    .module;
+    let fn_id = module
+        .impls
+        .get_impl_by_local_id(LocalImplId::from_index(0))
+        .methods[0];
+    let effects = &module
+        .get_own_function_by_id(fn_id)
+        .unwrap()
+        .definition
+        .ty_scheme
+        .ty()
+        .effects;
+    assert_eq!(effects, &effect(Fallible));
 }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::{
     Location, cached_ty,
     containers::SVec2,
-    effects::EffType,
+    effects::{EffType, PrimitiveEffect},
     error::InternalCompilationError,
     function::FunctionDefinition,
     ir::{self, Node},
@@ -473,7 +473,11 @@ pub fn add_to_module(to: &mut Module) {
         [(
             DESERIALIZE_FN_NAME,
             Def::new_infer_quantifiers(
-                FnType::new_by_val([variant_type()], var0_ty, EffType::empty()),
+                FnType::new_by_val(
+                    [variant_type()],
+                    var0_ty,
+                    EffType::single_primitive(PrimitiveEffect::Fallible),
+                ),
                 ["variant"],
                 "Deserialize a variant into a value of this type.",
             ),

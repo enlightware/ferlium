@@ -21,6 +21,7 @@ use crate::format::{type_variable_subscript, write_with_separator};
 pub enum PrimitiveEffect {
     Read,
     Write,
+    Fallible,
 }
 
 impl Display for PrimitiveEffect {
@@ -29,6 +30,7 @@ impl Display for PrimitiveEffect {
         match self {
             Read => write!(f, "read"),
             Write => write!(f, "write"),
+            Fallible => write!(f, "fallible"),
         }
     }
 }
@@ -189,6 +191,18 @@ impl EffType {
 
     pub fn contains(&self, effect: Effect) -> bool {
         self.0.contains(&effect)
+    }
+
+    /// Returns true if all effects in self are also in other.
+    /// This is a conservative check: if self contains any effect variables, it returns false.
+    pub fn is_subset_of(&self, other: &Self) -> bool {
+        // If self has any effect variables, we cannot guarantee it is a subset
+        if !self.inner_vars().is_empty() {
+            return false;
+        }
+        self.inner_non_vars()
+            .iter()
+            .all(|e| other.contains(Effect::Primitive(*e)))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Effect> {

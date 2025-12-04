@@ -15,7 +15,7 @@ use ustr::ustr;
 use crate::{
     cached_primitive_ty,
     containers::b,
-    effects::{EffType, no_effects},
+    effects::{EffType, PrimitiveEffect, effect, no_effects},
     error::RuntimeError,
     function::{
         BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, FunctionDefinition,
@@ -279,7 +279,11 @@ pub static NUM_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
 pub static DIV_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var0_ty = Type::variable_id(0);
-    let binary_fn_ty = FnType::new_by_val([var0_ty, var0_ty], var0_ty, EffType::empty());
+    let binary_fn_ty_f = FnType::new_by_val(
+        [var0_ty, var0_ty],
+        var0_ty,
+        effect(PrimitiveEffect::Fallible),
+    );
 
     TraitRef::new_with_self_input_type(
         "Div",
@@ -288,7 +292,7 @@ pub static DIV_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
         [(
             "div",
             Def::new_infer_quantifiers(
-                binary_fn_ty,
+                binary_fn_ty_f,
                 ["left", "right"],
                 "Divides `left` by `right`.",
             ),
@@ -366,7 +370,7 @@ pub fn add_to_module(to: &mut Module) {
             },
             ["left", "right"],
             "Divides `left` by `right` and truncates the result.",
-            no_effects(),
+            effect(PrimitiveEffect::Fallible),
         ),
     );
     to.add_named_function(
@@ -381,7 +385,7 @@ pub fn add_to_module(to: &mut Module) {
             },
             ["left", "right"],
             "Calculates the quotient of the Euclidean division of `left` by `right`.",
-            no_effects(),
+            effect(PrimitiveEffect::Fallible),
         ),
     );
     to.add_named_function(
@@ -396,7 +400,7 @@ pub fn add_to_module(to: &mut Module) {
             },
             ["left", "right"],
             "Calculates the remainder of the division of `left` by `right`.",
-            no_effects(),
+            effect(PrimitiveEffect::Fallible),
         ),
     );
     to.add_named_function(
@@ -411,7 +415,7 @@ pub fn add_to_module(to: &mut Module) {
             },
             ["left", "right"],
             "Calculates the modulo of the division of `left` by `right`.",
-            no_effects(),
+            effect(PrimitiveEffect::Fallible),
         ),
     );
 
