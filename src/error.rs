@@ -429,13 +429,13 @@ fn span_to_string(loc: &Location, source: &str) -> String {
         ),
         None => {
             if loc.start() < loc.end() {
-                source[loc.start()..loc.end()].to_string()
+                source[loc.as_range()].to_string()
             } else {
-                let end = source.len().min(loc.end() + 20);
+                let end = source.len().min(loc.end_usize() + 20);
                 let more = if end < source.len() { "…" } else { "" };
                 format!(
                     "location where \"{}{more}\" starts",
-                    &source[loc.start()..end]
+                    &source[loc.start_usize()..end]
                 )
             }
         }
@@ -1421,8 +1421,7 @@ impl CompilationError {
                 first_occurrence: first_occurrence_span,
                 ..
             } => {
-                let name =
-                    src[first_occurrence_span.start()..first_occurrence_span.end()].to_string();
+                let name = src[first_occurrence_span.as_range()].to_string();
                 if name == exp_name {
                 } else {
                     panic!(
@@ -1452,7 +1451,7 @@ impl CompilationError {
                 first_occurrence: first_occurrence_span,
                 ..
             } => {
-                let name = &src[first_occurrence_span.start()..first_occurrence_span.end()];
+                let name = &src[first_occurrence_span.as_range()];
                 if name == exp_name {
                 } else {
                     panic!(
@@ -1479,7 +1478,7 @@ impl CompilationError {
         use CompilationErrorImpl::*;
         match self.deref() {
             UndefinedVarInStringFormatting { var_span, .. } => {
-                let var_name = &src[var_span.start()..var_span.end()];
+                let var_name = &src[var_span.as_range()];
                 if var_name == exp_name {
                 } else {
                     panic!(
@@ -1608,7 +1607,7 @@ pub fn resolve_must_be_mutable_ctx(
 }
 
 pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
-    let fn_text = &src[span.start()..span.end()];
+    let fn_text = &src[span.as_range()];
     let bytes = fn_text.as_bytes();
     let mut count = 0;
     let mut args_start = fn_text.len();
@@ -1644,8 +1643,8 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
             ',' if count == 0 => {
                 if arg_count == index {
                     return Location::new_local(
-                        span.start() + args_start + 1 + start,
-                        span.start() + args_start + 1 + i,
+                        span.start() + args_start as u32 + 1 + start as u32,
+                        span.start() + args_start as u32 + 1 + i as u32,
                     );
                 }
                 arg_count += 1;
@@ -1658,8 +1657,8 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
     // Handling the last argument
     if arg_count == index && start < args_section.len() {
         return Location::new_local(
-            span.start() + args_start + 1 + start,
-            span.start() + args_start + 1 + args_section.len(),
+            span.start() + args_start as u32 + 1 + start as u32,
+            span.start() + args_start as u32 + 1 + args_section.len() as u32,
         );
     }
 
@@ -1673,22 +1672,22 @@ mod tests {
     #[test]
     fn extract_ith_fn_arg_single() {
         let src = "(|x| x)((1+2))";
-        let span = Location::new_local(0, src.len());
+        let span = Location::new_local_usize(0, src.len());
         let expected = ["(1+2)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
-            assert_eq!(&src[arg_span.start()..arg_span.end()], expected);
+            assert_eq!(&src[arg_span.as_range()], expected);
         }
     }
 
     #[test]
     fn extract_ith_fn_arg_multi() {
         let src = "(|x,y| x*y)(12, (1 + 3))";
-        let span = Location::new_local(0, src.len());
+        let span = Location::new_local_usize(0, src.len());
         let expected = ["12", " (1 + 3)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
-            assert_eq!(&src[arg_span.start()..arg_span.end()], expected);
+            assert_eq!(&src[arg_span.as_range()], expected);
         }
     }
 }

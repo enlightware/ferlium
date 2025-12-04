@@ -17,32 +17,40 @@ use crate::{format::FormatWith, module::ModuleEnv};
 /// It only contains the start and end byte offsets, not the actual input string.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Span {
-    pub start: usize,
-    pub end: usize,
+    pub start: u32,
+    pub end: u32,
 }
 
 impl Span {
-    pub fn new(start: usize, end: usize) -> Self {
+    pub fn new(start: u32, end: u32) -> Self {
         if end < start {
             panic!("Span starts ({start}) after it ends ({end})!");
         }
         Span { start, end }
     }
 
-    pub fn start(&self) -> usize {
+    pub fn start(&self) -> u32 {
         self.start
     }
 
-    pub fn end(&self) -> usize {
+    pub fn start_usize(&self) -> usize {
+        self.start as usize
+    }
+
+    pub fn end(&self) -> u32 {
         self.end
     }
 
-    pub fn len(&self) -> usize {
+    pub fn end_usize(&self) -> usize {
+        self.end as usize
+    }
+
+    pub fn len(&self) -> u32 {
         self.end - self.start
     }
 
     pub fn as_range(&self) -> Range<usize> {
-        self.start..self.end
+        self.start as usize..self.end as usize
     }
 }
 
@@ -75,7 +83,7 @@ pub struct Location {
 
 impl Location {
     /// Create a new location starting at byte `start` and ending at byte `end`.
-    pub fn new(start: usize, end: usize, module: Option<ExternalLocation>) -> Self {
+    pub fn new(start: u32, end: u32, module: Option<ExternalLocation>) -> Self {
         Location {
             span: Span::new(start, end),
             module,
@@ -84,16 +92,20 @@ impl Location {
 
     /// Create a new location starting at byte `start` and ending at byte `end`, in the current module.
     /// Panics if `end` is less than `start`.
-    pub fn new_local(start: usize, end: usize) -> Self {
+    pub fn new_local(start: u32, end: u32) -> Self {
         Self::new(start, end, None)
+    }
+
+    pub fn new_local_usize(start: usize, end: usize) -> Self {
+        Self::new(start as u32, end as u32, None)
     }
 
     /// Create a new location by fusing the spans of multiple locations.
     /// Panics if `others` is empty or are from different modules.
     pub fn fuse_range(others: impl IntoIterator<Item = Self>) -> Option<Self> {
         let mut module: Option<Option<ExternalLocation>> = None;
-        let mut start = usize::MAX;
-        let mut end = 0;
+        let mut start = u32::MAX;
+        let mut end = 0u32;
         for other in others {
             if let Some(module) = module {
                 let self_name = module.map(|m| m.module_name);
@@ -117,17 +129,27 @@ impl Location {
     }
 
     /// Byte offset of the start of the span.
-    pub fn start(&self) -> usize {
+    pub fn start(&self) -> u32 {
         self.span.start
     }
 
+    /// Byte offset of the start of the span.
+    pub fn start_usize(&self) -> usize {
+        self.span.start as usize
+    }
+
     /// Byte offset of the end of the span.
-    pub fn end(&self) -> usize {
+    pub fn end(&self) -> u32 {
         self.span.end
     }
 
+    /// Byte offset of the end of the span.
+    pub fn end_usize(&self) -> usize {
+        self.span.end as usize
+    }
+
     /// Length in bytes of the span.
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> u32 {
         self.span.end - self.span.start
     }
 
@@ -139,6 +161,11 @@ impl Location {
     /// Returns the span of this location.
     pub fn span(&self) -> Span {
         self.span
+    }
+
+    /// Returns a range suitable for slicing strings.
+    pub fn as_range(&self) -> Range<usize> {
+        self.span.as_range()
     }
 
     /// Returns the module this location comes from, if any.
