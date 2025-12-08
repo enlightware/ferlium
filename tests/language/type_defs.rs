@@ -18,7 +18,7 @@ use test_log::test;
 use indoc::indoc;
 use ustr::ustr;
 
-use crate::common::{bool, compile, fail_compilation, float, int, run, string};
+use crate::common::{TestSession, bool, float, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -26,6 +26,7 @@ use wasm_bindgen_test::*;
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn define_enum_types() {
+    let mut session = TestSession::new();
     let mod_src = indoc! { r#"
         // Basic unit variants
         enum SimpleColor {
@@ -70,7 +71,7 @@ fn define_enum_types() {
         // Empty enum
         enum Empty {}
     "# };
-    let module = compile(mod_src).0.module;
+    let module = session.compile(mod_src).module;
 
     let simple_color = module.type_defs.get(&ustr("SimpleColor")).unwrap();
     assert_eq!(simple_color.name, ustr("SimpleColor"));
@@ -167,7 +168,8 @@ fn define_enum_types() {
     assert!(empty_type.shape.data().is_never());
 
     assert_eq!(
-        fail_compilation("enum Invalid { A, B, A }")
+        session
+            .fail_compilation("enum Invalid { A, B, A }")
             .into_inner()
             .into_duplicated_variant()
             .unwrap()
@@ -175,7 +177,8 @@ fn define_enum_types() {
         DuplicatedVariantContext::Enum
     );
     assert_eq!(
-        fail_compilation("enum Invalid { A, B, A(int) }")
+        session
+            .fail_compilation("enum Invalid { A, B, A(int) }")
             .into_inner()
             .into_duplicated_variant()
             .unwrap()
@@ -183,7 +186,8 @@ fn define_enum_types() {
         DuplicatedVariantContext::Enum
     );
     assert_eq!(
-        fail_compilation("enum Invalid { A, B, A { a: int } }")
+        session
+            .fail_compilation("enum Invalid { A, B, A { a: int } }")
             .into_inner()
             .into_duplicated_variant()
             .unwrap()
@@ -191,7 +195,8 @@ fn define_enum_types() {
         DuplicatedVariantContext::Enum
     );
     assert_eq!(
-        fail_compilation("enum Invalid { A, B { a: T | T(int) } }")
+        session
+            .fail_compilation("enum Invalid { A, B { a: T | T(int) } }")
             .into_inner()
             .into_duplicated_variant()
             .unwrap()
@@ -203,8 +208,9 @@ fn define_enum_types() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_record_enum_values() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             enum Message {
                 Quit,
                 Move { x: int, y: int },
@@ -222,35 +228,38 @@ fn create_record_enum_values() {
         }
     " };
     assert_eq!(
-        run(&format!(
+        session.run(&format!(
             "{mod_src} Message::Flag {{ v1: false, v0: true }}"
         )),
         Value::raw_variant(ustr("Flag"), Value::tuple([bool(true), bool(false)]))
     );
 
     assert_eq!(
-        *fail_compilation(&format!(r#"{mod_src} Message::Flag {{ v0: true }}"#))
+        *session
+            .fail_compilation(&format!(r#"{mod_src} Message::Flag {{ v0: true }}"#))
             .as_missing_struct_field()
             .unwrap()
             .1,
         "v1"
     );
     assert_eq!(
-        *fail_compilation(&format!(
-            r#"{mod_src} Message::Flag {{ v1: false, v0: true, v2: false }}"#
-        ))
-        .as_invalid_struct_field()
-        .unwrap()
-        .1,
+        *session
+            .fail_compilation(&format!(
+                r#"{mod_src} Message::Flag {{ v1: false, v0: true, v2: false }}"#
+            ))
+            .as_invalid_struct_field()
+            .unwrap()
+            .1,
         "v2"
     );
-    fail_compilation(&format!(
-        r#"{mod_src} Message::Flag {{ v1: false, v0: 1.0 }}"#
-    ))
-    .expect_type_mismatch("float", "bool");
+    session
+        .fail_compilation(&format!(
+            r#"{mod_src} Message::Flag {{ v1: false, v0: 1.0 }}"#
+        ))
+        .expect_type_mismatch("float", "bool");
 
     // shorthand syntax when variable name matches field name
-    run(&format!(
+    session.run(&format!(
         r#"{mod_src} let v0 = true; let v1 = false; Message::Flag {{ v0, v1 }}"#
     ));
 }
@@ -258,8 +267,9 @@ fn create_record_enum_values() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_tuple_enum_values() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             enum Player {
                 Basic(string),
                 Positioned(int, int),
@@ -277,23 +287,28 @@ fn create_tuple_enum_values() {
         }
     " };
     assert_eq!(
-        run(&format!(r#"{mod_src} Player::Basic("ok")"#)),
+        session.run(&format!(r#"{mod_src} Player::Basic("ok")"#)),
         Value::raw_variant(ustr("Basic"), Value::tuple([string("ok")]))
     );
     assert_eq!(
-        run(&format!("{mod_src} Player::State(false)")),
+        session.run(&format!("{mod_src} Player::State(false)")),
         Value::raw_variant(ustr("State"), Value::tuple([bool(false)]))
     );
-    fail_compilation(&format!("{mod_src} Player::State(1.0)"))
+    session
+        .fail_compilation(&format!("{mod_src} Player::State(1.0)"))
         .expect_type_mismatch("float", "bool");
-    fail_compilation(&format!("{mod_src} Player::State()")).expect_wrong_number_of_arguments(1, 0);
-    fail_compilation(&format!("{mod_src} Player::State(true, 1.0)"))
+    session
+        .fail_compilation(&format!("{mod_src} Player::State()"))
+        .expect_wrong_number_of_arguments(1, 0);
+    session
+        .fail_compilation(&format!("{mod_src} Player::State(true, 1.0)"))
         .expect_wrong_number_of_arguments(1, 2);
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_mix_enum_values() {
+    let mut session = TestSession::new();
     let mod_src = indoc! { r#"
         enum Message {
             Quit,
@@ -305,37 +320,38 @@ fn create_mix_enum_values() {
     "# };
 
     assert_eq!(
-        run(&format!("{mod_src} Message::Quit")),
+        session.run(&format!("{mod_src} Message::Quit")),
         Value::raw_variant(ustr("Quit"), Value::unit())
     );
 
     assert_eq!(
-        run(&format!("{mod_src} Message::Move {{ x: 30, y: 40 }}")),
+        session.run(&format!("{mod_src} Message::Move {{ x: 30, y: 40 }}")),
         Value::raw_variant(ustr("Move"), Value::tuple(vec![int(30), int(40)]))
     );
 
     assert_eq!(
-        run(&format!(r#"{mod_src} Message::Write("Hello, world!")"#)),
+        session.run(&format!(r#"{mod_src} Message::Write("Hello, world!")"#)),
         Value::raw_variant(ustr("Write"), Value::tuple(vec![string("Hello, world!")])),
     );
 
     assert_eq!(
-        run(&format!("{mod_src} Message::ChangeColor(255, 0, 0)")),
+        session.run(&format!("{mod_src} Message::ChangeColor(255, 0, 0)")),
         Value::raw_variant(
             ustr("ChangeColor"),
             Value::tuple(vec![int(255), int(0), int(0)])
         )
     );
 
-    let value = run(&format!("{mod_src} Message::Callback(|x| x + 1)"));
+    let value = session.run(&format!("{mod_src} Message::Callback(|x| x + 1)"));
     assert_eq!(value.as_variant().unwrap().tag, ustr("Callback"));
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn enum_projections() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             enum Action {
                 Quit,
                 Jump(float),
@@ -353,7 +369,7 @@ fn enum_projections() {
         float(-5.0)
     );
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             enum Action {
                 Move1 { x: float, y: float },
                 Move2 { x: float, y: float },
@@ -373,6 +389,7 @@ fn enum_projections() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn define_struct_types() {
+    let mut session = TestSession::new();
     let mod_src = indoc! { r#"
         // Empty struct
         struct Empty {}
@@ -405,7 +422,7 @@ fn define_struct_types() {
             callback: (string) -> ()
         }
     "# };
-    let module = compile(mod_src).0.module;
+    let module = session.compile(mod_src).module;
 
     let empty_type = module.type_defs.get(&ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));
@@ -456,7 +473,8 @@ fn define_struct_types() {
     );
 
     assert_eq!(
-        fail_compilation("struct Invalid { a: int, a: int }")
+        session
+            .fail_compilation("struct Invalid { a: int, a: int }")
             .into_inner()
             .into_duplicated_field()
             .unwrap()
@@ -464,7 +482,8 @@ fn define_struct_types() {
         DuplicatedFieldContext::Struct
     );
     assert_eq!(
-        fail_compilation("struct Invalid { a: int, b: string, a: float }")
+        session
+            .fail_compilation("struct Invalid { a: int, b: string, a: float }")
             .into_inner()
             .into_duplicated_field()
             .unwrap()
@@ -472,7 +491,8 @@ fn define_struct_types() {
         DuplicatedFieldContext::Struct
     );
     assert_eq!(
-        fail_compilation("struct Invalid { a: int, b: { a: int, a: float } }")
+        session
+            .fail_compilation("struct Invalid { a: int, b: { a: int, a: float } }")
             .into_inner()
             .into_duplicated_field()
             .unwrap()
@@ -484,8 +504,9 @@ fn define_struct_types() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_record_struct_values() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             struct Person {
                 name: string,
                 age: int,
@@ -503,35 +524,38 @@ fn create_record_struct_values() {
 
     let mod_src = "struct Person { name: string, is_active: bool }";
     assert_eq!(
-        run(&format!(
+        session.run(&format!(
             r#"{mod_src} Person {{ name: "Alice", is_active: true }}"#
         )),
         Value::tuple(vec![bool(true), string("Alice")])
     );
 
     assert_eq!(
-        *fail_compilation(&format!(r#"{mod_src} Person {{ name: "Alice" }}"#))
+        *session
+            .fail_compilation(&format!(r#"{mod_src} Person {{ name: "Alice" }}"#))
             .as_missing_struct_field()
             .unwrap()
             .1,
         "is_active"
     );
     assert_eq!(
-        *fail_compilation(&format!(
-            r#"{mod_src} Person {{ name: "Alice", is_active: true, age: 20.2 }}"#
-        ))
-        .as_invalid_struct_field()
-        .unwrap()
-        .1,
+        *session
+            .fail_compilation(&format!(
+                r#"{mod_src} Person {{ name: "Alice", is_active: true, age: 20.2 }}"#
+            ))
+            .as_invalid_struct_field()
+            .unwrap()
+            .1,
         "age"
     );
-    fail_compilation(&format!(
-        r#"{mod_src} Person {{ name: "Alice", is_active: 1.2 }}"#
-    ))
-    .expect_type_mismatch("float", "bool");
+    session
+        .fail_compilation(&format!(
+            r#"{mod_src} Person {{ name: "Alice", is_active: 1.2 }}"#
+        ))
+        .expect_type_mismatch("float", "bool");
 
     // shorthand syntax when variable name matches field name
-    run(&format!(
+    session.run(&format!(
         r#"{mod_src} let name = "Alice"; let is_active = true; Person {{ name, is_active }}"#
     ));
 }
@@ -539,37 +563,42 @@ fn create_record_struct_values() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_empty_struct_values() {
-    assert_eq!(run(r#"struct Empty; Empty"#), Value::unit());
-    assert_eq!(run(r#"struct Empty2 {} Empty2 {}"#), Value::empty_tuple());
+    let mut session = TestSession::new();
+    assert_eq!(session.run(r#"struct Empty; Empty"#), Value::unit());
+    assert_eq!(
+        session.run(r#"struct Empty2 {} Empty2 {}"#),
+        Value::empty_tuple()
+    );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_tuple_struct_values() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(r#"struct Email(string) Email(string_concat("h", "i"))"#),
+        session.run(r#"struct Email(string) Email(string_concat("h", "i"))"#),
         Value::tuple(vec![string("hi")])
     );
     assert_eq!(
-        run(r#"struct Email(string) Email("hi")"#),
+        session.run(r#"struct Email(string) Email("hi")"#),
         Value::tuple(vec![string("hi")])
     );
 
     assert_eq!(
-        run(r#"struct Email((string, )) Email((string_concat("h", "i"), ))"#),
+        session.run(r#"struct Email((string, )) Email((string_concat("h", "i"), ))"#),
         Value::tuple(vec![Value::tuple(vec![string("hi")])])
     );
     assert_eq!(
-        run(r#"struct Email((string, )) Email(("hi", ))"#),
+        session.run(r#"struct Email((string, )) Email(("hi", ))"#),
         Value::tuple(vec![Value::tuple(vec![string("hi")])])
     );
 
     assert_eq!(
-        run(r#"struct Point(int, int) Point(1 + 0, 2)"#),
+        session.run(r#"struct Point(int, int) Point(1 + 0, 2)"#),
         Value::tuple(vec![int(1), int(2)])
     );
     assert_eq!(
-        run(r#"struct Point(float, float) Point(1.0, 2.0)"#),
+        session.run(r#"struct Point(float, float) Point(1.0, 2.0)"#),
         Value::tuple(vec![float(1.0), float(2.0)])
     );
 }
@@ -577,20 +606,26 @@ fn create_tuple_struct_values() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn struct_projections() {
-    assert_eq!(run(r#"struct Email(string) Email("hi").0"#), string("hi"));
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(r#"struct Email(string) Email("hi").0"#),
+        string("hi")
+    );
 
     assert_eq!(
-        run(r#"struct Person(string, int) Person("John", 30).0"#),
+        session.run(r#"struct Person(string, int) Person("John", 30).0"#),
         string("John")
     );
 
     assert_eq!(
-        run(r#"struct Person { name: string, age: int } Person { name: "John", age: 30 }.name"#),
+        session.run(
+            r#"struct Person { name: string, age: int } Person { name: "John", age: 30 }.name"#
+        ),
         string("John")
     );
 
     assert_eq!(
-        run(r#"struct Age(int) struct Person(string, Age) Person("John", Age(30)).0"#),
+        session.run(r#"struct Age(int) struct Person(string, Age) Person("John", Age(30)).0"#),
         string("John")
     );
 }
@@ -598,8 +633,9 @@ fn struct_projections() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn same_module_references() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             struct Age(int)
             struct Name(string)
             struct Person { name: Name, age: Age }
@@ -614,7 +650,8 @@ fn same_module_references() {
     );
 
     assert_eq!(
-        fail_compilation("struct A { a: A }")
+        session
+            .fail_compilation("struct A { a: A }")
             .into_inner()
             .into_unsupported()
             .unwrap()
@@ -622,7 +659,8 @@ fn same_module_references() {
         "Self-referential type paths are not supported, but `A` refers to itself"
     );
     assert_eq!(
-        fail_compilation("enum A { X(A) }")
+        session
+            .fail_compilation("enum A { X(A) }")
             .into_inner()
             .into_unsupported()
             .unwrap()
@@ -630,7 +668,8 @@ fn same_module_references() {
         "Self-referential type paths are not supported, but `A` refers to itself"
     );
     assert_eq!(
-        fail_compilation("enum A { X(B) } struct B { a: A }")
+        session
+            .fail_compilation("enum A { X(B) } struct B { a: A }")
             .into_inner()
             .into_unsupported()
             .unwrap()
@@ -642,6 +681,7 @@ fn same_module_references() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn type_annotations() {
+    let mut session = TestSession::new();
     let mod_src = indoc! { r#"
         struct Age(int)
         struct Person1 { age: Age }
@@ -651,19 +691,23 @@ fn type_annotations() {
         fn age1(d: Person1) { d.age.0 }
     "# };
     assert_eq!(
-        run(&format!(r"{mod_src} age(Person1 {{ age: Age(30) }})")),
+        session.run(&format!(r"{mod_src} age(Person1 {{ age: Age(30) }})")),
         int(30)
     );
     assert_eq!(
-        run(&format!(r"{mod_src} age1(Person1 {{ age: Age(30) }})")),
+        session.run(&format!(r"{mod_src} age1(Person1 {{ age: Age(30) }})")),
         int(30)
     );
     assert_eq!(
-        run(&format!(r"{mod_src} age(Person2 {{ age: Age(30) }})")),
+        session.run(&format!(r"{mod_src} age(Person2 {{ age: Age(30) }})")),
         int(30)
     );
-    assert_eq!(run(&format!(r"{mod_src} age({{ age: Age(30) }})")), int(30));
-    let error = fail_compilation(&format!(r"{mod_src} age1(Person2 {{ age: Age(30) }})"))
+    assert_eq!(
+        session.run(&format!(r"{mod_src} age({{ age: Age(30) }})")),
+        int(30)
+    );
+    let error = session
+        .fail_compilation(&format!(r"{mod_src} age1(Person2 {{ age: Age(30) }})"))
         .into_inner()
         .into_named_type_mismatch()
         .unwrap();
@@ -676,12 +720,13 @@ fn type_annotations() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn double_newtype() {
+    let mut session = TestSession::new();
     let mod_src = indoc! { r#"
         struct Person(string)
         struct Creature(Person)
     "# };
     assert_eq!(
-        run(&format!(r#"{mod_src} Creature(Person("Alice")).0.0"#)),
+        session.run(&format!(r#"{mod_src} Creature(Person("Alice")).0.0"#)),
         string("Alice")
     );
 }
@@ -689,10 +734,11 @@ fn double_newtype() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn attributes() {
+    let mut session = TestSession::new();
     // Helper to get attributes of a type definition
-    let attrs = |code, name| {
-        compile(code)
-            .0
+    let mut attrs = |code, name| {
+        session
+            .compile(code)
             .module
             .type_defs
             .get(&ustr(name))

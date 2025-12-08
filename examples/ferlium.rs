@@ -12,53 +12,114 @@ use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
 use std::rc::Rc;
 
-use ariadne::Label;
+use ariadne::{Label, Source};
 use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
 use ferlium::module::{Module, ModuleEnv, ModuleRc, Modules, ShowModuleDetails, Use, UseSome};
-use ferlium::std::{new_module_using_std, new_std_modules};
+use ferlium::std::new_module_using_std;
 use ferlium::typing_env::Local;
-use ferlium::{Location, ModuleAndExpr, SubOrSameType, ast, compile_to};
+use ferlium::{
+    CompilerSession, Location, ModuleAndExpr, SourceId, SourceTable, SubOrSameType, ast,
+};
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 use ustr::{Ustr, ustr};
 
 use ferlium::eval::{EvalCtx, ValOrMut};
 
-fn span_union_range(span1: Location, span2: Location) -> std::ops::Range<usize> {
-    assert_eq!(span1.module(), span2.module());
-    span1.start().min(span2.start()) as usize..span1.end().max(span2.end()) as usize
+/// A wrapper around location to implement ariadne::Span
+#[derive(Debug, Clone, Copy)]
+struct Span(Location);
+impl ariadne::Span for Span {
+    type SourceId = SourceId;
+
+    fn source(&self) -> &Self::SourceId {
+        &self.0.source_id_ref()
+    }
+
+    fn start(&self) -> usize {
+        self.0.start_usize()
+    }
+
+    fn end(&self) -> usize {
+        self.0.end_usize()
+    }
 }
 
-fn pretty_print_parse_errors(src: &str, errors: &[LocatedError]) {
-    use ariadne::{Color, Report, ReportKind, Source};
+/// A wrapper around SourceTable to implement ariadne::Cache
+struct Cache<'src> {
+    cache: HashMap<SourceId, Source<&'src String>>,
+    source_table: &'src SourceTable,
+}
+impl Cache<'_> {
+    pub fn new(source_table: &SourceTable) -> Cache<'_> {
+        Cache {
+            cache: HashMap::new(),
+            source_table,
+        }
+    }
+}
+impl<'src> ariadne::Cache<SourceId> for Cache<'src> {
+    type Storage = &'src String;
+
+    fn fetch(&mut self, id: &SourceId) -> Result<&Source<Self::Storage>, impl std::fmt::Debug> {
+        let entry = self.cache.entry(*id).or_insert_with(|| {
+            let source = self
+                .source_table
+                .get_source(*id)
+                .expect("Source not found in source table for ariadne cache");
+            Source::from(source)
+        });
+        Ok::<&Source<Self::Storage>, std::convert::Infallible>(entry)
+    }
+
+    fn display<'id>(&self, id: &'id SourceId) -> Option<impl std::fmt::Display + 'id> {
+        self.source_table.get_source_name(*id).cloned()
+    }
+}
+
+fn span_union_range(span1: Location, span2: Location) -> Span {
+    assert_eq!(span1.source_id(), span2.source_id());
+    Span(Location::new(
+        span1.start().min(span2.start()),
+        span1.end().max(span2.end()),
+        span1.source_id(),
+    ))
+}
+
+fn pretty_print_parse_errors(errors: &[LocatedError], source_table: &SourceTable) {
+    use ariadne::{Color, Report, ReportKind};
+    let mut cache = Cache::new(source_table);
     for (text, span) in errors {
-        Report::build(ReportKind::Error, ("input", span.as_range()))
+        let span = Span(*span);
+        Report::build(ReportKind::Error, span)
             .with_message(format!("Parse error: {text}.",))
-            .with_label(Label::new(("input", span.as_range())).with_color(Color::Blue))
+            .with_label(Label::new(span).with_color(Color::Blue))
             .finish()
-            .eprint(("input", Source::from(src)))
+            .eprint(&mut cache)
             .unwrap();
     }
 }
 
-fn pretty_print_checking_error(error: &CompilationError, src: &str) {
+fn pretty_print_checking_error(error: &CompilationError, src: &str, source_table: &SourceTable) {
     use CompilationErrorImpl::*;
-    use ariadne::{Color, Fmt, Report, ReportKind, Source};
+    use ariadne::{Color, Fmt, Report, ReportKind};
+    let mut cache = Cache::new(source_table);
     match error.deref() {
         ParsingFailed(errors) => {
-            pretty_print_parse_errors(src, errors);
+            pretty_print_parse_errors(errors, source_table);
         }
         TypeNotFound(span) => {
             let name = &src[span.as_range()];
-            Report::build(ReportKind::Error, ("input", span.as_range()))
+            let span = Span(*span);
+            Report::build(ReportKind::Error, span)
                 .with_message(format!(
                     "Cannot find type `{}` in this scope.",
                     name.fg(Color::Blue)
                 ))
-                .with_label(Label::new(("input", span.as_range())).with_color(Color::Blue))
+                .with_label(Label::new(span).with_color(Color::Blue))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         WrongNumberOfArguments {
@@ -67,16 +128,18 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             got,
             got_span,
         } => {
-            Report::build(ReportKind::Error, ("input", expected_span.as_range()))
+            let expected_span = Span(*expected_span);
+            let got_span = Span(*got_span);
+            Report::build(ReportKind::Error, expected_span)
                 .with_message(format!(
                     "Wrong number of arguments: expected {} but found {}.",
                     expected.fg(Color::Blue),
                     got.fg(Color::Magenta)
                 ))
-                .with_label(Label::new(("input", expected_span.as_range())).with_color(Color::Blue))
-                .with_label(Label::new(("input", got_span.as_range())).with_color(Color::Magenta))
+                .with_label(Label::new(expected_span).with_color(Color::Blue))
+                .with_label(Label::new(got_span).with_color(Color::Magenta))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         MutabilityMustBe {
@@ -85,70 +148,70 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             what,
             ..
         } => {
-            let source_span = *source_span;
-            let reason_span = *reason_span;
-            let span = span_union_range(source_span, reason_span);
             let source = &src[source_span.as_range()];
             let reason = &src[reason_span.as_range()];
+            let span = span_union_range(*source_span, *reason_span);
+            let source_span = Span(*source_span);
+            let reason_span = Span(*reason_span);
             use MutabilityMustBeWhat::*;
             match what {
-                Mutable => Report::build(ReportKind::Error, ("input", span))
+                Mutable => Report::build(ReportKind::Error, span)
                     .with_message(format!(
                         "Expression {} must be mutable.",
                         source.fg(Color::Blue),
                     ))
                     .with_label(
-                        Label::new(("input", source_span.as_range()))
+                        Label::new(source_span)
                             .with_message("This expression is just a value.")
                             .with_color(Color::Blue),
                     )
                     .with_label(
-                        Label::new(("input", reason_span.as_range()))
+                        Label::new(reason_span)
                             .with_message("But it must be mutable due to this.")
                             .with_color(Color::Green)
                             .with_order(1),
                     )
                     .finish()
-                    .eprint(("input", Source::from(src)))
+                    .eprint(&mut cache)
                     .unwrap(),
-                Constant => Report::build(ReportKind::Error, ("input", span))
+                Constant => Report::build(ReportKind::Error, span)
                     .with_message(format!(
                         "Expression {} must be constant.",
                         source.fg(Color::Blue),
                     ))
                     .with_label(
-                        Label::new(("input", source_span.as_range()))
+                        Label::new(source_span)
                             .with_message("This expression is mutable.")
                             .with_color(Color::Blue),
                     )
                     .with_label(
-                        Label::new(("input", reason_span.as_range()))
+                        Label::new(reason_span)
                             .with_message("But it must be constant due to this.")
                             .with_color(Color::Green)
                             .with_order(1),
                     )
                     .finish()
-                    .eprint(("input", Source::from(src)))
+                    .eprint(&mut cache)
                     .unwrap(),
-                Equal => Report::build(ReportKind::Error, ("input", span))
+                Equal => Report::build(ReportKind::Error, span)
                     .with_message(format!(
                         "Expressions {} and {} must have the same mutability.",
                         source.fg(Color::Blue),
                         reason.fg(Color::Green),
                     ))
                     .with_label(
-                        Label::new(("input", source_span.as_range()))
+                        Label::new(source_span)
                             .with_message("There.")
                             .with_color(Color::Blue),
                     )
                     .with_label(
-                        Label::new(("input", reason_span.as_range()))
+                        Label::new(reason_span)
                             .with_message("And here.")
                             .with_color(Color::Green)
                             .with_order(1),
                     )
                     .finish()
-                    .eprint(("input", Source::from(src)))
+                    .eprint(&mut cache)
                     .unwrap(),
             }
         }
@@ -160,36 +223,37 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             sub_or_same,
         } => {
             let span = span_union_range(*current_span, *expected_span);
+            let current_span = Span(*current_span);
+            let expected_span = Span(*expected_span);
             use SubOrSameType::*;
             let extra_reason = match sub_or_same {
                 SubType => "not a subtype",
                 SameType => "not the same type",
             };
-            Report::build(ReportKind::Error, ("input", span))
+            Report::build(ReportKind::Error, span)
                 .with_message(format!(
                     "Type {} is incompatible with type {} (i.e. {}).",
                     current_ty.fg(Color::Magenta),
                     expected_ty.fg(Color::Blue),
                     extra_reason
                 ))
-                .with_label(
-                    Label::new(("input", current_span.as_range())).with_color(Color::Magenta),
-                )
-                .with_label(Label::new(("input", expected_span.as_range())).with_color(Color::Blue))
+                .with_label(Label::new(current_span).with_color(Color::Magenta))
+                .with_label(Label::new(expected_span).with_color(Color::Blue))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         UnboundTypeVar { ty_var, ty, span } => {
-            Report::build(ReportKind::Error, ("input", span.as_range()))
+            let span = Span(*span);
+            Report::build(ReportKind::Error, span)
                 .with_message(format!(
                     "Unbound type variable {} in type {}.",
                     ty_var.fg(Color::Blue),
                     ty.fg(Color::Blue)
                 ))
-                .with_label(Label::new(("input", span.as_range())).with_color(Color::Blue))
+                .with_label(Label::new(span).with_color(Color::Blue))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         InvalidTupleIndex {
@@ -199,16 +263,18 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             tuple_span,
         } => {
             let span = span_union_range(*index_span, *tuple_span);
+            let index_span = Span(*index_span);
+            let tuple_span = Span(*tuple_span);
             let colored_index = (*index).fg(Color::Blue);
-            Report::build(ReportKind::Error, ("input", span))
+            Report::build(ReportKind::Error, span)
                 .with_message(format!("Tuple index {colored_index} is out of bounds."))
                 .with_label(
-                    Label::new(("input", index_span.as_range()))
+                    Label::new(index_span)
                         .with_message(format!("Index is {colored_index}."))
                         .with_color(Color::Blue),
                 )
                 .with_label(
-                    Label::new(("input", tuple_span.as_range()))
+                    Label::new(tuple_span)
                         .with_message(format!(
                             "But tuple has only {} elements.",
                             (*tuple_length).fg(Color::Blue)
@@ -217,7 +283,7 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
                         .with_order(1),
                 )
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         InvalidTupleProjection {
@@ -226,16 +292,18 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             index_span,
         } => {
             let span = span_union_range(*expr_span, *index_span);
+            let expr_span = Span(*expr_span);
+            let index_span = Span(*index_span);
             let colored_ty = expr_ty.fg(Color::Blue);
-            Report::build(ReportKind::Error, ("input", span))
+            Report::build(ReportKind::Error, span)
                 .with_message(format!("Type {colored_ty} cannot be projected as a tuple."))
                 .with_label(
-                    Label::new(("input", expr_span.as_range()))
+                    Label::new(expr_span)
                         .with_message(format!("This expression has type {colored_ty}."))
                         .with_color(Color::Blue),
                 )
                 .with_label(
-                    Label::new(("input", index_span.as_range()))
+                    Label::new(index_span)
                         .with_message(format!(
                             "But a tuple is needed due to projection {}.",
                             "here".fg(Color::Green)
@@ -244,7 +312,7 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
                         .with_order(1),
                 )
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         DuplicatedField {
@@ -253,34 +321,33 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             ctx,
             ..
         } => {
-            let span = span_union_range(*first_occurrence, *second_occurrence);
             let name = &src[first_occurrence.as_range()];
-            Report::build(ReportKind::Error, ("input", span))
+            let span = span_union_range(*first_occurrence, *second_occurrence);
+            let first_occurrence = Span(*first_occurrence);
+            let second_occurrence = Span(*second_occurrence);
+            Report::build(ReportKind::Error, span)
                 .with_message(format!(
                     "Duplicated field \"{}\" in {}.",
                     name.fg(Color::Blue),
                     ctx.as_str(),
                 ))
-                .with_label(
-                    Label::new(("input", first_occurrence.as_range())).with_color(Color::Blue),
-                )
-                .with_label(
-                    Label::new(("input", second_occurrence.as_range())).with_color(Color::Blue),
-                )
+                .with_label(Label::new(first_occurrence).with_color(Color::Blue))
+                .with_label(Label::new(second_occurrence).with_color(Color::Blue))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         InvalidVariantConstructor { span } => {
             let name = &src[span.as_range()];
-            Report::build(ReportKind::Error, ("input", span.as_range()))
+            let span = Span(*span);
+            Report::build(ReportKind::Error, span)
                 .with_message(format!(
                     "Variant constructor cannot be a path, but {} is.",
                     name.fg(Color::Blue)
                 ))
-                .with_label(Label::new(("input", span.as_range())).with_color(Color::Blue))
+                .with_label(Label::new(span).with_color(Color::Blue))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         InconsistentADT {
@@ -290,24 +357,26 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             b_span,
         } => {
             let span = span_union_range(*a_span, *b_span);
+            let a_span = Span(*a_span);
+            let b_span = Span(*b_span);
             let a_ty = a_type.adt_kind().fg(Color::Blue);
             let b_ty = b_type.adt_kind().fg(Color::Magenta);
-            Report::build(ReportKind::Error, ("input", span))
+            Report::build(ReportKind::Error, span)
                 .with_message(format!(
                     "Data type {a_ty} is different than data type {b_ty}."
                 ))
                 .with_label(
-                    Label::new(("input", a_span.as_range()))
+                    Label::new(a_span)
                         .with_message(format!("type is {a_ty} here"))
                         .with_color(Color::Blue),
                 )
                 .with_label(
-                    Label::new(("input", b_span.as_range()))
+                    Label::new(b_span)
                         .with_message(format!("but type is {b_ty} here"))
                         .with_color(Color::Magenta),
                 )
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         MutablePathsOverlap {
@@ -315,52 +384,58 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str) {
             b_span,
             fn_span,
         } => {
-            let span = span_union_range(*a_span, *b_span);
             let a_name = &src[a_span.as_range()];
             let b_name = &src[b_span.as_range()];
             let fn_name = &src[fn_span.as_range()];
-            Report::build(ReportKind::Error, ("input", span))
+            let span = span_union_range(*a_span, *b_span);
+            let a_span = Span(*a_span);
+            let b_span = Span(*b_span);
+            let fn_span = Span(*fn_span);
+            Report::build(ReportKind::Error, span)
                 .with_message(format!(
                     "Mutable paths {} and {} overlap when calling {}.",
                     a_name.fg(Color::Blue),
                     b_name.fg(Color::Blue),
                     fn_name.fg(Color::Green)
                 ))
-                .with_label(Label::new(("input", a_span.as_range())).with_color(Color::Blue))
-                .with_label(Label::new(("input", b_span.as_range())).with_color(Color::Blue))
-                .with_label(Label::new(("input", fn_span.as_range())).with_color(Color::Green))
+                .with_label(Label::new(a_span).with_color(Color::Blue))
+                .with_label(Label::new(b_span).with_color(Color::Blue))
+                .with_label(Label::new(fn_span).with_color(Color::Green))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         UndefinedVarInStringFormatting {
             var_span,
             string_span,
         } => {
-            let span = span_union_range(*var_span, *string_span);
             let var_name = &src[var_span.as_range()];
             let string = &src[string_span.as_range()];
-            Report::build(ReportKind::Error, ("input", span))
+            let span = span_union_range(*var_span, *string_span);
+            let var_span = Span(*var_span);
+            let string_span = Span(*string_span);
+            Report::build(ReportKind::Error, span)
                 .with_message(format!(
                     "Undefined variable {} used in string formatting {}.",
                     var_name.fg(Color::Blue),
                     string.fg(Color::Blue)
                 ))
-                .with_label(Label::new(("input", var_span.as_range())).with_color(Color::Blue))
-                .with_label(Label::new(("input", string_span.as_range())))
+                .with_label(Label::new(var_span).with_color(Color::Blue))
+                .with_label(Label::new(string_span))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
         Unsupported { span, reason } => {
-            Report::build(ReportKind::Error, ("input", span.as_range()))
+            let span = Span(*span);
+            Report::build(ReportKind::Error, span)
                 .with_message(format!("Unsupported feature: {reason}."))
-                .with_label(Label::new(("input", span.as_range())).with_color(Color::Blue))
+                .with_label(Label::new(span).with_color(Color::Blue))
                 .finish()
-                .eprint(("input", Source::from(src)))
+                .eprint(&mut cache)
                 .unwrap();
         }
-        _ => eprintln!("Module emission error: {}", error.format_with(&src)),
+        _ => eprintln!("Module emission error: {}", error.format_with(source_table)),
     }
 }
 
@@ -378,14 +453,15 @@ fn print_help() {
 }
 
 /// Process a single input: parse, compile module, and evaluate expression if present.
-/// Returns Ok(true) if successful, Ok(false) if there was an error but we should continue,
-/// and Err(exit_code) if we should exit with the given code.
+/// Returns Ok(module) if successful and Err(exit_code) if there was a failure.
 fn process_input(
+    name: &str,
     input: &str,
     reverse_uses: HashMap<Ustr, Ustr>,
     other_modules: &Modules,
     locals: &mut Vec<Local>,
     environment: &mut Vec<ValOrMut>,
+    session: &mut CompilerSession,
     is_repl: bool,
 ) -> Result<ModuleRc, i32> {
     // Initialize module with use directives
@@ -412,10 +488,11 @@ fn process_input(
     };
 
     // Compile the input to a module and an expression (if any)
-    let ModuleAndExpr { module, expr } =
-        compile_to(input, module, other_modules, Some(&ast_inspector)).map_err(|e| {
+    let ModuleAndExpr { module, expr } = session
+        .compile_to(name, input, module, other_modules, Some(&ast_inspector))
+        .map_err(|e| {
             eprintln!("Compilation error:");
-            pretty_print_checking_error(&e, input);
+            pretty_print_checking_error(&e, input, session.source_table());
             1
         })?;
 
@@ -487,17 +564,20 @@ fn process_pipe_input(print_module: bool) -> i32 {
     }
 
     // Initialize ferlium contexts
-    let other_modules = new_std_modules();
+    let mut session = CompilerSession::new();
+    let other_modules = session.new_std_modules();
     let mut locals: Vec<Local> = vec![];
     let mut environment: Vec<ValOrMut> = vec![];
 
     // Process the input
     process_input(
+        "<stdin>",
         &input,
         HashMap::new(),
         &other_modules,
         &mut locals,
         &mut environment,
+        &mut session,
         false,
     )
     .map_or_else(
@@ -551,9 +631,9 @@ fn main() {
 
     // Check for print-std flag
     if args.len() > 1 && args[1] == "--print-std" {
-        let other_modules = new_std_modules();
-        if let Some(module) = other_modules.get(&ustr("std")) {
-            println!("{}", module.format_with(&other_modules));
+        let session = CompilerSession::new();
+        if let Some(module) = session.std_modules().get(&ustr("std")) {
+            println!("{}", module.format_with(session.std_modules()));
         } else {
             eprintln!("Module std not found.");
         }
@@ -569,7 +649,8 @@ fn run_interactive_repl() {
     env_logger::init();
 
     // ferlium emission and evaluation contexts
-    let mut other_modules = new_std_modules();
+    let mut session = CompilerSession::new();
+    let mut other_modules = session.new_std_modules();
     let mut last_module = Rc::new(new_module_using_std());
     let mut locals: Vec<Local> = vec![];
     let mut environment: Vec<ValOrMut> = vec![];
@@ -722,32 +803,32 @@ fn run_interactive_repl() {
         for i in 0..counter {
             let index = counter - i - 1;
             let mod_name = ustr(&format!("repl{index}"));
-            let module = other_modules
-                .get(&mod_name)
-                .expect("missing repl<counter> module");
-            for sym in module.own_symbols() {
-                if !reverse_uses.contains_key(&sym) {
-                    reverse_uses.insert(sym, mod_name);
+            if let Some(module) = other_modules.get(&mod_name) {
+                for sym in module.own_symbols() {
+                    if !reverse_uses.contains_key(&sym) {
+                        reverse_uses.insert(sym, mod_name);
+                    }
                 }
             }
         }
 
         // Process the input using the shared function
+        let name = &format!("repl{counter}");
         let result = process_input(
+            &name,
             &src,
             reverse_uses,
             &other_modules,
             &mut locals,
             &mut environment,
+            &mut session,
             true,
         );
         if let Ok(module) = result {
             last_module = module;
-            let name = ustr(&format!("repl{counter}"));
-            other_modules.register_module_rc(name, last_module.clone());
-            counter += 1;
+            other_modules.register_module_rc(ustr(name), last_module.clone());
         }
-
+        counter += 1;
         if let Err(e) = rl.save_history(history_filename) {
             println!("Failed to save history: {e:?}");
         }

@@ -7,10 +7,10 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    Location,
     containers::b,
     effects::EffType,
     function::{BinaryNativeFnVVV, FunctionDefinition},
+    location::InstantiableLocation,
     module::{BlanketTraitImplSubKey, Module},
     std::{math::int_type, option::option_type},
     r#trait::TraitRef,
@@ -50,7 +50,7 @@ pub fn add_to_module(to: &mut Module) {
         trait_ref: iterator_trait.clone(),
         input_tys: vec![Type::variable_id(2)],
         output_tys: vec![Type::variable_id(1)],
-        span: Location::new_local(0, 0), // FIXME: we should not have a location here.
+        span: InstantiableLocation::new_none(),
     };
     let seq_trait = TraitRef::new_with_constraints(
         SEQ_TRAIT_NAME,
@@ -120,7 +120,7 @@ pub fn add_to_module(to: &mut Module) {
                 trait_ref: iterator_trait,
                 input_tys: vec![Type::variable_id(0)],
                 output_tys: vec![Type::variable_id(1)],
-                span: Location::new_local(0, 0), // FIXME: we should not have a location here.
+                span: InstantiableLocation::new_none(),
             }],
         },
         vec![Type::variable_id(1), Type::variable_id(0)],

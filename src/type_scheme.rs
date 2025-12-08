@@ -17,7 +17,7 @@ use crate::{
     dictionary_passing::ExtraParameters,
     error::InternalCompilationError,
     format::{FormatWith, write_with_separator_and_format_fn},
-    location::Span,
+    location::InstantiableLocation,
     std::core::REPR_TRAIT,
     r#trait::TraitRef,
     trait_solver::TraitSolver,
@@ -56,33 +56,33 @@ pub enum PubTypeConstraint {
     /// Tuple projection constraint: tuple_ty.index = element_ty
     TupleAtIndexIs {
         tuple_ty: Type,
-        tuple_span: Location,
+        tuple_span: InstantiableLocation,
         index: usize,
-        index_span: Location,
+        index_span: InstantiableLocation,
         element_ty: Type,
     },
     /// Record field access constraint: record_ty.field = element_ty
     RecordFieldIs {
         record_ty: Type,
-        record_span: Location,
+        record_span: InstantiableLocation,
         field: Ustr,
-        field_span: Location,
+        field_span: InstantiableLocation,
         element_ty: Type,
     },
     /// Variant for type: variant_ty ⊇ tag(payload_ty)
     TypeHasVariant {
         variant_ty: Type,
-        variant_span: Location,
+        variant_span: InstantiableLocation,
         tag: Ustr,
         payload_ty: Type,
-        payload_span: Location,
+        payload_span: InstantiableLocation,
     },
     /// Types have trait
     HaveTrait {
         trait_ref: TraitRef,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
-        span: Location,
+        span: InstantiableLocation,
     },
 }
 
@@ -96,9 +96,9 @@ impl PubTypeConstraint {
     ) -> Self {
         Self::TupleAtIndexIs {
             tuple_ty,
-            tuple_span,
+            tuple_span: InstantiableLocation::new(tuple_span),
             index,
-            index_span,
+            index_span: InstantiableLocation::new(index_span),
             element_ty,
         }
     }
@@ -112,9 +112,9 @@ impl PubTypeConstraint {
     ) -> Self {
         Self::RecordFieldIs {
             record_ty,
-            record_span,
+            record_span: InstantiableLocation::new(record_span),
             field,
-            field_span,
+            field_span: InstantiableLocation::new(field_span),
             element_ty,
         }
     }
@@ -128,10 +128,10 @@ impl PubTypeConstraint {
     ) -> Self {
         Self::TypeHasVariant {
             variant_ty,
-            variant_span,
+            variant_span: InstantiableLocation::new(variant_span),
             tag,
             payload_ty,
-            payload_span,
+            payload_span: InstantiableLocation::new(payload_span),
         }
     }
 
@@ -147,11 +147,22 @@ impl PubTypeConstraint {
             trait_ref,
             input_tys,
             output_tys,
-            span,
+            span: InstantiableLocation::new(span),
         }
     }
 
-    pub fn instantiate_module(&mut self, module_name: Option<Ustr>, inst_span: Span) {
+    pub fn use_site(&self) -> Location {
+        use PubTypeConstraint::*;
+        match self {
+            TupleAtIndexIs { tuple_span, .. } => tuple_span.use_site,
+            RecordFieldIs { record_span, .. } => record_span.use_site,
+            TypeHasVariant { variant_span, .. } => variant_span.use_site,
+            HaveTrait { span, .. } => span.use_site,
+        }
+        .unwrap()
+    }
+
+    pub fn instantiate_location(&mut self, use_site: Location) {
         use PubTypeConstraint::*;
         match self {
             TupleAtIndexIs {
@@ -159,26 +170,32 @@ impl PubTypeConstraint {
                 index_span,
                 ..
             } => {
-                tuple_span.instantiate(module_name, inst_span);
-                index_span.instantiate(module_name, inst_span);
+                tuple_span.instantiate(use_site);
+                index_span.instantiate(use_site);
             }
             RecordFieldIs {
                 record_span,
                 field_span,
                 ..
             } => {
-                record_span.instantiate(module_name, inst_span);
-                field_span.instantiate(module_name, inst_span);
+                record_span.instantiate(use_site);
+                field_span.instantiate(use_site);
             }
             TypeHasVariant {
                 payload_span: span, ..
             } => {
-                span.instantiate(module_name, inst_span);
+                span.instantiate(use_site);
             }
             HaveTrait { span, .. } => {
-                span.instantiate(module_name, inst_span);
+                span.instantiate(use_site);
             }
         }
+    }
+
+    pub fn instantiate_location_cloned(&self, use_site: Location) -> Self {
+        let mut constraint = self.clone();
+        constraint.instantiate_location(use_site);
+        constraint
     }
 
     pub fn instantiate_and_drop_if_solved(
@@ -241,8 +258,11 @@ impl PubTypeConstraint {
                 span,
             } => {
                 if input_tys.iter().all(Type::is_constant) {
-                    let got_output_tys =
-                        trait_solver.solve_output_types(trait_ref, input_tys, *span)?;
+                    let got_output_tys = trait_solver.solve_output_types(
+                        trait_ref,
+                        input_tys,
+                        span.use_site.unwrap(),
+                    )?;
                     assert_eq!(got_output_tys.len(), output_tys.len());
                     for (got_output_ty, output_ty) in got_output_tys.iter().zip(output_tys.iter()) {
                         let inner_ty_vars = output_ty.inner_ty_vars();
@@ -260,7 +280,12 @@ impl PubTypeConstraint {
                             let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(ty_var_count);
                             let output_ty = output_ty.instantiate(&local_subst);
                             ty_inf
-                                .unify_same_type(*got_output_ty, *span, output_ty, *span)
+                                .unify_same_type(
+                                    *got_output_ty,
+                                    span.use_site.unwrap(),
+                                    output_ty,
+                                    span.use_site.unwrap(),
+                                )
                                 .unwrap();
                             for (index, inner_ty_var) in inner_ty_vars.iter().enumerate() {
                                 let ty = ty_inf.lookup_type_var(TypeVar::new(index as u32));
@@ -288,50 +313,50 @@ impl TypeLike for PubTypeConstraint {
                 index,
                 index_span,
                 element_ty,
-            } => Self::new_tuple_at_index_is(
-                tuple_ty.map(f),
-                *tuple_span,
-                *index,
-                *index_span,
-                element_ty.map(f),
-            ),
+            } => TupleAtIndexIs {
+                tuple_ty: tuple_ty.map(f),
+                tuple_span: tuple_span.clone(),
+                index: *index,
+                index_span: index_span.clone(),
+                element_ty: element_ty.map(f),
+            },
             RecordFieldIs {
                 record_ty,
                 record_span,
                 field,
                 field_span,
                 element_ty,
-            } => Self::new_record_field_is(
-                record_ty.map(f),
-                *record_span,
-                *field,
-                *field_span,
-                element_ty.map(f),
-            ),
+            } => RecordFieldIs {
+                record_ty: record_ty.map(f),
+                record_span: record_span.clone(),
+                field: *field,
+                field_span: field_span.clone(),
+                element_ty: element_ty.map(f),
+            },
             TypeHasVariant {
                 variant_ty,
                 variant_span,
                 tag,
                 payload_ty,
                 payload_span,
-            } => Self::new_type_has_variant(
-                variant_ty.map(f),
-                *variant_span,
-                *tag,
-                payload_ty.map(f),
-                *payload_span,
-            ),
+            } => TypeHasVariant {
+                variant_ty: variant_ty.map(f),
+                variant_span: variant_span.clone(),
+                tag: *tag,
+                payload_ty: payload_ty.map(f),
+                payload_span: payload_span.clone(),
+            },
             HaveTrait {
                 trait_ref,
                 input_tys,
                 output_tys,
                 span,
-            } => Self::new_have_trait(
-                trait_ref.clone(),
-                input_tys.iter().map(|ty| ty.map(f)).collect(),
-                output_tys.iter().map(|ty| ty.map(f)).collect(),
-                *span,
-            ),
+            } => HaveTrait {
+                trait_ref: trait_ref.clone(),
+                input_tys: input_tys.iter().map(|ty| ty.map(f)).collect(),
+                output_tys: output_tys.iter().map(|ty| ty.map(f)).collect(),
+                span: span.clone(),
+            },
         }
     }
 
@@ -659,8 +684,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     pub(crate) fn instantiate_with_fresh_vars(
         &self,
         ty_inf: &mut TypeInference,
-        src_module_name: Option<Ustr>,
-        inst_span: Span,
+        use_site: Location,
         ty_var_count: Option<u32>,
     ) -> (Ty, FnInstData, InstSubstitution) {
         let mut ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
@@ -678,7 +702,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         let subst = (ty_subst, eff_subst);
         for constraint in &self.constraints {
             let mut constraint = constraint.instantiate(&subst);
-            constraint.instantiate_module(src_module_name, inst_span);
+            constraint.instantiate_location(use_site);
             ty_inf.add_pub_constraint(constraint);
         }
         let ty = self.ty.instantiate(&subst);

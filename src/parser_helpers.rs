@@ -7,6 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::Location;
+use crate::SourceId;
 use crate::ast::Expr;
 use crate::ast::ExprKind;
 use crate::ast::PExpr;
@@ -38,13 +39,13 @@ use std::sync::LazyLock;
 use ustr::{Ustr, ustr};
 
 /// Create a span from two numbers (used by lalrpop with @L/@R positions)
-pub(crate) fn span(l: usize, r: usize) -> Location {
-    Location::new_local_usize(l, r)
+pub(crate) fn span(l: usize, r: usize, source_id: SourceId) -> Location {
+    Location::new_usize(l, r, source_id)
 }
 
 /// Create a span from two u32 values (used when combining locations)
-pub(crate) fn span_u32(l: u32, r: u32) -> Location {
-    Location::new_local(l, r)
+pub(crate) fn span_u32(l: u32, r: u32, source_id: SourceId) -> Location {
+    Location::new(l, r, source_id)
 }
 
 /// Make a custom parse error
@@ -172,7 +173,7 @@ pub(crate) fn syn_static_apply<P: Phase>(identifier: UstrSpan, args: Vec<Expr<P>
 }
 
 pub(crate) fn assign_op(op: UstrSpan, lhs: PExpr, rhs: PExpr) -> PExprKind {
-    let span = Location::new_local(lhs.span.start(), rhs.span.end());
+    let span = Location::fuse([lhs.span, rhs.span]).unwrap();
     let apply = Expr::new(syn_static_apply(op, vec![lhs.clone(), rhs]), span);
     ExprKind::Assign(b(lhs), op.1, b(apply))
 }
@@ -219,7 +220,7 @@ pub(crate) fn cond_if(cond: PExpr, if_true: PExpr) -> PExprKind {
 /// Create a for loop
 pub(crate) fn for_loop(var_name: UstrSpan, seq: PExpr, body: PExpr) -> PExprKind {
     let seq_span = seq.span;
-    let seq_span_start = Location::new_local(seq.span.start(), seq.span.start());
+    let seq_span_start = seq.span.start_location();
     let iterator = PExpr::new(
         syn_static_apply((ustr("iter"), seq_span_start), vec![seq]),
         seq_span,
@@ -274,10 +275,14 @@ fn resolve_token_names(names: Vec<String>) -> Vec<String> {
 /// Extract the name and the span from an error recovery data structure
 pub(crate) fn describe_parse_error(
     error: ParseError<usize, Token<'_>, LocatedError>,
+    source_id: SourceId,
 ) -> LocatedError {
     use ParseError::*;
     match error {
-        InvalidToken { location } => ("invalid token".to_string(), span(location, location + 1)),
+        InvalidToken { location } => (
+            "invalid token".to_string(),
+            span(location, location + 1, source_id),
+        ),
         UnrecognizedEof { location, expected } => (
             if expected.len() > 1 {
                 format!(
@@ -290,7 +295,7 @@ pub(crate) fn describe_parse_error(
                     resolve_token_names(expected).join("")
                 )
             },
-            span(location, location),
+            span(location, location, source_id),
         ),
         UnrecognizedToken { token, expected } => (
             if expected.len() > 1 {
@@ -306,11 +311,11 @@ pub(crate) fn describe_parse_error(
                     token.1
                 )
             },
-            span(token.0, token.2),
+            span(token.0, token.2, source_id),
         ),
         ExtraToken { token } => (
             format!("unexpected \"{}\"", token.1),
-            span(token.0, token.2),
+            span(token.0, token.2, source_id),
         ),
         User { error } => error,
     }

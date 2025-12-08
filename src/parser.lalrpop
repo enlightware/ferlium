@@ -1,4 +1,4 @@
-use crate::{Location, LocatedError};
+use crate::{SourceId, Location, LocatedError};
 use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
@@ -11,7 +11,10 @@ use ustr::{Ustr, ustr};
 
 use lalrpop_util::ErrorRecovery;
 
-grammar<'err>(errors: &'err mut Vec<ErrorRecovery<usize, Token<'input>, LocatedError>>);
+grammar<'err>(
+    source_id: SourceId,
+    errors: &'err mut Vec<ErrorRecovery<usize, Token<'input>, LocatedError>>
+);
 
 extern {
     type Error = LocatedError;
@@ -26,11 +29,11 @@ pub ModuleAndBlockContent: (Module, Option<Expr>) = {
         if s.is_empty() {
             (m, None)
         } else {
-            (m, Some(Expr::new(Block(s), span(l, r))))
+            (m, Some(Expr::new(Block(s), span(l, r, source_id))))
         }
     },
     <m:Module> <l:@L> <s:Stmts> <e:Expr> <r:@R> => {
-        (m, Some(Expr::new(Block(ext_b(s, e)), span(l, r))))
+        (m, Some(Expr::new(Block(ext_b(s, e)), span(l, r, source_id))))
     },
 }
 
@@ -59,7 +62,7 @@ TraitImpl: TraitImpl = {
         TraitImpl {
             trait_name,
             functions,
-            span: span(l, r),
+            span: span(l, r, source_id),
         }
     }
 }
@@ -74,7 +77,7 @@ ModuleTypeDef: Module = {
 
 Function: ModuleFunction = {
     <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
-        ModuleFunction::new(name, args, span(al, ar), ret, body, span(l, r), parse_doc_comments(doc)),
+        ModuleFunction::new(name, args, span(al, ar, source_id), ret, body, span(l, r, source_id), parse_doc_comments(doc)),
 }
 
 ModuleFunctionArgs: Vec<ModuleFunctionArg> = {
@@ -140,8 +143,8 @@ SpFnRet<P>: TypeSpan = {
 }
 
 ArgType<P, R>: FnArgType = {
-    <l:@L> "&" "mut" <t:Sp<Type<P, R>>> <r:@R> => FnArgType::new(t, Some(MutType::Mut), span(l, r)),
-    <l:@L> "&" "?" <t:Sp<Type<P, R>>> <r:@R> if P !=  "" => FnArgType::new(t, Some(MutType::Infer), span(l, r)),
+    <l:@L> "&" "mut" <t:Sp<Type<P, R>>> <r:@R> => FnArgType::new(t, Some(MutType::Mut), span(l, r, source_id)),
+    <l:@L> "&" "?" <t:Sp<Type<P, R>>> <r:@R> if P !=  "" => FnArgType::new(t, Some(MutType::Infer), span(l, r, source_id)),
     <t:Sp<Type<P, R>>> => { let span = t.1; FnArgType::new(t, None, span) },
 }
 
@@ -162,7 +165,7 @@ SetType<P>: Type = {
 }
 
 MapType<P>: Type = {
-    "{" <k:Sp<Type<P, "">>> "=>" <v:Sp<Type<P, "">>> "}" =>? error("map types not implemented yet".into(), span_u32(k.1.start(), v.1.end()))
+    "{" <k:Sp<Type<P, "">>> "=>" <v:Sp<Type<P, "">>> "}" =>? error("map types not implemented yet".into(), span_u32(k.1.start(), v.1.end(), source_id))
 }
 
 RecordType<P>: Type = {
@@ -186,8 +189,8 @@ VariantType<P, R>: Type = {
 
 VariantTypeAlternative<P, U, R>: (UstrSpan, TypeSpan) = {
     <tag:Sp<UIdentifier>> if U != "" => (tag, (Type::Unit, tag.1)),
-    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P, R>>, ",">> ")" <r:@R> => (tag, (Type::Tuple(args), span(l, r))),
-    <tag:Sp<UIdentifier>> <l:@L> "{" <rec:RecordTypeFields<P>> "}" <r:@R> if R != "" => (tag, (rec, span(l, r))),
+    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P, R>>, ",">> ")" <r:@R> => (tag, (Type::Tuple(args), span(l, r, source_id))),
+    <tag:Sp<UIdentifier>> <l:@L> "{" <rec:RecordTypeFields<P>> "}" <r:@R> if R != "" => (tag, (rec, span(l, r, source_id))),
 }
 
 TypeAscription: TypeSpan = {
@@ -195,7 +198,7 @@ TypeAscription: TypeSpan = {
 }
 
 RefMutTypeAscription: MutTypeTypeSpan = {
-    ":" <l:@L> <ref_mut:("&" MutTyOrInfer)?> <ty:HoledType> <r:@R> => (ref_mut.map(|(_, m)| m), ty, span(l, r))
+    ":" <l:@L> <ref_mut:("&" MutTyOrInfer)?> <ty:HoledType> <r:@R> => (ref_mut.map(|(_, m)| m), ty, span(l, r, source_id))
 }
 
 MutTyOrInfer: MutType = {
@@ -217,7 +220,7 @@ StructDefinition: TypeDef = {
             generic_params: generics.unwrap_or_default(),
             shape,
             attributes,
-            span: span(l, r),
+            span: span(l, r, source_id),
             doc_comments: vec![],
         }
     }
@@ -252,7 +255,7 @@ EnumDefinition: TypeDef = {
             generic_params: generics.unwrap_or_default(),
             shape: Type::Never,
             attributes,
-            span: span(l, r),
+            span: span(l, r, source_id),
             doc_comments: vec![],
         }
     },
@@ -263,7 +266,7 @@ EnumDefinition: TypeDef = {
             generic_params: generics.unwrap_or_default(),
             shape: variant_ty,
             attributes,
-            span: span(l, r),
+            span: span(l, r, source_id),
             doc_comments: vec![],
         }
     }
@@ -275,7 +278,7 @@ Attribute: Attribute = {
         Attribute {
             path,
             items,
-            span: span(l, r)
+            span: span(l, r, source_id)
         }
     }
 }
@@ -295,7 +298,7 @@ AttrMetaItem: MetaItem = {
     <id:Sp<UIdentifier>> => MetaItem::Flag(id),
     // identifier = string value
     <l:@L> <key:Sp<UIdentifier>> "=" <value:Sp<UString>> <r:@R> => {
-        MetaItem::NameValue { key, value, span: span(l, r) }
+        MetaItem::NameValue { key, value, span: span(l, r, source_id) }
     }
 }
 
@@ -310,13 +313,13 @@ EnumVariant: (UstrSpan, TypeSpan) = {
     <name:Sp<UIdentifier>> => (name, (Type::Unit, name.1)),
 
     // Tuple variant with single type: Name(Type)
-    <name:Sp<UIdentifier>> <l:@L> "(" <ty:Sp<DefinedType>> ")" <r:@R> => (name, (Type::Tuple(vec![ty]), span(l, r))),
+    <name:Sp<UIdentifier>> <l:@L> "(" <ty:Sp<DefinedType>> ")" <r:@R> => (name, (Type::Tuple(vec![ty]), span(l, r, source_id))),
 
     // Tuple variant with multiple types: Name(Type1, Type2, ...)
     <name:Sp<UIdentifier>> <l:@L> "(" <f:Sp<DefinedType>> "," <rest:Sep<Sp<DefinedType>, ",">> ")" <r:@R> => {
         let tys = ext_f(f, rest);
         let tuple_ty = Type::Tuple(tys);
-        (name, (tuple_ty, span(l, r)))
+        (name, (tuple_ty, span(l, r, source_id)))
     },
 
     // Record variant: Name { field1: Type1, field2: Type2, ... }
@@ -357,7 +360,7 @@ TopExpr<NoStruct> = {
 }
 
 AssignExpr<NoStruct>: ExprKind = {
-    <le:Es<PipeExpr<NoStruct>>> <ls:@L> "=" <rs:@R> <re:Es<TopExpr<NoStruct>>> => Assign(boxed(le), span(ls, rs), boxed(re)),
+    <le:Es<PipeExpr<NoStruct>>> <ls:@L> "=" <rs:@R> <re:Es<TopExpr<NoStruct>>> => Assign(boxed(le), span(ls, rs, source_id), boxed(re)),
     <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op, le, re),
 }
 
@@ -401,7 +404,7 @@ CastExpr<NoStruct>: ExprKind = {
         let e_span = e.span;
         let cast_expr = Expr::new(
             Identifier(ustr("cast")),
-            span(l, r)
+            span(l, r, source_id)
         );
         TypeAscription(
             boxed(Expr::new(
@@ -709,7 +712,7 @@ StrOrMoreArgs = {
 
 StrOrMore: PatternVar = {
     <id:Sp<UIdentifier>> => PatternVar::Named(id),
-    <l:@L> ".." <r:@R> => PatternVar::Wildcard(span(l, r)),
+    <l:@L> ".." <r:@R> => PatternVar::Wildcard(span(l, r, source_id)),
 }
 
 // Terminals
@@ -721,7 +724,7 @@ RangeOp: Ustr = {
 UnaryOp: Ustr = {
     "-" => ustr("std::neg"),
     "not" => ustr("std::not"),
-    <l:@L> "!" <r:@R> =>? error("for readability, use the \"not\" keyword instead of the C-style ! operator".into(), span(l, r)),
+    <l:@L> "!" <r:@R> =>? error("for readability, use the \"not\" keyword instead of the C-style ! operator".into(), span(l, r, source_id)),
 }
 
 MulOp: Ustr = {
@@ -745,12 +748,12 @@ CompOp: Ustr = {
 
 LogicalAndOp: () = {
     "and" => (),
-    <l:@L> "&&" <r:@R> =>? error("for readability, use the \"and\" keyword instead of the C-style && operator".into(), span(l, r)),
+    <l:@L> "&&" <r:@R> =>? error("for readability, use the \"and\" keyword instead of the C-style && operator".into(), span(l, r, source_id)),
 }
 
 LogicalOrOp: () = {
     "or" => (),
-    <l:@L> "||" <r:@R> =>? error("for readability, use the \"or\" keyword instead of the C-style || operator".into(), span(l, r)),
+    <l:@L> "||" <r:@R> =>? error("for readability, use the \"or\" keyword instead of the C-style || operator".into(), span(l, r, source_id)),
 }
 
 UIdentifier: Ustr = {
@@ -774,12 +777,12 @@ IntLiteral: (LiteralValue, IrType) = {
 
 IntValue: isize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<isize>(s) {
     Ok(value) => Ok(value),
-    Err(msg) => error(msg, span(l, r)),
+    Err(msg) => error(msg, span(l, r, source_id)),
 };
 
 UIntValue: usize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<usize>(s) {
     Ok(value) => Ok(value),
-    Err(msg) => error(msg, span(l, r)),
+    Err(msg) => error(msg, span(l, r, source_id)),
 };
 
 StringLiteral: (LiteralValue, IrType) = StringToken => (string_literal(<>), string_type());
@@ -813,12 +816,12 @@ Ps<T>: Pattern = {
 
 // Return T along with its location
 Sp<T>: (T, Location) = {
-    <l:@L> <t: T> <r:@R> => (t, span(l, r)),
+    <l:@L> <t: T> <r:@R> => (t, span(l, r, source_id)),
 };
 
 // Return the location of T, ignoring its content
 Loc<T>: Location = {
-    <l:@L> T <r:@R> => span(l, r),
+    <l:@L> T <r:@R> => span(l, r, source_id),
 };
 
 // S-separated list of T, with optional trailing S

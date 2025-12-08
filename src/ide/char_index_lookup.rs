@@ -50,20 +50,10 @@ impl CharIndexLookup {
     }
 }
 
-/// Get the line and column of a byte position in a string.
-pub fn get_line_column(s: &str, byte_pos: usize) -> (usize, usize) {
-    assert!(byte_pos <= s.len(), "byte_pos out of range");
-
-    let s_up_to_pos = &s[..byte_pos];
-    let line = s_up_to_pos.matches('\n').count() + 1;
-    let last_newline_pos = s_up_to_pos.rfind('\n').map(|pos| pos + 1).unwrap_or(0);
-    let col = s[last_newline_pos..byte_pos].chars().count() + 1;
-
-    (line, col)
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::location::get_line_column;
+
     use super::*;
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test;

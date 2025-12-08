@@ -19,6 +19,7 @@ use log::log_enabled;
 use ustr::{Ustr, ustr};
 
 use crate::{
+    Location,
     ast::{self, *},
     containers::{b, iterable_to_string, sorted},
     dictionary_passing::DictElaborationCtx,
@@ -155,6 +156,7 @@ pub fn emit_module(
         let functions = || functions.iter().copied();
         let trait_ctx = EmitTraitCtx {
             trait_ref: trait_ref.clone(),
+            span: imp.span,
         };
         let emit_output =
             emit_functions(&mut output, functions, others, within_std, Some(trait_ctx))?.unwrap();
@@ -176,6 +178,7 @@ pub fn emit_module(
 
 struct EmitTraitCtx {
     trait_ref: TraitRef,
+    span: Location,
 }
 
 pub(crate) struct EmitTraitOutput {
@@ -210,7 +213,7 @@ where
         let input_tys = ty_inf.fresh_type_var_tys(trait_ref.input_type_count() as usize);
         let output_tys = ty_inf.fresh_type_var_tys(trait_ref.output_type_count() as usize);
         for constraint in &trait_ctx.trait_ref.constraints {
-            ty_inf.add_pub_constraint(constraint.clone());
+            ty_inf.add_pub_constraint(constraint.instantiate_location_cloned(trait_ctx.span));
         }
         Some(EmitTraitOutput {
             input_tys,
@@ -622,10 +625,10 @@ where
                 .iter()
                 .map(|c| c.format_with(&module_env))
                 .join(" ∧ ");
-            return Err(internal_compilation_error!(Internal(format!(
-                "Unused constraints in module compilation: {}",
-                constraints
-            ))));
+            return Err(internal_compilation_error!(Internal {
+                error: format!("Unused constraints in module compilation: {}", constraints),
+                span: unused_constraints[0].use_site(),
+            }));
         }
 
         // Sixth pass, run the borrow checker and elaborate dictionaries.
@@ -1064,11 +1067,14 @@ fn validate_and_cleanup_constraints(
                 .collect::<Vec<_>>();
             let fake_current = new_module_using_std();
             let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
-            return Err(internal_compilation_error!(Internal(format!(
-                "Orphan constraints found in module fn: {}\nsubst: {}",
-                orphans.format_with(&env),
-                subst.format_with(&env)
-            ))));
+            return Err(internal_compilation_error!(Internal {
+                error: format!(
+                    "Orphan constraints found in module fn: {}\nsubst: {}",
+                    orphans.format_with(&env),
+                    subst.format_with(&env)
+                ),
+                span: orphans[0].use_site(),
+            }));
         }
         (constraints, subst)
     };
@@ -1132,9 +1138,14 @@ fn validate_and_simplify_trait_imp_constraints(
         trait_solver,
     )?;
     if !other_orphans.is_empty() {
-        return Err(internal_compilation_error!(Internal(format!(
-            "Orphan constraints found in trait impl: {other_orphans:?}"
-        ))));
+        return Err(internal_compilation_error!(Internal {
+            error: format!("Orphan constraints found in trait impl: {other_orphans:?}"),
+            span: orphan_constraints
+                .into_iter()
+                .find(|c| other_orphans.contains(&constraint_ptr(c)))
+                .unwrap()
+                .use_site(),
+        }));
     }
 
     // Compute quantifiers based on the trait signature and its constraints.
@@ -1295,11 +1306,14 @@ fn compute_num_trait_default_types(
                             // https://github.com/enlightware/ferlium/issues/59, a proper fix would likely solve both.
                             let fake_current = new_module_using_std();
                             let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
-                            return Err(internal_compilation_error!(Internal(format!(
-                                "Type variable {ty_var} already exists in type substitution with type `{}`, but trying to use type `{}` instead",
-                                entry_ty.format_with(&env),
-                                default_ty.format_with(&env)
-                            ))));
+                            return Err(internal_compilation_error!(Internal {
+                                error: format!(
+                                    "Type variable {ty_var} already exists in type substitution with type `{}`, but trying to use type `{}` instead",
+                                    entry_ty.format_with(&env),
+                                    default_ty.format_with(&env)
+                                ),
+                                span: all_constraints.iter().next().unwrap().use_site(),
+                            }));
                         }
                     }
                     Entry::Vacant(entry) => {
@@ -1333,8 +1347,11 @@ fn compute_num_trait_default_types(
                         .iter()
                         .all(|ty| ty.data().as_variable().is_some());
                     if output_tys_all_vars {
-                        let solved_output_tys =
-                            trait_solver.solve_output_types(&trait_ref, &input_tys, span)?;
+                        let solved_output_tys = trait_solver.solve_output_types(
+                            &trait_ref,
+                            &input_tys,
+                            span.use_site.unwrap(),
+                        )?;
                         for (output_ty, solved_ty) in
                             output_tys.iter().zip(solved_output_tys.iter())
                         {
@@ -1346,16 +1363,22 @@ fn compute_num_trait_default_types(
                     }
                     let output_tys_all_const = output_tys.iter().all(Type::is_constant);
                     if output_tys_all_const {
-                        let solved_output_tys =
-                            trait_solver.solve_output_types(&trait_ref, &input_tys, span)?;
+                        let solved_output_tys = trait_solver.solve_output_types(
+                            &trait_ref,
+                            &input_tys,
+                            span.use_site.unwrap(),
+                        )?;
                         if output_tys != solved_output_tys {
                             let fake_current = new_module_using_std();
                             let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
-                            return Err(internal_compilation_error!(Internal(format!(
-                                "While defaulting Num types, a constraint ended up having invalid output types [{}] while the correct ones are [{}].",
-                                output_tys.format_with(&env),
-                                solved_output_tys.format_with(&env)
-                            ))));
+                            return Err(internal_compilation_error!(Internal {
+                                error: format!(
+                                    "While defaulting Num types, a constraint ended up having invalid output types [{}] while the correct ones are [{}].",
+                                    output_tys.format_with(&env),
+                                    solved_output_tys.format_with(&env)
+                                ),
+                                span: span.use_site.unwrap(),
+                            }));
                         }
                         selected_constraints.remove(&constraint_ptr(constraint));
                         progress = true;

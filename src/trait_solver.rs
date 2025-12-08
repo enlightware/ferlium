@@ -566,18 +566,23 @@ impl<'a> TraitSolver<'a> {
     /// If necessary, the import slots are updated.
     pub fn get_function(
         &mut self,
+        use_site: Location,
         module_name: Ustr,
         function_name: Ustr,
     ) -> Result<FunctionId, InternalCompilationError> {
         let module = self.others.modules.get(&module_name).ok_or_else(|| {
-            internal_compilation_error!(Internal(format!(
-                "Module {module_name} not found when looking for function {function_name}"
-            )))
+            internal_compilation_error!(Internal {
+                error: format!(
+                    "Module {module_name} not found when looking for function {function_name}"
+                ),
+                span: use_site
+            })
         })?;
         module.get_own_function(function_name).ok_or_else(|| {
-            internal_compilation_error!(Internal(format!(
-                "Function {function_name} not found in module {module_name}"
-            )))
+            internal_compilation_error!(Internal {
+                error: format!("Function {function_name} not found in module {module_name}"),
+                span: use_site
+            })
         })?;
         Ok(FunctionId::Import(
             self.import_function(module_name, function_name),

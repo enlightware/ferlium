@@ -11,9 +11,8 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::common::int;
+use crate::common::{TestSession, int};
 
-use super::common::run;
 use ferlium::value::Value;
 
 #[cfg(target_arch = "wasm32")]
@@ -22,8 +21,9 @@ use wasm_bindgen_test::*;
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn factorial() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             fn factorial(n) {
                 if n <= 1 {
                     1
@@ -41,8 +41,9 @@ fn factorial() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn quicksort() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             fn swap(a, i, j) {
                 let temp = a[i];
                 a[i] = a[j];

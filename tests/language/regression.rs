@@ -14,7 +14,7 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::common::{int, run};
+use crate::common::{TestSession, int};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -22,8 +22,9 @@ use wasm_bindgen_test::*;
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_iterator() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
 			fn it(x) {
 				for i in x { }
 			}
@@ -37,8 +38,9 @@ fn array_iterator() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn count_some_bug_minimized() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
 		fn count_some(a: [None | Some(int)]) {
 			let mut sum = 0;
 			for option in a {
@@ -59,8 +61,9 @@ fn count_some_bug_minimized() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn enum_constructors() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
 			enum Action { Quit }
 
 			Action::Quit

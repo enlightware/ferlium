@@ -503,7 +503,7 @@ fn build_panic(
     let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
     let build_string = n(native_str(message), string_type());
-    let function = solver.get_function(ustr("std"), ustr("panic"))?;
+    let function = solver.get_function(span, ustr("std"), ustr("panic"))?;
     Ok(n(
         static_apply_pure(
             function,
@@ -556,7 +556,7 @@ fn build_variant_to_x(
     // helpers to synthesize IR
     let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
-    let function = solver.get_function(ustr("std"), ustr(&format!("variant_to_{what}")))?;
+    let function = solver.get_function(span, ustr("std"), ustr(&format!("variant_to_{what}")))?;
     Ok(n(
         static_apply_pure(function, [(variant_node, variant_type())], ret_ty, span),
         ret_ty,
@@ -580,7 +580,7 @@ fn build_expect_variant_object_entry(
     let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
     let name = n(native_str(name), string_type());
-    let function = solver.get_function(ustr("std"), ustr("expect_variant_object_entry"))?;
+    let function = solver.get_function(span, ustr("std"), ustr("expect_variant_object_entry"))?;
     Ok(n(
         static_apply_pure(
             function,

@@ -11,10 +11,7 @@ use ferlium::{
     effects::EffType,
     error::CompilationErrorImpl,
     format::{FormatWith, FormatWithData},
-    module::ModuleEnv,
-    resolve_defined_type, resolve_holed_type,
     std::{
-        StdModuleEnv,
         array::array_type,
         logic::bool_type,
         math::{float_type, int_type},
@@ -32,27 +29,18 @@ use ustr::ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
-use crate::common::{compile, fail_compilation, float, int, run};
+use crate::common::{TestSession, float, int};
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn primitive() {
-    let env = StdModuleEnv::new();
+    let mut session = TestSession::new();
+    assert_eq!(session.resolve_defined_type("()").unwrap(), Type::unit());
+    assert_eq!(session.resolve_defined_type("bool").unwrap(), bool_type());
+    assert_eq!(session.resolve_defined_type("int").unwrap(), int_type());
+    assert_eq!(session.resolve_defined_type("float").unwrap(), float_type());
     assert_eq!(
-        resolve_defined_type("()", &env.get()).unwrap(),
-        Type::unit()
-    );
-    assert_eq!(
-        resolve_defined_type("bool", &env.get()).unwrap(),
-        bool_type()
-    );
-    assert_eq!(resolve_defined_type("int", &env.get()).unwrap(), int_type());
-    assert_eq!(
-        resolve_defined_type("float", &env.get()).unwrap(),
-        float_type()
-    );
-    assert_eq!(
-        resolve_defined_type("string", &env.get()).unwrap(),
+        session.resolve_defined_type("string").unwrap(),
         string_type()
     );
 }
@@ -60,25 +48,27 @@ fn primitive() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn tuple() {
-    let env = StdModuleEnv::new();
+    let mut session = TestSession::new();
     assert_eq!(
-        resolve_defined_type("(int,)", &env.get()).unwrap(),
+        session.resolve_defined_type("(int,)").unwrap(),
         tuple_type([int_type()])
     );
     assert_eq!(
-        resolve_defined_type("(int, int)", &env.get()).unwrap(),
+        session.resolve_defined_type("(int, int)").unwrap(),
         tuple_type([int_type(), int_type()])
     );
     assert_eq!(
-        resolve_defined_type("(int, int, int)", &env.get()).unwrap(),
+        session.resolve_defined_type("(int, int, int)").unwrap(),
         tuple_type([int_type(), int_type(), int_type()])
     );
     assert_eq!(
-        resolve_defined_type("(int, float)", &env.get()).unwrap(),
+        session.resolve_defined_type("(int, float)").unwrap(),
         tuple_type([int_type(), float_type()])
     );
     assert_eq!(
-        resolve_defined_type("(int, (bool, string))", &env.get()).unwrap(),
+        session
+            .resolve_defined_type("(int, (bool, string))")
+            .unwrap(),
         tuple_type([int_type(), tuple_type([bool_type(), string_type()])])
     );
 }
@@ -86,33 +76,35 @@ fn tuple() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn record() {
-    let env = StdModuleEnv::new();
+    let mut session = TestSession::new();
     assert_eq!(
-        resolve_defined_type("{a: int}", &env.get()).unwrap(),
+        session.resolve_defined_type("{a: int}").unwrap(),
         record_type([("a", int_type())])
     );
     assert_eq!(
-        resolve_defined_type("{a: int,}", &env.get()).unwrap(),
+        session.resolve_defined_type("{a: int,}").unwrap(),
         record_type([("a", int_type())])
     );
     assert_eq!(
-        resolve_defined_type("{a: int, b: bool}", &env.get()).unwrap(),
+        session.resolve_defined_type("{a: int, b: bool}").unwrap(),
         record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
-        resolve_defined_type("{a: int, b: bool, }", &env.get()).unwrap(),
+        session.resolve_defined_type("{a: int, b: bool, }").unwrap(),
         record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
-        resolve_defined_type("{b: bool, a: int}", &env.get()).unwrap(),
+        session.resolve_defined_type("{b: bool, a: int}").unwrap(),
         record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
-        resolve_defined_type("{b: bool, a: int}", &env.get()).unwrap(),
-        resolve_defined_type("{a: int, b: bool}", &env.get()).unwrap(),
+        session.resolve_defined_type("{b: bool, a: int}").unwrap(),
+        session.resolve_defined_type("{a: int, b: bool}").unwrap(),
     );
     assert_eq!(
-        resolve_defined_type("{a: int, b: { c: bool, d: float } }", &env.get()).unwrap(),
+        session
+            .resolve_defined_type("{a: int, b: { c: bool, d: float } }")
+            .unwrap(),
         record_type([
             ("a", int_type()),
             ("b", record_type([("c", bool_type()), ("d", float_type())]))
@@ -123,13 +115,15 @@ fn record() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variant() {
-    let env = StdModuleEnv::new();
+    let mut session = TestSession::new();
     assert_eq!(
-        resolve_defined_type("Some(int)|None", &env.get()).unwrap(),
+        session.resolve_defined_type("Some(int)|None").unwrap(),
         variant_type([("Some", tuple_type([int_type()])), ("None", Type::unit()),])
     );
     assert_eq!(
-        resolve_defined_type("RGB (int, int, int) | Color(string)", &env.get()).unwrap(),
+        session
+            .resolve_defined_type("RGB (int, int, int) | Color(string)")
+            .unwrap(),
         variant_type([
             ("RGB", tuple_type([int_type(), int_type(), int_type()])),
             ("Color", tuple_type([string_type()])),
@@ -140,18 +134,12 @@ fn variant() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn parentheses() {
-    let env = StdModuleEnv::new();
-    assert_eq!(resolve_defined_type("int", &env.get()).unwrap(), int_type());
+    let mut session = TestSession::new();
+    assert_eq!(session.resolve_defined_type("int").unwrap(), int_type());
+    assert_eq!(session.resolve_defined_type("(int)").unwrap(), int_type());
+    assert_eq!(session.resolve_defined_type("((int))").unwrap(), int_type());
     assert_eq!(
-        resolve_defined_type("(int)", &env.get()).unwrap(),
-        int_type()
-    );
-    assert_eq!(
-        resolve_defined_type("((int))", &env.get()).unwrap(),
-        int_type()
-    );
-    assert_eq!(
-        resolve_defined_type("(((int)))", &env.get()).unwrap(),
+        session.resolve_defined_type("(((int)))").unwrap(),
         int_type()
     );
 }
@@ -159,25 +147,25 @@ fn parentheses() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn fn_type() {
-    let env = StdModuleEnv::new();
+    let mut session = TestSession::new();
     assert_eq!(
-        resolve_defined_type("() -> ()", &env.get()).unwrap(),
+        session.resolve_defined_type("() -> ()").unwrap(),
         Type::function_by_val_with_effects([], Type::unit(), EffType::empty())
     );
     assert_eq!(
-        resolve_defined_type("(int) -> int", &env.get()).unwrap(),
+        session.resolve_defined_type("(int) -> int").unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
-        resolve_defined_type("((int)) -> int", &env.get()).unwrap(),
+        session.resolve_defined_type("((int)) -> int").unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
-        resolve_defined_type("(int) -> (int)", &env.get()).unwrap(),
+        session.resolve_defined_type("(int) -> (int)").unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
-        resolve_defined_type("(int) -> (int,)", &env.get()).unwrap(),
+        session.resolve_defined_type("(int) -> (int,)").unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             tuple_type([int_type()]),
@@ -185,7 +173,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_defined_type("(int, float) -> ()", &env.get()).unwrap(),
+        session.resolve_defined_type("(int, float) -> ()").unwrap(),
         Type::function_by_val_with_effects(
             [int_type(), float_type()],
             Type::unit(),
@@ -193,7 +181,9 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_defined_type("((int, float)) -> ()", &env.get()).unwrap(),
+        session
+            .resolve_defined_type("((int, float)) -> ()")
+            .unwrap(),
         Type::function_by_val_with_effects(
             [tuple_type([int_type(), float_type()])],
             Type::unit(),
@@ -201,7 +191,9 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_defined_type("((int, float)) -> (bool, string)", &env.get()).unwrap(),
+        session
+            .resolve_defined_type("((int, float)) -> (bool, string)")
+            .unwrap(),
         Type::function_by_val_with_effects(
             [tuple_type([int_type(), float_type()])],
             tuple_type([bool_type(), string_type()]),
@@ -209,7 +201,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_defined_type("(&mut [int]) -> int", &env.get()).unwrap(),
+        session.resolve_defined_type("(&mut [int]) -> int").unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(int_type()), true)],
             int_type(),
@@ -217,7 +209,9 @@ fn fn_type() {
         ))
     );
     assert_eq!(
-        resolve_defined_type("(&mut [float], &mut int) -> ()", &env.get()).unwrap(),
+        session
+            .resolve_defined_type("(&mut [float], &mut int) -> ()")
+            .unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(float_type()), true), (int_type(), true)],
             Type::unit(),
@@ -226,11 +220,11 @@ fn fn_type() {
     );
 
     assert_eq!(
-        resolve_holed_type("() -> ()", &env.get()).unwrap(),
+        session.resolve_holed_type("() -> ()").unwrap(),
         Type::function_by_val_with_effects([], Type::unit(), EffType::single_variable_id(0))
     );
     assert_eq!(
-        resolve_holed_type("(int) -> int", &env.get()).unwrap(),
+        session.resolve_holed_type("(int) -> int").unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             int_type(),
@@ -238,7 +232,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_holed_type("((int)) -> int", &env.get()).unwrap(),
+        session.resolve_holed_type("((int)) -> int").unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             int_type(),
@@ -246,7 +240,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_holed_type("(int) -> (int)", &env.get()).unwrap(),
+        session.resolve_holed_type("(int) -> (int)").unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             int_type(),
@@ -254,7 +248,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_holed_type("(int) -> (int,)", &env.get()).unwrap(),
+        session.resolve_holed_type("(int) -> (int,)").unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             tuple_type([int_type()]),
@@ -262,7 +256,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_holed_type("(int, float) -> ()", &env.get()).unwrap(),
+        session.resolve_holed_type("(int, float) -> ()").unwrap(),
         Type::function_by_val_with_effects(
             [int_type(), float_type()],
             Type::unit(),
@@ -270,7 +264,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_holed_type("((int, float)) -> ()", &env.get()).unwrap(),
+        session.resolve_holed_type("((int, float)) -> ()").unwrap(),
         Type::function_by_val_with_effects(
             [tuple_type([int_type(), float_type()])],
             Type::unit(),
@@ -278,7 +272,9 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_holed_type("((int, float)) -> (bool, string)", &env.get()).unwrap(),
+        session
+            .resolve_holed_type("((int, float)) -> (bool, string)")
+            .unwrap(),
         Type::function_by_val_with_effects(
             [tuple_type([int_type(), float_type()])],
             tuple_type([bool_type(), string_type()]),
@@ -286,7 +282,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_holed_type("(&mut [int]) -> int", &env.get()).unwrap(),
+        session.resolve_holed_type("(&mut [int]) -> int").unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(int_type()), true)],
             int_type(),
@@ -294,7 +290,9 @@ fn fn_type() {
         ))
     );
     assert_eq!(
-        resolve_holed_type("(&mut [float], &mut int) -> ()", &env.get()).unwrap(),
+        session
+            .resolve_holed_type("(&mut [float], &mut int) -> ()")
+            .unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(float_type()), true), (int_type(), true)],
             Type::unit(),
@@ -302,56 +300,66 @@ fn fn_type() {
         ))
     );
 
-    assert_eq!(
+    assert!(
         format!(
             "{}",
             FormatWithData::new(
-                &resolve_defined_type("(&mut int)", &env.get()).unwrap_err(),
-                &"(&mut int)"
+                &session.resolve_defined_type("(&mut int)").unwrap_err(),
+                session.source_table(),
             )
-        ),
-        "Parsing failed: types outside function arguments cannot be &mut in &mut int"
+        )
+        .starts_with(
+            "Parsing failed: types outside function arguments cannot be &mut in `&mut int`"
+        )
     );
-    assert_eq!(
+    assert!(
         format!(
             "{}",
             FormatWithData::new(
-                &resolve_defined_type("(&mut int,)", &env.get()).unwrap_err(),
-                &"(&mut int,)"
+                &session.resolve_defined_type("(&mut int,)").unwrap_err(),
+                session.source_table(),
             )
-        ),
-        "Parsing failed: types outside function arguments cannot be &mut in &mut int"
+        )
+        .starts_with(
+            "Parsing failed: types outside function arguments cannot be &mut in `&mut int`"
+        )
     );
-    assert_eq!(
+    assert!(
         format!(
             "{}",
             FormatWithData::new(
-                &resolve_defined_type("(bool, float, &mut int)", &env.get()).unwrap_err(),
-                &"(bool, float, &mut int)"
+                &session
+                    .resolve_defined_type("(bool, float, &mut int)")
+                    .unwrap_err(),
+                session.source_table(),
             )
-        ),
-        "Parsing failed: types outside function arguments cannot be &mut in &mut int"
+        )
+        .starts_with(
+            "Parsing failed: types outside function arguments cannot be &mut in `&mut int`"
+        )
     );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_types() {
-    let env = StdModuleEnv::new();
+    let mut session = TestSession::new();
     assert_eq!(
-        resolve_holed_type("_", &env.get()).unwrap(),
+        session.resolve_holed_type("_").unwrap(),
         Type::variable_id(0)
     );
     assert_eq!(
-        resolve_holed_type("(int, _)", &env.get()).unwrap(),
+        session.resolve_holed_type("(int, _)").unwrap(),
         tuple_type([int_type(), Type::variable_id(0)])
     );
     assert_eq!(
-        resolve_holed_type("(_, _)", &env.get()).unwrap(),
+        session.resolve_holed_type("(_, _)").unwrap(),
         tuple_type([Type::variable_id(0), Type::variable_id(0)])
     );
     assert_eq!(
-        resolve_holed_type("(&mut [_], &mut int) -> _", &env.get()).unwrap(),
+        session
+            .resolve_holed_type("(&mut [_], &mut int) -> _")
+            .unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(Type::variable_id(0)), true), (int_type(), true)],
             Type::variable_id(0),
@@ -363,13 +371,11 @@ fn generic_types() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn complex_type() {
-    let env = StdModuleEnv::new();
+    let mut session = TestSession::new();
     assert_eq!(
-        resolve_defined_type(
-            "[{name: string, age: int, nick: Some(string) | None}]",
-            &env.get()
-        )
-        .unwrap(),
+        session
+            .resolve_defined_type("[{name: string, age: int, nick: Some(string) | None}]")
+            .unwrap(),
         array_type(record_type([
             ("name", string_type()),
             ("age", int_type()),
@@ -387,7 +393,8 @@ fn complex_type() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variant_type_ascription() {
-    let result = run(indoc! { r#"
+    let mut session = TestSession::new();
+    let result = session.run(indoc! { r#"
         fn score(value) -> int {
             match value {
                 Some { value } => value,
@@ -409,7 +416,7 @@ fn variant_type_ascription() {
     assert_eq!(result, tuple!(int(40), int(3), int(0)),);
 
     // Limitation: to avoid a conflict, return types instantiate the grammar without record variants.
-    let err = fail_compilation(indoc! { r#"
+    let err = session.fail_compilation(indoc! { r#"
         fn invalid() -> Some { value: int } | Pair(int, int) {
             Empty
         }
@@ -425,8 +432,9 @@ fn variant_type_ascription() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ret_type_overloading() {
+    let mut session = TestSession::new();
     assert_eq!(
-        run(indoc! { r#"
+        session.run(indoc! { r#"
             fn f() { let a = 0; a }
             ((f(): int), (f(): float))
         "# }),
@@ -437,33 +445,35 @@ fn ret_type_overloading() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn returning_variant_is_properly_unified() {
+    let mut session = TestSession::new();
     // Test the Variant type which had the original issue
     // This tests deeply nested recursive variant structures
-    let (module_and_expr, modules) = compile(indoc! { r#"
+    let module = session
+        .compile(indoc! { r#"
         fn make_variant_array() -> Variant {
             Array([])
         }
-    "# });
-    let module = module_and_expr.module;
+    "# })
+        .module;
     let fn_def = &module
         .get_own_function(ustr("make_variant_array"))
         .unwrap()
         .definition;
-    if fn_def.ty_scheme.ty().ret != variant::variant_type() {
-        let module_env = ModuleEnv::new(&module, &modules, false);
-        panic!(
-            "Expected return type to be Variant, got {}",
-            fn_def.ty_scheme.ty().ret.format_with(&module_env)
-        );
-    }
+    assert_eq!(
+        fn_def.ty_scheme.ty().ret,
+        variant::variant_type(),
+        "Expected return type to be Variant"
+    );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variant_type_alias_in_function_signature() {
+    let mut session = TestSession::new();
     // Test that the Variant type alias is preserved in function signatures
     // This reproduces the issue where Variant appears unfolded in function types
-    let (module_and_expr, modules) = compile(indoc! { r#"
+    let module = session
+        .compile(indoc! { r#"
         fn process_variant(v: Variant) -> Variant {
             v
         }
@@ -471,16 +481,19 @@ fn variant_type_alias_in_function_signature() {
         fn process_variant_array(entries: [(string, Variant)]) -> Variant {
             entries[0].1
         }
-    "# });
-    let module = module_and_expr.module;
-    let module_env = ModuleEnv::new(&module, &modules, false);
+    "# })
+        .module;
 
     // Check first function
     let fn_def1 = &module
         .get_own_function(ustr("process_variant"))
         .unwrap()
         .definition;
-    let sig1 = fn_def1.ty_scheme.ty().format_with(&module_env).to_string();
+    let sig1 = fn_def1
+        .ty_scheme
+        .ty()
+        .format_with(&session.std_module_env())
+        .to_string();
     println!("process_variant signature: {}", sig1);
 
     // The signature should contain "Variant", not the unfolded type
@@ -500,7 +513,11 @@ fn variant_type_alias_in_function_signature() {
         .get_own_function(ustr("process_variant_array"))
         .unwrap()
         .definition;
-    let sig2 = fn_def2.ty_scheme.ty().format_with(&module_env).to_string();
+    let sig2 = fn_def2
+        .ty_scheme
+        .ty()
+        .format_with(&session.std_module_env())
+        .to_string();
     println!("process_variant_array signature: {}", sig2);
 
     // Debug: Check what type is actually in the tuple
@@ -525,7 +542,7 @@ fn variant_type_alias_in_function_signature() {
 
             // Dump world 1 to show the canonical Variant
             println!("\n=== Dumping world 1 (canonical Variant) ===");
-            ferlium::r#type::dump_type_world(1, &module_env);
+            ferlium::r#type::dump_type_world(1, &session.std_module_env());
         } else {
             panic!("Expected array element to be a tuple");
         }

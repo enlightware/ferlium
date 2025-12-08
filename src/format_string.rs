@@ -61,18 +61,17 @@ pub fn emit_format_string_ast(
         LazyLock::new(|| Regex::new(r"\{([\p{L}_][\p{L}\p{N}_]*)\}").unwrap());
 
     // Start with an empty mutable string.
-    let start_span = Location::new_local(span.start(), span.start());
     let mut exprs = vec![Expr::new(
         ExprKind::Let(
-            (ustr("@s"), start_span),
+            (ustr("@s"), span),
             MutVal::mutable(),
             b(Expr::new(
                 ExprKind::Literal(Value::native(String::new()), string_type()),
-                start_span,
+                span,
             )),
             None,
         ),
-        start_span,
+        span,
     )];
     let start_pos = span.start_usize() + 2; // starting of input in source code
 
@@ -99,16 +98,22 @@ pub fn emit_format_string_ast(
         // Push the literal text before the match.
         if match_start > last_end {
             // Push the literal text before the match.
-            let string_span =
-                Location::new_local_usize(start_pos + last_end, start_pos + match_start);
+            let string_span = Location::new_usize(
+                start_pos + last_end,
+                start_pos + match_start,
+                span.source_id(),
+            );
             let string = &input[last_end..match_start];
             let expr = string_literal(string, string_span);
             extend_exprs_with(expr);
         }
 
         // Push the variable name found within the braces.
-        let var_span =
-            Location::new_local_usize(start_pos + match_start + 1, start_pos + match_end - 1);
+        let var_span = Location::new_usize(
+            start_pos + match_start + 1,
+            start_pos + match_end - 1,
+            span.source_id(),
+        );
         let var_name = &input[match_start + 1..match_end - 1];
         let expr = variable_to_string(var_name, var_span, span, locals)?;
         extend_exprs_with(expr);
@@ -117,14 +122,18 @@ pub fn emit_format_string_ast(
     }
     // Append remaining literal text after the last match.
     if last_end < input.len() {
-        let string_span = Location::new_local_usize(start_pos + last_end, start_pos + input.len());
+        let string_span = Location::new_usize(
+            start_pos + last_end,
+            start_pos + input.len(),
+            span.source_id(),
+        );
         let string = &input[last_end..];
         let expr = string_literal(string, string_span);
         extend_exprs_with(expr);
     }
 
     // Evaluate the mutable string and return it.
-    let end_span = Location::new_local(span.end(), span.end());
+    let end_span = Location::new(span.end(), span.end(), span.source_id());
     exprs.push(Expr::new(ExprKind::Identifier(ustr("@s")), end_span));
 
     Ok(ExprKind::Block(exprs))

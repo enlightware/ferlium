@@ -52,7 +52,10 @@ const extensions = [
 
 function fillDiagnostics(errorData: ErrorData[]){
 	diagnostics.length = 0;
-	for (const data of errorData){
+	for (const data of errorData) {
+		if (data.file != "<playground>") {
+			continue;
+		}
 		diagnostics.push({
 			from: data.from,
 			to: data.to,
@@ -66,7 +69,7 @@ function processUpdate(update: ViewUpdate) {
 	const text = update.state.doc.toString();
 	const view = update.view;
 	if (update.docChanged) {
-		const errorData = compiler.compile(text);
+		const errorData = compiler.compile("<playground>", text);
 		if (errorData !== undefined) {
 			fillDiagnostics(errorData);
 			setAnnotations(view, []);

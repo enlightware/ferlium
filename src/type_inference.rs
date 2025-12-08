@@ -469,10 +469,10 @@ impl TypeInference {
                     }));
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((definition, function, module_name)) = env.get_function(path) {
+                else if let Some((definition, function, _module_name)) = env.get_function(path) {
                     let (fn_ty, inst_data, _subst) = definition
                         .ty_scheme
-                        .instantiate_with_fresh_vars(self, module_name, expr.span.span(), None);
+                        .instantiate_with_fresh_vars(self, expr.span, None);
                     let node = K::GetFunction(b(ir::GetFunction {
                         function,
                         function_path: ustr(path),
@@ -813,8 +813,7 @@ impl TypeInference {
                     }
                     // If it is not a known type def, assume it to be a variant constructor.
                     let (record_node, record_ty, effects) = self.infer_record(env, &fields)?;
-                    let record_span =
-                        Location::fuse_range(fields.iter().map(|(n, _)| n.1)).unwrap();
+                    let record_span = Location::fuse(fields.iter().map(|(n, _)| n.1)).unwrap();
                     let payload_node = N::new(record_node, record_ty, effects.clone(), record_span);
                     let name = path.0;
                     // Create a fresh type and add a constraint for that type to include this variant.
@@ -985,15 +984,11 @@ impl TypeInference {
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
-        let args_span = || {
-            args.iter()
-                .map(|arg| arg.borrow().span)
-                .reduce(|a, b| Location::new_local(a.start(), b.end()))
-                .unwrap_or(path_span)
-        };
+        let args_span =
+            || Location::fuse(args.iter().map(|arg| arg.borrow().span)).unwrap_or(path_span);
         // Get the function and its type from the environment.
         Ok(
-            if let Some((module_name, trait_descr)) = env.module_env.get_trait_function(path) {
+            if let Some((_module_name, trait_descr)) = env.module_env.get_trait_function(path) {
                 let (trait_ref, function_index, definition) = trait_descr;
                 // Validate the number of arguments
                 if definition.ty_scheme.ty.args.len() != args.len() {
@@ -1005,13 +1000,9 @@ impl TypeInference {
                     }));
                 }
                 // Instantiate its type scheme
-                let (inst_fn_ty, inst_data, subst) =
-                    definition.ty_scheme.instantiate_with_fresh_vars(
-                        self,
-                        module_name,
-                        path_span.span(),
-                        Some(trait_ref.type_var_count()),
-                    );
+                let (inst_fn_ty, inst_data, subst) = definition
+                    .ty_scheme
+                    .instantiate_with_fresh_vars(self, path_span, Some(trait_ref.type_var_count()));
                 assert!(
                     inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait function is not supported yet."
@@ -1019,7 +1010,7 @@ impl TypeInference {
                 // Instantiate the constraints and add them to our list.
                 trait_ref.constraints.iter().for_each(|constraint| {
                     let mut constraint = constraint.instantiate(&subst);
-                    constraint.instantiate_module(module_name, path_span.span());
+                    constraint.instantiate_location(path_span);
                     self.add_pub_constraint(constraint);
                 });
                 // Make sure the types of the trait arguments match the expected types
@@ -1051,7 +1042,7 @@ impl TypeInference {
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
-            } else if let Some((definition, function, module_name)) = env.get_function(path) {
+            } else if let Some((definition, function, _module_name)) = env.get_function(path) {
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: definition.ty_scheme.ty.args.len(),
@@ -1063,7 +1054,7 @@ impl TypeInference {
                 // Instantiate its type scheme
                 let (inst_fn_ty, inst_data, _subst) = definition
                     .ty_scheme
-                    .instantiate_with_fresh_vars(self, module_name, path_span.span(), None);
+                    .instantiate_with_fresh_vars(self, path_span, None);
                 // Get argument names if any
                 let argument_names = arguments_unnamed.filter_args(&definition.arg_names);
                 // Get the code and make sure the types of its arguments match the expected types
@@ -1172,7 +1163,7 @@ impl TypeInference {
                     _ => {
                         let payload_ty = Type::tuple(payload_types);
                         let payload_span =
-                            Location::fuse_range(payload_nodes.iter().map(|n| n.span)).unwrap();
+                            Location::fuse(payload_nodes.iter().map(|n| n.span)).unwrap();
                         let node = if let Some(values) = nodes_as_bare_immediate(&payload_nodes) {
                             K::Immediate(Immediate::new(Value::tuple(values)))
                         } else {
@@ -1852,7 +1843,11 @@ impl UnifiedTypeInference {
                             let tuple_ty = unified_ty_inf.normalize_type(*tuple_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
                             // tuple_span and index_span *must* originate from the same module
-                            let span = Location::fuse_range([*tuple_span, *index_span]).unwrap();
+                            let span = Location::fuse([
+                                tuple_span.use_site.unwrap(),
+                                index_span.use_site.unwrap(),
+                            ])
+                            .unwrap();
                             if let Some(variant) = variants_are.get(&tuple_ty) {
                                 let variant_span = variant.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1895,7 +1890,11 @@ impl UnifiedTypeInference {
                             let record_ty = unified_ty_inf.normalize_type(*record_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
                             // record_span and field_span *must* originate from the same module
-                            let span = Location::fuse_range([*record_span, *field_span]).unwrap();
+                            let span = Location::fuse([
+                                record_span.use_site.unwrap(),
+                                field_span.use_site.unwrap(),
+                            ])
+                            .unwrap();
                             if let Some(variant) = variants_are.get(&record_ty) {
                                 let variant_span = variant.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1939,7 +1938,7 @@ impl UnifiedTypeInference {
                             let payload_ty = unified_ty_inf.normalize_type(*payload_ty);
                             // We observed that sometimes variant_span and payload_span come from different modules.
                             // So we just use variant_span here.
-                            let span = *variant_span;
+                            let span = variant_span.use_site.unwrap();
                             if let Some(tuple) = tuples_at_index_is.get(&variant_ty) {
                                 let index_span = tuple.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1960,7 +1959,7 @@ impl UnifiedTypeInference {
                                 if let Some((expected_ty, expected_span)) = variants.get(tag) {
                                     unified_ty_inf.unify_same_type(
                                         payload_ty,
-                                        *payload_span,
+                                        payload_span.use_site.unwrap(),
                                         *expected_ty,
                                         *expected_span,
                                     )?;
@@ -1968,7 +1967,10 @@ impl UnifiedTypeInference {
                                     variants.insert(*tag, (payload_ty, span));
                                 }
                             } else {
-                                let variant = HashMap::from([(*tag, (payload_ty, *payload_span))]);
+                                let variant = HashMap::from([(
+                                    *tag,
+                                    (payload_ty, payload_span.use_site.unwrap()),
+                                )]);
                                 variants_are.insert(variant_ty, variant);
                             }
                         }
@@ -1988,13 +1990,13 @@ impl UnifiedTypeInference {
                                 {
                                     unified_ty_inf.unify_same_type(
                                         *actual,
-                                        *span,
+                                        span.use_site.unwrap(),
                                         *expected,
                                         have_trait.1,
                                     )?;
                                 }
                             } else {
-                                have_traits.insert(key, (output_types, *span));
+                                have_traits.insert(key, (output_types, span.use_site.unwrap()));
                             }
                         }
                     }
@@ -2013,7 +2015,11 @@ impl UnifiedTypeInference {
                             index_span,
                             element_ty,
                         } => unified_ty_inf.unify_tuple_project(
-                            tuple_ty, tuple_span, index, index_span, element_ty,
+                            tuple_ty,
+                            tuple_span.use_site.unwrap(),
+                            index,
+                            index_span.use_site.unwrap(),
+                            element_ty,
                         )?,
                         RecordFieldIs {
                             record_ty,
@@ -2023,9 +2029,9 @@ impl UnifiedTypeInference {
                             element_ty,
                         } => unified_ty_inf.unify_record_field_access(
                             record_ty,
-                            record_span,
+                            record_span.use_site.unwrap(),
                             field,
-                            field_span,
+                            field_span.use_site.unwrap(),
                             element_ty,
                         )?,
                         TypeHasVariant {
@@ -2036,10 +2042,10 @@ impl UnifiedTypeInference {
                             payload_span,
                         } => unified_ty_inf.unify_type_has_variant(
                             variant_ty,
-                            variant_span,
+                            variant_span.use_site.unwrap(),
                             tag,
                             payload_ty,
-                            payload_span,
+                            payload_span.use_site.unwrap(),
                         )?,
                         HaveTrait {
                             trait_ref,
@@ -2056,7 +2062,7 @@ impl UnifiedTypeInference {
                                 trait_ref,
                                 &input_tys,
                                 &output_tys,
-                                span,
+                                span.use_site.unwrap(),
                                 is_ty_adt,
                                 trait_solver,
                             )?
@@ -3114,13 +3120,13 @@ impl UnifiedTypeInference {
             } => {
                 let tuple_ty = self.substitute_in_type(*tuple_ty);
                 let element_ty = self.substitute_in_type(*element_ty);
-                PubTypeConstraint::new_tuple_at_index_is(
+                TupleAtIndexIs {
                     tuple_ty,
-                    *tuple_span,
-                    *index,
-                    *index_span,
+                    tuple_span: tuple_span.clone(),
+                    index: *index,
+                    index_span: index_span.clone(),
                     element_ty,
-                )
+                }
             }
             RecordFieldIs {
                 record_ty,
@@ -3131,13 +3137,13 @@ impl UnifiedTypeInference {
             } => {
                 let record_ty = self.substitute_in_type(*record_ty);
                 let element_ty = self.substitute_in_type(*element_ty);
-                PubTypeConstraint::new_record_field_is(
+                RecordFieldIs {
                     record_ty,
-                    *record_span,
-                    *field,
-                    *field_span,
+                    record_span: record_span.clone(),
+                    field: *field,
+                    field_span: field_span.clone(),
                     element_ty,
-                )
+                }
             }
             TypeHasVariant {
                 variant_ty,
@@ -3148,13 +3154,13 @@ impl UnifiedTypeInference {
             } => {
                 let variant_ty = self.substitute_in_type(*variant_ty);
                 let payload_ty = self.substitute_in_type(*payload_ty);
-                PubTypeConstraint::new_type_has_variant(
+                TypeHasVariant {
                     variant_ty,
-                    *variant_span,
-                    *tag,
+                    variant_span: variant_span.clone(),
+                    tag: *tag,
                     payload_ty,
-                    *payload_span,
-                )
+                    payload_span: payload_span.clone(),
+                }
             }
             HaveTrait {
                 trait_ref,
@@ -3164,7 +3170,12 @@ impl UnifiedTypeInference {
             } => {
                 let input_tys = self.substitute_in_types(input_tys);
                 let output_tys = self.substitute_in_types(output_tys);
-                PubTypeConstraint::new_have_trait(trait_ref.clone(), input_tys, output_tys, *span)
+                HaveTrait {
+                    trait_ref: trait_ref.clone(),
+                    input_tys,
+                    output_tys,
+                    span: span.clone(),
+                }
             }
         }
     }

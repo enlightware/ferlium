@@ -71,10 +71,11 @@ impl TypeInference {
         let first_alternative = alternatives.first().unwrap();
         let first_alternative_span = first_alternative.0.span;
         let is_variant = first_alternative.0.kind.is_variant();
-        let alternatives_span = Location::new_local(
-            alternatives.first().unwrap().0.span.start(),
-            alternatives.last().unwrap().0.span.end(),
-        );
+        let alternatives_span = Location::fuse([
+            alternatives.first().unwrap().0.span,
+            alternatives.last().unwrap().1.span,
+        ])
+        .unwrap();
 
         Ok(if is_variant {
             // Variant patterns
@@ -232,7 +233,7 @@ impl TypeInference {
 
             // Generate code for each alternative
             let mut return_ty = None;
-            let mut return_ty_span = Location::new_local(0, 0); // placeholder
+            let mut return_ty_span = match_span;
             let mut alternatives = types
                 .iter()
                 .zip(exprs)

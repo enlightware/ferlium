@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    ModuleAndExpr,
+    CompilerSession, ModuleAndExpr, SourceTable,
     containers::IntoSVec2,
     effects::{PrimitiveEffect, effect, effects, no_effects},
     error::{CompilationError, RuntimeError},
@@ -16,11 +16,10 @@ use ferlium::{
         BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnVN,
     },
-    module::{Module, Modules},
+    module::{Module, ModuleEnv, Modules},
     std::{
         array::{Array, array_type},
         math::int_type,
-        new_std_modules,
         option::option_type,
     },
     r#type::{FnType, Type, variant_type},
@@ -179,82 +178,122 @@ fn test_property_module() -> Module {
     module
 }
 
-/// Compile and run the src and return its module and expression
-pub fn try_compile(src: &str) -> Result<(ModuleAndExpr, Modules), CompilationError> {
-    let mut other_modules = new_std_modules();
-    other_modules.register_module(ustr("testing"), testing_module());
-    other_modules.register_module(ustr("effects"), test_effect_module());
-    other_modules.register_module(ustr("props"), test_property_module());
-    Ok((ferlium::compile(src, &other_modules, &[])?, other_modules))
+/// A test session with std, testing, effects and props modules
+#[derive(Debug)]
+pub struct TestSession {
+    session: CompilerSession,
+    test_modules: Modules,
 }
-
-/// Compile the src and return its module and expression
-pub fn compile(src: &str) -> (ModuleAndExpr, Modules) {
-    try_compile(src).unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
-}
-
-/// Compile and get a specific function definition
-pub fn compile_and_get_fn_def(src: &str, fn_name: &str) -> FunctionDefinition {
-    compile(src)
-        .0
-        .module
-        .get_own_function(ustr(fn_name))
-        .expect("Function not found")
-        .definition
-        .clone()
-}
-
-/// Compile and run the src and return its execution result (either a value or an error)
-pub fn try_compile_and_run(src: &str) -> CompileRunResult {
-    // Compile the source.
-    let (ModuleAndExpr { module, expr }, ..) = try_compile(src).map_err(Error::Compilation)?;
-
-    // Run the expression if any.
-    if let Some(expr) = expr {
-        expr.expr
-            .eval(module)
-            .map(ControlFlow::into_value)
-            .map_err(Error::Runtime)
-    } else {
-        Ok(Value::unit())
+impl TestSession {
+    /// Create a new test session with std, testing, effects and props modules registered.
+    pub fn new() -> Self {
+        let compiler_session = CompilerSession::new();
+        let mut test_modules = compiler_session.new_std_modules();
+        test_modules.register_module(ustr("testing"), testing_module());
+        test_modules.register_module(ustr("effects"), test_effect_module());
+        test_modules.register_module(ustr("props"), test_property_module());
+        Self {
+            session: compiler_session,
+            test_modules,
+        }
     }
-}
 
-/// Compile and run the src and return its execution result (either a value or an error)
-pub fn try_run(src: &str) -> EvalResult {
-    try_compile_and_run(src).map_err(|error| match error {
-        Error::Compilation(error) => panic!("Compilation error: {error:?}"),
-        Error::Runtime(error) => error,
-    })
-}
-
-/// Compile and run the src and return its value
-pub fn run(src: &str) -> Value {
-    try_run(src).unwrap_or_else(|error| panic!("Runtime error: {error:?}"))
-}
-
-/// Compile and run the src and expect a runtime error
-pub fn fail_run(src: &str) -> RuntimeError {
-    match try_run(src) {
-        Ok(value) => panic!(
-            "Expected runtime error, got value: {}",
-            value.to_string_repr()
-        ),
-        Err(error) => error,
+    /// Get a module environment, with an empty module including the standard library
+    /// for debugging purposes.
+    pub fn std_module_env(&self) -> ModuleEnv<'_> {
+        self.session.std_module_env()
     }
-}
 
-/// Compile and expect a check error
-pub fn fail_compilation(src: &str) -> CompilationError {
-    match try_compile_and_run(src) {
-        Ok(value) => panic!(
-            "Expected compilation error, got value: {}",
-            value.to_string_repr()
-        ),
-        Err(error) => match error {
-            Error::Compilation(error) => error,
-            _ => panic!("Expected compilation error, got {error:?}"),
-        },
+    /// Get the source table for this compilation session.
+    pub fn source_table(&self) -> &SourceTable {
+        &self.session.source_table()
+    }
+
+    /// Parse a type from a source code and return the corresponding fully-defined Type.
+    pub fn resolve_defined_type(&mut self, src: &str) -> Result<Type, CompilationError> {
+        self.session.resolve_defined_type_with_std("<test>", src)
+    }
+
+    /// Resolve a generic type from a source code and return the corresponding Type,
+    /// with placeholder filled with first generic variable.
+    pub fn resolve_holed_type(&mut self, src: &str) -> Result<Type, CompilationError> {
+        self.session.resolve_holed_type_with_std("<test>", src)
+    }
+
+    /// Compile and run the src and return its module and expression
+    pub fn try_compile(&mut self, src: &str) -> Result<ModuleAndExpr, CompilationError> {
+        self.session.compile("<test>", src, &self.test_modules, &[])
+    }
+
+    /// Compile the src and return its module and expression
+    pub fn compile(&mut self, src: &str) -> ModuleAndExpr {
+        self.try_compile(src)
+            .unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
+    }
+
+    /// Compile and get a specific function definition
+    pub fn compile_and_get_fn_def(&mut self, src: &str, fn_name: &str) -> FunctionDefinition {
+        self.compile(src)
+            .module
+            .get_own_function(ustr(fn_name))
+            .expect("Function not found")
+            .definition
+            .clone()
+    }
+
+    /// Compile and run the src and return its execution result (either a value or an error)
+    pub fn try_compile_and_run(&mut self, src: &str) -> CompileRunResult {
+        // Compile the source.
+        let ModuleAndExpr { module, expr } = self.try_compile(src).map_err(Error::Compilation)?;
+
+        // Run the expression if any.
+        if let Some(expr) = expr {
+            expr.expr
+                .eval(module)
+                .map(ControlFlow::into_value)
+                .map_err(Error::Runtime)
+        } else {
+            Ok(Value::unit())
+        }
+    }
+
+    /// Compile and run the src and return its execution result (either a value or an error)
+    pub fn try_run(&mut self, src: &str) -> EvalResult {
+        self.try_compile_and_run(src).map_err(|error| match error {
+            Error::Compilation(error) => panic!("Compilation error: {error:?}"),
+            Error::Runtime(error) => error,
+        })
+    }
+
+    /// Compile and run the src and return its value
+    pub fn run(&mut self, src: &str) -> Value {
+        self.try_run(src)
+            .unwrap_or_else(|error| panic!("Runtime error: {error:?}"))
+    }
+
+    /// Compile and run the src and expect a runtime error
+    pub fn fail_run(&mut self, src: &str) -> RuntimeError {
+        match self.try_run(src) {
+            Ok(value) => panic!(
+                "Expected runtime error, got value: {}",
+                value.to_string_repr()
+            ),
+            Err(error) => error,
+        }
+    }
+
+    /// Compile and expect a check error
+    pub fn fail_compilation(&mut self, src: &str) -> CompilationError {
+        match self.try_compile_and_run(src) {
+            Ok(value) => panic!(
+                "Expected compilation error, got value: {}",
+                value.to_string_repr()
+            ),
+            Err(error) => match error {
+                Error::Compilation(error) => error,
+                _ => panic!("Expected compilation error, got {error:?}"),
+            },
+        }
     }
 }
 

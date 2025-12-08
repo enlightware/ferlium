@@ -13,8 +13,13 @@ use std::{
 };
 
 use crate::{
-    format::FormatWith, location::Location, r#trait::TraitRef, r#type::TypeDefRef,
-    type_inference::SubOrSameType, type_scheme::PubTypeConstraint,
+    SourceId,
+    format::FormatWith,
+    location::{Location, SourceTable, get_line_column},
+    r#trait::TraitRef,
+    r#type::TypeDefRef,
+    type_inference::SubOrSameType,
+    type_scheme::PubTypeConstraint,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
@@ -365,7 +370,10 @@ pub enum CompilationErrorImpl<S: Scope> {
         import_chain: Vec<String>,
         span: Location,
     },*/
-    Internal(String),
+    Internal {
+        span: Location,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -418,43 +426,42 @@ impl InternalCompilationError {
     }
 }
 
-impl FormatWith<(ModuleEnv<'_>, &str)> for InternalCompilationError {
-    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &(ModuleEnv<'_>, &str)) -> fmt::Result {
-        let (env, source) = data;
-        let error = CompilationError::resolve_types(self.clone(), env, source);
-        write!(f, "{}", error.format_with(source))
+impl FormatWith<(ModuleEnv<'_>, &SourceTable)> for InternalCompilationError {
+    fn fmt_with(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        data: &(ModuleEnv<'_>, &SourceTable),
+    ) -> fmt::Result {
+        let (env, source_table) = data;
+        let error = CompilationError::resolve_types(self.clone(), env, source_table);
+        write!(f, "{}", error.format_with(*source_table))
     }
 }
 
-fn span_to_string(loc: &Location, source: &str) -> String {
-    match loc.module() {
-        Some(module) => format!(
-            "{}..{} in module {}",
-            module.span().start(),
-            module.span().end(),
-            module.module_name()
-        ),
+fn span_to_string(loc: &Location, source_table: &SourceTable) -> String {
+    let start = loc.start_usize();
+    let end = loc.end_usize();
+    let source_id = loc.source_id();
+    match source_table.get_source(source_id) {
+        Some(source) => {
+            let position = get_line_column(source, start);
+            let snippet = &source[start..end];
+            format!(
+                "`{}` (in {}:{}:{})",
+                snippet, source_id, position.0, position.1,
+            )
+        }
         None => {
-            if loc.start() < loc.end() {
-                source[loc.as_range()].to_string()
-            } else {
-                let end = source.len().min(loc.end_usize() + 20);
-                let more = if end < source.len() { "…" } else { "" };
-                format!(
-                    "location where \"{}{more}\" starts",
-                    &source[loc.start_usize()..end]
-                )
-            }
+            format!("#{}:{}..{}", source_id, start, end)
         }
     }
 }
 
 pub type CompilationError = BoxedCompilationError<External>;
 
-impl FormatWith<&str> for CompilationError {
-    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &&'_ str) -> fmt::Result {
-        let source = data;
-        let fmt_span = |loc: &Location| span_to_string(loc, source);
+impl FormatWith<SourceTable> for CompilationError {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &SourceTable) -> fmt::Result {
+        let fmt_span = |loc: &Location| span_to_string(loc, data);
         use CompilationErrorImpl::*;
         match self.deref() {
             ParsingFailed(errors) => {
@@ -471,10 +478,10 @@ impl FormatWith<&str> for CompilationError {
                 write!(f, "Name `{name}` defined multiple times")
             }
             TypeNotFound(span) => {
-                write!(f, "Cannot find type `{}` in this scope", fmt_span(span))
+                write!(f, "Cannot find type {} in this scope", fmt_span(span))
             }
             TraitNotFound(span) => {
-                write!(f, "Cannot find trait `{}` in this scope", fmt_span(span))
+                write!(f, "Cannot find trait {} in this scope", fmt_span(span))
             }
             WrongNumberOfArguments {
                 expected,
@@ -484,7 +491,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Wrong number of arguments: expected {} due to `{}`, but {} were provided in `{}`",
+                    "Wrong number of arguments: expected {} due to {}, but {} were provided in {}",
                     expected,
                     fmt_span(expected_span),
                     got,
@@ -505,10 +512,7 @@ impl FormatWith<&str> for CompilationError {
                     Constant => "constant due to",
                     Equal => "of same mutability to",
                 };
-                write!(
-                    f,
-                    "Expression `{source_name}` must be {what} `{reason_name}`"
-                )
+                write!(f, "Expression {source_name} must be {what} {reason_name}")
             }
             TypeMismatch {
                 current_ty,
@@ -518,7 +522,7 @@ impl FormatWith<&str> for CompilationError {
                 sub_or_same,
             } => write!(
                 f,
-                "Type `{}` in `{}` is not {} `{}` in `{}`",
+                "Type `{}` in {} is not {} `{}` in {}",
                 current_ty,
                 fmt_span(current_span),
                 match sub_or_same {
@@ -535,7 +539,7 @@ impl FormatWith<&str> for CompilationError {
                 expected_span,
             } => write!(
                 f,
-                "Named type `{}` in `{}` (from `{}`) is different than named type `{}` in `{}` (from `{}`)",
+                "Named type `{}` in {} (from {}) is different than named type `{}` in {} (from {})",
                 current_decl.0,
                 fmt_span(current_span),
                 fmt_span(&current_decl.1),
@@ -546,7 +550,7 @@ impl FormatWith<&str> for CompilationError {
             InfiniteType(ty_var, ty, span) => {
                 write!(
                     f,
-                    "Infinite type: `{}` = `{}` in `{}`",
+                    "Infinite type: `{}` = `{}` in {}",
                     ty_var,
                     ty,
                     fmt_span(span)
@@ -555,7 +559,7 @@ impl FormatWith<&str> for CompilationError {
             UnboundTypeVar { ty_var, ty, span } => {
                 write!(
                     f,
-                    "Unbound type variable `{}` in type `{}` in `{}`",
+                    "Unbound type variable `{}` in type `{}` in {}",
                     ty_var,
                     ty,
                     fmt_span(span)
@@ -564,7 +568,7 @@ impl FormatWith<&str> for CompilationError {
             UnresolvedConstraints { constraints, span } => {
                 write!(
                     f,
-                    "Unresolved constraints `{}` in expression `{}`",
+                    "Unresolved constraints `{}` in expression {}",
                     constraints.join(" ∧ "),
                     fmt_span(span)
                 )
@@ -577,7 +581,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Invalid index {} of a tuple of length {} in `{}`",
+                    "Invalid index {} of a tuple of length {} in {}",
                     index,
                     tuple_length,
                     fmt_span(tuple_span)
@@ -588,7 +592,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Expected tuple, got `{}` in `{}`",
+                    "Expected tuple, got `{}` in {}",
                     expr_ty,
                     fmt_span(expr_span)
                 )
@@ -601,7 +605,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Duplicated field `{}` in {} `{}`",
+                    "Duplicated field {} in {} {}",
                     fmt_span(first_occurrence),
                     ctx.as_str(),
                     fmt_span(constructor_span)
@@ -614,7 +618,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Field `{}` not found in record `{}` of type `{}`",
+                    "Field {} not found in record {} of type `{}`",
                     fmt_span(field_span),
                     fmt_span(record_span),
                     record_ty,
@@ -627,7 +631,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Expected record due to `{}`, got `{}` in `{}`",
+                    "Expected record due to {}, got `{}` in {}",
                     fmt_span(field_span),
                     record_ty,
                     fmt_span(record_span)
@@ -636,7 +640,7 @@ impl FormatWith<&str> for CompilationError {
             InvalidVariantName { name, ty, valid } => {
                 write!(
                     f,
-                    "Variant name `{}` does not exist for variant type `{}`, valid names are `{}`",
+                    "Variant name {} does not exist for variant type `{}`, valid names are `{}`",
                     fmt_span(name),
                     ty,
                     valid.join(", ")
@@ -645,7 +649,7 @@ impl FormatWith<&str> for CompilationError {
             InvalidVariantType { name, ty } => {
                 write!(
                     f,
-                    "Type `{}` is not a variant, but variant constructor `{}` requires it",
+                    "Type `{}` is not a variant, but variant constructor {} requires it",
                     ty,
                     fmt_span(name)
                 )
@@ -653,14 +657,14 @@ impl FormatWith<&str> for CompilationError {
             InvalidVariantConstructor { span } => {
                 write!(
                     f,
-                    "Variant constructor cannot be paths, but `{}` is",
+                    "Variant constructor cannot be paths, but {} is",
                     fmt_span(span)
                 )
             }
             ReturnOutsideFunction { span } => {
                 write!(
                     f,
-                    "Return statement can only be used inside a function, but found in sub-expression `{}`",
+                    "Return statement can only be used inside a function, but found in sub-expression {}",
                     fmt_span(span)
                 )
             }
@@ -684,7 +688,7 @@ impl FormatWith<&str> for CompilationError {
                 };
                 write!(
                     f,
-                    "{} requires {} `{}`",
+                    "{} requires {} {}",
                     what,
                     which,
                     fmt_span(instantiation_span)
@@ -698,7 +702,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Field `{}` does not exists in `{}`, but is present in `{}`",
+                    "Field `{}` does not exists in `{}`, but is present in {}",
                     field_name,
                     type_def.0,
                     fmt_span(instantiation_span)
@@ -711,7 +715,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Field `{}` from `{}` is missing in `{}`",
+                    "Field `{}` from `{}` is missing in {}",
                     field_name,
                     type_def.0,
                     fmt_span(instantiation_span)
@@ -725,7 +729,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Inconsistent data types: {} due to `{}` is incompatible with {} due to `{}`",
+                    "Inconsistent data types: {} due to {} is incompatible with {} due to {}",
                     a_type.adt_kind(),
                     fmt_span(a_span),
                     b_type.adt_kind(),
@@ -755,7 +759,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Duplicated variant `{}` in {} `{}`",
+                    "Duplicated variant {} in {} {}",
                     fmt_span(first_occurrence),
                     ctx.as_str(),
                     fmt_span(ctx_span)
@@ -764,7 +768,7 @@ impl FormatWith<&str> for CompilationError {
             RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
                 write!(
                     f,
-                    "Record wildcard pattern .. must be at the end of the pattern in `{}`",
+                    "Record wildcard pattern .. must be at the end of the pattern in {}",
                     fmt_span(pattern_span)
                 )
             }
@@ -775,7 +779,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Implementation of trait `{}` over types `{}` not found (when calling `{}`)",
+                    "Implementation of trait `{}` over types `{}` not found (when calling {})",
                     trait_ref,
                     input_tys.join(", "),
                     fmt_span(fn_span)
@@ -784,7 +788,7 @@ impl FormatWith<&str> for CompilationError {
             MethodsNotPartOfTrait { trait_ref, spans } => {
                 write!(
                     f,
-                    "Methods `{}` are not part of trait `{}`",
+                    "Methods {} are not part of trait `{}`",
                     spans.iter().map(fmt_span).join(", "),
                     trait_ref
                 )
@@ -796,7 +800,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Implementation of trait `{}` is missing methods `{}` in `{}`",
+                    "Implementation of trait `{}` is missing methods `{}` in {}",
                     trait_ref,
                     missings.iter().join(", "),
                     fmt_span(impl_span)
@@ -812,7 +816,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Method `{}` of trait `{}` expects {} arguments, but {} are provided in `{}`",
+                    "Method `{}` of trait `{}` expects {} arguments, but {} are provided in {}",
                     method_name,
                     trait_ref,
                     expected,
@@ -829,7 +833,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}` in `{}`",
+                    "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}` in {}",
                     method_name,
                     trait_ref,
                     if expected.is_empty() {
@@ -852,7 +856,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Identifier `{}` bound more than once in a pattern: `{}`",
+                    "Identifier {} bound more than once in a pattern: {}",
                     fmt_span(first_occurrence),
                     fmt_span(pattern_span)
                 )
@@ -864,18 +868,18 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Duplicated literal pattern `{}` in match `{}`",
+                    "Duplicated literal pattern {} in match {}",
                     fmt_span(first_occurrence),
                     fmt_span(match_span)
                 )
             }
             EmptyMatchBody { span } => {
-                write!(f, "Match body cannot be empty in `{}`", fmt_span(span))
+                write!(f, "Match body cannot be empty in {}", fmt_span(span))
             }
             NonExhaustivePattern { span, ty } => {
                 write!(
                     f,
-                    "Non-exhaustive patterns for type `{}`, all possible values must be covered in `{}`",
+                    "Non-exhaustive patterns for type `{}`, all possible values must be covered in {}",
                     ty,
                     fmt_span(span)
                 )
@@ -883,7 +887,7 @@ impl FormatWith<&str> for CompilationError {
             TypeValuesCannotBeEnumerated { span, ty } => {
                 write!(
                     f,
-                    "Values of type `{}` cannot be enumerated in `{}`, but all possible values must be known for exhaustive match coverage analysis",
+                    "Values of type `{}` cannot be enumerated in {}, but all possible values must be known for exhaustive match coverage analysis",
                     ty,
                     fmt_span(span)
                 )
@@ -895,7 +899,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Mutable paths overlap: `{}` and `{}` when calling `{}`",
+                    "Mutable paths overlap: {} and {} when calling {}",
                     fmt_span(a_span),
                     fmt_span(b_span),
                     fmt_span(fn_span),
@@ -907,7 +911,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Undefined variable `{}` used in string formatting `{}`",
+                    "Undefined variable {} used in string formatting {}",
                     fmt_span(var_span),
                     fmt_span(string_span),
                 )
@@ -920,7 +924,7 @@ impl FormatWith<&str> for CompilationError {
             } => {
                 write!(
                     f,
-                    "Invalid effect dependency: `{}` due to `{}` is incompatible with `{}` due to `{}`",
+                    "Invalid effect dependency: `{}` due to {} is incompatible with `{}` due to {}",
                     source,
                     fmt_span(source_span),
                     target,
@@ -942,7 +946,7 @@ impl FormatWith<&str> for CompilationError {
                 )
             }
             Unsupported { span, reason } => {
-                write!(f, "Unsupported: {} in `{}`", reason, fmt_span(span))
+                write!(f, "Unsupported: {} in {}", reason, fmt_span(span))
             }
             /*UnresolvedImport {
                 function_path,
@@ -976,7 +980,7 @@ impl FormatWith<&str> for CompilationError {
                     fmt_span(span)
                 )
             }*/
-            Internal(msg) => write!(f, "ICE: {msg}"),
+            Internal { span, error } => write!(f, "ICE: {} in {}", error, fmt_span(span)),
         }
     }
 }
@@ -994,7 +998,7 @@ impl CompilationError {
     pub fn resolve_types(
         error: InternalCompilationError,
         env: &ModuleEnv<'_>,
-        source: &str,
+        source_table: &SourceTable,
     ) -> Self {
         use CompilationErrorImpl::*;
         match error.into_inner() {
@@ -1028,7 +1032,7 @@ impl CompilationError {
                 ctx,
             } => {
                 let (source_span, reason_span) =
-                    resolve_must_be_mutable_ctx(source_span, reason_span, ctx, source);
+                    resolve_must_be_mutable_ctx(source_span, reason_span, ctx, source_table);
                 compilation_error!(MutabilityMustBe {
                     source_span,
                     reason_span,
@@ -1371,7 +1375,7 @@ impl CompilationError {
             CircularImportDependency { import_chain, span } => {
                 compilation_error!(CircularImportDependency { import_chain, span })
             }*/
-            Internal(msg) => compilation_error!(Internal(msg)),
+            Internal { span, error } => compilation_error!(Internal { span, error }),
         }
     }
 
@@ -1678,13 +1682,13 @@ pub fn resolve_must_be_mutable_ctx(
     current_span: Location,
     reason_span: Location,
     ctx: MutabilityMustBeContext,
-    src: &str,
+    source_table: &SourceTable,
 ) -> (Location, Location) {
+    use MutabilityMustBeContext::*;
     match ctx {
-        MutabilityMustBeContext::Value => (current_span, reason_span),
-        MutabilityMustBeContext::FnTypeArg(index) => {
-            // FIXME: this should probably be done later on when the source is available anyway
-            if reason_span.module().is_none() {
+        Value => (current_span, reason_span),
+        FnTypeArg(index) => {
+            if let Some(src) = source_table.get_source(reason_span.source_id()) {
                 let arg_span = extract_ith_fn_arg(src, reason_span, index);
                 (arg_span, current_span)
             } else {
@@ -1730,9 +1734,10 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
             ')' => count -= 1,
             ',' if count == 0 => {
                 if arg_count == index {
-                    return Location::new_local(
+                    return Location::new(
                         span.start() + args_start as u32 + 1 + start as u32,
                         span.start() + args_start as u32 + 1 + i as u32,
+                        SourceId::from_index(0),
                     );
                 }
                 arg_count += 1;
@@ -1744,9 +1749,10 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
 
     // Handling the last argument
     if arg_count == index && start < args_section.len() {
-        return Location::new_local(
+        return Location::new(
             span.start() + args_start as u32 + 1 + start as u32,
             span.start() + args_start as u32 + 1 + args_section.len() as u32,
+            SourceId::from_index(0),
         );
     }
 
@@ -1760,7 +1766,7 @@ mod tests {
     #[test]
     fn extract_ith_fn_arg_single() {
         let src = "(|x| x)((1+2))";
-        let span = Location::new_local_usize(0, src.len());
+        let span = Location::new_usize(0, src.len(), SourceId::from_index(0));
         let expected = ["(1+2)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
@@ -1771,7 +1777,7 @@ mod tests {
     #[test]
     fn extract_ith_fn_arg_multi() {
         let src = "(|x,y| x*y)(12, (1 + 3))";
-        let span = Location::new_local_usize(0, src.len());
+        let span = Location::new_usize(0, src.len(), SourceId::from_index(0));
         let expected = ["12", " (1 + 3)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);

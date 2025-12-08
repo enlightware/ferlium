@@ -7,26 +7,38 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use crate::{add_code_to_module, format::FormatWithData, module::Module, module::Modules};
+use crate::{
+    add_code_to_module,
+    format::FormatWithData,
+    location::SourceTable,
+    module::{Module, Modules},
+};
 
-pub fn add_to_module(to: &mut Module) {
+macro_rules! prelude {
+    ($name:literal) => {
+        ($name, include_str!(concat!("prelude/", $name)))
+    };
+}
+
+pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable) {
     // The prelude code is split into multiple parts
     // to allow dependencies between trait implementations.
     let codes = [
         // First compiles basic comparison functions.
-        include_str!("prelude/comparison.fer"),
+        prelude!("comparison.fer"),
         // Then most of the core traits.
-        include_str!("prelude/core_traits.fer"),
+        prelude!("core_traits.fer"),
         // These functions depend on array iterator being available,
         // so they are compiled in a next batch.
-        include_str!("prelude/core_traits_dependent.fer"),
+        prelude!("core_traits_dependent.fer"),
     ];
-    for code in codes {
-        add_code_to_module(code, to, &Modules::new_empty(), true).unwrap_or_else(|e| {
-            panic!(
-                "Failed to add prelude to module: {}",
-                FormatWithData::new(&e, &code)
-            )
-        });
+    for (name, code) in codes {
+        add_code_to_module(name, code, to, &Modules::new_empty(), source_table, true)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to add prelude to module: {}",
+                    FormatWithData::new(&e, source_table)
+                )
+            });
     }
 }

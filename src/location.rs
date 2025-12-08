@@ -9,9 +9,7 @@
 
 use std::ops::Range;
 
-use ustr::{Ustr, ustr};
-
-use crate::{format::FormatWith, module::ModuleEnv};
+use crate::{define_id_type, format::FormatWith};
 
 /// A range of bytes in the user's input.
 /// It only contains the start and end byte offsets, not the actual input string.
@@ -54,78 +52,52 @@ impl Span {
     }
 }
 
-/// An external location is a span in a different module.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct ExternalLocation {
-    module_name: Ustr,
-    span: Span,
-}
-
-impl ExternalLocation {
-    pub fn module_name(&self) -> Ustr {
-        self.module_name
-    }
-
-    pub fn span(&self) -> Span {
-        self.span
-    }
-}
-
-/// A location in the user's input.
-/// If it originated outside the current module, the module field tracks that original location,
-/// and span tracks the location within the current module where it was brought into scope.
-/// (the function instantiation point).
+/// A location in the user's input, containing a span and a source ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Location {
     span: Span,
-    module: Option<ExternalLocation>,
+    source_id: SourceId,
 }
 
 impl Location {
-    /// Create a new location starting at byte `start` and ending at byte `end`.
-    pub fn new(start: u32, end: u32, module: Option<ExternalLocation>) -> Self {
+    /// Create a new location starting at byte `start` and ending at byte `end`,
+    /// within the source identified by `source_id`.
+    pub fn new(start: u32, end: u32, source_id: SourceId) -> Self {
         Location {
             span: Span::new(start, end),
-            module,
+            source_id,
         }
     }
 
-    /// Create a new location starting at byte `start` and ending at byte `end`, in the current module.
-    /// Panics if `end` is less than `start`.
-    pub fn new_local(start: u32, end: u32) -> Self {
-        Self::new(start, end, None)
-    }
-
-    pub fn new_local_usize(start: usize, end: usize) -> Self {
-        Self::new(start as u32, end as u32, None)
+    /// Create a new location starting at byte `start` and ending at byte `end`,
+    /// within the source identified by `source_id`, taking byte index as usize.
+    pub fn new_usize(start: usize, end: usize, source_id: SourceId) -> Self {
+        Self::new(start as u32, end as u32, source_id)
     }
 
     /// Create a new location by fusing the spans of multiple locations.
-    /// Panics if `others` is empty or are from different modules.
-    pub fn fuse_range(others: impl IntoIterator<Item = Self>) -> Option<Self> {
-        let mut module: Option<Option<ExternalLocation>> = None;
+    /// Panics if `others` are from different sources.
+    pub fn fuse(locations: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut source_id: Option<SourceId> = None;
         let mut start = u32::MAX;
         let mut end = 0u32;
-        for other in others {
-            if let Some(module) = module {
-                let self_name = module.map(|m| m.module_name);
-                let other_name = other.module.map(|m| m.module_name);
-                if self_name != other_name {
-                    let self_name = self_name.unwrap_or(ustr("<current module>"));
-                    let other_name = other_name.unwrap_or(ustr("<current module>"));
+        for other in locations {
+            if let Some(source_id) = source_id {
+                let other_id = other.source_id;
+                if other_id != source_id {
                     panic!(
-                        "Cannot fuse locations from different modules: {self_name}:{:?} with {other_name}:{:?}",
+                        "Cannot fuse locations from different sources: {source_id}:{:?} with {other_id}:{:?}",
                         start..end,
                         other.span.as_range()
                     );
                 }
             } else {
-                module = Some(other.module);
+                source_id = Some(other.source_id);
             }
             start = start.min(other.start());
             end = end.max(other.end());
         }
-        module.map(|module| Self::new(start, end, module))
+        source_id.map(|source_id| Self::new(start, end, source_id))
     }
 
     /// Byte offset of the start of the span.
@@ -138,6 +110,11 @@ impl Location {
         self.span.start as usize
     }
 
+    /// Returns a location at the start of this location.
+    pub fn start_location(&self) -> Self {
+        Self::new(self.start(), self.start(), self.source_id)
+    }
+
     /// Byte offset of the end of the span.
     pub fn end(&self) -> u32 {
         self.span.end
@@ -146,6 +123,11 @@ impl Location {
     /// Byte offset of the end of the span.
     pub fn end_usize(&self) -> usize {
         self.span.end as usize
+    }
+
+    /// Returns a location at the end of this location.
+    pub fn end_location(&self) -> Self {
+        Self::new(self.end(), self.end(), self.source_id)
     }
 
     /// Length in bytes of the span.
@@ -168,61 +150,103 @@ impl Location {
         self.span.as_range()
     }
 
-    /// Returns the module this location comes from, if any.
-    pub fn module(&self) -> Option<ExternalLocation> {
-        self.module
+    /// Returns the source ID of this location.
+    pub fn source_id(&self) -> SourceId {
+        self.source_id
     }
 
-    /// If module is not None, this location is in a different module, make it
-    /// an imported location.
-    pub fn instantiate(&mut self, module: Option<Ustr>, span: Span) {
-        let name = match module {
-            Some(name) => name,
-            None => return,
-        };
-        if self.module.is_none() {
-            // if the location was previously local, make it external
-            self.module = Some(ExternalLocation {
-                module_name: name,
-                span: self.span, // The original span
-            });
-        }
-        // Note: if the location was already external, just overwrite the instantiation point
-        self.span = span; // The span of the instantiation point in the current module
+    /// Returns a reference to the source ID of this location.
+    pub fn source_id_ref(&self) -> &SourceId {
+        &self.source_id
     }
 }
 
-impl FormatWith<ModuleEnv<'_>> for Location {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        if let Some(location) = self.module {
-            match env.others.get(&location.module_name) {
-                None => {
-                    write!(
-                        f,
-                        "{}..{} in unknown imported module \"{}\"",
-                        location.span.start(),
-                        location.span.end(),
-                        location.module_name
-                    )
-                }
-                Some(module) => {
-                    if let Some(source) = module.source.as_ref() {
-                        write!(f, "{}", &source[location.span.as_range()])
-                    } else {
-                        write!(
-                            f,
-                            "{}..{} in imported module \"{}\"",
-                            location.span.start(),
-                            location.span.end(),
-                            location.module_name
-                        )
-                    }
-                }
-            }
-        } else if let Some(source) = env.current.source.as_ref() {
-            write!(f, "{}", &source[self.span.as_range()])
-        } else {
-            write!(f, "{}..{} in current module", self.start(), self.end())
+/// A location that can be instantiated at a use site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstantiableLocation {
+    pub def_site: Option<Location>,
+    pub use_site: Option<Location>,
+}
+impl InstantiableLocation {
+    pub fn new(initial: Location) -> Self {
+        Self {
+            def_site: Some(initial),
+            use_site: Some(initial),
         }
     }
+
+    pub fn new_none() -> Self {
+        Self {
+            def_site: None,
+            use_site: None,
+        }
+    }
+
+    pub fn instantiate(&mut self, use_site: Location) {
+        self.use_site = Some(use_site);
+    }
+}
+
+impl FormatWith<SourceTable> for Location {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        source_table: &SourceTable,
+    ) -> std::fmt::Result {
+        let start = self.start_usize();
+        let end = self.end_usize();
+        let source_id = self.source_id();
+        match source_table.get_source(source_id) {
+            Some(source) => {
+                let position = get_line_column(source, start);
+                let snippet = &source[start..end];
+                write!(
+                    f,
+                    "{}:{}:{}: `{}`",
+                    source_id, position.0, position.1, snippet
+                )
+            }
+            None => {
+                write!(f, "#{}:{}..{}", source_id, start, end)
+            }
+        }
+    }
+}
+
+define_id_type!(
+    /// Source code ID within a source table
+    SourceId
+);
+
+/// Table of source code strings for modules.
+#[derive(Debug, Clone, Default)]
+pub struct SourceTable {
+    sources: Vec<(String, String)>,
+}
+impl SourceTable {
+    pub fn add_source(&mut self, name: String, source: String) -> SourceId {
+        let id = SourceId::from_index(self.sources.len());
+        self.sources.push((name, source));
+        id
+    }
+
+    pub fn get_source(&self, index: SourceId) -> Option<&String> {
+        self.sources.get(index.as_index()).map(|(_, source)| source)
+    }
+
+    pub fn get_source_name(&self, index: SourceId) -> Option<&String> {
+        self.sources.get(index.as_index()).map(|(name, _)| name)
+    }
+}
+
+/// Get the line and column of a byte position in a string.
+pub fn get_line_column(s: &str, byte_pos: usize) -> (usize, usize) {
+    assert!(byte_pos <= s.len(), "byte_pos out of range");
+
+    let s_up_to_pos = &s[..byte_pos];
+    let line = s_up_to_pos.matches('\n').count() + 1;
+    let last_newline_pos = s_up_to_pos.rfind('\n').map(|pos| pos + 1).unwrap_or(0);
+    let col = s[last_newline_pos..byte_pos].chars().count() + 1;
+
+    (line, col)
 }

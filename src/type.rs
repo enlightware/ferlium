@@ -1737,9 +1737,8 @@ pub struct TypeNames {
 #[cfg(test)]
 mod tests {
     use crate::{
-        resolve_defined_type,
+        CompilerSession,
         std::{
-            StdModuleEnv,
             array::Array,
             logic::bool_type,
             math::{Int, float_type, int_type},
@@ -1751,11 +1750,14 @@ mod tests {
 
     #[test]
     fn parse_and_format() {
-        let env = StdModuleEnv::new();
-        let check = |name: &str| {
-            let ty = resolve_defined_type(name, &env.get()).unwrap();
-            let formatted = format!("{}", ty.format_with(&env.get()));
-            assert_eq!(name, formatted);
+        let mut session = CompilerSession::new();
+        let mut check = |src: &str| {
+            let ty = session
+                .resolve_defined_type_with_std("<test>", src)
+                .unwrap();
+            let env = session.std_module_env();
+            let formatted = format!("{}", ty.format_with(&env));
+            assert_eq!(src, formatted);
         };
         check("()");
         check("bool");

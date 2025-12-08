@@ -10,14 +10,14 @@ use test_log::test;
 
 use ustr::ustr;
 
-use super::common::{compile, fail_compilation};
+use super::common::TestSession;
 use ferlium::{effects::*, module::LocalImplId};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
-pub fn test_mod(src: &str, f: &str, exp_eff: EffType) {
-    let (module, others) = compile(src);
+pub fn test_mod(session: &mut TestSession, src: &str, f: &str, exp_eff: EffType) {
+    let module = session.compile(src);
     let effects = module
         .module
         .get_own_function(ustr(f))
@@ -28,14 +28,12 @@ pub fn test_mod(src: &str, f: &str, exp_eff: EffType) {
         .effects
         .clone();
     assert_eq!(effects, exp_eff);
-    drop(others);
 }
 
-fn test_expr(src: &str, exp_eff: EffType) {
-    let (module, others) = compile(src);
+fn test_expr(session: &mut TestSession, src: &str, exp_eff: EffType) {
+    let module = session.compile(src);
     let effects = module.expr.unwrap().expr.effects.clone();
     assert_eq!(effects, exp_eff);
-    drop(others);
 }
 
 #[test]
@@ -43,32 +41,40 @@ fn test_expr(src: &str, exp_eff: EffType) {
 fn effects_in_mod() {
     use PrimitiveEffect::*;
 
+    let mut session = TestSession::new();
+
     test_mod(
+        &mut session,
         "fn r() { effects::read() } fn w() { effects::write() }",
         "r",
         effect(Read),
     );
     test_mod(
+        &mut session,
         "fn r() { effects::read() } fn w() { effects::write() }",
         "w",
         effect(Write),
     );
     test_mod(
+        &mut session,
         "fn rw() { effects::write(); effects::read() }",
         "rw",
         effects(&[Read, Write]),
     );
     test_mod(
+        &mut session,
         "fn rw() { effects::write(); effects::read() } fn o() { rw() } ",
         "o",
         effects(&[Read, Write]),
     );
     test_mod(
+        &mut session,
         "fn r() { effects::read() } fn t1() { r() } fn t2() { t1() }",
         "t2",
         effect(Read),
     );
     test_mod(
+        &mut session,
         "fn rw() { effects::write(); effects::read() } fn o() { ((rw, ).0)() } ",
         "o",
         effects(&[Read, Write]),
@@ -80,7 +86,13 @@ fn effects_in_mod() {
 fn effects_in_expr() {
     use PrimitiveEffect::*;
 
-    test_expr("let a = |f| f(); a(|| effects::write())", effect(Write));
+    let mut session = TestSession::new();
+
+    test_expr(
+        &mut session,
+        "let a = |f| f(); a(|| effects::write())",
+        effect(Write),
+    );
 }
 
 #[test]
@@ -88,8 +100,11 @@ fn effects_in_expr() {
 fn fn_variance() {
     use PrimitiveEffect::*;
 
+    let mut session = TestSession::new();
+
     // passing pure to read
     test_mod(
+        &mut session,
         "fn pure() { () } fn f() { effects::take_read(pure) } ",
         "f",
         effect(Read),
@@ -97,29 +112,35 @@ fn fn_variance() {
 
     // passing read to read
     test_mod(
+        &mut session,
         "fn f() { effects::take_read(effects::read) } ",
         "f",
         effect(Read),
     );
     test_mod(
+        &mut session,
         "fn r() { effects::read() } fn f() { effects::take_read(r) } ",
         "f",
         effect(Read),
     );
 
     // passing write to read, should fail
-    fail_compilation("fn f() { effects::take_read(effects::write) }")
+    session
+        .fail_compilation("fn f() { effects::take_read(effects::write) }")
         .expect_invalid_effect_dependency(effect(Write), effect(Read));
-    fail_compilation("fn w() { effects::write() } fn f() { effects::take_read(w) }")
+    session
+        .fail_compilation("fn w() { effects::write() } fn f() { effects::take_read(w) }")
         .expect_invalid_effect_dependency(effect(Write), effect(Read));
 
     // passing read, write to read, should fail
-    fail_compilation("fn f() { effects::take_read(effects::read_write) }")
+    session
+        .fail_compilation("fn f() { effects::take_read(effects::read_write) }")
         .expect_invalid_effect_dependency(effects(&[Read, Write]), effect(Read));
-    fail_compilation(
-        "fn rw() { effects::read(); effects::write() } fn f() { effects::take_read(rw) }",
-    )
-    .expect_invalid_effect_dependency(effects(&[Read, Write]), effect(Read));
+    session
+        .fail_compilation(
+            "fn rw() { effects::read(); effects::write() } fn f() { effects::take_read(rw) }",
+        )
+        .expect_invalid_effect_dependency(effects(&[Read, Write]), effect(Read));
 }
 
 #[test]
@@ -127,26 +148,55 @@ fn fn_variance() {
 fn effects_from_fn_value() {
     use PrimitiveEffect::*;
 
+    let mut session = TestSession::new();
+
     let code1 = "fn a(f) { f() } fn b() { a(|| effects::write()) }";
-    test_mod(code1, "a", effect_var(0));
-    test_mod(code1, "b", effect(Write));
+    test_mod(&mut session, code1, "a", effect_var(0));
+    test_mod(&mut session, code1, "b", effect(Write));
 
     let code2 = "fn a(f, g) { b(f); f(); g(); () } fn b(f) { a(f, || effects::write()) }";
-    test_mod(code2, "a", effect(Write).union(&effect_vars(&[0, 1])));
-    test_mod(code2, "b", effect(Write).union(&effect_var(0)));
+    test_mod(
+        &mut session,
+        code2,
+        "a",
+        effect(Write).union(&effect_vars(&[0, 1])),
+    );
+    test_mod(
+        &mut session,
+        code2,
+        "b",
+        effect(Write).union(&effect_var(0)),
+    );
 
-    // FIXME: this is buggy, as the function order should have no effect
     let code3 = "fn b(f) { a(f, || effects::write()) } fn a(f, g) { b(f); f(); g(); () } ";
-    test_mod(code3, "a", effect(Write).union(&effect_vars(&[0, 1])));
-    test_mod(code3, "b", effect(Write).union(&effect_var(0)));
+    test_mod(
+        &mut session,
+        code3,
+        "a",
+        effect(Write).union(&effect_vars(&[0, 1])),
+    );
+    test_mod(
+        &mut session,
+        code3,
+        "b",
+        effect(Write).union(&effect_var(0)),
+    );
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn effects_in_recursive_fns() {
-    test_mod("fn a(f) { b(f); f() } fn b(f) { a(f) }", "b", effect_var(0));
+    let mut session = TestSession::new();
 
     test_mod(
+        &mut session,
+        "fn a(f) { b(f); f() } fn b(f) { a(f) }",
+        "b",
+        effect_var(0),
+    );
+
+    test_mod(
+        &mut session,
         "fn a(f, g) { b(f, g); f() } fn b(f, g) { a(f, g); g() }",
         "a",
         effect_vars(&[0, 1]),
@@ -156,8 +206,16 @@ fn effects_in_recursive_fns() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn effects_of_fn_called_multiple_times() {
-    test_mod("fn a(f) { f(); f(); f(); () }", "a", effect_var(0));
+    let mut session = TestSession::new();
+
     test_mod(
+        &mut session,
+        "fn a(f) { f(); f(); f(); () }",
+        "a",
+        effect_var(0),
+    );
+    test_mod(
+        &mut session,
         "fn a(f, g) { f(); g(); g(); f(); f(); g(); () }",
         "a",
         effect_vars(&[0, 1]),
@@ -167,7 +225,10 @@ fn effects_of_fn_called_multiple_times() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn effects_in_fn_type_ascription() {
+    let mut session = TestSession::new();
+
     test_mod(
+        &mut session,
         "fn g(f: (() -> (), () -> ())) { (f.0(), f.1()) }",
         "g",
         effect_vars(&[0, 1]),
@@ -179,9 +240,12 @@ fn effects_in_fn_type_ascription() {
 fn trait_impl_effect_must_not_have_more_than_def_effects() {
     use PrimitiveEffect::*;
 
+    let mut session = TestSession::new();
+
     // Serialize trait method is not fallible, but implementation calls panic which is fallible.
-    fail_compilation(
-        r#"
+    session
+        .fail_compilation(
+            r#"
         struct S;
         impl Serialize {
             fn serialize(x: S) {
@@ -189,13 +253,13 @@ fn trait_impl_effect_must_not_have_more_than_def_effects() {
             }
         }
         "#,
-    )
-    .expect_trait_method_effect_mismatch(
-        "Serialize",
-        "serialize",
-        &EffType::empty(),
-        &effect(Fallible),
-    );
+        )
+        .expect_trait_method_effect_mismatch(
+            "Serialize",
+            "serialize",
+            &EffType::empty(),
+            &effect(Fallible),
+        );
 }
 
 #[test]
@@ -203,9 +267,12 @@ fn trait_impl_effect_must_not_have_more_than_def_effects() {
 fn trait_impl_effect_must_have_at_least_def_effects() {
     use PrimitiveEffect::*;
 
+    let mut session = TestSession::new();
+
     // Deserialize trait method is fallible, pure implementation is OK (subset).
-    let module = compile(
-        r#"
+    let module = session
+        .compile(
+            r#"
         struct S;
         impl Deserialize {
             fn deserialize(v) {
@@ -213,9 +280,8 @@ fn trait_impl_effect_must_have_at_least_def_effects() {
             }
         }
         "#,
-    )
-    .0
-    .module;
+        )
+        .module;
     let fn_id = module
         .impls
         .get_impl_by_local_id(LocalImplId::from_index(0))

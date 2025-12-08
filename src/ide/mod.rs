@@ -7,7 +7,6 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
-    borrow::Cow,
     collections::HashSet,
     fmt::{self, Display},
     ops::Deref,
@@ -15,14 +14,15 @@ use std::{
 };
 
 use crate::{
-    CompilationError, DisplayStyle, Location, ModuleAndExpr, ModuleEnv, compile,
+    CompilationError, CompilerSession, DisplayStyle, Location, ModuleAndExpr, ModuleEnv,
     error::{
         CompilationErrorImpl, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     eval::{EvalCtx, ValOrMut},
     format::FormatWith,
+    location::{SourceTable, get_line_column},
     module::{ModuleFunction, ModuleRc, Modules, Uses},
-    std::{new_module_using_std, new_std_modules},
+    std::new_module_using_std,
     r#type::{FnArgType, Type, tuple_type},
     value::{NativeValue, Value},
 };
@@ -33,26 +33,31 @@ use wasm_bindgen::prelude::*;
 
 mod annotations;
 mod char_index_lookup;
-use char_index_lookup::{CharIndexLookup, get_line_column};
+use char_index_lookup::CharIndexLookup;
 
 /// An error-data structure to be used in IDEs
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
 pub struct ErrorData {
     pub from: u32,
     pub to: u32,
+    pub file: String,
     pub text: String,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl ErrorData {
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
-    pub fn new(from: u32, to: u32, text: String) -> Self {
-        Self { from, to, text }
-    }
-    fn from_location(loc: &Location, text: String) -> Self {
+    // #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
+    // pub fn new(from: u32, to: u32, text: String) -> Self {
+    //     Self { from, to, text }
+    // }
+    fn from_location(loc: &Location, source_table: &SourceTable, text: String) -> Self {
         Self {
             from: loc.start(),
             to: loc.end(),
+            file: source_table
+                .get_source_name(loc.source_id())
+                .unwrap_or(&format!("#{}", loc.source_id()))
+                .to_string(),
             text,
         }
     }
@@ -60,6 +65,7 @@ impl ErrorData {
         Self {
             from: f(self.from),
             to: f(self.to),
+            file: self.file,
             text: self.text,
         }
     }
@@ -81,60 +87,53 @@ pub struct FunctionSignature {
 
 fn compilation_error_to_data(
     error: &CompilationError,
-    src: &str,
-    modules: &Modules,
+    source_table: &SourceTable,
 ) -> Vec<ErrorData> {
-    let fmt_span = |span: &Location| match span.module() {
-        None => Cow::from(&src[span.as_range()]),
-        Some(module) => Cow::from(
-            match modules
-                .get(&module.module_name())
-                .and_then(|module| module.source.as_deref())
-            {
-                Some(src) => {
-                    let position = get_line_column(src, module.span().start_usize());
-                    format!(
-                        "{} (in {}:{}:{})",
-                        &src[module.span().as_range()],
-                        module.module_name(),
-                        position.0,
-                        position.1,
-                    )
-                }
-                None => format!(
-                    "{}..{} in unknown module {}",
-                    module.span().start(),
-                    module.span().end(),
-                    module.module_name(),
-                ),
-            },
-        ),
+    let fmt_span = |span: &Location| {
+        let start = span.start_usize();
+        let end = span.end_usize();
+        let source_id = span.source_id();
+        match source_table.get_source(source_id) {
+            Some(source) => {
+                let position = get_line_column(source, start);
+                let snippet = &source[start..end];
+                format!(
+                    "{} (in {}:{}:{})",
+                    snippet, source_id, position.0, position.1
+                )
+            }
+            None => {
+                format!("#{}:{}..{}", source_id, start, end)
+            }
+        }
     };
     use CompilationErrorImpl::*;
+    let error_data_from_location =
+        |loc: &Location, msg: String| ErrorData::from_location(loc, source_table, msg);
     match error.deref() {
         ParsingFailed(errors) => errors
             .iter()
-            .map(|(msg, span)| ErrorData::from_location(span, msg.clone()))
+            .map(|(msg, span)| error_data_from_location(span, msg.clone()))
             .collect(),
         NameDefinedMultipleTimes {
             name,
             first_occurrence,
             second_occurrence,
         } => vec![
-            ErrorData::from_location(
+            error_data_from_location(
                 first_occurrence,
                 format!("Name `{name}` defined multiple times"),
             ),
-            ErrorData::from_location(
+            error_data_from_location(
                 second_occurrence,
                 format!("Name `{name}` defined multiple times"),
             ),
         ],
-        TypeNotFound(span) => vec![ErrorData::from_location(
+        TypeNotFound(span) => vec![error_data_from_location(
             span,
             format!("Cannot find type `{}` in this scope", fmt_span(span)),
         )],
-        TraitNotFound(span) => vec![ErrorData::from_location(
+        TraitNotFound(span) => vec![error_data_from_location(
             span,
             format!("Cannot find trait `{}` in this scope", fmt_span(span)),
         )],
@@ -144,11 +143,11 @@ fn compilation_error_to_data(
             got,
             got_span,
         } => vec![
-            ErrorData::from_location(
+            error_data_from_location(
                 expected_span,
                 format!("Expected {expected} arguments here, but {got} were provided"),
             ),
-            ErrorData::from_location(
+            error_data_from_location(
                 got_span,
                 format!("Expected {expected} arguments, but {got} are provided here"),
             ),
@@ -158,7 +157,7 @@ fn compilation_error_to_data(
             reason_span,
             what,
             ..
-        } => vec![ErrorData::from_location(source_span, {
+        } => vec![error_data_from_location(source_span, {
             use MutabilityMustBeWhat::*;
             match what {
                 Mutable => format!(
@@ -180,7 +179,7 @@ fn compilation_error_to_data(
             current_span,
             expected_ty,
             ..
-        } => vec![ErrorData::from_location(
+        } => vec![error_data_from_location(
             current_span,
             format!("Type `{current_ty}` is incompatible with type `{expected_ty}`"),
         )],
@@ -189,7 +188,7 @@ fn compilation_error_to_data(
             current_span,
             expected_decl,
             ..
-        } => vec![ErrorData::from_location(
+        } => vec![error_data_from_location(
             current_span,
             format!(
                 "Named type `{}` from `{}` is different from named type `{}` from `{}`",
@@ -199,15 +198,15 @@ fn compilation_error_to_data(
                 fmt_span(&expected_decl.1),
             ),
         )],
-        InfiniteType(ty_var, ty, span) => vec![ErrorData::from_location(
+        InfiniteType(ty_var, ty, span) => vec![error_data_from_location(
             span,
             format!("Infinite type: `{ty_var}` = `{ty}`"),
         )],
-        UnboundTypeVar { ty_var, ty, span } => vec![ErrorData::from_location(
+        UnboundTypeVar { ty_var, ty, span } => vec![error_data_from_location(
             span,
             format!("Unbound type variable `{ty_var}` in `{ty}`"),
         )],
-        UnresolvedConstraints { constraints, span } => vec![ErrorData::from_location(
+        UnresolvedConstraints { constraints, span } => vec![error_data_from_location(
             span,
             format!("Unresolved constraints: `{}`", constraints.join(" ∧ ")),
         )],
@@ -216,7 +215,7 @@ fn compilation_error_to_data(
             index_span,
             tuple_length,
             ..
-        } => vec![ErrorData::from_location(
+        } => vec![error_data_from_location(
             index_span,
             format!("Invalid index {index} of a tuple of length {tuple_length}"),
         )],
@@ -226,7 +225,7 @@ fn compilation_error_to_data(
             index_span,
         } => {
             let index_name = fmt_span(index_span);
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 expr_span,
                 format!(
                     "Expected tuple because of `.{index_name}`, but `{expr_ty}` was provided instead"
@@ -241,8 +240,8 @@ fn compilation_error_to_data(
             let name = fmt_span(first_occurrence);
             let text = format!("Duplicated field `{name}`");
             vec![
-                ErrorData::from_location(first_occurrence, text.clone()),
-                ErrorData::from_location(second_occurrence, text),
+                error_data_from_location(first_occurrence, text.clone()),
+                error_data_from_location(second_occurrence, text),
             ]
         }
         InvalidRecordField {
@@ -251,7 +250,7 @@ fn compilation_error_to_data(
             ..
         } => {
             let field_name = fmt_span(field_span);
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 field_span,
                 format!("Field `{field_name}` not found in record `{record_ty}`"),
             )]
@@ -262,30 +261,26 @@ fn compilation_error_to_data(
             ..
         } => {
             let field_name = fmt_span(field_span);
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 field_span,
                 format!(
                     "Expected record because of `.{field_name}`, but `{record_ty}` was provided instead"
                 ),
             )]
         }
-        InvalidVariantName {
-            name,
-            ty,
-            valid: valids,
-        } => {
+        InvalidVariantName { name, ty, valid } => {
             let name_text = fmt_span(name);
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 name,
                 format!(
                     "Variant name `{name_text}` does not exist for variant type `{ty}`, valid names are `{}`",
-                    valids.join(", ")
+                    valid.join(", ")
                 ),
             )]
         }
         InvalidVariantType { name, ty } => {
             let name_text = fmt_span(name);
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 name,
                 format!(
                     "Type `{ty}` is not a variant, but variant constructor `{name_text}` requires it"
@@ -293,13 +288,13 @@ fn compilation_error_to_data(
             )]
         }
         InvalidVariantConstructor { span } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 span,
                 "Variant constructor cannot be a path".to_string(),
             )]
         }
         ReturnOutsideFunction { span } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 span,
                 "Return statement can only be used inside a function, but found within an expression".to_string(),
             )]
@@ -322,7 +317,7 @@ fn compilation_error_to_data(
                 }
                 WhatIsNotAProductType::Struct => format!("`{}`", type_def.0),
             };
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 instantiation_span,
                 format!("{what} requires {which}"),
             )]
@@ -333,7 +328,7 @@ fn compilation_error_to_data(
             ..
         } => {
             let field_name = fmt_span(field_span);
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 field_span,
                 format!("Field `{field_name}` does not exists in `{}`", type_def.0),
             )]
@@ -343,7 +338,7 @@ fn compilation_error_to_data(
             field_name,
             instantiation_span,
         } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 instantiation_span,
                 format!("Field `{field_name}` from `{}` is missing here", type_def.0),
             )]
@@ -357,11 +352,11 @@ fn compilation_error_to_data(
             let a_name = a_type.adt_kind();
             let b_name = b_type.adt_kind();
             vec![
-                ErrorData::from_location(
+                error_data_from_location(
                     a_span,
                     format!("Data type {a_name} here is different than data type {b_name}"),
                 ),
-                ErrorData::from_location(
+                error_data_from_location(
                     b_span,
                     format!("Data type {b_name} here is different than data type {a_name}"),
                 ),
@@ -376,11 +371,11 @@ fn compilation_error_to_data(
             let a_name = a_type.name();
             let b_name = b_type.name();
             vec![
-                ErrorData::from_location(
+                error_data_from_location(
                     a_span,
                     format!("Pattern expects a {a_name}, but {b_name} was provided instead"),
                 ),
-                ErrorData::from_location(
+                error_data_from_location(
                     b_span,
                     format!("Pattern expects a {b_name}, but {a_name} was provided instead"),
                 ),
@@ -394,12 +389,12 @@ fn compilation_error_to_data(
             let name = fmt_span(first_occurrence);
             let text = format!("Duplicated variant `{name}`");
             vec![
-                ErrorData::from_location(first_occurrence, text.clone()),
-                ErrorData::from_location(second_occurrence, text),
+                error_data_from_location(first_occurrence, text.clone()),
+                error_data_from_location(second_occurrence, text),
             ]
         }
         RecordWildcardPatternNotAtEnd { pattern_span, .. } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 pattern_span,
                 "Record wildcard pattern .. must be at the end of the pattern".to_string(),
             )]
@@ -409,7 +404,7 @@ fn compilation_error_to_data(
             input_tys,
             fn_span,
         } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 fn_span,
                 format!(
                     "Implementation of trait `{trait_ref}` over types `{}` not found",
@@ -420,7 +415,7 @@ fn compilation_error_to_data(
         MethodsNotPartOfTrait { trait_ref, spans } => spans
             .iter()
             .map(|span| {
-                ErrorData::from_location(
+                error_data_from_location(
                     span,
                     format!(
                         "Method `{}` is not part of trait `{}`",
@@ -435,7 +430,7 @@ fn compilation_error_to_data(
             missings,
             impl_span,
         } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 impl_span,
                 format!(
                     "Implementation of trait `{}` is missing methods: `{}`",
@@ -452,7 +447,7 @@ fn compilation_error_to_data(
             args_span,
             ..
         } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 args_span,
                 format!(
                     "Method `{}` of trait `{}` expects {} arguments, got {}",
@@ -467,7 +462,7 @@ fn compilation_error_to_data(
             got,
             span,
         } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 span,
                 format!(
                     "Method `{}` of trait `{}` has effects `{}`, but implementation has effects `{}`",
@@ -494,8 +489,8 @@ fn compilation_error_to_data(
             let name_text = fmt_span(first_occurrence);
             let text = format!("Identifier `{name_text}` bound more than once in a pattern");
             vec![
-                ErrorData::from_location(first_occurrence, text.clone()),
-                ErrorData::from_location(second_occurrence, text),
+                error_data_from_location(first_occurrence, text.clone()),
+                error_data_from_location(second_occurrence, text),
             ]
         }
         DuplicatedLiteralPattern {
@@ -506,16 +501,16 @@ fn compilation_error_to_data(
             let name_text = fmt_span(first_occurrence);
             let text = format!("Duplicated literal pattern `{name_text}`");
             vec![
-                ErrorData::from_location(first_occurrence, text.clone()),
-                ErrorData::from_location(second_occurrence, text),
+                error_data_from_location(first_occurrence, text.clone()),
+                error_data_from_location(second_occurrence, text),
             ]
         }
-        EmptyMatchBody { span } => vec![ErrorData::from_location(
+        EmptyMatchBody { span } => vec![error_data_from_location(
             span,
             "Match body cannot be empty".to_string(),
         )],
         NonExhaustivePattern { span, ty } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 span,
                 format!(
                     "Non-exhaustive patterns for type `{ty}`, all possible values must be covered"
@@ -523,7 +518,7 @@ fn compilation_error_to_data(
             )]
         }
         TypeValuesCannotBeEnumerated { span, ty } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 span,
                 format!(
                     "Values of type `{ty}` cannot be enumerated, but all possible values must be known for exhaustive match coverage analysis"
@@ -539,19 +534,19 @@ fn compilation_error_to_data(
             let b_name = fmt_span(b_span);
             let fn_name = fmt_span(fn_span);
             vec![
-                ErrorData::from_location(
+                error_data_from_location(
                     a_span,
                     format!(
                         "Mutable path `{a_name}` (here) overlaps with `{b_name}` when calling function `{fn_name}`"
                     ),
                 ),
-                ErrorData::from_location(
+                error_data_from_location(
                     b_span,
                     format!(
                         "Mutable path `{a_name}` overlaps with `{b_name}` (here) when calling function `{fn_name}`"
                     ),
                 ),
-                ErrorData::from_location(
+                error_data_from_location(
                     fn_span,
                     format!(
                         "When calling function `{fn_name}`: mutable path `{a_name}` overlaps with `{b_name}`"
@@ -565,7 +560,7 @@ fn compilation_error_to_data(
         } => {
             let var_text = fmt_span(var_span);
             let string_text = fmt_span(string_span);
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 var_span,
                 format!(
                     "Undefined variable `{var_text}` used in string formatting: `{string_text}`"
@@ -578,7 +573,7 @@ fn compilation_error_to_data(
             target,
             ..
         } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 source_span,
                 format!("Effect `{source}` cannot depend on `{target}`"),
             )]
@@ -589,15 +584,15 @@ fn compilation_error_to_data(
             span,
             ..
         } => {
-            vec![ErrorData::from_location(
+            vec![error_data_from_location(
                 span,
                 format!("Unknown property `{scope}.{variable}`"),
             )]
         }
-        Unsupported { span, reason } => vec![ErrorData::from_location(span, reason.to_string())],
-        Internal(msg) => vec![ErrorData::from_location(
-            &Location::new_local(0, 0),
-            format!("ICE: {msg}"),
+        Unsupported { span, reason } => vec![error_data_from_location(span, reason.to_string())],
+        Internal { span, error } => vec![error_data_from_location(
+            span,
+            format!("Internal compiler error: {error}"),
         )],
     }
 }
@@ -617,9 +612,10 @@ impl AnnotationData {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Compiler {
+    session: CompilerSession,
     modules: Modules,
     extra_uses: Uses,
     user_src: String,
@@ -631,25 +627,31 @@ pub struct Compiler {
 impl Compiler {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new() -> Self {
+        let session = CompilerSession::new();
+        let modules = session.std_modules().clone();
         Self {
-            modules: new_std_modules(),
+            session,
+            modules,
+            extra_uses: Uses::new(),
             user_module: ModuleAndExpr::new_just_module(new_module_using_std()),
-            ..Default::default()
+            user_src: String::new(),
         }
     }
 
-    fn compile_internal(&mut self, src: &str) -> Result<(), CompilationError> {
-        self.user_module = compile(src, &self.modules, &self.extra_uses)?;
+    fn compile_internal(&mut self, name: &str, src: &str) -> Result<(), CompilationError> {
+        self.user_module = self
+            .session
+            .compile(name, src, &self.modules, &self.extra_uses)?;
         self.user_src = src.to_string();
         Ok(())
     }
 
-    pub fn compile(&mut self, src: &str) -> Option<Vec<ErrorData>> {
+    pub fn compile(&mut self, name: &str, src: &str) -> Option<Vec<ErrorData>> {
         let char_indices = CharIndexLookup::new(src);
-        match self.compile_internal(src) {
+        match self.compile_internal(name, src) {
             Ok(()) => None,
             Err(err) => Some(
-                compilation_error_to_data(&err, src, &self.modules)
+                compilation_error_to_data(&err, &self.session.source_table)
                     .into_iter()
                     .map(|data| {
                         data.map(|pos| char_indices.byte_to_char_position(pos as usize) as u32)
@@ -795,11 +797,13 @@ impl Compiler {
 /// The compiler to be used in the web IDE, non-wasm-available part
 impl Compiler {
     pub fn new_with_modules(modules: Modules, extra_uses: Uses) -> Self {
+        let session = CompilerSession::new();
         let user_src = String::new();
         let mut module = new_module_using_std();
         module.uses.extend(extra_uses.iter().cloned());
         let user_module = ModuleAndExpr::new_just_module(module);
         Self {
+            session,
             modules,
             extra_uses,
             user_src,
@@ -1023,6 +1027,12 @@ impl Compiler {
     }
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Compiler::new()
+    }
+}
+
 fn remove_effects(signature: &str) -> &str {
     match signature.rsplit_once("!") {
         // If "!" is found, return the part before it (removing the effects)
@@ -1043,7 +1053,7 @@ mod tests {
 
     fn build(code: &str) -> Compiler {
         let mut compiler = Compiler::new();
-        let errors = compiler.compile(code);
+        let errors = compiler.compile("<test>", code);
         if let Some(errors) = errors {
             panic!("Compilation errors: {}", iterable_to_string(&errors, ", "));
         }

@@ -21,7 +21,7 @@ test-log = "0.2.16"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 rustyline = "17.0.0"
-ariadne = "0.5"
+ariadne = "0.6"
 env_logger ="0.11.5"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

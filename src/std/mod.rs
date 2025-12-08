@@ -6,10 +6,11 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{cell::OnceCell, rc::Rc, str::FromStr};
+use std::{rc::Rc, str::FromStr};
 
 use crate::{
-    module::{Module, ModuleEnv, Modules, Use, finalize_module},
+    location::SourceTable,
+    module::{Module, ModuleRc, Use, finalize_module},
     r#type::{Type, TypeKind, bare_native_type},
     value::Value,
 };
@@ -39,81 +40,39 @@ pub mod serde;
 pub mod string;
 pub mod variant;
 
-thread_local! {
-    static STD_MODULE: OnceCell<Rc<Module>> = const { OnceCell::new() };
-}
-
-pub fn std_module() -> Rc<Module> {
-    STD_MODULE.with(|cell| {
-        cell.get_or_init(|| {
-            let module = Rc::new({
-                let mut module = Module::default();
-                core::add_to_module(&mut module);
-                flow::add_to_module(&mut module);
-                cast::add_to_module(&mut module);
-                // mem::add_to_module(&mut module);
-                bits::add_to_module(&mut module);
-                logic::add_to_module(&mut module);
-                ordering::add_to_module(&mut module);
-                concat::add_to_module(&mut module);
-                contains::add_to_module(&mut module);
-                math::add_to_module(&mut module);
-                range::add_to_module(&mut module);
-                array::add_to_module(&mut module);
-                io::add_to_module(&mut module);
-                string::add_to_module(&mut module);
-                variant::add_to_module(&mut module);
-                iterator::add_to_module(&mut module);
-                serde::add_to_module(&mut module);
-                json::add_to_module(&mut module);
-                prelude::add_to_module(&mut module);
-                module
-            });
-            // No need to link because std has no imports.
-            finalize_module(&module);
-            module
-        })
-        .clone()
-    })
-}
-
-pub fn new_std_modules() -> Modules {
-    let mut modules: Modules = Default::default();
-    modules.modules.insert(ustr("std"), std_module());
-    modules
+pub fn std_module(source_table: &mut SourceTable) -> ModuleRc {
+    let module = Rc::new({
+        let mut module = Module::default();
+        core::add_to_module(&mut module);
+        flow::add_to_module(&mut module);
+        cast::add_to_module(&mut module);
+        // mem::add_to_module(&mut module);
+        bits::add_to_module(&mut module);
+        logic::add_to_module(&mut module);
+        ordering::add_to_module(&mut module);
+        concat::add_to_module(&mut module);
+        contains::add_to_module(&mut module);
+        math::add_to_module(&mut module);
+        range::add_to_module(&mut module);
+        array::add_to_module(&mut module);
+        io::add_to_module(&mut module);
+        string::add_to_module(&mut module);
+        variant::add_to_module(&mut module);
+        iterator::add_to_module(&mut module);
+        serde::add_to_module(&mut module);
+        json::add_to_module(&mut module);
+        prelude::add_to_module(&mut module, source_table);
+        module
+    });
+    // No need to link because std has no imports.
+    finalize_module(&module);
+    module
 }
 
 pub fn new_module_using_std() -> Module {
     let mut new_module = Module::default();
     new_module.uses.push(Use::All(ustr("std")));
     new_module
-}
-
-#[derive(Debug, Clone)]
-pub struct StdModuleEnv {
-    others: Modules,
-    pub current: Module,
-}
-impl Default for StdModuleEnv {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StdModuleEnv {
-    pub fn new() -> Self {
-        Self {
-            others: new_std_modules(),
-            current: new_module_using_std(),
-        }
-    }
-    pub fn get(&self) -> ModuleEnv<'_> {
-        ModuleEnv {
-            others: &self.others,
-            current: &self.current,
-            within_std: false,
-        }
-    }
 }
 
 pub fn default_value_for_type(ty: Type) -> Option<Value> {

@@ -613,11 +613,12 @@ impl PExpr {
                     iterator,
                     body,
                 } = for_loop;
-                let iterator_start_span =
-                    Location::new_local(iterator.span.start(), iterator.span.start());
+                let iterator_start_span = iterator.span;
                 let body_span: Location = body.span;
-                let body_start_span = Location::new_local(body_span.start(), body_span.start());
-                let body_end_span = Location::new_local(body_span.end(), body_span.end());
+                let body_start_span =
+                    Location::new(body_span.start(), body_span.start(), body_span.source_id());
+                let body_end_span =
+                    Location::new(body_span.end(), body_span.end(), body_span.source_id());
                 let it_store = Expr::new(
                     Let(
                         (ustr("@it"), iterator_start_span),
