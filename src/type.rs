@@ -1737,7 +1737,7 @@ pub struct TypeNames {
 #[cfg(test)]
 mod tests {
     use crate::{
-        resolve_concrete_type,
+        resolve_defined_type,
         std::{
             StdModuleEnv,
             array::Array,
@@ -1753,7 +1753,7 @@ mod tests {
     fn parse_and_format() {
         let env = StdModuleEnv::new();
         let check = |name: &str| {
-            let ty = resolve_concrete_type(name, &env.get()).unwrap();
+            let ty = resolve_defined_type(name, &env.get()).unwrap();
             let formatted = format!("{}", ty.format_with(&env.get()));
             assert_eq!(name, formatted);
         };

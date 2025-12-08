@@ -11,7 +11,7 @@ use ferlium::{
     effects::EffType,
     format::{FormatWith, FormatWithData},
     module::ModuleEnv,
-    resolve_concrete_type, resolve_generic_type,
+    resolve_defined_type, resolve_holed_type,
     std::{
         StdModuleEnv,
         array::array_type,
@@ -38,23 +38,20 @@ use crate::common::{compile, float, int, run};
 fn primitive() {
     let env = StdModuleEnv::new();
     assert_eq!(
-        resolve_concrete_type("()", &env.get()).unwrap(),
+        resolve_defined_type("()", &env.get()).unwrap(),
         Type::unit()
     );
     assert_eq!(
-        resolve_concrete_type("bool", &env.get()).unwrap(),
+        resolve_defined_type("bool", &env.get()).unwrap(),
         bool_type()
     );
+    assert_eq!(resolve_defined_type("int", &env.get()).unwrap(), int_type());
     assert_eq!(
-        resolve_concrete_type("int", &env.get()).unwrap(),
-        int_type()
-    );
-    assert_eq!(
-        resolve_concrete_type("float", &env.get()).unwrap(),
+        resolve_defined_type("float", &env.get()).unwrap(),
         float_type()
     );
     assert_eq!(
-        resolve_concrete_type("string", &env.get()).unwrap(),
+        resolve_defined_type("string", &env.get()).unwrap(),
         string_type()
     );
 }
@@ -64,23 +61,23 @@ fn primitive() {
 fn tuple() {
     let env = StdModuleEnv::new();
     assert_eq!(
-        resolve_concrete_type("(int,)", &env.get()).unwrap(),
+        resolve_defined_type("(int,)", &env.get()).unwrap(),
         tuple_type([int_type()])
     );
     assert_eq!(
-        resolve_concrete_type("(int, int)", &env.get()).unwrap(),
+        resolve_defined_type("(int, int)", &env.get()).unwrap(),
         tuple_type([int_type(), int_type()])
     );
     assert_eq!(
-        resolve_concrete_type("(int, int, int)", &env.get()).unwrap(),
+        resolve_defined_type("(int, int, int)", &env.get()).unwrap(),
         tuple_type([int_type(), int_type(), int_type()])
     );
     assert_eq!(
-        resolve_concrete_type("(int, float)", &env.get()).unwrap(),
+        resolve_defined_type("(int, float)", &env.get()).unwrap(),
         tuple_type([int_type(), float_type()])
     );
     assert_eq!(
-        resolve_concrete_type("(int, (bool, string))", &env.get()).unwrap(),
+        resolve_defined_type("(int, (bool, string))", &env.get()).unwrap(),
         tuple_type([int_type(), tuple_type([bool_type(), string_type()])])
     );
 }
@@ -90,31 +87,31 @@ fn tuple() {
 fn record() {
     let env = StdModuleEnv::new();
     assert_eq!(
-        resolve_concrete_type("{a: int}", &env.get()).unwrap(),
+        resolve_defined_type("{a: int}", &env.get()).unwrap(),
         record_type([("a", int_type())])
     );
     assert_eq!(
-        resolve_concrete_type("{a: int,}", &env.get()).unwrap(),
+        resolve_defined_type("{a: int,}", &env.get()).unwrap(),
         record_type([("a", int_type())])
     );
     assert_eq!(
-        resolve_concrete_type("{a: int, b: bool}", &env.get()).unwrap(),
+        resolve_defined_type("{a: int, b: bool}", &env.get()).unwrap(),
         record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
-        resolve_concrete_type("{a: int, b: bool, }", &env.get()).unwrap(),
+        resolve_defined_type("{a: int, b: bool, }", &env.get()).unwrap(),
         record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
-        resolve_concrete_type("{b: bool, a: int}", &env.get()).unwrap(),
+        resolve_defined_type("{b: bool, a: int}", &env.get()).unwrap(),
         record_type([("a", int_type()), ("b", bool_type())])
     );
     assert_eq!(
-        resolve_concrete_type("{b: bool, a: int}", &env.get()).unwrap(),
-        resolve_concrete_type("{a: int, b: bool}", &env.get()).unwrap(),
+        resolve_defined_type("{b: bool, a: int}", &env.get()).unwrap(),
+        resolve_defined_type("{a: int, b: bool}", &env.get()).unwrap(),
     );
     assert_eq!(
-        resolve_concrete_type("{a: int, b: { c: bool, d: float } }", &env.get()).unwrap(),
+        resolve_defined_type("{a: int, b: { c: bool, d: float } }", &env.get()).unwrap(),
         record_type([
             ("a", int_type()),
             ("b", record_type([("c", bool_type()), ("d", float_type())]))
@@ -127,11 +124,11 @@ fn record() {
 fn variant() {
     let env = StdModuleEnv::new();
     assert_eq!(
-        resolve_concrete_type("Some(int)|None", &env.get()).unwrap(),
+        resolve_defined_type("Some(int)|None", &env.get()).unwrap(),
         variant_type([("Some", tuple_type([int_type()])), ("None", Type::unit()),])
     );
     assert_eq!(
-        resolve_concrete_type("RGB (int, int, int) | Color(string)", &env.get()).unwrap(),
+        resolve_defined_type("RGB (int, int, int) | Color(string)", &env.get()).unwrap(),
         variant_type([
             ("RGB", tuple_type([int_type(), int_type(), int_type()])),
             ("Color", tuple_type([string_type()])),
@@ -143,20 +140,17 @@ fn variant() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn parentheses() {
     let env = StdModuleEnv::new();
+    assert_eq!(resolve_defined_type("int", &env.get()).unwrap(), int_type());
     assert_eq!(
-        resolve_concrete_type("int", &env.get()).unwrap(),
+        resolve_defined_type("(int)", &env.get()).unwrap(),
         int_type()
     );
     assert_eq!(
-        resolve_concrete_type("(int)", &env.get()).unwrap(),
+        resolve_defined_type("((int))", &env.get()).unwrap(),
         int_type()
     );
     assert_eq!(
-        resolve_concrete_type("((int))", &env.get()).unwrap(),
-        int_type()
-    );
-    assert_eq!(
-        resolve_concrete_type("(((int)))", &env.get()).unwrap(),
+        resolve_defined_type("(((int)))", &env.get()).unwrap(),
         int_type()
     );
 }
@@ -166,23 +160,23 @@ fn parentheses() {
 fn fn_type() {
     let env = StdModuleEnv::new();
     assert_eq!(
-        resolve_concrete_type("() -> ()", &env.get()).unwrap(),
+        resolve_defined_type("() -> ()", &env.get()).unwrap(),
         Type::function_by_val_with_effects([], Type::unit(), EffType::empty())
     );
     assert_eq!(
-        resolve_concrete_type("(int) -> int", &env.get()).unwrap(),
+        resolve_defined_type("(int) -> int", &env.get()).unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
-        resolve_concrete_type("((int)) -> int", &env.get()).unwrap(),
+        resolve_defined_type("((int)) -> int", &env.get()).unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
-        resolve_concrete_type("(int) -> (int)", &env.get()).unwrap(),
+        resolve_defined_type("(int) -> (int)", &env.get()).unwrap(),
         Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
     );
     assert_eq!(
-        resolve_concrete_type("(int) -> (int,)", &env.get()).unwrap(),
+        resolve_defined_type("(int) -> (int,)", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             tuple_type([int_type()]),
@@ -190,7 +184,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_concrete_type("(int, float) -> ()", &env.get()).unwrap(),
+        resolve_defined_type("(int, float) -> ()", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [int_type(), float_type()],
             Type::unit(),
@@ -198,7 +192,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_concrete_type("((int, float)) -> ()", &env.get()).unwrap(),
+        resolve_defined_type("((int, float)) -> ()", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [tuple_type([int_type(), float_type()])],
             Type::unit(),
@@ -206,7 +200,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_concrete_type("((int, float)) -> (bool, string)", &env.get()).unwrap(),
+        resolve_defined_type("((int, float)) -> (bool, string)", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [tuple_type([int_type(), float_type()])],
             tuple_type([bool_type(), string_type()]),
@@ -214,7 +208,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_concrete_type("(&mut [int]) -> int", &env.get()).unwrap(),
+        resolve_defined_type("(&mut [int]) -> int", &env.get()).unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(int_type()), true)],
             int_type(),
@@ -222,7 +216,7 @@ fn fn_type() {
         ))
     );
     assert_eq!(
-        resolve_concrete_type("(&mut [float], &mut int) -> ()", &env.get()).unwrap(),
+        resolve_defined_type("(&mut [float], &mut int) -> ()", &env.get()).unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(float_type()), true), (int_type(), true)],
             Type::unit(),
@@ -231,11 +225,11 @@ fn fn_type() {
     );
 
     assert_eq!(
-        resolve_generic_type("() -> ()", &env.get()).unwrap(),
+        resolve_holed_type("() -> ()", &env.get()).unwrap(),
         Type::function_by_val_with_effects([], Type::unit(), EffType::single_variable_id(0))
     );
     assert_eq!(
-        resolve_generic_type("(int) -> int", &env.get()).unwrap(),
+        resolve_holed_type("(int) -> int", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             int_type(),
@@ -243,7 +237,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_generic_type("((int)) -> int", &env.get()).unwrap(),
+        resolve_holed_type("((int)) -> int", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             int_type(),
@@ -251,7 +245,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_generic_type("(int) -> (int)", &env.get()).unwrap(),
+        resolve_holed_type("(int) -> (int)", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             int_type(),
@@ -259,7 +253,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_generic_type("(int) -> (int,)", &env.get()).unwrap(),
+        resolve_holed_type("(int) -> (int,)", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [int_type()],
             tuple_type([int_type()]),
@@ -267,7 +261,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_generic_type("(int, float) -> ()", &env.get()).unwrap(),
+        resolve_holed_type("(int, float) -> ()", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [int_type(), float_type()],
             Type::unit(),
@@ -275,7 +269,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_generic_type("((int, float)) -> ()", &env.get()).unwrap(),
+        resolve_holed_type("((int, float)) -> ()", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [tuple_type([int_type(), float_type()])],
             Type::unit(),
@@ -283,7 +277,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_generic_type("((int, float)) -> (bool, string)", &env.get()).unwrap(),
+        resolve_holed_type("((int, float)) -> (bool, string)", &env.get()).unwrap(),
         Type::function_by_val_with_effects(
             [tuple_type([int_type(), float_type()])],
             tuple_type([bool_type(), string_type()]),
@@ -291,7 +285,7 @@ fn fn_type() {
         )
     );
     assert_eq!(
-        resolve_generic_type("(&mut [int]) -> int", &env.get()).unwrap(),
+        resolve_holed_type("(&mut [int]) -> int", &env.get()).unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(int_type()), true)],
             int_type(),
@@ -299,7 +293,7 @@ fn fn_type() {
         ))
     );
     assert_eq!(
-        resolve_generic_type("(&mut [float], &mut int) -> ()", &env.get()).unwrap(),
+        resolve_holed_type("(&mut [float], &mut int) -> ()", &env.get()).unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(float_type()), true), (int_type(), true)],
             Type::unit(),
@@ -311,7 +305,7 @@ fn fn_type() {
         format!(
             "{}",
             FormatWithData::new(
-                &resolve_concrete_type("(&mut int)", &env.get()).unwrap_err(),
+                &resolve_defined_type("(&mut int)", &env.get()).unwrap_err(),
                 &"(&mut int)"
             )
         ),
@@ -321,7 +315,7 @@ fn fn_type() {
         format!(
             "{}",
             FormatWithData::new(
-                &resolve_concrete_type("(&mut int,)", &env.get()).unwrap_err(),
+                &resolve_defined_type("(&mut int,)", &env.get()).unwrap_err(),
                 &"(&mut int,)"
             )
         ),
@@ -331,7 +325,7 @@ fn fn_type() {
         format!(
             "{}",
             FormatWithData::new(
-                &resolve_concrete_type("(bool, float, &mut int)", &env.get()).unwrap_err(),
+                &resolve_defined_type("(bool, float, &mut int)", &env.get()).unwrap_err(),
                 &"(bool, float, &mut int)"
             )
         ),
@@ -344,19 +338,19 @@ fn fn_type() {
 fn generic_types() {
     let env = StdModuleEnv::new();
     assert_eq!(
-        resolve_generic_type("_", &env.get()).unwrap(),
+        resolve_holed_type("_", &env.get()).unwrap(),
         Type::variable_id(0)
     );
     assert_eq!(
-        resolve_generic_type("(int, _)", &env.get()).unwrap(),
+        resolve_holed_type("(int, _)", &env.get()).unwrap(),
         tuple_type([int_type(), Type::variable_id(0)])
     );
     assert_eq!(
-        resolve_generic_type("(_, _)", &env.get()).unwrap(),
+        resolve_holed_type("(_, _)", &env.get()).unwrap(),
         tuple_type([Type::variable_id(0), Type::variable_id(0)])
     );
     assert_eq!(
-        resolve_generic_type("(&mut [_], &mut int) -> _", &env.get()).unwrap(),
+        resolve_holed_type("(&mut [_], &mut int) -> _", &env.get()).unwrap(),
         Type::function_type(FnType::new_mut_resolved(
             [(array_type(Type::variable_id(0)), true), (int_type(), true)],
             Type::variable_id(0),
@@ -370,7 +364,7 @@ fn generic_types() {
 fn complex_type() {
     let env = StdModuleEnv::new();
     assert_eq!(
-        resolve_concrete_type(
+        resolve_defined_type(
             "[{name: string, age: int, nick: Some(string) | None}]",
             &env.get()
         )

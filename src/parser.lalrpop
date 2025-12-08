@@ -85,11 +85,11 @@ ModuleFunctionArgs: Vec<ModuleFunctionArg> = {
 
 // Type
 
-pub ConcreteType: Type = {
+pub DefinedType: Type = {
     Type<"">
 }
 
-pub GenericType: Type = {
+pub HoledType: Type = {
     Type<"P">
 }
 
@@ -190,11 +190,11 @@ VariantTypeAlternative<P, U>: (UstrSpan, TypeSpan) = {
 }
 
 TypeAscription: TypeSpan = {
-    ":" <ty:Sp<Type<"P">>> => ty,
+    ":" <ty:Sp<HoledType>> => ty,
 }
 
 RefMutTypeAscription: MutTypeTypeSpan = {
-    ":" <l:@L> <ref_mut:("&" MutTyOrInfer)?> <ty:Type<"P">> <r:@R> => (ref_mut.map(|(_, m)| m), ty, span(l, r))
+    ":" <l:@L> <ref_mut:("&" MutTyOrInfer)?> <ty:HoledType> <r:@R> => (ref_mut.map(|(_, m)| m), ty, span(l, r))
 }
 
 MutTyOrInfer: MutType = {
@@ -239,9 +239,9 @@ StructNamedField: (UstrSpan, TypeSpan) = {
 }
 
 StructTupleFields: Vec<TypeSpan> = {
-    <t:Sp<Type<"">>> => vec![t],
-    <t:Sp<Type<"">>> "," <r:StructTupleFields> => ext_f(t, r),
-    <t:Sp<Type<"">>> "," => vec![t], // trailing comma
+    <t:Sp<DefinedType>> => vec![t],
+    <t:Sp<DefinedType>> "," <r:StructTupleFields> => ext_f(t, r),
+    <t:Sp<DefinedType>> "," => vec![t], // trailing comma
 }
 
 EnumDefinition: TypeDef = {
@@ -309,10 +309,10 @@ EnumVariant: (UstrSpan, TypeSpan) = {
     <name:Sp<UIdentifier>> => (name, (Type::Unit, name.1)),
 
     // Tuple variant with single type: Name(Type)
-    <name:Sp<UIdentifier>> <l:@L> "(" <ty:Sp<Type<"">>> ")" <r:@R> => (name, (Type::Tuple(vec![ty]), span(l, r))),
+    <name:Sp<UIdentifier>> <l:@L> "(" <ty:Sp<DefinedType>> ")" <r:@R> => (name, (Type::Tuple(vec![ty]), span(l, r))),
 
     // Tuple variant with multiple types: Name(Type1, Type2, ...)
-    <name:Sp<UIdentifier>> <l:@L> "(" <f:Sp<Type<"">>> "," <rest:Sep<Sp<Type<"">>, ",">> ")" <r:@R> => {
+    <name:Sp<UIdentifier>> <l:@L> "(" <f:Sp<DefinedType>> "," <rest:Sep<Sp<DefinedType>, ",">> ")" <r:@R> => {
         let tys = ext_f(f, rest);
         let tuple_ty = Type::Tuple(tys);
         (name, (tuple_ty, span(l, r)))
@@ -424,7 +424,7 @@ CastTargetType: Type = {
 }
 
 CastTargetTypeParens: Type = {
-    "(" <ty:Type<"">> ")" => ty
+    "(" <ty:DefinedType> ")" => ty
 }
 
 UnaryExpr<NoStruct> = {
