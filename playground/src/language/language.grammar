@@ -62,7 +62,7 @@ StructDef {
 
 structBody {
     recordType
-    | '(' (Type ',')* Type? ')'
+    | '(' (TypeAllowRecordVariant ',')* TypeAllowRecordVariant? ')'
     | ';' // empty struct
 }
 
@@ -76,30 +76,54 @@ EnumDef {
 
 enumVariant {
     TagName { Identifier }
-    | TagName { Identifier } '(' (Type ',')* Type? ')'
+    | TagName { Identifier } '(' (TypeAllowRecordVariant ',')* TypeAllowRecordVariant? ')'
     | TagName { Identifier } recordType
 }
 
 Type {
+    TypeAllowRecordVariant
+}
+
+TypeAllowRecordVariant {
     placeholderType
     | Path
     | arrayType
     | recordType
-    | variantType
-    | tupleOrFnType
+    | variantTypeAllowRecord
+    | tupleOrFnTypeAllowRecord
 }
 
-tupleOrFnType {
-    '(' (argType ',')* argType? ')' fnRet?
+TypeNoRecordVariant {
+    placeholderType
+    | Path
+    | arrayType
+    | recordType
+    | variantTypeNoRecord
+    | tupleOrFnTypeNoRecord
+}
+
+tupleOrFnTypeAllowRecord {
+    '(' ')' fnRet?
+    | '(' (argTypeAllowRecord ',')* argTypeAllowRecord? ')' fnRet?
+}
+
+tupleOrFnTypeNoRecord {
+    '(' ')' fnRet?
+    | '(' (argTypeNoRecord ',')* argTypeNoRecord? ')' fnRet?
 }
 
 fnRet {
-    '->' Type
+    '->' TypeNoRecordVariant
 }
 
-argType {
-    '&' 'mut' Type
-    | Type
+argTypeAllowRecord {
+    '&' 'mut' TypeAllowRecordVariant
+    | TypeAllowRecordVariant
+}
+
+argTypeNoRecord {
+    '&' 'mut' TypeNoRecordVariant
+    | TypeNoRecordVariant
 }
 
 placeholderType {
@@ -107,7 +131,7 @@ placeholderType {
 }
 
 arrayType {
-    '[' Type ']'
+    '[' TypeNoRecordVariant ']'
 }
 
 recordType {
@@ -115,29 +139,61 @@ recordType {
 }
 
 recordTypeField {
-    FieldName { Identifier } ':' Type
+    FieldName { Identifier } ':' TypeNoRecordVariant
 }
 
-variantType {
-    variantTypeAlternativeRestricted
-    | variantTypeAlternative '|' variantTypeAlternative ('|' variantTypeAlternative)*
+variantTypeAllowRecord {
+    variantTypeAlternativeRestrictedAllowRecord
+    | variantTypeAlternativeAllowRecord '|' variantTypeAlternativeAllowRecord ('|' variantTypeAlternativeAllowRecord)*
 }
 
-variantTypeAlternativeRestricted {
-    Identifier '(' (Type ',')* Type? ')'
+variantTypeNoRecord {
+    variantTypeAlternativeRestrictedNoRecord
+    | variantTypeAlternativeNoRecord '|' variantTypeAlternativeNoRecord ('|' variantTypeAlternativeNoRecord)*
 }
 
-variantTypeAlternative {
+variantTypeAlternativeRestrictedAllowRecord {
+    variantTypeTupleAllowRecord
+    | variantTypeRecord
+}
+
+variantTypeAlternativeRestrictedNoRecord {
+    variantTypeTupleNoRecord
+}
+
+variantTypeAlternativeAllowRecord {
+    variantTypeUnit
+    | variantTypeTupleAllowRecord
+    | variantTypeRecord
+}
+
+variantTypeAlternativeNoRecord {
+    variantTypeUnit
+    | variantTypeTupleNoRecord
+}
+
+variantTypeUnit {
     Identifier
-    | Identifier '(' (Type ',')* Type? ')'
+}
+
+variantTypeTupleAllowRecord {
+    Identifier '(' (TypeAllowRecordVariant ',')* TypeAllowRecordVariant? ')'
+}
+
+variantTypeTupleNoRecord {
+    Identifier '(' (TypeNoRecordVariant ',')* TypeNoRecordVariant? ')'
+}
+
+variantTypeRecord {
+    Identifier recordType
 }
 
 TypeAscription {
-    TypeOp { ':' } Type
+    TypeOp { ':' } TypeAllowRecordVariant
 }
 
 RefMutTypeAscription {
-    TypeOp { ':' } (MutTyOrInfer)? Type
+    TypeOp { ':' } (MutTyOrInfer)? TypeAllowRecordVariant
 }
 
 MutTyOrInfer {
@@ -214,7 +270,7 @@ castExpr {
 
 CastTargetType {
     Path
-    | '(' Type ')'
+    | '(' TypeAllowRecordVariant ')'
     | arrayType
     | recordType
 }

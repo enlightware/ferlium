@@ -387,7 +387,7 @@ fn complex_type() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn variant_type_ascription() {
-    let program = indoc! { r#"
+    let result = run(indoc! { r#"
         fn score(value) -> int {
             match value {
                 Some { value } => value,
@@ -405,9 +405,8 @@ fn variant_type_ascription() {
             score(tuple),
             score(unit),
         )
-    "# };
-
-    assert_eq!(run(program), tuple!(int(40), int(3), int(0)),);
+    "# });
+    assert_eq!(result, tuple!(int(40), int(3), int(0)),);
 
     // Limitation: to avoid a conflict, return types instantiate the grammar without record variants.
     let err = fail_compilation(indoc! { r#"
@@ -468,7 +467,7 @@ fn variant_type_alias_in_function_signature() {
         fn process_variant(v: Variant) -> Variant {
             v
         }
-        
+
         fn process_variant_array(entries: [(string, Variant)]) -> Variant {
             entries[0].1
         }

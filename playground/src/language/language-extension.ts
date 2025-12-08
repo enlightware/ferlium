@@ -17,7 +17,7 @@ const highlight = styleTags({
 	"fn let mut impl struct enum": t.definitionKeyword,
 	"if else match for return": t.controlKeyword,
 	"in as": t.operatorKeyword,
-	"Type/...": t.typeName,
+	"Type/... TypeAllowRecordVariant/... TypeNoRecordVariant/...": t.typeName,
 	"CastTargetType/...": t.typeName,
 	MutTyOrInfer: t.typeName,
 	Identifier: t.name,
