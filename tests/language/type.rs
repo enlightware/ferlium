@@ -9,6 +9,7 @@
 
 use ferlium::{
     effects::EffType,
+    error::CompilationErrorImpl,
     format::{FormatWith, FormatWithData},
     module::ModuleEnv,
     resolve_defined_type, resolve_holed_type,
@@ -31,7 +32,7 @@ use ustr::ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
-use crate::common::{compile, float, int, run};
+use crate::common::{compile, fail_compilation, float, int, run};
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -381,6 +382,45 @@ fn complex_type() {
             )
         ]))
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn variant_type_ascription() {
+    let program = indoc! { r#"
+        fn score(value) -> int {
+            match value {
+                Some { value } => value,
+                Pair(x, y) => x + y,
+                Empty => 0,
+            }
+        }
+
+        let record: Some { value: int } | Pair(int, int) | Empty = Some { value: 40 };
+        let tuple: Some { value: int } | Pair(int, int) | Empty = Pair(1, 2);
+        let unit: Some { value: int } | Pair(int, int) | Empty = Empty;
+
+        (
+            score(record),
+            score(tuple),
+            score(unit),
+        )
+    "# };
+
+    assert_eq!(run(program), tuple!(int(40), int(3), int(0)),);
+
+    // Limitation: to avoid a conflict, return types instantiate the grammar without record variants.
+    let err = fail_compilation(indoc! { r#"
+        fn invalid() -> Some { value: int } | Pair(int, int) {
+            Empty
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::ParsingFailed(_) => {}
+        other => {
+            panic!("expected parsing failure for record-style variant return types, got {other:?}")
+        }
+    }
 }
 
 #[test]

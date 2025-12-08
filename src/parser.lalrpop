@@ -86,28 +86,28 @@ ModuleFunctionArgs: Vec<ModuleFunctionArg> = {
 // Type
 
 pub DefinedType: Type = {
-    Type<"">
+    Type<"", "R">
 }
 
 pub HoledType: Type = {
-    Type<"P">
+    Type<"P", "R">
 }
 
-Type<P>: Type = {
+Type<P, R>: Type = {
     PlaceholderType if P != "",
     PathType,
     ArrayType<P>,
     SetType<P>,
     MapType<P>,
     RecordType<P>,
-    VariantType<P>,
-    TupleOrFnType<P>,
+    VariantType<P, R>,
+    TupleOrFnType<P, R>,
 }
 
-TupleOrFnType<P>: Type = {
+TupleOrFnType<P, R>: Type = {
     "(" ")" => Type::Unit,
     "(" ")" <ret:EffFnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, ret.1)),
-    "(" <arg:ArgType<P>> ")" <ret:EffFnRet<P>?> =>?
+    "(" <arg:ArgType<P, R>> ")" <ret:EffFnRet<P>?> =>?
         Ok(if let Some(ret) = ret {
             Type::function_type(FnType::new(vec![arg], ret.0, ret.1))
         } else if arg.mut_ty.is_some() {
@@ -115,7 +115,7 @@ TupleOrFnType<P>: Type = {
         } else {
             arg.ty.0
         }),
-    "(" <arg0:ArgType<P>> "," <args:Sep<ArgType<P>, ",">> ")" <ret:EffFnRet<P>?> =>?
+    "(" <arg0:ArgType<P, R>> "," <args:Sep<ArgType<P, R>, ",">> ")" <ret:EffFnRet<P>?> =>?
     {
         let args = ext_f(arg0, args);
         Ok(if let Some(ret) = ret {
@@ -130,19 +130,19 @@ TupleOrFnType<P>: Type = {
 
 #[inline]
 EffFnRet<P>: (TypeSpan, bool) = {
-    "->" <ret:Sp<Type<P>>> if P != "" => (ret, true),
-    "->" <ret:Sp<Type<P>>> if P == "" => (ret, false)
+    "->" <ret:Sp<Type<P, "">>> if P != "" => (ret, true),
+    "->" <ret:Sp<Type<P, "">>> if P == "" => (ret, false)
 }
 
 #[inline]
 SpFnRet<P>: TypeSpan = {
-    "->" <ret:Sp<Type<P>>> => ret
+    "->" <ret:Sp<Type<P, "">>> => ret
 }
 
-ArgType<P>: FnArgType = {
-    <l:@L> "&" "mut" <t:Sp<Type<P>>> <r:@R> => FnArgType::new(t, Some(MutType::Mut), span(l, r)),
-    <l:@L> "&" "?" <t:Sp<Type<P>>> <r:@R> if P !=  "" => FnArgType::new(t, Some(MutType::Infer), span(l, r)),
-    <t:Sp<Type<P>>> => { let span = t.1; FnArgType::new(t, None, span) },
+ArgType<P, R>: FnArgType = {
+    <l:@L> "&" "mut" <t:Sp<Type<P, R>>> <r:@R> => FnArgType::new(t, Some(MutType::Mut), span(l, r)),
+    <l:@L> "&" "?" <t:Sp<Type<P, R>>> <r:@R> if P !=  "" => FnArgType::new(t, Some(MutType::Infer), span(l, r)),
+    <t:Sp<Type<P, R>>> => { let span = t.1; FnArgType::new(t, None, span) },
 }
 
 PlaceholderType: Type = {
@@ -154,15 +154,15 @@ PathType: Type = {
 }
 
 ArrayType<P>: Type = {
-    "[" <t:Sp<Type<P>>> "]" => Type::Array(boxed(t))
+    "[" <t:Sp<Type<P, "">>> "]" => Type::Array(boxed(t))
 }
 
 SetType<P>: Type = {
-    "{" <t:Sp<Type<P>>> "}" =>? error("set types not implemented yet".into(), t.1)
+    "{" <t:Sp<Type<P, "">>> "}" =>? error("set types not implemented yet".into(), t.1)
 }
 
 MapType<P>: Type = {
-    "{" <k:Sp<Type<P>>> "=>" <v:Sp<Type<P>>> "}" =>? error("map types not implemented yet".into(), span_u32(k.1.start(), v.1.end()))
+    "{" <k:Sp<Type<P, "">>> "=>" <v:Sp<Type<P, "">>> "}" =>? error("map types not implemented yet".into(), span_u32(k.1.start(), v.1.end()))
 }
 
 RecordType<P>: Type = {
@@ -176,17 +176,18 @@ RecordTypeFields<P>: Type = {
 }
 
 RecordTypeField<P>: (UstrSpan, TypeSpan) = {
-    <n:Sp<UIdentifier>> ":" <t:Sp<Type<P>>> => (n, t),
+    <n:Sp<UIdentifier>> ":" <t:Sp<Type<P, "">>> => (n, t),
 }
 
-VariantType<P>: Type = {
-    <f:VariantTypeAlternative<P, "">> => Type::Variant(vec![f]),
-    <f:VariantTypeAlternative<P, "U">> "|" <n:VariantTypeAlternative<P, "U">> <r:("|" <VariantTypeAlternative<P, "U">>)*> => Type::Variant(ext_f(f, ext_f(n, r))),
+VariantType<P, R>: Type = {
+    <f:VariantTypeAlternative<P, "", R>> => Type::Variant(vec![f]),
+    <f:VariantTypeAlternative<P, "U", R>> "|" <n:VariantTypeAlternative<P, "U", R>> <r:("|" <VariantTypeAlternative<P, "U", R>>)*> => Type::Variant(ext_f(f, ext_f(n, r))),
 }
 
-VariantTypeAlternative<P, U>: (UstrSpan, TypeSpan) = {
+VariantTypeAlternative<P, U, R>: (UstrSpan, TypeSpan) = {
     <tag:Sp<UIdentifier>> if U != "" => (tag, (Type::Unit, tag.1)),
-    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P>>, ",">> ")" <r:@R> => (tag, (Type::Tuple(args), span(l, r))),
+    <tag:Sp<UIdentifier>> <l:@L> "(" <args:Sep<Sp<Type<P, R>>, ",">> ")" <r:@R> => (tag, (Type::Tuple(args), span(l, r))),
+    <tag:Sp<UIdentifier>> <l:@L> "{" <rec:RecordTypeFields<P>> "}" <r:@R> if R != "" => (tag, (rec, span(l, r))),
 }
 
 TypeAscription: TypeSpan = {
