@@ -50,7 +50,7 @@ pub struct ErrorData {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl ErrorData {
-    fn from_location(loc: &Location, source_table: &SourceTable, text: String) -> Self {
+    fn from_location(loc: Location, source_table: &SourceTable, text: String) -> Self {
         Self {
             source_id: loc.source_id(),
             from: loc.start(),
@@ -112,7 +112,7 @@ fn compilation_error_to_data(
     };
     use CompilationErrorImpl::*;
     let error_data_from_location =
-        |loc: &Location, msg: String| ErrorData::from_location(loc, source_table, msg);
+        |loc: &Location, msg: String| ErrorData::from_location(*loc, source_table, msg);
     match error.deref() {
         ParsingFailed(errors) => errors
             .iter()
@@ -762,11 +762,17 @@ impl Compiler {
                         "{}",
                         error.format_with(&(self.session.source_table(), &modules))
                     );
+                    let source_id = self
+                        .session
+                        .source_table()
+                        .get_latest_source_by_name(SRC_NAME)
+                        .unwrap()
+                        .0;
                     let data = ExecutionErrorData {
-                        summary,
-                        complete: complete.clone(),
-                        data: error.location.as_ref().map(|loc| {
-                            ErrorData::from_location(loc, self.session.source_table(), complete)
+                        summary: summary.clone(),
+                        complete,
+                        data: error.top_most_location_in(source_id).map(|loc| {
+                            ErrorData::from_location(loc, self.session.source_table(), summary)
                         }),
                     };
                     ExecutionResult::error(data)

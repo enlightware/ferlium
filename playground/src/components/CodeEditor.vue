@@ -6,7 +6,7 @@ import { Compiler, ErrorData } from "script-api";
 import { EditorView, keymap, ViewUpdate, scrollPastEnd } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
 import { indentUnit } from "@codemirror/language";
-import { linter, type Diagnostic } from "@codemirror/lint";
+import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { basicSetup } from "codemirror";
 import { renderAnnotationsPlugin, setAnnotations } from "../annotation-extension";
 import { languageExtension } from "../language/language-extension";
@@ -31,6 +31,22 @@ const myKeymap = keymap.of([
 	},
 ]);
 
+let forceLint = false;
+
+function linterNeedsRefresh() {
+	if (forceLint) {
+		forceLint = false;
+		return true;
+	}
+	return false;
+}
+
+const editorTheme = EditorView.theme({
+	"&.cm-editor": {height: "100%"},
+	".cm-scroller": {overflow: "auto", fontFamily: "'JuliaMono', monospace"},
+	".cursor-panel": {textAlign: "right", paddingRight: "4px"}
+});
+
 const extensions = [
 	myKeymap,
 	basicSetup,
@@ -42,15 +58,12 @@ const extensions = [
 	EditorView.lineWrapping,
 	renderAnnotationsPlugin,
 	EditorView.updateListener.of(processUpdate),
-	linter(() => diagnostics, { delay: 0 }),
-	EditorView.theme({
-		"&.cm-editor": {height: "100%"},
-		".cm-scroller": {overflow: "auto", fontFamily: "'JuliaMono', monospace"},
-		".cursor-panel": {textAlign: "right", paddingRight: "4px"}
-	}),
+	linter(() => diagnostics, { delay: 0, needsRefresh: linterNeedsRefresh }),
+	lintGutter(),
+	editorTheme,
 ];
 
-function fillDiagnostics(errorData: ErrorData[]){
+function fillDiagnostics(errorData: ErrorData[]) {
 	diagnostics.length = 0;
 	for (const data of errorData) {
 		if (data.file != "<ide>") {
@@ -82,8 +95,6 @@ function processUpdate(update: ViewUpdate) {
 	}
 }
 
-
-
 const setText = (newText: string) => {
 	if (view.value) {
 		const text = view.value.state.doc.toString();
@@ -95,8 +106,10 @@ const runCode = () => {
 	try {
 		const result = compiler.run_expr();
 		const errorData = result?.error_data();
-		if (errorData !== undefined) {
+		if (errorData !== undefined && view.value) {
 			fillDiagnostics([errorData]);
+			forceLint = true;
+			view.value.dispatch({});
 		}
 		return result;
 	} catch (e) {

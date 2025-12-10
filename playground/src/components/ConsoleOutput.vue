@@ -40,8 +40,9 @@ div {
 	white-space: pre-wrap; /* Maintains whitespace formatting */
 	border: 1px solid #333;
 	min-height: calc(2em + 8px);
-	max-height: 50%;
+	max-height: 30%;
 	overflow: auto;
+	flex-shrink: 0;
 }
 div :deep(.warning) {
 	color: #ffe786;

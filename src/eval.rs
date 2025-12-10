@@ -14,7 +14,7 @@ use enum_as_inner::EnumAsInner;
 use ustr::{Ustr, ustr};
 
 use crate::{
-    Location, SourceTable,
+    Location, SourceId, SourceTable,
     containers::b,
     error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
@@ -539,6 +539,20 @@ impl RuntimeError {
 
     pub fn backtrace(&self) -> &Vec<BacktraceFrame> {
         &self.backtrace
+    }
+
+    pub fn top_most_location_in(&self, source_id: SourceId) -> Option<Location> {
+        if let Some(location) = self.location
+            && location.source_id == source_id
+        {
+            return Some(location);
+        }
+        for frame in &self.backtrace {
+            if frame.location.source_id == source_id {
+                return Some(frame.location);
+            }
+        }
+        None
     }
 }
 
