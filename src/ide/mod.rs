@@ -20,7 +20,7 @@ use crate::{
     },
     eval::{EvalCtx, ValOrMut},
     format::FormatWith,
-    location::{SourceTable, get_line_column},
+    location::SourceTable,
     module::{ModuleFunction, ModuleRc, Modules, Uses},
     std::new_module_using_std,
     r#type::{FnArgType, Type, tuple_type},
@@ -95,7 +95,7 @@ fn compilation_error_to_data(
         let source_id = span.source_id();
         match source_table.get_source(source_id) {
             Some(source) => {
-                let position = get_line_column(source, start);
+                let position = source_table.get_line_column(source_id, start);
                 let snippet = &source[start..end];
                 format!(
                     "{} (in {}:{}:{})",

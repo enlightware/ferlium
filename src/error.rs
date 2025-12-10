@@ -15,7 +15,7 @@ use std::{
 use crate::{
     SourceId,
     format::FormatWith,
-    location::{Location, SourceTable, get_line_column},
+    location::{Location, SourceTable},
     r#trait::TraitRef,
     r#type::TypeDefRef,
     type_inference::SubOrSameType,
@@ -444,7 +444,7 @@ fn span_to_string(loc: &Location, source_table: &SourceTable) -> String {
     let source_id = loc.source_id();
     match source_table.get_source(source_id) {
         Some(source) => {
-            let position = get_line_column(source, start);
+            let position = source_table.get_line_column(source_id, start);
             let snippet = &source[start..end];
             format!(
                 "`{}` (in {}:{}:{})",

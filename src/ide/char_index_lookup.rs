@@ -52,8 +52,6 @@ impl CharIndexLookup {
 
 #[cfg(test)]
 mod tests {
-    use crate::location::get_line_column;
-
     use super::*;
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test;
@@ -68,24 +66,5 @@ mod tests {
         assert_eq!(lookup.byte_to_char_position(2), 1);
         assert_eq!(lookup.byte_to_char_position(3), 2);
         assert_eq!(lookup.byte_to_char_position(4), 2);
-    }
-
-    #[test]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    fn test_get_line_column() {
-        let text = "Hello\n世界\nRust";
-        assert_eq!(get_line_column(text, 0), (1, 1));
-        let byte_pos_o = text.find('o').unwrap();
-        assert_eq!(get_line_column(text, byte_pos_o), (1, 5));
-        let byte_pos_newline = text.find('\n').unwrap();
-        assert_eq!(get_line_column(text, byte_pos_newline), (1, 6));
-        let byte_pos_kanji = text.find('世').unwrap();
-        assert_eq!(get_line_column(text, byte_pos_kanji), (2, 1));
-        let byte_pos_kanji2 = text.find('界').unwrap();
-        assert_eq!(get_line_column(text, byte_pos_kanji2), (2, 2));
-        let byte_pos_rust = text.rfind('R').unwrap();
-        assert_eq!(get_line_column(text, byte_pos_rust), (3, 1));
-        let byte_pos_end = text.len();
-        assert_eq!(get_line_column(text, byte_pos_end), (3, 5)); // "Rust" has 4 characters
     }
 }

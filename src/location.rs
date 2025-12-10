@@ -198,7 +198,7 @@ impl FormatWith<SourceTable> for Location {
         let source_id = self.source_id();
         match source_table.get_source(source_id) {
             Some(source) => {
-                let position = get_line_column(source, start);
+                let position = source_table.get_line_column(source_id, start);
                 let snippet = &source[start..end];
                 write!(
                     f,
@@ -218,35 +218,105 @@ define_id_type!(
     SourceId
 );
 
+/// An entry in the source table, containing a name and the source code string.
+#[derive(Debug, Clone, Default)]
+pub struct SourceEntry {
+    name: String,
+    source: String,
+    line_starts: Vec<usize>,
+}
+impl SourceEntry {
+    /// Create a new source entry with the given name and source code.
+    /// It also computes the starting byte positions of each line in the source code.
+    pub fn new(name: String, source: String) -> Self {
+        let mut line_starts = vec![0];
+        for (i, c) in source.char_indices() {
+            if c == '\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        Self {
+            name,
+            source,
+            line_starts,
+        }
+    }
+
+    /// Get the line and column (unicode scalar value) of a byte position in this source entry.
+    pub fn get_line_column(&self, byte_pos: usize) -> (usize, usize) {
+        let s = &self.source;
+        assert!(byte_pos <= s.len(), "byte_pos out of range");
+
+        // Binary search to find which line this byte position is on.
+        // line_starts contains the byte position of the start of each line.
+        let line = match self.line_starts.binary_search(&byte_pos) {
+            Ok(idx) => idx + 1, // Exact match: byte_pos is the start of a line
+            Err(idx) => idx, // Not found: position is between line_starts[idx-1] and line_starts[idx]
+        };
+
+        // Get the byte position where this line starts
+        let line_start = self.line_starts[line - 1];
+
+        // Calculate column by counting UTF-8 characters from line start to byte_pos
+        let col = s[line_start..byte_pos].chars().count() + 1;
+
+        (line, col)
+    }
+}
+
 /// Table of source code strings for modules.
 #[derive(Debug, Clone, Default)]
 pub struct SourceTable {
-    sources: Vec<(String, String)>,
+    sources: Vec<SourceEntry>,
 }
 impl SourceTable {
     pub fn add_source(&mut self, name: String, source: String) -> SourceId {
         let id = SourceId::from_index(self.sources.len());
-        self.sources.push((name, source));
+        self.sources.push(SourceEntry::new(name, source));
         id
     }
 
     pub fn get_source(&self, index: SourceId) -> Option<&String> {
-        self.sources.get(index.as_index()).map(|(_, source)| source)
+        self.sources
+            .get(index.as_index())
+            .map(|entry| &entry.source)
     }
 
     pub fn get_source_name(&self, index: SourceId) -> Option<&String> {
-        self.sources.get(index.as_index()).map(|(name, _)| name)
+        self.sources.get(index.as_index()).map(|entry| &entry.name)
+    }
+
+    /// Get the line and column (unicode scalar value) of a byte position in a given source.
+    pub fn get_line_column(&self, index: SourceId, byte_pos: usize) -> (usize, usize) {
+        match self.sources.get(index.as_index()) {
+            Some(source) => source.get_line_column(byte_pos),
+            None => (0, 0),
+        }
     }
 }
 
-/// Get the line and column of a byte position in a string.
-pub fn get_line_column(s: &str, byte_pos: usize) -> (usize, usize) {
-    assert!(byte_pos <= s.len(), "byte_pos out of range");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    let s_up_to_pos = &s[..byte_pos];
-    let line = s_up_to_pos.matches('\n').count() + 1;
-    let last_newline_pos = s_up_to_pos.rfind('\n').map(|pos| pos + 1).unwrap_or(0);
-    let col = s[last_newline_pos..byte_pos].chars().count() + 1;
-
-    (line, col)
+    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    fn source_entry_get_line_column() {
+        let entry = SourceEntry::new("test".into(), "Hello\n世界\nRust".into());
+        assert_eq!(entry.get_line_column(0), (1, 1));
+        let byte_pos_o = entry.source.find('o').unwrap();
+        assert_eq!(entry.get_line_column(byte_pos_o), (1, 5));
+        let byte_pos_newline = entry.source.find('\n').unwrap();
+        assert_eq!(entry.get_line_column(byte_pos_newline), (1, 6));
+        let byte_pos_kanji = entry.source.find('世').unwrap();
+        assert_eq!(entry.get_line_column(byte_pos_kanji), (2, 1));
+        let byte_pos_kanji2 = entry.source.find('界').unwrap();
+        assert_eq!(entry.get_line_column(byte_pos_kanji2), (2, 2));
+        let byte_pos_rust = entry.source.rfind('R').unwrap();
+        assert_eq!(entry.get_line_column(byte_pos_rust), (3, 1));
+        let byte_pos_end = entry.source.len();
+        assert_eq!(entry.get_line_column(byte_pos_end), (3, 5)); // "Rust" has 4 characters
+    }
 }
