@@ -613,14 +613,9 @@ impl TypeInference {
                 let env_size = env.locals.len();
                 let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
                 env.locals.truncate(env_size);
-                if nodes.len() <= 1 {
-                    let node = nodes.into_iter().next().unwrap();
-                    (node.kind, node.ty, MutType::constant(), effects)
-                } else {
-                    let node = K::Block(b(SVec2::from_vec(nodes)));
-                    let ty = types.last().copied().unwrap_or(Type::unit());
-                    (node, ty, MutType::constant(), effects)
-                }
+                let node = K::Block(b(SVec2::from_vec(nodes)));
+                let ty = types.last().copied().unwrap_or(Type::unit());
+                (node, ty, MutType::constant(), effects)
             }
             Assign(place, sign_span, value) => {
                 if let Some((scope, variable)) = place.kind.as_property_path() {

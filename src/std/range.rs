@@ -135,7 +135,7 @@ pub fn add_to_module(to: &mut Module) {
     to.type_aliases.set("range_iterator", range_iterator_type());
 
     // Functions
-    to.add_named_function(
+    to.add_function(
         ustr("range"),
         BinaryNativeFnNNN::description_with_default_ty(
             Range::new,
@@ -144,7 +144,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("range_iter"),
         UnaryNativeFnNN::description_with_default_ty(
             Range::iter,
@@ -153,7 +153,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("range_len"),
         UnaryNativeFnNN::description_with_default_ty(
             Range::len,
@@ -162,7 +162,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("range_iterator_new"),
         BinaryNativeFnNNN::description_with_default_ty(
             RangeIterator::new,
@@ -171,7 +171,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("range_iterator_next"),
         RangeIterator::next_value_descr(),
     );

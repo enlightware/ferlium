@@ -17,7 +17,7 @@ use std::{
 use super::string::String as Str;
 use crate::{
     effects::{PrimitiveEffect, effect},
-    error::RuntimeError,
+    error::RuntimeErrorKind,
     function::UnaryNativeFnNFV,
     module::Module,
     std::{
@@ -34,10 +34,10 @@ use ustr::ustr;
 
 fn next_event<R: Read>(
     reader: &'_ mut ReaderJsonParser<R>,
-) -> Result<json_event_parser::JsonEvent<'_>, RuntimeError> {
-    reader
-        .parse_next()
-        .map_err(|e| RuntimeError::InvalidArgument(ustr(&format!("Failed to parse JSON: {}", e))))
+) -> Result<json_event_parser::JsonEvent<'_>, RuntimeErrorKind> {
+    reader.parse_next().map_err(|e| {
+        RuntimeErrorKind::InvalidArgument(ustr(&format!("Failed to parse JSON: {}", e)))
+    })
 }
 
 #[derive(Debug, EnumAsInner)]
@@ -50,7 +50,7 @@ enum ParseResult {
 
 fn parse_json_stream<R: Read>(
     reader: &mut ReaderJsonParser<R>,
-) -> Result<ParseResult, RuntimeError> {
+) -> Result<ParseResult, RuntimeErrorKind> {
     let variant = |tag, value| Value::tuple_variant(ustr(tag), [value]);
     let event = next_event(reader)?;
     use json_event_parser::JsonEvent::*;
@@ -108,7 +108,7 @@ fn parse_json_stream<R: Read>(
     Ok(ParseResult::Value(value))
 }
 
-fn parse_json(input: Str) -> Result<Value, RuntimeError> {
+fn parse_json(input: Str) -> Result<Value, RuntimeErrorKind> {
     let reader = Cursor::new(input.as_ref().as_bytes());
     let mut reader = ReaderJsonParser::new(reader);
     let value = parse_json_stream(&mut reader)?;
@@ -124,7 +124,7 @@ fn parse_json(input: Str) -> Result<Value, RuntimeError> {
 }
 
 pub fn add_to_module(to: &mut Module) {
-    to.add_named_function(
+    to.add_function(
         ustr("parse_json"),
         UnaryNativeFnNFV::description_with_ty(
             parse_json,

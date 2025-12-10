@@ -10,7 +10,7 @@ use ustr::ustr;
 
 use crate::{
     effects::{PrimitiveEffect, effect},
-    error::RuntimeError,
+    error::RuntimeErrorKind,
     function::{NullaryNativeFnFN, UnaryNativeFnNFN},
     module::Module,
     std::string::String as Str,
@@ -20,18 +20,18 @@ use crate::{
 
 use super::string::string_type;
 
-fn abort() -> Result<(), RuntimeError> {
-    Err(RuntimeError::Aborted(None))
+fn abort() -> Result<(), RuntimeErrorKind> {
+    Err(RuntimeErrorKind::Aborted(None))
 }
 
-fn panic(msg: Str) -> Result<(), RuntimeError> {
-    Err(RuntimeError::Aborted(Some(msg.into())))
+fn panic(msg: Str) -> Result<(), RuntimeErrorKind> {
+    Err(RuntimeErrorKind::Aborted(Some(msg.into())))
 }
 
 pub fn add_to_module(to: &mut Module) {
     // Control flow operation
     // Note: we use no_effects() for now as non-termination is modelled purely in the return type
-    to.add_named_function(
+    to.add_function(
         ustr("abort"),
         NullaryNativeFnFN::description_with_ty_scheme(
             abort,
@@ -44,7 +44,7 @@ pub fn add_to_module(to: &mut Module) {
             )),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("panic"),
         UnaryNativeFnNFN::description_with_ty_scheme(
             panic,

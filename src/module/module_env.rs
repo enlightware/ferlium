@@ -156,25 +156,23 @@ impl<'m> ModuleEnv<'m> {
                             .find(|local_fn| Rc::ptr_eq(&local_fn.function.code, func))
                             .map(|local_fn| {
                                 let fn_name = local_fn.name;
-                                if let Some(fn_name) = fn_name {
-                                    if self.current.uses(*mod_name, fn_name) {
-                                        fn_name.to_string()
-                                    } else {
-                                        format!("{mod_name}::{fn_name}")
-                                    }
+                                if self.current.uses(*mod_name, fn_name) {
+                                    fn_name.to_string()
                                 } else {
-                                    "<anonymous>".to_string()
+                                    format!("{mod_name}::{fn_name}")
                                 }
                             })
                     })
                 },
-                |local_fn| Some(local_fn.name.unwrap_or(ustr("anonymous")).to_string()),
+                |local_fn| Some(local_fn.name.to_string()),
             )
     }
 
     /// Get a function from the current module, or other ones, return the name of the module if other.
     pub fn get_function(&'m self, path: &'m str) -> Option<(Option<Ustr>, &'m ModuleFunction)> {
-        self.get_module_member(path, &|name, module| module.get_own_function(ustr(name)))
+        self.get_module_member(path, &|name, module| {
+            module.get_unique_own_function(ustr(name))
+        })
     }
 
     /// Get a function from the current module, or other ones, return the name of the module if other.
@@ -182,7 +180,9 @@ impl<'m> ModuleEnv<'m> {
         &'m self,
         path: &'m str,
     ) -> Option<(Option<Ustr>, &'m ModuleFunction)> {
-        self.get_module_member(path, &|name, module| module.get_own_function(ustr(name)))
+        self.get_module_member(path, &|name, module| {
+            module.get_unique_own_function(ustr(name))
+        })
     }
 
     /// Get the trait reference associated to a trait name.

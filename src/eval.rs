@@ -8,25 +8,24 @@
 //
 use std::{collections::VecDeque, mem, rc::Rc};
 
-#[cfg(debug_assertions)]
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 #[cfg(debug_assertions)]
 use ustr::{Ustr, ustr};
 
 use crate::{
+    Location, SourceTable,
     containers::b,
-    error::RuntimeError,
+    error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
     function::{Closure, FunctionRc},
     ir::{Node, NodeKind},
-    module::{FunctionId, ModuleRc, TraitImplId},
+    module::{FunctionId, ModuleRc, Modules, TraitImplId},
     std::array,
     r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},
 };
 
-#[cfg(debug_assertions)]
 use crate::module::ImportFunctionTarget;
 
 /// Either a value or a unique mutable reference to a value.
@@ -54,14 +53,14 @@ impl ValOrMut {
     pub fn as_mut_primitive<T: 'static>(
         self,
         ctx: &mut EvalCtx,
-    ) -> Result<Option<&mut T>, RuntimeError> {
+    ) -> Result<Option<&mut T>, RuntimeErrorKind> {
         Ok(match self {
             ValOrMut::Val(_) => None,
             ValOrMut::Mut(place) => place.target_mut(ctx)?.as_primitive_ty_mut::<T>(),
         })
     }
 
-    pub fn as_value(&self, ctx: &EvalCtx) -> Result<Value, RuntimeError> {
+    pub fn as_value(&self, ctx: &EvalCtx) -> Result<Value, RuntimeErrorKind> {
         Ok(match self {
             ValOrMut::Val(value) => value.clone(),
             ValOrMut::Mut(place) => place.target_ref(ctx)?.clone(),
@@ -120,7 +119,7 @@ pub struct EvalCtx {
 }
 
 impl EvalCtx {
-    const DEFAULT_RECURSION_LIMIT: usize = 100;
+    const DEFAULT_RECURSION_LIMIT: usize = 50;
 
     pub fn new(module: ModuleRc) -> EvalCtx {
         EvalCtx {
@@ -221,11 +220,7 @@ impl EvalCtx {
             Local(id) => {
                 let function = &self.module.functions[id.as_index()];
                 module_name = self.get_last_module_name();
-                format!(
-                    "{module_name}::{} (#{})",
-                    function.name.map_or("<anonymous>", |s| s.as_str()),
-                    id
-                )
+                format!("{module_name}::{} (#{})", function.name, id)
             }
             Import(id) => {
                 let slot = &self.module.import_fn_slots[id.as_index()];
@@ -234,11 +229,7 @@ impl EvalCtx {
                 match &slot.target {
                     TraitImplMethod { key, index } => {
                         let trait_ref = key.trait_ref();
-                        let fn_name = trait_ref.functions[*index as usize].0;
-                        format!(
-                            "{module_name}::impl {} for <…>::{}",
-                            trait_ref.name, fn_name
-                        )
+                        trait_ref.qualified_method_name(*index as usize)
                     }
                     NamedFunction(fn_name) => {
                         format!("{module_name}::{fn_name}")
@@ -276,13 +267,16 @@ impl EvalCtx {
         &mut self,
         function_value: &FunctionValue,
         arguments: Vec<ValOrMut>,
+        location: Location,
     ) -> EvalControlFlowResult {
         let function = &function_value.function;
         let module = function_value.upgrade_module();
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(self.get_stack_entry_from_fn_and_mod(function, &module));
-        let result = self.call_function(function, module, arguments)?;
+        let result = self
+            .call_function(function, module.clone(), arguments)
+            .map_err(|err| err.with_frame(module, None, self.environment.len(), location))?;
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
         Ok(result)
@@ -293,12 +287,22 @@ impl EvalCtx {
         &mut self,
         function_id: FunctionId,
         arguments: Vec<ValOrMut>,
+        location: Location,
     ) -> EvalControlFlowResult {
         let (function, module) = self.get_function(function_id);
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(self.get_stack_entry_from_function_id(function_id));
-        let result = self.call_function(&function, module, arguments)?;
+        let result = self
+            .call_function(&function, module.clone(), arguments)
+            .map_err(|err| {
+                err.with_frame(
+                    self.module.clone(),
+                    Some(function_id),
+                    self.environment.len(),
+                    location,
+                )
+            })?;
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
         Ok(result)
@@ -354,7 +358,7 @@ impl Place {
     }
 
     /// Get a mutable reference to the target value
-    pub fn target_mut<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, RuntimeError> {
+    pub fn target_mut<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, RuntimeErrorKind> {
         let (path, index) = self.resolved_path_and_index(ctx);
         let mut target = ctx.environment[index].as_val_mut().unwrap();
         for &index in path.iter() {
@@ -370,7 +374,9 @@ impl Place {
                     let len = array.len();
                     match array.get_mut_signed(index) {
                         Some(target) => target,
-                        None => return Err(RuntimeError::ArrayAccessOutOfBounds { index, len }),
+                        None => {
+                            return Err(RuntimeErrorKind::ArrayAccessOutOfBounds { index, len });
+                        }
                     }
                 }
                 _ => panic!("Cannot access a non-compound value"),
@@ -380,7 +386,7 @@ impl Place {
     }
 
     /// Get a shared reference to the target value
-    pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, RuntimeError> {
+    pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, RuntimeErrorKind> {
         let (path, index) = self.resolved_path_and_index(ctx);
         let mut target = ctx.environment[index].as_val().unwrap();
         for &index in path.iter() {
@@ -395,7 +401,9 @@ impl Place {
                     let len = array.len();
                     match array.get_signed(index) {
                         Some(target) => target,
-                        None => return Err(RuntimeError::ArrayAccessOutOfBounds { index, len }),
+                        None => {
+                            return Err(RuntimeErrorKind::ArrayAccessOutOfBounds { index, len });
+                        }
                     }
                 }
                 _ => panic!("Cannot access a non-compound value"),
@@ -433,6 +441,125 @@ impl ControlFlow<Value> {
             ControlFlow::Continue(value) => value,
             ControlFlow::Return(value) => value,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BacktraceFrame {
+    module: ModuleRc,
+    function_id: Option<FunctionId>,
+    #[allow(dead_code)]
+    frame_base: usize,
+    location: Location,
+}
+impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        data: &(&SourceTable, &Modules),
+    ) -> std::fmt::Result {
+        let (source_table, modules) = data;
+        let mut module_name = modules
+            .get_module_name(&self.module)
+            .map(|name| name.as_str())
+            .unwrap_or("<unknown>");
+        match self.function_id {
+            Some(function_id) => match function_id {
+                FunctionId::Local(id) => {
+                    let local_name = self.module.functions[id.as_index()].name;
+                    write!(f, "{module_name}::{local_name}")?
+                }
+                FunctionId::Import(id) => {
+                    let slot = &self.module.import_fn_slots[id.as_index()];
+                    module_name = slot.module_name.as_str();
+                    use ImportFunctionTarget::*;
+                    match &slot.target {
+                        TraitImplMethod { key, index } => {
+                            let trait_ref = key.trait_ref();
+                            write!(f, "{}", trait_ref.qualified_method_name(*index as usize))?
+                        }
+                        NamedFunction(fn_name) => write!(f, "{module_name}::{fn_name}")?,
+                    }
+                }
+            },
+            None => write!(f, "{module_name}::<anonymous function>")?,
+        };
+        write!(f, " at {}", self.location.format_with(source_table))
+    }
+}
+
+/// A runtime error that occurred during evaluation and is propagated upwards.
+#[derive(Debug, Clone, new)]
+pub struct RuntimeError {
+    /// The kind of the error.
+    pub(crate) kind: RuntimeErrorKind,
+    /// The location where the error occurred, None if in native code.
+    pub(crate) location: Option<Location>,
+    /// The call stack at the time of the error.
+    #[new(default)]
+    pub(crate) backtrace: Vec<BacktraceFrame>,
+}
+impl RuntimeError {
+    pub fn new_native(kind: RuntimeErrorKind) -> Self {
+        Self {
+            kind,
+            location: None,
+            backtrace: Vec::new(),
+        }
+    }
+
+    pub fn with_frame(
+        self,
+        module: ModuleRc,
+        function_id: Option<FunctionId>,
+        frame_base: usize,
+        location: Location,
+    ) -> Self {
+        let mut backtrace = self.backtrace;
+        backtrace.push(BacktraceFrame {
+            module,
+            function_id,
+            frame_base,
+            location,
+        });
+        Self {
+            kind: self.kind,
+            location: self.location,
+            backtrace,
+        }
+    }
+
+    pub fn kind(&self) -> RuntimeErrorKind {
+        self.kind.clone()
+    }
+
+    pub fn location(&self) -> Option<Location> {
+        self.location
+    }
+
+    pub fn backtrace(&self) -> &Vec<BacktraceFrame> {
+        &self.backtrace
+    }
+}
+
+impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        data: &(&SourceTable, &Modules),
+    ) -> std::fmt::Result {
+        write!(f, "Execution error: {}", self.kind)?;
+        if let Some(location) = &self.location {
+            write!(f, " at {}", location.format_with(data.0))?;
+        }
+        writeln!(f)?;
+        if !self.backtrace.is_empty() {
+            writeln!(f, "stack backtrace:")?;
+            for (i, frame) in self.backtrace.iter().enumerate() {
+                writeln!(f, "  {i}: {}", frame.format_with(data))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -481,7 +608,7 @@ impl Node {
                 let function_value = function_value.into_function().unwrap().function;
                 let function_value = FunctionValue::new(function_value, Rc::downgrade(&ctx.module));
                 cont(Value::function(
-                    b(Closure::new(function_value, captured)),
+                    b(Closure::new(function_value, captured, self.span)),
                     Rc::downgrade(&ctx.module),
                 ))
             }
@@ -499,11 +626,11 @@ impl Node {
                         .clone()
                 };
                 let arguments = eval_or_return!(eval_args(&app.arguments, &args_ty, ctx));
-                ctx.call_function_value(function_value, arguments)
+                ctx.call_function_value(function_value, arguments, self.span)
             }
             StaticApply(app) => {
                 let arguments = eval_or_return!(eval_args(&app.arguments, &app.ty.args, ctx));
-                ctx.call_function_id(app.function, arguments)
+                ctx.call_function_id(app.function, arguments, self.span)
             }
             TraitFnApply(_) => {
                 panic!(
@@ -527,7 +654,11 @@ impl Node {
             }
             EnvLoad(node) => {
                 let index = ctx.frame_base + node.index;
-                cont(ctx.environment[index].as_value(ctx)?)
+                cont(
+                    ctx.environment[index]
+                        .as_value(ctx)
+                        .map_err(|err| RuntimeError::new(err, Some(self.span)))?,
+                )
             }
             Return(node) => ret(node.eval_with_ctx(ctx)?.into_value()),
             Block(nodes) => {
@@ -557,7 +688,9 @@ impl Node {
                 // Evaluate left-to-right: place first, then value (matches Rust semantics)
                 let place = eval_or_return!(assignment.place.as_place(ctx));
                 let value = eval_or_return!(assignment.value.eval_with_ctx(ctx));
-                let target_ref = place.target_mut(ctx)?;
+                let target_ref = place
+                    .target_mut(ctx)
+                    .map_err(|err| RuntimeError::new(err, Some(self.span)))?;
                 *target_ref = value;
                 cont(Value::unit())
             }
@@ -581,7 +714,8 @@ impl Node {
                 let value = eval_or_return!(access.0.eval_with_ctx(ctx));
                 let index = ctx.frame_base + access.1;
                 let index = ctx.environment[index]
-                    .as_value(ctx)?
+                    .as_value(ctx)
+                    .map_err(|err| RuntimeError::new(err, Some(self.span)))?
                     .into_primitive_ty::<isize>()
                     .unwrap();
                 cont(match value {
@@ -614,7 +748,10 @@ impl Node {
                     Some(value) => cont(value.clone()),
                     None => {
                         let len = array.len();
-                        Err(RuntimeError::ArrayAccessOutOfBounds { index, len })
+                        Err(RuntimeError::new(
+                            RuntimeErrorKind::ArrayAccessOutOfBounds { index, len },
+                            Some(self.span),
+                        ))
                     }
                 }
             }
@@ -661,7 +798,9 @@ impl Node {
                     let (ref node, index) = **projection;
                     let mut place = eval_or_return!(resolve_node(node, ctx));
                     let index = ctx.frame_base + index;
-                    let index_value = ctx.environment[index].as_value(ctx)?;
+                    let index_value = ctx.environment[index]
+                        .as_value(ctx)
+                        .map_err(|err| RuntimeError::new(err, Some(node.span)))?;
                     let index = index_value.into_primitive_ty::<isize>().unwrap();
                     place.path.push(index);
                     place

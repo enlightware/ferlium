@@ -211,4 +211,16 @@ fn range_sum2(start, end) {
 `],
 ['Function pipe operator',
 `[1, 2] |> array_concat([3, 4]) |> array_map(|x| x*x)`],
+['Stack trace',
+`fn f() -> float {
+	1.0 / 0
+}
+
+fn g() {
+	let x = || f();
+	x()
+}
+
+g()
+`]
 ] as const;

@@ -180,7 +180,7 @@ impl FunctionCollector {
     pub fn get_function(&self, name: Ustr) -> Option<LocalFunctionId> {
         self.new_elements
             .iter()
-            .position(|function| function.name == Some(name))
+            .position(|function| function.name == name)
             .map(|i| LocalFunctionId::from_index(self.initial_count + i))
     }
 }
@@ -252,8 +252,9 @@ impl TraitImpls {
         trait_ref.validate_impl_size(&input_tys, &output_tys, functions.len());
 
         // Add to local functions, collect their IDs and build the overall interface hash.
+        let namer = |method_index: usize| trait_ref.qualified_method_name(method_index).into();
         let (methods, dictionary_type, interface_hash) =
-            Self::bundle_module_functions(functions, fn_collector);
+            Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
         let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
@@ -319,8 +320,9 @@ impl TraitImpls {
         trait_ref.validate_impl_size(&sub_key.input_tys, &output_tys, functions.len());
 
         // Add to local functions, collect their IDs and build the overall interface hash.
+        let namer = |method_index: usize| trait_ref.qualified_method_name(method_index).into();
         let (methods, dictionary_type, interface_hash) =
-            Self::bundle_module_functions(functions, fn_collector);
+            Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
         let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
@@ -352,14 +354,16 @@ impl TraitImpls {
     fn bundle_module_functions(
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
+        namer: impl Fn(usize) -> Ustr,
     ) -> (Vec<LocalFunctionId>, Type, u64) {
         let mut interface_hasher = DefaultHasher::new();
         let (methods, tys): (Vec<_>, Vec<_>) = functions
             .into_iter()
-            .map(|function| {
+            .enumerate()
+            .map(|(index, function)| {
                 let id = fn_collector.next_id();
                 let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
-                let local_fn = LocalFunction::new_anonymous(function);
+                let local_fn = LocalFunction::new_compute_interface_hash(function, namer(index));
                 local_fn.interface_hash.hash(&mut interface_hasher);
                 fn_collector.push(local_fn);
                 (id, fn_ty)

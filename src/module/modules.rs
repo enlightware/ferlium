@@ -59,7 +59,7 @@ impl Modules {
                 let (function, hash) = match &slot.target {
                     ImportFunctionTarget::NamedFunction(function_name) => {
                         if let Some(target_function) =
-                            target_module.get_local_function(*function_name)
+                            target_module.get_unique_local_function(*function_name)
                         {
                             (
                                 &target_function.function.code,
@@ -194,6 +194,16 @@ impl Modules {
     /// Get a module bundle by name
     pub fn get_module(&self, name: Ustr) -> Option<ModuleRc> {
         self.modules.get(&name).cloned()
+    }
+
+    /// Get the name of a registered module
+    pub fn get_module_name(&self, module: &ModuleRc) -> Option<Ustr> {
+        for (name, m) in &self.modules {
+            if Rc::ptr_eq(m, module) {
+                return Some(*name);
+            }
+        }
+        None
     }
 
     /// List all registered modules

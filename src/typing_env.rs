@@ -159,18 +159,16 @@ impl<'m> TypingEnv<'m> {
                 .module_env
                 .others
                 .get(&module_name)?
-                .get_own_function(function_name)?
+                .get_unique_own_function(function_name)?
                 .definition;
             (definition, FunctionId::Import(id), Some(module_name))
         } else {
-            let id = *self
+            let id = self
                 .module_env
                 .current
-                .function_name_to_id
-                .get(&function_name)
+                .get_unique_local_function_id(function_name)
                 .unwrap();
-            let index = id.0 as usize;
-            let local_fn = &self.module_env.current.functions[index];
+            let local_fn = &self.module_env.current.functions[id.as_index()];
             (&local_fn.function.definition, FunctionId::Local(id), None)
         })
     }

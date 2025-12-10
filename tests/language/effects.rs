@@ -20,7 +20,7 @@ pub fn test_mod(session: &mut TestSession, src: &str, f: &str, exp_eff: EffType)
     let module = session.compile(src);
     let effects = module
         .module
-        .get_own_function(ustr(f))
+        .get_unique_own_function(ustr(f))
         .unwrap()
         .definition
         .ty_scheme

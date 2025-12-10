@@ -20,9 +20,10 @@ use ustr::Ustr;
 use ferlium_macros::declare_native_fn_aliases;
 
 use crate::{
+    Location,
     effects::EffType,
-    error::RuntimeError,
-    eval::{ControlFlow, EvalControlFlowResult, EvalCtx, ValOrMut, cont},
+    error::RuntimeErrorKind,
+    eval::{ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, cont},
     format::FormatWith,
     ir::{self},
     module::{ModuleEnv, ModuleFunction},
@@ -91,14 +92,13 @@ impl FunctionDefinition {
     pub fn fmt_with_name_and_module_env(
         &self,
         f: &mut fmt::Formatter,
-        name: &Option<Ustr>,
+        name: Ustr,
         prefix: &str,
         env: &ModuleEnv<'_>,
     ) -> fmt::Result {
         if let Some(doc) = &self.doc {
             writeln!(f, "{prefix}/// {doc}")?;
         }
-        let name = name.as_ref().map_or("<anonymous>", |n| n.as_str());
         write!(f, "{prefix}fn {name}")?;
         let mut quantifiers = self
             .ty_scheme
@@ -138,9 +138,9 @@ impl TypeLike for FunctionDefinition {
     }
 }
 
-impl FormatWith<ModuleEnv<'_>> for (&FunctionDefinition, Option<Ustr>) {
+impl FormatWith<ModuleEnv<'_>> for (&FunctionDefinition, Ustr) {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        self.0.fmt_with_name_and_module_env(f, &self.1, "", env)?;
+        self.0.fmt_with_name_and_module_env(f, self.1, "", env)?;
         Ok(())
     }
 }
@@ -260,9 +260,12 @@ impl Callable for ScriptFunction {
         ctx.environment_names.extend(self.arg_names.iter().copied());
         ctx.recursion += 1;
         if ctx.recursion >= ctx.recursion_limit {
-            return Err(RuntimeError::RecursionLimitExceeded {
-                limit: ctx.recursion_limit,
-            });
+            return Err(RuntimeError::new(
+                RuntimeErrorKind::RecursionLimitExceeded {
+                    limit: ctx.recursion_limit,
+                },
+                Some(self.code.span),
+            ));
         }
         let ret = self.code.eval_with_ctx(ctx)?;
         ctx.recursion -= 1;
@@ -304,6 +307,7 @@ impl Eq for Box<ScriptFunction> {}
 pub struct Closure {
     pub function: FunctionValue,
     pub captured: Vec<Value>,
+    pub span: Location,
 }
 impl Callable for Closure {
     fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult {
@@ -314,7 +318,7 @@ impl Callable for Closure {
             .map(ValOrMut::Val)
             .chain(args)
             .collect();
-        ctx.call_function_value(&self.function, args)
+        ctx.call_function_value(&self.function, args, self.span)
     }
 
     fn format_ind(
@@ -360,14 +364,20 @@ pub struct NatMut<T> {
 pub trait ArgExtractor {
     type Output<'a>;
     const MUTABLE: bool;
-    fn extract<'m>(arg: ValOrMut, ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError>;
+    fn extract<'m>(
+        arg: ValOrMut,
+        ctx: &'m mut CallCtx,
+    ) -> Result<Self::Output<'m>, RuntimeErrorKind>;
     fn default_ty() -> Type;
 }
 
 impl ArgExtractor for Value {
     type Output<'a> = Value;
     const MUTABLE: bool = false;
-    fn extract<'m>(arg: ValOrMut, _ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError> {
+    fn extract<'m>(
+        arg: ValOrMut,
+        _ctx: &'m mut CallCtx,
+    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
         Ok(arg.into_val().unwrap())
     }
     fn default_ty() -> Type {
@@ -378,7 +388,10 @@ impl ArgExtractor for Value {
 impl ArgExtractor for &'_ mut Value {
     type Output<'a> = &'a mut Value;
     const MUTABLE: bool = true;
-    fn extract<'m>(arg: ValOrMut, ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError> {
+    fn extract<'m>(
+        arg: ValOrMut,
+        ctx: &'m mut CallCtx,
+    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
         arg.as_place().target_mut(ctx)
     }
     fn default_ty() -> Type {
@@ -389,7 +402,10 @@ impl ArgExtractor for &'_ mut Value {
 impl<T: Clone + 'static> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
     const MUTABLE: bool = false;
-    fn extract<'m>(arg: ValOrMut, ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError> {
+    fn extract<'m>(
+        arg: ValOrMut,
+        ctx: &'m mut CallCtx,
+    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
         let arg2 = arg.clone();
         Ok(arg.into_primitive::<T>().unwrap_or_else(|| {
             panic!(
@@ -407,7 +423,10 @@ impl<T: Clone + 'static> ArgExtractor for NatVal<T> {
 impl<T: Clone + 'static> ArgExtractor for NatMut<T> {
     type Output<'a> = &'a mut T;
     const MUTABLE: bool = true;
-    fn extract<'m>(arg: ValOrMut, ctx: &'m mut CallCtx) -> Result<Self::Output<'m>, RuntimeError> {
+    fn extract<'m>(
+        arg: ValOrMut,
+        ctx: &'m mut CallCtx,
+    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
         Ok(arg.as_mut_primitive::<T>(ctx)?.unwrap())
     }
     fn default_ty() -> Type {
@@ -438,9 +457,11 @@ impl<O: NativeOutput> OutputBuilder for NatVal<O> {
 }
 
 impl<O: NativeOutput> OutputBuilder for Fallible<NatVal<O>> {
-    type Input = Result<O, RuntimeError>;
+    type Input = Result<O, RuntimeErrorKind>;
     fn build(result: Self::Input) -> EvalControlFlowResult {
-        cont(Value::Native(Box::new(result?)))
+        cont(Value::Native(Box::new(
+            result.map_err(RuntimeError::new_native)?,
+        )))
     }
     fn default_ty() -> Type {
         Type::primitive::<O>()
@@ -458,9 +479,9 @@ impl OutputBuilder for Value {
 }
 
 impl OutputBuilder for Fallible<Value> {
-    type Input = Result<Value, RuntimeError>;
+    type Input = Result<Value, RuntimeErrorKind>;
     fn build(result: Self::Input) -> EvalControlFlowResult {
-        cont(result?)
+        cont(result.map_err(RuntimeError::new_native)?)
     }
     fn default_ty() -> Type {
         Type::variable_id(0)
@@ -547,7 +568,7 @@ macro_rules! n_ary_native_fn {
                     let [<$arg:lower>] = args_iter.next().unwrap();
                     // SAFETY: the borrow checker ensures that all mutable references are disjoint
                     let arg_ctx = unsafe { &mut *(ctx as *mut CallCtx) };
-                    let [<$arg:lower>] = $arg::extract([<$arg:lower>], arg_ctx)?;
+                    let [<$arg:lower>] = $arg::extract([<$arg:lower>], arg_ctx).map_err(RuntimeError::new_native)?;
                 )*
 
                 // Call the function using the extracted arguments

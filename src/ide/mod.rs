@@ -7,14 +7,14 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::{self, Display},
     ops::Deref,
     sync::LazyLock,
 };
 
 use crate::{
-    CompilationError, CompilerSession, DisplayStyle, Location, ModuleAndExpr, ModuleEnv,
+    CompilationError, CompilerSession, DisplayStyle, Location, ModuleAndExpr, ModuleEnv, SourceId,
     error::{
         CompilationErrorImpl, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
@@ -26,8 +26,10 @@ use crate::{
     r#type::{FnArgType, Type, tuple_type},
     value::{NativeValue, Value},
 };
+use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use regex::Regex;
+use ustr::ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -37,7 +39,9 @@ use char_index_lookup::CharIndexLookup;
 
 /// An error-data structure to be used in IDEs
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Debug, Clone)]
 pub struct ErrorData {
+    source_id: SourceId,
     pub from: u32,
     pub to: u32,
     pub file: String,
@@ -46,12 +50,9 @@ pub struct ErrorData {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl ErrorData {
-    // #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
-    // pub fn new(from: u32, to: u32, text: String) -> Self {
-    //     Self { from, to, text }
-    // }
     fn from_location(loc: &Location, source_table: &SourceTable, text: String) -> Self {
         Self {
+            source_id: loc.source_id(),
             from: loc.start(),
             to: loc.end(),
             file: source_table
@@ -61,8 +62,10 @@ impl ErrorData {
             text,
         }
     }
-    pub(crate) fn map(self, f: impl Fn(u32) -> u32) -> Self {
+
+    pub(crate) fn map(self, mut f: impl FnMut(u32) -> u32) -> Self {
         Self {
+            source_id: self.source_id,
             from: f(self.from),
             to: f(self.to),
             file: self.file,
@@ -93,7 +96,7 @@ fn compilation_error_to_data(
         let start = span.start_usize();
         let end = span.end_usize();
         let source_id = span.source_id();
-        match source_table.get_source(source_id) {
+        match source_table.get_source_text(source_id) {
             Some(source) => {
                 let position = source_table.get_line_column(source_id, start);
                 let snippet = &source[start..end];
@@ -612,15 +615,70 @@ impl AnnotationData {
     }
 }
 
-#[derive(Debug)]
+/// The content of an execution error in the IDE
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+#[derive(Debug, Clone)]
+pub struct ExecutionErrorData {
+    pub summary: String,
+    pub complete: String,
+    pub data: Option<ErrorData>,
+}
+
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum ExecutionResultInner {
+    Success(String),
+    Error(ExecutionErrorData),
+}
+
+/// The result of executing an expression in the IDE
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+pub struct ExecutionResult(ExecutionResultInner);
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl ExecutionResult {
+    pub fn html_message(&self) -> String {
+        use ExecutionResultInner::*;
+        match &self.0 {
+            Success(output) => html_escape::encode_text(&output).to_string(),
+            Error(data) => {
+                format!(
+                    "<span class=\"error\">{}</span>",
+                    html_escape::encode_text(&data.complete)
+                )
+            }
+        }
+    }
+
+    pub fn error_content(&self) -> Option<ExecutionErrorData> {
+        self.0.as_error().cloned()
+    }
+
+    pub fn error_data(&self) -> Option<ErrorData> {
+        self.0.as_error().and_then(|data| data.data.clone())
+    }
+}
+
+impl ExecutionResult {
+    pub fn success(output: String) -> Self {
+        Self(ExecutionResultInner::Success(output))
+    }
+
+    pub fn error(data: ExecutionErrorData) -> Self {
+        Self(ExecutionResultInner::Error(data))
+    }
+}
+
+/// The compiler to be used in the web IDE
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Compiler {
     session: CompilerSession,
     modules: Modules,
     extra_uses: Uses,
-    user_src: String,
     user_module: ModuleAndExpr,
+    char_index_lookup: HashMap<SourceId, CharIndexLookup>,
 }
+
+const SRC_NAME: &str = "<ide>";
 
 /// The compiler to be used in the web IDE, wasm-available part
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -634,27 +692,30 @@ impl Compiler {
             modules,
             extra_uses: Uses::new(),
             user_module: ModuleAndExpr::new_just_module(new_module_using_std()),
-            user_src: String::new(),
+            char_index_lookup: HashMap::new(),
         }
     }
 
-    fn compile_internal(&mut self, name: &str, src: &str) -> Result<(), CompilationError> {
+    fn compile_internal(&mut self, src: &str) -> Result<(), CompilationError> {
         self.user_module = self
             .session
-            .compile(name, src, &self.modules, &self.extra_uses)?;
-        self.user_src = src.to_string();
+            .compile(SRC_NAME, src, &self.modules, &self.extra_uses)?;
         Ok(())
     }
 
-    pub fn compile(&mut self, name: &str, src: &str) -> Option<Vec<ErrorData>> {
-        let char_indices = CharIndexLookup::new(src);
-        match self.compile_internal(name, src) {
+    pub fn compile(&mut self, src: &str) -> Option<Vec<ErrorData>> {
+        match self.compile_internal(src) {
             Ok(()) => None,
             Err(err) => Some(
                 compilation_error_to_data(&err, &self.session.source_table)
                     .into_iter()
                     .map(|data| {
-                        data.map(|pos| char_indices.byte_to_char_position(pos as usize) as u32)
+                        let source_id = data.source_id;
+                        data.map(|pos| {
+                            self.char_index_lookup(source_id)
+                                .byte_to_char_position(pos as usize)
+                                as u32
+                        })
                     })
                     .collect(),
             ),
@@ -680,8 +741,8 @@ impl Compiler {
             .map(str::to_string)
     }
 
-    pub fn run_expr_to_html(&self) -> String {
-        if let Some(expr) = &self.user_module.expr {
+    pub fn run_expr(&self) -> Option<ExecutionResult> {
+        self.user_module.expr.as_ref().map(|expr| {
             match expr.expr.eval(self.user_module.module.clone()) {
                 Ok(value) => {
                     let value = value.into_value();
@@ -691,29 +752,51 @@ impl Compiler {
                         value.display_pretty(&expr.ty.ty),
                         expr.ty.display_rust_style(&module_env)
                     );
-                    html_escape::encode_text(&output).to_string()
+                    ExecutionResult::success(output)
                 }
-                Err(err) => {
-                    let text = format!("{err}");
-                    format!(
-                        "<span class=\"error\">{}</span>",
-                        html_escape::encode_text(&text)
-                    )
+                Err(error) => {
+                    let summary = error.kind.to_string();
+                    let mut modules = self.modules.clone();
+                    modules.register_module_rc(ustr(SRC_NAME), self.user_module.module.clone());
+                    let complete = format!(
+                        "{}",
+                        error.format_with(&(self.session.source_table(), &modules))
+                    );
+                    let data = ExecutionErrorData {
+                        summary,
+                        complete: complete.clone(),
+                        data: error.location.as_ref().map(|loc| {
+                            ErrorData::from_location(loc, self.session.source_table(), complete)
+                        }),
+                    };
+                    ExecutionResult::error(data)
                 }
             }
-        } else {
-            "<span class=\"warning\">No expression to run</span>".to_string()
-        }
+        })
     }
 
-    pub fn get_annotations(&self) -> Vec<AnnotationData> {
-        let char_indices = CharIndexLookup::new(&self.user_src);
-        let mut annotations = self
-            .user_module
-            .display_annotations(self.user_src.as_str(), &self.modules, DisplayStyle::Rust)
-            .iter()
+    pub fn get_annotations(&mut self) -> Vec<AnnotationData> {
+        let (source_id, source_entry) = match self
+            .session
+            .source_table()
+            .get_latest_source_by_name(SRC_NAME)
+        {
+            Some(source) => source,
+            None => return Vec::new(),
+        };
+        let annotations = self.user_module.display_annotations(
+            source_id,
+            source_entry.source(),
+            &self.modules,
+            DisplayStyle::Rust,
+        );
+        let mut annotations = annotations
+            .into_iter()
             .map(|(pos, hint)| {
-                AnnotationData::new(char_indices.byte_to_char_position(*pos), hint.clone())
+                AnnotationData::new(
+                    self.char_index_lookup(source_id).byte_to_char_position(pos),
+                    hint,
+                )
             })
             .collect::<Vec<_>>();
         annotations.sort_by_key(|a| a.pos);
@@ -732,10 +815,11 @@ impl Compiler {
         for module in &self.modules.modules {
             let mod_name = *module.0;
             for local_fn in &module.1.functions {
-                let sym_name = match local_fn.name {
-                    Some(name) => name,
-                    None => continue,
-                };
+                let sym_name = local_fn.name;
+                // skip trait methods
+                if !module.1.is_non_trait_local_function(sym_name) {
+                    continue;
+                }
                 if sym_name.starts_with('@') {
                     continue; // skip hidden functions
                 }
@@ -767,10 +851,11 @@ impl Compiler {
         for module in &self.modules.modules {
             let mod_name = *module.0;
             for local_fn in &module.1.functions {
-                let sym_name = match local_fn.name {
-                    Some(name) => name,
-                    None => continue,
-                };
+                let sym_name = local_fn.name;
+                // skip trait methods
+                if !module.1.is_non_trait_local_function(sym_name) {
+                    continue;
+                }
                 let captures = if let Some(captures) = RE.captures(&sym_name) {
                     captures
                 } else {
@@ -798,7 +883,6 @@ impl Compiler {
 impl Compiler {
     pub fn new_with_modules(modules: Modules, extra_uses: Uses) -> Self {
         let session = CompilerSession::new();
-        let user_src = String::new();
         let mut module = new_module_using_std();
         module.uses.extend(extra_uses.iter().cloned());
         let user_module = ModuleAndExpr::new_just_module(module);
@@ -806,8 +890,8 @@ impl Compiler {
             session,
             modules,
             extra_uses,
-            user_src,
             user_module,
+            char_index_lookup: HashMap::new(),
         }
     }
 
@@ -819,6 +903,17 @@ impl Compiler {
         self
     }
     */
+
+    fn char_index_lookup(&mut self, source_id: SourceId) -> &mut CharIndexLookup {
+        self.char_index_lookup.entry(source_id).or_insert_with(|| {
+            CharIndexLookup::new(
+                self.session
+                    .source_table()
+                    .get_source_text(source_id)
+                    .unwrap(),
+            )
+        })
+    }
 
     fn run_fn<R>(
         &self,
@@ -849,7 +944,7 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?;
+                    .map_err(|err| format!("Execution error: {}", err.kind))?;
                 Ok(())
             }
         })
@@ -875,7 +970,7 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?
+                    .map_err(|err| format!("Execution error: {}", err.kind))?
                     .into_value();
                 Ok(ret.into_primitive_ty::<O>().unwrap())
             }
@@ -907,7 +1002,7 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?
+                    .map_err(|err| format!("Execution error: {}", err.kind))?
                     .into_value();
                 let ret_tuple = ret.into_tuple().unwrap();
                 let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
@@ -951,7 +1046,7 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?
+                    .map_err(|err| format!("Execution error: {}", err.kind))?
                     .into_value();
                 let ret_tuple = ret.into_tuple().unwrap();
                 let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
@@ -986,7 +1081,7 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?;
+                    .map_err(|err| format!("Execution error: {}", err.kind))?;
                 Ok(())
             }
         })
@@ -1019,7 +1114,7 @@ impl Compiler {
                     .code
                     .borrow()
                     .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
-                    .map_err(|err| format!("Execution error: {err}"))?
+                    .map_err(|err| format!("Execution error: {}", err.kind))?
                     .into_value();
                 Ok(ret.into_primitive_ty::<O>().unwrap())
             }
@@ -1053,7 +1148,7 @@ mod tests {
 
     fn build(code: &str) -> Compiler {
         let mut compiler = Compiler::new();
-        let errors = compiler.compile("<test>", code);
+        let errors = compiler.compile(code);
         if let Some(errors) = errors {
             panic!("Compilation errors: {}", iterable_to_string(&errors, ", "));
         }

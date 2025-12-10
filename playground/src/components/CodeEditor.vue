@@ -53,7 +53,7 @@ const extensions = [
 function fillDiagnostics(errorData: ErrorData[]){
 	diagnostics.length = 0;
 	for (const data of errorData) {
-		if (data.file != "<playground>") {
+		if (data.file != "<ide>") {
 			continue;
 		}
 		diagnostics.push({
@@ -69,7 +69,7 @@ function processUpdate(update: ViewUpdate) {
 	const text = update.state.doc.toString();
 	const view = update.view;
 	if (update.docChanged) {
-		const errorData = compiler.compile("<playground>", text);
+		const errorData = compiler.compile(text);
 		if (errorData !== undefined) {
 			fillDiagnostics(errorData);
 			setAnnotations(view, []);
@@ -93,7 +93,12 @@ const setText = (newText: string) => {
 
 const runCode = () => {
 	try {
-		return compiler.run_expr_to_html();
+		const result = compiler.run_expr();
+		const errorData = result?.error_data();
+		if (errorData !== undefined) {
+			fillDiagnostics([errorData]);
+		}
+		return result;
 	} catch (e) {
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		return `The compiler crashed, reload the page! Error: ${(e as any).toString()}`;

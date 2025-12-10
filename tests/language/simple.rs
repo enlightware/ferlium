@@ -18,7 +18,7 @@ use super::common::{
     TestSession, bool, float, get_property_value, int, set_property_value, string, unit,
 };
 use ferlium::{
-    error::{DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeError},
+    error::{DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeErrorKind},
     mutability::MutType,
     std::{
         array::{Array, array_type_generic},
@@ -1329,7 +1329,7 @@ fn borrow_checker() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn execution_errors() {
     let mut session = TestSession::new();
-    use RuntimeError::*;
+    use RuntimeErrorKind::*;
     assert_eq!(session.fail_run("abort()"), Aborted(None));
     assert_eq!(
         session.fail_run("panic(\"oh no\")"),
@@ -1393,7 +1393,7 @@ fn execution_errors() {
     );
     assert_eq!(
         session.fail_run("fn rf() { rf() } rf() + 0"),
-        RecursionLimitExceeded { limit: 100 }
+        RecursionLimitExceeded { limit: 50 }
     );
 }
 
@@ -1401,7 +1401,7 @@ fn execution_errors() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_type() {
     let mut session = TestSession::new();
-    use RuntimeError::*;
+    use RuntimeErrorKind::*;
     assert_eq!(session.run("if true { 2 } else { abort() }"), int(2));
     assert_eq!(
         session.fail_run("if false { 2 } else { abort() }"),
@@ -1658,8 +1658,16 @@ fn type_ascription() {
     assert_eq!(session.run("(5: float)"), float(5.0));
     // Optimisation
     let mut compile_expr = |s: &str| session.compile(s).expr.unwrap().expr;
-    assert!(compile_expr("1").kind.is_static_apply());
-    assert!(compile_expr("(1: int)").kind.is_immediate());
+    assert!(
+        compile_expr("1").kind.as_block().unwrap()[0]
+            .kind
+            .is_static_apply()
+    );
+    assert!(
+        compile_expr("(1: int)").kind.as_block().unwrap()[0]
+            .kind
+            .is_immediate()
+    );
 }
 
 #[test]

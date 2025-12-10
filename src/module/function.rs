@@ -19,7 +19,7 @@ use crate::{
     module::{ModuleEnv, ModuleRc, TraitKey, format_impl_header_by_key},
 };
 
-use ustr::{Ustr, ustr};
+use ustr::Ustr;
 
 define_id_type!(
     /// Local function ID within a module
@@ -44,9 +44,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         match self {
             FunctionId::Local(id) => {
-                let name = env.current.functions[id.as_index()]
-                    .name
-                    .unwrap_or(ustr("<unnamed>"));
+                let name = env.current.functions[id.as_index()].name;
                 write!(f, "local function {name} (#{id})")
             }
             FunctionId::Import(id) => {
@@ -106,18 +104,18 @@ pub struct ImportFunctionSlot {
 /// An entry in local functions
 #[derive(Debug, Clone)]
 pub struct LocalFunction {
-    /// Name of the function, impl methods have no name for themselves
-    pub name: Option<Ustr>,
+    /// Name of the function
+    pub name: Ustr,
     /// Function code and definition
     pub function: ModuleFunction,
     /// Cached interface hash for quick compatibility checks
     pub interface_hash: u64,
 }
 impl LocalFunction {
-    pub fn new_anonymous(function: ModuleFunction) -> Self {
+    pub fn new_compute_interface_hash(function: ModuleFunction, name: Ustr) -> Self {
         let interface_hash = function.definition.signature_hash();
         Self {
-            name: None,
+            name,
             function,
             interface_hash,
         }
@@ -180,11 +178,11 @@ impl ModuleFunction {
     }
 }
 
-impl FormatWith<ModuleEnv<'_>> for (&ModuleFunction, Option<Ustr>) {
+impl FormatWith<ModuleEnv<'_>> for (&ModuleFunction, Ustr) {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         self.0
             .definition
-            .fmt_with_name_and_module_env(f, &self.1, "", env)?;
+            .fmt_with_name_and_module_env(f, self.1, "", env)?;
         writeln!(f)?;
         self.0.fmt_code(f, env)
     }

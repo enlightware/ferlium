@@ -36,7 +36,7 @@ pub use uses::*;
 
 use std::{
     cell::{Ref, RefCell, RefMut},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     hash::{DefaultHasher, Hash, Hasher},
 };
@@ -66,7 +66,8 @@ pub struct Module {
 
     // Functions, including methods of concrete trait
     pub functions: Vec<LocalFunction>,
-    pub function_name_to_id: HashMap<Ustr, LocalFunctionId>,
+    // Note: multiple functions can have the same name (e.g. trait methods)
+    pub function_name_to_id: HashMap<Ustr, HashSet<LocalFunctionId>>,
 
     // Type system content
     pub type_aliases: TypeAliases,
@@ -79,21 +80,8 @@ pub struct Module {
 }
 
 impl Module {
-    /// Add a named function to this module, returning its ID.
-    pub fn add_named_function(&mut self, name: Ustr, function: ModuleFunction) {
-        self.add_function(Some(name), function);
-    }
-
     /// Add a function to this module, returning its ID.
-    pub fn add_function(
-        &mut self,
-        name: Option<Ustr>,
-        function: ModuleFunction,
-    ) -> LocalFunctionId {
-        if let Some(name) = name {
-            // FIXME: decide whether we want to allow that (useful for REPL?), but then we would leak
-            assert!(!self.function_name_to_id.contains_key(&name));
-        }
+    pub fn add_function(&mut self, name: Ustr, function: ModuleFunction) -> LocalFunctionId {
         let id = LocalFunctionId::from_index(self.functions.len());
         let interface_hash = function.definition.signature_hash();
         self.functions.push(LocalFunction {
@@ -101,9 +89,7 @@ impl Module {
             function,
             interface_hash,
         });
-        if let Some(name) = name {
-            self.function_name_to_id.insert(name, id);
-        }
+        self.function_name_to_id.entry(name).or_default().insert(id);
         id
     }
 
@@ -248,7 +234,7 @@ impl Module {
         others: &'a Modules,
     ) -> Option<&'a ModuleFunction> {
         self.get_member(name, others, &|name, module| {
-            module.get_own_function(ustr(name))
+            module.get_unique_own_function(ustr(name))
         })
         .map(|(_, f)| f)
     }
@@ -284,41 +270,64 @@ impl Module {
         )
     }
 
+    /// Check if a local function name is unique in this module.
+    pub fn is_non_trait_local_function(&self, name: Ustr) -> bool {
+        match self.function_name_to_id.get(&name) {
+            Some(ids) => {
+                if ids.len() == 1 {
+                    !name.contains("…")
+                } else {
+                    false
+                }
+            }
+            None => false,
+        }
+    }
+
+    /// Get a local function ID by name
+    pub fn get_unique_local_function_id(&self, name: Ustr) -> Option<LocalFunctionId> {
+        let ids = self.function_name_to_id.get(&name)?;
+        if ids.len() != 1 {
+            return None;
+        }
+        Some(*ids.iter().next().unwrap())
+    }
+
     /// Get a local function and its data by name
-    pub fn get_local_function(&self, name: Ustr) -> Option<&LocalFunction> {
-        let id = self.function_name_to_id.get(&name)?;
+    pub fn get_unique_local_function(&self, name: Ustr) -> Option<&LocalFunction> {
+        let id = self.get_unique_local_function_id(name)?;
         self.functions.get(id.as_index())
     }
 
     /// Get a local function by name
-    pub fn get_own_function(&self, name: Ustr) -> Option<&ModuleFunction> {
-        self.get_local_function(name).map(|f| &f.function)
+    pub fn get_unique_own_function(&self, name: Ustr) -> Option<&ModuleFunction> {
+        self.get_unique_local_function(name).map(|f| &f.function)
     }
 
     /// Get a mutable local function by name
-    pub fn get_own_function_mut(&mut self, name: Ustr) -> Option<&mut ModuleFunction> {
-        self.get_own_function_id_mut(name).map(|(_, f)| f)
+    pub fn get_unique_own_function_mut(&mut self, name: Ustr) -> Option<&mut ModuleFunction> {
+        self.get_unique_own_function_id_mut(name).map(|(_, f)| f)
     }
 
     /// Get a mutable local function and its ID by name
-    pub fn get_own_function_id_mut(
+    pub fn get_unique_own_function_id_mut(
         &mut self,
         name: Ustr,
     ) -> Option<(LocalFunctionId, &mut ModuleFunction)> {
-        let id = self.function_name_to_id.get(&name)?;
+        let id = self.get_unique_local_function_id(name)?;
         self.functions
             .get_mut(id.as_index())
-            .map(|f| (*id, &mut f.function))
+            .map(|f| (id, &mut f.function))
     }
 
     /// Look-up a function by name only in this module and return its script node, if it is a script function.
-    pub fn get_own_function_node(&mut self, name: Ustr) -> Option<Ref<'_, Node>> {
-        self.get_own_function(name)?.get_node()
+    pub fn get_unique_own_function_node(&mut self, name: Ustr) -> Option<Ref<'_, Node>> {
+        self.get_unique_own_function(name)?.get_node()
     }
 
     /// Look-up a function by name only in this module and return its mutable script node, if it is a script function.
-    pub fn get_own_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<'_, Node>> {
-        self.get_own_function_mut(name)?.get_node_mut()
+    pub fn get_unique_own_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<'_, Node>> {
+        self.get_unique_own_function_mut(name)?.get_node_mut()
     }
 
     /// Get a local function by ID
@@ -456,15 +465,19 @@ impl Module {
             self.impls.fmt_with_filter(f, &env, filter)?;
         }
         if !self.functions.is_empty() {
-            let named_count = self.functions.iter().filter(|f| f.name.is_some()).count();
+            let named_count = self
+                .functions
+                .iter()
+                .filter(|f| self.is_non_trait_local_function(f.name))
+                .count();
             writeln!(f, "Named functions ({}):\n", named_count)?;
             for (i, LocalFunction { name, function, .. }) in self.functions.iter().enumerate() {
-                if name.is_none() {
+                if !self.is_non_trait_local_function(*name) {
                     continue;
                 }
                 function
                     .definition
-                    .fmt_with_name_and_module_env(f, name, "", &env)?;
+                    .fmt_with_name_and_module_env(f, *name, "", &env)?;
                 writeln!(f, " (#{i})")?;
                 if show_details {
                     function.fmt_code(f, &env)?;
@@ -473,7 +486,7 @@ impl Module {
             }
             let unnamed_count = self.functions.len() - named_count;
             if unnamed_count > 0 {
-                writeln!(f, "\nNot showing {} unnamed functions.", unnamed_count)?;
+                writeln!(f, "\nNot showing {} trait impl functions.", unnamed_count)?;
             }
         }
         Ok(())
@@ -512,11 +525,15 @@ impl Module {
             if !stats.is_empty() {
                 stats.push_str(", ");
             }
-            let named_count = self.functions.iter().filter(|f| f.name.is_some()).count();
+            let named_count = self
+                .functions
+                .iter()
+                .filter(|f| self.is_non_trait_local_function(f.name))
+                .count();
             stats.push_str(&format!("named functions: {}", named_count));
             if self.functions.len() > named_count {
                 let unnamed_count = self.functions.len() - named_count;
-                stats.push_str(&format!(", unnamed functions: {}", unnamed_count));
+                stats.push_str(&format!(", trait impl functions: {}", unnamed_count));
             }
         }
         stats
@@ -567,7 +584,7 @@ impl FormatWith<ModuleEnv<'_>> for LocalFunction {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         self.function
             .definition
-            .fmt_with_name_and_module_env(f, &self.name, "", env)?;
+            .fmt_with_name_and_module_env(f, self.name, "", env)?;
         self.function.code.borrow().format_ind(f, env, 1, 1)
     }
 }

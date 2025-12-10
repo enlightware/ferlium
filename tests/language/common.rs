@@ -10,8 +10,8 @@ use ferlium::{
     CompilerSession, ModuleAndExpr, SourceTable,
     containers::IntoSVec2,
     effects::{PrimitiveEffect, effect, effects, no_effects},
-    error::{CompilationError, RuntimeError},
-    eval::{ControlFlow, EvalResult},
+    error::{CompilationError, RuntimeErrorKind},
+    eval::{ControlFlow, EvalResult, RuntimeError},
     function::{
         BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnVN,
@@ -38,7 +38,7 @@ pub type CompileRunResult = Result<Value, Error>;
 
 fn testing_module() -> Module {
     let mut module: Module = Default::default();
-    module.add_named_function(
+    module.add_function(
         "some_int".into(),
         UnaryNativeFnNV::description_with_ty(
             |v: isize| Value::tuple_variant(ustr("Some"), [Value::native(v)]),
@@ -50,7 +50,7 @@ fn testing_module() -> Module {
         ),
     );
     let pair_variant_type = variant_type([("Pair", Type::tuple([int_type(), int_type()]))]);
-    module.add_named_function(
+    module.add_function(
         "pair".into(),
         BinaryNativeFnNNV::description_with_ty(
             |a: isize, b: isize| {
@@ -69,7 +69,7 @@ fn testing_module() -> Module {
 
 fn test_effect_module() -> Module {
     let mut module: Module = Default::default();
-    module.add_named_function(
+    module.add_function(
         "read".into(),
         NullaryNativeFnN::description_with_default_ty(
             || (),
@@ -78,7 +78,7 @@ fn test_effect_module() -> Module {
             effect(PrimitiveEffect::Read),
         ),
     );
-    module.add_named_function(
+    module.add_function(
         "write".into(),
         NullaryNativeFnN::description_with_default_ty(
             || (),
@@ -87,7 +87,7 @@ fn test_effect_module() -> Module {
             effect(PrimitiveEffect::Write),
         ),
     );
-    module.add_named_function(
+    module.add_function(
         "read_write".into(),
         NullaryNativeFnN::description_with_default_ty(
             || (),
@@ -96,7 +96,7 @@ fn test_effect_module() -> Module {
             effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write]),
         ),
     );
-    module.add_named_function(
+    module.add_function(
         "take_read".into(),
         UnaryNativeFnVN::description_with_in_ty(
             |_value: Value| (),
@@ -137,7 +137,7 @@ pub fn get_array_property_value() -> Array {
 
 fn test_property_module() -> Module {
     let mut module: Module = Default::default();
-    module.add_named_function(
+    module.add_function(
         "@get my_scope.my_var".into(),
         NullaryNativeFnN::description_with_default_ty(
             get_property_value,
@@ -146,7 +146,7 @@ fn test_property_module() -> Module {
             effect(PrimitiveEffect::Read),
         ),
     );
-    module.add_named_function(
+    module.add_function(
         "@set my_scope.my_var".into(),
         UnaryNativeFnNN::description_with_default_ty(
             set_property_value,
@@ -155,7 +155,7 @@ fn test_property_module() -> Module {
             effect(PrimitiveEffect::Write),
         ),
     );
-    module.add_named_function(
+    module.add_function(
         "@get my_scope.my_array".into(),
         NullaryNativeFnN::description_with_ty(
             get_array_property_value,
@@ -165,7 +165,7 @@ fn test_property_module() -> Module {
             effect(PrimitiveEffect::Read),
         ),
     );
-    module.add_named_function(
+    module.add_function(
         "@set my_scope.my_array".into(),
         UnaryNativeFnNN::description_with_in_ty(
             set_array_property_value,
@@ -235,7 +235,7 @@ impl TestSession {
     pub fn compile_and_get_fn_def(&mut self, src: &str, fn_name: &str) -> FunctionDefinition {
         self.compile(src)
             .module
-            .get_own_function(ustr(fn_name))
+            .get_unique_own_function(ustr(fn_name))
             .expect("Function not found")
             .definition
             .clone()
@@ -272,13 +272,13 @@ impl TestSession {
     }
 
     /// Compile and run the src and expect a runtime error
-    pub fn fail_run(&mut self, src: &str) -> RuntimeError {
+    pub fn fail_run(&mut self, src: &str) -> RuntimeErrorKind {
         match self.try_run(src) {
             Ok(value) => panic!(
                 "Expected runtime error, got value: {}",
                 value.to_string_repr()
             ),
-            Err(error) => error,
+            Err(error) => error.kind(),
         }
     }
 

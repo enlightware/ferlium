@@ -24,7 +24,7 @@ function getCurrentPosition(state: EditorState): string {
 		return `${cursors.length} cursors`;
 	}
 	const line = state.doc.lineAt(state.selection.main.head);
-	return `Ln ${line.number}, Col ${defined(cursors[0]).head - line.from}`;
+	return `Ln ${line.number}, Col ${defined(cursors[0]).head - line.from + 1}`;
 }
 
 function cursorPositionPanel(view: EditorView): Panel {

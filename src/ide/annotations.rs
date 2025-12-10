@@ -11,7 +11,7 @@ use std::{collections::HashSet, sync::LazyLock};
 use heck::ToSnakeCase;
 
 use crate::{
-    ModuleAndExpr,
+    ModuleAndExpr, SourceId,
     format::FormatWith,
     ir::{Node, NodeKind},
     module::{ModuleEnv, Modules},
@@ -19,10 +19,11 @@ use crate::{
 };
 
 impl ModuleAndExpr {
-    /// Type and other annotations for display in a IDE
+    /// Type and other annotations for display in a IDE, for a given source file.
     /// Returns a vector of positions in byte offsets and annotations.
     pub fn display_annotations(
         &self,
+        source_id: SourceId,
         src: &str,
         other_modules: &Modules,
         style: DisplayStyle,
@@ -33,140 +34,147 @@ impl ModuleAndExpr {
 
         // Function and expression bodies.
         for local_fn in &self.module.functions {
-            if local_fn.name.is_none() {
-                // Do not annotate unnamed, generated functions.
+            let function = &local_fn.function;
+            let spans = match &function.spans {
+                Some(spans) => spans,
+                None => continue,
+            };
+            if spans.span.source_id != source_id {
                 continue;
             }
-            let mut code = local_fn.function.code.borrow_mut();
+            let mut code = function.code.borrow_mut();
             if let Some(script_fn) = code.as_script_mut() {
                 script_fn
                     .code
                     .variable_type_annotations(&mut annotations, &env);
             }
         }
-        if let Some(expr) = &self.expr {
+        if let Some(expr) = &self.expr
+            && expr.expr.span.source_id == source_id
+        {
             expr.expr.variable_type_annotations(&mut annotations, &env);
         }
 
         // Function signatures.
         for local_fn in &self.module.functions {
-            if local_fn.name.is_none() {
-                // Do not annotate unnamed, generated functions.
+            let function = &local_fn.function;
+            let spans = match &function.spans {
+                Some(spans) => spans,
+                None => continue,
+            };
+            if spans.span.source_id != source_id {
                 continue;
             }
-            let function = &local_fn.function;
-            if let Some(spans) = &function.spans {
-                if !function.definition.ty_scheme.is_just_type() {
-                    match style {
-                        Mathematical => {
-                            annotations.push((
-                                spans.span.start_usize(),
-                                format!(
-                                    "{} ",
-                                    function
-                                        .definition
-                                        .ty_scheme
-                                        .display_quantifiers_and_constraints_math_style(&env)
-                                ),
-                            ));
-                        }
-                        Rust => {
-                            annotations.push((
-                                spans.name.end_usize(),
-                                format!(
-                                    "{}",
-                                    function
-                                        .definition
-                                        .ty_scheme
-                                        .display_quantifiers_rust_style()
-                                ),
-                            ));
-                        }
-                    }
-                }
-                for ((name_span, ty_span), arg_ty) in spans
-                    .args
-                    .iter()
-                    .zip(&function.definition.ty_scheme.ty.args)
-                {
-                    if let Some((ty_span, ty_constant)) = ty_span {
-                        if !ty_constant {
-                            annotations.push((
-                                ty_span.end_usize(),
-                                format!(" ⇨ {}", arg_ty.format_with(&env)),
-                            ));
-                        }
-                    } else {
+            if !function.definition.ty_scheme.is_just_type() {
+                match style {
+                    Mathematical => {
                         annotations.push((
-                            name_span.end_usize(),
-                            format!(": {}", arg_ty.format_with(&env)),
+                            spans.span.start_usize(),
+                            format!(
+                                "{} ",
+                                function
+                                    .definition
+                                    .ty_scheme
+                                    .display_quantifiers_and_constraints_math_style(&env)
+                            ),
+                        ));
+                    }
+                    Rust => {
+                        annotations.push((
+                            spans.name.end_usize(),
+                            format!(
+                                "{}",
+                                function
+                                    .definition
+                                    .ty_scheme
+                                    .display_quantifiers_rust_style()
+                            ),
                         ));
                     }
                 }
-                let byte_src = src.as_bytes();
-                let past_args_index = spans.args_span.end_usize();
-                let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
-                    ""
-                } else {
-                    " "
-                };
-                let mut annotation = if function.definition.ty_scheme.ty.effects.is_empty() {
-                    if let Some((_, ty_constant)) = spans.ret_ty {
-                        if !ty_constant {
-                            Some(format!(
-                                "{start_space}⇨ {}",
-                                function.definition.ty_scheme.ty.ret.format_with(&env)
-                            ))
-                        } else {
-                            None
-                        }
-                    } else {
-                        Some(format!(
-                            "{start_space}-> {}",
-                            function.definition.ty_scheme.ty.ret.format_with(&env)
-                        ))
+            }
+            for ((name_span, ty_span), arg_ty) in spans
+                .args
+                .iter()
+                .zip(&function.definition.ty_scheme.ty.args)
+            {
+                if let Some((ty_span, ty_constant)) = ty_span {
+                    if !ty_constant {
+                        annotations.push((
+                            ty_span.end_usize(),
+                            format!(" ⇨ {}", arg_ty.format_with(&env)),
+                        ));
                     }
-                } else if let Some((_, ty_constant)) = spans.ret_ty {
+                } else {
+                    annotations.push((
+                        name_span.end_usize(),
+                        format!(": {}", arg_ty.format_with(&env)),
+                    ));
+                }
+            }
+            let byte_src = src.as_bytes();
+            let past_args_index = spans.args_span.end_usize();
+            let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
+                ""
+            } else {
+                " "
+            };
+            let mut annotation = if function.definition.ty_scheme.ty.effects.is_empty() {
+                if let Some((_, ty_constant)) = spans.ret_ty {
                     if !ty_constant {
                         Some(format!(
-                            "{start_space}⇨ {} ! {}",
-                            function.definition.ty_scheme.ty.ret.format_with(&env),
-                            function.definition.ty_scheme.ty.effects
+                            "{start_space}⇨ {}",
+                            function.definition.ty_scheme.ty.ret.format_with(&env)
                         ))
                     } else {
-                        Some(format!(
-                            "{start_space}! {}",
-                            function.definition.ty_scheme.ty.effects
-                        ))
+                        None
                     }
                 } else {
                     Some(format!(
-                        "{start_space}-> {} ! {}",
+                        "{start_space}-> {}",
+                        function.definition.ty_scheme.ty.ret.format_with(&env)
+                    ))
+                }
+            } else if let Some((_, ty_constant)) = spans.ret_ty {
+                if !ty_constant {
+                    Some(format!(
+                        "{start_space}⇨ {} ! {}",
                         function.definition.ty_scheme.ty.ret.format_with(&env),
                         function.definition.ty_scheme.ty.effects
                     ))
-                };
-                if style == Rust && !function.definition.ty_scheme.is_just_type_and_effects() {
-                    annotation = Some(format!(
-                        "{}{}{}",
-                        annotation.as_ref().map_or("", |v| v),
-                        annotation.as_ref().map_or(start_space, |_| " "),
-                        function
-                            .definition
-                            .ty_scheme
-                            .display_constraints_rust_style(&env)
-                    ));
+                } else {
+                    Some(format!(
+                        "{start_space}! {}",
+                        function.definition.ty_scheme.ty.effects
+                    ))
                 }
-                if let Some(mut annotation) = annotation {
-                    let end_space =
-                        if past_args_index < byte_src.len() && byte_src[past_args_index] == b' ' {
-                            ""
-                        } else {
-                            " "
-                        };
-                    annotation.push_str(end_space);
-                    annotations.push((past_args_index, annotation));
-                }
+            } else {
+                Some(format!(
+                    "{start_space}-> {} ! {}",
+                    function.definition.ty_scheme.ty.ret.format_with(&env),
+                    function.definition.ty_scheme.ty.effects
+                ))
+            };
+            if style == Rust && !function.definition.ty_scheme.is_just_type_and_effects() {
+                annotation = Some(format!(
+                    "{}{}{}",
+                    annotation.as_ref().map_or("", |v| v),
+                    annotation.as_ref().map_or(start_space, |_| " "),
+                    function
+                        .definition
+                        .ty_scheme
+                        .display_constraints_rust_style(&env)
+                ));
+            }
+            if let Some(mut annotation) = annotation {
+                let end_space =
+                    if past_args_index < byte_src.len() && byte_src[past_args_index] == b' ' {
+                        ""
+                    } else {
+                        " "
+                    };
+                annotation.push_str(end_space);
+                annotations.push((past_args_index, annotation));
             }
         }
 

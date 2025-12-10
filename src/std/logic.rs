@@ -87,7 +87,7 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(test_bit)) as Function,
         ],
     );
-    to.add_named_function(
+    to.add_function(
         ustr("not"),
         UnaryNativeFnNN::description_with_default_ty(
             std::ops::Not::not as fn(bool) -> bool,
@@ -98,7 +98,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // Generic equalities
-    to.add_named_function(
+    to.add_function(
         ustr("eq"),
         BinaryNativeFnVVN::description_with_default_ty(
             |a: Value, b: Value| a == b,

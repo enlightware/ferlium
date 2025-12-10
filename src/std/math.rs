@@ -16,7 +16,7 @@ use crate::{
     cached_primitive_ty,
     containers::b,
     effects::{EffType, PrimitiveEffect, effect, no_effects},
-    error::RuntimeError,
+    error::RuntimeErrorKind,
     function::{
         BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, FunctionDefinition,
         UnaryNativeFnNN,
@@ -301,7 +301,7 @@ pub static DIV_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 });
 
 pub fn add_to_module(to: &mut Module) {
-    use RuntimeError::*;
+    use RuntimeErrorKind::*;
 
     // Types
     to.type_aliases.set("int", int_type());
@@ -358,7 +358,7 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
     );
-    to.add_named_function(
+    to.add_function(
         ustr("idiv"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
@@ -373,7 +373,7 @@ pub fn add_to_module(to: &mut Module) {
             effect(PrimitiveEffect::Fallible),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("idiv_euclid"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
@@ -388,7 +388,7 @@ pub fn add_to_module(to: &mut Module) {
             effect(PrimitiveEffect::Fallible),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("rem"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
@@ -403,7 +403,7 @@ pub fn add_to_module(to: &mut Module) {
             effect(PrimitiveEffect::Fallible),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("mod"),
         BinaryNativeFnNNFN::description_with_default_ty(
             |lhs: isize, rhs: isize| {
@@ -452,7 +452,7 @@ pub fn add_to_module(to: &mut Module) {
             }
         })) as Function],
     );
-    to.add_named_function(
+    to.add_function(
         ustr("round"),
         UnaryNativeFnNN::description_with_default_ty(
             |value: Float| value.round() as Int,

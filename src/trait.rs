@@ -82,10 +82,16 @@ impl Trait {
         self.input_type_count() + self.output_type_count()
     }
 
+    /// Return the index of the method with the given name, if it exists.
     pub fn method_index(&self, name: Ustr) -> Option<usize> {
         self.functions
             .iter()
             .position(|(fn_name, _)| *fn_name == name)
+    }
+
+    /// Return the qualified method name for the given method index, e.g., "TraitName<…>::method_name".
+    pub fn qualified_method_name(&self, index: usize) -> String {
+        format!("{}<…>::{}", self.name, self.functions[index].0)
     }
 
     /// Validate the trait, ensuring that its function signatures adhere to the limitations of the current implementation.
@@ -263,7 +269,7 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
             } else {
                 writeln!(f)?;
             }
-            def.fmt_with_name_and_module_env(f, &Some(*name), "    ", env)?;
+            def.fmt_with_name_and_module_env(f, *name, "    ", env)?;
         }
         writeln!(f, "\n}}")?;
         Ok(())

@@ -56,7 +56,7 @@ impl Span {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Location {
     span: Span,
-    source_id: SourceId,
+    pub(crate) source_id: SourceId,
 }
 
 impl Location {
@@ -196,14 +196,17 @@ impl FormatWith<SourceTable> for Location {
         let start = self.start_usize();
         let end = self.end_usize();
         let source_id = self.source_id();
-        match source_table.get_source(source_id) {
+        match source_table.get_source_entry(source_id) {
             Some(source) => {
-                let position = source_table.get_line_column(source_id, start);
-                let snippet = &source[start..end];
+                let position = source.get_line_column(start);
+                let snippet = &source.source()[start..end];
                 write!(
                     f,
                     "{}:{}:{}: `{}`",
-                    source_id, position.0, position.1, snippet
+                    source.name(),
+                    position.0,
+                    position.1,
+                    snippet
                 )
             }
             None => {
@@ -242,6 +245,14 @@ impl SourceEntry {
         }
     }
 
+    pub fn name(&self) -> &String {
+        &self.name
+    }
+
+    pub fn source(&self) -> &String {
+        &self.source
+    }
+
     /// Get the line and column (unicode scalar value) of a byte position in this source entry.
     pub fn get_line_column(&self, byte_pos: usize) -> (usize, usize) {
         let s = &self.source;
@@ -276,7 +287,11 @@ impl SourceTable {
         id
     }
 
-    pub fn get_source(&self, index: SourceId) -> Option<&String> {
+    pub fn get_source_entry(&self, index: SourceId) -> Option<&SourceEntry> {
+        self.sources.get(index.as_index())
+    }
+
+    pub fn get_source_text(&self, index: SourceId) -> Option<&String> {
         self.sources
             .get(index.as_index())
             .map(|entry| &entry.source)
@@ -284,6 +299,15 @@ impl SourceTable {
 
     pub fn get_source_name(&self, index: SourceId) -> Option<&String> {
         self.sources.get(index.as_index()).map(|entry| &entry.name)
+    }
+
+    pub fn get_latest_source_by_name(&self, name: &str) -> Option<(SourceId, &SourceEntry)> {
+        for (i, entry) in self.sources.iter().enumerate().rev() {
+            if entry.name == name {
+                return Some((SourceId::from_index(i), entry));
+            }
+        }
+        None
     }
 
     /// Get the line and column (unicode scalar value) of a byte position in a given source.

@@ -45,7 +45,7 @@ const highlight = styleTags({
 
 export function languageExtension() {
 	return new LanguageSupport(LRLanguage.define({
-		name: "Candli script",
+		name: "Ferlium",
 		parser: parser.configure({
 			props: [
 				highlight,

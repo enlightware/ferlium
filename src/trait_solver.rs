@@ -442,7 +442,12 @@ impl<'a> TraitSolver<'a> {
                             ));
                             let code: FunctionRc = Rc::new(RefCell::new(code));
                             let function = ModuleFunction::new_without_spans(def, code);
-                            let local_fn = LocalFunction::new_anonymous(function);
+                            let name = Ustr::from(&format!(
+                                "{} (thunk)>",
+                                trait_ref.qualified_method_name(method_index)
+                            ));
+                            let local_fn =
+                                LocalFunction::new_compute_interface_hash(function, name);
                             let id = self.fn_collector.next_id();
                             self.fn_collector.push(local_fn);
                             id
@@ -578,12 +583,14 @@ impl<'a> TraitSolver<'a> {
                 span: use_site
             })
         })?;
-        module.get_own_function(function_name).ok_or_else(|| {
-            internal_compilation_error!(Internal {
-                error: format!("Function {function_name} not found in module {module_name}"),
-                span: use_site
-            })
-        })?;
+        module
+            .get_unique_own_function(function_name)
+            .ok_or_else(|| {
+                internal_compilation_error!(Internal {
+                    error: format!("Function {function_name} not found in module {module_name}"),
+                    span: use_site
+                })
+            })?;
         Ok(FunctionId::Import(
             self.import_function(module_name, function_name),
         ))

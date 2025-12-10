@@ -66,7 +66,7 @@ impl<'src> ariadne::Cache<SourceId> for Cache<'src> {
         let entry = self.cache.entry(*id).or_insert_with(|| {
             let source = self
                 .source_table
-                .get_source(*id)
+                .get_source_text(*id)
                 .expect("Source not found in source table for ariadne cache");
             Source::from(source)
         });
@@ -528,7 +528,9 @@ fn process_input(
                 );
             }
             Err(error) => {
-                eprintln!("Runtime error: {error}");
+                let mut modules = other_modules.clone();
+                modules.register_module_rc(ustr(name), module.clone());
+                eprintln!("{}", error.format_with(&(session.source_table(), &modules)));
                 if cfg!(debug_assertions) {
                     eval_ctx.print_environment();
                 }
@@ -737,7 +739,7 @@ fn run_interactive_repl() {
                                     Ok(id) => id,
                                     Err(_) => {
                                         // not a number, attempt to find by name
-                                        match module.function_name_to_id.get(&ustr(arg)) {
+                                        match module.get_unique_local_function_id(ustr(arg)) {
                                             Some(id) => id.as_index(),
                                             None => {
                                                 println!(

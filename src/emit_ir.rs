@@ -228,15 +228,18 @@ where
 
     // Populate the function table
     let mut local_fns = Vec::new();
-    for ast::ModuleFunction {
-        name,
-        args,
-        args_span,
-        ret_ty,
-        span,
-        doc,
-        ..
-    } in ast_functions()
+    for (
+        function_index,
+        ast::ModuleFunction {
+            name,
+            args,
+            args_span,
+            ret_ty,
+            span,
+            doc,
+            ..
+        },
+    ) in ast_functions().enumerate()
     {
         // Create type and mutability variables for the arguments.
         // Note: the type quantifiers and constraints are left empty.
@@ -320,10 +323,13 @@ where
             code: Rc::new(RefCell::new(dummy_code)),
             spans: Some(spans),
         };
-        let name = if trait_ctx.is_some() {
-            None
+        let name = if let Some(trait_ctx) = &trait_ctx {
+            trait_ctx
+                .trait_ref
+                .qualified_method_name(function_index)
+                .into()
         } else {
-            Some(name.0)
+            name.0
         };
         local_fns.push(output.add_function(name, descr));
     }

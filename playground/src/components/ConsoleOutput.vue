@@ -39,6 +39,9 @@ div {
 	padding: 4px;
 	white-space: pre-wrap; /* Maintains whitespace formatting */
 	border: 1px solid #333;
+	min-height: calc(2em + 8px);
+	max-height: 50%;
+	overflow: auto;
 }
 div :deep(.warning) {
 	color: #ffe786;

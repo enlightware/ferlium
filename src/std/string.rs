@@ -295,7 +295,7 @@ pub fn add_to_module(to: &mut Module) {
         [b(BinaryNativeFnNNN::new(String::contains)) as Function],
     );
 
-    to.add_named_function(
+    to.add_function(
         ustr("to_string"),
         UnaryNativeFnVN::description_with_default_ty(
             String::any_to_string,
@@ -304,7 +304,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("string_push_str"),
         BinaryNativeFnMNN::description_with_default_ty(
             String::push_str,
@@ -313,7 +313,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("string_concat"),
         BinaryNativeFnNNN::description_with_default_ty(
             |a: String, b: String| String::concat(&a, &b),
@@ -322,7 +322,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("string_len"),
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.grapheme_count() as isize,
@@ -331,7 +331,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("string_byte_len"),
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.byte_len() as isize,
@@ -340,7 +340,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("string_is_empty"),
         UnaryNativeFnNN::description_with_default_ty(
             |a: String| a.is_empty() as isize,
@@ -349,7 +349,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("string_replace"),
         TernaryNativeFnNNNN::description_with_default_ty(
             |s: String, from: String, to: String| {
@@ -362,7 +362,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("string_slice"),
         TernaryNativeFnNNNN::description_with_default_ty(
             |s: String, start: isize, end: isize| s.slice(start, end),
@@ -371,7 +371,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("uppercase"),
         UnaryNativeFnNN::description_with_default_ty(
             |s: String| s.uppercase(),
@@ -380,7 +380,7 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
-    to.add_named_function(
+    to.add_function(
         ustr("lowercase"),
         UnaryNativeFnNN::description_with_default_ty(
             |s: String| s.lowercase(),
@@ -393,8 +393,8 @@ pub fn add_to_module(to: &mut Module) {
     // Iterator
     to.type_aliases
         .set_with_ustr(ustr("string_iterator"), string_iter_type());
-    to.add_named_function(ustr("string_iter"), String::iter_descr());
-    to.add_named_function(
+    to.add_function(ustr("string_iter"), String::iter_descr());
+    to.add_function(
         ustr("string_iterator_next"),
         StringIterator::next_value_descr(),
     );

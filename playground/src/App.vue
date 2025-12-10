@@ -22,7 +22,12 @@ function updateEditor(data: { value: string, index: number }) {
 
 function runCode() {
 	if (editor.value && !isRunDisabled.value) {
-		runOutput.value = editor.value.runCode();
+		const result = editor.value.runCode();
+		if (result !== undefined) {
+			runOutput.value = result.html_message();
+		} else {
+			runOutput.value = "<span class=\"warning\">No expression to run</span>";
+		}
 		defined(console.value).highlight();
 	}
 }

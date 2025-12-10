@@ -442,7 +442,7 @@ fn span_to_string(loc: &Location, source_table: &SourceTable) -> String {
     let start = loc.start_usize();
     let end = loc.end_usize();
     let source_id = loc.source_id();
-    match source_table.get_source(source_id) {
+    match source_table.get_source_text(source_id) {
         Some(source) => {
             let position = source_table.get_line_column(source_id, start);
             let snippet = &source[start..end];
@@ -1644,7 +1644,7 @@ impl CompilationError {
 /// Runtime error
 
 #[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
-pub enum RuntimeError {
+pub enum RuntimeErrorKind {
     Aborted(Option<String>),
     DivisionByZero,
     RemainderByZero,
@@ -1654,9 +1654,9 @@ pub enum RuntimeError {
     // TODO: add execution duration limit exhausted
 }
 
-impl Display for RuntimeError {
+impl Display for RuntimeErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use RuntimeError::*;
+        use RuntimeErrorKind::*;
         match self {
             Aborted(msg) => match msg {
                 Some(msg) => write!(f, "Aborted: {msg}"),
@@ -1688,7 +1688,7 @@ pub fn resolve_must_be_mutable_ctx(
     match ctx {
         Value => (current_span, reason_span),
         FnTypeArg(index) => {
-            if let Some(src) = source_table.get_source(reason_span.source_id()) {
+            if let Some(src) = source_table.get_source_text(reason_span.source_id()) {
                 let arg_span = extract_ith_fn_arg(src, reason_span, index);
                 (arg_span, current_span)
             } else {

@@ -380,16 +380,16 @@ pub fn add_to_module(to: &mut Module) {
 
     // TODO: use type classes to get rid of the array prefix
     // to.add_local_function(ustr("array_from_iterator"), Array::from_iterator_descr());
-    to.add_named_function(ustr("array_append"), Array::append_descr());
-    to.add_named_function(ustr("array_prepend"), Array::prepend_descr());
-    to.add_named_function(ustr("array_pop_back"), Array::pop_back_desc());
-    to.add_named_function(ustr("array_pop_front"), Array::pop_front_desc());
-    to.add_named_function(ustr("array_len"), Array::len_descr());
-    to.add_named_function(ustr("array_concat"), Array::concat_descr());
+    to.add_function(ustr("array_append"), Array::append_descr());
+    to.add_function(ustr("array_prepend"), Array::prepend_descr());
+    to.add_function(ustr("array_pop_back"), Array::pop_back_desc());
+    to.add_function(ustr("array_pop_front"), Array::pop_front_desc());
+    to.add_function(ustr("array_len"), Array::len_descr());
+    to.add_function(ustr("array_concat"), Array::concat_descr());
     // to.add_local_function(ustr("array_map"), Array::map_descr());
-    to.add_named_function(ustr("array_iter"), Array::iter_descr());
+    to.add_function(ustr("array_iter"), Array::iter_descr());
 
-    to.add_named_function(
+    to.add_function(
         ustr("array_iterator_next"),
         ArrayIterator::next_value_descr(),
     );
