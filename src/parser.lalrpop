@@ -345,62 +345,68 @@ GenericParamList: Vec<UstrSpan> = {
 // Also: https://github.com/bleibig/rust-grammar/blob/master/parser-lalr.y
 // Also: https://github.com/nikomatsakis/rustypop/blob/master/src/rusty.lalrpop
 
-// TODO: add Rust-style optional semicolons in block expressions using
-// the guard macro features of lalrpop as in Niko's rustypop.
-
 pub Expr = {
-    Es<TopExpr<"">>
+    Es<TopExpr<"", "">>
 }
 
-TopExpr<NoStruct> = {
-    AssignExpr<NoStruct>,
+TopExpr<NoStruct, NoElideFollow> = {
+    AssignExpr<NoStruct, NoElideFollow>,
     ReturnExpr<NoStruct>,
-    AbstractExpr<NoStruct>,
-    PipeExpr<NoStruct>,
+    AbstractExpr<NoStruct, NoElideFollow>,
+    PipeExpr<NoStruct, NoElideFollow>,
 }
 
-AssignExpr<NoStruct>: ExprKind = {
-    <le:Es<PipeExpr<NoStruct>>> <ls:@L> "=" <rs:@R> <re:Es<TopExpr<NoStruct>>> => Assign(boxed(le), span(ls, rs, source_id), boxed(re)),
-    <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op, le, re),
+AssignExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <le:Es<PipeExpr<NoStruct, NoElideFollow>>> <ls:@L> "=" <rs:@R> <re:Es<TopExpr<NoStruct, "">>> => Assign(boxed(le), span(ls, rs, source_id), boxed(re)),
+    <le:Es<PipeExpr<NoStruct, NoElideFollow>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct, "">>> => assign_op(op, le, re),
 }
 
 ReturnExpr<NoStruct>: ExprKind = {
-    "return" <e:Es<TopExpr<NoStruct>>> => Return(boxed(e)),
+    "return" <e:Es<TopExpr<NoStruct, "">>> => Return(boxed(e)),
 }
 
-AbstractExpr<NoStruct>: ExprKind = {
-    "|" <args:StrArgs> "|" <body:Es<TopExpr<NoStruct>>> => Abstract(args, boxed(body)),
-    "||" <body:Es<TopExpr<NoStruct>>> => Abstract(vec![], boxed(body)),
+AbstractExpr<NoStruct, NoElideFollow>: ExprKind = {
+    "|" <args:StrArgs> "|" <body:Es<TopExpr<NoStruct, "">>> => Abstract(args, boxed(body)),
+    "||" <body:Es<TopExpr<NoStruct, "">>> if NoElideFollow == "" => Abstract(vec![], boxed(body)),
 }
 
-PipeExpr<NoStruct>: ExprKind = {
-    <l:Es<PipeExpr<NoStruct>>> "|>" <e:Es<SuffixExpr<"">>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), ext_f(l, a), UnnamedArg::First),
-    RangeExpr<NoStruct>,
+PipeExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <l:Es<PipeExpr<NoStruct, NoElideFollow>>> "|>" <e:Es<SuffixExpr<"", "">>> "(" <a:Sep<Es<TopExpr<"", "">>, ",">> ")" => Apply(boxed(e), ext_f(l, a), UnnamedArg::First),
+    RangeExpr<NoStruct, NoElideFollow>,
 }
 
-RangeExpr<NoStruct>: ExprKind = {
-    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => syn_static_apply(o, vec![l, r]),
-    LogicOrExpr<NoStruct>,
+RangeExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <l:Es<UnaryExpr<NoStruct, NoElideFollow>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct, "">>> => syn_static_apply(o, vec![l, r]),
+    LogicOrExpr<NoStruct, NoElideFollow>,
 }
 
-LogicOrExpr<NoStruct>: ExprKind = {
-    <l:Es<LogicOrExpr<NoStruct>>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr<NoStruct>>> => cond_if_else(l, literal_expr(true, o.1), r),
-    LogicAndExpr<NoStruct>,
+LogicOrExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <l:Es<LogicOrExpr<NoStruct, NoElideFollow>>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr<NoStruct, "">>> => cond_if_else(l, literal_expr(true, o.1), r),
+    LogicAndExpr<NoStruct, NoElideFollow>,
 }
 
-LogicAndExpr<NoStruct>: ExprKind = {
-    <l:Es<LogicAndExpr<NoStruct>>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr<NoStruct>>> => cond_if_else(l, r, literal_expr(false, o.1)),
-    CompExpr<NoStruct>,
+LogicAndExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <l:Es<LogicAndExpr<NoStruct, NoElideFollow>>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr<NoStruct, "">>> => cond_if_else(l, r, literal_expr(false, o.1)),
+    CompExpr<NoStruct, NoElideFollow>,
 }
 
-CompExpr<NoStruct> = BinOpLeftAssoc<CompOp, AddExpr<NoStruct>>;
+CompExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <l:Es<CompExpr<NoStruct, NoElideFollow>>> <o:Sp<CompOp>> <r:Es<AddExpr<NoStruct, "">>> => syn_static_apply(o, vec![l, r]),
+    AddExpr<NoStruct, NoElideFollow>,
+};
 
-AddExpr<NoStruct> = BinOpLeftAssoc<AddOp, MulExpr<NoStruct>>;
+AddExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <l:Es<AddExpr<NoStruct, NoElideFollow>>> <o:Sp<AddOp>> <r:Es<MulExpr<NoStruct, "">>> => syn_static_apply(o, vec![l, r]),
+    MulExpr<NoStruct, NoElideFollow>,
+};
 
-MulExpr<NoStruct> = BinOpLeftAssoc<MulOp, CastExpr<NoStruct>>;
+MulExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <l:Es<MulExpr<NoStruct, NoElideFollow>>> <o:Sp<MulOp>> <r:Es<CastExpr<NoStruct, "">>> => syn_static_apply(o, vec![l, r]),
+    CastExpr<NoStruct, NoElideFollow>,
+};
 
-CastExpr<NoStruct>: ExprKind = {
-    <e:Es<CastExpr<NoStruct>>> <l:@L> "as" <ty:Sp<CastTargetType>> <r:@R> => {
+CastExpr<NoStruct, NoElideFollow>: ExprKind = {
+    <e:Es<CastExpr<NoStruct, NoElideFollow>>> <l:@L> "as" <ty:Sp<CastTargetType>> <r:@R> => {
         let e_span = e.span;
         let cast_expr = Expr::new(
             Identifier(ustr("cast")),
@@ -415,7 +421,7 @@ CastExpr<NoStruct>: ExprKind = {
             ty.1
         )
     },
-    UnaryExpr<NoStruct>,
+    UnaryExpr<NoStruct, NoElideFollow>,
 }
 
 // Cast target types: only allow simple, unambiguous types
@@ -431,30 +437,30 @@ CastTargetTypeParens: Type = {
     "(" <ty:DefinedType> ")" => ty
 }
 
-UnaryExpr<NoStruct> = {
-    SuffixExpr<NoStruct>,
-    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => syn_static_apply(o, vec![e]),
+UnaryExpr<NoStruct, NoElideFollow> = {
+    SuffixExpr<NoStruct, NoElideFollow>,
+    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct, "">>> if NoElideFollow == "" => syn_static_apply(o, vec![e]),
 }
 
-SuffixExpr<NoStruct> = {
-    AtomExpr<NoStruct>,
-    <e:Es<SuffixExpr<NoStruct>>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
-    <e:Es<SuffixExpr<NoStruct>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
-    <e:Es<SuffixExpr<NoStruct>>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
-    <e:Es<SuffixExpr<NoStruct>>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), a, UnnamedArg::None),
+SuffixExpr<NoStruct, NoElideFollow> = {
+    AtomExpr<NoStruct, NoElideFollow>,
+    <e:Es<SuffixExpr<NoStruct, NoElideFollow>>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
+    <e:Es<SuffixExpr<NoStruct, NoElideFollow>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
+    <e:Es<SuffixExpr<NoStruct, NoElideFollow>>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
+    <e:Es<SuffixExpr<NoStruct, NoElideFollow>>> "(" <a:Sep<Es<TopExpr<"", "">>, ",">> ")" => Apply(boxed(e), a, UnnamedArg::None),
 }
 
-AtomExpr<NoStruct> = {
-    ParExpr,
+AtomExpr<NoStruct, NoElideFollow> = {
+    StmtLikeExpr,
     PathOrStructExpr<NoStruct>,
     PropertyPathExpr,
-    LiteralExpr,
+    LiteralExpr<NoElideFollow>,
     FormattedString,
-    TupleExpr,
-    ArrayExpr,
     RecordExpr,
     SoftBreakExpr,
-    StmtLikeExpr,
+    ParExpr if NoElideFollow == "",
+    TupleExpr if NoElideFollow == "",
+    ArrayExpr if NoElideFollow == "",
     BrokenExpr,
 }
 
@@ -498,20 +504,20 @@ PathIdentifier<E>: Ustr = {
 }
 
 ForExpr: ExprKind = {
-    "for" <id:Sp<UIdentifier>> "in" <seq:Es<TopExpr<"NoStruct">>> <body:Es<Block>> =>
+    "for" <id:Sp<UIdentifier>> "in" <seq:Es<TopExpr<"NoStruct", "">>> <body:Es<Block>> =>
         for_loop(id, seq, body),
 }
 
 IfExpr: ExprKind = {
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f),
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<Block>> => cond_if_else(c, t, f),
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> => cond_if(c, t),
+    "if" <c:Es<TopExpr<"NoStruct", "">>> <t:Es<Block>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f),
+    "if" <c:Es<TopExpr<"NoStruct", "">>> <t:Es<Block>> "else" <f:Es<Block>> => cond_if_else(c, t, f),
+    "if" <c:Es<TopExpr<"NoStruct", "">>> <t:Es<Block>> => cond_if(c, t),
 }
 
 MatchExpr: ExprKind = {
-    "match" <e:Es<TopExpr<"NoStruct">>> "{" <m:Sep<MatchArg, ",">> "}" =>
+    "match" <e:Es<TopExpr<"NoStruct", "">>> "{" <m:Sep<MatchArg, ",">> "}" =>
         Match(boxed(e), m, None),
-    "match" <e:Es<TopExpr<"NoStruct">>> "{" <m:(<MatchArg> ",")*> "_" "=>" <d:Expr> ","? "}" =>
+    "match" <e:Es<TopExpr<"NoStruct", "">>> "{" <m:(<MatchArg> ",")*> "_" "=>" <d:Expr> ","? "}" =>
         Match(boxed(e), m, Some(boxed(d))),
 }
 
@@ -565,8 +571,11 @@ TupleLiteralPattern: (LiteralValue, IrType) = {
     },
 }
 
-LiteralExpr: ExprKind = {
-    LiteralValue => Literal(<>.0.into_value(), <>.1),
+LiteralExpr<NoElideFollow>: ExprKind = {
+    UnitLiteral if NoElideFollow == "" => Literal(<>.0.into_value(), <>.1),
+    BoolLiteral => Literal(<>.0.into_value(), <>.1),
+    IntLiteral => Literal(<>.0.into_value(), <>.1),
+    StringLiteral => Literal(<>.0.into_value(), <>.1),
 }
 
 LiteralValue = {
@@ -649,8 +658,64 @@ SoftBreakExpr: ExprKind = {
 }
 
 Block: ExprKind = {
-    "{" <e:Stmts> <r:Expr> "}" => Block(ext_b(e, r)),
-    "{" <e:Stmts> <r:Loc<"}">> => Block(ext_b(e, unit_literal_expr(r))),
+    <l:@L> "{" <parts:BlockParts> <r:Loc<"}">> => {
+        let (mut exprs, ends_with_semi_or_empty) = parts;
+        if ends_with_semi_or_empty {
+            exprs.push(unit_literal_expr(r));
+        }
+        Block(exprs)
+    },
+}
+
+// Block body parsing with Rust-like semicolon elision after block-like expressions.
+//
+// Key property (to keep the grammar LR(1)):
+// - a non-`;` expression is only allowed as the *final tail expression*, OR
+// - as a statement without `;` only if it is `StmtLikeExpr` (if/match/for/loop/block)
+//   and is followed by more block content.
+BlockParts: (Vec<Expr>, bool) = {
+    => (vec![], true),
+    <s:BlockStmtSemi> <rest:BlockParts> => ext_f_with_flag(s, rest),
+    <s:Es<StmtLikeExpr>> <rest:BlockPartsNonEmptyAfterElided> => ext_f_with_flag(s, rest),
+    <t:Expr> => (vec![t], false),
+}
+
+// After a semicolon-elided `StmtLikeExpr` statement, the next item must *not*
+// begin with tokens that would normally continue an expression (e.g. calls).
+// This keeps the grammar LR(1) and matches Rust-style behavior:
+// - `match .. { .. }(3)` parses as a call expression
+// - `match .. { .. } ; (3)` is needed if you want two separate statements.
+BlockPartsNonEmptyAfterElided: (Vec<Expr>, bool) = {
+    <s:BlockStmtSemiAfterElided> <rest:BlockParts> => ext_f_with_flag(s, rest),
+    <s:Es<StmtLikeExpr>> <rest:BlockPartsNonEmptyAfterElided> => ext_f_with_flag(s, rest),
+    <t:ExprStartNoElideFollow> => (vec![t], false),
+}
+
+#[inline]
+BlockStmtSemiAfterElided: Expr = {
+    Es<LetStmt>,
+    ExprStmtAfterElided,
+}
+
+ExprStmtAfterElided: Expr = {
+    <e:ExprStartNoElideFollow> ";" => e,
+}
+
+// Expression grammar variant used only to restrict the *leading token* of an
+// item that follows a semicolon-elided stmt-like expression in a block.
+//
+// Important: this is implemented by instantiating the main expression grammar
+// with a non-empty `NoElideFollow` template parameter, which removes expression
+// forms that would begin with tokens that can also *continue* the previous
+// expression (notably calls/tuples/arrays via `(` / `[` and leading unary ops).
+ExprStartNoElideFollow: Expr = {
+    Es<TopExpr<"", "NoElideFollow">>
+}
+
+#[inline]
+BlockStmtSemi: Expr = {
+    Es<LetStmt>,
+    ExprStmt,
 }
 
 #[inline]

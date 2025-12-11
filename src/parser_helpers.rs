@@ -242,6 +242,13 @@ pub(crate) fn ext_f<T>(e: T, v: Vec<T>) -> Vec<T> {
     result
 }
 
+/// Extend v with a single element e at the beginning, preserving the bool flag
+pub(crate) fn ext_f_with_flag<T>(e: T, v: (Vec<T>, bool)) -> (Vec<T>, bool) {
+    let mut result = vec![e];
+    result.extend(v.0);
+    (result, v.1)
+}
+
 /// Parse a single-line, Rust-style doc comment
 pub(crate) fn parse_doc_comments(comment: Option<&str>) -> Option<String> {
     comment.map(|comment| comment.trim_start_matches("///").trim().to_string())

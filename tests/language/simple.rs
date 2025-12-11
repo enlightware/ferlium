@@ -91,6 +91,64 @@ fn blocks() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn semicolon_elision_stmt_like_rust() {
+    let mut session = TestSession::new();
+
+    // Like Rust: block-like statements may omit `;` in statement position.
+    assert_eq!(session.run("{ {} 1 }"), int(1));
+    assert_eq!(
+        session.run("{ let mut a = 0; if true { a = 1 } a }"),
+        int(1)
+    );
+    assert_eq!(session.run("{ if true { 1 } else { 2 } 3 }"), int(3));
+    assert_eq!(
+        session.run(indoc! { r#"
+            {
+                let mut a = 0;
+                match true {
+                    true => { a = 1 },
+                    _ => { a = 2 },
+                }
+                a
+            }
+        "# }),
+        int(1)
+    );
+    assert_eq!(
+        session.run("{ let mut s = 0; for i in 1..4 { s = s + i } s }"),
+        int(6)
+    );
+
+    // Like Rust: `match .. { .. } (args)` should be parsed as a call expression,
+    // not as an elided statement followed by a parenthesized expression.
+    assert_eq!(
+        session.run(indoc! { r#"
+            {
+                match true {
+                    true => |x| x + 1,
+                    _ => |x| x + 2,
+                } (3)
+            }
+        "# }),
+        int(4)
+    );
+
+    // A semicolon forces statement separation.
+    assert_eq!(
+        session.run("{ match true { true => 1, _ => 2 }; (3) }"),
+        int(3)
+    );
+
+    // Non-block-like expressions still require a semicolon to separate statements.
+    session
+        .fail_compilation("{ 1 2 }")
+        .into_inner()
+        .into_parsing_failed()
+        .unwrap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn equalities() {
     let mut session = TestSession::new();
     assert_eq!(session.run("42 == 42"), bool(true));
