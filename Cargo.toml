@@ -60,3 +60,7 @@ ferlium_macros = { path = "ferlium_macros", features = ["ferlium_abi_64"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.97"
+
+[lints.rust]
+# As we are developing, some assignments may be unused temporarily.
+unused_assignments = "allow"
