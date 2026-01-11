@@ -35,7 +35,6 @@ pub mod mem;
 pub mod option;
 pub mod ordering;
 mod prelude;
-pub mod range;
 pub mod serde;
 pub mod string;
 pub mod variant;
@@ -53,7 +52,6 @@ pub fn std_module(source_table: &mut SourceTable) -> ModuleRc {
         concat::add_to_module(&mut module);
         contains::add_to_module(&mut module);
         math::add_to_module(&mut module);
-        range::add_to_module(&mut module);
         array::add_to_module(&mut module);
         io::add_to_module(&mut module);
         string::add_to_module(&mut module);

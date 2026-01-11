@@ -7,6 +7,56 @@ fn clamp(value, min_bound, max_bound) {
 	}
 }
 
+// Ranges
+
+// /// A range bounded inclusively at start and exclusively at end: [start..end)
+struct Range {
+	start: int,
+	end: int,
+}
+
+struct RangeIterator {
+	range: Range,
+	next: int,
+}
+
+impl Iterator {
+	fn next(it: &mut RangeIterator) {
+		let next = it.next;
+		if it.range.end >= it.range.start {
+			if it.next < it.range.end {
+				it.next += 1;
+				Some(next)
+			} else {
+				None
+			}
+		} else {
+			if it.next > it.range.end {
+				it.next -= 1;
+				Some(next)
+			} else {
+				None
+			}
+		}
+	}
+}
+
+impl Seq {
+	fn iter(r: Range) {
+		RangeIterator { range: r, next: r.start }
+	}
+}
+
+impl SizedSeq {
+	fn len(r: Range) {
+		abs(r.end - r.start)
+	}
+}
+
+fn range(start: int, end: int) {
+	Range { start: start, end: end }
+}
+
 // Arrays
 
 /// Return the last element of an array, or None if the array is empty.
@@ -202,23 +252,6 @@ impl Seq {
 impl SizedSeq {
 	fn len(s) {
 		string_len(s)
-	}
-}
-
-// Iterator and Seq for ranges
-impl Iterator {
-	fn next(a) {
-		range_iterator_next(a)
-	}
-}
-impl Seq {
-	fn iter(a) {
-		range_iter(a)
-	}
-}
-impl SizedSeq {
-	fn len(a) {
-		range_len(a)
 	}
 }
 
