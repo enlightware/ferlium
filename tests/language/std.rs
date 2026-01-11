@@ -25,7 +25,7 @@ use wasm_bindgen_test::*;
 fn range_iterators() {
     let mut session = TestSession::new();
     assert_eq!(
-        session.run("let r = range(0, 2); let mut it = iter(r); (next(it), next(it))"),
+        session.run("let r = 0..2; let mut it = iter(r); (next(it), next(it))"),
         tuple!(variant_t1("Some", int(0)), variant_t1("Some", int(1)))
     );
     assert_eq!(session.run("len(3..3)"), int(0));
