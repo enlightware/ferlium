@@ -230,6 +230,7 @@ pipeExpr {
 rangeExpr {
     logicOrExpr
     | unaryExpr '..' unaryExpr
+    | unaryExpr '..=' unaryExpr
 }
 
 logicOrExpr {
