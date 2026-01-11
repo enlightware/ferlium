@@ -12,6 +12,7 @@ use crate::ast::Expr;
 use crate::ast::ExprKind;
 use crate::ast::PExpr;
 use crate::ast::PExprKind;
+use crate::ast::PType;
 use crate::ast::Pattern;
 use crate::ast::PatternKind;
 use crate::ast::Phase;
@@ -21,6 +22,7 @@ use crate::containers::SVec2;
 use crate::containers::b;
 use crate::error::LocatedError;
 use crate::escapes::apply_string_escapes;
+use crate::std::math::int_type;
 use crate::std::string::String as MyString;
 use crate::r#type::Type;
 use crate::value::LiteralValue;
@@ -176,6 +178,27 @@ pub(crate) fn assign_op(op: UstrSpan, lhs: PExpr, rhs: PExpr) -> PExprKind {
     let span = Location::fuse([lhs.span, rhs.span]).unwrap();
     let apply = Expr::new(syn_static_apply(op, vec![lhs.clone(), rhs]), span);
     ExprKind::Assign(b(lhs), op.1, b(apply))
+}
+
+pub(crate) fn build_range(op: UstrSpan, start: PExpr, end: PExpr) -> PExprKind {
+    // Forces not using the from_int method when int literals are used
+    let start_span = start.span;
+    let start = PExpr::new(
+        ExprKind::TypeAscription(b(start), PType::Resolved(int_type()), start_span),
+        start_span,
+    );
+    let end_span = end.span;
+    let end = PExpr::new(
+        ExprKind::TypeAscription(b(end), PType::Resolved(int_type()), end_span),
+        end_span,
+    );
+    ExprKind::StructLiteral(
+        op,
+        vec![
+            ((ustr("start"), start.span), start),
+            ((ustr("end"), end.span), end),
+        ],
+    )
 }
 
 /// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor

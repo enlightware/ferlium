@@ -840,6 +840,43 @@ fn for_loops_with_range() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn for_loops_with_inclusive_range() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run("for i in 0..=3 { () }"), unit());
+    assert_eq!(
+        session.run("let mut s = 0; for i in 1..=4 { s = s + i }; s"),
+        int(10)
+    );
+    assert_eq!(
+        session.run("let mut s = 0; for i in -1..=-4 { s = s + i }; s"),
+        int(-10)
+    );
+    assert_eq!(
+        session.run("let mut a = []; for i in 2..=5 { array_append(a, i) }; a"),
+        int_a![2, 3, 4, 5]
+    );
+    assert_eq!(
+        session.run(
+            "fn s() { 2 } fn e() { 5 } let mut a = []; for i in s()..=e() { array_append(a, i) }; a"
+        ),
+        int_a![2, 3, 4, 5]
+    );
+    assert_eq!(
+        session.run("let mut a = []; for i in 5..=2 { array_append(a, i) }; a"),
+        int_a![5, 4, 3, 2]
+    );
+    assert_eq!(
+        session.run("let mut s = 0; for i in 1..=1 { s = s + i }; s"),
+        int(1)
+    );
+    assert_eq!(
+        session.run("let mut a = []; for i in 1..=0 { array_append(a, i) }; a"),
+        int_a![1, 0]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn for_loops_with_arrays() {
     let mut session = TestSession::new();
     assert_eq!(session.run("for i in [0, 1, 2] { () }"), unit());

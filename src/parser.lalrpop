@@ -379,7 +379,7 @@ PipeExpr<NoStruct>: ExprKind = {
 }
 
 RangeExpr<NoStruct>: ExprKind = {
-    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => syn_static_apply(o, vec![l, r]),
+    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => build_range(o, l, r),
     LogicOrExpr<NoStruct>,
 }
 
@@ -718,7 +718,8 @@ StrOrMore: PatternVar = {
 // Terminals
 
 RangeOp: Ustr = {
-    ".." => ustr("std::range"),
+    ".." => ustr("std::Range"),
+    "..=" => ustr("std::RangeInclusive"),
 }
 
 UnaryOp: Ustr = {

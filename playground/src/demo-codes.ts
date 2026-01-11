@@ -207,7 +207,11 @@ fn range_sum2(start, end) {
 	sum2(start..end)
 }
 
-(range_sum2(0, 5), sum2([1.0, 1.5, 2.0]))
+fn range_inclusive_sum2(start, end) {
+	sum2(start..=end)
+}
+
+(range_sum2(0, 5), range_inclusive_sum2(0, 5), sum2([1.0, 1.5, 2.0]))
 `],
 ['Function pipe operator',
 `[1, 2] |> array_concat([3, 4]) |> array_map(|x| x*x)`],

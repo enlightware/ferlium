@@ -24,14 +24,14 @@ impl Iterator {
 	fn next(it: &mut RangeIterator) {
 		let next = it.next;
 		if it.range.end >= it.range.start {
-			if it.next < it.range.end {
+			if next < it.range.end {
 				it.next += 1;
 				Some(next)
 			} else {
 				None
 			}
 		} else {
-			if it.next > it.range.end {
+			if next > it.range.end {
 				it.next -= 1;
 				Some(next)
 			} else {
@@ -53,8 +53,47 @@ impl SizedSeq {
 	}
 }
 
-fn range(start: int, end: int) {
-	Range { start: start, end: end }
+struct RangeInclusive {
+	start: int,
+	end: int,
+}
+
+struct RangeInclusiveIterator {
+	range: RangeInclusive,
+	next: int,
+}
+
+impl Iterator {
+	fn next(it: &mut RangeInclusiveIterator) {
+		let next = it.next;
+		if it.range.end >= it.range.start {
+			if next <= it.range.end {
+				it.next += 1;
+				Some(next)
+			} else {
+				None
+			}
+		} else {
+			if next >= it.range.end {
+				it.next -= 1;
+				Some(next)
+			} else {
+				None
+			}
+		}
+	}
+}
+
+impl Seq {
+	fn iter(r: RangeInclusive) {
+		RangeInclusiveIterator { range: r, next: r.start }
+	}
+}
+
+impl SizedSeq {
+	fn len(r: RangeInclusive) {
+		abs(r.end - r.start) + 1
+	}
 }
 
 // Arrays
@@ -404,7 +443,7 @@ impl Deserialize {
 impl Serialize {
 	fn serialize(a) {
 		let mut result = [];
-		for i in range(0, array_len(a)) {
+		for i in 0..array_len(a) {
 			array_append(result, serialize(a[i]));
 		};
 		Array(result)
@@ -415,7 +454,7 @@ impl Deserialize {
 		match (a) {
 			Array(a) => {
 				let mut result = [];
-				for i in range(0, array_len(a)) {
+				for i in 0..array_len(a) {
 					array_append(result, deserialize(a[i]));
 				};
 				result
