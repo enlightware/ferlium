@@ -9,13 +9,13 @@
 use std::rc::Rc;
 
 use crate::{
-    module::{Module, ModuleFunction, Modules},
+    ast::{self, UstrSpan},
+    module::{Module, ModuleFunction, Modules, path::Path},
     r#trait::TraitRef,
     r#type::TypeDefRef,
     typing_env::TraitFunctionDescription,
 };
 use derive_new::new;
-use itertools::Itertools;
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -53,12 +53,12 @@ impl<'m> ModuleEnv<'m> {
     pub fn type_alias_name(&self, ty: Type) -> Option<String> {
         self.current.type_aliases.get_name(ty).map_or_else(
             || {
-                self.others.modules.iter().find_map(|(mod_name, module)| {
+                self.others.modules.iter().find_map(|(mod_path, module)| {
                     module.type_aliases.get_name(ty).map(|ty_name| {
-                        if self.current.uses(*mod_name, ty_name) {
+                        if self.current.uses(mod_path, ty_name) {
                             ty_name.to_string()
                         } else {
-                            format!("{mod_name}::{ty_name}")
+                            format!("{mod_path}::{ty_name}")
                         }
                     })
                 })
@@ -78,7 +78,7 @@ impl<'m> ModuleEnv<'m> {
                             .type_aliases
                             .get_bare_native_name(native)
                             .map(|ty_name| {
-                                if self.current.uses(*mod_name, ty_name) {
+                                if self.current.uses(mod_name, ty_name) {
                                     ty_name.to_string()
                                 } else {
                                     format!("{mod_name}::{ty_name}")
@@ -90,30 +90,27 @@ impl<'m> ModuleEnv<'m> {
             )
     }
 
-    pub fn type_alias_type(&self, path: &str) -> Option<Type> {
-        self.get_module_member(path, &|name, module| {
+    pub fn type_alias_type(&self, path: &ast::Path) -> Option<Type> {
+        self.get_module_member(&path.segments, &|name, module| {
             module.type_aliases.get_type(&ustr(name))
         })
         .map(|(_, ty)| ty)
     }
 
-    pub fn type_def_for_construction(&self, joined_path: &str) -> Option<TypeDefLookupResult> {
-        let path = joined_path.split("::").collect::<Vec<_>>();
+    pub fn type_def_for_construction(&self, path: &ast::Path) -> Option<TypeDefLookupResult> {
         // First search for a matching enum
-        let len = path.len();
+        let segments = &path.segments;
+        let len = segments.len();
         if len >= 2 {
-            // FIXME: this is inefficient, we should keep the split path all the way from parsing
-            let enum_path = path[0..=len - 2].join("::");
-            let variant_name = path[len - 1];
-            if let Some((_, ty_def)) = self.get_module_member(&enum_path, &|name, module| {
+            let enum_segments = &segments[0..len - 1];
+            let variant_name = segments[len - 1].0;
+            if let Some((_, ty_def)) = self.get_module_member(enum_segments, &|name, module| {
                 module.type_defs.get(&ustr(name)).cloned()
             }) {
                 if ty_def.is_enum() {
                     let ty_data = ty_def.shape.data();
                     let variants = ty_data.as_variant().unwrap();
-                    let variant = variants
-                        .iter()
-                        .find(|(name, _)| name.as_str() == variant_name);
+                    let variant = variants.iter().find(|(name, _)| *name == variant_name);
                     if let Some((tag, ty)) = variant {
                         return Some(TypeDefLookupResult::Enum(ty_def.clone(), *tag, *ty));
                     }
@@ -122,7 +119,7 @@ impl<'m> ModuleEnv<'m> {
         }
         // Not found, search for a matching struct
         if len >= 1 {
-            if let Some((_, ty_def)) = self.get_module_member(joined_path, &|name, module| {
+            if let Some((_, ty_def)) = self.get_module_member(segments, &|name, module| {
                 module.type_defs.get(&ustr(name)).cloned()
             }) {
                 if ty_def.is_struct_like() {
@@ -134,8 +131,8 @@ impl<'m> ModuleEnv<'m> {
         None
     }
 
-    pub fn type_def_type(&self, path: &str) -> Option<Type> {
-        self.get_module_member(path, &|name, module| {
+    pub fn type_def_type(&self, path: &ast::Path) -> Option<Type> {
+        self.get_module_member(&path.segments, &|name, module| {
             module.type_defs.get(&ustr(name)).cloned()
         })
         .map(|(_, ty_def)| ty_def.as_type())
@@ -156,7 +153,7 @@ impl<'m> ModuleEnv<'m> {
                             .find(|local_fn| Rc::ptr_eq(&local_fn.function.code, func))
                             .map(|local_fn| {
                                 let fn_name = local_fn.name;
-                                if self.current.uses(*mod_name, fn_name) {
+                                if self.current.uses(mod_name, fn_name) {
                                     fn_name.to_string()
                                 } else {
                                     format!("{mod_name}::{fn_name}")
@@ -169,7 +166,10 @@ impl<'m> ModuleEnv<'m> {
     }
 
     /// Get a function from the current module, or other ones, return the name of the module if other.
-    pub fn get_function(&'m self, path: &'m str) -> Option<(Option<Ustr>, &'m ModuleFunction)> {
+    pub fn get_function(
+        &'m self,
+        path: &'m [UstrSpan],
+    ) -> Option<(Option<Path>, &'m ModuleFunction)> {
         self.get_module_member(path, &|name, module| {
             module.get_unique_own_function(ustr(name))
         })
@@ -178,16 +178,16 @@ impl<'m> ModuleEnv<'m> {
     /// Get a function from the current module, or other ones, return the name of the module if other.
     pub fn get_program_function(
         &'m self,
-        path: &'m str,
-    ) -> Option<(Option<Ustr>, &'m ModuleFunction)> {
+        path: &'m [UstrSpan],
+    ) -> Option<(Option<Path>, &'m ModuleFunction)> {
         self.get_module_member(path, &|name, module| {
             module.get_unique_own_function(ustr(name))
         })
     }
 
     /// Get the trait reference associated to a trait name.
-    pub fn get_trait_ref(&'m self, path: &'m str) -> Option<TraitRef> {
-        self.get_module_member(path, &|name, module| {
+    pub fn get_trait_ref(&'m self, name: UstrSpan) -> Option<TraitRef> {
+        self.get_module_member(&[name], &|name, module| {
             module.traits.iter().find_map(|trait_ref| {
                 if trait_ref.name == name {
                     Some(trait_ref.clone())
@@ -202,9 +202,9 @@ impl<'m> ModuleEnv<'m> {
     /// Get a trait function from the current module, or other ones, return the name of the module if other.
     pub fn get_trait_function(
         &'m self,
-        path: &'m str,
-    ) -> Option<(Option<Ustr>, TraitFunctionDescription<'m>)> {
-        self.get_module_member(path, &|name, module| {
+        path: &'m ast::Path,
+    ) -> Option<(Option<Path>, TraitFunctionDescription<'m>)> {
+        self.get_module_member(&path.segments, &|name, module| {
             module.traits.iter().find_map(|trait_ref| {
                 trait_ref
                     .functions
@@ -224,25 +224,30 @@ impl<'m> ModuleEnv<'m> {
     /// Get a member of a module, by first looking in the current module, and then in others, considering the path.
     fn get_module_member<T>(
         &'m self,
-        path: &'m str,
+        segments: &'m [UstrSpan],
         getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
-    ) -> Option<(Option<Ustr>, T)> {
-        self.current
-            .get_member(path, self.others, getter)
-            .or_else(|| {
-                let path = path.split("::").next_tuple();
-                if let Some(path) = path {
-                    let (module_name, function_name) = path;
-                    if module_name == "std" && self.within_std {
-                        return self.current.get_member(function_name, self.others, getter);
-                    }
-                    let module_name = ustr(module_name);
-                    self.others
-                        .get(&module_name)
-                        .and_then(|module| module.get_member(function_name, self.others, getter))
-                } else {
-                    None
+    ) -> Option<(Option<Path>, T)> {
+        let member = if let [(name, _)] = segments {
+            self.current.get_member(name, self.others, getter)
+        } else {
+            None
+        };
+        member.or_else(|| {
+            if let Some(path) = segments.split_last() {
+                let ((function_name, _), module) = path;
+                if let [single_segment] = module
+                    && single_segment.0 == "std"
+                    && self.within_std
+                {
+                    return self.current.get_member(function_name, self.others, getter);
                 }
-            })
+                let path = Path::new(module.iter().map(|(seg, _)| *seg).collect());
+                self.others
+                    .get(&path)
+                    .and_then(|module| module.get_member(function_name, self.others, getter))
+            } else {
+                None
+            }
+        })
     }
 }

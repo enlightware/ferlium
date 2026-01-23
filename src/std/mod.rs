@@ -10,14 +10,13 @@ use std::{rc::Rc, str::FromStr};
 
 use crate::{
     location::SourceTable,
-    module::{Module, ModuleRc, Use, finalize_module},
+    module::{self, Module, ModuleRc, Use, finalize_module},
     r#type::{Type, TypeKind, bare_native_type},
     value::Value,
 };
 
 use array::Array;
 use math::{Float, Int};
-use ustr::ustr;
 
 pub mod array;
 pub mod bits;
@@ -69,7 +68,9 @@ pub fn std_module(source_table: &mut SourceTable) -> ModuleRc {
 
 pub fn new_module_using_std() -> Module {
     let mut new_module = Module::default();
-    new_module.uses.push(Use::All(ustr("std")));
+    new_module
+        .uses
+        .push(Use::All(module::Path::single_str("std")));
     new_module
 }
 

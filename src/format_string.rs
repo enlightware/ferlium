@@ -8,7 +8,7 @@
 //
 use std::{str::FromStr, sync::LazyLock};
 
-use crate::parser_helpers::syn_static_apply;
+use crate::parser_helpers::syn_static_apply_path;
 use crate::{Location, internal_compilation_error};
 use regex::Regex;
 use ustr::{Ustr, ustr};
@@ -45,9 +45,9 @@ fn variable_to_string(
             }
         ));
     };
-    let var_expr = Expr::new(ExprKind::Identifier(ustr(var_name)), var_span);
+    let var_expr = Expr::single_identifier(ustr(var_name), var_span);
     Ok(Expr::new(
-        syn_static_apply((ustr("std::to_string"), var_span), vec![var_expr]),
+        syn_static_apply_path(["std", "to_string"], var_span, vec![var_expr]),
         var_span,
     ))
 }
@@ -79,9 +79,10 @@ pub fn emit_format_string_ast(
     let mut extend_exprs_with = |expr: Expr| {
         let span = expr.span;
         let extend_expr = Expr::new(
-            syn_static_apply(
-                (ustr("std::string_push_str"), span),
-                vec![Expr::new(ExprKind::Identifier(ustr("@s")), span), expr],
+            syn_static_apply_path(
+                ["std", "string_push_str"],
+                span,
+                vec![Expr::single_identifier(ustr("@s"), span), expr],
             ),
             span,
         );
@@ -134,7 +135,7 @@ pub fn emit_format_string_ast(
 
     // Evaluate the mutable string and return it.
     let end_span = Location::new(span.end(), span.end(), span.source_id());
-    exprs.push(Expr::new(ExprKind::Identifier(ustr("@s")), end_span));
+    exprs.push(Expr::single_identifier(ustr("@s"), end_span));
 
     Ok(ExprKind::Block(exprs))
 }

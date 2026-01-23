@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    SourceId,
+    SourceId, ast,
     format::FormatWith,
     location::{Location, SourceTable},
     r#trait::TraitRef,
@@ -344,7 +344,7 @@ pub enum CompilationErrorImpl<S: Scope> {
         target_span: Location,
     },
     UnknownProperty {
-        scope: Ustr,
+        scope: ast::Path,
         variable: Ustr,
         cause: PropertyAccess,
         span: Location,

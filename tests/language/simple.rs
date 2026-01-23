@@ -1591,6 +1591,32 @@ fn modules() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn deep_modules() {
+    let mut session = TestSession::new();
+    // Test that the same function name can exist in different modules.
+    assert_eq!(
+        session.run("(deep::level1::level(), deep::deeper::level2::level())"),
+        int_tuple!(1, 2)
+    );
+    // Validate newtype equality when from same module.
+    assert_eq!(
+        session.run("deep::level1::Pair(1, 2) == deep::level1::Pair(1, 2)"),
+        bool(true),
+    );
+    // Validate newtype inequality when from different modules.
+    session
+        .fail_compilation("deep::level1::Pair(1, 2) == deep::deeper::level2::Pair(1, 2)")
+        .as_named_type_mismatch()
+        .unwrap();
+    // Validate first-class function passing between modules.
+    assert_eq!(
+        session.run("deep::deeper::level2::receiver(deep::level1::sender())"),
+        float(2.5)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_functions() {
     let mut session = TestSession::new();
     assert_eq!(

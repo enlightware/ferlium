@@ -34,6 +34,40 @@ use crate::{
 /// A spanned Ustr
 pub type UstrSpan = (Ustr, Location);
 
+/// A spanned path
+#[derive(Debug, Clone, PartialEq, Eq, new)]
+
+pub struct Path {
+    pub segments: Vec<UstrSpan>,
+}
+
+impl Path {
+    pub fn single(name: Ustr, span: Location) -> Self {
+        Self {
+            segments: vec![(name, span)],
+        }
+    }
+    pub fn single_str(name: &str, span: Location) -> Self {
+        Self {
+            segments: vec![(Ustr::from(name), span)],
+        }
+    }
+    pub fn single_tuple(name: UstrSpan) -> Self {
+        Self {
+            segments: vec![name],
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+}
+
+impl Display for Path {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_with_separator(self.segments.iter().map(|(s, _)| s), "::", f)
+    }
+}
+
 /// A spanned Type
 pub type TypeSpan<P> = (<P as Phase>::Type, Location);
 
@@ -186,7 +220,7 @@ pub enum PType {
     /// A type that must be inferred (`_`)
     Infer,
     /// A path to a type
-    Path(Vec<UstrSpan>),
+    Path(Path),
     /// Tagged union sum type
     Variant(Vec<(UstrSpan, TypeSpan<Parsed>)>),
     /// Position-based product type
@@ -213,15 +247,15 @@ impl PType {
     ) -> Result<(), InternalCompilationError> {
         use PType::*;
         match self {
-            Path(items) => {
-                if items.len() == 1 {
-                    let ty_name = items[0].0;
+            Path(path) => {
+                if path.segments.len() == 1 {
+                    let ty_name = path.segments[0].0;
                     if ty_name == name {
                         return Err(internal_compilation_error!(Unsupported {
                             reason: format!(
                                 "Self-referential type paths are not supported, but `{ty_name}` refers to itself"
                             ),
-                            span: items[0].1,
+                            span: path.segments[0].1,
                         }));
                     }
                     if let Some(index) = ty_names.get(&ty_name) {
@@ -254,7 +288,7 @@ impl FormatWith<ModuleEnv<'_>> for PType {
             Unit => write!(f, "()"),
             Resolved(ty) => ty.fmt_with(f, env),
             Infer => write!(f, "_"),
-            Path(items) => write!(f, "{}", items.iter().map(|(s, _)| s).join("::")),
+            Path(path) => write!(f, "{}", path.segments.iter().map(|(s, _)| s).join("::")),
             Variant(types) => {
                 for (i, ((name, _), (ty, _))) in types.iter().enumerate() {
                     if i > 0 {
@@ -656,7 +690,7 @@ pub enum ExprKind<P: Phase> {
     Literal(Value, IrType),
     FormattedString(P::FormattedString),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
-    Identifier(Ustr),
+    Identifier(Path),
     Let(
         UstrSpan,
         MutVal,
@@ -668,11 +702,11 @@ pub enum ExprKind<P: Phase> {
     Apply(B<Expr<P>>, Vec<Expr<P>>, UnnamedArg),
     Block(Vec<Expr<P>>),
     Assign(B<Expr<P>>, Location, B<Expr<P>>),
-    PropertyPath(Ustr, Ustr),
+    PropertyPath(Path, Ustr),
     Tuple(Vec<Expr<P>>),
     Project(B<Expr<P>>, (usize, Location)),
     Record(RecordFields<P>),
-    StructLiteral(UstrSpan, RecordFields<P>),
+    StructLiteral(Path, RecordFields<P>),
     FieldAccess(B<Expr<P>>, UstrSpan),
     Array(Vec<Expr<P>>),
     Index(B<Expr<P>>, B<Expr<P>>),
@@ -691,6 +725,12 @@ pub struct Expr<P: Phase> {
     pub span: Location,
 }
 
+impl<P: Phase> Expr<P> {
+    pub fn single_identifier(name: Ustr, span: Location) -> Self {
+        Expr::new(ExprKind::Identifier(Path::single(name, span)), span)
+    }
+}
+
 impl<P: Phase> FormatWithIndent for Expr<P> {
     fn format_ind(
         &self,
@@ -703,7 +743,7 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
         match &self.kind {
             Literal(value, ty) => writeln!(f, "{indent_str}{}", value.display_pretty(ty)),
             FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
-            Identifier(name) => writeln!(f, "{indent_str}{name} (local)"),
+            Identifier(path) => writeln!(f, "{indent_str}{path}"),
             Let((name, _), mutable, expr, _) => {
                 let kw = mutable.var_def_string();
                 writeln!(f, "{indent_str}{kw} {name} =")?;
@@ -756,8 +796,8 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
                 expr.format_ind(f, env, indent)?;
                 writeln!(f, "{indent_str}  .{index}")
             }
-            StructLiteral(name, fields) => {
-                writeln!(f, "{indent_str}{} {{", name.0)?;
+            StructLiteral(path, fields) => {
+                writeln!(f, "{indent_str}{path} {{")?;
                 for ((name, _), value) in fields.iter() {
                     writeln!(f, "{indent_str}  {name}:")?;
                     value.format_ind(f, env, indent + 2)?;

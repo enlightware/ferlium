@@ -11,7 +11,7 @@ use std::{collections::HashSet, sync::LazyLock};
 use heck::ToSnakeCase;
 
 use crate::{
-    ModuleAndExpr, SourceId,
+    ModuleAndExpr, SourceId, ast,
     format::FormatWith,
     ir::{Node, NodeKind},
     module::{ModuleEnv, Modules},
@@ -315,12 +315,16 @@ impl Node {
 
 // Essentially implement a similar logic as rust-analyzer's "should_hide_param_name_hint" fn
 fn should_hide_arg_name_hint(
-    function_path: &str,
+    function_path: &ast::Path,
     arity: usize,
     arg_name: &str,
     argument: &Node,
 ) -> bool {
-    if function_path.starts_with('@') {
+    if function_path
+        .segments
+        .iter()
+        .any(|segment| segment.0.starts_with('@'))
+    {
         return true;
     }
 
@@ -337,11 +341,13 @@ fn should_hide_arg_name_hint(
         .into_iter()
         .collect()
     });
-    if PATHS_TO_HIDE.contains(&function_path) {
+    let joined_path = format!("{function_path}");
+    if PATHS_TO_HIDE.contains(joined_path.as_str()) {
         return true;
     }
 
-    is_arg_name_suffix_of_unary_fn_name(function_path, arity, arg_name)
+    let function_name = function_path.segments.last().unwrap().0;
+    is_arg_name_suffix_of_unary_fn_name(&function_name, arity, arg_name)
         || is_argument_similar_to_arg_name(argument, arg_name)
         || (arity <= 2 && is_obvious_param(arg_name))
         || is_adt_constructor_similar_to_arg_name(argument, arg_name)

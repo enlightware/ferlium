@@ -509,7 +509,7 @@ impl Node {
                     let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
                     self.kind = StaticApply(b(ir::StaticApplication {
                         function,
-                        function_path: Some(app.function_path),
+                        function_path: Some(app.function_path.clone()),
                         function_span: app.function_span,
                         arguments: mem::take(&mut app.arguments),
                         argument_names,

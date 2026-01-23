@@ -8,7 +8,7 @@
 //
 use crate::{
     Location,
-    ast::UnnamedArg,
+    ast::{self, UnnamedArg},
     format::FormatWith,
     module::{FunctionId, ModuleRc, TraitImplId},
     r#trait::TraitRef,
@@ -107,7 +107,7 @@ pub struct Application {
 #[derive(Debug, Clone)]
 pub struct StaticApplication {
     pub function: FunctionId,
-    pub function_path: Option<Ustr>,
+    pub function_path: Option<ast::Path>,
     pub function_span: Location,
     pub arguments: Vec<Node>,
     pub argument_names: Vec<Ustr>,
@@ -119,7 +119,7 @@ pub struct StaticApplication {
 pub struct TraitFnApplication {
     pub trait_ref: TraitRef,
     pub function_index: usize,
-    pub function_path: Ustr,
+    pub function_path: ast::Path,
     pub function_span: Location,
     pub arguments: Vec<Node>,
     pub arguments_unnamed: UnnamedArg,
@@ -173,7 +173,7 @@ pub struct Case {
 #[derive(Debug, Clone)]
 pub struct GetFunction {
     pub function: FunctionId,
-    pub function_path: Ustr,
+    pub function_path: ast::Path,
     pub function_span: Location,
     pub inst_data: FnInstData,
 }

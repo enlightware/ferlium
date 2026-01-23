@@ -21,7 +21,7 @@ use crate::{
     eval::{EvalCtx, ValOrMut},
     format::FormatWith,
     location::SourceTable,
-    module::{ModuleFunction, ModuleRc, Modules, Uses},
+    module::{self, ModuleFunction, ModuleRc, Modules, Uses},
     std::new_module_using_std,
     r#type::{FnArgType, Type, tuple_type},
     value::{NativeValue, Value},
@@ -29,7 +29,6 @@ use crate::{
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use regex::Regex;
-use ustr::ustr;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -757,7 +756,10 @@ impl Compiler {
                 Err(error) => {
                     let summary = error.kind.to_string();
                     let mut modules = self.modules.clone();
-                    modules.register_module_rc(ustr(SRC_NAME), self.user_module.module.clone());
+                    modules.register_module_rc(
+                        module::Path::single_str(SRC_NAME),
+                        self.user_module.module.clone(),
+                    );
                     let complete = format!(
                         "{}",
                         error.format_with(&(self.session.source_table(), &modules))
@@ -819,7 +821,7 @@ impl Compiler {
     pub fn list_module_fns(&self) -> Vec<FunctionSignature> {
         let mut sigs = Vec::new();
         for module in &self.modules.modules {
-            let mod_name = *module.0;
+            let mod_name = module.0;
             for local_fn in &module.1.functions {
                 let sym_name = local_fn.name;
                 // skip trait methods
@@ -855,7 +857,7 @@ impl Compiler {
         let mut getters = HashSet::new();
         let mut setters = HashSet::new();
         for module in &self.modules.modules {
-            let mod_name = *module.0;
+            let mod_name = module.0;
             for local_fn in &module.1.functions {
                 let sym_name = local_fn.name;
                 // skip trait methods

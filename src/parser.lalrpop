@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
+use crate::ast::{UstrSpan, Path, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -361,7 +361,7 @@ TopExpr<NoStruct> = {
 
 AssignExpr<NoStruct>: ExprKind = {
     <le:Es<PipeExpr<NoStruct>>> <ls:@L> "=" <rs:@R> <re:Es<TopExpr<NoStruct>>> => Assign(boxed(le), span(ls, rs, source_id), boxed(re)),
-    <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op, le, re),
+    <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op.0, op.1, le, re),
 }
 
 ReturnExpr<NoStruct>: ExprKind = {
@@ -379,7 +379,7 @@ PipeExpr<NoStruct>: ExprKind = {
 }
 
 RangeExpr<NoStruct>: ExprKind = {
-    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => build_range(o, l, r),
+    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => build_range(o.0, o.1, l, r),
     LogicOrExpr<NoStruct>,
 }
 
@@ -403,7 +403,7 @@ CastExpr<NoStruct>: ExprKind = {
     <e:Es<CastExpr<NoStruct>>> <l:@L> "as" <ty:Sp<CastTargetType>> <r:@R> => {
         let e_span = e.span;
         let cast_expr = Expr::new(
-            Identifier(ustr("cast")),
+            Identifier(Path::single_str("cast", e_span)),
             span(l, r, source_id)
         );
         TypeAscription(
@@ -433,7 +433,7 @@ CastTargetTypeParens: Type = {
 
 UnaryExpr<NoStruct> = {
     SuffixExpr<NoStruct>,
-    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => syn_static_apply(o, vec![e]),
+    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => syn_static_apply_path(o.0, o.1, vec![e]),
 }
 
 SuffixExpr<NoStruct> = {
@@ -472,22 +472,22 @@ ParExpr: ExprKind = {
 }
 
 PathOrStructExpr<NoStruct>: ExprKind = {
-    <p:FlatPath> => Identifier(p),
-    <p:Sp<FlatPath>> <body:StructExprImpl> if NoStruct != "NoStruct" => StructLiteral((p.0, p.1), body),
-    <p:Sp<FlatPath>> "{" "}" if NoStruct != "NoStruct" => StructLiteral((p.0, p.1), vec![]),
+    <p:Path> => Identifier(p),
+    <p:Path> <body:StructExprImpl> if NoStruct != "NoStruct" => StructLiteral(p, body),
+    <p:Path> "{" "}" if NoStruct != "NoStruct" => StructLiteral(p, vec![]),
 }
 
 PropertyPathExpr: ExprKind = {
     <p:PropertyPath> => PropertyPath(p.0, p.1),
 }
 
-FlatPath: Ustr = {
-    <p:Path> => ustr(&p.into_iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join("::")),
+Path: Path = {
+    <p:PathSegments> => Path::new(p),
 }
 
-Path: Vec<UstrSpan> = {
+PathSegments: Vec<UstrSpan> = {
     Sp<PathIdentifier<"">> => vec![<>],
-    <p:Path> "::" <e:Sp<PathIdentifier<"E">>> => ext_b(p, e),
+    <p:PathSegments> "::" <e:Sp<PathIdentifier<"E">>> => ext_b(p, e),
 }
 
 PathIdentifier<E>: Ustr = {
@@ -620,7 +620,7 @@ RecordExplicitField: (UstrSpan, Expr) = {
 }
 
 RecordAbbrevField: (UstrSpan, Expr) = {
-    <n:Sp<UIdentifier>> => (n, Expr::new(Identifier(n.0), n.1)),
+    <n:Sp<UIdentifier>> => (n, Expr::new(Identifier(Path::single_tuple(n)), n.1)),
 }
 
 // Struct literals support both explicit and shorthand field syntax
@@ -633,11 +633,11 @@ StructField: (UstrSpan, Expr) = {
     // Explicit field assignment: field_name: expression
     <n:Sp<UIdentifier>> ":" <e:Expr> => (n, e),
     // Shorthand syntax: field_name (equivalent to field_name: field_name)
-    <n:Sp<UIdentifier>> => (n, Expr::new(Identifier(n.0), n.1)),
+    <n:Sp<UIdentifier>> => (n, Expr::new(Identifier(Path::single_tuple(n)), n.1)),
 }
 
-PropertyPath: (Ustr, Ustr) = {
-    "@" <p:FlatPath> "." <f:UIdentifier> => (p, f),
+PropertyPath: (Path, Ustr) = {
+    "@" <p:Path> "." <f:UIdentifier> => (p, f),
 }
 
 LoopExpr: ExprKind = {
@@ -717,34 +717,34 @@ StrOrMore: PatternVar = {
 
 // Terminals
 
-RangeOp: Ustr = {
-    ".." => ustr("std::Range"),
-    "..=" => ustr("std::RangeInclusive"),
+RangeOp: Vec<&'static str> = {
+    ".." => vec!["std", "Range"],
+    "..=" => vec!["std", "RangeInclusive"],
 }
 
-UnaryOp: Ustr = {
-    "-" => ustr("std::neg"),
-    "not" => ustr("std::not"),
+UnaryOp: Vec<&'static str> = {
+    "-" => vec!["std", "neg"],
+    "not" => vec!["std", "not"],
     <l:@L> "!" <r:@R> =>? error("for readability, use the \"not\" keyword instead of the C-style ! operator".into(), span(l, r, source_id)),
 }
 
-MulOp: Ustr = {
-    "*" => ustr("std::mul"),
-    "/" => ustr("std::div"),
+MulOp: Vec<&'static str> = {
+    "*" => vec!["std", "mul"],
+    "/" => vec!["std", "div"],
 }
 
-AddOp: Ustr = {
-    "+" => ustr("std::add"),
-    "-" => ustr("std::sub"),
+AddOp: Vec<&'static str> = {
+    "+" => vec!["std", "add"],
+    "-" => vec!["std", "sub"],
 }
 
-CompOp: Ustr = {
-    "==" => ustr("std::eq"),
-    "!=" => ustr("std::ne"),
-    "<=" => ustr("std::le"),
-    "<" => ustr("std::lt"),
-    ">=" => ustr("std::ge"),
-    ">" => ustr("std::gt"),
+CompOp: Vec<&'static str> = {
+    "==" => vec!["std", "eq"],
+    "!=" => vec!["std", "ne"],
+    "<=" => vec!["std", "le"],
+    "<" => vec!["std", "lt"],
+    ">=" => vec!["std", "ge"],
+    ">" => vec!["std", "gt"],
 }
 
 LogicalAndOp: () = {
@@ -794,11 +794,11 @@ StringToken: &'input str = r#"\"([^\\\"]|\\.)*\""# => <>;
 
 FormattedString: ExprKind = r#"f\"([^\\\"]|\\.)*\""# => formatted_string(<>);
 
-OpEqual: Ustr = {
-    "+=" => ustr("std::add"),
-    "-=" => ustr("std::sub"),
-    "*=" => ustr("std::mul"),
-    "/=" => ustr("std::div"),
+OpEqual: Vec<&'static str> = {
+    "+=" => vec!["std", "add"],
+    "-=" => vec!["std", "sub"],
+    "*=" => vec!["std", "mul"],
+    "/=" => vec!["std", "div"],
 }
 
 // Macros
@@ -839,7 +839,7 @@ Sep<T, S>: Vec<T> = {
 // A tier of expression, for a binary operation, left-associative
 #[inline]
 BinOpLeftAssoc<Op, NextTier>: ExprKind = {
-    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => syn_static_apply(o, vec![l, r]),
+    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => syn_static_apply_path(o.0, o.1, vec![l, r]),
     NextTier
 };
 

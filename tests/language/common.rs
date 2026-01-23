@@ -16,7 +16,7 @@ use ferlium::{
         BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnVN,
     },
-    module::{Module, ModuleEnv, Modules},
+    module::{Module, ModuleEnv, Modules, Path},
     std::{
         array::{Array, array_type},
         math::int_type,
@@ -178,6 +178,23 @@ fn test_property_module() -> Module {
     module
 }
 
+macro_rules! ferlium {
+    ($name:expr, $file:literal) => {
+        ($name, $file, include_str!($file))
+    };
+}
+
+fn add_deep_modules(to: &mut Modules, session: &mut CompilerSession) {
+    for (name, file, code) in [
+        ferlium!("deep::level1", "deep_module1.fer"),
+        ferlium!("deep::deeper::level2", "deep_module2.fer"),
+    ] {
+        let module = session.compile(file, code, &to, &[]).unwrap().module;
+        let path = Path::new(name.split("::").map(ustr).collect());
+        to.register_module_rc(path, module);
+    }
+}
+
 /// A test session with std, testing, effects and props modules
 #[derive(Debug)]
 pub struct TestSession {
@@ -187,11 +204,12 @@ pub struct TestSession {
 impl TestSession {
     /// Create a new test session with std, testing, effects and props modules registered.
     pub fn new() -> Self {
-        let compiler_session = CompilerSession::new();
+        let mut compiler_session = CompilerSession::new();
         let mut test_modules = compiler_session.new_std_modules();
-        test_modules.register_module(ustr("testing"), testing_module());
-        test_modules.register_module(ustr("effects"), test_effect_module());
-        test_modules.register_module(ustr("props"), test_property_module());
+        test_modules.register_module(Path::single_str("testing"), testing_module());
+        test_modules.register_module(Path::single_str("effects"), test_effect_module());
+        test_modules.register_module(Path::single_str("props"), test_property_module());
+        add_deep_modules(&mut test_modules, &mut compiler_session);
         Self {
             session: compiler_session,
             test_modules,

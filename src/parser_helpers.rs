@@ -13,6 +13,7 @@ use crate::ast::ExprKind;
 use crate::ast::PExpr;
 use crate::ast::PExprKind;
 use crate::ast::PType;
+use crate::ast::Path;
 use crate::ast::Pattern;
 use crate::ast::PatternKind;
 use crate::ast::Phase;
@@ -170,17 +171,46 @@ pub(crate) fn proj_or_float<L, T>(
 }
 
 pub(crate) fn syn_static_apply<P: Phase>(identifier: UstrSpan, args: Vec<Expr<P>>) -> ExprKind<P> {
-    let identifier = Expr::<P>::new(ExprKind::Identifier(identifier.0), identifier.1);
+    let identifier = Expr::<P>::single_identifier(identifier.0, identifier.1);
     ExprKind::Apply(b(identifier), args, UnnamedArg::All)
 }
 
-pub(crate) fn assign_op(op: UstrSpan, lhs: PExpr, rhs: PExpr) -> PExprKind {
-    let span = Location::fuse([lhs.span, rhs.span]).unwrap();
-    let apply = Expr::new(syn_static_apply(op, vec![lhs.clone(), rhs]), span);
-    ExprKind::Assign(b(lhs), op.1, b(apply))
+pub(crate) fn syn_static_apply_path<P: Phase>(
+    identifiers: impl Into<Vec<&'static str>>,
+    identifier_span: Location,
+    args: Vec<Expr<P>>,
+) -> ExprKind<P> {
+    let path = Path::new(
+        identifiers
+            .into()
+            .into_iter()
+            .map(|s| (ustr(s), identifier_span))
+            .collect(),
+    );
+    let identifier = Expr::new(ExprKind::Identifier(path), identifier_span);
+    ExprKind::Apply(b(identifier), args, UnnamedArg::All)
 }
 
-pub(crate) fn build_range(op: UstrSpan, start: PExpr, end: PExpr) -> PExprKind {
+pub(crate) fn assign_op(
+    identifiers: impl Into<Vec<&'static str>>,
+    identifier_span: Location,
+    lhs: PExpr,
+    rhs: PExpr,
+) -> PExprKind {
+    let span = Location::fuse([lhs.span, rhs.span]).unwrap();
+    let apply = Expr::new(
+        syn_static_apply_path(identifiers, identifier_span, vec![lhs.clone(), rhs]),
+        span,
+    );
+    ExprKind::Assign(b(lhs), identifier_span, b(apply))
+}
+
+pub(crate) fn build_range(
+    identifiers: impl Into<Vec<&'static str>>,
+    identifier_span: Location,
+    start: PExpr,
+    end: PExpr,
+) -> PExprKind {
     // Forces not using the from_int method when int literals are used
     let start_span = start.span;
     let start = PExpr::new(
@@ -192,8 +222,15 @@ pub(crate) fn build_range(op: UstrSpan, start: PExpr, end: PExpr) -> PExprKind {
         ExprKind::TypeAscription(b(end), PType::Resolved(int_type()), end_span),
         end_span,
     );
+    let path = Path::new(
+        identifiers
+            .into()
+            .into_iter()
+            .map(|s| (ustr(s), identifier_span))
+            .collect(),
+    );
     ExprKind::StructLiteral(
-        op,
+        path,
         vec![
             ((ustr("start"), start.span), start),
             ((ustr("end"), end.span), end),

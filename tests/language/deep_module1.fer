@@ -1,0 +1,9 @@
+fn level() -> int {
+	1
+}
+
+struct Pair(int, int)
+
+fn sender() {
+	|x| { x + 1 }
+}

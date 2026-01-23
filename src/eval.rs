@@ -13,6 +13,8 @@ use enum_as_inner::EnumAsInner;
 #[cfg(debug_assertions)]
 use ustr::{Ustr, ustr};
 
+#[cfg(debug_assertions)]
+use crate::module::Path;
 use crate::{
     Location, SourceId, SourceTable,
     containers::b,
@@ -93,7 +95,7 @@ impl FormatWith<EvalCtx> for ValOrMut {
 #[derive(Debug, Clone, new)]
 struct StackEntry {
     fn_name: String,
-    mod_name: Ustr,
+    mod_path: Path,
     frame_base: usize,
 }
 
@@ -195,11 +197,11 @@ impl EvalCtx {
     }
 
     #[cfg(debug_assertions)]
-    fn get_last_module_name(&self) -> Ustr {
+    fn get_last_module_path(&self) -> Path {
         self.stack_trace
             .last()
-            .map(|entry| entry.mod_name)
-            .unwrap_or(ustr("<current>"))
+            .map(|entry| entry.mod_path.clone())
+            .unwrap_or(Path::single_str("<current>"))
     }
 
     #[cfg(debug_assertions)]
@@ -209,22 +211,26 @@ impl EvalCtx {
         module: &ModuleRc,
     ) -> StackEntry {
         let fn_name = format!("value function {:p}::{:p}", module, function);
-        StackEntry::new(fn_name, ustr("<unknown>"), self.environment.len())
+        StackEntry::new(
+            fn_name,
+            Path::single_str("<unknown>"),
+            self.environment.len(),
+        )
     }
 
     #[cfg(debug_assertions)]
     fn get_stack_entry_from_function_id(&self, function: FunctionId) -> StackEntry {
         use FunctionId::*;
-        let module_name;
+        let module_path;
         let fn_name = match &function {
             Local(id) => {
                 let function = &self.module.functions[id.as_index()];
-                module_name = self.get_last_module_name();
-                format!("{module_name}::{} (#{})", function.name, id)
+                module_path = self.get_last_module_path();
+                format!("{module_path}::{} (#{})", function.name, id)
             }
             Import(id) => {
                 let slot = &self.module.import_fn_slots[id.as_index()];
-                module_name = slot.module_name;
+                module_path = slot.module.clone();
                 use ImportFunctionTarget::*;
                 match &slot.target {
                     TraitImplMethod { key, index } => {
@@ -232,12 +238,12 @@ impl EvalCtx {
                         trait_ref.qualified_method_name(*index as usize)
                     }
                     NamedFunction(fn_name) => {
-                        format!("{module_name}::{fn_name}")
+                        format!("{module_path}::{fn_name}")
                     }
                 }
             }
         };
-        StackEntry::new(fn_name, module_name, self.environment.len())
+        StackEntry::new(fn_name, module_path, self.environment.len())
     }
 
     /// Get the dictionary value for a ImplId at runtime using module.
@@ -459,30 +465,30 @@ impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
         data: &(&SourceTable, &Modules),
     ) -> std::fmt::Result {
         let (source_table, modules) = data;
-        let mut module_name = modules
-            .get_module_name(&self.module)
-            .map(|name| name.as_str())
-            .unwrap_or("<unknown>");
+        let mut module_path = modules
+            .get_module_path(&self.module)
+            .map(|name| format!("{name}"))
+            .unwrap_or("<unknown>".to_string());
         match self.function_id {
             Some(function_id) => match function_id {
                 FunctionId::Local(id) => {
                     let local_name = self.module.functions[id.as_index()].name;
-                    write!(f, "{module_name}::{local_name}")?
+                    write!(f, "{module_path}::{local_name}")?
                 }
                 FunctionId::Import(id) => {
                     let slot = &self.module.import_fn_slots[id.as_index()];
-                    module_name = slot.module_name.as_str();
+                    module_path = format!("{}", slot.module);
                     use ImportFunctionTarget::*;
                     match &slot.target {
                         TraitImplMethod { key, index } => {
                             let trait_ref = key.trait_ref();
                             write!(f, "{}", trait_ref.qualified_method_name(*index as usize))?
                         }
-                        NamedFunction(fn_name) => write!(f, "{module_name}::{fn_name}")?,
+                        NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
                     }
                 }
             },
-            None => write!(f, "{module_name}::<anonymous function>")?,
+            None => write!(f, "{module_path}::<anonymous function>")?,
         };
         write!(f, " at {}", self.location.format_with(source_table))
     }

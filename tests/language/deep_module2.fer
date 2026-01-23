@@ -1,0 +1,9 @@
+fn level() -> int {
+	2
+}
+
+struct Pair(int, int)
+
+fn receiver(f) {
+	f(1.5)
+}

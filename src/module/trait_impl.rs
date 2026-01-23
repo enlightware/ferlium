@@ -24,7 +24,7 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     function::{Function, FunctionDefinition, FunctionRc},
-    module::{LocalFunction, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc},
+    module::{LocalFunction, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc, path::Path},
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     type_inference::InstSubstitution,
@@ -64,7 +64,7 @@ impl FormatWith<ModuleEnv<'_>> for TraitImplId {
             }
             TraitImplId::Import(id) => {
                 let slot = &env.current.import_impl_slots[id.as_index()];
-                let module_name = slot.module_name;
+                let module_name = &slot.module;
                 write!(f, "imported dictionary {module_name}::<")?;
                 format_impl_header_by_import_slot(f, slot, env)?;
                 write!(f, "> (slot #{id})")
@@ -77,7 +77,7 @@ impl FormatWith<ModuleEnv<'_>> for TraitImplId {
 #[derive(Debug, Clone)]
 pub struct ImportImplSlot {
     /// Name of the module to import from
-    pub module_name: Ustr,
+    pub module: Path,
     /// The key of the trait impl in that module
     pub key: TraitKey,
     /// Cached resolved dictionary/module and its interface hash - updated during relinking
@@ -710,11 +710,10 @@ pub fn format_impl_header_by_import_slot(
     env: &ModuleEnv<'_>,
 ) -> fmt::Result {
     let key = &slot.key;
-    let module_name = slot.module_name;
     let impls = &env
         .others
         .modules
-        .get(&module_name)
+        .get(&slot.module)
         .expect("imported module not found")
         .impls;
     let imp = impls

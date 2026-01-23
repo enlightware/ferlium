@@ -11,9 +11,11 @@
 use derive_new::new;
 use ustr::Ustr;
 
+use crate::module::path::Path;
+
 #[derive(Debug, Clone, new)]
 pub struct UseSome {
-    pub module: Ustr,
+    pub module: Path,
     pub symbols: Vec<Ustr>,
 }
 
@@ -21,7 +23,7 @@ pub struct UseSome {
 #[derive(Debug, Clone)]
 pub enum Use {
     /// Use all symbols from a module
-    All(Ustr),
+    All(Path),
     /// Use only some symbols from a module
     Some(UseSome),
 }

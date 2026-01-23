@@ -107,7 +107,7 @@ pub fn emit_module(
         // Validate the function mapping.
         let module_env = ModuleEnv::new(&output, others, within_std);
         let trait_ref = module_env
-            .get_trait_ref(&imp.trait_name.0)
+            .get_trait_ref(imp.trait_name)
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
 
         // Check that all functions in the impl are part of the trait.

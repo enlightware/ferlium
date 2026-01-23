@@ -17,8 +17,8 @@ use std::{
 
 use crate::{
     ast::{
-        DExpr, Desugared, ExprKind, Pattern, PatternKind, PatternVar, RecordField, RecordFields,
-        UnnamedArg,
+        self, DExpr, Desugared, ExprKind, Pattern, PatternKind, PatternVar, RecordField,
+        RecordFields, UnnamedArg,
     },
     containers::continuous_hashmap_to_vec,
     error::{
@@ -445,10 +445,12 @@ impl TypeInference {
             }
             Identifier(path) => {
                 // Retrieve the index and the type of the variable from the environment, if it exists
-                if let Some((index, ty, mut_ty)) = env.get_variable_index_and_type_scheme(path) {
+                if let [(name, _)] = &path.segments[..]
+                    && let Some((index, ty, mut_ty)) = env.get_variable_index_and_type_scheme(name)
+                {
                     let node = K::EnvLoad(b(ir::EnvLoad {
                         index,
-                        name: Some(*path),
+                        name: Some(*name),
                     }));
                     (node, ty, mut_ty, no_effects())
                 }
@@ -475,7 +477,7 @@ impl TypeInference {
                         .instantiate_with_fresh_vars(self, expr.span, None);
                     let node = K::GetFunction(b(ir::GetFunction {
                         function,
-                        function_path: ustr(path),
+                        function_path: path.clone(),
                         function_span: expr.span,
                         inst_data,
                     }));
@@ -512,7 +514,7 @@ impl TypeInference {
                 // Otherwise, the name is neither a known variable or function, assume it to be a variant constructor
                 else {
                     // Variants cannot be paths
-                    if path.contains("::") {
+                    if path.segments.len() > 1 {
                         return Err(internal_compilation_error!(InvalidVariantConstructor {
                             span: expr.span,
                         }));
@@ -520,13 +522,14 @@ impl TypeInference {
                     // Create a fresh type and add a constraint for that type to include this variant.
                     let variant_ty = self.fresh_type_var_ty();
                     let payload_ty = Type::unit();
+                    let tag = path.segments[0].0;
                     self.ty_constraints.push(TypeConstraint::Pub(
                         PubTypeConstraint::new_type_has_variant(
-                            variant_ty, expr.span, *path, payload_ty, expr.span,
+                            variant_ty, expr.span, tag, payload_ty, expr.span,
                         ),
                     ));
                     // Build the variant value.
-                    let node = K::Immediate(Immediate::new(Value::unit_variant(*path)));
+                    let node = K::Immediate(Immediate::new(Value::unit_variant(tag)));
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
@@ -572,11 +575,15 @@ impl TypeInference {
             }
             Apply(func, args, arguments_unnamed) => {
                 // Do we have a global function or variant?
-                if let Identifier(path) = func.kind {
-                    if !env.has_variable_name(path) {
+                if let Identifier(path) = &func.kind {
+                    let is_variable = match &path.segments[..] {
+                        [(name, _)] => env.has_variable_name(*name),
+                        _ => false,
+                    };
+                    if !is_variable {
                         let (node, ty, mut_ty, effects) = self.infer_static_apply(
                             env,
-                            &path,
+                            path,
                             func.span,
                             args,
                             expr.span,
@@ -619,11 +626,11 @@ impl TypeInference {
             }
             Assign(place, sign_span, value) => {
                 if let Some((scope, variable)) = place.kind.as_property_path() {
-                    let fn_name =
-                        property_to_fn_name(scope, variable, PropertyAccess::Set, expr.span, env)?;
+                    let fn_path =
+                        property_to_fn_path(scope, variable, PropertyAccess::Set, expr.span, env)?;
                     let (node, ty, mut_ty, effects) = self.infer_static_apply(
                         env,
-                        &fn_name,
+                        &fn_path,
                         place.span,
                         &[value.as_ref()],
                         expr.span,
@@ -698,7 +705,7 @@ impl TypeInference {
                     DuplicatedFieldContext::Struct,
                 )?;
                 // First check if the path is a known type definition.
-                if let Some(type_def) = env.module_env.type_def_for_construction(&path.0) {
+                if let Some(type_def) = env.module_env.type_def_for_construction(path) {
                     // Then resolve the layout of the struct.
                     let (type_def, payload_ty, tag) = type_def.lookup_payload();
                     // Check that it is a record.
@@ -801,23 +808,23 @@ impl TypeInference {
                     (node, ty, MutType::constant(), effects)
                 } else {
                     // Structural variants cannot be paths
-                    if path.0.contains("::") {
+                    if path.segments.len() > 1 {
                         return Err(internal_compilation_error!(InvalidVariantConstructor {
-                            span: path.1,
+                            span: path.segments[0].1,
                         }));
                     }
                     // If it is not a known type def, assume it to be a variant constructor.
                     let (record_node, record_ty, effects) = self.infer_record(env, &fields)?;
                     let record_span = Location::fuse(fields.iter().map(|(n, _)| n.1)).unwrap();
                     let payload_node = N::new(record_node, record_ty, effects.clone(), record_span);
-                    let name = path.0;
                     // Create a fresh type and add a constraint for that type to include this variant.
+                    let tag = path.segments[0].0;
                     let variant_ty = self.fresh_type_var_ty();
                     self.ty_constraints.push(TypeConstraint::Pub(
                         PubTypeConstraint::new_type_has_variant(
                             variant_ty,
                             expr.span,
-                            name,
+                            tag,
                             record_ty,
                             payload_node.span,
                         ),
@@ -825,9 +832,9 @@ impl TypeInference {
                     // Build the variant construction node.
                     let node = if let Some(values) = nodes_as_bare_immediate(&[&payload_node]) {
                         let value = values.first().unwrap().clone();
-                        K::Immediate(Immediate::new(Value::raw_variant(name, value)))
+                        K::Immediate(Immediate::new(Value::raw_variant(tag, value)))
                     } else {
-                        K::Variant(b((name, payload_node)))
+                        K::Variant(b((tag, payload_node)))
                     };
                     (node, variant_ty, MutType::constant(), effects)
                 }
@@ -936,11 +943,11 @@ impl TypeInference {
                 no_effects(),
             ),
             PropertyPath(scope, variable) => {
-                let fn_name =
-                    property_to_fn_name(scope, variable, PropertyAccess::Get, expr.span, env)?;
+                let fn_path =
+                    property_to_fn_path(scope, variable, PropertyAccess::Get, expr.span, env)?;
                 self.infer_static_apply(
                     env,
-                    &fn_name,
+                    &fn_path,
                     expr.span,
                     &[] as &[DExpr],
                     expr.span,
@@ -971,7 +978,7 @@ impl TypeInference {
     fn infer_static_apply(
         &mut self,
         env: &mut TypingEnv,
-        path: &str,
+        path: &ast::Path,
         path_span: Location,
         args: &[impl Borrow<DExpr>],
         expr_span: Location,
@@ -1028,7 +1035,7 @@ impl TypeInference {
                 let node = K::TraitFnApply(b(ir::TraitFnApplication {
                     trait_ref,
                     function_index,
-                    function_path: ustr(path),
+                    function_path: path.clone(),
                     function_span: path_span,
                     arguments: args_nodes,
                     arguments_unnamed,
@@ -1061,7 +1068,7 @@ impl TypeInference {
                     self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
                 let node = K::StaticApply(b(ir::StaticApplication {
                     function,
-                    function_path: Some(ustr(path)),
+                    function_path: Some(path.clone()),
                     function_span: path_span,
                     arguments: args_nodes,
                     argument_names,
@@ -1136,7 +1143,7 @@ impl TypeInference {
                 (node, ty, MutType::constant(), effects)
             } else {
                 // Structural variants cannot be paths
-                if path.contains("::") {
+                if path.segments.len() > 1 {
                     return Err(internal_compilation_error!(InvalidVariantConstructor {
                         span: path_span,
                     }));
@@ -1168,14 +1175,14 @@ impl TypeInference {
                         (payload_ty, payload_node)
                     }
                 };
-                let name = ustr(path);
                 // Create a fresh type and add a constraint for that type to include this variant.
+                let tag = path.segments[0].0;
                 let variant_ty = self.fresh_type_var_ty();
                 self.ty_constraints.push(TypeConstraint::Pub(
                     PubTypeConstraint::new_type_has_variant(
                         variant_ty,
                         expr_span,
-                        name,
+                        tag,
                         payload_ty,
                         payload_node.span,
                     ),
@@ -1183,9 +1190,9 @@ impl TypeInference {
                 // Build the variant construction node.
                 let node = if let Some(values) = nodes_as_bare_immediate(&[&payload_node]) {
                     let value = values.first().unwrap().clone();
-                    K::Immediate(Immediate::new(Value::raw_variant(name, value)))
+                    K::Immediate(Immediate::new(Value::raw_variant(tag, value)))
                 } else {
-                    K::Variant(b((name, payload_node)))
+                    K::Variant(b((tag, payload_node)))
                 };
                 (node, variant_ty, MutType::constant(), effects)
             },
@@ -3314,10 +3321,12 @@ fn collect_free_variables(
 ) {
     use ExprKind::*;
     match &expr.kind {
-        Identifier(name) => {
-            let is_bound = bound.iter().rev().any(|scope| scope.contains(name));
-            if !is_bound {
-                free.insert(*name);
+        Identifier(path) => {
+            if let [(name, _)] = &path.segments[..] {
+                let is_bound = bound.iter().rev().any(|scope| scope.contains(name));
+                if !is_bound {
+                    free.insert(*name);
+                }
             }
         }
         Let((name, _), _, init, _) => {
@@ -3405,28 +3414,26 @@ fn collect_pattern_vars(pattern: &Pattern, bound: &mut HashSet<ustr::Ustr>) {
     }
 }
 
-fn property_to_fn_name(
-    scope: &str,
+fn property_to_fn_path(
+    path: &ast::Path,
     variable: &str,
     access: PropertyAccess,
     span: Location,
     env: &TypingEnv,
-) -> Result<String, InternalCompilationError> {
-    let mut scope_parts = scope.rsplitn(2, "::");
-    let scope = scope_parts.next().unwrap(); // safe to unwrap, as we have at least one part
-    let path = scope_parts
-        .next()
-        .map_or("".into(), |path| format!("{path}::"));
-    let fn_name = format!("{}@{} {}.{}", path, access.as_prefix(), scope, variable);
-    if env.module_env.get_function(&fn_name).is_none() {
+) -> Result<ast::Path, InternalCompilationError> {
+    let (scope, mod_path) = path.segments.split_last().unwrap();
+    let fn_name = format!("@{} {}.{}", access.as_prefix(), scope.0, variable);
+    let mut fn_path = ast::Path::new(mod_path.to_vec());
+    fn_path.segments.push((ustr(&fn_name), span));
+    if env.module_env.get_function(&fn_path.segments).is_none() {
         Err(internal_compilation_error!(UnknownProperty {
-            scope: ustr(scope),
+            scope: path.clone(),
             variable: ustr(variable),
             cause: access,
             span,
         }))
     } else {
-        Ok(fn_name)
+        Ok(fn_path)
     }
 }
 

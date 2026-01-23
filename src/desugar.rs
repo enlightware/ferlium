@@ -96,19 +96,13 @@ impl ast::PType {
             Unit => Type::unit(),
             Resolved(ty) => *ty,
             Infer => Type::variable_id(0), // always emit variable id 0 that will be replaced by fresh variables in type inference
-            Path(items) => {
-                // FIXME: this is inefficient, we should keep the split path all the way from parsing
-                let path: String = items
-                    .iter()
-                    .map(|(name, _)| name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                if let Some(ty) = env.type_alias_type(&path) {
+            Path(path) => {
+                if let Some(ty) = env.type_alias_type(path) {
                     ty
-                } else if let Some(ty) = env.type_def_type(&path) {
+                } else if let Some(ty) = env.type_def_type(path) {
                     ty
-                } else if items.len() == 1 {
-                    Type::variant([(items[0].0, Type::unit())])
+                } else if let [(name, _)] = &path.segments[..] {
+                    Type::variant([(*name, Type::unit())])
                 } else {
                     return Err(internal_compilation_error!(TypeNotFound(span)));
                 }
@@ -458,9 +452,9 @@ impl PExpr {
         let kind = match self.kind {
             Literal(value, ty) => {
                 if ty == int_type() {
-                    // convert integer literals to from_int(literal)
+                    // Convert integer literals to from_int(literal).
                     Apply(
-                        b(DExpr::new(Identifier(ustr("from_int")), self.span)),
+                        b(DExpr::single_identifier(ustr("from_int"), self.span)),
                         vec![DExpr::new(Literal(value, ty), self.span)],
                         UnnamedArg::All,
                     )
@@ -469,15 +463,21 @@ impl PExpr {
                 }
             }
             FormattedString(s) => emit_format_string_ast(&s, self.span, &ctx.locals)?,
-            Identifier(name) => {
-                if !ctx.locals.iter().rev().any(|&local| local == name) {
-                    // there is *NOT* a local variable shadowing a function definition
-                    if let Some(index) = ctx.fn_map.get(&name) {
-                        // this is a know function part of this module
+            Identifier(path) => {
+                let is_local = match path.segments.as_slice() {
+                    [(name, _)] => ctx.locals.contains(name),
+                    _ => false,
+                };
+                if !is_local {
+                    // There is *NOT* a local variable shadowing a function definition.
+                    if let [(name, _)] = &path.segments[..]
+                        && let Some(index) = ctx.fn_map.get(name)
+                    {
+                        // This is a known function part of this module.
                         ctx.fn_deps.insert(*index);
                     }
                 }
-                Identifier(name)
+                Identifier(path)
             }
             Let(name, mut_val, expr, ty_ascription) => {
                 let expr = expr.desugar_boxed(ctx)?;
@@ -539,7 +539,7 @@ impl PExpr {
                         );
                         let index_expr = Expr::new(
                             Index(
-                                b(DExpr::new(Identifier(ustr("tmp")), self.span)),
+                                b(Expr::single_identifier(ustr("tmp"), self.span)),
                                 index.1.clone(),
                             ),
                             self.span,
@@ -550,7 +550,7 @@ impl PExpr {
                             Assign(
                                 index.0.clone(),
                                 sign_loc,
-                                b(DExpr::new(Identifier(ustr("tmp")), self.span)),
+                                b(Expr::single_identifier(ustr("tmp"), self.span)),
                             ),
                             self.span,
                         );
@@ -631,7 +631,7 @@ impl PExpr {
                 let it_next = Expr::new(
                     syn_static_apply(
                         (ustr("next"), body_start_span),
-                        vec![Expr::new(Identifier(ustr("@it")), body_start_span)],
+                        vec![Expr::single_identifier(ustr("@it"), body_start_span)],
                     ),
                     body_start_span,
                 );

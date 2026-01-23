@@ -15,7 +15,9 @@ use std::rc::Rc;
 use ariadne::{Label, Source};
 use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
-use ferlium::module::{Module, ModuleEnv, ModuleRc, Modules, ShowModuleDetails, Use, UseSome};
+use ferlium::module::{
+    Module, ModuleEnv, ModuleRc, Modules, Path, ShowModuleDetails, Use, UseSome,
+};
 use ferlium::std::new_module_using_std;
 use ferlium::typing_env::Local;
 use ferlium::{
@@ -457,7 +459,7 @@ fn print_help() {
 fn process_input(
     name: &str,
     input: &str,
-    reverse_uses: HashMap<Ustr, Ustr>,
+    reverse_uses: HashMap<Ustr, Path>,
     other_modules: &Modules,
     locals: &mut Vec<Local>,
     environment: &mut Vec<ValOrMut>,
@@ -529,7 +531,7 @@ fn process_input(
             }
             Err(error) => {
                 let mut modules = other_modules.clone();
-                modules.register_module_rc(ustr(name), module.clone());
+                modules.register_module_rc(Path::single_str(name), module.clone());
                 eprintln!("{}", error.format_with(&(session.source_table(), &modules)));
                 if cfg!(debug_assertions) {
                     eval_ctx.print_environment();
@@ -634,7 +636,7 @@ fn main() {
     // Check for print-std flag
     if args.len() > 1 && args[1] == "--print-std" {
         let session = CompilerSession::new();
-        if let Some(module) = session.std_modules().get(&ustr("std")) {
+        if let Some(module) = session.std_modules().get(&Path::single_str("std")) {
             println!("{}", module.format_with(session.std_modules()));
         } else {
             eprintln!("Module std not found.");
@@ -709,7 +711,7 @@ fn run_interactive_repl() {
                         }
                         "module" => {
                             let module = if let Some(arg) = args.get(1) {
-                                if let Some(module) = other_modules.get(&ustr(arg)) {
+                                if let Some(module) = other_modules.get(&Path::single_str(arg)) {
                                     module.deref()
                                 } else {
                                     println!("Module {arg} not found.");
@@ -722,18 +724,19 @@ fn run_interactive_repl() {
                             true
                         }
                         "function" => {
-                            let (module, module_name): (&Module, &str) =
-                                if let Some(arg) = args.get(2) {
-                                    let name = *arg;
-                                    if let Some(module) = other_modules.get(&ustr(arg)) {
-                                        (&module, name)
-                                    } else {
-                                        println!("Module {arg} not found.");
-                                        continue;
-                                    }
+                            let (module, module_name): (&Module, &str) = if let Some(arg) =
+                                args.get(2)
+                            {
+                                let name = *arg;
+                                if let Some(module) = other_modules.get(&Path::single_str(arg)) {
+                                    (&module, name)
                                 } else {
-                                    (&last_module, "current")
-                                };
+                                    println!("Module {arg} not found.");
+                                    continue;
+                                }
+                            } else {
+                                (&last_module, "current")
+                            };
                             let index = if let Some(arg) = args.get(1) {
                                 match arg.parse::<usize>() {
                                     Ok(id) => id,
@@ -766,8 +769,8 @@ fn run_interactive_repl() {
                         }
                         "history" => {
                             for i in 0..counter {
-                                let name = ustr(&format!("repl{i}"));
-                                if let Some(module) = other_modules.get(&name) {
+                                let name = format!("repl{i}");
+                                if let Some(module) = other_modules.get(&Path::single_str(&name)) {
                                     println!("{}: {}", name, module.list_stats());
                                 }
                             }
@@ -804,11 +807,11 @@ fn run_interactive_repl() {
         let mut reverse_uses = HashMap::new();
         for i in 0..counter {
             let index = counter - i - 1;
-            let mod_name = ustr(&format!("repl{index}"));
-            if let Some(module) = other_modules.get(&mod_name) {
+            let mod_name = format!("repl{index}");
+            if let Some(module) = other_modules.get(&Path::single_str(&mod_name)) {
                 for sym in module.own_symbols() {
                     if !reverse_uses.contains_key(&sym) {
-                        reverse_uses.insert(sym, mod_name);
+                        reverse_uses.insert(sym, Path::single_str(&mod_name));
                     }
                 }
             }
@@ -828,7 +831,7 @@ fn run_interactive_repl() {
         );
         if let Ok(module) = result {
             last_module = module;
-            other_modules.register_module_rc(ustr(name), last_module.clone());
+            other_modules.register_module_rc(Path::single_str(name), last_module.clone());
         }
         counter += 1;
         if let Err(e) = rl.save_history(history_filename) {

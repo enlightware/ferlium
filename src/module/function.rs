@@ -16,7 +16,7 @@ use crate::{
     format::FormatWith,
     function::{FunctionDefinition, FunctionRc},
     ir::Node,
-    module::{ModuleEnv, ModuleRc, TraitKey, format_impl_header_by_key},
+    module::{ModuleEnv, ModuleRc, TraitKey, format_impl_header_by_key, path::Path},
 };
 
 use ustr::Ustr;
@@ -49,7 +49,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
             }
             FunctionId::Import(id) => {
                 let slot = &env.current.import_fn_slots[id.as_index()];
-                let module_name = slot.module_name;
+                let module_name = &slot.module;
                 write!(f, "imported function {module_name}::")?;
                 let function_name = match &slot.target {
                     ImportFunctionTarget::TraitImplMethod { key, index } => {
@@ -57,7 +57,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                         let impls = &env
                             .others
                             .modules
-                            .get(&module_name)
+                            .get(module_name)
                             .expect("imported module not found")
                             .impls;
                         let imp = impls
@@ -94,7 +94,7 @@ pub enum ImportFunctionTarget {
 #[derive(Debug, Clone)]
 pub struct ImportFunctionSlot {
     /// Name of the module to import from
-    pub module_name: Ustr,
+    pub module: Path,
     /// The target function in that module
     pub target: ImportFunctionTarget,
     /// Cached resolved function/module and its interface hash - updated during relinking

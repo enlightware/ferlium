@@ -10,9 +10,8 @@
 use std::rc::Weak;
 use std::{collections::HashMap, rc::Rc};
 
-use ustr::Ustr;
-
 use crate::module::Module;
+use crate::module::path::Path;
 use crate::module::{ImportFunctionTarget, TraitKey};
 
 /// Arc-wrapped module bundle for sharing between threads
@@ -36,7 +35,7 @@ pub enum ModuleRef {
 #[derive(Debug, Clone, Default)]
 pub struct Modules {
     /// Map from module name to the latest module
-    pub(crate) modules: HashMap<Ustr, ModuleRc>,
+    pub(crate) modules: HashMap<Path, ModuleRc>,
 }
 
 impl Modules {
@@ -44,8 +43,8 @@ impl Modules {
         Self::default()
     }
 
-    pub fn get(&self, name: &Ustr) -> Option<&ModuleRc> {
-        self.modules.get(name)
+    pub fn get(&self, path: &Path) -> Option<&ModuleRc> {
+        self.modules.get(path)
     }
 
     /// Non-incremental linking of all import slots in a module
@@ -55,7 +54,7 @@ impl Modules {
             if slot.resolved.borrow().is_some() {
                 continue; // Already linked
             }
-            if let Some(target_module) = self.modules.get(&slot.module_name) {
+            if let Some(target_module) = self.modules.get(&slot.module) {
                 let (function, hash) = match &slot.target {
                     ImportFunctionTarget::NamedFunction(function_name) => {
                         if let Some(target_function) =
@@ -68,7 +67,7 @@ impl Modules {
                         } else {
                             panic!(
                                 "Function {} not found in module {}",
-                                function_name, slot.module_name
+                                function_name, slot.module
                             );
                         }
                     }
@@ -99,7 +98,7 @@ impl Modules {
             } else {
                 panic!(
                     "Module {} not found for import function slot {}",
-                    slot.module_name, slot_index
+                    slot.module, slot_index
                 );
             }
         }
@@ -109,7 +108,7 @@ impl Modules {
             if slot.resolved.borrow().is_some() {
                 continue; // Already linked
             }
-            if let Some(target_module) = self.modules.get(&slot.module_name) {
+            if let Some(target_module) = self.modules.get(&slot.module) {
                 let imp = target_module
                     .impls
                     .get_impl_by_key(&slot.key)
@@ -122,20 +121,20 @@ impl Modules {
             } else {
                 panic!(
                     "Module {} not found for import impl slot {}",
-                    slot.module_name, slot_index
+                    slot.module, slot_index
                 );
             }
         }
     }
 
     /// Register a new module bundle
-    pub fn register_module(&mut self, name: Ustr, module: Module) {
-        self.register_module_rc(name, Rc::new(module));
+    pub fn register_module(&mut self, path: Path, module: Module) {
+        self.register_module_rc(path, Rc::new(module));
     }
 
     /// Register a new module bundle
-    pub fn register_module_rc(&mut self, name: Ustr, module: ModuleRc) {
-        self.modules.insert(name, module.clone());
+    pub fn register_module_rc(&mut self, path: Path, module: ModuleRc) {
+        self.modules.insert(path, module.clone());
     }
 
     /*
@@ -192,23 +191,23 @@ impl Modules {
     */
 
     /// Get a module bundle by name
-    pub fn get_module(&self, name: Ustr) -> Option<ModuleRc> {
-        self.modules.get(&name).cloned()
+    pub fn get_module(&self, path: &Path) -> Option<ModuleRc> {
+        self.modules.get(path).cloned()
     }
 
     /// Get the name of a registered module
-    pub fn get_module_name(&self, module: &ModuleRc) -> Option<Ustr> {
-        for (name, m) in &self.modules {
+    pub fn get_module_path(&self, module: &ModuleRc) -> Option<Path> {
+        for (path, m) in &self.modules {
             if Rc::ptr_eq(m, module) {
-                return Some(*name);
+                return Some(path.clone());
             }
         }
         None
     }
 
     /// List all registered modules
-    pub fn list_modules(&self) -> Vec<Ustr> {
-        self.modules.keys().copied().collect()
+    pub fn list_modules(&self) -> Vec<Path> {
+        self.modules.keys().cloned().collect()
     }
 
     /// Check if this program has any modules (used by ModuleRelinker)

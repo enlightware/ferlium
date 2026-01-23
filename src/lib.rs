@@ -110,7 +110,9 @@ impl CompilerSession {
         let mut source_table = SourceTable::default();
         let std_module = std::std_module(&mut source_table);
         let mut std_modules: Modules = Default::default();
-        std_modules.modules.insert(ustr("std"), std_module.clone());
+        std_modules
+            .modules
+            .insert(module::Path::single_str("std"), std_module.clone());
         let empty_std_user = new_module_using_std();
         Self {
             source_table,
@@ -218,7 +220,7 @@ impl CompilerSession {
     /// All spans are in byte offsets.
     pub fn compile(
         &mut self,
-        name: &str,
+        source_name: &str,
         src: &str,
         other_modules: &Modules,
         extra_uses: &[Use],
@@ -246,9 +248,15 @@ impl CompilerSession {
                     log::debug!("Expr AST\n{}", expr_ast.format_with(&env));
                 }
             };
-            self.compile_to(name, src, module, other_modules, Some(&ast_inspector))
+            self.compile_to(
+                source_name,
+                src,
+                module,
+                other_modules,
+                Some(&ast_inspector),
+            )
         } else {
-            self.compile_to(name, src, module, other_modules, None)
+            self.compile_to(source_name, src, module, other_modules, None)
         }?;
 
         // If debug logging is enabled, display the final IR, after linking and finalizing pending functions.
@@ -271,7 +279,7 @@ impl CompilerSession {
     /// All spans are in byte offsets.
     pub fn compile_to(
         &mut self,
-        name: &str,
+        source_name: &str,
         src: &str,
         module: Module,
         other_modules: &Modules,
@@ -280,7 +288,7 @@ impl CompilerSession {
         // Parse the source code.
         let source_id = self
             .source_table
-            .add_source(name.to_string(), src.to_string());
+            .add_source(source_name.to_string(), src.to_string());
         let (module_ast, expr_ast) = parse_module_and_expr(src, source_id, false)
             .map_err(|error| compilation_error!(ParsingFailed(error)))?;
         if let Some(ast_inspector) = ast_inspector {
@@ -367,7 +375,7 @@ fn parse_module_and_expr(
 /// Compile a source code, given some other Modules, and it to an existing module, or an error.
 /// Allow unstable features as this is typically not user code.
 pub(crate) fn add_code_to_module(
-    name: &str,
+    source_name: &str,
     code: &str,
     to: &mut Module,
     other_modules: &Modules,
@@ -375,7 +383,7 @@ pub(crate) fn add_code_to_module(
     within_std: bool,
 ) -> Result<SourceId, CompilationError> {
     // Parse the source code.
-    let source_id = source_table.add_source(name.to_string(), code.to_string());
+    let source_id = source_table.add_source(source_name.to_string(), code.to_string());
     let module_ast = parse_module(code, source_id, true)
         .map_err(|error| compilation_error!(ParsingFailed(error)))?;
     assert_eq!(module_ast.errors(), &[]);

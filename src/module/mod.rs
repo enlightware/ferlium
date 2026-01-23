@@ -25,12 +25,14 @@ pub mod function;
 pub mod id;
 pub mod module_env;
 pub mod modules;
+pub mod path;
 pub mod trait_impl;
 pub mod uses;
 
 pub use function::*;
 pub use module_env::*;
 pub use modules::*;
+pub use path::*;
 pub use trait_impl::*;
 pub use uses::*;
 
@@ -220,10 +222,10 @@ impl Module {
     }
 
     /// Return whether this module uses sym_name from mod_name.
-    pub fn uses(&self, mod_name: Ustr, sym_name: Ustr) -> bool {
+    pub fn uses(&self, mod_path: &Path, sym_name: Ustr) -> bool {
         self.uses.iter().any(|u| match u {
-            Use::All(module) => *module == mod_name,
-            Use::Some(some) => some.module == mod_name && some.symbols.contains(&sym_name),
+            Use::All(module) => module == mod_path,
+            Use::Some(some) => some.module == *mod_path && some.symbols.contains(&sym_name),
         })
     }
 
@@ -247,17 +249,17 @@ impl Module {
         name: &'a str,
         others: &'a Modules,
         getter: &impl Fn(&'a str, &'a Self) -> Option<T>,
-    ) -> Option<(Option<Ustr>, T)> {
+    ) -> Option<(Option<Path>, T)> {
         getter(name, self).map_or_else(
             || {
                 self.uses.iter().find_map(|use_module| match use_module {
                     Use::All(module) => {
                         let module_ref = others.get(module)?;
-                        getter(name, module_ref).map(|t| (Some(*module), t))
+                        getter(name, module_ref).map(|t| (Some(module.clone()), t))
                     }
                     Use::Some(use_some) => {
                         if use_some.symbols.contains(&ustr(name)) {
-                            let module = use_some.module;
+                            let module = use_some.module.clone();
                             let module_ref = others.get(&module)?;
                             getter(name, module_ref).map(|t| (Some(module), t))
                         } else {
