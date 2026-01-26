@@ -72,6 +72,15 @@ The following features are out of scope:
 * Mutable Value Semantics (especially [this paper](https://www.jot.fm/issues/issue_2022_02/article2.pdf))
 * This [series of blog posts](https://thunderseethe.dev/posts/type-inference/)
 
+## Running tests
+
+To run the tests locally, use:
+```
+make test-local
+```
+
+This use [`nextest`](https://nexte.st/) that is way faster than `cargo test`.
+
 ## Limitations
 
 Currently the compiler can only be used from a single thread to avoid deadlocks when accessing the interned type universe.
