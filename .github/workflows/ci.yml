@@ -37,7 +37,7 @@ jobs:
         run: cargo build
 
       - name: Install cargo-nextest
-        run: cargo install cargo-nextest
+        run: cargo install --locked cargo-nextest
 
       - name: Run local tests
         run: cargo nextest run
