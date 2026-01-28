@@ -230,8 +230,6 @@ impl PartialEq for FunctionRef {
 impl Eq for FunctionRef {}
 
 /// A function holding user-defined code.
-/// If captured is non-empty it is a closure, and these will be passed
-/// as extra first arguments to the environment of the function.
 #[derive(Debug, Clone, new)]
 pub struct ScriptFunction {
     pub code: ir::Node,
@@ -303,6 +301,7 @@ impl PartialEq for Box<ScriptFunction> {
 
 impl Eq for Box<ScriptFunction> {}
 
+/// A function holding user-defined code with a non-empty closure that's passed as extra argument.
 #[derive(new)]
 pub struct Closure {
     pub function: FunctionValue,
