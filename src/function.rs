@@ -301,7 +301,7 @@ impl PartialEq for Box<ScriptFunction> {
 
 impl Eq for Box<ScriptFunction> {}
 
-/// A function holding user-defined code with a non-empty closure that's passed as extra argument.
+/// A function holding user-defined code with a non-empty closure with captures passed as extra arguments.
 #[derive(new)]
 pub struct Closure {
     pub function: FunctionValue,
