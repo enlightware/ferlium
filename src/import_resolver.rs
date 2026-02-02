@@ -51,7 +51,7 @@ impl ModulesResolver<'_> {
 /// Validation performed (explicit `Name` imports only):
 /// - `NameImportedMultipleTimes`: same *introduced* name imported twice.
 /// - `NameImportedConflictsWithLocalDefinition`: name already defined locally.
-/// - `ImportNotFound`: imported symbol doesn't exist (if `exists` is provided).
+/// - `ImportNotFound`: imported symbol doesn't exist.
 ///
 /// Notes:
 /// - `Glob` entries are flattened into `Use::All(...)` but NOT expanded.
@@ -276,7 +276,6 @@ fn register_import(
 }
 
 /// Best-effort span to attribute glob-imported names to.
-/// Prefer the last segment span if present; otherwise return a default-ish span.
 fn glob_span_for(p: &AstPath) -> Location {
     p.segments
         .last()
