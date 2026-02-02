@@ -74,7 +74,7 @@ pub fn store(value: Node, index: usize, name: Ustr) -> NodeKind {
         value,
         index,
         name,
-        name_span: None,
+        name_span: Location::new_synthesized(),
         ty_span: None,
     }))
 }

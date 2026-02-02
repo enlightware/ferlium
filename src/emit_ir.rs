@@ -1353,7 +1353,7 @@ fn compute_num_trait_default_types(
                         let solved_output_tys = trait_solver.solve_output_types(
                             &trait_ref,
                             &input_tys,
-                            span.use_site.unwrap(),
+                            span.use_site,
                         )?;
                         for (output_ty, solved_ty) in
                             output_tys.iter().zip(solved_output_tys.iter())
@@ -1369,7 +1369,7 @@ fn compute_num_trait_default_types(
                         let solved_output_tys = trait_solver.solve_output_types(
                             &trait_ref,
                             &input_tys,
-                            span.use_site.unwrap(),
+                            span.use_site,
                         )?;
                         if output_tys != solved_output_tys {
                             let fake_current = new_module_using_std();
@@ -1380,7 +1380,7 @@ fn compute_num_trait_default_types(
                                     output_tys.format_with(&env),
                                     solved_output_tys.format_with(&env)
                                 ),
-                                span: span.use_site.unwrap(),
+                                span: span.use_site,
                             }));
                         }
                         selected_constraints.remove(&constraint_ptr(constraint));

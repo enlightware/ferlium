@@ -547,7 +547,7 @@ impl TypeInference {
                     value: node,
                     index,
                     name: *name,
-                    name_span: Some(*name_span),
+                    name_span: *name_span,
                     ty_span: *ty_span,
                 }));
                 (node, Type::unit(), MutType::constant(), effects)
@@ -1845,11 +1845,8 @@ impl UnifiedTypeInference {
                             let tuple_ty = unified_ty_inf.normalize_type(*tuple_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
                             // tuple_span and index_span *must* originate from the same module
-                            let span = Location::fuse([
-                                tuple_span.use_site.unwrap(),
-                                index_span.use_site.unwrap(),
-                            ])
-                            .unwrap();
+                            let span =
+                                Location::fuse([tuple_span.use_site, index_span.use_site]).unwrap();
                             if let Some(variant) = variants_are.get(&tuple_ty) {
                                 let variant_span = variant.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1892,11 +1889,8 @@ impl UnifiedTypeInference {
                             let record_ty = unified_ty_inf.normalize_type(*record_ty);
                             let element_ty = unified_ty_inf.normalize_type(*element_ty);
                             // record_span and field_span *must* originate from the same module
-                            let span = Location::fuse([
-                                record_span.use_site.unwrap(),
-                                field_span.use_site.unwrap(),
-                            ])
-                            .unwrap();
+                            let span = Location::fuse([record_span.use_site, field_span.use_site])
+                                .unwrap();
                             if let Some(variant) = variants_are.get(&record_ty) {
                                 let variant_span = variant.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1940,7 +1934,7 @@ impl UnifiedTypeInference {
                             let payload_ty = unified_ty_inf.normalize_type(*payload_ty);
                             // We observed that sometimes variant_span and payload_span come from different modules.
                             // So we just use variant_span here.
-                            let span = variant_span.use_site.unwrap();
+                            let span = variant_span.use_site;
                             if let Some(tuple) = tuples_at_index_is.get(&variant_ty) {
                                 let index_span = tuple.iter().next().unwrap().1.1;
                                 return Err(InternalCompilationError::new_inconsistent_adt(
@@ -1961,7 +1955,7 @@ impl UnifiedTypeInference {
                                 if let Some((expected_ty, expected_span)) = variants.get(tag) {
                                     unified_ty_inf.unify_same_type(
                                         payload_ty,
-                                        payload_span.use_site.unwrap(),
+                                        payload_span.use_site,
                                         *expected_ty,
                                         *expected_span,
                                     )?;
@@ -1969,10 +1963,8 @@ impl UnifiedTypeInference {
                                     variants.insert(*tag, (payload_ty, span));
                                 }
                             } else {
-                                let variant = HashMap::from([(
-                                    *tag,
-                                    (payload_ty, payload_span.use_site.unwrap()),
-                                )]);
+                                let variant =
+                                    HashMap::from([(*tag, (payload_ty, payload_span.use_site))]);
                                 variants_are.insert(variant_ty, variant);
                             }
                         }
@@ -1992,13 +1984,13 @@ impl UnifiedTypeInference {
                                 {
                                     unified_ty_inf.unify_same_type(
                                         *actual,
-                                        span.use_site.unwrap(),
+                                        span.use_site,
                                         *expected,
                                         have_trait.1,
                                     )?;
                                 }
                             } else {
-                                have_traits.insert(key, (output_types, span.use_site.unwrap()));
+                                have_traits.insert(key, (output_types, span.use_site));
                             }
                         }
                     }
@@ -2018,9 +2010,9 @@ impl UnifiedTypeInference {
                             element_ty,
                         } => unified_ty_inf.unify_tuple_project(
                             tuple_ty,
-                            tuple_span.use_site.unwrap(),
+                            tuple_span.use_site,
                             index,
-                            index_span.use_site.unwrap(),
+                            index_span.use_site,
                             element_ty,
                         )?,
                         RecordFieldIs {
@@ -2031,9 +2023,9 @@ impl UnifiedTypeInference {
                             element_ty,
                         } => unified_ty_inf.unify_record_field_access(
                             record_ty,
-                            record_span.use_site.unwrap(),
+                            record_span.use_site,
                             field,
-                            field_span.use_site.unwrap(),
+                            field_span.use_site,
                             element_ty,
                         )?,
                         TypeHasVariant {
@@ -2044,10 +2036,10 @@ impl UnifiedTypeInference {
                             payload_span,
                         } => unified_ty_inf.unify_type_has_variant(
                             variant_ty,
-                            variant_span.use_site.unwrap(),
+                            variant_span.use_site,
                             tag,
                             payload_ty,
-                            payload_span.use_site.unwrap(),
+                            payload_span.use_site,
                         )?,
                         HaveTrait {
                             trait_ref,
@@ -2064,7 +2056,7 @@ impl UnifiedTypeInference {
                                 trait_ref,
                                 &input_tys,
                                 &output_tys,
-                                span.use_site.unwrap(),
+                                span.use_site,
                                 is_ty_adt,
                                 trait_solver,
                             )?

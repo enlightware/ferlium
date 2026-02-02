@@ -254,9 +254,7 @@ impl Node {
             EnvStore(node) => {
                 // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.
                 // Note: synthesized let nodes have empty name span, so we ignore these.
-                if !node.name.starts_with("@")
-                    && let Some(name_span) = node.name_span
-                {
+                if !node.name.starts_with("@") && !node.name_span.is_synthesized() {
                     if let Some((ty_span, ty_constant)) = node.ty_span {
                         if !ty_constant {
                             result.push((
@@ -266,7 +264,7 @@ impl Node {
                         }
                     } else {
                         result.push((
-                            name_span.end_usize(),
+                            node.name_span.end_usize(),
                             format!(": {}", node.value.ty.format_with(env)),
                         ));
                     }

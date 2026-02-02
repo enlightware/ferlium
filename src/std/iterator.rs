@@ -50,7 +50,7 @@ pub fn add_to_module(to: &mut Module) {
         trait_ref: iterator_trait.clone(),
         input_tys: vec![Type::variable_id(2)],
         output_tys: vec![Type::variable_id(1)],
-        span: InstantiableLocation::new_none(),
+        span: InstantiableLocation::new_synthesized(),
     };
     let seq_trait = TraitRef::new_with_constraints(
         SEQ_TRAIT_NAME,
@@ -120,7 +120,7 @@ pub fn add_to_module(to: &mut Module) {
                 trait_ref: iterator_trait,
                 input_tys: vec![Type::variable_id(0)],
                 output_tys: vec![Type::variable_id(1)],
-                span: InstantiableLocation::new_none(),
+                span: InstantiableLocation::new_synthesized(),
             }],
         },
         vec![Type::variable_id(1), Type::variable_id(0)],

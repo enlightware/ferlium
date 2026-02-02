@@ -75,6 +75,11 @@ impl Location {
         Self::new(start as u32, end as u32, source_id)
     }
 
+    /// Create a new synthesized location with span 0..0 and source ID 0.
+    pub fn new_synthesized() -> Self {
+        Self::new(0, 0, SourceId::from_index(0))
+    }
+
     /// Create a new location by fusing the spans of multiple locations.
     /// Panics if `others` are from different sources.
     pub fn fuse(locations: impl IntoIterator<Item = Self>) -> Option<Self> {
@@ -98,6 +103,11 @@ impl Location {
             end = end.max(other.end());
         }
         source_id.map(|source_id| Self::new(start, end, source_id))
+    }
+
+    /// Returns `true` if this location is synthesized (source ID 0 and empty span).
+    pub fn is_synthesized(&self) -> bool {
+        self.source_id.as_index() == 0 && self.is_empty()
     }
 
     /// Byte offset of the start of the span.
@@ -164,26 +174,26 @@ impl Location {
 /// A location that can be instantiated at a use site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstantiableLocation {
-    pub def_site: Option<Location>,
-    pub use_site: Option<Location>,
+    pub def_site: Location,
+    pub use_site: Location,
 }
 impl InstantiableLocation {
     pub fn new(initial: Location) -> Self {
         Self {
-            def_site: Some(initial),
-            use_site: Some(initial),
+            def_site: initial,
+            use_site: initial,
         }
     }
 
-    pub fn new_none() -> Self {
+    pub fn new_synthesized() -> Self {
         Self {
-            def_site: None,
-            use_site: None,
+            def_site: Location::new_synthesized(),
+            use_site: Location::new_synthesized(),
         }
     }
 
     pub fn instantiate(&mut self, use_site: Location) {
-        self.use_site = Some(use_site);
+        self.use_site = use_site;
     }
 }
 
@@ -276,7 +286,7 @@ impl SourceEntry {
 }
 
 /// Table of source code strings for modules.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SourceTable {
     sources: Vec<SourceEntry>,
 }
@@ -315,6 +325,15 @@ impl SourceTable {
         match self.sources.get(index.as_index()) {
             Some(source) => source.get_line_column(byte_pos),
             None => (0, 0),
+        }
+    }
+}
+
+impl Default for SourceTable {
+    fn default() -> Self {
+        let entry = SourceEntry::new("<synthesized>".into(), "".into());
+        SourceTable {
+            sources: vec![entry],
         }
     }
 }

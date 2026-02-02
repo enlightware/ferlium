@@ -159,7 +159,6 @@ impl PubTypeConstraint {
             TypeHasVariant { variant_span, .. } => variant_span.use_site,
             HaveTrait { span, .. } => span.use_site,
         }
-        .unwrap()
     }
 
     pub fn instantiate_location(&mut self, use_site: Location) {
@@ -258,11 +257,8 @@ impl PubTypeConstraint {
                 span,
             } => {
                 if input_tys.iter().all(Type::is_constant) {
-                    let got_output_tys = trait_solver.solve_output_types(
-                        trait_ref,
-                        input_tys,
-                        span.use_site.unwrap(),
-                    )?;
+                    let got_output_tys =
+                        trait_solver.solve_output_types(trait_ref, input_tys, span.use_site)?;
                     assert_eq!(got_output_tys.len(), output_tys.len());
                     for (got_output_ty, output_ty) in got_output_tys.iter().zip(output_tys.iter()) {
                         let inner_ty_vars = output_ty.inner_ty_vars();
@@ -282,9 +278,9 @@ impl PubTypeConstraint {
                             ty_inf
                                 .unify_same_type(
                                     *got_output_ty,
-                                    span.use_site.unwrap(),
+                                    span.use_site,
                                     output_ty,
-                                    span.use_site.unwrap(),
+                                    span.use_site,
                                 )
                                 .unwrap();
                             for (index, inner_ty_var) in inner_ty_vars.iter().enumerate() {

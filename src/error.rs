@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    SourceId, ast,
+    ast,
     format::FormatWith,
     location::{Location, SourceTable},
     r#trait::TraitRef,
@@ -1809,7 +1809,7 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
                     return Location::new(
                         span.start() + args_start as u32 + 1 + start as u32,
                         span.start() + args_start as u32 + 1 + i as u32,
-                        SourceId::from_index(0),
+                        span.source_id(),
                     );
                 }
                 arg_count += 1;
@@ -1824,7 +1824,7 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
         return Location::new(
             span.start() + args_start as u32 + 1 + start as u32,
             span.start() + args_start as u32 + 1 + args_section.len() as u32,
-            SourceId::from_index(0),
+            span.source_id(),
         );
     }
 
@@ -1833,12 +1833,14 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
 
 #[cfg(test)]
 mod tests {
+    use crate::SourceId;
+
     use super::*;
 
     #[test]
     fn extract_ith_fn_arg_single() {
         let src = "(|x| x)((1+2))";
-        let span = Location::new_usize(0, src.len(), SourceId::from_index(0));
+        let span = Location::new_usize(0, src.len(), SourceId::from_index(1));
         let expected = ["(1+2)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
@@ -1849,7 +1851,7 @@ mod tests {
     #[test]
     fn extract_ith_fn_arg_multi() {
         let src = "(|x,y| x*y)(12, (1 + 3))";
-        let span = Location::new_usize(0, src.len(), SourceId::from_index(0));
+        let span = Location::new_usize(0, src.len(), SourceId::from_index(1));
         let expected = ["12", " (1 + 3)"];
         for (index, expected) in expected.into_iter().enumerate() {
             let arg_span = super::extract_ith_fn_arg(src, span, index);
