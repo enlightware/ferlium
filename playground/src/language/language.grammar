@@ -14,7 +14,7 @@
 
     "[" "]" "{" "}" "(" ")"
     ";" ":" "::" ","
-    "=>" ".." "|>"
+    "=>" ".." "|>" "*"
 
     @precedence { LineComment, BlockComment, "/" }
     @precedence { Boolean, String, Identifier }
@@ -41,6 +41,7 @@ modelItem {
     Function
     | TraitImpl
     | TypeDef
+    | UseDecl
 }
 
 Function {
@@ -54,6 +55,14 @@ TraitImpl {
 TypeDef {
     StructDef
     | EnumDef
+}
+
+UseDecl {
+    kw<'use'> UseTree ';'
+}
+
+UseTree {
+    (Identifier "::")* ("*" | "{" (UseTree ",")* UseTree? "}" | Identifier)
 }
 
 StructDef {

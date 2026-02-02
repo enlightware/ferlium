@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -51,10 +51,11 @@ ModuleItem = {
     ModuleFunction,
     ModuleTraitImpl,
     ModuleTypeDef,
+    ModuleUseDecl,
 }
 
 ModuleTraitImpl: Module = {
-    TraitImpl => Module { functions: vec![], impls: vec![<>], type_aliases: vec![], type_defs: vec![] }
+    TraitImpl => Module::single_impl(<>)
 }
 
 TraitImpl: TraitImpl = {
@@ -68,11 +69,32 @@ TraitImpl: TraitImpl = {
 }
 
 ModuleFunction: Module = {
-    Function => Module { functions: vec![<>], impls: vec![], type_aliases: vec![], type_defs: vec![] }
+    Function => Module::single_function(<>)
 }
 
 ModuleTypeDef: Module = {
-    TypeDefinition => Module { functions: vec![], impls: vec![], type_aliases: vec![], type_defs: vec![<>] }
+    TypeDefinition => Module::single_type_def(<>)
+}
+
+ModuleUseDecl: Module = {
+    UseDeclaration => Module::uses_tree(<>)
+}
+
+UseDeclaration: UseTree = {
+    "use" <u:UseTree> ";" => u
+}
+
+UseTree: UseTree = {
+    <p:(<Path> "::")?> "*" => {
+        UseTree::Glob(p)
+    },
+    <p:(<Path> "::")?> "{" <t:Sep<UseTree, ",">> "}" => {
+        UseTree::Group(p, t)
+    },
+    // TODO: when needed, add "as" renaming support
+    <p:Path> => {
+        UseTree::Name(p)
+    }
 }
 
 Function: ModuleFunction = {
@@ -481,6 +503,7 @@ PropertyPathExpr: ExprKind = {
     <p:PropertyPath> => PropertyPath(p.0, p.1),
 }
 
+#[inline]
 Path: Path = {
     <p:PathSegments> => Path::new(p),
 }

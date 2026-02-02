@@ -68,6 +68,17 @@ impl Display for Path {
     }
 }
 
+/// A use definition tree
+#[derive(Debug, Clone)]
+pub enum UseTree {
+    /// Use all symbols from a path
+    Glob(Option<Path>),
+    /// Use a group of use directives from a path
+    Group(Option<Path>, Vec<UseTree>),
+    /// Use one symbol from a path
+    Name(Path),
+}
+
 /// A spanned Type
 pub type TypeSpan<P> = (<P as Phase>::Type, Location);
 
@@ -495,13 +506,47 @@ pub struct Module<P: Phase> {
     pub impls: Vec<TraitImpl<P>>,
     pub type_aliases: Vec<P::TypeAliasInModule>,
     pub type_defs: Vec<P::TypeDefInModule>,
+    pub uses: Vec<UseTree>,
 }
 impl<P: Phase> Module<P> {
+    pub fn single_function(function: ModuleFunction<P>) -> Self {
+        Self {
+            functions: vec![function],
+            ..Self::default()
+        }
+    }
+    pub fn single_impl(imp: TraitImpl<P>) -> Self {
+        Self {
+            impls: vec![imp],
+            ..Self::default()
+        }
+    }
+    pub fn single_type_alias(alias: P::TypeAliasInModule) -> Self {
+        Self {
+            type_aliases: vec![alias],
+            ..Self::default()
+        }
+    }
+    pub fn single_type_def(def: P::TypeDefInModule) -> Self {
+        Self {
+            type_defs: vec![def],
+            ..Self::default()
+        }
+    }
+
+    pub fn uses_tree(uses: UseTree) -> Self {
+        Self {
+            uses: vec![uses],
+            ..Self::default()
+        }
+    }
+
     pub fn extend(&mut self, other: Self) {
         self.functions.extend(other.functions);
         self.impls.extend(other.impls);
         self.type_aliases.extend(other.type_aliases);
         self.type_defs.extend(other.type_defs);
+        self.uses.extend(other.uses);
     }
 
     pub fn merge(mut self, other: Self) -> Self {
@@ -518,6 +563,7 @@ impl<P: Phase> Module<P> {
             && self.impls.is_empty()
             && self.type_aliases.is_empty()
             && self.type_defs.is_empty()
+            && self.uses.is_empty()
     }
 }
 impl Module<Parsed> {
@@ -538,6 +584,7 @@ impl<P: Phase> Default for Module<P> {
             impls: Vec::new(),
             type_aliases: Vec::new(),
             type_defs: Vec::new(),
+            uses: Vec::new(),
         }
     }
 }

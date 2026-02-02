@@ -131,6 +131,58 @@ fn compilation_error_to_data(
                 format!("Name `{name}` defined multiple times"),
             ),
         ],
+        NameImportedMultipleTimes {
+            name,
+            first_occurrence,
+            second_occurrence,
+        } => vec![
+            error_data_from_location(
+                &first_occurrence.span,
+                format!(
+                    "Name `{name}` imported multiple times, here from module `{}`",
+                    first_occurrence.module
+                ),
+            ),
+            error_data_from_location(
+                &second_occurrence.span,
+                format!(
+                    "Name `{name}` imported multiple times, here from module `{}`",
+                    second_occurrence.module
+                ),
+            ),
+        ],
+        ImportConflictsWithLocalDefinition {
+            name,
+            definition_span,
+            import_site: import_span,
+        } => vec![
+            error_data_from_location(
+                definition_span,
+                format!(
+                    "Local definition of `{name}` conflicts with import from module `{}`",
+                    import_span.module
+                ),
+            ),
+            error_data_from_location(
+                &import_span.span,
+                format!(
+                    "Import of `{name}` from module `{}` conflicts with local definition",
+                    import_span.module
+                ),
+            ),
+        ],
+        ImportNotFound {
+            name,
+            import_site: import_span,
+        } => {
+            vec![error_data_from_location(
+                &import_span.span,
+                format!(
+                    "Import of `{name}` not found in module `{}`",
+                    import_span.module
+                ),
+            )]
+        }
         TypeNotFound(span) => vec![error_data_from_location(
             span,
             format!("Cannot find type `{}` in this scope", fmt_span(span)),

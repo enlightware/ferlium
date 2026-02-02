@@ -77,9 +77,6 @@ pub fn emit_module(
     // Preliminary: Make sure no name is defined multiple times.
     validate_name_uniqueness(&source)?;
 
-    // TODO: import uses from source.
-    // TODO: check that uses do not bring name conflicts.
-
     // First desugar the module.
     let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
     let (source, sorted_sccs) = source.desugar(&mut output, others, within_std)?;

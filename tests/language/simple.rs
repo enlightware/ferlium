@@ -1617,6 +1617,96 @@ fn deep_modules() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn use_definitions() {
+    // Use symbols from deep modules.
+    let mut session = TestSession::new();
+    assert_eq!(session.run("use deep::level1::level; level()"), int(1));
+    assert_eq!(
+        session.run("use deep::deeper::level2::level; level()"),
+        int(2)
+    );
+    assert_eq!(
+        session.run("use deep::level1::Pair; Pair(3, 4)"),
+        int_tuple!(3, 4)
+    );
+    assert_eq!(
+        session.run("use deep::level1::Pair; fn level() { 3 } level()"),
+        int(3)
+    );
+    assert_eq!(
+        session.run("use deep::deeper::level2::Pair; Pair(5, 6)"),
+        int_tuple!(5, 6)
+    );
+
+    // Use wildcard imports.
+    assert_eq!(
+        session.run("use deep::level1::*; Pair(1,3).1 + level()"),
+        int(4)
+    );
+
+    // Allow wildcard and explicit imports together.
+    assert_eq!(
+        session.run(
+            "use deep::deeper::level2::*; use deep::deeper::level2::level; level() + Pair(2,3).0"
+        ),
+        int(4)
+    );
+
+    // Use multiple grouped imports.
+    assert_eq!(
+        session.run("use deep::{level1::Pair, deeper::{level2::level}}; level() + Pair(2,3).0"),
+        int(4)
+    );
+
+    // Use entire modules.
+    // FIXME: these is currently not implemented
+    // assert_eq!(session.run("use deep::level1; level1::level()"), int(1));
+    // assert_eq!(
+    //     session.run("use deep::deeper::level2; level2::level()"),
+    //     int(2)
+    // );
+
+    // Detect missing imports.
+    session
+        .fail_compilation("use deep::level1::nonexistent;")
+        .as_import_not_found()
+        .unwrap();
+
+    // Detect import name conflicts.
+    session
+        .fail_compilation("use deep::level1::level; use deep::level1::level;")
+        .as_name_imported_multiple_times()
+        .unwrap();
+    session
+        .fail_compilation("use deep::level1::level; use deep::deeper::level2::level;")
+        .as_name_imported_multiple_times()
+        .unwrap();
+    session
+        .fail_compilation("use deep::level1::*; use deep::deeper::level2::level;")
+        .as_name_imported_multiple_times()
+        .unwrap();
+    session
+        .fail_compilation("use deep::level1::*; use deep::deeper::level2::*;")
+        .as_name_imported_multiple_times()
+        .unwrap();
+
+    // Detect conflicts with local definitions.
+    session
+        .fail_compilation("use deep::level1::level; fn level() {}")
+        .as_import_conflicts_with_local_definition()
+        .unwrap();
+    session
+        .fail_compilation("use deep::level1::*; fn level() {}")
+        .as_import_conflicts_with_local_definition()
+        .unwrap();
+    session
+        .fail_compilation("use deep::level1::*; fn Pair() {}")
+        .as_import_conflicts_with_local_definition()
+        .unwrap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_functions() {
     let mut session = TestSession::new();
     assert_eq!(

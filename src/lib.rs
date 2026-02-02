@@ -33,6 +33,7 @@ mod format_string;
 pub mod function;
 mod graph;
 pub mod ide;
+mod import_resolver;
 pub mod ir;
 mod ir_syn;
 mod location;

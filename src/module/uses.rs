@@ -9,6 +9,7 @@
 //! Use directives
 
 use derive_new::new;
+use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
 
 use crate::module::path::Path;
@@ -20,7 +21,7 @@ pub struct UseSome {
 }
 
 /// A use directive
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EnumAsInner)]
 pub enum Use {
     /// Use all symbols from a module
     All(Path),
