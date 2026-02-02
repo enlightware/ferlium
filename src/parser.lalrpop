@@ -85,8 +85,8 @@ UseDeclaration: UseTree = {
 }
 
 UseTree: UseTree = {
-    <p:(<Path> "::")?> "*" => {
-        UseTree::Glob(p)
+    <p:(<Path> "::")?> <w:Sp<"*">> => {
+        UseTree::Glob(p, w.1)
     },
     <p:(<Path> "::")?> "{" <t:Sep<UseTree, ",">> "}" => {
         UseTree::Group(p, t)

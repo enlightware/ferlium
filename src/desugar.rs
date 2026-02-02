@@ -25,7 +25,7 @@ use crate::{
     error::{DuplicatedFieldContext, DuplicatedVariantContext, InternalCompilationError},
     format_string::emit_format_string_ast,
     graph::{find_strongly_connected_components, topological_sort_sccs},
-    import_resolver::{ModulesResolver, flatten_use_trees},
+    import_resolver::{ModulesResolver, resolve_imports},
     internal_compilation_error,
     module::{Module, ModuleEnv, Modules},
     mutability::{MutType, MutVal},
@@ -278,8 +278,7 @@ impl PModule {
         // Flatten uses from self and check for conflicts with local definitions.
         let local_names = self.name_iter().collect();
         let resolver = ModulesResolver::new(others);
-        let new_uses = flatten_use_trees(&self.uses, &local_names, &resolver)?;
-        output.uses.extend(new_uses);
+        resolve_imports(&self.uses, &local_names, &resolver, &mut output.uses)?;
 
         // Build a map of type names to their location and definitions or aliases.
         // The ty_names map holds indices to the ty_refs vector, which contains the data.

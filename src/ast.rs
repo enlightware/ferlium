@@ -71,8 +71,8 @@ impl Display for Path {
 /// A use definition tree
 #[derive(Debug, Clone)]
 pub enum UseTree {
-    /// Use all symbols from a path
-    Glob(Option<Path>),
+    /// Use all symbols from a path, location of `*` character
+    Glob(Option<Path>, Location),
     /// Use a group of use directives from a path
     Group(Option<Path>, Vec<UseTree>),
     /// Use one symbol from a path

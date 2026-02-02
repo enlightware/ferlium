@@ -10,21 +10,25 @@
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
-use ustr::Ustr;
 
-use crate::module::path::Path;
+use crate::{Location, ast::UstrSpan, module::path::Path};
 
 #[derive(Debug, Clone, new)]
 pub struct UseSome {
     pub module: Path,
-    pub symbols: Vec<Ustr>,
+    pub symbols: Vec<UstrSpan>,
+}
+impl UseSome {
+    pub fn contains(&self, sym_name: &str) -> bool {
+        self.symbols.iter().any(|s| s.0.as_str() == sym_name)
+    }
 }
 
 /// A use directive
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum Use {
     /// Use all symbols from a module
-    All(Path),
+    All(Path, Location),
     /// Use only some symbols from a module
     Some(UseSome),
 }

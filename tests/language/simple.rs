@@ -990,7 +990,7 @@ fn records() {
     );
     assert_eq!(
         session.run(
-            "fn sum(i, l) { if i < l.count { sum(i + 1, l) + 1 } else { 0 } } sum(0, {count: 4})"
+            "fn my_sum(i, l) { if i < l.count { my_sum(i + 1, l) + 1 } else { 0 } } my_sum(0, {count: 4})"
         ),
         int(4)
     );

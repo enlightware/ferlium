@@ -224,8 +224,8 @@ impl Module {
     /// Return whether this module uses sym_name from mod_name.
     pub fn uses(&self, mod_path: &Path, sym_name: Ustr) -> bool {
         self.uses.iter().any(|u| match u {
-            Use::All(module) => module == mod_path,
-            Use::Some(some) => some.module == *mod_path && some.symbols.contains(&sym_name),
+            Use::All(module, _) => module == mod_path,
+            Use::Some(some) => some.module == *mod_path && some.contains(&sym_name),
         })
     }
 
@@ -253,12 +253,12 @@ impl Module {
         getter(name, self).map_or_else(
             || {
                 self.uses.iter().find_map(|use_module| match use_module {
-                    Use::All(module) => {
+                    Use::All(module, _) => {
                         let module_ref = others.get(module)?;
                         getter(name, module_ref).map(|t| (Some(module.clone()), t))
                     }
                     Use::Some(use_some) => {
-                        if use_some.symbols.contains(&ustr(name)) {
+                        if use_some.contains(name) {
                             let module = use_some.module.clone();
                             let module_ref = others.get(&module)?;
                             getter(name, module_ref).map(|t| (Some(module), t))
@@ -421,10 +421,10 @@ impl Module {
             writeln!(f, "Use directives ({}):", self.uses.len())?;
             for use_module in self.uses.iter() {
                 match use_module {
-                    Use::All(module) => writeln!(f, "  {module}: *")?,
+                    Use::All(module, _) => writeln!(f, "  {module}: *")?,
                     Use::Some(use_some) => {
                         write!(f, "  {}:", use_some.module)?;
-                        for symbol in use_some.symbols.iter() {
+                        for (symbol, _) in use_some.symbols.iter() {
                             write!(f, " {symbol}")?;
                         }
                         writeln!(f)?;

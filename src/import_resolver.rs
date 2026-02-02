@@ -46,6 +46,7 @@ impl ModulesResolver<'_> {
 }
 
 /// Flatten a list of `UseTree`s into `Uses` and validate explicit imports.
+/// Updates `uses` in place.
 ///
 /// Validation performed (explicit `Name` imports only):
 /// - `NameImportedMultipleTimes`: same *introduced* name imported twice.
@@ -54,49 +55,94 @@ impl ModulesResolver<'_> {
 ///
 /// Notes:
 /// - `Glob` entries are flattened into `Use::All(...)` but NOT expanded.
-pub fn flatten_use_trees(
+pub fn resolve_imports(
     trees: &[UseTree],
     local_names: &HashMap<Ustr, Location>,
     resolver: &ModulesResolver<'_>,
-) -> Result<Uses, InternalCompilationError> {
-    let mut uses_out: Uses = Vec::new();
-
+    uses: &mut Uses,
+) -> Result<(), InternalCompilationError> {
     // Track names introduced by imports (explicit and glob-expanded for conflict checking).
     let mut seen: HashMap<Ustr, ImportSite> = HashMap::new();
+    prefill_seen_from_existing_uses(uses, local_names, resolver, &mut seen)?;
     let mut use_index_by_module: HashMap<ModPath, usize> = HashMap::new();
 
     for t in trees {
-        flatten_one(
+        resolve_one(
             t,
             None,
             local_names,
             &mut seen,
-            &mut uses_out,
+            uses,
             &mut use_index_by_module,
             resolver,
         )?;
     }
 
-    Ok(uses_out)
+    Ok(())
 }
 
-fn flatten_one(
+fn prefill_seen_from_existing_uses(
+    existing_uses: &Uses,
+    defined_names: &HashMap<Ustr, Location>,
+    resolver: &ModulesResolver<'_>,
+    seen: &mut HashMap<Ustr, ImportSite>,
+) -> Result<(), InternalCompilationError> {
+    for u in existing_uses {
+        match u {
+            Use::Some(UseSome { module, symbols }) => {
+                for sym in symbols {
+                    let site = ImportSite {
+                        module: module.clone(),
+                        symbol: sym.0,
+                        span: sym.1,
+                        kind: ImportKind::Explicit,
+                    };
+                    register_import(sym.0, site, defined_names, seen)?;
+                }
+            }
+
+            Use::All(module, span) => {
+                for sym in resolver.list_importable_symbols(module) {
+                    let site = ImportSite {
+                        module: module.clone(),
+                        symbol: sym,
+                        span: *span,
+                        kind: ImportKind::Glob,
+                    };
+                    register_import(sym, site, defined_names, seen)?;
+                }
+            } // future-proofing
+              /*Use::Module { alias, target, span } => {
+                  let site = ImportSite {
+                      module: target.clone(),
+                      symbol: *alias,
+                      span: *span,
+                      kind: ImportKind::Explicit,
+                  };
+                  register_import(*alias, site, defined_names, seen)?;
+              }*/
+        }
+    }
+    Ok(())
+}
+
+fn resolve_one(
     tree: &UseTree,
     base: Option<&AstPath>,
     local_names: &HashMap<Ustr, Location>,
     seen: &mut HashMap<Ustr, ImportSite>,
-    uses_out: &mut Uses,
+    uses: &mut Uses,
     use_index_by_module: &mut HashMap<ModPath, usize>,
     resolver: &ModulesResolver<'_>,
 ) -> Result<(), InternalCompilationError> {
     use UseTree::*;
     match tree {
-        Glob(opt_path) => {
+        Glob(opt_path, span) => {
             let full = join_base_and_opt_path(base, opt_path.as_ref());
             let module = ast_to_module_path(&full);
 
             // Keep existing semantics: record the glob for later lookup.
-            uses_out.push(Use::All(module.clone()));
+            uses.push(Use::All(module.clone(), *span));
 
             // Conflict detection by enumerating all importable symbols of that module.
             let glob_span = glob_span_for(&full);
@@ -117,12 +163,12 @@ fn flatten_one(
         Group(opt_path, children) => {
             let new_base = join_base_and_opt_path(base, opt_path.as_ref());
             for c in children {
-                flatten_one(
+                resolve_one(
                     c,
                     Some(&new_base),
                     local_names,
                     seen,
-                    uses_out,
+                    uses,
                     use_index_by_module,
                     resolver,
                 )?;
@@ -156,15 +202,19 @@ fn flatten_one(
             let idx = if let Some(idx) = use_index_by_module.get(&module).copied() {
                 idx
             } else {
-                let idx = uses_out.len();
-                uses_out.push(Use::Some(UseSome {
+                let idx = uses.len();
+                uses.push(Use::Some(UseSome {
                     module: module.clone(),
                     symbols: Vec::new(),
                 }));
                 use_index_by_module.insert(module.clone(), idx);
                 idx
             };
-            uses_out[idx].as_some_mut().unwrap().symbols.push(symbol);
+            uses[idx]
+                .as_some_mut()
+                .unwrap()
+                .symbols
+                .push((symbol, span));
 
             Ok(())
         }

@@ -469,9 +469,8 @@ fn process_input(
     // Initialize module with use directives
     let mut module = new_module_using_std();
     for (sym_name, mod_name) in reverse_uses {
-        module
-            .uses
-            .push(Use::Some(UseSome::new(mod_name, vec![sym_name])));
+        let symbols = vec![(sym_name, Location::new_synthesized())];
+        module.uses.push(Use::Some(UseSome::new(mod_name, symbols)));
     }
 
     // AST debug output for REPL
