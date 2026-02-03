@@ -65,7 +65,7 @@ pub use ustr::{Ustr, ustr};
 
 use crate::{
     format::FormatWith,
-    module::{Module, ModuleRc, Modules, Use},
+    module::{Module, ModuleRc, Modules},
     r#type::Type,
 };
 
@@ -224,7 +224,6 @@ impl CompilerSession {
         source_name: &str,
         src: &str,
         other_modules: &Modules,
-        extra_uses: &[Use],
     ) -> Result<ModuleAndExpr, CompilationError> {
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
@@ -235,8 +234,7 @@ impl CompilerSession {
         }
 
         // Prepare a module with the extra uses.
-        let mut module = new_module_using_std();
-        module.uses.extend(extra_uses.iter().cloned());
+        let module = new_module_using_std();
 
         // Compile the code.
         // If debug logging is enabled, prepare an AST inspector that logs the ASTs.

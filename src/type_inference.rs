@@ -456,7 +456,7 @@ impl TypeInference {
                 }
                 // Retrieve the trait method from the environment, if it exists
                 else if let Some((module_name, _trait_descr)) =
-                    env.module_env.get_trait_function(path)
+                    env.module_env.get_trait_function(path)?
                 {
                     // TODO: add TraitFnImmediate for trait functions
                     let module_text = match module_name {
@@ -471,7 +471,7 @@ impl TypeInference {
                     }));
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((definition, function, _module_name)) = env.get_function(path) {
+                else if let Some((definition, function, _module_name)) = env.get_function(path)? {
                     let (fn_ty, inst_data, _subst) = definition
                         .ty_scheme
                         .instantiate_with_fresh_vars(self, expr.span, None);
@@ -489,7 +489,7 @@ impl TypeInference {
                     )
                 }
                 // Retrieve the struct constructor, if it exists
-                else if let Some(type_def) = env.module_env.type_def_for_construction(path) {
+                else if let Some(type_def) = env.module_env.type_def_for_construction(path)? {
                     // Retrieve the payload type and the tag, if it is an enum.
                     let (type_def, payload_ty, tag) = type_def.lookup_payload();
                     if payload_ty != Type::unit() {
@@ -705,7 +705,7 @@ impl TypeInference {
                     DuplicatedFieldContext::Struct,
                 )?;
                 // First check if the path is a known type definition.
-                if let Some(type_def) = env.module_env.type_def_for_construction(path) {
+                if let Some(type_def) = env.module_env.type_def_for_construction(path)? {
                     // Then resolve the layout of the struct.
                     let (type_def, payload_ty, tag) = type_def.lookup_payload();
                     // Check that it is a record.
@@ -990,7 +990,7 @@ impl TypeInference {
             || Location::fuse(args.iter().map(|arg| arg.borrow().span)).unwrap_or(path_span);
         // Get the function and its type from the environment.
         Ok(
-            if let Some((_module_name, trait_descr)) = env.module_env.get_trait_function(path) {
+            if let Some((_module_name, trait_descr)) = env.module_env.get_trait_function(path)? {
                 let (trait_ref, function_index, definition) = trait_descr;
                 // Validate the number of arguments
                 if definition.ty_scheme.ty.args.len() != args.len() {
@@ -1044,7 +1044,7 @@ impl TypeInference {
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
-            } else if let Some((definition, function, _module_name)) = env.get_function(path) {
+            } else if let Some((definition, function, _module_name)) = env.get_function(path)? {
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: definition.ty_scheme.ty.args.len(),
@@ -1076,7 +1076,7 @@ impl TypeInference {
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
-            } else if let Some(type_def) = env.module_env.type_def_for_construction(path) {
+            } else if let Some(type_def) = env.module_env.type_def_for_construction(path)? {
                 // Retrieve the payload type and the tag, if it is an enum.
                 let (type_def, payload_ty, tag) = type_def.lookup_payload();
                 // Compute the arity from the payload type.
@@ -3417,7 +3417,7 @@ fn property_to_fn_path(
     let fn_name = format!("@{} {}.{}", access.as_prefix(), scope.0, variable);
     let mut fn_path = ast::Path::new(mod_path.to_vec());
     fn_path.segments.push((ustr(&fn_name), span));
-    if env.module_env.get_function(&fn_path.segments).is_none() {
+    if env.module_env.get_function(&fn_path.segments)?.is_none() {
         Err(internal_compilation_error!(UnknownProperty {
             scope: path.clone(),
             variable: ustr(variable),

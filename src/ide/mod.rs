@@ -16,12 +16,13 @@ use std::{
 use crate::{
     CompilationError, CompilerSession, DisplayStyle, Location, ModuleAndExpr, ModuleEnv, SourceId,
     error::{
-        CompilationErrorImpl, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
+        CompilationErrorImpl, ImportKind, MutabilityMustBeWhat, WhatIsNotAProductType,
+        WhichProductTypeIsNot,
     },
     eval::{EvalCtx, ValOrMut},
     format::FormatWith,
     location::SourceTable,
-    module::{self, ModuleFunction, ModuleRc, Modules, Uses},
+    module::{self, ModuleFunction, ModuleRc, Modules},
     std::new_module_using_std,
     r#type::{FnArgType, Type, tuple_type},
     value::{NativeValue, Value},
@@ -131,26 +132,18 @@ fn compilation_error_to_data(
                 format!("Name `{name}` defined multiple times"),
             ),
         ],
-        NameImportedMultipleTimes {
-            name,
-            first_occurrence,
-            second_occurrence,
-        } => vec![
-            error_data_from_location(
-                &first_occurrence.span,
-                format!(
-                    "Name `{name}` imported multiple times, here from module `{}`",
-                    first_occurrence.module
-                ),
-            ),
-            error_data_from_location(
-                &second_occurrence.span,
-                format!(
-                    "Name `{name}` imported multiple times, here from module `{}`",
-                    second_occurrence.module
-                ),
-            ),
-        ],
+        NameImportedMultipleTimes { name, occurrences } => occurrences
+            .iter()
+            .map(|import_site| {
+                error_data_from_location(
+                    &import_site.span,
+                    format!(
+                        "Name `{name}` imported multiple times, here from module `{}`",
+                        import_site.module
+                    ),
+                )
+            })
+            .collect(),
         ImportConflictsWithLocalDefinition {
             name,
             definition_span,
@@ -171,16 +164,16 @@ fn compilation_error_to_data(
                 ),
             ),
         ],
-        ImportNotFound {
-            name,
-            import_site: import_span,
-        } => {
+        ImportNotFound(site) => {
             vec![error_data_from_location(
-                &import_span.span,
-                format!(
-                    "Import of `{name}` not found in module `{}`",
-                    import_span.module
-                ),
+                &site.span,
+                match &site.kind {
+                    ImportKind::Symbol(symbol) => format!(
+                        "Import of `{}` not found in module `{}`",
+                        symbol, site.module
+                    ),
+                    ImportKind::Module => format!("Module {} does not exist", site.module),
+                },
             )]
         }
         TypeNotFound(span) => vec![error_data_from_location(
@@ -724,7 +717,6 @@ impl ExecutionResult {
 pub struct Compiler {
     session: CompilerSession,
     modules: Modules,
-    extra_uses: Uses,
     user_module: ModuleAndExpr,
     char_index_lookup: HashMap<SourceId, CharIndexLookup>,
 }
@@ -741,16 +733,13 @@ impl Compiler {
         Self {
             session,
             modules,
-            extra_uses: Uses::new(),
             user_module: ModuleAndExpr::new_just_module(new_module_using_std()),
             char_index_lookup: HashMap::new(),
         }
     }
 
     fn compile_internal(&mut self, src: &str) -> Result<(), CompilationError> {
-        self.user_module = self
-            .session
-            .compile(SRC_NAME, src, &self.modules, &self.extra_uses)?;
+        self.user_module = self.session.compile(SRC_NAME, src, &self.modules)?;
         Ok(())
     }
 
@@ -774,7 +763,13 @@ impl Compiler {
     }
 
     pub fn fn_signature(&self, name: &str) -> Option<String> {
-        if let Some(func) = self.user_module.module.get_function(name, &self.modules) {
+        if let Some(func) = self
+            .user_module
+            .module
+            .get_function(name, &self.modules)
+            .ok()
+            .flatten()
+        {
             let module_env = ModuleEnv::new(&self.user_module.module, &self.modules, false);
             Some(format!(
                 "{}",
@@ -941,20 +936,6 @@ impl Compiler {
 
 /// The compiler to be used in the web IDE, non-wasm-available part
 impl Compiler {
-    pub fn new_with_modules(modules: Modules, extra_uses: Uses) -> Self {
-        let session = CompilerSession::new();
-        let mut module = new_module_using_std();
-        module.uses.extend(extra_uses.iter().cloned());
-        let user_module = ModuleAndExpr::new_just_module(module);
-        Self {
-            session,
-            modules,
-            extra_uses,
-            user_module,
-            char_index_lookup: HashMap::new(),
-        }
-    }
-
     /* TODO: figure out how to clean that
     pub fn with_module(mut self, name: &str, module: ModuleRc, extra_uses: Uses) -> Self {
         self.modules.modules.insert(name.into(), module);
@@ -980,10 +961,10 @@ impl Compiler {
         name: &str,
         f: impl FnOnce(&ModuleFunction, &ModuleRc, &Modules) -> Result<R, String>,
     ) -> Result<R, String> {
-        if let Some(func) = self.user_module.module.get_function(name, &self.modules) {
-            f(func, &self.user_module.module, &self.modules)
-        } else {
-            Err(format!("Function {name} not found"))
+        match self.user_module.module.get_function(name, &self.modules) {
+            Ok(Some(func)) => f(func, &self.user_module.module, &self.modules),
+            Ok(None) => Err(format!("Function {name} not found")),
+            Err(e) => Err(format!("Lookup error for {name}: {e:?}")),
         }
     }
 

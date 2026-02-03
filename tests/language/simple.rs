@@ -1651,6 +1651,14 @@ fn use_definitions() {
         ),
         int(4)
     );
+    assert_eq!(
+        session.run("use deep::level1::*; use deep::deeper::level2::level; level()"),
+        int(2)
+    );
+
+    // Allow wildcard and local definitions together.
+    assert_eq!(session.run("use deep::level1::*; fn level() {}"), unit());
+    assert_eq!(session.run("use deep::level1::*; fn Pair() {}"), unit());
 
     // Use multiple grouped imports.
     assert_eq!(
@@ -1682,25 +1690,13 @@ fn use_definitions() {
         .as_name_imported_multiple_times()
         .unwrap();
     session
-        .fail_compilation("use deep::level1::*; use deep::deeper::level2::level;")
-        .as_name_imported_multiple_times()
-        .unwrap();
-    session
-        .fail_compilation("use deep::level1::*; use deep::deeper::level2::*;")
+        .fail_compilation("use deep::level1::*; use deep::deeper::level2::*; level")
         .as_name_imported_multiple_times()
         .unwrap();
 
     // Detect conflicts with local definitions.
     session
         .fail_compilation("use deep::level1::level; fn level() {}")
-        .as_import_conflicts_with_local_definition()
-        .unwrap();
-    session
-        .fail_compilation("use deep::level1::*; fn level() {}")
-        .as_import_conflicts_with_local_definition()
-        .unwrap();
-    session
-        .fail_compilation("use deep::level1::*; fn Pair() {}")
         .as_import_conflicts_with_local_definition()
         .unwrap();
 }

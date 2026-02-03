@@ -8,29 +8,27 @@
 //
 //! Use directives
 
-use derive_new::new;
-use enum_as_inner::EnumAsInner;
+use std::collections::HashMap;
 
-use crate::{Location, ast::UstrSpan, module::path::Path};
+use derive_new::new;
+use ustr::Ustr;
+
+use crate::{Location, module::path::Path};
 
 #[derive(Debug, Clone, new)]
-pub struct UseSome {
+pub struct UseData {
     pub module: Path,
-    pub symbols: Vec<UstrSpan>,
+    pub span: Location,
 }
-impl UseSome {
-    pub fn contains(&self, sym_name: &str) -> bool {
-        self.symbols.iter().any(|s| s.0.as_str() == sym_name)
+
+/// Use directives of a module, separated into explicit and wildcard uses
+#[derive(Debug, Clone, new)]
+pub struct Uses {
+    pub explicits: HashMap<Ustr, UseData>,
+    pub wildcards: Vec<UseData>,
+}
+impl Default for Uses {
+    fn default() -> Self {
+        Self::new(HashMap::new(), vec![])
     }
 }
-
-/// A use directive
-#[derive(Debug, Clone, EnumAsInner)]
-pub enum Use {
-    /// Use all symbols from a module
-    All(Path, Location),
-    /// Use only some symbols from a module
-    Some(UseSome),
-}
-
-pub type Uses = Vec<Use>;

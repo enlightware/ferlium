@@ -15,9 +15,7 @@ use std::rc::Rc;
 use ariadne::{Label, Source};
 use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
-use ferlium::module::{
-    Module, ModuleEnv, ModuleRc, Modules, Path, ShowModuleDetails, Use, UseSome,
-};
+use ferlium::module::{Module, ModuleEnv, ModuleRc, Modules, Path, ShowModuleDetails, UseData};
 use ferlium::std::new_module_using_std;
 use ferlium::typing_env::Local;
 use ferlium::{
@@ -469,8 +467,8 @@ fn process_input(
     // Initialize module with use directives
     let mut module = new_module_using_std();
     for (sym_name, mod_name) in reverse_uses {
-        let symbols = vec![(sym_name, Location::new_synthesized())];
-        module.uses.push(Use::Some(UseSome::new(mod_name, symbols)));
+        let use_data = UseData::new(mod_name, Location::new_synthesized());
+        module.uses.explicits.insert(sym_name, use_data);
     }
 
     // AST debug output for REPL

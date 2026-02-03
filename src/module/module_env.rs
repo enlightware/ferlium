@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use crate::{
     ast::{self, UstrSpan},
+    error::InternalCompilationError,
     module::{Module, ModuleFunction, Modules, path::Path},
     r#trait::TraitRef,
     r#type::TypeDefRef,
@@ -90,14 +91,21 @@ impl<'m> ModuleEnv<'m> {
             )
     }
 
-    pub fn type_alias_type(&self, path: &ast::Path) -> Option<Type> {
-        self.get_module_member(&path.segments, &|name, module| {
-            module.type_aliases.get_type(&ustr(name))
-        })
-        .map(|(_, ty)| ty)
+    pub fn type_alias_type(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<Type>, InternalCompilationError> {
+        Ok(self
+            .get_module_member(&path.segments, &|name, module| {
+                module.type_aliases.get_type(&ustr(name))
+            })?
+            .map(|(_, ty)| ty))
     }
 
-    pub fn type_def_for_construction(&self, path: &ast::Path) -> Option<TypeDefLookupResult> {
+    pub fn type_def_for_construction(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<TypeDefLookupResult>, InternalCompilationError> {
         // First search for a matching enum
         let segments = &path.segments;
         let len = segments.len();
@@ -106,13 +114,13 @@ impl<'m> ModuleEnv<'m> {
             let variant_name = segments[len - 1].0;
             if let Some((_, ty_def)) = self.get_module_member(enum_segments, &|name, module| {
                 module.type_defs.get(&ustr(name)).cloned()
-            }) {
+            })? {
                 if ty_def.is_enum() {
                     let ty_data = ty_def.shape.data();
                     let variants = ty_data.as_variant().unwrap();
                     let variant = variants.iter().find(|(name, _)| *name == variant_name);
                     if let Some((tag, ty)) = variant {
-                        return Some(TypeDefLookupResult::Enum(ty_def.clone(), *tag, *ty));
+                        return Ok(Some(TypeDefLookupResult::Enum(ty_def.clone(), *tag, *ty)));
                     }
                 }
             }
@@ -121,21 +129,25 @@ impl<'m> ModuleEnv<'m> {
         if len >= 1 {
             if let Some((_, ty_def)) = self.get_module_member(segments, &|name, module| {
                 module.type_defs.get(&ustr(name)).cloned()
-            }) {
+            })? {
                 if ty_def.is_struct_like() {
-                    return Some(TypeDefLookupResult::Struct(ty_def.clone()));
+                    return Ok(Some(TypeDefLookupResult::Struct(ty_def.clone())));
                 }
             }
         }
 
-        None
+        Ok(None)
     }
 
-    pub fn type_def_type(&self, path: &ast::Path) -> Option<Type> {
-        self.get_module_member(&path.segments, &|name, module| {
-            module.type_defs.get(&ustr(name)).cloned()
-        })
-        .map(|(_, ty_def)| ty_def.as_type())
+    pub fn type_def_type(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<Type>, InternalCompilationError> {
+        Ok(self
+            .get_module_member(&path.segments, &|name, module| {
+                module.type_defs.get(&ustr(name)).cloned()
+            })?
+            .map(|(_, ty_def)| ty_def.as_type()))
     }
 
     pub fn function_name(&self, func: &FunctionRc) -> Option<String> {
@@ -169,7 +181,7 @@ impl<'m> ModuleEnv<'m> {
     pub fn get_function(
         &'m self,
         path: &'m [UstrSpan],
-    ) -> Option<(Option<Path>, &'m ModuleFunction)> {
+    ) -> Result<Option<(Option<Path>, &'m ModuleFunction)>, InternalCompilationError> {
         self.get_module_member(path, &|name, module| {
             module.get_unique_own_function(ustr(name))
         })
@@ -179,31 +191,36 @@ impl<'m> ModuleEnv<'m> {
     pub fn get_program_function(
         &'m self,
         path: &'m [UstrSpan],
-    ) -> Option<(Option<Path>, &'m ModuleFunction)> {
+    ) -> Result<Option<(Option<Path>, &'m ModuleFunction)>, InternalCompilationError> {
         self.get_module_member(path, &|name, module| {
             module.get_unique_own_function(ustr(name))
         })
     }
 
     /// Get the trait reference associated to a trait name.
-    pub fn get_trait_ref(&'m self, name: UstrSpan) -> Option<TraitRef> {
-        self.get_module_member(&[name], &|name, module| {
-            module.traits.iter().find_map(|trait_ref| {
-                if trait_ref.name == name {
-                    Some(trait_ref.clone())
-                } else {
-                    None
-                }
-            })
-        })
-        .map(|(_, t)| t)
+    pub fn get_trait_ref(
+        &'m self,
+        name: UstrSpan,
+    ) -> Result<Option<TraitRef>, InternalCompilationError> {
+        Ok(self
+            .get_module_member(&[name], &|name, module| {
+                module.traits.iter().find_map(|trait_ref| {
+                    if trait_ref.name == name {
+                        Some(trait_ref.clone())
+                    } else {
+                        None
+                    }
+                })
+            })?
+            .map(|(_, t)| t))
     }
 
     /// Get a trait function from the current module, or other ones, return the name of the module if other.
     pub fn get_trait_function(
         &'m self,
         path: &'m ast::Path,
-    ) -> Option<(Option<Path>, TraitFunctionDescription<'m>)> {
+    ) -> Result<Option<(Option<Path>, TraitFunctionDescription<'m>)>, InternalCompilationError>
+    {
         self.get_module_member(&path.segments, &|name, module| {
             module.traits.iter().find_map(|trait_ref| {
                 trait_ref
@@ -226,28 +243,24 @@ impl<'m> ModuleEnv<'m> {
         &'m self,
         segments: &'m [UstrSpan],
         getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
-    ) -> Option<(Option<Path>, T)> {
-        let member = if let [(name, _)] = segments {
-            self.current.get_member(name, self.others, getter)
-        } else {
-            None
-        };
-        member.or_else(|| {
-            if let Some(path) = segments.split_last() {
-                let ((function_name, _), module) = path;
-                if let [single_segment] = module
-                    && single_segment.0 == "std"
-                    && self.within_std
-                {
-                    return self.current.get_member(function_name, self.others, getter);
-                }
-                let path = Path::new(module.iter().map(|(seg, _)| *seg).collect());
-                self.others
-                    .get(&path)
-                    .and_then(|module| module.get_member(function_name, self.others, getter))
-            } else {
-                None
+    ) -> Result<Option<(Option<Path>, T)>, InternalCompilationError> {
+        if let [(name, _)] = segments {
+            return self.current.get_member(name, self.others, getter);
+        }
+        if let Some(path) = segments.split_last() {
+            let ((function_name, _), module) = path;
+            if let [single_segment] = module
+                && single_segment.0 == "std"
+                && self.within_std
+            {
+                return self.current.get_member(function_name, self.others, getter);
             }
-        })
+            let path = Path::new(module.iter().map(|(seg, _)| *seg).collect());
+            self.others.get(&path).map_or(Ok(None), |module| {
+                module.get_member(function_name, self.others, getter)
+            })
+        } else {
+            Ok(None)
+        }
     }
 }

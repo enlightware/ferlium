@@ -150,20 +150,19 @@ impl Scope for External {
     type ValidVariant = Vec<String>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumAsInner)]
 pub enum ImportKind {
-    Explicit,
-    Glob,
+    // TODO: split between introduced_name and original_symbol once we support "as" renaming
+    Symbol(Ustr),
+    Module,
 }
 
 /// An import site within a module.
 #[derive(Debug, Clone)]
 pub struct ImportSite {
-    pub module: crate::module::path::Path,
-    // TODO: split between introduced_name and original_symbol once we support "as" renaming
-    pub symbol: Ustr,
-    pub span: Location,
     pub kind: ImportKind,
+    pub module: crate::module::path::Path,
+    pub span: Location,
 }
 
 /// Compilation error implementation.
@@ -179,18 +178,14 @@ pub enum CompilationErrorImpl<S: Scope> {
     },
     NameImportedMultipleTimes {
         name: Ustr,
-        first_occurrence: ImportSite,
-        second_occurrence: ImportSite,
+        occurrences: Vec<ImportSite>,
     },
     ImportConflictsWithLocalDefinition {
         name: Ustr,
         definition_span: Location,
         import_site: ImportSite,
     },
-    ImportNotFound {
-        name: Ustr,
-        import_site: ImportSite,
-    },
+    ImportNotFound(ImportSite),
     TypeNotFound(Location),
     TraitNotFound(Location),
     WrongNumberOfArguments {
@@ -519,15 +514,14 @@ impl FormatWith<SourceTable> for CompilationError {
                     import_site.module
                 )
             }
-            ImportNotFound {
-                name, import_site, ..
-            } => {
-                write!(
+            ImportNotFound(site) => match &site.kind {
+                ImportKind::Symbol(symbol) => write!(
                     f,
-                    "Name `{name}` not found in module `{}`",
-                    import_site.module
-                )
-            }
+                    "Import of `{}` not found in module `{}`",
+                    symbol, site.module
+                ),
+                ImportKind::Module => write!(f, "Module {} does not exist", site.module),
+            },
             TypeNotFound(span) => {
                 write!(f, "Cannot find type {} in this scope", fmt_span(span))
             }
@@ -1063,15 +1057,9 @@ impl CompilationError {
                 first_occurrence,
                 second_occurrence,
             }),
-            NameImportedMultipleTimes {
-                name,
-                first_occurrence,
-                second_occurrence,
-            } => compilation_error!(NameImportedMultipleTimes {
-                name,
-                first_occurrence,
-                second_occurrence,
-            }),
+            NameImportedMultipleTimes { name, occurrences } => {
+                compilation_error!(NameImportedMultipleTimes { name, occurrences })
+            }
             ImportConflictsWithLocalDefinition {
                 name,
                 definition_span,
@@ -1081,8 +1069,8 @@ impl CompilationError {
                 definition_span,
                 import_site,
             }),
-            ImportNotFound { name, import_site } => {
-                compilation_error!(ImportNotFound { name, import_site })
+            ImportNotFound(site) => {
+                compilation_error!(ImportNotFound(site))
             }
             TypeNotFound(span) => compilation_error!(TypeNotFound(span)),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),

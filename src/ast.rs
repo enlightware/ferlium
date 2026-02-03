@@ -60,6 +60,15 @@ impl Path {
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
+
+    pub fn span(&self) -> Option<Location> {
+        if let (Some(&(_, start)), Some(&(_, end))) = (self.segments.first(), self.segments.last())
+        {
+            Location::fuse([start, end])
+        } else {
+            None
+        }
+    }
 }
 
 impl Display for Path {

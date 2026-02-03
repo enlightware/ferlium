@@ -10,6 +10,7 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     Location, ast,
+    error::InternalCompilationError,
     function::FunctionDefinition,
     module::{
         self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, Module,
@@ -60,6 +61,8 @@ impl Local {
         FnArgType::new(self.ty, self.mutable)
     }
 }
+
+pub type GetFunctionData<'a> = (&'a FunctionDefinition, FunctionId, Option<module::Path>);
 
 /// A typing environment, mapping local variable names to types.
 #[derive(new)]
@@ -118,9 +121,9 @@ impl<'m> TypingEnv<'m> {
     pub fn get_function(
         &mut self,
         path: &ast::Path,
-    ) -> Option<(&FunctionDefinition, FunctionId, Option<module::Path>)> {
+    ) -> Result<Option<GetFunctionData<'_>>, InternalCompilationError> {
         if path.is_empty() {
-            return None;
+            return Ok(None);
         }
         // Resolve the symbol in the module environment, to (Option<module path>, function name)
         let segments = &path.segments;
@@ -138,7 +141,7 @@ impl<'m> TypingEnv<'m> {
             };
             self.module_env
                 .current
-                .get_member(&fn_name, self.module_env.others, &get_fn)
+                .get_member(&fn_name, self.module_env.others, &get_fn)?
         } else {
             let module_path = module::Path::from_ast_segments(&segments[..segments.len() - 1]);
             self.module_env
@@ -155,16 +158,21 @@ impl<'m> TypingEnv<'m> {
         };
 
         // Create the ProgramFunction from the resolved key
-        let (module_path_opt, function_name) = key?;
-        Some(if let Some(module_path) = module_path_opt {
+        let (module_path_opt, function_name) = match key {
+            Some(k) => k,
+            None => return Ok(None),
+        };
+        Ok(if let Some(module_path) = module_path_opt {
             let id = self.import_function(&module_path, function_name);
             let definition = &self
                 .module_env
                 .others
-                .get(&module_path)?
-                .get_unique_own_function(function_name)?
+                .get(&module_path)
+                .unwrap()
+                .get_unique_own_function(function_name)
+                .unwrap()
                 .definition;
-            (definition, FunctionId::Import(id), Some(module_path))
+            Some((definition, FunctionId::Import(id), Some(module_path)))
         } else {
             let id = self
                 .module_env
@@ -172,7 +180,7 @@ impl<'m> TypingEnv<'m> {
                 .get_unique_local_function_id(function_name)
                 .unwrap();
             let local_fn = &self.module_env.current.functions[id.as_index()];
-            (&local_fn.function.definition, FunctionId::Local(id), None)
+            Some((&local_fn.function.definition, FunctionId::Local(id), None))
         })
     }
 

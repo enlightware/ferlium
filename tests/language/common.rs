@@ -189,7 +189,7 @@ fn add_deep_modules(to: &mut Modules, session: &mut CompilerSession) {
         ferlium!("deep::level1", "deep_module1.fer"),
         ferlium!("deep::deeper::level2", "deep_module2.fer"),
     ] {
-        let module = session.compile(file, code, &to, &[]).unwrap().module;
+        let module = session.compile(file, code, &to).unwrap().module;
         let path = Path::new(name.split("::").map(ustr).collect());
         to.register_module_rc(path, module);
     }
@@ -240,7 +240,7 @@ impl TestSession {
 
     /// Compile and run the src and return its module and expression
     pub fn try_compile(&mut self, src: &str) -> Result<ModuleAndExpr, CompilationError> {
-        self.session.compile("<test>", src, &self.test_modules, &[])
+        self.session.compile("<test>", src, &self.test_modules)
     }
 
     /// Compile the src and return its module and expression

@@ -48,8 +48,10 @@ use ustr::{Ustr, ustr};
 use crate::{
     containers::SVec2,
     emit_ir::EmitTraitOutput,
+    error::{ImportKind, ImportSite, InternalCompilationError},
     format::FormatWith,
     function::Function,
+    internal_compilation_error,
     ir::Node,
     r#trait::TraitRef,
     r#type::{Type, TypeAliases, TypeDefRef},
@@ -223,10 +225,11 @@ impl Module {
 
     /// Return whether this module uses sym_name from mod_name.
     pub fn uses(&self, mod_path: &Path, sym_name: Ustr) -> bool {
-        self.uses.iter().any(|u| match u {
-            Use::All(module, _) => module == mod_path,
-            Use::Some(some) => some.module == *mod_path && some.contains(&sym_name),
-        })
+        self.uses
+            .explicits
+            .get(&sym_name)
+            .is_some_and(|use_data| use_data.module == *mod_path)
+            || self.uses.wildcards.iter().any(|u| u.module == *mod_path)
     }
 
     /// Look-up a function by name in this module or in any of the modules this module uses.
@@ -234,11 +237,11 @@ impl Module {
         &'a self,
         name: &'a str,
         others: &'a Modules,
-    ) -> Option<&'a ModuleFunction> {
+    ) -> Result<Option<&'a ModuleFunction>, InternalCompilationError> {
         self.get_member(name, others, &|name, module| {
             module.get_unique_own_function(ustr(name))
         })
-        .map(|(_, f)| f)
+        .map(|opt| opt.map(|(_, f)| f))
     }
 
     /// Look-up a member by name in this module or in any of the modules this module uses.
@@ -249,27 +252,50 @@ impl Module {
         name: &'a str,
         others: &'a Modules,
         getter: &impl Fn(&'a str, &'a Self) -> Option<T>,
-    ) -> Option<(Option<Path>, T)> {
-        getter(name, self).map_or_else(
-            || {
-                self.uses.iter().find_map(|use_module| match use_module {
-                    Use::All(module, _) => {
-                        let module_ref = others.get(module)?;
-                        getter(name, module_ref).map(|t| (Some(module.clone()), t))
-                    }
-                    Use::Some(use_some) => {
-                        if use_some.contains(name) {
-                            let module = use_some.module.clone();
-                            let module_ref = others.get(&module)?;
-                            getter(name, module_ref).map(|t| (Some(module), t))
-                        } else {
-                            None
-                        }
-                    }
-                })
-            },
-            |t| Some((None, t)),
-        )
+    ) -> Result<Option<(Option<Path>, T)>, InternalCompilationError> {
+        if let Some(t) = getter(name, self) {
+            return Ok(Some((None, t)));
+        }
+
+        let u_name = ustr(name);
+        if let Some(use_data) = self.uses.explicits.get(&u_name) {
+            if let Some(module_ref) = others.get(&use_data.module) {
+                if let Some(t) = getter(name, module_ref) {
+                    return Ok(Some((Some(use_data.module.clone()), t)));
+                }
+            }
+        }
+
+        let mut matches = Vec::new();
+        for wildcard_use in &self.uses.wildcards {
+            if let Some(module_ref) = others.get(&wildcard_use.module) {
+                if let Some(t) = getter(name, module_ref) {
+                    matches.push((wildcard_use, t));
+                }
+            }
+        }
+
+        match matches.len() {
+            0 => Ok(None),
+            1 => {
+                let (wildcard_use, t) = matches.pop().unwrap();
+                Ok(Some((Some(wildcard_use.module.clone()), t)))
+            }
+            _ => {
+                let occurrences = matches
+                    .iter()
+                    .map(|(w, _)| ImportSite {
+                        module: w.module.clone(),
+                        span: w.span,
+                        kind: ImportKind::Module,
+                    })
+                    .collect();
+                Err(internal_compilation_error!(NameImportedMultipleTimes {
+                    name: u_name,
+                    occurrences,
+                }))
+            }
+        }
     }
 
     /// Check if a local function name is unique in this module.
@@ -417,19 +443,25 @@ impl Module {
         show_details: bool,
     ) -> fmt::Result {
         let env = ModuleEnv::new(self, modules, false);
-        if !self.uses.is_empty() {
-            writeln!(f, "Use directives ({}):", self.uses.len())?;
-            for use_module in self.uses.iter() {
-                match use_module {
-                    Use::All(module, _) => writeln!(f, "  {module}: *")?,
-                    Use::Some(use_some) => {
-                        write!(f, "  {}:", use_some.module)?;
-                        for (symbol, _) in use_some.symbols.iter() {
-                            write!(f, " {symbol}")?;
-                        }
-                        writeln!(f)?;
-                    }
-                }
+        if !self.uses.explicits.is_empty() {
+            writeln!(
+                f,
+                "Explicit use directives ({}):",
+                self.uses.explicits.len()
+            )?;
+            for (symbol, use_data) in self.uses.explicits.iter() {
+                writeln!(f, "  {}: {}", use_data.module, symbol)?;
+            }
+            writeln!(f, "\n")?;
+        }
+        if !self.uses.wildcards.is_empty() {
+            writeln!(
+                f,
+                "Wildcard use directives ({}):",
+                self.uses.wildcards.len()
+            )?;
+            for wildcard_use in self.uses.wildcards.iter() {
+                writeln!(f, "  {}: *", wildcard_use.module)?;
             }
             writeln!(f, "\n")?;
         }
@@ -496,8 +528,12 @@ impl Module {
 
     pub fn list_stats(&self) -> String {
         let mut stats = String::new();
-        if !self.uses.is_empty() {
-            stats.push_str(&format!("use directives: {}", self.uses.len()));
+        if !self.uses.explicits.is_empty() || !self.uses.wildcards.is_empty() {
+            stats.push_str(&format!(
+                "use directives: {} explicit, {} wildcards",
+                self.uses.explicits.len(),
+                self.uses.wildcards.len()
+            ));
         }
         if !self.type_aliases.is_empty() {
             if !stats.is_empty() {

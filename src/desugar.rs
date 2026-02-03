@@ -98,9 +98,9 @@ impl ast::PType {
             Resolved(ty) => *ty,
             Infer => Type::variable_id(0), // always emit variable id 0 that will be replaced by fresh variables in type inference
             Path(path) => {
-                if let Some(ty) = env.type_alias_type(path) {
+                if let Some(ty) = env.type_alias_type(path)? {
                     ty
-                } else if let Some(ty) = env.type_def_type(path) {
+                } else if let Some(ty) = env.type_def_type(path)? {
                     ty
                 } else if let [(name, _)] = &path.segments[..] {
                     Type::variant([(*name, Type::unit())])

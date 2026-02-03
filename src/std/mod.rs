@@ -11,7 +11,7 @@ use std::{rc::Rc, str::FromStr};
 use crate::{
     Location,
     location::SourceTable,
-    module::{self, Module, ModuleRc, Use, finalize_module},
+    module::{self, Module, ModuleRc, UseData, finalize_module},
     r#type::{Type, TypeKind, bare_native_type},
     value::Value,
 };
@@ -69,7 +69,7 @@ pub fn std_module(source_table: &mut SourceTable) -> ModuleRc {
 
 pub fn new_module_using_std() -> Module {
     let mut new_module = Module::default();
-    new_module.uses.push(Use::All(
+    new_module.uses.wildcards.push(UseData::new(
         module::Path::single_str("std"),
         Location::new_synthesized(),
     ));

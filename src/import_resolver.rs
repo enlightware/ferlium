@@ -19,7 +19,7 @@ use crate::{
     module::{
         Modules,
         path::Path as ModPath,
-        uses::{Use, UseSome, Uses},
+        uses::{UseData, Uses},
     },
 };
 
@@ -35,13 +35,8 @@ impl ModulesResolver<'_> {
             false
         }
     }
-
-    fn list_importable_symbols(&self, module: &ModPath) -> Box<dyn Iterator<Item = Ustr> + '_> {
-        if let Some(m) = self.modules.get(module) {
-            Box::new(m.own_symbols())
-        } else {
-            Box::new(std::iter::empty())
-        }
+    fn module_exists(&self, module: &ModPath) -> bool {
+        self.modules.get(module).is_some()
     }
 }
 
@@ -61,21 +56,12 @@ pub fn resolve_imports(
     resolver: &ModulesResolver<'_>,
     uses: &mut Uses,
 ) -> Result<(), InternalCompilationError> {
-    // Track names introduced by imports (explicit and glob-expanded for conflict checking).
+    // Track names introduced by explicit imports for conflict checking.
     let mut seen: HashMap<Ustr, ImportSite> = HashMap::new();
-    prefill_seen_from_existing_uses(uses, local_names, resolver, &mut seen)?;
-    let mut use_index_by_module: HashMap<ModPath, usize> = HashMap::new();
+    prefill_seen_from_existing_uses(uses, local_names, &mut seen)?;
 
     for t in trees {
-        resolve_one(
-            t,
-            None,
-            local_names,
-            &mut seen,
-            uses,
-            &mut use_index_by_module,
-            resolver,
-        )?;
+        resolve_one(t, None, local_names, &mut seen, uses, resolver)?;
     }
 
     Ok(())
@@ -84,44 +70,15 @@ pub fn resolve_imports(
 fn prefill_seen_from_existing_uses(
     existing_uses: &Uses,
     defined_names: &HashMap<Ustr, Location>,
-    resolver: &ModulesResolver<'_>,
     seen: &mut HashMap<Ustr, ImportSite>,
 ) -> Result<(), InternalCompilationError> {
-    for u in existing_uses {
-        match u {
-            Use::Some(UseSome { module, symbols }) => {
-                for sym in symbols {
-                    let site = ImportSite {
-                        module: module.clone(),
-                        symbol: sym.0,
-                        span: sym.1,
-                        kind: ImportKind::Explicit,
-                    };
-                    register_import(sym.0, site, defined_names, seen)?;
-                }
-            }
-
-            Use::All(module, span) => {
-                for sym in resolver.list_importable_symbols(module) {
-                    let site = ImportSite {
-                        module: module.clone(),
-                        symbol: sym,
-                        span: *span,
-                        kind: ImportKind::Glob,
-                    };
-                    register_import(sym, site, defined_names, seen)?;
-                }
-            } // future-proofing
-              /*Use::Module { alias, target, span } => {
-                  let site = ImportSite {
-                      module: target.clone(),
-                      symbol: *alias,
-                      span: *span,
-                      kind: ImportKind::Explicit,
-                  };
-                  register_import(*alias, site, defined_names, seen)?;
-              }*/
-        }
+    for (&symbol, use_data) in &existing_uses.explicits {
+        let site = ImportSite {
+            module: use_data.module.clone(),
+            span: use_data.span,
+            kind: ImportKind::Symbol(symbol),
+        };
+        register_import(symbol, site, defined_names, seen)?;
     }
     Ok(())
 }
@@ -132,7 +89,6 @@ fn resolve_one(
     local_names: &HashMap<Ustr, Location>,
     seen: &mut HashMap<Ustr, ImportSite>,
     uses: &mut Uses,
-    use_index_by_module: &mut HashMap<ModPath, usize>,
     resolver: &ModulesResolver<'_>,
 ) -> Result<(), InternalCompilationError> {
     use UseTree::*;
@@ -141,21 +97,17 @@ fn resolve_one(
             let full = join_base_and_opt_path(base, opt_path.as_ref());
             let module = ast_to_module_path(&full);
 
-            // Keep existing semantics: record the glob for later lookup.
-            uses.push(Use::All(module.clone(), *span));
-
-            // Conflict detection by enumerating all importable symbols of that module.
-            let glob_span = glob_span_for(&full);
-
-            for sym in resolver.list_importable_symbols(&module) {
-                let site = ImportSite {
+            if !resolver.module_exists(&module) {
+                let fused_span = Location::fuse([full.span().unwrap(), *span]).unwrap();
+                return Err(internal_compilation_error!(ImportNotFound(ImportSite {
                     module: module.clone(),
-                    symbol: sym,
-                    span: glob_span,
-                    kind: ImportKind::Glob,
-                };
-                register_import(sym, site, local_names, seen)?;
+                    span: fused_span,
+                    kind: ImportKind::Module,
+                },)));
             }
+
+            // Record the glob for later lookup.
+            uses.wildcards.push(UseData::new(module, *span));
 
             Ok(())
         }
@@ -163,15 +115,7 @@ fn resolve_one(
         Group(opt_path, children) => {
             let new_base = join_base_and_opt_path(base, opt_path.as_ref());
             for c in children {
-                resolve_one(
-                    c,
-                    Some(&new_base),
-                    local_names,
-                    seen,
-                    uses,
-                    use_index_by_module,
-                    resolver,
-                )?;
+                resolve_one(c, Some(&new_base), local_names, seen, uses, resolver)?;
             }
             Ok(())
         }
@@ -180,41 +124,29 @@ fn resolve_one(
             let full = join_opt_base_and_path(base, rel_path);
 
             let (module, symbol, span) = split_module_and_symbol(&full);
+
+            // Check module first and then symbol existence.
+            if !resolver.module_exists(&module) {
+                return Err(internal_compilation_error!(ImportNotFound(ImportSite {
+                    module: module.clone(),
+                    span: full.span().unwrap(),
+                    kind: ImportKind::Module,
+                },)));
+            }
             let site = ImportSite {
                 module: module.clone(),
-                symbol,
                 span,
-                kind: ImportKind::Explicit,
+                kind: ImportKind::Symbol(symbol),
             };
-
-            // Check existence first for a nicer error in case of typos.
             if !resolver.import_exists(&module, symbol) {
-                return Err(internal_compilation_error!(ImportNotFound {
-                    name: symbol,
-                    import_site: site,
-                }));
+                return Err(internal_compilation_error!(ImportNotFound(site)));
             }
 
             // Then apply collision checks (also marks the name as seen).
-            register_import(symbol, site.clone(), local_names, seen)?;
+            register_import(symbol, site, local_names, seen)?;
 
-            // Emit `Use::Some` entry, grouped by module.
-            let idx = if let Some(idx) = use_index_by_module.get(&module).copied() {
-                idx
-            } else {
-                let idx = uses.len();
-                uses.push(Use::Some(UseSome {
-                    module: module.clone(),
-                    symbols: Vec::new(),
-                }));
-                use_index_by_module.insert(module.clone(), idx);
-                idx
-            };
-            uses[idx]
-                .as_some_mut()
-                .unwrap()
-                .symbols
-                .push((symbol, span));
+            // Record in uses.
+            uses.explicits.insert(symbol, UseData::new(module, span));
 
             Ok(())
         }
@@ -222,12 +154,19 @@ fn resolve_one(
 }
 
 /// Checks collisions and records the import in `seen` if OK.
+/// Only explicit imports are checked for collisions.
 fn register_import(
     name: Ustr,
     site: ImportSite,
     defined_names: &HashMap<Ustr, Location>,
     seen: &mut HashMap<Ustr, ImportSite>,
 ) -> Result<(), InternalCompilationError> {
+    // Only check for Explicit imports.
+    // Glob imports do not conflict with anything at this stage.
+    if site.kind.is_module() {
+        return Ok(());
+    }
+
     // 1) conflicts with local definition?
     if let Some(def_span) = defined_names.get(&name) {
         return Err(internal_compilation_error!(
@@ -239,48 +178,17 @@ fn register_import(
         ));
     }
 
-    // 2) imported twice? (explicit/explicit, glob/glob, or explicit/glob)
+    // 2) imported twice? (explicit vs explicit)
     if let Some(first_site) = seen.get(&name) {
-        use ImportKind::*;
-
-        // Case 1: explicit + explicit => always error (even if redundant)
-        if first_site.kind == Explicit && site.kind == Explicit {
-            return Err(internal_compilation_error!(NameImportedMultipleTimes {
-                name,
-                first_occurrence: first_site.clone(),
-                second_occurrence: site,
-            }));
-        }
-
-        // Case 2: at least one side is glob:
-        // Allow only if it’s redundant (same origin).
-        if first_site.module == site.module && first_site.symbol == site.symbol {
-            // Optional: keep explicit site if present (nicer error spans later).
-            if first_site.kind == Glob && site.kind == Explicit {
-                seen.insert(name, site);
-            }
-            return Ok(());
-        }
-
-        // Otherwise glob introduces a different origin than the other import => error
         return Err(internal_compilation_error!(NameImportedMultipleTimes {
             name,
-            first_occurrence: first_site.clone(),
-            second_occurrence: site,
+            occurrences: vec![first_site.clone(), site,],
         }));
     }
 
     // record
     seen.insert(name, site);
     Ok(())
-}
-
-/// Best-effort span to attribute glob-imported names to.
-fn glob_span_for(p: &AstPath) -> Location {
-    p.segments
-        .last()
-        .map(|(_, span)| *span)
-        .expect("non-empty path for glob import")
 }
 
 /// Join a base AST path with an optional AST path.
