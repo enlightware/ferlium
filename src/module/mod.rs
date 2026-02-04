@@ -200,7 +200,8 @@ impl Module {
             && self.impls.is_empty()
     }
 
-    /// Return an iterator over the names of all own symbols (functions) in this module.
+    /// Return an iterator over the names of all user-definable own symbols in this module.
+    /// Traits names are not included, as they cannot currently be defined by Ferlium code.
     pub fn own_symbols(&self) -> impl Iterator<Item = Ustr> + use<'_> {
         self.function_name_to_id
             .keys()
