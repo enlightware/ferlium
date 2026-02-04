@@ -18,6 +18,9 @@ lalrpop = "0.22.0"
 
 [dev-dependencies]
 test-log = "0.2.16"
+pulldown-cmark = "0.13"
+directories = "6"
+sha2 = "0.10"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 rustyline = "17.0.0"

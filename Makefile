@@ -12,6 +12,13 @@ test: test-local test-wasm
 repl:
 	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium
 
+book-devel:
+	cargo install mdbook
+	mdbook serve --open docs/book/en
+
+validate-book:
+	cargo run --example validate_book docs/book/en/
+
 update-license-headers:
 	licensure --in-place `find . -name "*.rs"`
 	licensure --in-place `find playground/src -name "*.ts"` playground/*.ts

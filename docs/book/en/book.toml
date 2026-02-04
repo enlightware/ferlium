@@ -1,0 +1,12 @@
+[book]
+title = "Ferlium – The Language Book"
+authors = ["Stéphane Magnenat"]
+language = "en"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/enlightware/ferlium"
+edit-url-template = "https://github.com/enlightware/ferlium/edit/main/docs/book/en/{path}"
+additional-js = ["highlightjs/ferlium.js"]
+code.hidelines = { ferlium = "#" }

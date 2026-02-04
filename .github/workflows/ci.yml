@@ -56,12 +56,9 @@ jobs:
         if: runner.os == 'macOS'
         run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --safari --headless --test language --lib
 
-  build_playground:
-    name: Build and upload playground
+  build_site:
+    name: Build and upload playground and book
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: playground
 
     steps:
       - name: Checkout repository
@@ -85,10 +82,23 @@ jobs:
           node-version: lts/*
 
       - name: Build Playground
+        working-directory: playground
         run: make build
 
-      - name: Move Playground build output to its own subdirectory
-        run: mkdir -p ../site && mv dist ../site/playground
+      - name: Install mdBook
+        run: |
+          mkdir -p ~/mdbook
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-musl.tar.gz | tar -xz --directory=~/mdbook
+          echo "$HOME/mdbook" >> $GITHUB_PATH
+
+      - name: Build Book
+        run: mdbook build docs/book/en
+
+      - name: Prepare site directory
+        run: |
+          mkdir -p site
+          mv playground/dist site/playground
+          mv docs/book/en/book site/book
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
@@ -118,7 +128,7 @@ jobs:
         run: make validate-grammar
 
   deploy_pages:
-    name: Deploy playground
+    name: Deploy playground and book to GitHub Pages
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -126,7 +136,7 @@ jobs:
       pages: write
       id-token: write
     runs-on: ubuntu-latest
-    needs: build_playground
+    needs: build_site
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
