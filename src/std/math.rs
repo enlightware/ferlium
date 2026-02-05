@@ -304,8 +304,8 @@ pub fn add_to_module(to: &mut Module) {
     use RuntimeErrorKind::*;
 
     // Types
-    to.type_aliases.set("int", int_type());
-    to.type_aliases.set("float", float_type());
+    to.add_type_alias_str("int", int_type());
+    to.add_type_alias_str("float", float_type());
 
     // Traits
     to.traits.push(NUM_TRAIT.clone());

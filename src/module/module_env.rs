@@ -97,7 +97,7 @@ impl<'m> ModuleEnv<'m> {
     ) -> Result<Option<Type>, InternalCompilationError> {
         Ok(self
             .get_module_member(&path.segments, &|name, module| {
-                module.type_aliases.get_type(&ustr(name))
+                module.get_type_alias(ustr(name))
             })?
             .map(|(_, ty)| ty))
     }
@@ -113,7 +113,7 @@ impl<'m> ModuleEnv<'m> {
             let enum_segments = &segments[0..len - 1];
             let variant_name = segments[len - 1].0;
             if let Some((_, ty_def)) = self.get_module_member(enum_segments, &|name, module| {
-                module.type_defs.get(&ustr(name)).cloned()
+                module.get_type_def(ustr(name))
             })? {
                 if ty_def.is_enum() {
                     let ty_data = ty_def.shape.data();
@@ -127,9 +127,9 @@ impl<'m> ModuleEnv<'m> {
         }
         // Not found, search for a matching struct
         if len >= 1 {
-            if let Some((_, ty_def)) = self.get_module_member(segments, &|name, module| {
-                module.type_defs.get(&ustr(name)).cloned()
-            })? {
+            if let Some((_, ty_def)) =
+                self.get_module_member(segments, &|name, module| module.get_type_def(ustr(name)))?
+            {
                 if ty_def.is_struct_like() {
                     return Ok(Some(TypeDefLookupResult::Struct(ty_def.clone())));
                 }
@@ -145,7 +145,7 @@ impl<'m> ModuleEnv<'m> {
     ) -> Result<Option<Type>, InternalCompilationError> {
         Ok(self
             .get_module_member(&path.segments, &|name, module| {
-                module.type_defs.get(&ustr(name)).cloned()
+                module.get_type_def(ustr(name))
             })?
             .map(|(_, ty_def)| ty_def.as_type()))
     }

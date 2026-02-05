@@ -15,6 +15,7 @@ use std::rc::Rc;
 use ariadne::{Label, Source};
 use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
+use ferlium::module::id::Id;
 use ferlium::module::{Module, ModuleEnv, ModuleRc, Modules, Path, ShowModuleDetails, UseData};
 use ferlium::std::new_module_using_std;
 use ferlium::typing_env::Local;

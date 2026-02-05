@@ -24,7 +24,9 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     function::{Function, FunctionDefinition, FunctionRc},
-    module::{LocalFunction, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc, path::Path},
+    module::{
+        LocalFunction, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc, id::Id, path::Path,
+    },
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     type_inference::InstSubstitution,

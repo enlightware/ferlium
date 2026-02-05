@@ -73,7 +73,7 @@ fn define_enum_types() {
     "# };
     let module = session.compile(mod_src).module;
 
-    let simple_color = module.type_defs.get(&ustr("SimpleColor")).unwrap();
+    let simple_color = module.get_type_def(ustr("SimpleColor")).unwrap();
     assert_eq!(simple_color.name, ustr("SimpleColor"));
     let simple_color = simple_color.shape.data().as_variant().unwrap().clone();
     assert_eq!(
@@ -85,7 +85,7 @@ fn define_enum_types() {
         ]
     );
 
-    let option_type = module.type_defs.get(&ustr("Option")).unwrap();
+    let option_type = module.get_type_def(ustr("Option")).unwrap();
     assert_eq!(option_type.name, ustr("Option"));
     let option_type = option_type.shape.data().as_variant().unwrap().clone();
     assert_eq!(
@@ -96,12 +96,12 @@ fn define_enum_types() {
         ]
     );
 
-    let option2_type = module.type_defs.get(&ustr("Option2")).unwrap();
+    let option2_type = module.get_type_def(ustr("Option2")).unwrap();
     assert_eq!(option2_type.name, ustr("Option2"));
     let option2_type = option2_type.shape.data().as_variant().unwrap().clone();
     assert_eq!(option2_type, option_type);
 
-    let player_type = module.type_defs.get(&ustr("Player")).unwrap();
+    let player_type = module.get_type_def(ustr("Player")).unwrap();
     assert_eq!(player_type.name, ustr("Player"));
     let player_type = player_type.shape.data().as_variant().unwrap().clone();
     assert_eq!(
@@ -119,7 +119,7 @@ fn define_enum_types() {
         ]
     );
 
-    let event_type = module.type_defs.get(&ustr("Event")).unwrap();
+    let event_type = module.get_type_def(ustr("Event")).unwrap();
     assert_eq!(event_type.name, ustr("Event"));
     let event_type = event_type.shape.data().as_variant().unwrap().clone();
     assert_eq!(
@@ -140,7 +140,7 @@ fn define_enum_types() {
         ]
     );
 
-    let message_type = module.type_defs.get(&ustr("Message")).unwrap();
+    let message_type = module.get_type_def(ustr("Message")).unwrap();
     assert_eq!(message_type.name, ustr("Message"));
     let message_type = message_type.shape.data().as_variant().unwrap().clone();
     assert_eq!(
@@ -163,7 +163,7 @@ fn define_enum_types() {
         ]
     );
 
-    let empty_type = module.type_defs.get(&ustr("Empty")).unwrap();
+    let empty_type = module.get_type_def(ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));
     assert!(empty_type.shape.data().is_never());
 
@@ -424,12 +424,12 @@ fn define_struct_types() {
     "# };
     let module = session.compile(mod_src).module;
 
-    let empty_type = module.type_defs.get(&ustr("Empty")).unwrap();
+    let empty_type = module.get_type_def(ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));
     let empty_type_shape = empty_type.shape.data().as_record().unwrap().clone();
     assert_eq!(empty_type_shape, vec![]);
 
-    let person_type = module.type_defs.get(&ustr("Person")).unwrap();
+    let person_type = module.get_type_def(ustr("Person")).unwrap();
     assert_eq!(person_type.name, ustr("Person"));
     let person_type_shape = person_type.shape.data().as_record().unwrap().clone();
     assert_eq!(
@@ -441,27 +441,27 @@ fn define_struct_types() {
         ]
     );
 
-    let person2_type = module.type_defs.get(&ustr("Person2")).unwrap();
+    let person2_type = module.get_type_def(ustr("Person2")).unwrap();
     assert_eq!(person2_type.name, ustr("Person2"));
     let person2_type_shape = person2_type.shape.data().as_record().unwrap().clone();
     assert_eq!(person2_type_shape, person_type_shape);
 
-    let email_type = module.type_defs.get(&ustr("Email")).unwrap();
+    let email_type = module.get_type_def(ustr("Email")).unwrap();
     assert_eq!(email_type.name, ustr("Email"));
     let email_type_shape = email_type.shape.data().as_tuple().unwrap().clone();
     assert_eq!(email_type_shape, vec![string_type()]);
 
-    let point_type = module.type_defs.get(&ustr("Point")).unwrap();
+    let point_type = module.get_type_def(ustr("Point")).unwrap();
     assert_eq!(point_type.name, ustr("Point"));
     let point_type_shape = point_type.shape.data().as_tuple().unwrap().clone();
     assert_eq!(point_type_shape, vec![int_type(), int_type()]);
 
-    let point2_type = module.type_defs.get(&ustr("Point2")).unwrap();
+    let point2_type = module.get_type_def(ustr("Point2")).unwrap();
     assert_eq!(point2_type.name, ustr("Point2"));
     let point2_type_shape = point2_type.shape.data().as_tuple().unwrap().clone();
     assert_eq!(point2_type_shape, vec![int_type(), int_type()]);
 
-    let callable_type = module.type_defs.get(&ustr("Callable")).unwrap();
+    let callable_type = module.get_type_def(ustr("Callable")).unwrap();
     assert_eq!(callable_type.name, ustr("Callable"));
     let callable_type_shape = callable_type.shape.data().as_record().unwrap().clone();
     assert_eq!(
@@ -740,8 +740,7 @@ fn attributes() {
         session
             .compile(code)
             .module
-            .type_defs
-            .get(&ustr(name))
+            .get_type_def(ustr(name))
             .unwrap()
             .attributes
             .clone()

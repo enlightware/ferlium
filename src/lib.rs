@@ -65,7 +65,10 @@ pub use ustr::{Ustr, ustr};
 
 use crate::{
     format::FormatWith,
-    module::{Module, ModuleRc, Modules},
+    module::{
+        Module, ModuleId, ModuleRc, Modules,
+        id::{Id, NamedIndexed},
+    },
     r#type::Type,
 };
 
@@ -97,8 +100,10 @@ pub type AstInspectorCb<'a> = &'a dyn Fn(&ast::PModule, &Option<ast::PExpr>);
 pub struct CompilerSession {
     /// Source table for this compilation session.
     source_table: SourceTable,
+    /// All compiled modules
+    modules: NamedIndexed<module::Path, ModuleId, ModuleRc>,
     /// Pre-created standard library module.
-    std_module: ModuleRc,
+    std_module: ModuleId,
     /// Pre-created set of modules including only the standard library.
     std_modules: Modules,
     /// Pre-created empty module just using the standard library, for debugging purposes.
@@ -110,14 +115,16 @@ impl CompilerSession {
     pub fn new() -> Self {
         let mut source_table = SourceTable::default();
         let std_module = std::std_module(&mut source_table);
+        let mut modules = NamedIndexed::default();
+        let std_name = module::Path::single_str("std");
+        modules.insert(std_name.clone(), std_module.clone());
         let mut std_modules: Modules = Default::default();
-        std_modules
-            .modules
-            .insert(module::Path::single_str("std"), std_module.clone());
+        std_modules.modules.insert(std_name, std_module.clone());
         let empty_std_user = new_module_using_std();
         Self {
             source_table,
-            std_module,
+            modules,
+            std_module: ModuleId::from_index(0),
             std_modules,
             empty_std_user,
         }
@@ -140,7 +147,7 @@ impl CompilerSession {
 
     /// Get the standard library module.
     pub fn std_module(&self) -> &ModuleRc {
-        &self.std_module
+        &self.modules.get(self.std_module).unwrap()
     }
 
     /// Get the standard library as a set of modules.
@@ -324,6 +331,12 @@ impl CompilerSession {
         // Link the module.
         // This must be done after emitting the expression, as that may add new imports.
         other_modules.link(&module);
+
+        // Store the module if not empty.
+        if !module.is_empty() {
+            // TODO: move linking to CompilerSession and manage paths here and get rid of Modules.
+            self.modules.insert_anonymous(module.clone());
+        }
 
         Ok(ModuleAndExpr { module, expr })
     }

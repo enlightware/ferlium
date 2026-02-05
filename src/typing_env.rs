@@ -14,7 +14,7 @@ use crate::{
     function::FunctionDefinition,
     module::{
         self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, Module,
-        ModuleEnv,
+        ModuleEnv, id::Id,
     },
     mutability::MutType,
     r#trait::TraitRef,

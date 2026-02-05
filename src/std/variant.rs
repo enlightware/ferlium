@@ -64,5 +64,5 @@ pub fn variant_object_entry_type() -> Type {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.type_aliases.set("Variant", variant_type());
+    to.add_type_alias_str("Variant", variant_type());
 }

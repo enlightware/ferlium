@@ -11,7 +11,10 @@ use test_log::test;
 use ustr::ustr;
 
 use super::common::TestSession;
-use ferlium::{effects::*, module::LocalImplId};
+use ferlium::{
+    effects::*,
+    module::{LocalImplId, id::Id},
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

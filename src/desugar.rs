@@ -332,10 +332,10 @@ impl PModule {
             match ty_ref {
                 NamedTypeData::Alias(name, alias) => {
                     let ty = alias.0.desugar(alias.1, false, &env)?;
-                    output.type_aliases.set_with_ustr(name.0, ty);
+                    output.add_type_alias(name.0, ty);
                 }
                 NamedTypeData::Def(def) => {
-                    output.type_defs.insert(def.name.0, def.desugar(&env)?);
+                    output.add_type_def(def.name.0, def.desugar(&env)?);
                 }
             }
             env = ModuleEnv::new(output, others, within_std);

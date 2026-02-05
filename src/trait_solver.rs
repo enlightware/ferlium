@@ -30,7 +30,7 @@ use crate::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, FunctionCollector,
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, ImportImplSlot,
         ImportImplSlotId, LocalFunction, LocalImplId, ModuleEnv, ModuleFunction, Modules,
-        TraitImpl, TraitImplId, TraitImpls, TraitKey,
+        TraitImpl, TraitImplId, TraitImpls, TraitKey, id::Id,
     },
     mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},

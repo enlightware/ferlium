@@ -22,6 +22,7 @@ pub mod path;
 pub mod trait_impl;
 pub mod uses;
 
+use enum_as_inner::EnumAsInner;
 pub use function::*;
 pub use module_env::*;
 pub use modules::*;
@@ -40,16 +41,51 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     containers::SVec2,
+    define_id_type,
     emit_ir::EmitTraitOutput,
     error::{ImportKind, ImportSite, InternalCompilationError},
     format::FormatWith,
     function::Function,
     internal_compilation_error,
     ir::Node,
+    module::id::{Id, NamedIndexed},
     r#trait::TraitRef,
-    r#type::{Type, TypeAliases, TypeDefRef},
+    r#type::{LocalTypeAliasId, Type, TypeAliases, TypeDefRef},
     value::Value,
 };
+
+define_id_type!(
+    /// ID of a module within a CompilerSession
+    ModuleId
+);
+
+define_id_type!(
+    /// ID of a definition within a module
+    LocalDefId
+);
+
+/// A reference to a definition, consisting of the module ID and the definition index within that module.
+pub type DefId = (ModuleId, LocalDefId);
+
+define_id_type!(
+    /// ID of a type definition within a module
+    LocalTypeDefId
+);
+
+define_id_type!(
+    /// ID of a trait definition within a module
+    LocalTraitId
+);
+
+/// All possible kinds of definitions within a module
+#[derive(Debug, Clone, Copy, EnumAsInner)]
+pub enum DefKind {
+    Function(LocalFunctionId),
+    TypeDef(LocalTypeDefId),
+    TypeAlias(LocalTypeAliasId),
+    Trait(LocalTraitId),
+    Impl(LocalImplId),
+}
 
 // Module itself
 
@@ -61,14 +97,17 @@ pub struct Module {
 
     pub uses: Uses,
 
+    /// All symbols defined in this module
+    pub def_table: NamedIndexed<Ustr, LocalDefId, DefKind>,
+
     // Functions, including methods of concrete trait
     pub functions: Vec<LocalFunction>,
     // Note: multiple functions can have the same name (e.g. trait methods)
     pub function_name_to_id: HashMap<Ustr, HashSet<LocalFunctionId>>,
 
     // Type system content
-    pub type_aliases: TypeAliases,
-    pub type_defs: HashMap<Ustr, TypeDefRef>,
+    type_aliases: TypeAliases,
+    type_defs: Vec<TypeDefRef>,
     pub traits: Traits,
     pub impls: TraitImpls,
 
@@ -86,7 +125,11 @@ impl Module {
             function,
             interface_hash,
         });
+        // if self.function_name_to_id.get(&name).is_some() {
+        //     panic!("Function with name '{}' already exists in module", name);
+        // }
         self.function_name_to_id.entry(name).or_default().insert(id);
+        self.def_table.insert(name, DefKind::Function(id));
         id
     }
 
@@ -110,6 +153,7 @@ impl Module {
             functions,
             &mut fn_collector,
         );
+        // TODO: find the name and use it to store the impl
         self.functions.extend(fn_collector.new_elements);
     }
 
@@ -164,6 +208,42 @@ impl Module {
         }
     }
 
+    pub(crate) fn add_type_alias_str(&mut self, name: &str, ty: Type) -> LocalTypeAliasId {
+        self.add_type_alias(ustr(name), ty)
+    }
+
+    pub(crate) fn add_type_alias(&mut self, name: Ustr, ty: Type) -> LocalTypeAliasId {
+        let id = LocalTypeAliasId::from_index(self.type_aliases.len());
+        self.type_aliases.set_with_ustr(name, ty);
+        self.def_table.insert(name, DefKind::TypeAlias(id));
+        id
+    }
+
+    pub(crate) fn add_native_type_alias_str(
+        &mut self,
+        name: &str,
+        native: Box<dyn crate::r#type::BareNativeType>,
+    ) {
+        self.add_native_type_alias(ustr(name), native)
+    }
+
+    pub(crate) fn add_native_type_alias(
+        &mut self,
+        name: Ustr,
+        native: Box<dyn crate::r#type::BareNativeType>,
+    ) {
+        // TODO: store and return a DefId for native type aliases
+        self.type_aliases.set_bare_native_ustr(name, native);
+    }
+
+    /// Add a type definition to this module, returning its ID.
+    pub(crate) fn add_type_def(&mut self, name: Ustr, type_def: TypeDefRef) -> LocalTypeDefId {
+        let id = LocalTypeDefId::from_index(self.type_defs.len());
+        self.type_defs.push(type_def);
+        self.def_table.insert(name, DefKind::TypeDef(id));
+        id
+    }
+
     fn computer_interface_hash(&self, function_ids: &[LocalFunctionId]) -> (Type, u64) {
         let mut interface_hasher = DefaultHasher::new();
         let tys: Vec<_> = function_ids
@@ -193,14 +273,19 @@ impl Module {
             && self.impls.is_empty()
     }
 
-    /// Return an iterator over the names of all user-definable own symbols in this module.
-    /// Traits names are not included, as they cannot currently be defined by Ferlium code.
+    /// Return an iterator over the names of all own symbols in this module.
     pub fn own_symbols(&self) -> impl Iterator<Item = Ustr> + use<'_> {
-        self.function_name_to_id
-            .keys()
-            .cloned()
-            .chain(self.type_defs.keys().cloned())
-            .chain(self.type_aliases.iter().map(|(name, _)| *name))
+        self.def_table.name_iter().copied()
+        // self.function_name_to_id
+        //     .keys()
+        //     .cloned()
+        //     .chain(self.def_table.data_iter().filter_map(
+        //         |(def_kind, name)|
+        //         match def_kind {
+        //             DefKind::TypeAlias(_) | DefKind::TypeDef(_) => name.clone(),
+        //             _ => None,
+        //         }
+        //     ))
     }
 
     /// Return the type for the source pos, if any.
@@ -224,6 +309,31 @@ impl Module {
             .get(&sym_name)
             .is_some_and(|use_data| use_data.module == *mod_path)
             || self.uses.wildcards.iter().any(|u| u.module == *mod_path)
+    }
+
+    /// Look-up a definition by name in this module.
+    pub fn get_definition(&self, name: Ustr) -> Option<DefKind> {
+        self.def_table
+            .get_by_name(name)
+            .map(|(_, def_kind)| *def_kind)
+    }
+
+    /// Look-up a type definition by name in this module.
+    pub fn get_type_def(&self, name: Ustr) -> Option<&TypeDefRef> {
+        self.get_definition(name).and_then(|def_kind| {
+            def_kind
+                .as_type_def()
+                .map(|type_def_id| &self.type_defs[type_def_id.as_index()])
+        })
+    }
+
+    /// Look-up a type alias by name in this module.
+    pub fn get_type_alias(&self, name: Ustr) -> Option<Type> {
+        self.get_definition(name).and_then(|def_kind| {
+            def_kind
+                .as_type_alias()
+                .map(|type_alias_id| self.type_aliases.get_type(*type_alias_id).1)
+        })
     }
 
     /// Look-up a function by name in this module or in any of the modules this module uses.
@@ -468,7 +578,7 @@ impl Module {
         }
         if !self.type_defs.is_empty() {
             writeln!(f, "New types ({}):\n", self.type_defs.len())?;
-            for (_, decl) in self.type_defs.iter() {
+            for decl in self.type_defs.iter() {
                 write!(f, "  ")?;
                 decl.format_details(&env, f)?;
                 writeln!(f)?;

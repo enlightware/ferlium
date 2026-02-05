@@ -1821,7 +1821,7 @@ pub fn extract_ith_fn_arg(src: &str, span: Location, index: usize) -> Location {
 
 #[cfg(test)]
 mod tests {
-    use crate::SourceId;
+    use crate::{SourceId, module::id::Id};
 
     use super::*;
 

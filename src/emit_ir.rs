@@ -31,7 +31,7 @@ use crate::{
     ir::{self, Immediate, Node},
     module::{
         ConcreteTraitImplKey, LocalFunctionId, Module, ModuleEnv, ModuleFunction,
-        ModuleFunctionSpans, Modules,
+        ModuleFunctionSpans, Modules, id::Id,
     },
     mutability::MutType,
     std::{

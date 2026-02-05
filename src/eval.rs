@@ -22,7 +22,7 @@ use crate::{
     format::{FormatWith, write_with_separator},
     function::{Closure, FunctionRc},
     ir::{Node, NodeKind},
-    module::{FunctionId, ModuleRc, Modules, TraitImplId},
+    module::{FunctionId, ModuleRc, Modules, TraitImplId, id::Id},
     std::array,
     r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},

@@ -16,7 +16,7 @@ use crate::{
     format::FormatWith,
     function::{FunctionDefinition, FunctionRc},
     ir::Node,
-    module::{ModuleEnv, ModuleRc, TraitKey, format_impl_header_by_key, path::Path},
+    module::{ModuleEnv, ModuleRc, TraitKey, format_impl_header_by_key, id::Id, path::Path},
 };
 
 use ustr::Ustr;

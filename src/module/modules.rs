@@ -11,6 +11,7 @@ use std::rc::Weak;
 use std::{collections::HashMap, rc::Rc};
 
 use crate::module::Module;
+use crate::module::id::Id;
 use crate::module::path::Path;
 use crate::module::{ImportFunctionTarget, TraitKey};
 

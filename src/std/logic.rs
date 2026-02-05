@@ -61,7 +61,7 @@ fn test_bit(value: bool, position: Int) -> bool {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.type_aliases.set("bool", bool_type());
+    to.add_type_alias_str("bool", bool_type());
 
     // Operations on booleans
     use BinaryNativeFnNNN as BinaryFn;
