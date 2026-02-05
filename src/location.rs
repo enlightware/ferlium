@@ -9,7 +9,7 @@
 
 use std::ops::Range;
 
-use crate::{define_id_type, format::FormatWith};
+use crate::{define_id_type, format::FormatWith, module::id::Id};
 
 /// A range of bytes in the user's input.
 /// It only contains the start and end byte offsets, not the actual input string.

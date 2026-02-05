@@ -180,13 +180,13 @@ impl EvalCtx {
     /// Get the function code for a FunctionId at runtime using module.
     pub fn get_function(&self, function: FunctionId) -> (FunctionRc, ModuleRc) {
         use FunctionId::*;
-        match &function {
+        match function {
             Local(id) => (
-                self.module.functions[id.as_index()].function.code.clone(),
+                self.module.get_function_by_id(id).unwrap().code.clone(),
                 self.module.clone(),
             ),
             Import(id) => {
-                let slot = &self.module.import_fn_slots[id.as_index()];
+                let slot = &self.module.get_import_fn_slot(id).unwrap();
                 let resolved = slot.resolved.borrow();
                 let resolved = resolved.as_ref().unwrap_or_else(|| {
                     panic!("Function import slot #{id} not resolved.\nSlot data: {slot:?}")
@@ -222,20 +222,20 @@ impl EvalCtx {
     fn get_stack_entry_from_function_id(&self, function: FunctionId) -> StackEntry {
         use FunctionId::*;
         let module_path;
-        let fn_name = match &function {
+        let fn_name = match function {
             Local(id) => {
-                let function = &self.module.functions[id.as_index()];
+                let function = self.module.get_local_function_by_id(id).unwrap();
                 module_path = self.get_last_module_path();
                 format!("{module_path}::{} (#{})", function.name, id)
             }
             Import(id) => {
-                let slot = &self.module.import_fn_slots[id.as_index()];
+                let slot = &self.module.get_import_fn_slot(id).unwrap();
                 module_path = slot.module.clone();
                 use ImportFunctionTarget::*;
                 match &slot.target {
                     TraitImplMethod { key, index } => {
                         let trait_ref = key.trait_ref();
-                        trait_ref.qualified_method_name(*index as usize)
+                        trait_ref.qualified_method_name(*index as usize, key.input_tys())
                     }
                     NamedFunction(fn_name) => {
                         format!("{module_path}::{fn_name}")
@@ -249,13 +249,16 @@ impl EvalCtx {
     /// Get the dictionary value for a ImplId at runtime using module.
     pub fn get_dictionary(&self, dictionary: TraitImplId) -> Value {
         use TraitImplId::*;
-        match &dictionary {
-            Local(id) => self.module.impls.data[id.as_index()]
+        match dictionary {
+            Local(id) => self
+                .module
+                .get_impl_data(id)
+                .unwrap()
                 .dictionary_value
                 .borrow()
                 .clone(),
             Import(id) => {
-                let slot = &self.module.import_impl_slots[id.as_index()];
+                let slot = &self.module.get_import_impl_slot(id).unwrap();
                 slot.resolved
                     .borrow()
                     .as_ref()
@@ -472,17 +475,21 @@ impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
         match self.function_id {
             Some(function_id) => match function_id {
                 FunctionId::Local(id) => {
-                    let local_name = self.module.functions[id.as_index()].name;
+                    let local_name = self.module.get_local_function_by_id(id).unwrap().name;
                     write!(f, "{module_path}::{local_name}")?
                 }
                 FunctionId::Import(id) => {
-                    let slot = &self.module.import_fn_slots[id.as_index()];
+                    let slot = &self.module.get_import_fn_slot(id).unwrap();
                     module_path = format!("{}", slot.module);
                     use ImportFunctionTarget::*;
                     match &slot.target {
                         TraitImplMethod { key, index } => {
                             let trait_ref = key.trait_ref();
-                            write!(f, "{}", trait_ref.qualified_method_name(*index as usize))?
+                            write!(
+                                f,
+                                "{}",
+                                trait_ref.qualified_method_name(*index as usize, key.input_tys())
+                            )?
                         }
                         NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
                     }

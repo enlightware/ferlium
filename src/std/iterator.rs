@@ -44,7 +44,7 @@ pub fn add_to_module(to: &mut Module) {
             ),
         )],
     );
-    to.traits.push(iterator_trait.clone());
+    to.add_trait(iterator_trait.clone());
 
     let iter_item_constraint = PubTypeConstraint::HaveTrait {
         trait_ref: iterator_trait.clone(),
@@ -71,7 +71,7 @@ pub fn add_to_module(to: &mut Module) {
             ),
         )],
     );
-    to.traits.push(seq_trait.clone());
+    to.add_trait(seq_trait.clone());
 
     // Requires per trait method generics
     // let from_iter_trait = TraitRef::new_with_constraints(
@@ -107,7 +107,7 @@ pub fn add_to_module(to: &mut Module) {
             ),
         )],
     );
-    to.traits.push(sized_seq_trait);
+    to.add_trait(sized_seq_trait);
 
     // Implementation of Seq trait for Iterator
     // TODO: implement in Ferlium itself once we have constraint parsing in blanket implementations.

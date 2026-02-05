@@ -100,15 +100,13 @@ impl<'m> TypingEnv<'m> {
         module_path: &module::Path,
         function_name: Ustr,
     ) -> ImportFunctionSlotId {
-        let existing_slots = &self.module_env.current.import_fn_slots;
-        existing_slots
-            .iter()
+        self.module_env.current.iter_import_fn_slots()
             .position(|slot| slot.module == *module_path &&
                 matches!(slot.target, ImportFunctionTarget::NamedFunction(name) if name == function_name)
             )
             .map(|index| ImportFunctionSlotId(index as u32))
             .unwrap_or_else(|| {
-                let slot_index = (existing_slots.len() + self.new_import_slots.len()) as u32;
+                let slot_index = (self.module_env.current.import_fn_slot_count() + self.new_import_slots.len()) as u32;
                 self.new_import_slots.push(ImportFunctionSlot {
                     module: module_path.clone(),
                     target: ImportFunctionTarget::NamedFunction(function_name),
@@ -133,7 +131,7 @@ impl<'m> TypingEnv<'m> {
         let key = if is_local {
             let get_fn = |name: &str, m: &Module| {
                 let name = ustr(name);
-                if m.function_name_to_id.contains_key(&name) {
+                if m.get_local_function_id(name).is_some() {
                     Some(name)
                 } else {
                     None
@@ -148,7 +146,7 @@ impl<'m> TypingEnv<'m> {
                 .others
                 .get(&module_path)
                 .and_then(|m| {
-                    if m.function_name_to_id.contains_key(&fn_name) {
+                    if m.get_local_function_id(fn_name).is_some() {
                         Some(fn_name)
                     } else {
                         None
@@ -169,7 +167,7 @@ impl<'m> TypingEnv<'m> {
                 .others
                 .get(&module_path)
                 .unwrap()
-                .get_unique_own_function(function_name)
+                .get_function(function_name)
                 .unwrap()
                 .definition;
             Some((definition, FunctionId::Import(id), Some(module_path)))
@@ -177,10 +175,10 @@ impl<'m> TypingEnv<'m> {
             let id = self
                 .module_env
                 .current
-                .get_unique_local_function_id(function_name)
+                .get_local_function_id(function_name)
                 .unwrap();
-            let local_fn = &self.module_env.current.functions[id.as_index()];
-            Some((&local_fn.function.definition, FunctionId::Local(id), None))
+            let function = self.module_env.current.get_function_by_id(id).unwrap();
+            Some((&function.definition, FunctionId::Local(id), None))
         })
     }
 
@@ -190,8 +188,7 @@ impl<'m> TypingEnv<'m> {
             FunctionId::Import(id) => self
                 .module_env
                 .current
-                .import_fn_slots
-                .get(id.0 as usize)
+                .get_import_fn_slot(id)
                 .map(|slot| slot.module.clone()),
         }
     }

@@ -766,7 +766,7 @@ impl Compiler {
         if let Some(func) = self
             .user_module
             .module
-            .get_function(name, &self.modules)
+            .lookup_function(name, &self.modules)
             .ok()
             .flatten()
         {
@@ -869,7 +869,7 @@ impl Compiler {
         let mut sigs = Vec::new();
         for module in &self.modules.modules {
             let mod_name = module.0;
-            for local_fn in &module.1.functions {
+            for local_fn in module.1.iter_functions() {
                 let sym_name = local_fn.name;
                 // skip trait methods
                 if !module.1.is_non_trait_local_function(sym_name) {
@@ -905,7 +905,7 @@ impl Compiler {
         let mut setters = HashSet::new();
         for module in &self.modules.modules {
             let mod_name = module.0;
-            for local_fn in &module.1.functions {
+            for local_fn in module.1.iter_functions() {
                 let sym_name = local_fn.name;
                 // skip trait methods
                 if !module.1.is_non_trait_local_function(sym_name) {
@@ -961,7 +961,7 @@ impl Compiler {
         name: &str,
         f: impl FnOnce(&ModuleFunction, &ModuleRc, &Modules) -> Result<R, String>,
     ) -> Result<R, String> {
-        match self.user_module.module.get_function(name, &self.modules) {
+        match self.user_module.module.lookup_function(name, &self.modules) {
             Ok(Some(func)) => f(func, &self.user_module.module, &self.modules),
             Ok(None) => Err(format!("Function {name} not found")),
             Err(e) => Err(format!("Lookup error for {name}: {e:?}")),

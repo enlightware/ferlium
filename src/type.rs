@@ -26,9 +26,11 @@ use crate::Location;
 use crate::ast::Attribute;
 use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
+use crate::define_id_type;
 use crate::format::FormatWith;
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
+use crate::module::id::Id;
 use crate::mutability::FormatInFnArg;
 use crate::type_like::CastableToType;
 use crate::type_like::TypeLike;
@@ -629,35 +631,42 @@ impl PartialOrd for Type {
 
 pub type TypeSubstitution = HashMap<TypeVar, Type>;
 
+define_id_type!(
+    /// ID of a type alias definition within a module
+    LocalTypeAliasId
+);
+
 /// Aliased types
 #[derive(Debug, Clone, Default)]
-pub struct TypeAliases {
-    name_to_type: HashMap<Ustr, Type>,
+pub(crate) struct TypeAliases {
+    types: Vec<Type>,
     type_to_name: HashMap<Type, Ustr>,
+    /// Names for the native part of generic native types, used for formatting
     bare_native_to_name: HashMap<B<dyn BareNativeType>, Ustr>,
 }
 impl TypeAliases {
-    // TODO: handle errors
-    pub fn set(&mut self, alias: &str, ty: Type) {
-        let alias = ustr(alias);
-        self.set_with_ustr(alias, ty);
-    }
-
-    pub fn set_with_ustr(&mut self, alias: Ustr, ty: Type) {
-        self.name_to_type.insert(alias, ty);
+    pub fn set(&mut self, alias: Ustr, ty: Type) {
+        self.types.push(ty);
         self.type_to_name.insert(ty, alias);
     }
 
     pub fn get_name(&self, ty: Type) -> Option<Ustr> {
         self.type_to_name.get(&ty).copied()
     }
-    pub fn get_type(&self, name: &str) -> Option<Type> {
-        let name = ustr(name);
-        self.name_to_type.get(&name).copied()
+
+    pub fn get_type(&self, id: LocalTypeAliasId) -> Type {
+        self.types[id.as_index()]
     }
 
-    pub fn set_bare_native(&mut self, alias: &str, bare: B<dyn BareNativeType>) {
-        let alias = ustr(alias);
+    pub fn type_len(&self) -> usize {
+        self.types.len()
+    }
+
+    pub fn type_iter(&self) -> impl Iterator<Item = Type> {
+        self.types.iter().copied()
+    }
+
+    pub fn set_bare_native(&mut self, alias: Ustr, bare: B<dyn BareNativeType>) {
         self.bare_native_to_name.insert(bare, alias);
     }
 
@@ -665,23 +674,18 @@ impl TypeAliases {
         self.bare_native_to_name.get(bare).copied()
     }
 
-    pub fn len(&self) -> usize {
-        self.name_to_type.len()
+    pub fn bare_native_len(&self) -> usize {
+        self.bare_native_to_name.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Ustr, &Type)> {
-        self.name_to_type.iter()
+    pub fn bare_native_iter(&self) -> impl Iterator<Item = (Ustr, &B<dyn BareNativeType>)> {
+        self.bare_native_to_name
+            .iter()
+            .map(|(bare, name)| (*name, bare))
     }
 
-    pub fn extend(&mut self, other: Self) {
-        self.name_to_type.extend(other.name_to_type);
-        self.type_to_name.extend(other.type_to_name);
-        self.bare_native_to_name.extend(other.bare_native_to_name);
-    }
     pub fn is_empty(&self) -> bool {
-        self.name_to_type.is_empty()
-            && self.type_to_name.is_empty()
-            && self.bare_native_to_name.is_empty()
+        self.types.is_empty() && self.type_to_name.is_empty() && self.bare_native_to_name.is_empty()
     }
 }
 

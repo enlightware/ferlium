@@ -40,5 +40,5 @@ pub static CONCAT_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
 pub fn add_to_module(to: &mut Module) {
     // Traits
-    to.traits.push(CONCAT_TRAIT.clone());
+    to.add_trait(CONCAT_TRAIT.clone());
 }

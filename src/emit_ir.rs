@@ -31,7 +31,7 @@ use crate::{
     ir::{self, Immediate, Node},
     module::{
         ConcreteTraitImplKey, LocalFunctionId, Module, ModuleEnv, ModuleFunction,
-        ModuleFunctionSpans, Modules,
+        ModuleFunctionSpans, Modules, id::Id,
     },
     mutability::MutType,
     std::{
@@ -225,18 +225,15 @@ where
 
     // Populate the function table
     let mut local_fns = Vec::new();
-    for (
-        function_index,
-        ast::ModuleFunction {
-            name,
-            args,
-            args_span,
-            ret_ty,
-            span,
-            doc,
-            ..
-        },
-    ) in ast_functions().enumerate()
+    for ast::ModuleFunction {
+        name,
+        args,
+        args_span,
+        ret_ty,
+        span,
+        doc,
+        ..
+    } in ast_functions()
     {
         // Create type and mutability variables for the arguments.
         // Note: the type quantifiers and constraints are left empty.
@@ -320,20 +317,17 @@ where
             code: Rc::new(RefCell::new(dummy_code)),
             spans: Some(spans),
         };
-        let name = if let Some(trait_ctx) = &trait_ctx {
-            trait_ctx
-                .trait_ref
-                .qualified_method_name(function_index)
-                .into()
+        let id = if trait_ctx.is_some() {
+            output.add_function_anonymous(descr)
         } else {
-            name.0
+            output.add_function(name.0, descr)
         };
-        local_fns.push(output.add_function(name, descr));
+        local_fns.push(id);
     }
 
     // Second pass, infer types and emit function bodies.
     for (function, id) in ast_functions().zip(local_fns.iter()) {
-        let descr = &output.functions[id.as_index()].function;
+        let descr = output.get_function_by_id(*id).unwrap();
         let module_env = ModuleEnv::new(output, others, within_std);
         let arg_names: Vec<_> = function.args.iter().map(|arg| arg.name).collect();
         let mut new_import_slots = vec![];
@@ -352,7 +346,7 @@ where
             MutType::constant(),
             expected_span,
         )?;
-        let descr = &mut output.functions[id.as_index()].function;
+        let descr = output.get_function_by_id_mut(*id).unwrap();
         descr.definition.ty_scheme.ty.effects =
             ty_inf.unify_effects(&fn_node.effects, &descr.definition.ty_scheme.ty.effects);
         *descr.code.borrow_mut() = b(ScriptFunction::new(
@@ -525,7 +519,7 @@ where
             .into_iter()
             .map(|c| c.instantiate(&subst))
             .collect();
-        for id in local_fns.iter() {
+        for (function_index, id) in local_fns.iter().enumerate() {
             let descr = &mut output.functions[id.as_index()].function;
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
             descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
@@ -536,6 +530,14 @@ where
             let descr = &mut output.functions[id.as_index()].function;
             let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
+            drop(node);
+
+            // Name the function
+            let name = // TODO: retrieve proper name for generic arguments
+                trait_ref
+                    .qualified_method_name(function_index, &trait_output.input_tys)
+                    .into();
+            output.name_function(*id, name);
         }
 
         Ok(Some(trait_output))

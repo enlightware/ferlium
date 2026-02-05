@@ -286,7 +286,7 @@ pub fn string_value(s: &str) -> Value {
 }
 
 pub fn add_to_module(to: &mut Module) {
-    to.type_aliases.set("string", string_type());
+    to.add_type_alias_str("string", string_type());
 
     to.add_concrete_impl(
         CONTAINS_TRAIT.clone(),
@@ -391,8 +391,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // Iterator
-    to.type_aliases
-        .set_with_ustr(ustr("string_iterator"), string_iter_type());
+    to.add_type_alias_str("string_iterator", string_iter_type());
     to.add_function(ustr("string_iter"), String::iter_descr());
     to.add_function(
         ustr("string_iterator_next"),

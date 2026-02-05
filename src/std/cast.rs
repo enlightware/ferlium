@@ -77,5 +77,5 @@ pub static CAST_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
 pub fn add_to_module(to: &mut Module) {
     // Traits
-    to.traits.push(CAST_TRAIT.clone());
+    to.add_trait(CAST_TRAIT.clone());
 }

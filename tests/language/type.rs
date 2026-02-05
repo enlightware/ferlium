@@ -456,7 +456,7 @@ fn returning_variant_is_properly_unified() {
     "# })
         .module;
     let fn_def = &module
-        .get_unique_own_function(ustr("make_variant_array"))
+        .get_function(ustr("make_variant_array"))
         .unwrap()
         .definition;
     assert_eq!(
@@ -486,7 +486,7 @@ fn variant_type_alias_in_function_signature() {
 
     // Check first function
     let fn_def1 = &module
-        .get_unique_own_function(ustr("process_variant"))
+        .get_function(ustr("process_variant"))
         .unwrap()
         .definition;
     let sig1 = fn_def1
@@ -510,7 +510,7 @@ fn variant_type_alias_in_function_signature() {
 
     // Check second function
     let fn_def2 = &module
-        .get_unique_own_function(ustr("process_variant_array"))
+        .get_function(ustr("process_variant_array"))
         .unwrap()
         .definition;
     let sig2 = fn_def2

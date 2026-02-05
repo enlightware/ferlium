@@ -30,7 +30,7 @@ use crate::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, FunctionCollector,
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, ImportImplSlot,
         ImportImplSlotId, LocalFunction, LocalImplId, ModuleEnv, ModuleFunction, Modules,
-        TraitImpl, TraitImplId, TraitImpls, TraitKey,
+        TraitImpl, TraitImplId, TraitImpls, TraitKey, id::Id,
     },
     mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},
@@ -443,8 +443,8 @@ impl<'a> TraitSolver<'a> {
                             let code: FunctionRc = Rc::new(RefCell::new(code));
                             let function = ModuleFunction::new_without_spans(def, code);
                             let name = Ustr::from(&format!(
-                                "{} (thunk)>",
-                                trait_ref.qualified_method_name(method_index)
+                                "{}-thunk",
+                                trait_ref.qualified_method_name(method_index, input_tys)
                             ));
                             let local_fn =
                                 LocalFunction::new_compute_interface_hash(function, name);
@@ -584,14 +584,12 @@ impl<'a> TraitSolver<'a> {
                 span: use_site
             })
         })?;
-        module
-            .get_unique_own_function(function_name)
-            .ok_or_else(|| {
-                internal_compilation_error!(Internal {
-                    error: format!("Function {function_name} not found in module {module_path}"),
-                    span: use_site
-                })
-            })?;
+        module.get_function(function_name).ok_or_else(|| {
+            internal_compilation_error!(Internal {
+                error: format!("Function {function_name} not found in module {module_path}"),
+                span: use_site
+            })
+        })?;
         Ok(FunctionId::Import(
             self.import_function(module_path, function_name),
         ))

@@ -154,5 +154,5 @@ pub static BITS_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
 pub fn add_to_module(to: &mut Module) {
     // Traits
-    to.traits.push(BITS_TRAIT.clone());
+    to.add_trait(BITS_TRAIT.clone());
 }

@@ -373,10 +373,8 @@ pub fn array_iter_type_generic() -> Type {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.type_aliases
-        .set_bare_native("array", bare_native_type::<Array>());
-    to.type_aliases
-        .set_bare_native("array_iterator", bare_native_type::<ArrayIterator>());
+    to.add_bare_native_type_alias_str("array", bare_native_type::<Array>());
+    to.add_bare_native_type_alias_str("array_iterator", bare_native_type::<ArrayIterator>());
 
     // TODO: use type classes to get rid of the array prefix
     // to.add_local_function(ustr("array_from_iterator"), Array::from_iterator_descr());

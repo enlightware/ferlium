@@ -42,26 +42,24 @@ pub enum FunctionId {
 
 impl FormatWith<ModuleEnv<'_>> for FunctionId {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        match self {
+        match *self {
             FunctionId::Local(id) => {
-                let name = env.current.functions[id.as_index()].name;
+                let name = env.current.get_local_function_by_id(id).unwrap().name;
                 write!(f, "local function {name} (#{id})")
             }
             FunctionId::Import(id) => {
-                let slot = &env.current.import_fn_slots[id.as_index()];
+                let slot = &env.current.get_import_fn_slot(id).unwrap();
                 let module_name = &slot.module;
                 write!(f, "imported function {module_name}::")?;
                 let function_name = match &slot.target {
                     ImportFunctionTarget::TraitImplMethod { key, index } => {
                         let name = key.trait_ref().functions[*index as usize].0;
-                        let impls = &env
+                        let imp = env
                             .others
                             .modules
                             .get(module_name)
                             .expect("imported module not found")
-                            .impls;
-                        let imp = impls
-                            .get_impl_by_key(key)
+                            .get_impl_data_by_trait_key(key)
                             .expect("imported trait impl not found");
                         write!(f, "<")?;
                         format_impl_header_by_key(f, key, imp, env)?;

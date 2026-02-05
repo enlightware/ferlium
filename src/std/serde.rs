@@ -463,7 +463,7 @@ pub fn add_to_module(to: &mut Module) {
         .unwrap()
         .derives
         .push(Box::new(AlgebraicTypeSerializeDeriver));
-    to.traits.push(serialize_trait);
+    to.add_trait(serialize_trait);
 
     // Deserialize trait
     let mut deserialize_trait = TraitRef::new_with_self_input_type(
@@ -487,7 +487,7 @@ pub fn add_to_module(to: &mut Module) {
         .unwrap()
         .derives
         .push(Box::new(AlgebraicTypeDeserializeDeriver));
-    to.traits.push(deserialize_trait);
+    to.add_trait(deserialize_trait);
 
     // Trait implementations for basic types are in the prelude.
 }

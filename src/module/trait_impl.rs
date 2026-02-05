@@ -24,7 +24,9 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     function::{Function, FunctionDefinition, FunctionRc},
-    module::{LocalFunction, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc, path::Path},
+    module::{
+        LocalFunction, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc, id::Id, path::Path,
+    },
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     type_inference::InstSubstitution,
@@ -54,16 +56,16 @@ pub enum TraitImplId {
 
 impl FormatWith<ModuleEnv<'_>> for TraitImplId {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        match self {
+        match *self {
             TraitImplId::Local(id) => {
-                let key = env.current.impls.get_key_by_local_id(*id).unwrap();
-                let imp = &env.current.impls.data[id.as_index()];
+                let key = env.current.get_impl_trait_key_by_id(id).unwrap();
+                let imp = env.current.get_impl_data(id).unwrap();
                 write!(f, "local dictionary ")?;
                 format_impl_header_by_key(f, &key, imp, env)?;
                 write!(f, " (#{id})")
             }
             TraitImplId::Import(id) => {
-                let slot = &env.current.import_impl_slots[id.as_index()];
+                let slot = env.current.get_import_impl_slot(id).unwrap();
                 let module_name = &slot.module;
                 write!(f, "imported dictionary {module_name}::<")?;
                 format_impl_header_by_import_slot(f, slot, env)?;
@@ -135,6 +137,13 @@ pub enum TraitKey {
     Blanket(BlanketTraitImplKey),
 }
 impl TraitKey {
+    /// Get the input types of this key.
+    pub fn input_tys(&self) -> &[Type] {
+        match self {
+            TraitKey::Concrete(key) => &key.input_tys,
+            TraitKey::Blanket(key) => &key.sub_key.input_tys,
+        }
+    }
     /// Get the trait reference of this key.
     pub fn trait_ref(&self) -> &TraitRef {
         match self {
@@ -252,7 +261,11 @@ impl TraitImpls {
         trait_ref.validate_impl_size(&input_tys, &output_tys, functions.len());
 
         // Add to local functions, collect their IDs and build the overall interface hash.
-        let namer = |method_index: usize| trait_ref.qualified_method_name(method_index).into();
+        let namer = |method_index: usize| {
+            trait_ref
+                .qualified_method_name(method_index, &input_tys)
+                .into()
+        };
         let (methods, dictionary_type, interface_hash) =
             Self::bundle_module_functions(functions, fn_collector, namer);
 
@@ -320,7 +333,11 @@ impl TraitImpls {
         trait_ref.validate_impl_size(&sub_key.input_tys, &output_tys, functions.len());
 
         // Add to local functions, collect their IDs and build the overall interface hash.
-        let namer = |method_index: usize| trait_ref.qualified_method_name(method_index).into();
+        let namer = |method_index: usize| {
+            trait_ref
+                .qualified_method_name(method_index, &sub_key.input_tys)
+                .into()
+        };
         let (methods, dictionary_type, interface_hash) =
             Self::bundle_module_functions(functions, fn_collector, namer);
 
@@ -654,9 +671,9 @@ fn format_impl_fns(
 ) -> std::fmt::Result {
     let subst = (subst, HashMap::new());
     writeln!(f, " {{")?;
-    let impl_functions = imp.methods.iter().map(|id| {
-        let function = &env.current.functions[id.as_index()];
-        (&function.function, *id)
+    let impl_functions = imp.methods.iter().map(|&id| {
+        let function = &env.current.get_local_function_by_id(id).unwrap();
+        (&function.function, id)
     });
     for ((name, _), (function, id)) in trait_ref.functions.iter().zip(impl_functions) {
         let def = &function.definition;
@@ -700,7 +717,7 @@ pub fn format_impl_header_by_import_slot_id(
     id: ImportImplSlotId,
     env: &ModuleEnv<'_>,
 ) -> fmt::Result {
-    let slot = &env.current.import_impl_slots[id.as_index()];
+    let slot = env.current.get_import_impl_slot(id).unwrap();
     format_impl_header_by_import_slot(f, slot, env)
 }
 
@@ -710,14 +727,12 @@ pub fn format_impl_header_by_import_slot(
     env: &ModuleEnv<'_>,
 ) -> fmt::Result {
     let key = &slot.key;
-    let impls = &env
+    let imp = &env
         .others
         .modules
         .get(&slot.module)
         .expect("imported module not found")
-        .impls;
-    let imp = impls
-        .get_impl_by_key(key)
+        .get_impl_data_by_trait_key(key)
         .expect("imported trait impl not found");
     format_impl_header_by_key(f, key, imp, env)?;
     Ok(())

@@ -11,7 +11,10 @@ use test_log::test;
 use ustr::ustr;
 
 use super::common::TestSession;
-use ferlium::{effects::*, module::LocalImplId};
+use ferlium::{
+    effects::*,
+    module::{LocalImplId, id::Id},
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -20,7 +23,7 @@ pub fn test_mod(session: &mut TestSession, src: &str, f: &str, exp_eff: EffType)
     let module = session.compile(src);
     let effects = module
         .module
-        .get_unique_own_function(ustr(f))
+        .get_function(ustr(f))
         .unwrap()
         .definition
         .ty_scheme
@@ -283,11 +286,11 @@ fn trait_impl_effect_must_have_at_least_def_effects() {
         )
         .module;
     let fn_id = module
-        .impls
-        .get_impl_by_local_id(LocalImplId::from_index(0))
+        .get_impl_data(LocalImplId::from_index(0))
+        .unwrap()
         .methods[0];
     let effects = &module
-        .get_own_function_by_id(fn_id)
+        .get_function_by_id(fn_id)
         .unwrap()
         .definition
         .ty_scheme

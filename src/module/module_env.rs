@@ -97,7 +97,7 @@ impl<'m> ModuleEnv<'m> {
     ) -> Result<Option<Type>, InternalCompilationError> {
         Ok(self
             .get_module_member(&path.segments, &|name, module| {
-                module.type_aliases.get_type(&ustr(name))
+                module.get_type_alias(ustr(name))
             })?
             .map(|(_, ty)| ty))
     }
@@ -113,7 +113,7 @@ impl<'m> ModuleEnv<'m> {
             let enum_segments = &segments[0..len - 1];
             let variant_name = segments[len - 1].0;
             if let Some((_, ty_def)) = self.get_module_member(enum_segments, &|name, module| {
-                module.type_defs.get(&ustr(name)).cloned()
+                module.get_type_def(ustr(name))
             })? {
                 if ty_def.is_enum() {
                     let ty_data = ty_def.shape.data();
@@ -127,9 +127,9 @@ impl<'m> ModuleEnv<'m> {
         }
         // Not found, search for a matching struct
         if len >= 1 {
-            if let Some((_, ty_def)) = self.get_module_member(segments, &|name, module| {
-                module.type_defs.get(&ustr(name)).cloned()
-            })? {
+            if let Some((_, ty_def)) =
+                self.get_module_member(segments, &|name, module| module.get_type_def(ustr(name)))?
+            {
                 if ty_def.is_struct_like() {
                     return Ok(Some(TypeDefLookupResult::Struct(ty_def.clone())));
                 }
@@ -145,7 +145,7 @@ impl<'m> ModuleEnv<'m> {
     ) -> Result<Option<Type>, InternalCompilationError> {
         Ok(self
             .get_module_member(&path.segments, &|name, module| {
-                module.type_defs.get(&ustr(name)).cloned()
+                module.get_type_def(ustr(name))
             })?
             .map(|(_, ty_def)| ty_def.as_type()))
     }
@@ -153,15 +153,13 @@ impl<'m> ModuleEnv<'m> {
     pub fn function_name(&self, func: &FunctionRc) -> Option<String> {
         // FIXME: this needs update
         self.current
-            .functions
-            .iter()
+            .iter_functions()
             .find(|local_fn| Rc::ptr_eq(&local_fn.function.code, func))
             .map_or_else(
                 || {
                     self.others.modules.iter().find_map(|(mod_name, module)| {
                         module
-                            .functions
-                            .iter()
+                            .iter_functions()
                             .find(|local_fn| Rc::ptr_eq(&local_fn.function.code, func))
                             .map(|local_fn| {
                                 let fn_name = local_fn.name;
@@ -182,9 +180,7 @@ impl<'m> ModuleEnv<'m> {
         &'m self,
         path: &'m [UstrSpan],
     ) -> Result<Option<(Option<Path>, &'m ModuleFunction)>, InternalCompilationError> {
-        self.get_module_member(path, &|name, module| {
-            module.get_unique_own_function(ustr(name))
-        })
+        self.get_module_member(path, &|name, module| module.get_function(ustr(name)))
     }
 
     /// Get a function from the current module, or other ones, return the name of the module if other.
@@ -192,9 +188,7 @@ impl<'m> ModuleEnv<'m> {
         &'m self,
         path: &'m [UstrSpan],
     ) -> Result<Option<(Option<Path>, &'m ModuleFunction)>, InternalCompilationError> {
-        self.get_module_member(path, &|name, module| {
-            module.get_unique_own_function(ustr(name))
-        })
+        self.get_module_member(path, &|name, module| module.get_function(ustr(name)))
     }
 
     /// Get the trait reference associated to a trait name.
@@ -204,7 +198,7 @@ impl<'m> ModuleEnv<'m> {
     ) -> Result<Option<TraitRef>, InternalCompilationError> {
         Ok(self
             .get_module_member(&[name], &|name, module| {
-                module.traits.iter().find_map(|trait_ref| {
+                module.trait_iter().find_map(|trait_ref| {
                     if trait_ref.name == name {
                         Some(trait_ref.clone())
                     } else {
@@ -222,7 +216,7 @@ impl<'m> ModuleEnv<'m> {
     ) -> Result<Option<(Option<Path>, TraitFunctionDescription<'m>)>, InternalCompilationError>
     {
         self.get_module_member(&path.segments, &|name, module| {
-            module.traits.iter().find_map(|trait_ref| {
+            module.trait_iter().find_map(|trait_ref| {
                 trait_ref
                     .functions
                     .iter()

@@ -253,7 +253,7 @@ impl TestSession {
     pub fn compile_and_get_fn_def(&mut self, src: &str, fn_name: &str) -> FunctionDefinition {
         self.compile(src)
             .module
-            .get_unique_own_function(ustr(fn_name))
+            .get_function(ustr(fn_name))
             .expect("Function not found")
             .definition
             .clone()

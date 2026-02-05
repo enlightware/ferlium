@@ -50,7 +50,7 @@ impl Modules {
     /// Non-incremental linking of all import slots in a module
     pub fn link(&self, module: &ModuleRc) {
         // Link functions.
-        for (slot_index, slot) in module.import_fn_slots.iter().enumerate() {
+        for (slot_index, slot) in module.iter_import_fn_slots().enumerate() {
             if slot.resolved.borrow().is_some() {
                 continue; // Already linked
             }
@@ -58,7 +58,7 @@ impl Modules {
                 let (function, hash) = match &slot.target {
                     ImportFunctionTarget::NamedFunction(function_name) => {
                         if let Some(target_function) =
-                            target_module.get_unique_local_function(*function_name)
+                            target_module.get_local_function(*function_name)
                         {
                             (
                                 &target_function.function.code,
@@ -75,22 +75,18 @@ impl Modules {
                         // Get the impl identifier.
                         let impl_id = match key {
                             TraitKey::Concrete(key) => target_module
-                                .impls
-                                .concrete()
-                                .get(key)
+                                .get_concrete_impl_by_key(key)
                                 .expect("Concrete trait impl not found in target module"),
                             TraitKey::Blanket(key) => target_module
-                                .impls
-                                .blanket()
-                                .get(&key.trait_ref)
+                                .get_blanket_impl_by_key(&key.trait_ref)
                                 .expect("Blanket trait not found in target module")
                                 .get(&key.sub_key)
                                 .expect("Blanket trait impl sub-key not found in target module"),
                         };
                         // Extract the method function by index from the tuple.
-                        let imp = &target_module.impls.data[impl_id.as_index()];
+                        let imp = target_module.get_impl_data(*impl_id).unwrap();
                         let fn_id = imp.methods[*index as usize];
-                        let local_fn = &target_module.functions[fn_id.as_index()];
+                        let local_fn = &target_module.get_local_function_by_id(fn_id).unwrap();
                         (&local_fn.function.code, local_fn.interface_hash)
                     }
                 };
@@ -110,8 +106,7 @@ impl Modules {
             }
             if let Some(target_module) = self.modules.get(&slot.module) {
                 let imp = target_module
-                    .impls
-                    .get_impl_by_key(&slot.key)
+                    .get_impl_data_by_trait_key(&slot.key)
                     .expect("Trait impl not found in target module for import impl slot");
                 *slot.resolved.borrow_mut() = Some((
                     imp.dictionary_value.borrow().clone(),

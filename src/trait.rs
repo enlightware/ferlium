@@ -89,9 +89,21 @@ impl Trait {
             .position(|(fn_name, _)| *fn_name == name)
     }
 
-    /// Return the qualified method name for the given method index, e.g., "TraitName<…>::method_name".
-    pub fn qualified_method_name(&self, index: usize) -> String {
-        format!("{}<…>::{}", self.name, self.functions[index].0)
+    /// Return the qualified method name for the given method index, e.g., "TraitName<…>::method_name"
+    /// using the interned indices of the provided types.
+    pub fn qualified_method_name(&self, index: usize, input_tys: &[Type]) -> String {
+        let mut s = format!("{}<", self.name);
+        for (i, ty) in input_tys.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            if let Some(world) = ty.world() {
+                s.push_str(format!("{}-", world).as_str());
+            }
+            s.push_str(format!("{}", ty.index()).as_str());
+        }
+        s.push_str(&format!(">::{}", self.functions[index].0));
+        s
     }
 
     /// Validate the trait, ensuring that its function signatures adhere to the limitations of the current implementation.

@@ -53,8 +53,8 @@ pub static ORD_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.type_aliases.set("Ordering", ordering_type());
+    to.add_type_alias_str("Ordering", ordering_type());
 
     // Traits
-    to.traits.push(ORD_TRAIT.clone());
+    to.add_trait(ORD_TRAIT.clone());
 }

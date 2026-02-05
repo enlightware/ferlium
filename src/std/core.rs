@@ -22,10 +22,10 @@ pub static REPR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
 
 pub fn add_to_module(to: &mut Module) {
     // Add the unit type `()`
-    to.type_aliases.set("()", Type::unit());
+    to.add_type_alias_str("()", Type::unit());
 
     // Add the `Repr` trait
-    to.traits.push(REPR_TRAIT.clone());
+    to.add_trait(REPR_TRAIT.clone());
 
     // All types implement `Repr` to themselves, but to avoid overlapping
     // blanket implementations, this is implemented manually in the code.

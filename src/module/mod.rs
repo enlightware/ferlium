@@ -22,6 +22,7 @@ pub mod path;
 pub mod trait_impl;
 pub mod uses;
 
+use enum_as_inner::EnumAsInner;
 pub use function::*;
 pub use module_env::*;
 pub use modules::*;
@@ -31,7 +32,6 @@ pub use uses::*;
 
 use std::{
     cell::{Ref, RefCell, RefMut},
-    collections::{HashMap, HashSet},
     fmt,
     hash::{DefaultHasher, Hash, Hasher},
 };
@@ -39,44 +39,128 @@ use std::{
 use ustr::{Ustr, ustr};
 
 use crate::{
+    Location,
     containers::SVec2,
+    define_id_type,
     emit_ir::EmitTraitOutput,
     error::{ImportKind, ImportSite, InternalCompilationError},
     format::FormatWith,
     function::Function,
     internal_compilation_error,
     ir::Node,
+    module::id::{Id, NamedIndexed},
     r#trait::TraitRef,
-    r#type::{Type, TypeAliases, TypeDefRef},
+    r#type::{LocalTypeAliasId, Type, TypeAliases, TypeDefRef},
     value::Value,
 };
 
+define_id_type!(
+    /// ID of a module within a CompilerSession
+    ModuleId
+);
+
+define_id_type!(
+    /// ID of a definition within a module
+    LocalDefId
+);
+
+/// A reference to a definition, consisting of the module ID and the definition index within that module.
+pub type DefId = (ModuleId, LocalDefId);
+
+define_id_type!(
+    /// ID of a type definition within a module
+    LocalTypeDefId
+);
+
+define_id_type!(
+    /// ID of a trait definition within a module
+    LocalTraitId
+);
+
+/// All possible kinds of definitions within a module
+#[derive(Debug, Clone, Copy, EnumAsInner)]
+pub enum DefKind {
+    Function(LocalFunctionId),
+    TypeDef(LocalTypeDefId),
+    TypeAlias(LocalTypeAliasId),
+    Trait(LocalTraitId),
+    // Impl(LocalImplId), currently not accessed by name, if we want to add it, we must take care in trait solver to register the ones it adds
+}
+
 // Module itself
 
-/// Immutable module bundle containing all compiled module data
+/// Once-built immutable module bundle containing all compiled module data
+/// Items are conceptually private, but some are pub(crate) for lifetime constraints.
+/// These are only accessed directly by emit_ir and trait_solver, other users should go through accessors,
+/// with the exception of uses which is also accessed directly by desugar.
 #[derive(Debug, Clone, Default)]
 pub struct Module {
-    pub import_fn_slots: Vec<ImportFunctionSlot>,
-    pub import_impl_slots: Vec<ImportImplSlot>,
+    pub(crate) import_fn_slots: Vec<ImportFunctionSlot>,
+    pub(crate) import_impl_slots: Vec<ImportImplSlot>,
 
-    pub uses: Uses,
+    pub(crate) uses: Uses,
 
-    // Functions, including methods of concrete trait
-    pub functions: Vec<LocalFunction>,
-    // Note: multiple functions can have the same name (e.g. trait methods)
-    pub function_name_to_id: HashMap<Ustr, HashSet<LocalFunctionId>>,
+    /// All symbols defined in this module
+    def_table: NamedIndexed<Ustr, LocalDefId, DefKind>,
+
+    // Functions, including methods of trait implementations.
+    pub(crate) functions: Vec<LocalFunction>,
 
     // Type system content
-    pub type_aliases: TypeAliases,
-    pub type_defs: HashMap<Ustr, TypeDefRef>,
-    pub traits: Traits,
-    pub impls: TraitImpls,
-
-    // Source info for IDE support
-    pub source: Option<String>,
+    type_aliases: TypeAliases,
+    type_defs: Vec<TypeDefRef>,
+    traits: Traits,
+    pub(crate) impls: TraitImpls,
 }
 
 impl Module {
+    // Imports
+
+    /// Get a function import slot by ID
+    pub fn get_import_fn_slot(&self, slot_id: ImportFunctionSlotId) -> Option<&ImportFunctionSlot> {
+        self.import_fn_slots.get(slot_id.as_index())
+    }
+
+    /// Iterate over all function import slots in this module.
+    pub fn iter_import_fn_slots(&self) -> impl Iterator<Item = &ImportFunctionSlot> {
+        self.import_fn_slots.iter()
+    }
+
+    /// Return the number of function import slots in this module.
+    pub fn import_fn_slot_count(&self) -> usize {
+        self.import_fn_slots.len()
+    }
+
+    /// Get a trait implementation import slot by ID
+    pub fn get_import_impl_slot(&self, slot_id: ImportImplSlotId) -> Option<&ImportImplSlot> {
+        self.import_impl_slots.get(slot_id.as_index())
+    }
+
+    // Uses
+
+    /// Add an explicit use of a symbol from another module.
+    pub fn add_explicit_use(&mut self, sym_name: Ustr, module: Path, span: Location) {
+        self.uses
+            .explicits
+            .insert(sym_name, UseData::new(module, span));
+    }
+
+    /// Add a wildcard use of another module.
+    pub fn add_wildcard_use(&mut self, module: Path, span: Location) {
+        self.uses.wildcards.push(UseData::new(module, span));
+    }
+
+    /// Return whether this module uses sym_name from mod_name.
+    pub fn uses(&self, mod_path: &Path, sym_name: Ustr) -> bool {
+        self.uses
+            .explicits
+            .get(&sym_name)
+            .is_some_and(|use_data| use_data.module == *mod_path)
+            || self.uses.wildcards.iter().any(|u| u.module == *mod_path)
+    }
+
+    // Functions
+
     /// Add a function to this module, returning its ID.
     pub fn add_function(&mut self, name: Ustr, function: ModuleFunction) -> LocalFunctionId {
         let id = LocalFunctionId::from_index(self.functions.len());
@@ -86,9 +170,203 @@ impl Module {
             function,
             interface_hash,
         });
-        self.function_name_to_id.entry(name).or_default().insert(id);
+        self.def_table.insert(name, DefKind::Function(id));
         id
     }
+
+    /// Add an anonymous function to this module, returning its ID.
+    /// The function can be named later using `name_function`.
+    pub(crate) fn add_function_anonymous(&mut self, function: ModuleFunction) -> LocalFunctionId {
+        let id = LocalFunctionId::from_index(self.functions.len());
+        let interface_hash = function.definition.signature_hash();
+        self.functions.push(LocalFunction {
+            name: ustr("<DUMMY NAME>"),
+            function,
+            interface_hash,
+        });
+        id
+    }
+
+    /// Name a previously added anonymous function.
+    pub(crate) fn name_function(&mut self, id: LocalFunctionId, new_name: Ustr) {
+        self.functions[id.as_index()].name = new_name;
+        self.def_table.insert(new_name, DefKind::Function(id));
+    }
+
+    /// Add an existing LocalFunction to this module, returning its ID.
+    pub fn add_local_function(&mut self, function: LocalFunction) -> LocalFunctionId {
+        let id = LocalFunctionId::from_index(self.functions.len());
+        self.def_table.insert(function.name, DefKind::Function(id));
+        self.functions.push(function);
+        id
+    }
+
+    /// Check if a local function name is unique in this module.
+    pub fn is_non_trait_local_function(&self, name: Ustr) -> bool {
+        !name.contains(">::")
+    }
+
+    /// Get a local function ID by name
+    pub fn get_local_function_id(&self, name: Ustr) -> Option<LocalFunctionId> {
+        self.get_definition(name)
+            .and_then(|def_kind| def_kind.as_function().copied())
+    }
+
+    /// Get a local function and its data by name
+    pub fn get_local_function(&self, name: Ustr) -> Option<&LocalFunction> {
+        let id = self.get_local_function_id(name)?;
+        self.functions.get(id.as_index())
+    }
+
+    /// Get a local function by name
+    pub fn get_function(&self, name: Ustr) -> Option<&ModuleFunction> {
+        self.get_local_function(name).map(|f| &f.function)
+    }
+
+    /// Get a mutable local function by name
+    pub fn get_function_mut(&mut self, name: Ustr) -> Option<&mut ModuleFunction> {
+        self.get_function_id_mut(name).map(|(_, f)| f)
+    }
+
+    /// Get a mutable local function and its ID by name
+    pub fn get_function_id_mut(
+        &mut self,
+        name: Ustr,
+    ) -> Option<(LocalFunctionId, &mut ModuleFunction)> {
+        let id = self.get_local_function_id(name)?;
+        self.functions
+            .get_mut(id.as_index())
+            .map(|f| (id, &mut f.function))
+    }
+
+    /// Get a function by name only in this module and return its script node, if it is a script function.
+    pub fn get_function_node(&mut self, name: Ustr) -> Option<Ref<'_, Node>> {
+        self.get_function(name)?.get_node()
+    }
+
+    /// Gets a function by name only in this module and return its mutable script node, if it is a script function.
+    pub fn get_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<'_, Node>> {
+        self.get_function_mut(name)?.get_node_mut()
+    }
+
+    /// Get a local function and its data by ID
+    pub fn get_local_function_by_id(&self, id: LocalFunctionId) -> Option<&LocalFunction> {
+        self.functions.get(id.as_index())
+    }
+
+    /// Get a local function by ID
+    pub fn get_function_by_id(&self, id: LocalFunctionId) -> Option<&ModuleFunction> {
+        self.functions.get(id.as_index()).map(|f| &f.function)
+    }
+
+    /// Get a mutable local function by ID
+    pub fn get_function_by_id_mut(&mut self, id: LocalFunctionId) -> Option<&mut ModuleFunction> {
+        self.functions
+            .get_mut(id.as_index())
+            .map(|f| &mut f.function)
+    }
+
+    /// Iterate over all local functions in this module.
+    pub fn iter_functions(&self) -> impl Iterator<Item = &LocalFunction> {
+        self.functions.iter()
+    }
+
+    /// Get the number of functions in this module.
+    pub fn function_count(&self) -> usize {
+        self.functions.len()
+    }
+
+    /// Look-up a function by name in this module or in any of the modules this module uses.
+    pub fn lookup_function<'a>(
+        &'a self,
+        name: &'a str,
+        others: &'a Modules,
+    ) -> Result<Option<&'a ModuleFunction>, InternalCompilationError> {
+        self.get_member(name, others, &|name, module| {
+            module.get_function(ustr(name))
+        })
+        .map(|opt| opt.map(|(_, f)| f))
+    }
+
+    // Type aliases
+
+    /// Add a type alias to this module, name by &str, returning its ID.
+    pub(crate) fn add_type_alias_str(&mut self, name: &str, ty: Type) -> LocalTypeAliasId {
+        self.add_type_alias(ustr(name), ty)
+    }
+
+    /// Add a type alias to this module, returning its ID.
+    pub(crate) fn add_type_alias(&mut self, name: Ustr, ty: Type) -> LocalTypeAliasId {
+        let id = LocalTypeAliasId::from_index(self.type_aliases.type_len());
+        self.type_aliases.set(name, ty);
+        self.def_table.insert(name, DefKind::TypeAlias(id));
+        id
+    }
+
+    /// Look-up a type alias by name in this module.
+    pub fn get_type_alias(&self, name: Ustr) -> Option<Type> {
+        self.get_definition(name).and_then(|def_kind| {
+            def_kind
+                .as_type_alias()
+                .map(|type_alias_id| self.type_aliases.get_type(*type_alias_id))
+        })
+    }
+
+    /// Add a bare native type alias to this module, name by &str.
+    pub(crate) fn add_bare_native_type_alias_str(
+        &mut self,
+        name: &str,
+        native: Box<dyn crate::r#type::BareNativeType>,
+    ) {
+        self.add_bare_native_type_alias(ustr(name), native)
+    }
+
+    /// Add a bare native type alias to this module.
+    pub(crate) fn add_bare_native_type_alias(
+        &mut self,
+        name: Ustr,
+        native: Box<dyn crate::r#type::BareNativeType>,
+    ) {
+        self.type_aliases.set_bare_native(name, native);
+    }
+
+    // Type definitions
+
+    /// Add a type definition to this module, returning its ID.
+    pub(crate) fn add_type_def(&mut self, name: Ustr, type_def: TypeDefRef) -> LocalTypeDefId {
+        let id = LocalTypeDefId::from_index(self.type_defs.len());
+        self.type_defs.push(type_def);
+        self.def_table.insert(name, DefKind::TypeDef(id));
+        id
+    }
+
+    /// Look-up a type definition by name in this module.
+    pub fn get_type_def(&self, name: Ustr) -> Option<&TypeDefRef> {
+        self.get_definition(name).and_then(|def_kind| {
+            def_kind
+                .as_type_def()
+                .map(|type_def_id| &self.type_defs[type_def_id.as_index()])
+        })
+    }
+
+    // Trait definitions and implementations
+
+    /// Add a trait definition to this module, returning its ID.
+    pub fn add_trait(&mut self, trait_ref: TraitRef) -> LocalTraitId {
+        let id = LocalTraitId::from_index(self.traits.len());
+        self.traits.push(trait_ref.clone());
+        // As currently only std defines traits, we asserts that it has not been added yet.
+        assert!(self.def_table.get_by_name(trait_ref.name).is_none());
+        self.def_table.insert(trait_ref.name, DefKind::Trait(id));
+        id
+    }
+
+    /// Iterate over all traits defined in this module.
+    pub fn trait_iter(&self) -> impl Iterator<Item = &TraitRef> + '_ {
+        self.traits.iter()
+    }
+
+    // Trait implementations
 
     /// Add a concrete trait implementation to this module, with raw functions.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
@@ -110,6 +388,7 @@ impl Module {
             functions,
             &mut fn_collector,
         );
+        // TODO: find the name and use it to store the impl
         self.functions.extend(fn_collector.new_elements);
     }
 
@@ -164,24 +443,37 @@ impl Module {
         }
     }
 
-    fn computer_interface_hash(&self, function_ids: &[LocalFunctionId]) -> (Type, u64) {
-        let mut interface_hasher = DefaultHasher::new();
-        let tys: Vec<_> = function_ids
-            .iter()
-            .map(|id| {
-                let local_fn = &self
-                    .functions
-                    .get(id.as_index())
-                    .expect("Invalid function ID");
-                local_fn.interface_hash.hash(&mut interface_hasher);
-                let function = &local_fn.function;
-                Type::function_type(function.definition.ty_scheme.ty.clone())
-            })
-            .collect();
-        let hash = interface_hasher.finish();
-        let dictionary_ty = Type::tuple(tys);
-        (dictionary_ty, hash)
+    /// Return a concrete implementation id by its key, if it exists in this module.
+    pub fn get_concrete_impl_by_key(&self, key: &ConcreteTraitImplKey) -> Option<&LocalImplId> {
+        self.impls.concrete().get(key)
     }
+
+    /// Return a set of blanket implementation by their trait reference, if any exist in this module.
+    pub fn get_blanket_impl_by_key(&self, key: &TraitRef) -> Option<&BlanketTraitImpls> {
+        self.impls.blanket().get(key)
+    }
+
+    /// Return a trait implementation's data by ID.
+    pub fn get_impl_data(&self, impl_id: LocalImplId) -> Option<&TraitImpl> {
+        self.impls.data.get(impl_id.as_index())
+    }
+
+    /// Return a trait implementation's data by trait key.
+    pub fn get_impl_data_by_trait_key(&self, key: &TraitKey) -> Option<&TraitImpl> {
+        self.impls.get_impl_by_key(key)
+    }
+
+    /// Return a trait trait by implementation ID.
+    pub fn get_impl_trait_key_by_id(&self, impl_id: LocalImplId) -> Option<TraitKey> {
+        self.impls.get_key_by_local_id(impl_id)
+    }
+
+    /// Get the number of trait implementations in this module.
+    pub fn impl_count(&self) -> usize {
+        self.impls.data.len()
+    }
+
+    // General module queries
 
     /// Check if this module is "empty" (has no meaningful content)
     pub fn is_empty(&self) -> bool {
@@ -193,14 +485,9 @@ impl Module {
             && self.impls.is_empty()
     }
 
-    /// Return an iterator over the names of all user-definable own symbols in this module.
-    /// Traits names are not included, as they cannot currently be defined by Ferlium code.
+    /// Return an iterator over the names of all own symbols in this module.
     pub fn own_symbols(&self) -> impl Iterator<Item = Ustr> + use<'_> {
-        self.function_name_to_id
-            .keys()
-            .cloned()
-            .chain(self.type_defs.keys().cloned())
-            .chain(self.type_aliases.iter().map(|(name, _)| *name))
+        self.def_table.name_iter().copied()
     }
 
     /// Return the type for the source pos, if any.
@@ -217,25 +504,11 @@ impl Module {
         None
     }
 
-    /// Return whether this module uses sym_name from mod_name.
-    pub fn uses(&self, mod_path: &Path, sym_name: Ustr) -> bool {
-        self.uses
-            .explicits
-            .get(&sym_name)
-            .is_some_and(|use_data| use_data.module == *mod_path)
-            || self.uses.wildcards.iter().any(|u| u.module == *mod_path)
-    }
-
-    /// Look-up a function by name in this module or in any of the modules this module uses.
-    pub fn get_function<'a>(
-        &'a self,
-        name: &'a str,
-        others: &'a Modules,
-    ) -> Result<Option<&'a ModuleFunction>, InternalCompilationError> {
-        self.get_member(name, others, &|name, module| {
-            module.get_unique_own_function(ustr(name))
-        })
-        .map(|opt| opt.map(|(_, f)| f))
+    /// Look-up a definition by name in this module.
+    pub fn get_definition(&self, name: Ustr) -> Option<DefKind> {
+        self.def_table
+            .get_by_name(name)
+            .map(|(_, def_kind)| *def_kind)
     }
 
     /// Look-up a member by name in this module or in any of the modules this module uses.
@@ -292,74 +565,55 @@ impl Module {
         }
     }
 
-    /// Check if a local function name is unique in this module.
-    pub fn is_non_trait_local_function(&self, name: Ustr) -> bool {
-        match self.function_name_to_id.get(&name) {
-            Some(ids) => {
-                if ids.len() == 1 {
-                    !name.contains("…")
-                } else {
-                    false
-                }
+    pub fn list_stats(&self) -> String {
+        let mut stats = String::new();
+        if !self.uses.explicits.is_empty() || !self.uses.wildcards.is_empty() {
+            stats.push_str(&format!(
+                "use directives: {} explicit, {} wildcards",
+                self.uses.explicits.len(),
+                self.uses.wildcards.len()
+            ));
+        }
+        if !self.type_aliases.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
             }
-            None => false,
+            stats.push_str(&format!("type aliases: {}", self.type_aliases.type_len()));
         }
-    }
-
-    /// Get a local function ID by name
-    pub fn get_unique_local_function_id(&self, name: Ustr) -> Option<LocalFunctionId> {
-        let ids = self.function_name_to_id.get(&name)?;
-        if ids.len() != 1 {
-            return None;
+        if !self.type_defs.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            stats.push_str(&format!("new types: {}", self.type_defs.len()));
         }
-        Some(*ids.iter().next().unwrap())
-    }
-
-    /// Get a local function and its data by name
-    pub fn get_unique_local_function(&self, name: Ustr) -> Option<&LocalFunction> {
-        let id = self.get_unique_local_function_id(name)?;
-        self.functions.get(id.as_index())
-    }
-
-    /// Get a local function by name
-    pub fn get_unique_own_function(&self, name: Ustr) -> Option<&ModuleFunction> {
-        self.get_unique_local_function(name).map(|f| &f.function)
-    }
-
-    /// Get a mutable local function by name
-    pub fn get_unique_own_function_mut(&mut self, name: Ustr) -> Option<&mut ModuleFunction> {
-        self.get_unique_own_function_id_mut(name).map(|(_, f)| f)
-    }
-
-    /// Get a mutable local function and its ID by name
-    pub fn get_unique_own_function_id_mut(
-        &mut self,
-        name: Ustr,
-    ) -> Option<(LocalFunctionId, &mut ModuleFunction)> {
-        let id = self.get_unique_local_function_id(name)?;
-        self.functions
-            .get_mut(id.as_index())
-            .map(|f| (id, &mut f.function))
-    }
-
-    /// Look-up a function by name only in this module and return its script node, if it is a script function.
-    pub fn get_unique_own_function_node(&mut self, name: Ustr) -> Option<Ref<'_, Node>> {
-        self.get_unique_own_function(name)?.get_node()
-    }
-
-    /// Look-up a function by name only in this module and return its mutable script node, if it is a script function.
-    pub fn get_unique_own_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<'_, Node>> {
-        self.get_unique_own_function_mut(name)?.get_node_mut()
-    }
-
-    /// Get a local function by ID
-    pub fn get_own_function_by_id(&self, id: LocalFunctionId) -> Option<&ModuleFunction> {
-        self.functions.get(id.as_index()).map(|f| &f.function)
-    }
-
-    /// Get an import slot by ID
-    pub fn get_import_slot(&self, slot_id: ImportFunctionSlotId) -> Option<&ImportFunctionSlot> {
-        self.import_fn_slots.get(slot_id.as_index())
+        if !self.traits.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            stats.push_str(&format!("traits: {}", self.traits.len()));
+        }
+        if !self.impls.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            stats.push_str(&format!("trait implementations: {}", self.impls.len()));
+        }
+        if !self.functions.is_empty() {
+            if !stats.is_empty() {
+                stats.push_str(", ");
+            }
+            let named_count = self
+                .functions
+                .iter()
+                .filter(|f| self.is_non_trait_local_function(f.name))
+                .count();
+            stats.push_str(&format!("named functions: {}", named_count));
+            if self.functions.len() > named_count {
+                let unnamed_count = self.functions.len() - named_count;
+                stats.push_str(&format!(", trait impl functions: {}", unnamed_count));
+            }
+        }
+        stats
     }
 
     /*
@@ -430,6 +684,25 @@ impl Module {
     }
     */
 
+    fn computer_interface_hash(&self, function_ids: &[LocalFunctionId]) -> (Type, u64) {
+        let mut interface_hasher = DefaultHasher::new();
+        let tys: Vec<_> = function_ids
+            .iter()
+            .map(|id| {
+                let local_fn = &self
+                    .functions
+                    .get(id.as_index())
+                    .expect("Invalid function ID");
+                local_fn.interface_hash.hash(&mut interface_hasher);
+                let function = &local_fn.function;
+                Type::function_type(function.definition.ty_scheme.ty.clone())
+            })
+            .collect();
+        let hash = interface_hasher.finish();
+        let dictionary_ty = Type::tuple(tys);
+        (dictionary_ty, hash)
+    }
+
     fn format_with_modules(
         &self,
         f: &mut fmt::Formatter,
@@ -459,17 +732,28 @@ impl Module {
             }
             writeln!(f, "\n")?;
         }
-        if !self.type_aliases.is_empty() {
-            writeln!(f, "Type aliases ({}):\n", self.type_aliases.len())?;
-            for (name, ty) in self.type_aliases.iter() {
-                writeln!(f, "{}: {}", name, ty.format_with(&env))?;
+        if self.type_aliases.type_len() > 0 {
+            writeln!(f, "Type aliases ({}):\n", self.type_aliases.type_len())?;
+            for ty in self.type_aliases.type_iter() {
+                let name = self.type_aliases.get_name(ty).unwrap();
+                writeln!(f, "{}: {}", name, ty.data().format_with(&env))?;
+            }
+            writeln!(f, "\n")?;
+        }
+        if self.type_aliases.bare_native_len() > 0 {
+            writeln!(
+                f,
+                "Bare native type aliases ({}):\n",
+                self.type_aliases.bare_native_len()
+            )?;
+            for (name, native) in self.type_aliases.bare_native_iter() {
+                writeln!(f, "{}: {}", name, native.type_name())?;
             }
             writeln!(f, "\n")?;
         }
         if !self.type_defs.is_empty() {
             writeln!(f, "New types ({}):\n", self.type_defs.len())?;
-            for (_, decl) in self.type_defs.iter() {
-                write!(f, "  ")?;
+            for decl in self.type_defs.iter() {
                 decl.format_details(&env, f)?;
                 writeln!(f)?;
             }
@@ -518,57 +802,6 @@ impl Module {
             }
         }
         Ok(())
-    }
-
-    pub fn list_stats(&self) -> String {
-        let mut stats = String::new();
-        if !self.uses.explicits.is_empty() || !self.uses.wildcards.is_empty() {
-            stats.push_str(&format!(
-                "use directives: {} explicit, {} wildcards",
-                self.uses.explicits.len(),
-                self.uses.wildcards.len()
-            ));
-        }
-        if !self.type_aliases.is_empty() {
-            if !stats.is_empty() {
-                stats.push_str(", ");
-            }
-            stats.push_str(&format!("type aliases: {}", self.type_aliases.len()));
-        }
-        if !self.type_defs.is_empty() {
-            if !stats.is_empty() {
-                stats.push_str(", ");
-            }
-            stats.push_str(&format!("new types: {}", self.type_defs.len()));
-        }
-        if !self.traits.is_empty() {
-            if !stats.is_empty() {
-                stats.push_str(", ");
-            }
-            stats.push_str(&format!("traits: {}", self.traits.len()));
-        }
-        if !self.impls.is_empty() {
-            if !stats.is_empty() {
-                stats.push_str(", ");
-            }
-            stats.push_str(&format!("trait implementations: {}", self.impls.len()));
-        }
-        if !self.functions.is_empty() {
-            if !stats.is_empty() {
-                stats.push_str(", ");
-            }
-            let named_count = self
-                .functions
-                .iter()
-                .filter(|f| self.is_non_trait_local_function(f.name))
-                .count();
-            stats.push_str(&format!("named functions: {}", named_count));
-            if self.functions.len() > named_count {
-                let unnamed_count = self.functions.len() - named_count;
-                stats.push_str(&format!(", trait impl functions: {}", unnamed_count));
-            }
-        }
-        stats
     }
 }
 

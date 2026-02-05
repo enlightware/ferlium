@@ -15,7 +15,10 @@ use std::rc::Rc;
 use ariadne::{Label, Source};
 use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
-use ferlium::module::{Module, ModuleEnv, ModuleRc, Modules, Path, ShowModuleDetails, UseData};
+use ferlium::module::id::Id;
+use ferlium::module::{
+    LocalFunctionId, Module, ModuleEnv, ModuleRc, Modules, Path, ShowModuleDetails,
+};
 use ferlium::std::new_module_using_std;
 use ferlium::typing_env::Local;
 use ferlium::{
@@ -467,8 +470,7 @@ fn process_input(
     // Initialize module with use directives
     let mut module = new_module_using_std();
     for (sym_name, mod_name) in reverse_uses {
-        let use_data = UseData::new(mod_name, Location::new_synthesized());
-        module.uses.explicits.insert(sym_name, use_data);
+        module.add_explicit_use(sym_name, mod_name, Location::new_synthesized());
     }
 
     // AST debug output for REPL
@@ -739,7 +741,7 @@ fn run_interactive_repl() {
                                     Ok(id) => id,
                                     Err(_) => {
                                         // not a number, attempt to find by name
-                                        match module.get_unique_local_function_id(ustr(arg)) {
+                                        match module.get_local_function_id(ustr(arg)) {
                                             Some(id) => id.as_index(),
                                             None => {
                                                 println!(
@@ -754,7 +756,9 @@ fn run_interactive_repl() {
                                 println!("Function id is required.");
                                 continue;
                             };
-                            let local_fn = if let Some(local_fn) = module.functions.get(index) {
+                            let local_fn = if let Some(local_fn) =
+                                module.get_local_function_by_id(LocalFunctionId::from_index(index))
+                            {
                                 local_fn
                             } else {
                                 println!("Function id {index} not found in module {module_name}.");
