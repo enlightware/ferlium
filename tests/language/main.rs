@@ -18,4 +18,5 @@ mod regression;
 mod simple;
 mod std;
 mod r#type;
+mod type_alias;
 mod type_defs;

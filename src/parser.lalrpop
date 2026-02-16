@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, ExprKind::*, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -51,6 +51,7 @@ ModuleItem = {
     ModuleFunction,
     ModuleTraitImpl,
     ModuleTypeDef,
+    ModuleTypeAlias,
     ModuleUseDecl,
 }
 
@@ -74,6 +75,10 @@ ModuleFunction: Module = {
 
 ModuleTypeDef: Module = {
     TypeDefinition => Module::single_type_def(<>)
+}
+
+ModuleTypeAlias: Module = {
+    TypeAliasDefinition => Module::single_type_alias(<>)
 }
 
 ModuleUseDecl: Module = {
@@ -233,6 +238,12 @@ MutTyOrInfer: MutType = {
 TypeDefinition: TypeDef = {
     StructDefinition,
     EnumDefinition,
+}
+
+TypeAliasDefinition: TypeAlias = {
+    <l:@L> "type" <name:Sp<UIdentifier>> "=" <ty:Sp<DefinedType>> <r:@R> ";" => {
+        TypeAlias::new(name, ty)
+    }
 }
 
 StructDefinition: TypeDef = {

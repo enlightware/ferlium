@@ -55,6 +55,11 @@ TraitImpl {
 TypeDef {
     StructDef
     | EnumDef
+    | TypeAliasDef
+}
+
+TypeAliasDef {
+    kw<'type'> TypeName { Identifier } '=' AliasType ';'
 }
 
 UseDecl {
@@ -105,6 +110,14 @@ TypeNoRecordVariant {
     | recordType
     | variantTypeNoRecord
     | tupleOrFnTypeNoRecord
+}
+
+AliasType {
+    Path
+    | arrayType
+    | recordType
+    | variantTypeAllowRecord
+    | tupleOrFnTypeAllowRecord
 }
 
 tupleOrFnTypeAllowRecord {
