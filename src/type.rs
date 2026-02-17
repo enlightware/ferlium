@@ -442,11 +442,19 @@ impl Type {
     }
 
     pub fn variant(types: impl Into<Vec<(Ustr, Self)>>) -> Self {
-        TypeKind::Variant(types.into()).store()
+        let types = types.into();
+        if types.is_empty() {
+            return Self::never();
+        }
+        TypeKind::Variant(types).store()
     }
 
     pub fn tuple(elements: impl Into<Vec<Self>>) -> Self {
-        TypeKind::Tuple(elements.into()).store()
+        let elements = elements.into();
+        if elements.is_empty() {
+            return Self::unit();
+        }
+        TypeKind::Tuple(elements).store()
     }
 
     pub fn record(fields: impl Into<Vec<(Ustr, Self)>>) -> Self {
