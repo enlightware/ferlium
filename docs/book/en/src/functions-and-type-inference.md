@@ -75,6 +75,32 @@ add_one(10)
 Annotations are most useful when you want to fix a type to a specific one, or when you want to document intent.
 In all cases, the inferred type must agree with the annotation.
 
+## Recursive functions
+
+A function in Ferlium can call itself.
+This is called [recursion](https://en.wikipedia.org/wiki/Recursion_(computer_science)).
+Recursive functions are commonly used when a problem can be broken into smaller instances of the same problem.
+
+For example, factorial can be defined recursively:
+
+```ferlium
+fn fact(n) {
+    if n <= 1 {
+        1
+    } else {
+        n * fact(n - 1)
+    }
+}
+```
+
+Here, `fact` calls itself with a smaller argument until it reaches the base case `n <= 1`.
+
+Recursion works naturally with type inference. The compiler infers one type for the function and checks that all recursive calls are consistent with that type.
+
+Ferlium cannot enforce at compile time that recursive functions terminate.
+If a function calls itself indefinitely, execution will fail at runtime.
+It is the programmer's responsibility to ensure that recursion progresses toward a base case.
+
 ## What comes next
 
 In some cases, inference leaves certain types ambiguous.

@@ -24,7 +24,10 @@ let x = 3;
 sign(x)
 ```
 
-Ferlium programs are expressions. This means that constructs such as blocks, conditionals, and function bodies always produce a value. The value of a block is the value of its last expression; when there is no meaningful result, the value is the [unit value](https://en.wikipedia.org/wiki/Unit_type), equivalent to the empty tuple `()`. For this reason, functions in Ferlium always return a value.
+Ferlium programs are [expressions](https://en.wikipedia.org/wiki/Expression_(computer_science)).
+This means that constructs such as blocks, conditionals, and function bodies always produce a value.
+The value of a block is the value of its last expression; when there is no meaningful result, the value is the [unit value](https://en.wikipedia.org/wiki/Unit_type), equivalent to the empty tuple `()`.
+For this reason, functions in Ferlium always return a value.
 
 ## Comments
 

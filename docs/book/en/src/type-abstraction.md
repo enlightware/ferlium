@@ -33,6 +33,8 @@ Another useful way to think of a trait is as a **relation over types**.
 - Some traits relate multiple types at once.
 - Some traits also expose output type slots (often called associated types).
 
+Traits are also called [type classes](https://en.wikipedia.org/wiki/Type_class) in some languages, and they are a powerful way to achieve polymorphism and code reuse without inheritance.
+
 ### Traits relating multiple types
 
 A good example of trait relating multiple types is `Cast`, which relates a source type and a target type.

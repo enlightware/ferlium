@@ -18,7 +18,7 @@ For type checking, they are treated as the underlying type.
 
 ## Product Types
 
-Product types group several values into a single value.
+[Product types](https://en.wikipedia.org/wiki/Product_type) group several values into a single value.
 They are called “product” types because the number of possible values is the product of the possibilities of their components.
 
 ### Tuples
@@ -72,7 +72,7 @@ let user = { name: "A", age: 30 }; // inferred as { name: string, age: int }
 
 ## Sum Types
 
-Sum types let a value be one of several alternatives.
+[Sum types](https://en.wikipedia.org/wiki/Tagged_union) let a value be one of several alternatives.
 Each alternative — also called a **variant** — has a name and an optional payload of associated data.
 The name of the alternative is called a **tag**.
 
@@ -183,8 +183,8 @@ let m3 = Message::Move { x: 10, y: 20 };
 
 As seen in this chapter, Ferlium supports both structural and nominal reasoning.
 
-- Tuples, records and sum types are structural: compatibility depends on shape.
-- Named types — `struct` and `enum` — are nominal: compatibility depends on the declared type name rather than on structure alone.
+- Tuples, records and sum types are [structural](https://en.wikipedia.org/wiki/Structural_type_system): compatibility depends on shape.
+- Named types — `struct` and `enum` — are [nominal](https://en.wikipedia.org/wiki/Nominal_type_system): compatibility depends on the declared type name rather than on structure alone.
 
 Example:
 
@@ -205,6 +205,10 @@ fn age1(d: Person1) { d.age.0 }  // requires exactly Person1
 Ferlium includes an internal marker concept called `Repr` that links a named type to the value representation it exposes. In practice, this is why projections and pattern matching behave uniformly across structural and nominal data, while named types remain distinct during type checking.
 
 You do not write or define `Repr` yourself.
+
+## Algebraic Data Types
+
+Product and sum types are often called [algebraic data types](https://en.wikipedia.org/wiki/Algebraic_data_type) because they can be combined in ways that mirror algebraic operations: products correspond to multiplication of possibilities, and sums correspond to addition of possibilities.
 
 ## What comes next
 

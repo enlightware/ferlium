@@ -88,7 +88,7 @@ This is useful when you want to configure behavior once and apply it later.
 
 ## Closures capture surrounding values
 
-When a lambda refers to names from an outer scope, it forms a closure.
+When a lambda refers to names from an outer scope, it forms a [closure](https://en.wikipedia.org/wiki/Closure_(computer_programming)).
 In Ferlium, captures are by value.
 This means the closure receives its own copy of the captured values at the time it is created.
 

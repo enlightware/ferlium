@@ -1,6 +1,6 @@
 # Effects
 
-Effects describe how a function can interact with its environment beyond pure value computation.
+[Effects](https://en.wikipedia.org/wiki/Side_effect_(computer_science)) describe how a function can interact with its environment beyond pure value computation.
 In Ferlium, effects are inferred automatically and make a function’s behavior explicit: whether it may read environment state, write environment state, or fail at runtime.
 
 ## What effects mean in Ferlium
@@ -104,7 +104,7 @@ Signature shapes:
 
 ## Why effects are useful
 
-Effects make behavior easier to reason about: you can quickly see whether a function is pure, interacts with external state, or can fail.
+Effects make behavior easier to reason about: you can quickly see whether a [function is pure](https://en.wikipedia.org/wiki/Pure_function), interacts with external state, or can fail.
 
 They also support optimization, because pure and less-effectful code can be analyzed and transformed more aggressively than code with broader effects.
 
