@@ -135,14 +135,15 @@ The type of `cfg` is `{ host: string, port: int, paths: [string] }`.
 
 ### Variants
 
-A variant value has a tag and optional payload values.
+A variant is a value composed of a name with optional payload data.
+Each variant belongs to a sum type, which defines the possible alternatives.
 
 ```ferlium
 let a = None;
 let b = Some(1);
 ```
 
-The corresponding type is written `None | Some(int)`.
+The corresponding type is written `None | Some(int)`, a sum type with two alternatives: `None` and `Some`.
 
 ## Unit and “no meaningful result”
 

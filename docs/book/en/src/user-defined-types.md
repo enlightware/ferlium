@@ -61,7 +61,7 @@ let cfg = { host: "localhost", port: 8080 };
 cfg.port
 ```
 
-### Inference with product type values
+### Inference with product types
 
 Inference works naturally with tuples and records: the compiler infers field and element types from their construction and usage.
 
@@ -72,8 +72,8 @@ let user = { name: "A", age: 30 }; // inferred as { name: string, age: int }
 
 ## Sum Types
 
-Variants or sum types let a value be one of several alternatives.
-Each alternative has a name and an optional payload of associated data.
+Sum types let a value be one of several alternatives.
+Each alternative — also called a **variant** — has a name and an optional payload of associated data.
 The name of the alternative is called a **tag**.
 
 ```ferlium,ignore
@@ -93,10 +93,10 @@ type Shape = Circle(float) | Rectangle { width: float, height: float };
 let a: Shape = Circle(5.0);
 ```
 
-### Inference with sum type values
+### Inference with sum types
 
 Inference works with sum types as well.
-The compiler infers the type of a tagged value from its construction and usage.
+The compiler infers the type of a value from its construction and usage.
 For example, the function:
 
 ```ferlium
@@ -105,7 +105,7 @@ fn none() {
 }
 ```
 
-returns a value whose type includes the `None` alternative, because the caller may choose any compatible sum type that contains `None`.
+returns a value whose type includes the `None` variant, because the caller may choose any compatible sum type that contains `None`.
 
 If you want to specify a particular sum type, you can add an annotation:
 ```ferlium
@@ -114,7 +114,8 @@ fn none() -> None | Some(int) {
 }
 ```
 
-As we will see later, matching on a sum type value also narrows its type to the relevant alternative, which is how you can access the payload data. Also, this can constrain the set of valid alternatives.
+As we will see later, matching on a sum type also narrows the type to the relevant alternative, which is how you can access the payload data.
+Also, this can constrain the set of valid alternatives.
 
 ## Nominal Types
 
@@ -159,9 +160,9 @@ enum Message {
 }
 ```
 
-Enum variants can be:
+Each variant (alternative) within an enum can be:
 
-- unit-like, as with `Quit`
+- unit-like (no payload), as with `Quit`
 - tuple-like, as with `Write(string)`
 - record-like, as with `Move { x: int, y: int }`
 

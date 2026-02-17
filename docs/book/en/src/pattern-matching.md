@@ -75,8 +75,8 @@ Matching record values is not yet supported.
 
 ### Sum types
 
-Ferlium currently supports constructor-style patterns for sum types.
-These patterns bind the constructor’s payload to variables:
+Ferlium supports matching on sum types using constructor patterns.
+These patterns match on specific alternatives and bind their payload to variables:
 
 ```ferlium
 match Some(10) {
@@ -85,7 +85,7 @@ match Some(10) {
 }
 ```
 
-You can match nullary, tuple-style, and record-style variants:
+You can match all three forms of alternatives: nullary (unit-like), tuple-style, and record-style:
 
 ```ferlium
 enum Action {
@@ -105,7 +105,7 @@ fn f(a) {
 f(Action::Move { x: 30.0, y: 40.0 })
 ```
 
-In record-style variant patterns, `..` can be used to ignore remaining fields.
+In record-style patterns, `..` can be used to ignore remaining fields.
 
 ```ferlium
 match (Some { x: 1, y: 2, z: 3 }) {
@@ -183,9 +183,9 @@ match a {
 }
 ```
 
-### Variant matches
+### Sum type matches
 
-For variant constructor patterns, omitting `_` means that the listed constructors must cover the matched sum type completely.
+For constructor patterns, omitting `_` means that the listed alternatives must cover the matched sum type completely.
 This code is correct:
 ```ferlium
 let v: None | Some(int) = Some(0);
@@ -196,7 +196,7 @@ match v {
 }
 ```
 
-But an incomplete constructor set is rejected for a value with a wider variant type:
+But an incomplete set is rejected:
 
 ```ferlium,compile_fail
 let v: None | Some(int) = Some(0);
@@ -206,11 +206,11 @@ match v {
 }
 ```
 
-Use all constructors (or a default arm) when you intend to accept the full variant type.
+Use all alternatives (or a default arm `_`) to cover the full sum type.
 
 ## Current limitations
 
-- A match arm cannot consist solely of a variable pattern. Use a literal, a variant constructor pattern, or `_` as the default arm.
+- A match arm cannot consist solely of a variable pattern. Use a literal, a constructor pattern, or `_` as the default arm.
 - Destructuring plain tuples or records into variable bindings (e.g. `(x, y)`) is not yet supported; tuple patterns currently only work with literal and wildcard sub-patterns.
 - `..` is not supported in tuple-style constructor patterns.
 - In record-style constructor patterns, `..` is allowed only at the end.
