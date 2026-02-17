@@ -28,6 +28,8 @@ We also provide a REPL to play locally with the language:
 cargo run --example ferlium
 ```
 
+You can read a small book about the language [here](https://enlightware.github.io/ferlium/book/).
+
 You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com)
 
 ## Key features
