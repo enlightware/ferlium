@@ -361,7 +361,7 @@ where
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
     let mut ty_inf = ty_inf.unify(&mut solver)?;
-    solver.commit(&mut output.functions);
+    solver.commit(&mut output.functions, &mut output.def_table);
     let module_env = ModuleEnv::new(output, others, within_std);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
@@ -437,7 +437,7 @@ where
             &constraints,
             &mut solver,
         )?;
-        solver.commit(&mut output.functions);
+        solver.commit(&mut output.functions, &mut output.def_table);
 
         // Detect unbound type variables in the code and return error if not in unused variants only.
         // These are neither part of the function signature nor of the constraints.
@@ -468,7 +468,7 @@ where
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
-        solver.commit(&mut output.functions);
+        solver.commit(&mut output.functions, &mut output.def_table);
         // Make sure substitution is not due to constraint processing.
         assert_eq!(subst_size, subst.0.len());
         let dicts = extra_parameters_from_constraints(&trait_output.constraints);
@@ -507,7 +507,7 @@ where
             let result = node.elaborate_dictionaries(&mut ctx);
             drop(function);
             result?;
-            solver.commit(&mut output.functions);
+            solver.commit(&mut output.functions, &mut output.def_table);
         }
 
         // Seventh pass, normalize the input types, substitute the types in the functions and input/output types.
@@ -578,7 +578,7 @@ where
                 .collect();
             assert_eq!(constraints.len(), retained_constraints.len());
             drop(node);
-            solver.commit(&mut output.functions);
+            solver.commit(&mut output.functions, &mut output.def_table);
 
             // Substitute the constraint-originating types in the node.
             let mut solver = trait_solver_from_module!(output, others);
@@ -592,7 +592,7 @@ where
                 })
                 .collect::<Result<_, _>>()?;
             quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
-            solver.commit(&mut output.functions);
+            solver.commit(&mut output.functions, &mut output.def_table);
             let descr = &mut output.functions[id.as_index()].function;
             let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
@@ -662,7 +662,7 @@ where
             let mut ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), &mut solver);
             node.elaborate_dictionaries(&mut ctx)?;
             drop(function);
-            solver.commit(&mut output.functions);
+            solver.commit(&mut output.functions, &mut output.def_table);
         }
 
         // Seventh pass, normalize the type schemes, substitute the types in the functions.
@@ -748,7 +748,7 @@ pub fn emit_expr_unsafe(
     // Perform the unification.
     let mut solver = trait_solver_from_module!(module, others);
     let mut ty_inf = ty_inf.unify(&mut solver)?;
-    solver.commit(&mut module.functions);
+    solver.commit(&mut module.functions, &mut module.def_table);
     let module_env = ModuleEnv::new(module, others, false);
     ty_inf.log_debug_substitution_tables(module_env);
 
@@ -770,7 +770,7 @@ pub fn emit_expr_unsafe(
         constraint_subst,
         ..
     } = validate_and_cleanup_constraints(&node.ty, &constraints, &node, true, &mut solver)?;
-    solver.commit(&mut module.functions);
+    solver.commit(&mut module.functions, &mut module.def_table);
     let module_env = ModuleEnv::new(module, others, false);
     log_dropped_constraints_expr(
         &constraints,
@@ -804,7 +804,7 @@ pub fn emit_expr_unsafe(
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);
     }
-    solver.commit(&mut module.functions);
+    solver.commit(&mut module.functions, &mut module.def_table);
 
     // Normalize the type scheme
     let mut ty_scheme = TypeScheme {
@@ -837,7 +837,7 @@ pub fn emit_expr_unsafe(
     let mut solver = trait_solver_from_module!(module, &others);
     let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
     node.elaborate_dictionaries(&mut ctx)?;
-    solver.commit(&mut module.functions);
+    solver.commit(&mut module.functions, &mut module.def_table);
 
     Ok(CompiledExpr {
         expr: node,

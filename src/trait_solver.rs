@@ -27,10 +27,11 @@ use crate::{
     ir::Node,
     ir_syn::{get_dictionary, load, static_apply},
     module::{
-        self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, FunctionCollector,
-        FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, ImportImplSlot,
-        ImportImplSlotId, LocalFunction, LocalImplId, ModuleEnv, ModuleFunction, Modules,
-        TraitImpl, TraitImplId, TraitImpls, TraitKey, id::Id,
+        self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
+        FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
+        ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalFunction, LocalFunctionId,
+        LocalImplId, ModuleEnv, ModuleFunction, Modules, TraitImpl, TraitImplId, TraitImpls,
+        TraitKey, id::Id,
     },
     mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},
@@ -82,8 +83,12 @@ impl<'a> TraitSolver<'a> {
     /// Commit the newly created functions to the module.
     /// This must be called after trait solving is done,
     /// otherwise the created functions will be lost.
-    pub fn commit(mut self, functions: &mut Vec<LocalFunction>) {
-        functions.append(&mut self.fn_collector.new_elements);
+    pub fn commit(mut self, functions: &mut Vec<LocalFunction>, def_table: &mut DefTable) {
+        for (name, function) in self.fn_collector.new_elements.drain(..) {
+            let id = LocalFunctionId::from_index(functions.len());
+            def_table.insert(name, DefKind::Function(id));
+            functions.push(function);
+        }
     }
 
     /// Add a concrete trait implementation from the given code node, for single-function traits.
@@ -446,10 +451,9 @@ impl<'a> TraitSolver<'a> {
                                 "{}-thunk",
                                 trait_ref.qualified_method_name(method_index, input_tys)
                             ));
-                            let local_fn =
-                                LocalFunction::new_compute_interface_hash(function, name);
+                            let local_fn = LocalFunction::new_compute_interface_hash(function);
                             let id = self.fn_collector.next_id();
-                            self.fn_collector.push(local_fn);
+                            self.fn_collector.push(name, local_fn);
                             id
                         };
 

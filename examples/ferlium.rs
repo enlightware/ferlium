@@ -736,13 +736,13 @@ fn run_interactive_repl() {
                             } else {
                                 (&last_module, "current")
                             };
-                            let index = if let Some(arg) = args.get(1) {
+                            let fn_id = if let Some(arg) = args.get(1) {
                                 match arg.parse::<usize>() {
-                                    Ok(id) => id,
+                                    Ok(index) => LocalFunctionId::from_index(index),
                                     Err(_) => {
                                         // not a number, attempt to find by name
                                         match module.get_local_function_id(ustr(arg)) {
-                                            Some(id) => id.as_index(),
+                                            Some(id) => id,
                                             None => {
                                                 println!(
                                                     "Function name {arg} not found in module {module_name}."
@@ -757,15 +757,18 @@ fn run_interactive_repl() {
                                 continue;
                             };
                             let local_fn = if let Some(local_fn) =
-                                module.get_local_function_by_id(LocalFunctionId::from_index(index))
+                                module.get_local_function_by_id(fn_id)
                             {
                                 local_fn
                             } else {
-                                println!("Function id {index} not found in module {module_name}.");
+                                println!("Function id {fn_id} not found in module {module_name}.");
                                 continue;
                             };
                             let env = ModuleEnv::new(&module, &other_modules, false);
-                            println!("{}", (&local_fn.function, local_fn.name).format_with(&env));
+                            let fn_name = module
+                                .get_local_function_name_by_id(fn_id)
+                                .unwrap_or_else(|| ustr("<anonymous function>"));
+                            println!("{}", (&local_fn.function, fn_name).format_with(&env));
                             true
                         }
                         "history" => {

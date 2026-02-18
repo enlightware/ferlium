@@ -78,7 +78,7 @@ define_id_type!(
 );
 
 /// All possible kinds of definitions within a module
-#[derive(Debug, Clone, Copy, EnumAsInner)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumAsInner)]
 pub enum DefKind {
     Function(LocalFunctionId),
     TypeDef(LocalTypeDefId),
@@ -86,6 +86,8 @@ pub enum DefKind {
     Trait(LocalTraitId),
     // Impl(LocalImplId), currently not accessed by name, if we want to add it, we must take care in trait solver to register the ones it adds
 }
+
+pub type DefTable = NamedIndexed<Ustr, LocalDefId, DefKind>;
 
 // Module itself
 
@@ -101,7 +103,7 @@ pub struct Module {
     pub(crate) uses: Uses,
 
     /// All symbols defined in this module
-    def_table: NamedIndexed<Ustr, LocalDefId, DefKind>,
+    pub(crate) def_table: DefTable,
 
     // Functions, including methods of trait implementations.
     pub(crate) functions: Vec<LocalFunction>,
@@ -166,7 +168,6 @@ impl Module {
         let id = LocalFunctionId::from_index(self.functions.len());
         let interface_hash = function.definition.signature_hash();
         self.functions.push(LocalFunction {
-            name,
             function,
             interface_hash,
         });
@@ -180,7 +181,6 @@ impl Module {
         let id = LocalFunctionId::from_index(self.functions.len());
         let interface_hash = function.definition.signature_hash();
         self.functions.push(LocalFunction {
-            name: ustr("<DUMMY NAME>"),
             function,
             interface_hash,
         });
@@ -189,16 +189,31 @@ impl Module {
 
     /// Name a previously added anonymous function.
     pub(crate) fn name_function(&mut self, id: LocalFunctionId, new_name: Ustr) {
-        self.functions[id.as_index()].name = new_name;
         self.def_table.insert(new_name, DefKind::Function(id));
     }
 
     /// Add an existing LocalFunction to this module, returning its ID.
-    pub fn add_local_function(&mut self, function: LocalFunction) -> LocalFunctionId {
+    pub fn add_local_function(&mut self, name: Ustr, function: LocalFunction) -> LocalFunctionId {
         let id = LocalFunctionId::from_index(self.functions.len());
-        self.def_table.insert(function.name, DefKind::Function(id));
+        self.def_table.insert(name, DefKind::Function(id));
         self.functions.push(function);
         id
+    }
+
+    /// Add collected functions from a FunctionCollector to this module.
+    pub fn add_collected_functions(&mut self, collector: FunctionCollector) {
+        let start_id = self.functions.len();
+        let functions =
+            collector
+                .new_elements
+                .into_iter()
+                .enumerate()
+                .map(|(i, (name, function))| {
+                    let local_id = LocalFunctionId::from_index(start_id + i);
+                    self.def_table.insert(name, DefKind::Function(local_id));
+                    function
+                });
+        self.functions.extend(functions);
     }
 
     /// Check if a local function name is unique in this module.
@@ -254,6 +269,18 @@ impl Module {
         self.functions.get(id.as_index())
     }
 
+    /// Get a local function name by ID (slow, iterates over the def table)
+    pub fn get_local_function_name_by_id(&self, id: LocalFunctionId) -> Option<Ustr> {
+        self.def_table
+            .data_iter()
+            .find(|(def_kind, _)| {
+                def_kind
+                    .as_function()
+                    .is_some_and(|function_id| *function_id == id)
+            })
+            .and_then(|(_, name)| *name)
+    }
+
     /// Get a local function by ID
     pub fn get_function_by_id(&self, id: LocalFunctionId) -> Option<&ModuleFunction> {
         self.functions.get(id.as_index()).map(|f| &f.function)
@@ -269,6 +296,19 @@ impl Module {
     /// Iterate over all local functions in this module.
     pub fn iter_functions(&self) -> impl Iterator<Item = &LocalFunction> {
         self.functions.iter()
+    }
+
+    /// Iterate over all named local functions in this module, returning their name and data.
+    pub fn iter_named_functions(&self) -> impl Iterator<Item = (Ustr, &LocalFunction)> {
+        self.def_table
+            .data_iter()
+            .filter_map(|(def_kind, name_opt)| {
+                let name = (*name_opt)?;
+                def_kind.as_function().map(|function_id| {
+                    let function = &self.functions[function_id.as_index()];
+                    (name, function)
+                })
+            })
     }
 
     /// Get the number of functions in this module.
@@ -389,7 +429,7 @@ impl Module {
             &mut fn_collector,
         );
         // TODO: find the name and use it to store the impl
-        self.functions.extend(fn_collector.new_elements);
+        self.add_collected_functions(fn_collector);
     }
 
     /// Add a blanket trait implementation to this module, with raw functions.
@@ -407,7 +447,7 @@ impl Module {
         let mut fn_collector = FunctionCollector::new(self.functions.len());
         self.impls
             .add_blanket_raw(trait_ref, sub_key, output_tys, functions, &mut fn_collector);
-        self.functions.extend(fn_collector.new_elements);
+        self.add_collected_functions(fn_collector);
     }
 
     /// Add a concrete or blanket trait implementation to this module, using already-added local functions.
@@ -603,9 +643,15 @@ impl Module {
                 stats.push_str(", ");
             }
             let named_count = self
-                .functions
-                .iter()
-                .filter(|f| self.is_non_trait_local_function(f.name))
+                .def_table
+                .data_iter()
+                .filter(|(kind, name)| {
+                    if !kind.is_function() {
+                        false
+                    } else {
+                        name.is_some_and(|name| self.is_non_trait_local_function(name))
+                    }
+                })
                 .count();
             stats.push_str(&format!("named functions: {}", named_count));
             if self.functions.len() > named_count {
@@ -778,18 +824,18 @@ impl Module {
         }
         if !self.functions.is_empty() {
             let named_count = self
-                .functions
-                .iter()
-                .filter(|f| self.is_non_trait_local_function(f.name))
+                .iter_named_functions()
+                .filter(|&(name, _)| self.is_non_trait_local_function(name))
                 .count();
             writeln!(f, "Named functions ({}):\n", named_count)?;
-            for (i, LocalFunction { name, function, .. }) in self.functions.iter().enumerate() {
-                if !self.is_non_trait_local_function(*name) {
+            for (i, (name, function)) in self.iter_named_functions().enumerate() {
+                if !self.is_non_trait_local_function(name) {
                     continue;
                 }
+                let function = &function.function;
                 function
                     .definition
-                    .fmt_with_name_and_module_env(f, *name, "", &env)?;
+                    .fmt_with_name_and_module_env(f, name, "", &env)?;
                 writeln!(f, " (#{i})")?;
                 if show_details {
                     function.fmt_code(f, &env)?;
@@ -845,11 +891,11 @@ impl FormatWith<ShowModuleDetails<'_>> for Module {
     }
 }
 
-impl FormatWith<ModuleEnv<'_>> for LocalFunction {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        self.function
-            .definition
-            .fmt_with_name_and_module_env(f, self.name, "", env)?;
-        self.function.code.borrow().format_ind(f, env, 1, 1)
-    }
-}
+// impl FormatWith<ModuleEnv<'_>> for LocalFunction {
+//     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+//         self.function
+//             .definition
+//             .fmt_with_name_and_module_env(f, self.name, "", env)?;
+//         self.function.code.borrow().format_ind(f, env, 1, 1)
+//     }
+// }

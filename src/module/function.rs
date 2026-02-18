@@ -44,7 +44,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         match *self {
             FunctionId::Local(id) => {
-                let name = env.current.get_local_function_by_id(id).unwrap().name;
+                let name = env.current.get_local_function_name_by_id(id).unwrap();
                 write!(f, "local function {name} (#{id})")
             }
             FunctionId::Import(id) => {
@@ -102,18 +102,15 @@ pub struct ImportFunctionSlot {
 /// An entry in local functions
 #[derive(Debug, Clone)]
 pub struct LocalFunction {
-    /// Name of the function
-    pub name: Ustr,
     /// Function code and definition
     pub function: ModuleFunction,
     /// Cached interface hash for quick compatibility checks
     pub interface_hash: u64,
 }
 impl LocalFunction {
-    pub fn new_compute_interface_hash(function: ModuleFunction, name: Ustr) -> Self {
+    pub fn new_compute_interface_hash(function: ModuleFunction) -> Self {
         let interface_hash = function.definition.signature_hash();
         Self {
-            name,
             function,
             interface_hash,
         }

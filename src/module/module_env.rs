@@ -153,16 +153,15 @@ impl<'m> ModuleEnv<'m> {
     pub fn function_name(&self, func: &FunctionRc) -> Option<String> {
         // FIXME: this needs update
         self.current
-            .iter_functions()
-            .find(|local_fn| Rc::ptr_eq(&local_fn.function.code, func))
+            .iter_named_functions()
+            .find(|(_, local_fn)| Rc::ptr_eq(&local_fn.function.code, func))
             .map_or_else(
                 || {
                     self.others.modules.iter().find_map(|(mod_name, module)| {
                         module
-                            .iter_functions()
-                            .find(|local_fn| Rc::ptr_eq(&local_fn.function.code, func))
-                            .map(|local_fn| {
-                                let fn_name = local_fn.name;
+                            .iter_named_functions()
+                            .find(|(_, local_fn)| Rc::ptr_eq(&local_fn.function.code, func))
+                            .map(|(fn_name, _)| {
                                 if self.current.uses(mod_name, fn_name) {
                                     fn_name.to_string()
                                 } else {
@@ -171,7 +170,7 @@ impl<'m> ModuleEnv<'m> {
                             })
                     })
                 },
-                |local_fn| Some(local_fn.name.to_string()),
+                |(name, _)| Some(name.to_string()),
             )
     }
 

@@ -176,20 +176,20 @@ pub struct TraitImpl {
 pub struct FunctionCollector {
     pub initial_count: usize,
     #[new(default)]
-    pub new_elements: Vec<LocalFunction>,
+    pub new_elements: Vec<(Ustr, LocalFunction)>,
 }
 impl FunctionCollector {
     pub fn next_id(&self) -> LocalFunctionId {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
-    pub fn push(&mut self, function: LocalFunction) {
-        self.new_elements.push(function);
+    pub fn push(&mut self, name: Ustr, function: LocalFunction) {
+        self.new_elements.push((name, function));
     }
 
     pub fn get_function(&self, name: Ustr) -> Option<LocalFunctionId> {
         self.new_elements
             .iter()
-            .position(|function| function.name == name)
+            .position(|&(fn_name, _)| fn_name == name)
             .map(|i| LocalFunctionId::from_index(self.initial_count + i))
     }
 }
@@ -380,9 +380,9 @@ impl TraitImpls {
             .map(|(index, function)| {
                 let id = fn_collector.next_id();
                 let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
-                let local_fn = LocalFunction::new_compute_interface_hash(function, namer(index));
+                let local_fn = LocalFunction::new_compute_interface_hash(function);
                 local_fn.interface_hash.hash(&mut interface_hasher);
-                fn_collector.push(local_fn);
+                fn_collector.push(namer(index), local_fn);
                 (id, fn_ty)
             })
             .multiunzip();

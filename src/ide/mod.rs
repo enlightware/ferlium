@@ -869,8 +869,7 @@ impl Compiler {
         let mut sigs = Vec::new();
         for module in &self.modules.modules {
             let mod_name = module.0;
-            for local_fn in module.1.iter_functions() {
-                let sym_name = local_fn.name;
+            for (sym_name, local_fn) in module.1.iter_named_functions() {
                 // skip trait methods
                 if !module.1.is_non_trait_local_function(sym_name) {
                     continue;
@@ -905,8 +904,7 @@ impl Compiler {
         let mut setters = HashSet::new();
         for module in &self.modules.modules {
             let mod_name = module.0;
-            for local_fn in module.1.iter_functions() {
-                let sym_name = local_fn.name;
+            for (sym_name, _) in module.1.iter_named_functions() {
                 // skip trait methods
                 if !module.1.is_non_trait_local_function(sym_name) {
                     continue;
