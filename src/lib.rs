@@ -73,7 +73,7 @@ use crate::{
 };
 
 lalrpop_mod!(
-    #[allow(clippy::ptr_arg)]
+    #[allow(clippy::ptr_arg,clippy::type_complexity)]
     #[rustfmt::skip]
     parser
 );
