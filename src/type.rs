@@ -853,6 +853,39 @@ pub enum TypeKind {
 }
 // TODO: traits as bounds of generics
 
+/// Return the Cartesian product of all values of each element type, stored as
+/// `Value::tuple` entries, or `None` if any element is not enumerable or the
+/// total cardinality exceeds `max_cardinality`.
+fn cartesian_product_values(
+    element_types: impl Iterator<Item = Type>,
+    max_cardinality: usize,
+) -> Option<Vec<Value>> {
+    let mut cardinality = 1usize;
+    let element_values = element_types
+        .map(|ty| {
+            let all_values = ty.data().all_values()?;
+            cardinality = cardinality.saturating_mul(all_values.len());
+            Some(all_values)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if cardinality > max_cardinality {
+        return None;
+    }
+    let mut result = vec![vec![]];
+    for pool in element_values {
+        let mut new_result = Vec::with_capacity(result.len() * pool.len());
+        for prefix in &result {
+            for item in &pool {
+                let mut new_prefix = prefix.clone();
+                new_prefix.push(item.clone());
+                new_result.push(new_prefix);
+            }
+        }
+        result = new_result;
+    }
+    Some(result.into_iter().map(Value::tuple).collect())
+}
+
 impl TypeKind {
     /// Store in the type system and return a type identifier
     pub fn store(self) -> Type {
@@ -1100,35 +1133,11 @@ impl TypeKind {
                     None
                 }
             }
-            Tuple(elements) => {
-                let mut cardinality = 1;
-                let element_values = elements
-                    .iter()
-                    .map(|element| {
-                        let all_values = element.data().all_values()?;
-                        cardinality *= all_values.len();
-                        Some(all_values)
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                if cardinality > MAX_CARDINALITY {
-                    None
-                } else {
-                    // We do the Cartesian product of the values of the tuple elements
-                    let mut result = vec![vec![]];
-                    for pool in element_values {
-                        let mut new_result = Vec::new();
-                        for prefix in &result {
-                            for item in &pool {
-                                let mut new_prefix = prefix.clone();
-                                new_prefix.push(item.clone());
-                                new_result.push(new_prefix);
-                            }
-                        }
-                        result = new_result;
-                    }
-                    let result = result.into_iter().map(Value::tuple).collect::<Vec<_>>();
-                    Some(result)
-                }
+            Tuple(elements) => cartesian_product_values(elements.iter().copied(), MAX_CARDINALITY),
+            Record(fields) => {
+                // Records are stored as tuples (fields sorted alphabetically), so
+                // we enumerate the Cartesian product of field values the same way.
+                cartesian_product_values(fields.iter().map(|(_, ty)| *ty), MAX_CARDINALITY)
             }
             Never => Some(vec![]),
             _ => None,

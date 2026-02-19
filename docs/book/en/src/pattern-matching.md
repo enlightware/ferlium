@@ -71,7 +71,18 @@ match (true, (false, true)) {
 }
 ```
 
-Matching record values is not yet supported.
+Record values can also be matched using record literal patterns:
+
+```ferlium
+match { x: true, y: false } {
+    { x: true,  y: true  } => 1,
+    { x: true,  y: false } => 2,
+    { x: false, y: true  } => 3,
+    { x: false, y: false } => 4,
+}
+```
+
+Field order in record patterns does not matter; fields are matched by name.
 
 ### Sum types
 
@@ -165,7 +176,7 @@ This fails because `v` has type `None | Some(int)`, but the match only constrain
 ### Literal matches
 
 Without `_`, literal matching is considered exhaustive only when Ferlium can enumerate all possible values of the matched type.
-In practice, this works for finite enumerable domains (for example `bool`, and tuples built from enumerable element types).
+In practice, this works for finite enumerable domains (for example `bool`, and tuples or records built from enumerable field types).
 
 ```ferlium
 match true {
@@ -211,7 +222,7 @@ Use all alternatives (or a default arm `_`) to cover the full sum type.
 ## Current limitations
 
 - A match arm cannot consist solely of a variable pattern. Use a literal, a constructor pattern, or `_` as the default arm.
-- Destructuring plain tuples or records into variable bindings (e.g. `(x, y)`) is not yet supported; tuple patterns currently only work with literal and wildcard sub-patterns.
+- Destructuring plain tuples or records into variable bindings (e.g. `(x, y)`) is not yet supported; tuple and record patterns currently only work with literal and wildcard sub-patterns.
 - `..` is not supported in tuple-style constructor patterns.
 - In record-style constructor patterns, `..` is allowed only at the end.
 - Pattern guards (extra `if` conditions on patterns) are not available.

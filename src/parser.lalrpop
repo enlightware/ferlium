@@ -579,8 +579,16 @@ LiteralPatternKind: PatK = {
 LiteralPattern = {
     ScalarLiteralPattern,
     TupleLiteralPattern,
-    // TODO: add RecordLiteralPattern
+    RecordLiteralPattern,
     // TODO: add ArrayLiteralPattern
+}
+
+RecordLiteralPattern: (LiteralValue, IrType) = {
+    "{" <f:RecordLiteralField> <r:("," <RecordLiteralField>)*> ","? "}" => record_literal_pattern(ext_f(f, r)),
+}
+
+RecordLiteralField: (UstrSpan, (LiteralValue, IrType)) = {
+    <n:Sp<UIdentifier>> ":" <p:LiteralPattern> => (n, p),
 }
 
 ScalarLiteralPattern: (LiteralValue, IrType) = {

@@ -253,6 +253,23 @@ pub(crate) fn tuple(args: Vec<PExpr>) -> PExprKind {
     Literal(Value::tuple(values), Type::tuple(tys))
 }
 
+/// Build a record literal pattern from a list of `(name, (value, type))` pairs.
+/// Fields are sorted by name to match how records are stored internally.
+pub(crate) fn record_literal_pattern(
+    fields: Vec<(UstrSpan, (LiteralValue, Type))>,
+) -> (LiteralValue, Type) {
+    let mut fields: Vec<(Ustr, LiteralValue, Type)> = fields
+        .into_iter()
+        .map(|((name, _span), (val, ty))| (name, val, ty))
+        .collect();
+    fields.sort_by_key(|(name, _, _)| *name);
+    let vals: SVec2<LiteralValue> = fields.iter().map(|(_, val, _)| val.clone()).collect();
+    let names_tys: Vec<(Ustr, Type)> = fields.into_iter().map(|(name, _, ty)| (name, ty)).collect();
+    let val = LiteralValue::new_tuple(vals);
+    let ty = Type::record(names_tys);
+    (val, ty)
+}
+
 /// Create an if else block.
 pub(crate) fn cond_if_else(cond: PExpr, if_true: PExpr, if_false: PExpr) -> PExprKind {
     use ExprKind::*;

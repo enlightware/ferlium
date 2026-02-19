@@ -457,6 +457,7 @@ Path {
 literalPattern {
     scalarLiteralPattern
     | tupleLiteralPattern
+    | recordLiteralPattern
 }
 
 scalarLiteralPattern {
@@ -465,7 +466,15 @@ scalarLiteralPattern {
 }
 
 tupleLiteralPattern {
-    '(' literalPattern (',' literalPattern)* ')'
+    '(' literalPattern ',' (literalPattern ',')* literalPattern? ')'
+}
+
+recordLiteralPattern {
+    '{' recordLiteralField (',' recordLiteralField)* ','? '}'
+}
+
+recordLiteralField {
+    FieldName { Identifier } ':' literalPattern
 }
 
 Literal {

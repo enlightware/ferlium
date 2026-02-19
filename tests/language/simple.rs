@@ -558,6 +558,80 @@ fn match_tuples() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn match_records() {
+    let mut session = TestSession::new();
+    // Basic record matching with default arm
+    assert_eq!(
+        session.run("match { x: true } { { x: true } => 1, _ => 0 }"),
+        int(1)
+    );
+    assert_eq!(
+        session.run("match { x: false } { { x: true } => 1, _ => 0 }"),
+        int(0)
+    );
+
+    // Exhaustive matching on a single bool field
+    assert_eq!(
+        session.run("match { x: true } { { x: true } => 1, { x: false } => 0 }"),
+        int(1)
+    );
+    assert_eq!(
+        session.run("match { x: false } { { x: true } => 1, { x: false } => 0 }"),
+        int(0)
+    );
+
+    // Exhaustive matching on two bool fields
+    assert_eq!(
+        session.run(indoc! { r#"
+            let mut a = [];
+            for l in [false, true] {
+                for r in [false, true] {
+                    let v = match { x: l, y: r } {
+                        { x: true,  y: true  } => 1,
+                        { x: true,  y: false } => 2,
+                        { x: false, y: true  } => 3,
+                        { x: false, y: false } => 4,
+                    };
+                    array_append(a, v);
+                }
+            };
+            a
+        "# }),
+        int_a![4, 3, 2, 1]
+    );
+
+    // Field order in patterns is irrelevant (alphabetical sorting is applied)
+    assert_eq!(
+        session.run(indoc! { r#"
+            let mut a = [];
+            for l in [false, true] {
+                for r in [false, true] {
+                    let v = match { x: l, y: r } {
+                        { y: true,  x: true  } => 1,
+                        { y: false, x: true  } => 2,
+                        { y: true,  x: false } => 3,
+                        { y: false, x: false } => 4,
+                    };
+                    array_append(a, v);
+                }
+            };
+            a
+        "# }),
+        int_a![4, 3, 2, 1]
+    );
+
+    // Duplicate patterns are rejected
+    session
+        .fail_compilation(
+            "match { x: true } { { x: true } => 1, { x: true } => 2, { x: false } => 3 }",
+        )
+        .into_inner()
+        .into_duplicated_literal_pattern()
+        .unwrap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn tuple_creation() {
     let mut session = TestSession::new();
     assert_eq!(session.run("()"), unit());

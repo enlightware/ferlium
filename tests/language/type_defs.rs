@@ -632,6 +632,34 @@ fn struct_projections() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn projections_through_repr_in_match() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct S(bool)
+            let s = S(true);
+            match s {
+                (true,) => 1,
+                (false,) => 2
+            }
+        "# }),
+        int(1)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct S { x: bool }
+            let s = S { x: true };
+            match s {
+                { x: true } => 1,
+                { x: false } => 2
+            }
+        "# }),
+        int(1)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn same_module_references() {
     let mut session = TestSession::new();
     assert_eq!(
