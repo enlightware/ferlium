@@ -210,6 +210,8 @@ You do not write or define `Repr` yourself.
 
 Product and sum types are often called [algebraic data types](https://en.wikipedia.org/wiki/Algebraic_data_type) because they can be combined in ways that mirror algebraic operations: products correspond to multiplication of possibilities, and sums correspond to addition of possibilities.
 
+Contrary to most languages, Ferlium has complete and orthogonal coverage of both algebraic data types and  structural/nominal types, so you can choose the right tool for the job without compromise.
+
 ## What comes next
 
-The next chapter expands pattern matching for structured data, so you can inspect and branch on tuples, records, and enum variants directly.
+The next chapter expands pattern matching for structured data, so you can inspect and branch on tuples, records, and variants directly.
