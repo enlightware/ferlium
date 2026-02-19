@@ -16,7 +16,6 @@ With that semantics, a function argument is either a value or a mutable referenc
 Functions always return values.
 
 Ferlium aims at being lightweight and interfacing nicely with Rust.
-In particular, it tries hard not to duplicate existing Rust types and functions when not strictly necessary (e.g., it doesn't have a boolean type distinct of Rust's `bool`).
 
 
 ## Getting started
@@ -41,9 +40,9 @@ You can reach us on Zulip: [ferlium.zulipchat.com](https://ferlium.zulipchat.com
 * Rust-style new types (structs and enums) over structural data types
 * Type inference ([Hindley-Milner style, HM(X) flavor](https://www.researchgate.net/profile/Martin-Sulzmann/publication/220346751_Type_Inference_with_Constrained_Types/links/5ab00c0b0f7e9b4897c1d25b/Type-Inference-with-Constrained-Types.pdf))
 * Parametric polymorphism (generics)
-* Ad hoc polymorphism through type classes (traits), with support for multi-parameter traits and associated types
+* Ad hoc polymorphism through traits (type classes), with support for multi-parameter traits and associated types
 * Row polymorphism (for algebraic data types)
-* Optional type annotations, including `_` placeholders for type inference
+* Optional type annotations, including `_` holes for partial annotations
 * First-class and anonymous functions, including capture of outer variables by value (closures)
 * Pattern matching
 * Function pipelining with the `|>` operator
@@ -81,7 +80,7 @@ To run the tests locally, use:
 make test-local
 ```
 
-This use [`nextest`](https://nexte.st/) that is way faster than `cargo test`.
+This use [`nextest`](https://nexte.st/) which is way faster than `cargo test`.
 
 ## Limitations
 
