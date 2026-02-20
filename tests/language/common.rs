@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    CompilerSession, ModuleAndExpr, SourceTable,
+    CompilerSession, ModuleAndExpr, Modules, SourceTable,
     containers::IntoSVec2,
     effects::{PrimitiveEffect, effect, effects, no_effects},
     error::{CompilationError, RuntimeErrorKind},
@@ -16,7 +16,7 @@ use ferlium::{
         BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnVN,
     },
-    module::{Module, ModuleEnv, Modules, Path},
+    module::{Module, ModuleEnv, ModuleId, Path},
     std::{
         array::{Array, array_type},
         math::int_type,
@@ -25,7 +25,7 @@ use ferlium::{
     r#type::{FnType, Type, variant_type},
     value::Value,
 };
-use std::{cell::RefCell, sync::atomic::AtomicIsize};
+use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -36,8 +36,8 @@ pub enum Error {
 
 pub type CompileRunResult = Result<Value, Error>;
 
-fn testing_module() -> Module {
-    let mut module: Module = Default::default();
+fn testing_module(module_id: ModuleId) -> Module {
+    let mut module = Module::new(module_id);
     module.add_function(
         "some_int".into(),
         UnaryNativeFnNV::description_with_ty(
@@ -67,8 +67,8 @@ fn testing_module() -> Module {
     module
 }
 
-fn test_effect_module() -> Module {
-    let mut module: Module = Default::default();
+fn test_effect_module(module_id: ModuleId) -> Module {
+    let mut module = Module::new(module_id);
     module.add_function(
         "read".into(),
         NullaryNativeFnN::description_with_default_ty(
@@ -135,8 +135,8 @@ pub fn get_array_property_value() -> Array {
     INT_ARRAY_PROPERTY_VALUE.with(|cell| cell.borrow().clone())
 }
 
-fn test_property_module() -> Module {
-    let mut module: Module = Default::default();
+fn test_property_module(module_id: ModuleId) -> Module {
+    let mut module = Module::new(module_id);
     module.add_function(
         "@get my_scope.my_var".into(),
         NullaryNativeFnN::description_with_default_ty(
@@ -184,14 +184,13 @@ macro_rules! ferlium {
     };
 }
 
-fn add_deep_modules(to: &mut Modules, session: &mut CompilerSession) {
+fn add_deep_modules(session: &mut CompilerSession) {
     for (name, file, code) in [
         ferlium!("deep::level1", "deep_module1.fer"),
         ferlium!("deep::deeper::level2", "deep_module2.fer"),
     ] {
-        let module = session.compile(file, code, &to).unwrap().module;
         let path = Path::new(name.split("::").map(ustr).collect());
-        to.register_module_rc(path, module);
+        session.compile(code, file, path.clone()).unwrap();
     }
 }
 
@@ -199,27 +198,38 @@ fn add_deep_modules(to: &mut Modules, session: &mut CompilerSession) {
 #[derive(Debug)]
 pub struct TestSession {
     session: CompilerSession,
-    test_modules: Modules,
 }
 impl TestSession {
     /// Create a new test session with std, testing, effects and props modules registered.
     pub fn new() -> Self {
         let mut compiler_session = CompilerSession::new();
-        let mut test_modules = compiler_session.new_std_modules();
-        test_modules.register_module(Path::single_str("testing"), testing_module());
-        test_modules.register_module(Path::single_str("effects"), test_effect_module());
-        test_modules.register_module(Path::single_str("props"), test_property_module());
-        add_deep_modules(&mut test_modules, &mut compiler_session);
+        compiler_session.register_module(
+            Path::single_str("testing"),
+            Rc::new(testing_module(compiler_session.modules().next_id())),
+        );
+        compiler_session.register_module(
+            Path::single_str("effects"),
+            Rc::new(test_effect_module(compiler_session.modules().next_id())),
+        );
+        compiler_session.register_module(
+            Path::single_str("props"),
+            Rc::new(test_property_module(compiler_session.modules().next_id())),
+        );
+        add_deep_modules(&mut compiler_session);
         Self {
             session: compiler_session,
-            test_modules,
         }
+    }
+
+    /// Get the modules of this compilation session.
+    pub fn modules(&self) -> &Modules {
+        self.session.modules()
     }
 
     /// Get a module environment, with an empty module including the standard library
     /// for debugging purposes.
     pub fn std_module_env(&self) -> ModuleEnv<'_> {
-        self.session.std_module_env()
+        self.session.module_env()
     }
 
     /// Get the source table for this compilation session.
@@ -240,7 +250,8 @@ impl TestSession {
 
     /// Compile and run the src and return its module and expression
     pub fn try_compile(&mut self, src: &str) -> Result<ModuleAndExpr, CompilationError> {
-        self.session.compile("<test>", src, &self.test_modules)
+        self.session
+            .compile(src, "<test>", Path::single_str("test"))
     }
 
     /// Compile the src and return its module and expression
@@ -249,10 +260,16 @@ impl TestSession {
             .unwrap_or_else(|error| panic!("Compilation error: {error:?}"))
     }
 
+    /// Compile and get the module of the src
+    pub fn compile_and_get_module(&mut self, src: &str) -> &Module {
+        let module_id = self.compile(src).module_id;
+        self.session.modules().get(module_id).unwrap()
+    }
+
     /// Compile and get a specific function definition
     pub fn compile_and_get_fn_def(&mut self, src: &str, fn_name: &str) -> FunctionDefinition {
-        self.compile(src)
-            .module
+        let module = self.compile_and_get_module(src);
+        module
             .get_function(ustr(fn_name))
             .expect("Function not found")
             .definition
@@ -262,12 +279,15 @@ impl TestSession {
     /// Compile and run the src and return its execution result (either a value or an error)
     pub fn try_compile_and_run(&mut self, src: &str) -> CompileRunResult {
         // Compile the source.
-        let ModuleAndExpr { module, expr } = self.try_compile(src).map_err(Error::Compilation)?;
+        let ModuleAndExpr {
+            module_id: module,
+            expr,
+        } = self.try_compile(src).map_err(Error::Compilation)?;
 
         // Run the expression if any.
         if let Some(expr) = expr {
             expr.expr
-                .eval(module)
+                .eval(module, &self.session)
                 .map(ControlFlow::into_value)
                 .map_err(Error::Runtime)
         } else {

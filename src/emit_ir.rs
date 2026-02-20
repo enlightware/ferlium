@@ -31,7 +31,7 @@ use crate::{
     ir::{self, Immediate, Node},
     module::{
         ConcreteTraitImplKey, LocalFunctionId, Module, ModuleEnv, ModuleFunction,
-        ModuleFunctionSpans, Modules, id::Id,
+        ModuleFunctionSpans, ModuleId, Modules, id::Id,
     },
     mutability::MutType,
     std::{
@@ -70,6 +70,7 @@ fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompila
 /// Emit IR for the given module
 pub fn emit_module(
     source: ast::PModule,
+    module_id: ModuleId,
     others: &Modules,
     merge_with: Option<&Module>,
     within_std: bool,
@@ -78,7 +79,15 @@ pub fn emit_module(
     validate_name_uniqueness(&source)?;
 
     // First desugar the module.
-    let mut output = merge_with.map_or_else(Module::default, |module| module.clone());
+    let mut output = merge_with.map_or_else(
+        || Module::new(module_id),
+        |module| {
+            let mut module = module.clone();
+            // Make sure that the module_id is correct.
+            module.impls.module_id = module_id;
+            module
+        },
+    );
     let (source, sorted_sccs) = source.desugar(&mut output, others, within_std)?;
 
     // Process each functions' SCC one by one.
@@ -96,7 +105,7 @@ pub fn emit_module(
         }
 
         // Emit the corresponding functions.
-        emit_functions(&mut output, functions, others, within_std, None)?;
+        emit_functions(&mut output, functions, module_id, others, within_std, None)?;
     }
 
     // Process trait implementations
@@ -155,8 +164,15 @@ pub fn emit_module(
             trait_ref: trait_ref.clone(),
             span: imp.span,
         };
-        let emit_output =
-            emit_functions(&mut output, functions, others, within_std, Some(trait_ctx))?.unwrap();
+        let emit_output = emit_functions(
+            &mut output,
+            functions,
+            module_id,
+            others,
+            within_std,
+            Some(trait_ctx),
+        )?
+        .unwrap();
 
         // Add the implementation using the just emitted local functions.
         let is_concrete = emit_output.ty_var_count == 0;
@@ -189,6 +205,7 @@ pub(crate) struct EmitTraitOutput {
 fn emit_functions<'a, F, I>(
     output: &mut Module,
     ast_functions: F,
+    module_id: ModuleId,
     others: &Modules,
     within_std: bool,
     trait_ctx: Option<EmitTraitCtx>,
@@ -325,6 +342,29 @@ where
         local_fns.push(id);
     }
 
+    // Associated lambdas and macro to call and id and its associated lambdas
+    let mut associated_lambdas = HashMap::new();
+    macro_rules! apply_to_function_and_associated_lambdas {
+        ($id:expr, $f:expr) => {
+            $f($id);
+            associated_lambdas
+                .get($id)
+                .into_iter()
+                .flatten()
+                .for_each(|lambda_id| $f(lambda_id));
+        };
+    }
+    macro_rules! try_apply_to_function_and_associated_lambdas {
+        ($id:expr, $f:expr) => {
+            $f($id)?;
+            associated_lambdas
+                .get($id)
+                .into_iter()
+                .flatten()
+                .try_for_each(|lambda_id| $f(lambda_id))?;
+        };
+    }
+
     // Second pass, infer types and emit function bodies.
     for (function, id) in ast_functions().zip(local_fns.iter()) {
         let descr = output.get_function_by_id(*id).unwrap();
@@ -333,11 +373,15 @@ where
         let mut new_import_slots = vec![];
         let expected_ret_ty = descr.definition.ty_scheme.ty.ret;
         let expected_span = descr.spans.as_ref().unwrap().args_span;
+        let mut lambda_functions = vec![];
         let mut ty_env = TypingEnv::new(
             descr.definition.ty_scheme.ty.as_locals_no_bound(&arg_names),
             &mut new_import_slots,
+            module_id,
             module_env,
             Some((expected_ret_ty, expected_span)),
+            &mut lambda_functions,
+            output.functions.len() as u32,
         );
         let fn_node = ty_inf.check_expr(
             &mut ty_env,
@@ -346,6 +390,17 @@ where
             MutType::constant(),
             expected_span,
         )?;
+        lambda_functions.drain(..).for_each(|function| {
+            let lambda_id = output.add_function_anonymous(function);
+            output.name_function(
+                lambda_id,
+                format!("$lambda${}", lambda_id.as_index()).into(),
+            );
+            associated_lambdas
+                .entry(id)
+                .or_insert_with(Vec::new)
+                .push(lambda_id);
+        });
         let descr = output.get_function_by_id_mut(*id).unwrap();
         descr.definition.ty_scheme.ty.effects =
             ty_inf.unify_effects(&fn_node.effects, &descr.definition.ty_scheme.ty.effects);
@@ -368,11 +423,14 @@ where
 
     // Fourth pass, substitute the mono type variables with the inferred types.
     for id in local_fns.iter() {
-        let descr = &mut output.functions[id.as_index()];
-        ty_inf.substitute_in_module_function(descr);
+        apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+            let descr = &mut output.functions[id.as_index()];
+            ty_inf.substitute_in_module_function(descr);
+        });
 
         // Union duplicated effects from function arguments, and build a substitution for the
         // fully unioned effects, to removed duplications.
+        let descr = &mut output.functions[id.as_index()];
         ty_inf.unify_fn_arg_effects(&descr.definition.ty_scheme.ty);
         let effect_subst = descr
             .definition
@@ -386,11 +444,14 @@ where
                     .map(|target| (*var, EffType::single_variable(target)))
             })
             .collect();
-        let mut node = descr.get_node_mut().unwrap();
+
         let subst = (HashMap::new(), effect_subst);
-        node.instantiate(&subst);
-        drop(node);
-        descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
+        apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+            let descr = &mut output.functions[id.as_index()];
+            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
+            let mut node = descr.get_node_mut().unwrap();
+            node.instantiate(&subst);
+        });
     }
 
     // Fifth pass, get the remaining constraints and collect the free type variables.
@@ -478,35 +539,40 @@ where
         trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
         let mut module_inst_data = HashMap::new();
         for id in local_fns.iter() {
-            let descr = &mut output.functions[id.as_index()];
-            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
-            // type scheme quantifiers will be updated later on
-            let mut node = descr.get_node_mut().unwrap();
-            node.instantiate(&subst);
-            drop(node);
             module_inst_data.insert(*id, dicts.clone());
+            apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+                let descr = &mut output.functions[id.as_index()];
+                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
+                // type scheme quantifiers will be updated later on
+                let mut node = descr.get_node_mut().unwrap();
+                node.instantiate(&subst);
+            });
         }
 
         // Sixth pass, run the borrow checker and elaborate dictionaries.
         for id in local_fns.iter() {
             let mut solver = trait_solver_from_module!(output, &others);
-            let descr = &mut output.functions[id.as_index()];
-            let mut function = descr.code.borrow_mut();
-            let script_fn = function.as_script_mut().unwrap();
-            script_fn.arg_names.splice(
-                0..0,
-                dicts
-                    .requirements
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| ustr(&r.to_dict_name(i))),
-            );
-            let node = &mut script_fn.code;
-            node.check_borrows()?;
-            let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
-            let result = node.elaborate_dictionaries(&mut ctx);
-            drop(function);
-            result?;
+            try_apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| -> Result<
+                (),
+                InternalCompilationError,
+            > {
+                let descr = &output.functions[id.as_index()];
+                let mut function = descr.code.borrow_mut();
+                let script_fn = function.as_script_mut().unwrap();
+                script_fn.arg_names.splice(
+                    0..0,
+                    dicts
+                        .requirements
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| ustr(&r.to_dict_name(i))),
+                );
+                let node = &mut script_fn.code;
+                node.check_borrows()?;
+                let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
+                node.elaborate_dictionaries(&mut ctx)?;
+                Ok(())
+            });
             solver.commit(&mut output.functions, &mut output.def_table);
         }
 
@@ -520,17 +586,18 @@ where
             .map(|c| c.instantiate(&subst))
             .collect();
         for (function_index, id) in local_fns.iter().enumerate() {
-            let descr = &mut output.functions[id.as_index()];
-            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
-            descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
-            let eff_quantifiers = descr.definition.ty_scheme.ty.input_effect_vars();
-            assert!(eff_quantifiers.is_empty());
-            descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
-            descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-            let descr = &mut output.functions[id.as_index()];
-            let mut node = descr.get_node_mut().unwrap();
-            node.instantiate(&subst);
-            drop(node);
+            apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+                let descr = &mut output.functions[id.as_index()];
+                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
+                descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
+                let eff_quantifiers = descr.definition.ty_scheme.ty.input_effect_vars();
+                assert!(eff_quantifiers.is_empty());
+                descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
+                descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
+                let descr = &mut output.functions[id.as_index()];
+                let mut node = descr.get_node_mut().unwrap();
+                node.instantiate(&subst);
+            });
 
             // Name the function
             let name = // TODO: retrieve proper name for generic arguments
@@ -593,20 +660,42 @@ where
                 .collect::<Result<_, _>>()?;
             quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
             solver.commit(&mut output.functions, &mut output.def_table);
-            let descr = &mut output.functions[id.as_index()];
-            let mut node = descr.get_node_mut().unwrap();
-            node.instantiate(&subst);
-            drop(node);
+            // Apply substitution and finalize the type scheme for the parent function.
+            {
+                let descr = &mut output.functions[id.as_index()];
+                let mut node = descr.get_node_mut().unwrap();
+                node.instantiate(&subst);
+                drop(node);
 
-            // Write the final type scheme.
-            descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
-            descr.definition.ty_scheme.eff_quantifiers =
-                descr.definition.ty_scheme.ty.input_effect_vars();
-            descr.definition.ty_scheme.constraints = constraints;
-            assert_eq!(
-                sorted(descr.definition.ty_scheme.ty_quantifiers_from_signature()),
-                sorted(quantifiers)
-            );
+                // Write the final type scheme.
+                descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
+                descr.definition.ty_scheme.eff_quantifiers =
+                    descr.definition.ty_scheme.ty.input_effect_vars();
+                descr.definition.ty_scheme.constraints = constraints.clone();
+                assert_eq!(
+                    sorted(descr.definition.ty_scheme.ty_quantifiers_from_signature()),
+                    sorted(quantifiers.clone())
+                );
+            }
+            // Apply substitution and finalize the type scheme for associated lambdas.
+            // Lambdas derive their own quantifiers from their own type, since they are
+            // closed over the parent's type variables and do not share the parent's generics.
+            if let Some(lambda_ids) = associated_lambdas.get(id) {
+                for lambda_id in lambda_ids.clone() {
+                    let descr = &mut output.functions[lambda_id.as_index()];
+                    let mut node = descr.get_node_mut().unwrap();
+                    node.instantiate(&subst);
+                    drop(node);
+                    // Lambdas have their constraints handled by the parent; clear them here.
+                    descr.definition.ty_scheme.constraints = vec![];
+                    // Derive quantifiers from the lambda's own type signature.
+                    let lambda_quantifiers =
+                        descr.definition.ty_scheme.ty_quantifiers_from_signature();
+                    descr.definition.ty_scheme.ty_quantifiers = lambda_quantifiers;
+                    descr.definition.ty_scheme.eff_quantifiers =
+                        descr.definition.ty_scheme.ty.input_effect_vars();
+                }
+            }
 
             // Log the dropped constraints.
             let module_env = ModuleEnv::new(output, others, within_std);
@@ -646,33 +735,40 @@ where
         for id in local_fns.iter() {
             let dicts = module_inst_data.get(id).unwrap();
             let mut solver = trait_solver_from_module!(output, &others);
-            let descr = &mut output.functions[id.as_index()];
-            let mut function = descr.code.borrow_mut();
-            let script_fn = function.as_script_mut().unwrap();
-            script_fn.arg_names.splice(
-                0..0,
-                dicts
-                    .requirements
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| ustr(&r.to_dict_name(i))),
-            );
-            let node = &mut script_fn.code;
-            node.check_borrows()?;
-            let mut ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), &mut solver);
-            node.elaborate_dictionaries(&mut ctx)?;
-            drop(function);
+            try_apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| -> Result<
+                (),
+                InternalCompilationError,
+            > {
+                let descr = &output.functions[id.as_index()];
+                let mut function = descr.code.borrow_mut();
+                let script_fn = function.as_script_mut().unwrap();
+                script_fn.arg_names.splice(
+                    0..0,
+                    dicts
+                        .requirements
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| ustr(&r.to_dict_name(i))),
+                );
+                let node = &mut script_fn.code;
+                node.check_borrows()?;
+                let mut ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), &mut solver);
+                node.elaborate_dictionaries(&mut ctx)?;
+                Ok(())
+            });
             solver.commit(&mut output.functions, &mut output.def_table);
         }
 
         // Seventh pass, normalize the type schemes, substitute the types in the functions.
         for id in local_fns.iter() {
-            let descr = &mut output.functions[id.as_index()];
-            // Note: after that normalization, the functions do not share the same
-            // type variables anymore.
-            let subst = descr.definition.ty_scheme.normalize();
-            let mut node = descr.get_node_mut().unwrap();
-            node.instantiate(&subst);
+            apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+                let descr = &mut output.functions[id.as_index()];
+                // Note: after that normalization, the functions do not share the same
+                // type variables anymore.
+                let subst = descr.definition.ty_scheme.normalize();
+                let mut node = descr.get_node_mut().unwrap();
+                node.instantiate(&subst);
+            });
         }
 
         Ok(None)
@@ -718,6 +814,7 @@ pub struct CompiledExpr {
 pub fn emit_expr_unsafe(
     source: ast::PExpr,
     module: &mut Module,
+    module_id: ModuleId,
     others: &Modules,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
@@ -738,11 +835,28 @@ pub fn emit_expr_unsafe(
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
     let mut new_import_slots = vec![];
-    let mut ty_env = TypingEnv::new(locals, &mut new_import_slots, module_env, None);
+    let mut lambda_functions = vec![];
+    let mut ty_env = TypingEnv::new(
+        locals,
+        &mut new_import_slots,
+        module_id,
+        module_env,
+        None,
+        &mut lambda_functions,
+        module.functions.len() as u32,
+    );
     let mut ty_inf = TypeInference::new_empty();
     let (mut node, _) = ty_inf.infer_expr(&mut ty_env, &source)?;
     let mut locals = ty_env.get_locals_and_drop();
     ty_inf.log_debug_constraints(module_env);
+    let lambda_functions = lambda_functions
+        .drain(..)
+        .map(|function| {
+            let id = module.add_function_anonymous(function);
+            module.name_function(id, format!("$lambda${}", id.as_index()).into());
+            id
+        })
+        .collect::<Vec<_>>();
     module.import_fn_slots.extend(new_import_slots);
 
     // Perform the unification.
@@ -754,11 +868,16 @@ pub fn emit_expr_unsafe(
 
     // Substitute the result of the unification.
     ty_inf.substitute_in_node(&mut node);
+    for lambda_id in lambda_functions.iter() {
+        let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
+        ty_inf.substitute_in_module_function(descr);
+    }
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = ty_inf.substitute_in_type(local.ty);
     }
 
     // Get the remaining constraints and collect the free variables.
+    let module_env = ModuleEnv::new(module, others, false);
     ty_inf.log_debug_constraints(module_env);
     let mut constraints = ty_inf.constraints();
 
@@ -799,8 +918,21 @@ pub fn emit_expr_unsafe(
         }
         constraints = new_constraints;
     }
-    node.instantiate(&subst);
     quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
+    node.instantiate(&subst);
+    for lambda_id in lambda_functions.iter() {
+        let descr = &mut module.functions[lambda_id.as_index()];
+        let mut node = descr.get_node_mut().unwrap();
+        node.instantiate(&subst);
+        drop(node);
+        // Lambdas have their constraints handled by the parent; clear them here.
+        descr.definition.ty_scheme.constraints = vec![];
+        // Derive quantifiers from the lambda's own type signature.
+        descr.definition.ty_scheme.ty_quantifiers =
+            descr.definition.ty_scheme.ty_quantifiers_from_signature();
+        descr.definition.ty_scheme.eff_quantifiers =
+            descr.definition.ty_scheme.ty.input_effect_vars();
+    }
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);
     }
@@ -826,6 +958,12 @@ pub fn emit_expr_unsafe(
 
     // Substitute the normalized and constraint-originating types in the node, effects and locals.
     node.instantiate(&subst);
+    for lambda_id in lambda_functions.iter() {
+        let descr = &mut module.functions[lambda_id.as_index()];
+        descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
+        let mut node = descr.get_node_mut().unwrap();
+        node.instantiate(&subst);
+    }
     ty_scheme.ty = ty_scheme.ty.instantiate(&subst);
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);
@@ -833,10 +971,20 @@ pub fn emit_expr_unsafe(
 
     // Do borrow checking and dictionary elaboration.
     node.check_borrows()?;
+    for lambda_id in lambda_functions.iter() {
+        let descr = &mut module.functions[lambda_id.as_index()];
+        let node = descr.get_node_mut().unwrap();
+        node.check_borrows()?;
+    }
     let dicts = ty_scheme.extra_parameters();
     let mut solver = trait_solver_from_module!(module, &others);
     let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
     node.elaborate_dictionaries(&mut ctx)?;
+    for lambda_id in lambda_functions.iter() {
+        let descr = &mut module.functions[lambda_id.as_index()];
+        let mut node = descr.get_node_mut().unwrap();
+        node.elaborate_dictionaries(&mut ctx)?;
+    }
     solver.commit(&mut module.functions, &mut module.def_table);
 
     Ok(CompiledExpr {
@@ -851,11 +999,13 @@ pub fn emit_expr_unsafe(
 pub fn emit_expr(
     source: ast::PExpr,
     module: &mut Module,
+    module_id: ModuleId,
     others: &Modules,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     let span = source.span;
-    let CompiledExpr { ty, expr, locals } = emit_expr_unsafe(source, module, others, locals)?;
+    let CompiledExpr { ty, expr, locals } =
+        emit_expr_unsafe(source, module, module_id, others, locals)?;
     let ty_vars = ty.ty.inner_ty_vars();
     if !ty_vars.is_empty() {
         return Err(internal_compilation_error!(UnboundTypeVar {
@@ -1070,7 +1220,7 @@ fn validate_and_cleanup_constraints(
                 .into_iter()
                 .filter(|c| other_orphans.contains(&constraint_ptr(c)))
                 .collect::<Vec<_>>();
-            let fake_current = new_module_using_std();
+            let fake_current = new_module_using_std(ModuleId(0));
             let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
             return Err(internal_compilation_error!(Internal {
                 error: format!(
@@ -1309,7 +1459,7 @@ fn compute_num_trait_default_types(
                         if entry_ty != default_ty {
                             // FIXME: This is due lack of unification when doing this part, in a way that is a similar bug to
                             // https://github.com/enlightware/ferlium/issues/59, a proper fix would likely solve both.
-                            let fake_current = new_module_using_std();
+                            let fake_current = new_module_using_std(ModuleId(0));
                             let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
                             return Err(internal_compilation_error!(Internal {
                                 error: format!(
@@ -1374,7 +1524,7 @@ fn compute_num_trait_default_types(
                             span.use_site,
                         )?;
                         if output_tys != solved_output_tys {
-                            let fake_current = new_module_using_std();
+                            let fake_current = new_module_using_std(ModuleId(0));
                             let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
                             return Err(internal_compilation_error!(Internal {
                                 error: format!(

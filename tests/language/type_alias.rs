@@ -111,12 +111,10 @@ fn type_aliases() {
     assert_eq!(result, int(5));
 
     // Verify the type alias is stored in the module
-    let module = session
-        .compile(indoc! { r#"
+    let module = session.compile_and_get_module(indoc! { r#"
         type MyInt = int;
 
         fn dummy() -> int { 0 }
-    "# })
-        .module;
+    "# });
     assert!(module.get_type_alias(ustr("MyInt")).is_some());
 }

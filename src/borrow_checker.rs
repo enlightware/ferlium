@@ -136,13 +136,7 @@ impl Node {
     pub fn check_borrows(&self) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
         match &self.kind {
-            Immediate(immediate) => {
-                if let Some(function) = immediate.value.as_pending_function() {
-                    let mut function = function.borrow_mut();
-                    let script_fn = function.as_script_mut().unwrap();
-                    script_fn.code.check_borrows()?;
-                }
-            }
+            Immediate(_) => {}
             BuildClosure(build_closure) => {
                 build_closure.function.check_borrows()?;
                 for capture in &build_closure.captures {

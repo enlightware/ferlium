@@ -13,15 +13,13 @@ use crate::{
     error::InternalCompilationError,
     function::FunctionDefinition,
     module::{
-        self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, Module,
-        ModuleEnv,
+        self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget,
+        LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
     },
     mutability::MutType,
     r#trait::TraitRef,
     r#type::{FnArgType, Type},
 };
-
-use std::cell::RefCell;
 
 use derive_new::new;
 
@@ -71,15 +69,28 @@ pub struct TypingEnv<'m> {
     pub(crate) locals: Vec<Local>,
     /// The extra import slots that can be filled during type checking.
     pub(crate) new_import_slots: &'m mut Vec<ImportFunctionSlot>,
+    /// The id of the current module being compiled, used for resolving imports and accesses to other modules.
+    pub(crate) module_id: ModuleId,
     /// The program and the module we are currently compiling.
     pub(crate) module_env: ModuleEnv<'m>,
     /// The expected return type of the enclosing function (for type-checking `return` statements).
     pub(crate) expected_return_ty: Option<(Type, Location)>,
+    /// Newly-created module functions from lambdas
+    pub(crate) lambda_functions: &'m mut Vec<ModuleFunction>,
+    /// The next index for a new module function created from a lambda
+    pub(crate) base_local_function_index: u32,
 }
 
 impl<'m> TypingEnv<'m> {
     pub fn get_locals_and_drop(self) -> Vec<Local> {
         self.locals
+    }
+
+    pub fn collect_lambda_module_function(&mut self, function: ModuleFunction) -> LocalFunctionId {
+        let base_index = self.base_local_function_index;
+        let index = base_index + self.lambda_functions.len() as u32;
+        self.lambda_functions.push(function);
+        LocalFunctionId(index)
     }
 
     pub fn has_variable_name(&self, name: Ustr) -> bool {
@@ -110,7 +121,6 @@ impl<'m> TypingEnv<'m> {
                 self.new_import_slots.push(ImportFunctionSlot {
                     module: module_path.clone(),
                     target: ImportFunctionTarget::NamedFunction(function_name),
-                    resolved: RefCell::new(None),
                 });
                 ImportFunctionSlotId(slot_index)
             })
@@ -144,7 +154,7 @@ impl<'m> TypingEnv<'m> {
             let module_path = module::Path::from_ast_segments(&segments[..segments.len() - 1]);
             self.module_env
                 .others
-                .get(&module_path)
+                .get_value_by_name(&module_path)
                 .and_then(|m| {
                     if m.get_local_function_id(fn_name).is_some() {
                         Some(fn_name)
@@ -165,7 +175,7 @@ impl<'m> TypingEnv<'m> {
             let definition = &self
                 .module_env
                 .others
-                .get(&module_path)
+                .get_value_by_name(&module_path)
                 .unwrap()
                 .get_function(function_name)
                 .unwrap()

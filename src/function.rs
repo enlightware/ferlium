@@ -144,7 +144,7 @@ impl FormatWith<ModuleEnv<'_>> for (&FunctionDefinition, Ustr) {
     }
 }
 
-type CallCtx = EvalCtx;
+type CallCtx<'a> = EvalCtx<'a>;
 
 /// A function that can be called
 pub trait Callable {

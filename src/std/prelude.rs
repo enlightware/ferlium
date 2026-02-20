@@ -11,7 +11,7 @@ use crate::{
     add_code_to_module,
     format::FormatWithData,
     location::SourceTable,
-    module::{Module, Modules},
+    module::{Module, ModuleId, Modules},
 };
 
 macro_rules! prelude {
@@ -20,7 +20,7 @@ macro_rules! prelude {
     };
 }
 
-pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable) {
+pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable, module_id: ModuleId) {
     // The prelude code is split into multiple parts
     // to allow dependencies between trait implementations.
     let codes = [
@@ -33,12 +33,20 @@ pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable) {
         prelude!("core_traits_dependent.fer"),
     ];
     for (name, code) in codes {
-        add_code_to_module(name, code, to, &Modules::new_empty(), source_table, true)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "Failed to add prelude to module: {}",
-                    FormatWithData::new(&e, source_table)
-                )
-            });
+        add_code_to_module(
+            name,
+            code,
+            to,
+            module_id,
+            &Modules::default(),
+            source_table,
+            true,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "Failed to add prelude to module: {}",
+                FormatWithData::new(&e, source_table)
+            )
+        });
     }
 }

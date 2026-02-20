@@ -29,14 +29,14 @@ pub struct ModulesResolver<'a> {
 }
 impl ModulesResolver<'_> {
     fn import_exists(&self, module: &ModPath, symbol: Ustr) -> bool {
-        if let Some(m) = self.modules.get(module) {
+        if let Some(m) = self.modules.get_value_by_name(module) {
             m.own_symbols().any(|n| n == symbol)
         } else {
             false
         }
     }
     fn module_exists(&self, module: &ModPath) -> bool {
-        self.modules.get(module).is_some()
+        self.modules.get_value_by_name(module).is_some()
     }
 }
 

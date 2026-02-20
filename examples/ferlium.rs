@@ -10,15 +10,12 @@ use std::collections::HashMap;
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
-use std::rc::Rc;
 
 use ariadne::{Label, Source};
 use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
 use ferlium::module::id::Id;
-use ferlium::module::{
-    LocalFunctionId, Module, ModuleEnv, ModuleRc, Modules, Path, ShowModuleDetails,
-};
+use ferlium::module::{LocalFunctionId, ModuleEnv, ModuleId, Modules, Path, ShowModuleDetails};
 use ferlium::std::new_module_using_std;
 use ferlium::typing_env::Local;
 use ferlium::{
@@ -461,36 +458,42 @@ fn process_input(
     name: &str,
     input: &str,
     reverse_uses: HashMap<Ustr, Path>,
-    other_modules: &Modules,
     locals: &mut Vec<Local>,
     environment: &mut Vec<ValOrMut>,
     session: &mut CompilerSession,
     is_repl: bool,
-) -> Result<ModuleRc, i32> {
+) -> Result<ModuleId, i32> {
     // Initialize module with use directives
-    let mut module = new_module_using_std();
+    let mut module = new_module_using_std(session.modules().next_id());
     for (sym_name, mod_name) in reverse_uses {
         module.add_explicit_use(sym_name, mod_name, Location::new_synthesized());
     }
 
     // AST debug output for REPL
     let dbg_module = module.clone();
-    let ast_inspector = |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>| {
-        if !is_repl {
-            return;
-        }
-        let module_env = ModuleEnv::new(&dbg_module, other_modules, false);
-        if !module_ast.is_empty() {
-            println!("Module AST:\n{}", module_ast.format_with(&module_env));
-        }
-        if let Some(expr_ast) = expr_ast.as_ref() {
-            println!("Expr AST:\n{}", expr_ast.format_with(&module_env));
-        }
-    };
+    let ast_inspector =
+        |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>, modules: &Modules| {
+            if !is_repl {
+                return;
+            }
+            let module_env = ModuleEnv::new(&dbg_module, modules, false);
+            if !module_ast.is_empty() {
+                println!("Module AST:\n{}", module_ast.format_with(&module_env));
+            }
+            if let Some(expr_ast) = expr_ast.as_ref() {
+                println!("Expr AST:\n{}", expr_ast.format_with(&module_env));
+            }
+        };
 
     // Compile the input to a module and an expression (if any)
-    let ModuleAndExpr { module, expr } = session
-        .compile_to(name, input, module, other_modules, Some(&ast_inspector))
+    let ModuleAndExpr { module_id, expr } = session
+        .compile_to(
+            input,
+            name,
+            Path::single_str(name),
+            module,
+            Some(&ast_inspector),
+        )
         .map_err(|e| {
             eprintln!("Compilation error:");
             pretty_print_checking_error(&e, input, session.source_table());
@@ -499,13 +502,13 @@ fn process_input(
 
     // Show IR
     if is_repl {
-        let module: &Module = &module;
+        let module = session.modules().get(module_id).unwrap();
         println!(
             "Module IR:\n{}",
-            module.format_with(&ShowModuleDetails(other_modules))
+            module.format_with(&ShowModuleDetails(session.modules()))
         );
         if let Some(expr) = expr.as_ref() {
-            let module_env = ModuleEnv::new(&module, other_modules, false);
+            let module_env = ModuleEnv::new(&module, session.modules(), false);
             println!("Expr IR:\n{}", expr.expr.format_with(&module_env));
         }
     }
@@ -515,13 +518,15 @@ fn process_input(
         *locals = compiled_expr.locals;
 
         // Evaluate expression
-        let mut eval_ctx = EvalCtx::with_environment(module.clone(), environment.clone());
+        let mut eval_ctx =
+            EvalCtx::with_environment(module_id.clone(), environment.clone(), session);
         let old_size = eval_ctx.environment.len();
         let result = compiled_expr.expr.eval_with_ctx(&mut eval_ctx);
         match result {
             Ok(value) => {
                 let value = value.into_value();
-                let module_env = ModuleEnv::new(&module, other_modules, false);
+                let module = session.modules().get(module_id).unwrap();
+                let module_env = ModuleEnv::new(module, session.modules(), false);
                 println!(
                     "{}: {}",
                     value.display_pretty(&compiled_expr.ty.ty),
@@ -529,9 +534,10 @@ fn process_input(
                 );
             }
             Err(error) => {
-                let mut modules = other_modules.clone();
-                modules.register_module_rc(Path::single_str(name), module.clone());
-                eprintln!("{}", error.format_with(&(session.source_table(), &modules)));
+                eprintln!(
+                    "{}",
+                    error.format_with(&(session.source_table(), session.modules()))
+                );
                 if cfg!(debug_assertions) {
                     eval_ctx.print_environment();
                 }
@@ -550,7 +556,7 @@ fn process_input(
         }
     }
 
-    Ok(module)
+    Ok(module_id)
 }
 
 fn process_pipe_input(print_module: bool) -> i32 {
@@ -568,7 +574,6 @@ fn process_pipe_input(print_module: bool) -> i32 {
 
     // Initialize ferlium contexts
     let mut session = CompilerSession::new();
-    let other_modules = session.new_std_modules();
     let mut locals: Vec<Local> = vec![];
     let mut environment: Vec<ValOrMut> = vec![];
 
@@ -577,7 +582,6 @@ fn process_pipe_input(print_module: bool) -> i32 {
         "<stdin>",
         &input,
         HashMap::new(),
-        &other_modules,
         &mut locals,
         &mut environment,
         &mut session,
@@ -585,9 +589,10 @@ fn process_pipe_input(print_module: bool) -> i32 {
     )
     .map_or_else(
         |code| code,
-        |module| {
+        |module_id| {
             if print_module {
-                println!("{}", module.format_with(&other_modules));
+                let module = session.modules().get(module_id).unwrap();
+                println!("{}", module.format_with(session.modules()));
             }
             0
         },
@@ -635,11 +640,7 @@ fn main() {
     // Check for print-std flag
     if args.len() > 1 && args[1] == "--print-std" {
         let session = CompilerSession::new();
-        if let Some(module) = session.std_modules().get(&Path::single_str("std")) {
-            println!("{}", module.format_with(session.std_modules()));
-        } else {
-            eprintln!("Module std not found.");
-        }
+        println!("{}", session.std_module().format_with(session.modules()));
         return;
     }
 
@@ -653,8 +654,7 @@ fn run_interactive_repl() {
 
     // ferlium emission and evaluation contexts
     let mut session = CompilerSession::new();
-    let mut other_modules = session.new_std_modules();
-    let mut last_module = Rc::new(new_module_using_std());
+    let mut last_module = ModuleId::from_index(0); // start with the std module
     let mut locals: Vec<Local> = vec![];
     let mut environment: Vec<ValOrMut> = vec![];
     let mut counter: usize = 0;
@@ -674,7 +674,8 @@ fn run_interactive_repl() {
             println!("No locals.");
         } else {
             println!("Locals:");
-            let env = ModuleEnv::new(&last_module, &other_modules, false);
+            let module = session.modules().get(last_module).unwrap();
+            let env = ModuleEnv::new(module, session.modules(), false);
             for (i, local) in locals.iter().enumerate() {
                 println!(
                     "{} {}: {} = {}",
@@ -709,33 +710,38 @@ fn run_interactive_repl() {
                             true
                         }
                         "module" => {
-                            let module = if let Some(arg) = args.get(1) {
-                                if let Some(module) = other_modules.get(&Path::single_str(arg)) {
-                                    module.deref()
+                            let module_id = if let Some(arg) = args.get(1) {
+                                if let Some(module_id) =
+                                    session.modules().get_id_by_name(&Path::single_str(arg))
+                                {
+                                    module_id
                                 } else {
                                     println!("Module {arg} not found.");
                                     continue;
                                 }
                             } else {
-                                &last_module
+                                last_module
                             };
-                            println!("\n{}", module.format_with(&other_modules));
+                            let module = session.modules().get(module_id).unwrap();
+                            println!("\n{}", module.format_with(session.modules()));
                             true
                         }
                         "function" => {
-                            let (module, module_name): (&Module, &str) = if let Some(arg) =
-                                args.get(2)
-                            {
-                                let name = *arg;
-                                if let Some(module) = other_modules.get(&Path::single_str(arg)) {
-                                    (&module, name)
+                            let (module_id, module_name): (ModuleId, &str) =
+                                if let Some(arg) = args.get(2) {
+                                    let name = *arg;
+                                    if let Some(module_id) =
+                                        session.modules().get_id_by_name(&Path::single_str(arg))
+                                    {
+                                        (module_id, name)
+                                    } else {
+                                        println!("Module {arg} not found.");
+                                        continue;
+                                    }
                                 } else {
-                                    println!("Module {arg} not found.");
-                                    continue;
-                                }
-                            } else {
-                                (&last_module, "current")
-                            };
+                                    (last_module, "current")
+                                };
+                            let module = session.modules().get(module_id).unwrap();
                             let fn_id = if let Some(arg) = args.get(1) {
                                 match arg.parse::<usize>() {
                                     Ok(index) => LocalFunctionId::from_index(index),
@@ -763,7 +769,7 @@ fn run_interactive_repl() {
                                 println!("Function id {fn_id} not found in module {module_name}.");
                                 continue;
                             };
-                            let env = ModuleEnv::new(&module, &other_modules, false);
+                            let env = ModuleEnv::new(&module, session.modules(), false);
                             let fn_name = module
                                 .get_function_name_by_id(fn_id)
                                 .unwrap_or_else(|| ustr("<anonymous function>"));
@@ -773,7 +779,10 @@ fn run_interactive_repl() {
                         "history" => {
                             for i in 0..counter {
                                 let name = format!("repl{i}");
-                                if let Some(module) = other_modules.get(&Path::single_str(&name)) {
+                                if let Some(module) = session
+                                    .modules()
+                                    .get_value_by_name(&Path::single_str(&name))
+                                {
                                     println!("{}: {}", name, module.list_stats());
                                 }
                             }
@@ -811,7 +820,10 @@ fn run_interactive_repl() {
         for i in 0..counter {
             let index = counter - i - 1;
             let mod_name = format!("repl{index}");
-            if let Some(module) = other_modules.get(&Path::single_str(&mod_name)) {
+            if let Some(module) = session
+                .modules()
+                .get_value_by_name(&Path::single_str(&mod_name))
+            {
                 for sym in module.own_symbols() {
                     if !reverse_uses.contains_key(&sym) {
                         reverse_uses.insert(sym, Path::single_str(&mod_name));
@@ -826,7 +838,6 @@ fn run_interactive_repl() {
             &name,
             &src,
             reverse_uses,
-            &other_modules,
             &mut locals,
             &mut environment,
             &mut session,
@@ -834,7 +845,6 @@ fn run_interactive_repl() {
         );
         if let Ok(module) = result {
             last_module = module;
-            other_modules.register_module_rc(Path::single_str(name), last_module.clone());
         }
         counter += 1;
         if let Err(e) = rl.save_history(history_filename) {

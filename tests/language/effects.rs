@@ -20,9 +20,8 @@ use ferlium::{
 use wasm_bindgen_test::*;
 
 pub fn test_mod(session: &mut TestSession, src: &str, f: &str, exp_eff: EffType) {
-    let module = session.compile(src);
+    let module = session.compile_and_get_module(src);
     let effects = module
-        .module
         .get_function(ustr(f))
         .unwrap()
         .definition
@@ -34,8 +33,8 @@ pub fn test_mod(session: &mut TestSession, src: &str, f: &str, exp_eff: EffType)
 }
 
 fn test_expr(session: &mut TestSession, src: &str, exp_eff: EffType) {
-    let module = session.compile(src);
-    let effects = module.expr.unwrap().expr.effects.clone();
+    let module_and_expr = session.compile(src);
+    let effects = module_and_expr.expr.unwrap().expr.effects.clone();
     assert_eq!(effects, exp_eff);
 }
 
@@ -273,9 +272,8 @@ fn trait_impl_effect_must_have_at_least_def_effects() {
     let mut session = TestSession::new();
 
     // Deserialize trait method is fallible, pure implementation is OK (subset).
-    let module = session
-        .compile(
-            r#"
+    let module = session.compile_and_get_module(
+        r#"
         struct S;
         impl Deserialize {
             fn deserialize(v) {
@@ -283,8 +281,7 @@ fn trait_impl_effect_must_have_at_least_def_effects() {
             }
         }
         "#,
-        )
-        .module;
+    );
     let fn_id = module
         .get_impl_data(LocalImplId::from_index(0))
         .unwrap()

@@ -11,7 +11,7 @@ use std::{rc::Rc, str::FromStr};
 use crate::{
     Location,
     location::SourceTable,
-    module::{self, Module, ModuleRc, finalize_module},
+    module::{self, Module, ModuleId, ModuleRc},
     r#type::{Type, TypeKind, bare_native_type},
     value::Value,
 };
@@ -39,9 +39,9 @@ pub mod serde;
 pub mod string;
 pub mod variant;
 
-pub fn std_module(source_table: &mut SourceTable) -> ModuleRc {
-    let module = Rc::new({
-        let mut module = Module::default();
+pub fn std_module(source_table: &mut SourceTable, module_id: ModuleId) -> ModuleRc {
+    Rc::new({
+        let mut module = Module::new(module_id);
         core::add_to_module(&mut module);
         flow::add_to_module(&mut module);
         cast::add_to_module(&mut module);
@@ -59,16 +59,13 @@ pub fn std_module(source_table: &mut SourceTable) -> ModuleRc {
         iterator::add_to_module(&mut module);
         serde::add_to_module(&mut module);
         json::add_to_module(&mut module);
-        prelude::add_to_module(&mut module, source_table);
+        prelude::add_to_module(&mut module, source_table, module_id);
         module
-    });
-    // No need to link because std has no imports.
-    finalize_module(&module);
-    module
+    })
 }
 
-pub fn new_module_using_std() -> Module {
-    let mut new_module = Module::default();
+pub fn new_module_using_std(module_id: ModuleId) -> Module {
+    let mut new_module = Module::new(module_id);
     new_module.add_wildcard_use(module::Path::single_str("std"), Location::new_synthesized());
     new_module
 }

@@ -368,19 +368,16 @@ fn strip_hidden_lines(code: &str) -> String {
 
 fn compile_only(label: &str, code: &str) -> Result<(), RunError> {
     let mut session = CompilerSession::new();
-    let modules = session.new_std_modules();
     session
-        .compile(label, code, &modules)
+        .compile(code, label, ferlium::Path::single_str(label))
         .map(|_| ())
         .map_err(RunError::Compilation)
 }
 
 fn run_block(label: &str, code: &str, expect_panic: bool) -> BlockResult {
     let mut session = CompilerSession::new();
-    let modules = session.new_std_modules();
-
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        try_compile_and_run(label, code, &mut session, &modules)
+        try_compile_and_run(label, code, &mut session)
     }));
 
     match result {
@@ -417,15 +414,17 @@ fn try_compile_and_run(
     label: &str,
     code: &str,
     session: &mut CompilerSession,
-    modules: &ferlium::module::Modules,
 ) -> Result<(), RunError> {
-    let ModuleAndExpr { module, expr } = session
-        .compile(label, code, modules)
+    let ModuleAndExpr {
+        module_id: module,
+        expr,
+    } = session
+        .compile(code, label, ferlium::Path::single_str(label))
         .map_err(RunError::Compilation)?;
 
     if let Some(expr) = expr {
         expr.expr
-            .eval(module)
+            .eval(module, session)
             .map(ControlFlow::into_value)
             .map_err(RunError::Runtime)?;
     }

@@ -1776,7 +1776,7 @@ mod tests {
             let ty = session
                 .resolve_defined_type_with_std("<test>", src)
                 .unwrap();
-            let env = session.std_module_env();
+            let env = session.module_env();
             let formatted = format!("{}", ty.format_with(&env));
             assert_eq!(src, formatted);
         };

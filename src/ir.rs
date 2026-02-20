@@ -10,7 +10,7 @@ use crate::{
     Location,
     ast::{self, UnnamedArg},
     format::FormatWith,
-    module::{FunctionId, ModuleRc, TraitImplId},
+    module::{FunctionId, TraitImplId},
     r#trait::TraitRef,
     r#type::TypeKind,
     type_like::{CastableToType, TypeLike},
@@ -231,78 +231,6 @@ pub struct Node {
 }
 
 impl Node {
-    /// Recursively finalize any pending function values contained in this node.
-    pub fn finalize_pending_values(&mut self, module: &ModuleRc) {
-        use NodeKind::*;
-        match &mut self.kind {
-            Immediate(immediate) => immediate.value.finalize_pending(module),
-            BuildClosure(build_closure) => build_closure.function.finalize_pending_values(module),
-            Apply(app) => {
-                app.function.finalize_pending_values(module);
-                for arg in app.arguments.iter_mut() {
-                    arg.finalize_pending_values(module);
-                }
-            }
-            StaticApply(app) => {
-                for arg in app.arguments.iter_mut() {
-                    arg.finalize_pending_values(module);
-                }
-            }
-            TraitFnApply(app) => {
-                for arg in app.arguments.iter_mut() {
-                    arg.finalize_pending_values(module);
-                }
-            }
-            GetFunction(_) => {}
-            GetDictionary(_) => {}
-            EnvStore(node) => node.value.finalize_pending_values(module),
-            EnvLoad(_) => {}
-            Return(node) => node.finalize_pending_values(module),
-            Block(nodes) => {
-                for n in nodes.iter_mut() {
-                    n.finalize_pending_values(module);
-                }
-            }
-            Assign(assign) => {
-                assign.place.finalize_pending_values(module);
-                assign.value.finalize_pending_values(module);
-            }
-            Tuple(nodes) => {
-                for n in nodes.iter_mut() {
-                    n.finalize_pending_values(module);
-                }
-            }
-            Project(p) => p.0.finalize_pending_values(module),
-            Record(nodes) => {
-                for n in nodes.iter_mut() {
-                    n.finalize_pending_values(module);
-                }
-            }
-            FieldAccess(acc) => acc.0.finalize_pending_values(module),
-            ProjectAt(p) => p.0.finalize_pending_values(module),
-            Variant(v) => v.1.finalize_pending_values(module),
-            ExtractTag(n) => n.finalize_pending_values(module),
-            Array(nodes) => {
-                for n in nodes.iter_mut() {
-                    n.finalize_pending_values(module);
-                }
-            }
-            Index(array, index) => {
-                array.finalize_pending_values(module);
-                index.finalize_pending_values(module);
-            }
-            Case(case) => {
-                case.value.finalize_pending_values(module);
-                for (alt, node) in case.alternatives.iter_mut() {
-                    alt.finalize_pending(module);
-                    node.finalize_pending_values(module);
-                }
-                case.default.finalize_pending_values(module);
-            }
-            Loop(body) => body.finalize_pending_values(module),
-            SoftBreak => {}
-        }
-    }
     pub fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
@@ -760,9 +688,7 @@ impl Node {
     pub fn instantiate(&mut self, subst: &InstSubstitution) {
         use NodeKind::*;
         match &mut self.kind {
-            Immediate(immediate) => {
-                immediate.value.instantiate(subst);
-            }
+            Immediate(_) => {}
             BuildClosure(build_closure) => {
                 build_closure.function.instantiate(subst);
                 instantiate_nodes(&mut build_closure.captures, subst);
@@ -815,7 +741,6 @@ impl Node {
             Case(case) => {
                 case.value.instantiate(subst);
                 for alternative in case.alternatives.iter_mut() {
-                    alternative.0.instantiate(subst);
                     alternative.1.instantiate(subst);
                 }
                 case.default.instantiate(subst);

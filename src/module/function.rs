@@ -9,14 +9,14 @@
 
 //! Functions within a module
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Ref, RefMut};
 
 use crate::{
     Location, define_id_type,
     format::FormatWith,
     function::{FunctionDefinition, FunctionRc},
     ir::Node,
-    module::{ModuleEnv, ModuleRc, TraitKey, format_impl_header_by_key, path::Path},
+    module::{ModuleEnv, TraitKey, format_impl_header_by_key, path::Path},
 };
 
 use ustr::Ustr;
@@ -56,8 +56,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                         let name = key.trait_ref().functions[*index as usize].0;
                         let imp = env
                             .others
-                            .modules
-                            .get(module_name)
+                            .get_value_by_name(module_name)
                             .expect("imported module not found")
                             .get_impl_data_by_trait_key(key)
                             .expect("imported trait impl not found");
@@ -95,8 +94,6 @@ pub struct ImportFunctionSlot {
     pub module: Path,
     /// The target function in that module
     pub target: ImportFunctionTarget,
-    /// Cached resolved function/module - updated during relinking
-    pub resolved: RefCell<Option<(FunctionRc, ModuleRc)>>,
 }
 
 /// A module function argument span, with the span of the optional type ascription.

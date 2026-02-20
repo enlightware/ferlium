@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{collections::VecDeque, mem, rc::Rc};
+use std::{collections::VecDeque, mem};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -16,13 +16,13 @@ use ustr::{Ustr, ustr};
 #[cfg(debug_assertions)]
 use crate::module::Path;
 use crate::{
-    Location, SourceId, SourceTable,
+    CompilerSession, Location, SourceId, SourceTable,
     containers::b,
     error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
     function::FunctionRc,
     ir::{Node, NodeKind},
-    module::{FunctionId, ModuleRc, Modules, TraitImplId},
+    module::{FunctionId, LocalFunctionId, ModuleId, ModuleRc, Modules, TraitImplId},
     std::array,
     r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},
@@ -52,17 +52,17 @@ impl ValOrMut {
         }
     }
 
-    pub fn as_mut_primitive<T: 'static>(
+    pub fn as_mut_primitive<'a, 'b, T: 'static>(
         self,
-        ctx: &mut EvalCtx,
-    ) -> Result<Option<&mut T>, RuntimeErrorKind> {
+        ctx: &'a mut EvalCtx<'b>,
+    ) -> Result<Option<&'a mut T>, RuntimeErrorKind> {
         Ok(match self {
             ValOrMut::Val(_) => None,
             ValOrMut::Mut(place) => place.target_mut(ctx)?.as_primitive_ty_mut::<T>(),
         })
     }
 
-    pub fn as_value(&self, ctx: &EvalCtx) -> Result<Value, RuntimeErrorKind> {
+    pub fn as_value(&self, ctx: &EvalCtx<'_>) -> Result<Value, RuntimeErrorKind> {
         Ok(match self {
             ValOrMut::Val(value) => value.clone(),
             ValOrMut::Mut(place) => place.target_ref(ctx)?.clone(),
@@ -77,8 +77,8 @@ impl ValOrMut {
     }
 }
 
-impl FormatWith<EvalCtx> for ValOrMut {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx) -> std::fmt::Result {
+impl FormatWith<EvalCtx<'_>> for ValOrMut {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx<'_>) -> std::fmt::Result {
         match self {
             ValOrMut::Val(value) => {
                 write!(f, "value ")?;
@@ -101,7 +101,7 @@ struct StackEntry {
 
 /// Along with the Rust native stack, corresponds to the Zinc Abstract Machine of Caml language family
 /// with the addition of Mutable Value Semantics through references to earlier stack frames
-pub struct EvalCtx {
+pub struct EvalCtx<'a> {
     /// all values or mutable references of all stack frames
     pub environment: Vec<ValOrMut>,
     /// base of current stack frame in `environment`
@@ -112,25 +112,28 @@ pub struct EvalCtx {
     pub recursion_limit: usize,
     /// a flag to break the evaluation
     pub break_loop: bool,
-    /// reference to the current module for import slot resolution
-    pub module: ModuleRc,
+    /// id of the current module for import slot resolution
+    pub module_id: ModuleId,
+    /// session holding sources and other modules for error reporting and import resolution
+    compiler_session: &'a CompilerSession,
     #[cfg(debug_assertions)]
     stack_trace: Vec<StackEntry>,
     #[cfg(debug_assertions)]
     pub environment_names: Vec<Ustr>,
 }
 
-impl EvalCtx {
+impl<'a> EvalCtx<'a> {
     const DEFAULT_RECURSION_LIMIT: usize = 50;
 
-    pub fn new(module: ModuleRc) -> EvalCtx {
+    pub fn new(module_id: ModuleId, compiler_session: &'a CompilerSession) -> EvalCtx<'a> {
         EvalCtx {
             environment: Vec::new(),
             frame_base: 0,
             recursion: 0,
             recursion_limit: Self::DEFAULT_RECURSION_LIMIT,
             break_loop: false,
-            module,
+            module_id,
+            compiler_session,
             #[cfg(debug_assertions)]
             stack_trace: Vec::new(),
             #[cfg(debug_assertions)]
@@ -138,7 +141,11 @@ impl EvalCtx {
         }
     }
 
-    pub fn with_environment(module: ModuleRc, environment: Vec<ValOrMut>) -> EvalCtx {
+    pub fn with_environment(
+        module: ModuleId,
+        environment: Vec<ValOrMut>,
+        compiler_session: &'a CompilerSession,
+    ) -> EvalCtx<'a> {
         #[cfg(debug_assertions)]
         let environment_names = vec![ustr("<unknown>"); environment.len()];
         EvalCtx {
@@ -147,7 +154,8 @@ impl EvalCtx {
             recursion: 0,
             recursion_limit: Self::DEFAULT_RECURSION_LIMIT,
             break_loop: false,
-            module,
+            module_id: module,
+            compiler_session,
             #[cfg(debug_assertions)]
             stack_trace: Vec::new(),
             #[cfg(debug_assertions)]
@@ -177,21 +185,54 @@ impl EvalCtx {
         }
     }
 
-    /// Get the function code for a FunctionId at runtime using module.
-    pub fn get_function(&self, function: FunctionId) -> (FunctionRc, ModuleRc) {
+    /// Get a function's code and module for a FunctionId at runtime.
+    pub fn get_function(&self, function: FunctionId) -> (FunctionRc, ModuleId) {
+        let (local_id, module_id) = self.get_function_local_id(function);
+        let module = self.compiler_session.get_module_by_id(module_id).unwrap();
+        let function = module.get_function_by_id(local_id).unwrap().code.clone();
+        (function, module_id)
+    }
+
+    /// Get a function's local id and module for a FunctionId at runtime.
+    pub fn get_function_local_id(&self, function: FunctionId) -> (LocalFunctionId, ModuleId) {
         use FunctionId::*;
         match function {
-            Local(id) => (
-                self.module.get_function_by_id(id).unwrap().code.clone(),
-                self.module.clone(),
-            ),
+            Local(id) => (id, self.module_id),
             Import(id) => {
-                let slot = &self.module.get_import_fn_slot(id).unwrap();
-                let resolved = slot.resolved.borrow();
-                let resolved = resolved.as_ref().unwrap_or_else(|| {
-                    panic!("Function import slot #{id} not resolved.\nSlot data: {slot:?}")
-                });
-                (resolved.0.clone(), resolved.1.clone())
+                let module = self
+                    .compiler_session
+                    .get_module_by_id(self.module_id)
+                    .unwrap();
+                let slot = module
+                    .get_import_fn_slot(id)
+                    .unwrap_or_else(|| panic!("imported function slot not found: {}", id));
+                let module_path = &slot.module;
+                let (target_module_id, module) = self
+                    .compiler_session
+                    .modules()
+                    .get_by_name(module_path)
+                    .unwrap_or_else(|| panic!("imported module not found: {}", module_path));
+                use ImportFunctionTarget::*;
+                let local_id = match &slot.target {
+                    TraitImplMethod { key, index } => {
+                        let imp = module.get_impl_data_by_trait_key(key).unwrap_or_else(|| {
+                            panic!(
+                                "imported trait impl not found: {:?} in module {}",
+                                key, module_path
+                            )
+                        });
+                        imp.methods[*index as usize]
+                    }
+                    &NamedFunction(fn_name) => {
+                        module.get_local_function_id(fn_name).unwrap_or_else(|| {
+                            panic!(
+                                "imported function not found: {} in module {}",
+                                fn_name, module_path
+                            )
+                        })
+                    }
+                };
+                (local_id, target_module_id)
             }
         }
     }
@@ -224,12 +265,20 @@ impl EvalCtx {
         let module_path;
         let fn_name = match function {
             Local(id) => {
-                let fn_name = self.module.get_function_name_by_id(id).unwrap();
+                let module = self
+                    .compiler_session
+                    .get_module_by_id(self.module_id)
+                    .unwrap();
+                let fn_name = module.get_function_name_by_id(id).unwrap();
                 module_path = self.get_last_module_path();
                 format!("{module_path}::{} (#{})", fn_name, id)
             }
             Import(id) => {
-                let slot = &self.module.get_import_fn_slot(id).unwrap();
+                let module = self
+                    .compiler_session
+                    .get_module_by_id(self.module_id)
+                    .unwrap();
+                let slot = module.get_import_fn_slot(id).unwrap();
                 module_path = slot.module.clone();
                 use ImportFunctionTarget::*;
                 match &slot.target {
@@ -250,22 +299,27 @@ impl EvalCtx {
     pub fn get_dictionary(&self, dictionary: TraitImplId) -> Value {
         use TraitImplId::*;
         match dictionary {
-            Local(id) => self
-                .module
-                .get_impl_data(id)
-                .unwrap()
-                .dictionary_value
-                .borrow()
-                .clone(),
+            Local(id) => {
+                let module = self
+                    .compiler_session
+                    .get_module_by_id(self.module_id)
+                    .unwrap();
+                module.get_impl_data(id).unwrap().dictionary_value.clone()
+            }
             Import(id) => {
-                let slot = &self.module.get_import_impl_slot(id).unwrap();
-                slot.resolved
-                    .borrow()
-                    .as_ref()
-                    .unwrap_or_else(|| {
-                        panic!("Impl import slot #{id} not resolved.\nSlot data: {slot:?}")
-                    })
-                    .0
+                let module = self
+                    .compiler_session
+                    .get_module_by_id(self.module_id)
+                    .unwrap();
+                let slot = module.get_import_impl_slot(id).unwrap();
+                let module = self
+                    .compiler_session
+                    .get_module_by_path(&slot.module)
+                    .unwrap();
+                module
+                    .get_impl_data_by_trait_key(&slot.key)
+                    .unwrap()
+                    .dictionary_value
                     .clone()
             }
         }
@@ -278,11 +332,13 @@ impl EvalCtx {
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
-        let function = &function_value.function;
-        let module = function_value.upgrade_module();
+        let module_id = function_value.module;
+        let function_id = function_value.function;
+        let module = self.compiler_session.get_module_by_id(module_id).unwrap();
+        let function = &module.get_function_by_id(function_id).unwrap().code;
         #[cfg(debug_assertions)]
         self.stack_trace
-            .push(self.get_stack_entry_from_fn_and_mod(function, &module));
+            .push(self.get_stack_entry_from_fn_and_mod(function, module));
         let arguments = if function_value.captured.is_empty() {
             arguments
         } else {
@@ -295,8 +351,15 @@ impl EvalCtx {
                 .collect()
         };
         let result = self
-            .call_function(function, module.clone(), arguments)
-            .map_err(|err| err.with_frame(module, None, self.environment.len(), location))?;
+            .call_function(function, module_id, arguments)
+            .map_err(|err| {
+                err.with_frame(
+                    module_id,
+                    FunctionId::Local(function_id),
+                    self.environment.len(),
+                    location,
+                )
+            })?;
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
         Ok(result)
@@ -309,19 +372,14 @@ impl EvalCtx {
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
-        let (function, module) = self.get_function(function_id);
+        let (function, module_id) = self.get_function(function_id);
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(self.get_stack_entry_from_function_id(function_id));
         let result = self
-            .call_function(&function, module.clone(), arguments)
+            .call_function(&function, module_id, arguments)
             .map_err(|err| {
-                err.with_frame(
-                    self.module.clone(),
-                    Some(function_id),
-                    self.environment.len(),
-                    location,
-                )
+                err.with_frame(module_id, function_id, self.environment.len(), location)
             })?;
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
@@ -332,15 +390,15 @@ impl EvalCtx {
     fn call_function(
         &mut self,
         function: &FunctionRc,
-        mut module: ModuleRc,
+        mut module_id: ModuleId,
         arguments: Vec<ValOrMut>,
     ) -> EvalControlFlowResult {
         // Use the new module for the duration of the function call.
-        mem::swap(&mut self.module, &mut module);
+        mem::swap(&mut self.module_id, &mut module_id);
         // Call the function.
         let result = function.borrow().call(arguments, self);
         // Restore the previous module.
-        mem::swap(&mut self.module, &mut module);
+        mem::swap(&mut self.module_id, &mut module_id);
         // Return the call result.
         result
     }
@@ -433,8 +491,8 @@ impl Place {
     }
 }
 
-impl FormatWith<EvalCtx> for Place {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx) -> std::fmt::Result {
+impl FormatWith<EvalCtx<'_>> for Place {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter<'_>, data: &EvalCtx<'_>) -> std::fmt::Result {
         let Place { target, path } = self;
         let ctx = data;
         let relative_index = *target as isize - ctx.frame_base as isize;
@@ -466,8 +524,8 @@ impl ControlFlow<Value> {
 
 #[derive(Debug, Clone)]
 pub struct BacktraceFrame {
-    module: ModuleRc,
-    function_id: Option<FunctionId>,
+    module_id: ModuleId,
+    function_id: FunctionId,
     #[allow(dead_code)]
     frame_base: usize,
     location: Location,
@@ -480,33 +538,31 @@ impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
     ) -> std::fmt::Result {
         let (source_table, modules) = data;
         let mut module_path = modules
-            .get_module_path(&self.module)
+            .get_name(self.module_id)
             .map(|name| format!("{name}"))
             .unwrap_or("<unknown>".to_string());
+        let module = modules.get(self.module_id).unwrap();
         match self.function_id {
-            Some(function_id) => match function_id {
-                FunctionId::Local(id) => {
-                    let local_name = self.module.get_function_name_by_id(id).unwrap();
-                    write!(f, "{module_path}::{local_name}")?
-                }
-                FunctionId::Import(id) => {
-                    let slot = &self.module.get_import_fn_slot(id).unwrap();
-                    module_path = format!("{}", slot.module);
-                    use ImportFunctionTarget::*;
-                    match &slot.target {
-                        TraitImplMethod { key, index } => {
-                            let trait_ref = key.trait_ref();
-                            write!(
-                                f,
-                                "{}",
-                                trait_ref.qualified_method_name(*index as usize, key.input_tys())
-                            )?
-                        }
-                        NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
+            FunctionId::Local(id) => {
+                let local_name = module.get_function_name_by_id(id).unwrap();
+                write!(f, "{module_path}::{local_name}")?
+            }
+            FunctionId::Import(id) => {
+                let slot = module.get_import_fn_slot(id).unwrap();
+                module_path = format!("{}", slot.module);
+                use ImportFunctionTarget::*;
+                match &slot.target {
+                    TraitImplMethod { key, index } => {
+                        let trait_ref = key.trait_ref();
+                        write!(
+                            f,
+                            "{}",
+                            trait_ref.qualified_method_name(*index as usize, key.input_tys())
+                        )?
                     }
+                    NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
                 }
-            },
-            None => write!(f, "{module_path}::<anonymous function>")?,
+            }
         };
         write!(f, " at {}", self.location.format_with(source_table))
     }
@@ -534,14 +590,14 @@ impl RuntimeError {
 
     pub fn with_frame(
         self,
-        module: ModuleRc,
-        function_id: Option<FunctionId>,
+        module_id: ModuleId,
+        function_id: FunctionId,
         frame_base: usize,
         location: Location,
     ) -> Self {
         let mut backtrace = self.backtrace;
         backtrace.push(BacktraceFrame {
-            module,
+            module_id,
             function_id,
             frame_base,
             location,
@@ -629,8 +685,12 @@ macro_rules! eval_or_return {
 
 impl Node {
     /// Evaluate this node and return the result.
-    pub fn eval(&self, module: ModuleRc) -> EvalControlFlowResult {
-        let mut ctx = EvalCtx::new(module);
+    pub fn eval(
+        &self,
+        module_id: ModuleId,
+        compiler_session: &CompilerSession,
+    ) -> EvalControlFlowResult {
+        let mut ctx = EvalCtx::new(module_id, compiler_session);
         self.eval_with_ctx(&mut ctx)
     }
 
@@ -643,9 +703,9 @@ impl Node {
                 let captured = eval_or_return!(eval_nodes(&build_closure.captures, ctx));
                 // Note: function should be GetFunction or similar immediate - returns not allowed here
                 let function_value = build_closure.function.eval_with_ctx(ctx)?.into_value();
-                let function_value = function_value.into_function().unwrap().function;
+                let function_value = function_value.into_function().unwrap();
                 let function_value =
-                    FunctionValue::new(function_value, Rc::downgrade(&ctx.module), captured);
+                    FunctionValue::new(function_value.function, function_value.module, captured);
                 cont(Value::Function(function_value))
             }
             Apply(app) => {
@@ -674,8 +734,8 @@ impl Node {
                 );
             }
             GetFunction(get_fn) => {
-                let (function, module) = ctx.get_function(get_fn.function);
-                cont(Value::function_rc(function, Rc::downgrade(&module)))
+                let (function, module_id) = ctx.get_function_local_id(get_fn.function);
+                cont(Value::function(function, module_id))
             }
             GetDictionary(get_dict) => {
                 let value = ctx.get_dictionary(get_dict.dictionary);

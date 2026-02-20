@@ -14,7 +14,8 @@ use std::{
 };
 
 use crate::{
-    CompilationError, CompilerSession, DisplayStyle, Location, ModuleAndExpr, ModuleEnv, SourceId,
+    CompilationError, CompilerSession, DisplayStyle, Location, ModuleAndExpr, ModuleEnv, Path,
+    SourceId,
     error::{
         CompilationErrorImpl, ImportKind, MutabilityMustBeWhat, WhatIsNotAProductType,
         WhichProductTypeIsNot,
@@ -22,8 +23,7 @@ use crate::{
     eval::{EvalCtx, ValOrMut},
     format::FormatWith,
     location::SourceTable,
-    module::{self, ModuleFunction, ModuleRc, Modules},
-    std::new_module_using_std,
+    module::{ModuleFunction, ModuleRc, Modules},
     r#type::{FnArgType, Type, tuple_type},
     value::{NativeValue, Value},
 };
@@ -716,30 +716,33 @@ impl ExecutionResult {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Compiler {
     session: CompilerSession,
-    modules: Modules,
     user_module: ModuleAndExpr,
     char_index_lookup: HashMap<SourceId, CharIndexLookup>,
 }
 
 const SRC_NAME: &str = "<ide>";
+const MODULE_NAME: &str = "ide";
 
 /// The compiler to be used in the web IDE, wasm-available part
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl Compiler {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
     pub fn new() -> Self {
-        let session = CompilerSession::new();
-        let modules = session.std_modules().clone();
+        let mut session = CompilerSession::new();
+        let user_module = session
+            .compile("", SRC_NAME, Path::single_str(MODULE_NAME))
+            .unwrap();
         Self {
             session,
-            modules,
-            user_module: ModuleAndExpr::new_just_module(new_module_using_std()),
+            user_module,
             char_index_lookup: HashMap::new(),
         }
     }
 
     fn compile_internal(&mut self, src: &str) -> Result<(), CompilationError> {
-        self.user_module = self.session.compile(SRC_NAME, src, &self.modules)?;
+        self.user_module = self
+            .session
+            .compile(src, SRC_NAME, Path::single_str(MODULE_NAME))?;
         Ok(())
     }
 
@@ -763,14 +766,17 @@ impl Compiler {
     }
 
     pub fn fn_signature(&self, name: &str) -> Option<String> {
-        if let Some(func) = self
-            .user_module
-            .module
-            .lookup_function(name, &self.modules)
+        let module = self
+            .session
+            .modules()
+            .get(self.user_module.module_id)
+            .unwrap();
+        if let Some(func) = module
+            .lookup_function(name, self.session.modules())
             .ok()
             .flatten()
         {
-            let module_env = ModuleEnv::new(&self.user_module.module, &self.modules, false);
+            let module_env = ModuleEnv::new(module, self.session.modules(), false);
             Some(format!(
                 "{}",
                 func.definition.ty_scheme.display_rust_style(&module_env)
@@ -789,10 +795,15 @@ impl Compiler {
 
     pub fn run_expr(&self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
-            match expr.expr.eval(self.user_module.module.clone()) {
+            match expr.expr.eval(self.user_module.module_id, &self.session) {
                 Ok(value) => {
                     let value = value.into_value();
-                    let module_env = ModuleEnv::new(&self.user_module.module, &self.modules, false);
+                    let module = self
+                        .session
+                        .modules()
+                        .get(self.user_module.module_id)
+                        .unwrap();
+                    let module_env = ModuleEnv::new(module, self.session.modules(), false);
                     let output = format!(
                         "{}: {}",
                         value.display_pretty(&expr.ty.ty),
@@ -802,14 +813,9 @@ impl Compiler {
                 }
                 Err(error) => {
                     let summary = error.kind.to_string();
-                    let mut modules = self.modules.clone();
-                    modules.register_module_rc(
-                        module::Path::single_str(SRC_NAME),
-                        self.user_module.module.clone(),
-                    );
                     let complete = format!(
                         "{}",
-                        error.format_with(&(self.session.source_table(), &modules))
+                        error.format_with(&(self.session.source_table(), self.session.modules()))
                     );
                     let source_id = self
                         .session
@@ -842,7 +848,7 @@ impl Compiler {
         let annotations = self.user_module.display_annotations(
             source_id,
             source_entry.source(),
-            &self.modules,
+            &self.session,
             DisplayStyle::Rust,
         );
         let mut annotations = annotations
@@ -867,17 +873,21 @@ impl Compiler {
 
     pub fn list_module_fns(&self) -> Vec<FunctionSignature> {
         let mut sigs = Vec::new();
-        for module in &self.modules.modules {
-            let mod_name = module.0;
-            for (sym_name, func) in module.1.iter_named_functions() {
+        let user_module = self
+            .session
+            .modules()
+            .get(self.user_module.module_id)
+            .unwrap();
+        for (mod_name, module) in self.session.modules().iter_named() {
+            for (sym_name, func) in module.iter_named_functions() {
                 // skip trait methods
-                if !module.1.is_non_trait_local_function(sym_name) {
+                if !module.is_non_trait_local_function(sym_name) {
                     continue;
                 }
                 if sym_name.starts_with('@') {
                     continue; // skip hidden functions
                 }
-                let name = if self.user_module.module.uses(mod_name, sym_name) {
+                let name = if user_module.uses(mod_name, sym_name) {
                     sym_name.to_string()
                 } else {
                     format!("{mod_name}::{sym_name}")
@@ -901,11 +911,15 @@ impl Compiler {
         static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@(get|set) (.*)$").unwrap());
         let mut getters = HashSet::new();
         let mut setters = HashSet::new();
-        for module in &self.modules.modules {
-            let mod_name = module.0;
-            for (sym_name, _) in module.1.iter_named_functions() {
+        let user_module = self
+            .session
+            .modules()
+            .get(self.user_module.module_id)
+            .unwrap();
+        for (mod_name, module) in self.session.modules().iter_named() {
+            for (sym_name, _) in module.iter_named_functions() {
                 // skip trait methods
-                if !module.1.is_non_trait_local_function(sym_name) {
+                if !module.is_non_trait_local_function(sym_name) {
                     continue;
                 }
                 let captures = if let Some(captures) = RE.captures(&sym_name) {
@@ -920,7 +934,7 @@ impl Compiler {
                     "set" => &mut setters,
                     _ => continue,
                 };
-                if self.user_module.module.uses(mod_name, sym_name) {
+                if user_module.uses(mod_name, sym_name) {
                     bin.insert(format!("@{name}"));
                 } else {
                     bin.insert(format!("@{mod_name}::{name}"));
@@ -958,8 +972,13 @@ impl Compiler {
         name: &str,
         f: impl FnOnce(&ModuleFunction, &ModuleRc, &Modules) -> Result<R, String>,
     ) -> Result<R, String> {
-        match self.user_module.module.lookup_function(name, &self.modules) {
-            Ok(Some(func)) => f(func, &self.user_module.module, &self.modules),
+        let user_module = self
+            .session
+            .modules()
+            .get(self.user_module.module_id)
+            .unwrap();
+        match user_module.lookup_function(name, self.session.modules()) {
+            Ok(Some(func)) => f(func, user_module, self.session.modules()),
             Ok(None) => Err(format!("Function {name} not found")),
             Err(e) => Err(format!("Lookup error for {name}: {e:?}")),
         }
@@ -977,7 +996,7 @@ impl Compiler {
                     func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new(current.clone());
+                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
                 let _ret = func
                     .code
                     .borrow()
@@ -1003,7 +1022,7 @@ impl Compiler {
                     func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new(current.clone());
+                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
                 let ret = func
                     .code
                     .borrow()
@@ -1035,7 +1054,7 @@ impl Compiler {
                     func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new(current.clone());
+                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
                 let ret = func
                     .code
                     .borrow()
@@ -1079,7 +1098,7 @@ impl Compiler {
                     func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new(current.clone());
+                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
                 let ret = func
                     .code
                     .borrow()
@@ -1114,7 +1133,7 @@ impl Compiler {
                     func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new(current.clone());
+                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
                 let _ret = func
                     .code
                     .borrow()
@@ -1147,7 +1166,7 @@ impl Compiler {
                     func.definition.ty_scheme.display_rust_style(&module_env)
                 ))
             } else {
-                let mut ctx = EvalCtx::new(current.clone());
+                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
                 let ret = func
                     .code
                     .borrow()

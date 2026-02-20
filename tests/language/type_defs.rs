@@ -71,7 +71,8 @@ fn define_enum_types() {
         // Empty enum
         enum Empty {}
     "# };
-    let module = session.compile(mod_src).module;
+    let module_id = session.compile(mod_src).module_id;
+    let module = session.modules().get(module_id).unwrap();
 
     let simple_color = module.get_type_def(ustr("SimpleColor")).unwrap();
     assert_eq!(simple_color.name, ustr("SimpleColor"));
@@ -422,7 +423,8 @@ fn define_struct_types() {
             callback: (string) -> ()
         }
     "# };
-    let module = session.compile(mod_src).module;
+    let module_id = session.compile(mod_src).module_id;
+    let module = session.modules().get(module_id).unwrap();
 
     let empty_type = module.get_type_def(ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));
@@ -766,8 +768,7 @@ fn attributes() {
     // Helper to get attributes of a type definition
     let mut attrs = |code, name| {
         session
-            .compile(code)
-            .module
+            .compile_and_get_module(code)
             .get_type_def(ustr(name))
             .unwrap()
             .attributes

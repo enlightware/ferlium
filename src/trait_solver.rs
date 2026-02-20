@@ -34,7 +34,7 @@ use crate::{
     r#type::{FnArgType, Type},
     type_inference::UnifiedTypeInference,
     type_like::TypeLike,
-    value::Value,
+    value::{Value, build_dictionary_value},
 };
 
 #[cfg(debug_assertions)]
@@ -110,7 +110,7 @@ impl<'a> TraitSolver<'a> {
     /// Only public implementations from other modules are considered.
     pub fn has_concrete_impl(&self, key: &ConcreteTraitImplKey) -> bool {
         self.impls.concrete_key_to_id.contains_key(key)
-            || self.others.modules.iter().any(|(_, m)| {
+            || self.others.iter_named().any(|(_, m)| {
                 let id = m.impls.concrete_key_to_id.get(key);
                 if let Some(id) = id {
                     let imp = &m.impls.data[id.as_index()];
@@ -131,7 +131,7 @@ impl<'a> TraitSolver<'a> {
             .get(key)
             .map(|id| TraitImplId::Local(*id))
             .or_else(|| {
-                self.others.modules.iter().find_map(|(path, m)| {
+                self.others.iter_named().find_map(|(path, m)| {
                     m.impls.concrete_key_to_id.get(key).and_then(|id| {
                         let imp = &m.impls.data[id.as_index()];
                         if imp.public {
@@ -158,7 +158,7 @@ impl<'a> TraitSolver<'a> {
             .get(trait_ref)
             .map(|blankets| (None, blankets))
             .into_iter()
-            .chain(self.others.modules.iter().flat_map(|(path, m)| {
+            .chain(self.others.iter_named().flat_map(|(path, m)| {
                 m.impls
                     .blanket_key_to_id
                     .get(trait_ref)
@@ -169,10 +169,10 @@ impl<'a> TraitSolver<'a> {
     /// Print all known implementations for the given trait reference.
     fn log_debug_impls(&self, trait_ref: &TraitRef) {
         log::debug!("In current module:");
-        let fake_current = new_module_using_std();
+        let fake_current = new_module_using_std(self.others.next_id());
         let env = ModuleEnv::new(&fake_current, self.others, false);
         self.impls.log_debug_impls_headers(trait_ref, env);
-        for (module_path, module) in &self.others.modules {
+        for (module_path, module) in self.others.iter_named() {
             if module.impls.blanket_key_to_id.contains_key(trait_ref) {
                 log::debug!("In module {}:", module_path);
                 module.impls.log_debug_impls_headers(trait_ref, env);
@@ -219,7 +219,7 @@ impl<'a> TraitSolver<'a> {
                 let imp = TraitImpl {
                     output_tys: vec![output_ty],
                     methods: vec![],
-                    dictionary_value: RefCell::new(Value::empty_tuple()),
+                    dictionary_value: Value::empty_tuple(),
                     dictionary_ty: Type::tuple([]),
                     public: false,
                 };
@@ -361,7 +361,7 @@ impl<'a> TraitSolver<'a> {
 
                 // Succeeded? First get the blanket implementation data and compute the output types.
                 let impls = if let Some(module_path) = &imp_mod_path {
-                    &self.others.modules[module_path].impls
+                    &self.others.get_value_by_name(module_path).unwrap().impls
                 } else {
                     #[allow(clippy::needless_borrow)] // clippy has a bug here as of Rust 1.90
                     &self.impls
@@ -454,7 +454,7 @@ impl<'a> TraitSolver<'a> {
 
                 // Build and insert the implementation.
                 let dictionary_ty = Type::tuple(tys);
-                let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
+                let dictionary_value = build_dictionary_value(&methods, self.impls.module_id);
                 let imp =
                     TraitImpl::new(output_tys, methods, dictionary_value, dictionary_ty, true);
                 let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
@@ -543,14 +543,12 @@ impl<'a> TraitSolver<'a> {
                 let key = slot.key.as_concrete().unwrap();
                 let other_impls = &self
                     .others
-                    .modules
-                    .get(module_path)
-                    .expect("imported module not found")
+                    .get_value_by_name(module_path)
+                    .unwrap_or_else(|| panic!("imported module {module_path} not found"))
                     .impls;
-                let id = other_impls
-                    .concrete_key_to_id
-                    .get(key)
-                    .expect("imported trait impl not found");
+                let id = other_impls.concrete_key_to_id.get(key).unwrap_or_else(|| {
+                    panic!("imported trait impl {key:?} not found in module {module_path}")
+                });
                 &other_impls.data[id.as_index()]
             }
         }
@@ -564,7 +562,7 @@ impl<'a> TraitSolver<'a> {
         module_path: &module::Path,
         function_name: Ustr,
     ) -> Result<FunctionId, InternalCompilationError> {
-        let module = self.others.modules.get(module_path).ok_or_else(|| {
+        let module = self.others.get_value_by_name(module_path).ok_or_else(|| {
             internal_compilation_error!(Internal {
                 error: format!(
                     "Module {module_path} not found when looking for function {function_name}"
@@ -601,7 +599,6 @@ impl<'a> TraitSolver<'a> {
                 self.import_fn_slots.push(ImportFunctionSlot {
                     module: module_path.clone(),
                     target: ImportFunctionTarget::NamedFunction(function_name),
-                    resolved: RefCell::new(None),
                 });
                 ImportFunctionSlotId::from_index(index)
             })
@@ -629,7 +626,6 @@ impl<'a> TraitSolver<'a> {
                         key,
                         index: method_index,
                     },
-                    resolved: RefCell::new(None),
                 });
                 ImportFunctionSlotId::from_index(index)
             })
@@ -651,7 +647,6 @@ impl<'a> TraitSolver<'a> {
                 self.import_impl_slots.push(ImportImplSlot {
                     module: module_path.clone(),
                     key,
-                    resolved: RefCell::new(None),
                 });
                 ImportImplSlotId::from_index(index)
             })

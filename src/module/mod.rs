@@ -31,7 +31,7 @@ pub use trait_impl::*;
 pub use uses::*;
 
 use std::{
-    cell::{Ref, RefCell, RefMut},
+    cell::{Ref, RefMut},
     fmt,
     hash::Hash,
 };
@@ -39,9 +39,7 @@ use std::{
 use ustr::{Ustr, ustr};
 
 use crate::{
-    Location,
-    containers::SVec2,
-    define_id_type,
+    Location, define_id_type,
     emit_ir::EmitTraitOutput,
     error::{ImportKind, ImportSite, InternalCompilationError},
     format::FormatWith,
@@ -51,7 +49,7 @@ use crate::{
     module::id::{Id, NamedIndexed},
     r#trait::TraitRef,
     r#type::{LocalTypeAliasId, Type, TypeAliases, TypeDefRef},
-    value::Value,
+    value::build_dictionary_value,
 };
 
 define_id_type!(
@@ -95,7 +93,7 @@ pub type DefTable = NamedIndexed<Ustr, LocalDefId, DefKind>;
 /// Items are conceptually private, but some are pub(crate) for lifetime constraints.
 /// These are only accessed directly by emit_ir and trait_solver, other users should go through accessors,
 /// with the exception of uses which is also accessed directly by desugar.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Module {
     pub(crate) import_fn_slots: Vec<ImportFunctionSlot>,
     pub(crate) import_impl_slots: Vec<ImportImplSlot>,
@@ -116,6 +114,21 @@ pub struct Module {
 }
 
 impl Module {
+    /// Create a new empty module with the given ID, store the id in impls for later use.
+    pub fn new(module_id: ModuleId) -> Self {
+        Self {
+            import_fn_slots: Vec::new(),
+            import_impl_slots: Vec::new(),
+            uses: Uses::default(),
+            def_table: DefTable::new(),
+            functions: Vec::new(),
+            type_aliases: TypeAliases::default(),
+            type_defs: Vec::new(),
+            traits: Traits::new(),
+            impls: TraitImpls::new(module_id),
+        }
+    }
+
     // Imports
 
     /// Get a function import slot by ID
@@ -244,7 +257,7 @@ impl Module {
     /// Get a local function name by ID (slow, iterates over the def table)
     pub fn get_function_name_by_id(&self, id: LocalFunctionId) -> Option<Ustr> {
         self.def_table
-            .data_iter()
+            .iter_values_and_names()
             .find(|(def_kind, _)| {
                 def_kind
                     .as_function()
@@ -271,7 +284,7 @@ impl Module {
     /// Iterate over all named local functions in this module, returning their name and data.
     pub fn iter_named_functions(&self) -> impl Iterator<Item = (Ustr, &ModuleFunction)> {
         self.def_table
-            .data_iter()
+            .iter_values_and_names()
             .filter_map(|(def_kind, name_opt)| {
                 let name = (*name_opt)?;
                 def_kind.as_function().map(|function_id| {
@@ -366,7 +379,7 @@ impl Module {
         let id = LocalTraitId::from_index(self.traits.len());
         self.traits.push(trait_ref.clone());
         // As currently only std defines traits, we asserts that it has not been added yet.
-        assert!(self.def_table.get_by_name(trait_ref.name).is_none());
+        assert!(self.def_table.get_by_name(&trait_ref.name).is_none());
         self.def_table.insert(trait_ref.name, DefKind::Trait(id));
         id
     }
@@ -429,8 +442,7 @@ impl Module {
         // TODO: ensure coherence
 
         let dictionary_ty = self.computer_dictionary_ty(&emit_output.functions);
-        // Build and insert the implementation.
-        let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
+        let dictionary_value = build_dictionary_value(&emit_output.functions, self.impls.module_id);
         let imp = TraitImpl::new(
             emit_output.output_tys,
             emit_output.functions,
@@ -496,7 +508,7 @@ impl Module {
 
     /// Return an iterator over the names of all own symbols in this module.
     pub fn own_symbols(&self) -> impl Iterator<Item = Ustr> + use<'_> {
-        self.def_table.name_iter().copied()
+        self.def_table.iter_names().copied()
     }
 
     /// Return the type for the source pos, if any.
@@ -516,7 +528,7 @@ impl Module {
     /// Look-up a definition by name in this module.
     pub fn get_definition(&self, name: Ustr) -> Option<DefKind> {
         self.def_table
-            .get_by_name(name)
+            .get_by_name(&name)
             .map(|(_, def_kind)| *def_kind)
     }
 
@@ -535,7 +547,7 @@ impl Module {
 
         let u_name = ustr(name);
         if let Some(use_data) = self.uses.explicits.get(&u_name) {
-            if let Some(module_ref) = others.get(&use_data.module) {
+            if let Some(module_ref) = others.get_value_by_name(&use_data.module) {
                 if let Some(t) = getter(name, module_ref) {
                     return Ok(Some((Some(use_data.module.clone()), t)));
                 }
@@ -544,7 +556,7 @@ impl Module {
 
         let mut matches = Vec::new();
         for wildcard_use in &self.uses.wildcards {
-            if let Some(module_ref) = others.get(&wildcard_use.module) {
+            if let Some(module_ref) = others.get_value_by_name(&wildcard_use.module) {
                 if let Some(t) = getter(name, module_ref) {
                     matches.push((wildcard_use, t));
                 }
@@ -613,7 +625,7 @@ impl Module {
             }
             let named_count = self
                 .def_table
-                .data_iter()
+                .iter_values_and_names()
                 .filter(|(kind, name)| {
                     if !kind.is_function() {
                         false
@@ -811,32 +823,6 @@ impl Module {
             }
         }
         Ok(())
-    }
-}
-
-/// Finalize the module:
-/// - Build dictionary values for trait implementations.
-/// - Resolve pending function values inside the module by attaching the module's weak reference.
-pub fn finalize_module(module_rc: &ModuleRc) {
-    for function in &module_rc.functions {
-        let mut fn_mut = function.code.borrow_mut();
-        if let Some(script_fn) = fn_mut.as_script_mut() {
-            script_fn.code.finalize_pending_values(module_rc);
-        }
-    }
-    for imp in &module_rc.impls.data {
-        let mut value = imp.dictionary_value.borrow_mut();
-        let values = imp
-            .methods
-            .iter()
-            .map(|fn_id| {
-                let function = &module_rc.functions[fn_id.as_index()];
-                let code = function.code.clone();
-                Value::PendingFunction(code.clone())
-            })
-            .collect::<SVec2<_>>();
-        *value = Value::tuple(values);
-        value.finalize_pending(module_rc);
     }
 }
 

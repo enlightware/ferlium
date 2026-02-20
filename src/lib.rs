@@ -58,6 +58,7 @@ pub mod value;
 
 pub use ide::Compiler;
 pub use location::{Location, SourceId, SourceTable};
+pub use module::{Modules, Path};
 pub use type_inference::SubOrSameType;
 
 use type_scheme::DisplayStyle;
@@ -65,10 +66,7 @@ pub use ustr::{Ustr, ustr};
 
 use crate::{
     format::FormatWith,
-    module::{
-        Module, ModuleId, ModuleRc, Modules,
-        id::{Id, NamedIndexed},
-    },
+    module::{Module, ModuleId, ModuleRc, id::Id},
     r#type::Type,
 };
 
@@ -79,21 +77,21 @@ lalrpop_mod!(
 );
 
 /// A compiled module and an expression (if any).
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct ModuleAndExpr {
-    pub module: ModuleRc,
+    pub module_id: ModuleId,
     pub expr: Option<CompiledExpr>,
 }
 impl ModuleAndExpr {
-    pub fn new_just_module(module: Module) -> Self {
-        let module = Rc::new(module);
-        assert!(module.function_count() == 0);
-        assert!(module.impl_count() == 0);
-        Self { module, expr: None }
+    pub fn new_just_module(module: ModuleId) -> Self {
+        Self {
+            module_id: module,
+            expr: None,
+        }
     }
 }
 
-pub type AstInspectorCb<'a> = &'a dyn Fn(&ast::PModule, &Option<ast::PExpr>);
+pub type AstInspectorCb<'a> = &'a dyn Fn(&ast::PModule, &Option<ast::PExpr>, &Modules);
 
 /// A compilation session, that contains a source table and the standard library.
 #[derive(Debug)]
@@ -101,31 +99,30 @@ pub struct CompilerSession {
     /// Source table for this compilation session.
     source_table: SourceTable,
     /// All compiled modules
-    modules: NamedIndexed<module::Path, ModuleId, ModuleRc>,
+    modules: Modules,
     /// Pre-created standard library module.
     std_module: ModuleId,
-    /// Pre-created set of modules including only the standard library.
-    std_modules: Modules,
     /// Pre-created empty module just using the standard library, for debugging purposes.
-    empty_std_user: Module,
+    empty_std_user: ModuleId,
 }
 
 impl CompilerSession {
     /// Create a new compilation session with an empty source table and the standard library loaded.
     pub fn new() -> Self {
         let mut source_table = SourceTable::default();
-        let std_module = std::std_module(&mut source_table);
-        let mut modules = NamedIndexed::default();
+        let mut modules = Modules::default();
+        let std_module = std::std_module(&mut source_table, modules.next_id());
         let std_name = module::Path::single_str("std");
         modules.insert(std_name.clone(), std_module.clone());
-        let mut std_modules: Modules = Default::default();
-        std_modules.modules.insert(std_name, std_module.clone());
-        let empty_std_user = new_module_using_std();
+        let empty_std_user = new_module_using_std(modules.next_id());
+        let empty_std_user = modules.insert(
+            module::Path::single_str("$empty_std_user"),
+            Rc::new(empty_std_user),
+        );
         Self {
             source_table,
             modules,
             std_module: ModuleId::from_index(0),
-            std_modules,
             empty_std_user,
         }
     }
@@ -135,12 +132,27 @@ impl CompilerSession {
         &self.source_table
     }
 
+    /// Get all compiled modules for this compilation session.
+    pub fn modules(&self) -> &Modules {
+        &self.modules
+    }
+
+    /// Get a module by its ID, if it exists.
+    pub fn get_module_by_id(&self, id: ModuleId) -> Option<&ModuleRc> {
+        self.modules.get(id)
+    }
+
+    /// Get a module by its path, if it exists.
+    pub fn get_module_by_path(&self, path: &module::Path) -> Option<&ModuleRc> {
+        self.modules.get_by_name(path).map(|(_, module)| module)
+    }
+
     /// Get a module environment, with an empty module including the standard library
     /// for debugging purposes.
-    pub fn std_module_env(&self) -> ModuleEnv<'_> {
+    pub fn module_env(&self) -> ModuleEnv<'_> {
         ModuleEnv {
-            others: &self.std_modules,
-            current: &self.empty_std_user,
+            others: &self.modules,
+            current: self.modules.get(self.empty_std_user).unwrap(),
             within_std: false,
         }
     }
@@ -150,14 +162,11 @@ impl CompilerSession {
         self.modules.get(self.std_module).unwrap()
     }
 
-    /// Get the standard library as a set of modules.
-    pub fn std_modules(&self) -> &Modules {
-        &self.std_modules
-    }
-
-    /// Create a new set of modules including the standard library.
-    pub fn new_std_modules(&self) -> Modules {
-        self.std_modules.clone()
+    /// Register a module in this compilation session and return its id.
+    pub fn register_module(&mut self, path: module::Path, module: ModuleRc) -> ModuleId {
+        let module_id = self.modules.insert(path, module);
+        log::debug!("Registered module with id {module_id}");
+        module_id
     }
 
     /// Parse a type from a source code and return the corresponding fully-defined Type.
@@ -186,7 +195,7 @@ impl CompilerSession {
             .parse_defined_type(name, src)
             .map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
         let span = Location::new_usize(0, src.len(), source_id);
-        let env = self.std_module_env();
+        let env = self.module_env();
         ast.desugar(span, false, &env)
             .map_err(|error| CompilationError::resolve_types(error, &env, &self.source_table))
     }
@@ -219,60 +228,61 @@ impl CompilerSession {
             .parse_holed_type(name, src)
             .map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
         let span = Location::new_usize(0, src.len(), source_id);
-        let env = self.std_module_env();
+        let env = self.module_env();
         ast.desugar(span, false, &env)
             .map_err(|error| CompilationError::resolve_types(error, &env, &self.source_table))
     }
 
-    /// Compile a source code, given some other Modules, and return the compiled module and an expression (if any), or an error.
+    /// Compile a source code and return the compiled module and an expression (if any), or an error.
     /// All spans are in byte offsets.
     pub fn compile(
         &mut self,
+        src_code: &str,
         source_name: &str,
-        src: &str,
-        other_modules: &Modules,
+        module_path: Path,
     ) -> Result<ModuleAndExpr, CompilationError> {
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
                 "Using other modules: {}",
-                other_modules.modules.keys().join(", ")
+                self.modules.iter_names().join(", ")
             );
-            log::debug!("Input: {src}");
+            log::debug!("Input: {src_code}");
         }
 
         // Prepare a module with the extra uses.
-        let module = new_module_using_std();
+        let module = new_module_using_std(self.modules.next_id());
 
         // Compile the code.
         // If debug logging is enabled, prepare an AST inspector that logs the ASTs.
         let output = if log::log_enabled!(log::Level::Debug) {
             let dbg_module = module.clone();
-            let ast_inspector = |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>| {
-                let env = ModuleEnv::new(&dbg_module, other_modules, false);
-                log::debug!("Module AST\n{}", module_ast.format_with(&env));
-                if let Some(expr_ast) = expr_ast {
-                    log::debug!("Expr AST\n{}", expr_ast.format_with(&env));
-                }
-            };
+            let ast_inspector =
+                |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>, modules: &Modules| {
+                    let env = ModuleEnv::new(&dbg_module, modules, false);
+                    log::debug!("Module AST\n{}", module_ast.format_with(&env));
+                    if let Some(expr_ast) = expr_ast {
+                        log::debug!("Expr AST\n{}", expr_ast.format_with(&env));
+                    }
+                };
             self.compile_to(
+                src_code,
                 source_name,
-                src,
+                module_path,
                 module,
-                other_modules,
                 Some(&ast_inspector),
             )
         } else {
-            self.compile_to(source_name, src, module, other_modules, None)
+            self.compile_to(src_code, source_name, module_path, module, None)
         }?;
 
         // If debug logging is enabled, display the final IR, after linking and finalizing pending functions.
         if log::log_enabled!(log::Level::Debug) {
-            if !output.module.is_empty() {
-                let module: &Module = &output.module;
-                log::debug!("Module IR\n{}", module.format_with(other_modules));
+            let module = self.modules.get(output.module_id).unwrap();
+            if !module.is_empty() {
+                log::debug!("Module IR\n{}", module.format_with(&self.modules));
             }
             if let Some(expr) = output.expr.as_ref() {
-                let env = ModuleEnv::new(&output.module, other_modules, false);
+                let env = ModuleEnv::new(module, &self.modules, false);
                 log::debug!("Expr IR\n{}", expr.expr.format_with(&env));
             }
         }
@@ -280,39 +290,59 @@ impl CompilerSession {
         Ok(output)
     }
 
-    /// Compile a source code, given some other Modules, and return the compiled module and an expression (if any), or an error.
+    /// Compile a source code and return the compiled module and an expression (if any), or an error.
     /// Merge with existing module.
     /// All spans are in byte offsets.
     pub fn compile_to(
         &mut self,
+        src_code: &str,
         source_name: &str,
-        src: &str,
+        module_path: Path,
         module: Module,
-        other_modules: &Modules,
         ast_inspector: Option<AstInspectorCb<'_>>,
     ) -> Result<ModuleAndExpr, CompilationError> {
         // Parse the source code.
         let source_id = self
             .source_table
-            .add_source(source_name.to_string(), src.to_string());
-        let (module_ast, expr_ast) = parse_module_and_expr(src, source_id, false)
+            .add_source(source_name.to_string(), src_code.to_string());
+        let (module_ast, expr_ast) = parse_module_and_expr(src_code, source_id, false)
             .map_err(|error| compilation_error!(ParsingFailed(error)))?;
         if let Some(ast_inspector) = ast_inspector {
-            ast_inspector(&module_ast, &expr_ast);
+            ast_inspector(&module_ast, &expr_ast, &self.modules);
         }
 
+        // FIXME: this always associates a ModuleId, even if the module was not there yet and the compilation fails.
+        // We might not want this behavior.
+
+        // Get the old module of the same name, replacing it with a dummy for the duration of the compilation.
+        let (module_id, old_module) = self.modules.replace(
+            module_path.clone(),
+            Rc::new(Module::new(self.modules.next_id())),
+        );
+
         // Emit IR for the module.
-        let mut module =
-            emit_module(module_ast, other_modules, Some(&module), false).map_err(|error| {
-                let env = ModuleEnv::new(&module, other_modules, false);
+        let mut module = emit_module(module_ast, module_id, &self.modules, Some(&module), false)
+            .map_err(|error| {
+                // Restore the old module in case of error, to avoid leaving the session in a broken state.
+                // Note: the clone on old_module is due to a limitation of the borrow checker not realizing this function
+                // is only called when the parent function is exited with the ? below.
+                old_module
+                    .clone()
+                    .map(|old_module| self.modules.replace(module_path.clone(), old_module));
+                // Resolve types in the error, to provide better error messages.
+                let env = ModuleEnv::new(&module, &self.modules, false);
                 CompilationError::resolve_types(error, &env, &self.source_table)
             })?;
 
         // Emit IR for the expression, if any.
-        let mut expr = if let Some(expr_ast) = expr_ast {
-            let compiled_expr =
-                emit_expr(expr_ast, &mut module, other_modules, vec![]).map_err(|error| {
-                    let env = ModuleEnv::new(&module, other_modules, false);
+        let expr = if let Some(expr_ast) = expr_ast {
+            let compiled_expr = emit_expr(expr_ast, &mut module, module_id, &self.modules, vec![])
+                .map_err(|error| {
+                    // Restore the old module in case of error, to avoid leaving the session in a broken state.
+                    old_module
+                        .map(|old_module| self.modules.replace(module_path.clone(), old_module));
+                    // Resolve types in the error, to provide better error messages.
+                    let env = ModuleEnv::new(&module, &self.modules, false);
                     CompilationError::resolve_types(error, &env, &self.source_table)
                 })?;
             Some(compiled_expr)
@@ -320,24 +350,11 @@ impl CompilerSession {
             None
         };
 
-        // Finalize the module and the expression.
+        // Store the module.
         let module = Rc::new(module);
-        module::finalize_module(&module);
-        if let Some(expr) = expr.as_mut() {
-            expr.expr.finalize_pending_values(&module);
-        }
+        self.modules.replace(module_path, module);
 
-        // Link the module.
-        // This must be done after emitting the expression, as that may add new imports.
-        other_modules.link(&module);
-
-        // Store the module if not empty.
-        if !module.is_empty() {
-            // TODO: move linking to CompilerSession and manage paths here and get rid of Modules.
-            self.modules.insert_anonymous(module.clone());
-        }
-
-        Ok(ModuleAndExpr { module, expr })
+        Ok(ModuleAndExpr { module_id, expr })
     }
 }
 
@@ -389,6 +406,7 @@ pub(crate) fn add_code_to_module(
     source_name: &str,
     code: &str,
     to: &mut Module,
+    module_id: ModuleId,
     other_modules: &Modules,
     source_table: &mut SourceTable,
     within_std: bool,
@@ -404,10 +422,12 @@ pub(crate) fn add_code_to_module(
     }
 
     // Emit IR for the module.
-    let module = emit_module(module_ast, other_modules, Some(to), within_std).map_err(|error| {
-        let env = ModuleEnv::new(to, other_modules, within_std);
-        CompilationError::resolve_types(error, &env, source_table)
-    })?;
+    let module = emit_module(module_ast, module_id, other_modules, Some(to), within_std).map_err(
+        |error| {
+            let env = ModuleEnv::new(to, other_modules, within_std);
+            CompilationError::resolve_types(error, &env, source_table)
+        },
+    )?;
 
     // Swap the new module with the old one.
     *to = module;

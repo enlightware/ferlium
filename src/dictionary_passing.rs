@@ -24,7 +24,7 @@ use crate::{
 };
 use derive_new::new;
 use itertools::process_results;
-use ustr::{Ustr, ustr};
+use ustr::Ustr;
 
 use crate::{
     containers::b,
@@ -337,26 +337,7 @@ impl Node {
         use NodeKind::*;
         match &mut self.kind {
             Immediate(immediate) => {
-                assert!(
-                    !immediate.value.is_function(),
-                    "Resolved functions should not be present at this stage"
-                );
-                if let Some(function) = immediate.value.as_pending_function_mut() {
-                    // It is from the local scope, recurse to elaborate the function.
-                    let mut function = function.borrow_mut();
-                    let script_fn = function.as_script_mut().unwrap();
-                    script_fn.code.elaborate_dictionaries(ctx)?;
-                    if !ctx.dicts.is_empty() {
-                        script_fn.arg_names.splice(
-                            0..0,
-                            ctx.dicts
-                                .requirements
-                                .iter()
-                                .enumerate()
-                                .map(|(i, r)| ustr(&r.to_dict_name(i))),
-                        );
-                    }
-                    drop(function);
+                if immediate.value.is_function() {
                     // Build closure to capture the dictionaries of this function, if any.
                     if !ctx.dicts.is_empty() {
                         let captures =

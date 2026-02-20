@@ -11,10 +11,10 @@ use std::{collections::HashSet, sync::LazyLock};
 use heck::ToSnakeCase;
 
 use crate::{
-    ModuleAndExpr, SourceId, ast,
+    CompilerSession, ModuleAndExpr, SourceId, ast,
     format::FormatWith,
     ir::{Node, NodeKind},
-    module::{ModuleEnv, Modules},
+    module::ModuleEnv,
     type_scheme::DisplayStyle,
 };
 
@@ -25,15 +25,16 @@ impl ModuleAndExpr {
         &self,
         source_id: SourceId,
         src: &str,
-        other_modules: &Modules,
+        session: &CompilerSession,
         style: DisplayStyle,
     ) -> Vec<(usize, String)> {
         use DisplayStyle::*;
-        let env = ModuleEnv::new(&self.module, other_modules, false);
+        let module = session.modules().get(self.module_id).unwrap();
+        let env = ModuleEnv::new(module, session.modules(), false);
         let mut annotations = vec![];
 
         // Function and expression bodies.
-        for function in self.module.iter_functions() {
+        for function in module.iter_functions() {
             let spans = match &function.spans {
                 Some(spans) => spans,
                 None => continue,
@@ -55,7 +56,7 @@ impl ModuleAndExpr {
         }
 
         // Function signatures.
-        for function in self.module.iter_functions() {
+        for function in module.iter_functions() {
             let spans = match &function.spans {
                 Some(spans) => spans,
                 None => continue,

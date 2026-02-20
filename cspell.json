@@ -1,4 +1,9 @@
 {
+	"dictionaries": [
+		"en",
+		"en-gb",
+		"en_us"
+	],
         "words": [
                 "bijective",
                 "cmark",

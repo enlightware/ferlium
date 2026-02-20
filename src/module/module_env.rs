@@ -54,7 +54,7 @@ impl<'m> ModuleEnv<'m> {
     pub fn type_alias_name(&self, ty: Type) -> Option<String> {
         self.current.type_aliases.get_name(ty).map_or_else(
             || {
-                self.others.modules.iter().find_map(|(mod_path, module)| {
+                self.others.iter_named().find_map(|(mod_path, module)| {
                     module.type_aliases.get_name(ty).map(|ty_name| {
                         if self.current.uses(mod_path, ty_name) {
                             ty_name.to_string()
@@ -74,7 +74,7 @@ impl<'m> ModuleEnv<'m> {
             .get_bare_native_name(native)
             .map_or_else(
                 || {
-                    self.others.modules.iter().find_map(|(mod_name, module)| {
+                    self.others.iter_named().find_map(|(mod_name, module)| {
                         module
                             .type_aliases
                             .get_bare_native_name(native)
@@ -157,7 +157,7 @@ impl<'m> ModuleEnv<'m> {
             .find(|(_, function)| Rc::ptr_eq(&function.code, func))
             .map_or_else(
                 || {
-                    self.others.modules.iter().find_map(|(mod_name, module)| {
+                    self.others.iter_named().find_map(|(mod_name, module)| {
                         module
                             .iter_named_functions()
                             .find(|(_, function)| Rc::ptr_eq(&function.code, func))
@@ -249,9 +249,11 @@ impl<'m> ModuleEnv<'m> {
                 return self.current.get_member(function_name, self.others, getter);
             }
             let path = Path::new(module.iter().map(|(seg, _)| *seg).collect());
-            self.others.get(&path).map_or(Ok(None), |module| {
-                module.get_member(function_name, self.others, getter)
-            })
+            self.others
+                .get_value_by_name(&path)
+                .map_or(Ok(None), |module| {
+                    module.get_member(function_name, self.others, getter)
+                })
         } else {
             Ok(None)
         }

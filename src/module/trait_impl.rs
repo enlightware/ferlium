@@ -18,13 +18,13 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     function::{Function, FunctionDefinition, FunctionRc},
-    module::{LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc, id::Id, path::Path},
+    module::{LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id, path::Path},
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     type_inference::InstSubstitution,
     type_like::TypeLike,
     type_scheme::{PubTypeConstraint, format_constraints_consolidated},
-    value::Value,
+    value::{Value, build_dictionary_value},
 };
 
 define_id_type!(
@@ -74,10 +74,6 @@ pub struct ImportImplSlot {
     pub module: Path,
     /// The key of the trait impl in that module
     pub key: TraitKey,
-    /// Cached resolved dictionary/module - updated during relinking
-    /// Note: we must hold the module to keep it alive, as otherwise the FunctionValue inside Value
-    /// would have a module field that could fail to upgrade at runtime if the module would have been dropped.
-    pub resolved: RefCell<Option<(Value, ModuleRc)>>,
 }
 
 /// A vector of traits.
@@ -153,7 +149,7 @@ pub struct TraitImpl {
     /// The implemented methods in the module.
     pub methods: Vec<LocalFunctionId>,
     /// The implemented methods, in a tuple of first-class functions of the proper types.
-    pub dictionary_value: RefCell<Value>,
+    pub dictionary_value: Value,
     /// The type of the dictionary, a tuple of function types.
     /// If the implementation is a blanket one, the key contains the rest of the type scheme.
     pub dictionary_ty: Type,
@@ -197,10 +193,15 @@ pub(crate) type BlanketTraitImpls = HashMap<BlanketTraitImplSubKey, LocalImplId>
 pub(crate) type BlanketImpls = HashMap<TraitRef, BlanketTraitImpls>;
 
 /// All trait implementations in a module or in a given context.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, new)]
 pub struct TraitImpls {
+    /// The ID of the module this TraitImpls belongs to, used to construct dictionary values.
+    pub(crate) module_id: ModuleId,
+    #[new(default)]
     pub(crate) concrete_key_to_id: ConcreteImpls,
+    #[new(default)]
     pub(crate) blanket_key_to_id: BlanketImpls,
+    #[new(default)]
     pub(crate) data: Vec<TraitImpl>,
 }
 
@@ -260,7 +261,7 @@ impl TraitImpls {
             Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
-        let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
+        let dictionary_value = build_dictionary_value(&methods, self.module_id);
         let imp = TraitImpl::new(output_tys, methods, dictionary_value, dictionary_type, true);
         let key = ConcreteTraitImplKey::new(trait_ref, input_tys);
         self.add_concrete_struct(key, imp)
@@ -325,7 +326,7 @@ impl TraitImpls {
             Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
-        let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
+        let dictionary_value = build_dictionary_value(&methods, self.module_id);
         let imp = TraitImpl::new(output_tys, methods, dictionary_value, dictionary_type, true);
         let key = BlanketTraitImplKey::new(trait_ref, sub_key);
         self.add_blanket_struct(key, imp)
@@ -701,8 +702,7 @@ pub fn format_impl_header_by_import_slot(
     let key = &slot.key;
     let imp = &env
         .others
-        .modules
-        .get(&slot.module)
+        .get_value_by_name(&slot.module)
         .expect("imported module not found")
         .get_impl_data_by_trait_key(key)
         .expect("imported trait impl not found");

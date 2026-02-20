@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::mem::swap;
 
 /// An ID that can be used as an index into a collection
 pub trait Id: Copy {
@@ -55,6 +56,9 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
         }
     }
 
+    /// Insert a new entry with a name, returning its assigned ID.
+    /// If the name already exists, it is re-associated with the new ID,
+    /// but the old entry remains in the data vector (and can be accessed by its ID).
     pub fn insert(&mut self, name: N, value: T) -> I {
         let id = I::from_index(self.data.len());
         self.data.push((value, Some(name.clone())));
@@ -62,19 +66,38 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
         id
     }
 
+    /// Insert a new entry without a name, returning its assigned ID.
     pub fn insert_anonymous(&mut self, value: T) -> I {
         let id = I::from_index(self.data.len());
         self.data.push((value, None));
         id
     }
 
+    /// Replace the value associated with a name, returning the ID and the old value if it existed.
+    pub fn replace(&mut self, name: N, mut value: T) -> (I, Option<T>) {
+        let cur_index = self.name_to_id.get(&name).copied();
+        match cur_index {
+            Some(id) => {
+                let old_data = &mut self.data[id.as_index()];
+                swap(&mut old_data.0, &mut value);
+                (id, Some(value))
+            }
+            None => (self.insert(name, value), None),
+        }
+    }
+
+    /// Get the next ID that would be assigned to a new entry.
+    pub fn next_id(&self) -> I {
+        I::from_index(self.data.len())
+    }
+
     pub fn get(&self, id: I) -> Option<&T> {
         self.data.get(id.as_index()).map(|(data, _)| data)
     }
 
-    pub fn get_by_name(&self, name: N) -> Option<(I, &T)> {
+    pub fn get_by_name(&self, name: &N) -> Option<(I, &T)> {
         self.name_to_id
-            .get(&name)
+            .get(name)
             .and_then(|&id| self.get(id).map(|data| (id, data)))
     }
 
@@ -84,12 +107,38 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
             .and_then(|(_, name)| name.as_ref())
     }
 
-    pub fn name_iter(&self) -> impl Iterator<Item = &N> {
+    pub fn iter_names(&self) -> impl Iterator<Item = &N> {
         self.name_to_id.keys()
     }
 
-    pub fn data_iter(&self) -> impl Iterator<Item = &(T, Option<N>)> {
+    pub fn iter_values_and_names(&self) -> impl Iterator<Item = &(T, Option<N>)> {
         self.data.iter()
+    }
+
+    /// Get a value by name, returning only the value (without the ID).
+    pub fn get_value_by_name(&self, name: &N) -> Option<&T> {
+        self.get_by_name(name).map(|(_, v)| v)
+    }
+
+    /// Get the ID of an entry by its name.
+    pub fn get_id_by_name(&self, name: &N) -> Option<I> {
+        self.name_to_id.get(name).copied()
+    }
+
+    /// Iterate over all named entries, yielding `(&name, &value)` pairs.
+    pub fn iter_named(&self) -> impl Iterator<Item = (&N, &T)> {
+        self.data
+            .iter()
+            .filter_map(|(data, name_opt)| name_opt.as_ref().map(|name| (name, data)))
+    }
+
+    /// Find the name of an entry by a predicate on its value.
+    pub fn find_name_by_value(&self, pred: impl Fn(&T) -> bool) -> Option<&N> {
+        self.data.iter().find_map(
+            |(data, name_opt)| {
+                if pred(data) { name_opt.as_ref() } else { None }
+            },
+        )
     }
 }
 impl<N: Clone + Eq + Hash, I: Id, T> Default for NamedIndexed<N, I, T> {

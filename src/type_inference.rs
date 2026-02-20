@@ -25,7 +25,7 @@ use crate::{
         DuplicatedFieldContext, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     format::FormatWith,
-    function::FunctionRc,
+    function::{FunctionDefinition, FunctionRc},
     internal_compilation_error,
     location::Location,
     module::ModuleFunction,
@@ -34,6 +34,7 @@ use crate::{
     trait_solver::TraitSolver,
     type_like::TypeLike,
     type_mapper::TypeMapper,
+    type_scheme::TypeScheme,
     type_substitution::{TypeSubstituer, substitute_fn_type, substitute_type, substitute_types},
 };
 use derive_new::new;
@@ -380,8 +381,11 @@ impl TypeInference {
         let mut inner_env = TypingEnv::new(
             all_locals,
             env.new_import_slots,
+            env.module_id,
             env.module_env,
             Some((ret_ty, body.span)),
+            env.lambda_functions,
+            env.base_local_function_index,
         );
 
         // 5. Infer the body's type.
@@ -398,13 +402,23 @@ impl TypeInference {
         let fn_ty = FnType::new(args_ty, ret_ty, effects);
         let fn_ty_wrapper = Type::function_type(fn_ty.clone());
 
-        let arg_names: Vec<_> = capture_args
+        let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
+        let all_arg_names: Vec<_> = capture_args
             .iter()
             .map(|l| l.name)
-            .chain(args.iter().map(|(name, _)| *name))
+            .chain(arg_names.iter().copied())
             .collect();
 
-        let value_fn = Value::pending_function(b(ScriptFunction::new(code, arg_names)));
+        let code = ScriptFunction::new(code, all_arg_names);
+        let ty_scheme = TypeScheme::new_just_type(fn_ty);
+        let function = ModuleFunction {
+            definition: FunctionDefinition::new(ty_scheme, arg_names, None),
+            code: FunctionRc::new(RefCell::new(b(code))),
+            spans: None, // FIXME: add spans
+        };
+        // TODO: Maybe consider generating the BuildClosure node here.
+        let function_id = env.collect_lambda_module_function(function);
+        let value_fn = Value::function(function_id, env.module_id);
         let fn_node = N::new(
             K::Immediate(Immediate::new(value_fn)),
             fn_ty_wrapper,
@@ -2977,9 +2991,7 @@ impl UnifiedTypeInference {
         node.ty = self.substitute_in_type(node.ty);
         node.effects = SubstituteTypes(self).substitute_effect_type(&node.effects);
         match &mut node.kind {
-            Immediate(immediate) => {
-                self.substitute_in_value(&mut immediate.value);
-            }
+            Immediate(_) => {}
             BuildClosure(build_closure) => {
                 self.substitute_in_node(&mut build_closure.function);
                 self.substitute_in_nodes(&mut build_closure.captures);
@@ -3030,7 +3042,6 @@ impl UnifiedTypeInference {
             Case(case) => {
                 self.substitute_in_node(&mut case.value);
                 for alternative in case.alternatives.iter_mut() {
-                    self.substitute_in_value(&mut alternative.0);
                     self.substitute_in_node(&mut alternative.1);
                 }
                 self.substitute_in_node(&mut case.default);
@@ -3067,36 +3078,6 @@ impl UnifiedTypeInference {
                 },
             })
             .collect();
-    }
-
-    fn substitute_in_value(&mut self, value: &mut Value) {
-        use Value::*;
-        match value {
-            Native(_) => {}
-            Variant(variant) => {
-                self.substitute_in_value(&mut variant.value);
-            }
-            Tuple(tuple) => {
-                for value in tuple.iter_mut() {
-                    self.substitute_in_value(value);
-                }
-            }
-            PendingFunction(function) => {
-                self.substitute_in_value_fn(function);
-            }
-            Function(fv) => {
-                self.substitute_in_value_fn(&mut fv.function);
-            }
-        }
-    }
-
-    fn substitute_in_value_fn(&mut self, function: &mut FunctionRc) {
-        let function = function.try_borrow_mut();
-        if let Ok(mut function) = function {
-            if let Some(script_fn) = function.as_script_mut() {
-                self.substitute_in_node(&mut script_fn.code);
-            }
-        }
     }
 
     pub fn substitute_in_constraint(

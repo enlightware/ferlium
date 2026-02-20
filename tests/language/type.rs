@@ -448,13 +448,12 @@ fn returning_variant_is_properly_unified() {
     let mut session = TestSession::new();
     // Test the Variant type which had the original issue
     // This tests deeply nested recursive variant structures
-    let module = session
-        .compile(indoc! { r#"
+    let module = session.compile_and_get_module(indoc! { r#"
         fn make_variant_array() -> Variant {
             Array([])
         }
-    "# })
-        .module;
+    "# });
+
     let fn_def = &module
         .get_function(ustr("make_variant_array"))
         .unwrap()
@@ -472,7 +471,7 @@ fn variant_type_alias_in_function_signature() {
     let mut session = TestSession::new();
     // Test that the Variant type alias is preserved in function signatures
     // This reproduces the issue where Variant appears unfolded in function types
-    let module = session
+    let module_id = session
         .compile(indoc! { r#"
         fn process_variant(v: Variant) -> Variant {
             v
@@ -482,9 +481,10 @@ fn variant_type_alias_in_function_signature() {
             entries[0].1
         }
     "# })
-        .module;
+        .module_id;
 
     // Check first function
+    let module = session.modules().get(module_id).unwrap();
     let fn_def1 = &module
         .get_function(ustr("process_variant"))
         .unwrap()
@@ -492,6 +492,7 @@ fn variant_type_alias_in_function_signature() {
     let sig1 = fn_def1
         .ty_scheme
         .ty()
+        .clone()
         .format_with(&session.std_module_env())
         .to_string();
     println!("process_variant signature: {}", sig1);
