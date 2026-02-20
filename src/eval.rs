@@ -20,7 +20,7 @@ use crate::{
     containers::b,
     error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
-    function::{Closure, FunctionRc},
+    function::FunctionRc,
     ir::{Node, NodeKind},
     module::{FunctionId, ModuleRc, Modules, TraitImplId},
     std::array,
@@ -283,6 +283,17 @@ impl EvalCtx {
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(self.get_stack_entry_from_fn_and_mod(function, &module));
+        let arguments = if function_value.captured.is_empty() {
+            arguments
+        } else {
+            function_value
+                .captured
+                .clone()
+                .into_iter()
+                .map(ValOrMut::Val)
+                .chain(arguments)
+                .collect()
+        };
         let result = self
             .call_function(function, module.clone(), arguments)
             .map_err(|err| err.with_frame(module, None, self.environment.len(), location))?;
@@ -633,11 +644,9 @@ impl Node {
                 // Note: function should be GetFunction or similar immediate - returns not allowed here
                 let function_value = build_closure.function.eval_with_ctx(ctx)?.into_value();
                 let function_value = function_value.into_function().unwrap().function;
-                let function_value = FunctionValue::new(function_value, Rc::downgrade(&ctx.module));
-                cont(Value::function(
-                    b(Closure::new(function_value, captured, self.span)),
-                    Rc::downgrade(&ctx.module),
-                ))
+                let function_value =
+                    FunctionValue::new(function_value, Rc::downgrade(&ctx.module), captured);
+                cont(Value::Function(function_value))
             }
             Apply(app) => {
                 // Evaluate left-to-right: function first, then arguments (matches Rust semantics)

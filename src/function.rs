@@ -20,7 +20,6 @@ use ustr::Ustr;
 use ferlium_macros::declare_native_fn_aliases;
 
 use crate::{
-    Location,
     effects::EffType,
     error::RuntimeErrorKind,
     eval::{ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, cont},
@@ -32,7 +31,7 @@ use crate::{
     type_mapper::TypeMapper,
     type_scheme::{PubTypeConstraint, TypeScheme},
     type_visitor::TypeInnerVisitor,
-    value::{FunctionValue, NativeDisplay, Value},
+    value::{NativeDisplay, Value},
 };
 
 /// The definition of a function, to be used in modules, traits and IDEs.
@@ -300,46 +299,6 @@ impl PartialEq for Box<ScriptFunction> {
 }
 
 impl Eq for Box<ScriptFunction> {}
-
-/// A function holding user-defined code with a non-empty closure with captures passed as extra arguments.
-#[derive(new)]
-pub struct Closure {
-    pub function: FunctionValue,
-    pub captured: Vec<Value>,
-    pub span: Location,
-}
-impl Callable for Closure {
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult {
-        let args = self
-            .captured
-            .iter()
-            .cloned()
-            .map(ValOrMut::Val)
-            .chain(args)
-            .collect();
-        ctx.call_function_value(&self.function, args, self.span)
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> std::fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        writeln!(f, "{indent_str}closure of")?;
-        self.function
-            .function
-            .borrow()
-            .format_ind(f, env, spacing, indent + 1)?;
-        writeln!(f, "{indent_str}with captured [")?;
-        for captured in &self.captured {
-            captured.format_ind_repr(f, env, spacing, indent + 1)?;
-        }
-        writeln!(f, "{indent_str}]")
-    }
-}
 
 // Helper traits and structs for defining native functions
 
