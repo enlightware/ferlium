@@ -33,7 +33,7 @@ pub use uses::*;
 use std::{
     cell::{Ref, RefCell, RefMut},
     fmt,
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::Hash,
 };
 
 use ustr::{Ustr, ustr};
@@ -106,7 +106,7 @@ pub struct Module {
     pub(crate) def_table: DefTable,
 
     // Functions, including methods of trait implementations.
-    pub(crate) functions: Vec<LocalFunction>,
+    pub(crate) functions: Vec<ModuleFunction>,
 
     // Type system content
     type_aliases: TypeAliases,
@@ -166,11 +166,7 @@ impl Module {
     /// Add a function to this module, returning its ID.
     pub fn add_function(&mut self, name: Ustr, function: ModuleFunction) -> LocalFunctionId {
         let id = LocalFunctionId::from_index(self.functions.len());
-        let interface_hash = function.definition.signature_hash();
-        self.functions.push(LocalFunction {
-            function,
-            interface_hash,
-        });
+        self.functions.push(function);
         self.def_table.insert(name, DefKind::Function(id));
         id
     }
@@ -179,25 +175,13 @@ impl Module {
     /// The function can be named later using `name_function`.
     pub(crate) fn add_function_anonymous(&mut self, function: ModuleFunction) -> LocalFunctionId {
         let id = LocalFunctionId::from_index(self.functions.len());
-        let interface_hash = function.definition.signature_hash();
-        self.functions.push(LocalFunction {
-            function,
-            interface_hash,
-        });
+        self.functions.push(function);
         id
     }
 
     /// Name a previously added anonymous function.
     pub(crate) fn name_function(&mut self, id: LocalFunctionId, new_name: Ustr) {
         self.def_table.insert(new_name, DefKind::Function(id));
-    }
-
-    /// Add an existing LocalFunction to this module, returning its ID.
-    pub fn add_local_function(&mut self, name: Ustr, function: LocalFunction) -> LocalFunctionId {
-        let id = LocalFunctionId::from_index(self.functions.len());
-        self.def_table.insert(name, DefKind::Function(id));
-        self.functions.push(function);
-        id
     }
 
     /// Add collected functions from a FunctionCollector to this module.
@@ -227,15 +211,10 @@ impl Module {
             .and_then(|def_kind| def_kind.as_function().copied())
     }
 
-    /// Get a local function and its data by name
-    pub fn get_local_function(&self, name: Ustr) -> Option<&LocalFunction> {
-        let id = self.get_local_function_id(name)?;
-        self.functions.get(id.as_index())
-    }
-
     /// Get a local function by name
     pub fn get_function(&self, name: Ustr) -> Option<&ModuleFunction> {
-        self.get_local_function(name).map(|f| &f.function)
+        let id = self.get_local_function_id(name)?;
+        self.functions.get(id.as_index())
     }
 
     /// Get a mutable local function by name
@@ -249,9 +228,7 @@ impl Module {
         name: Ustr,
     ) -> Option<(LocalFunctionId, &mut ModuleFunction)> {
         let id = self.get_local_function_id(name)?;
-        self.functions
-            .get_mut(id.as_index())
-            .map(|f| (id, &mut f.function))
+        self.functions.get_mut(id.as_index()).map(|f| (id, f))
     }
 
     /// Get a function by name only in this module and return its script node, if it is a script function.
@@ -264,13 +241,8 @@ impl Module {
         self.get_function_mut(name)?.get_node_mut()
     }
 
-    /// Get a local function and its data by ID
-    pub fn get_local_function_by_id(&self, id: LocalFunctionId) -> Option<&LocalFunction> {
-        self.functions.get(id.as_index())
-    }
-
     /// Get a local function name by ID (slow, iterates over the def table)
-    pub fn get_local_function_name_by_id(&self, id: LocalFunctionId) -> Option<Ustr> {
+    pub fn get_function_name_by_id(&self, id: LocalFunctionId) -> Option<Ustr> {
         self.def_table
             .data_iter()
             .find(|(def_kind, _)| {
@@ -283,23 +255,21 @@ impl Module {
 
     /// Get a local function by ID
     pub fn get_function_by_id(&self, id: LocalFunctionId) -> Option<&ModuleFunction> {
-        self.functions.get(id.as_index()).map(|f| &f.function)
+        self.functions.get(id.as_index())
     }
 
     /// Get a mutable local function by ID
     pub fn get_function_by_id_mut(&mut self, id: LocalFunctionId) -> Option<&mut ModuleFunction> {
-        self.functions
-            .get_mut(id.as_index())
-            .map(|f| &mut f.function)
+        self.functions.get_mut(id.as_index())
     }
 
     /// Iterate over all local functions in this module.
-    pub fn iter_functions(&self) -> impl Iterator<Item = &LocalFunction> {
+    pub fn iter_functions(&self) -> impl Iterator<Item = &ModuleFunction> {
         self.functions.iter()
     }
 
     /// Iterate over all named local functions in this module, returning their name and data.
-    pub fn iter_named_functions(&self) -> impl Iterator<Item = (Ustr, &LocalFunction)> {
+    pub fn iter_named_functions(&self) -> impl Iterator<Item = (Ustr, &ModuleFunction)> {
         self.def_table
             .data_iter()
             .filter_map(|(def_kind, name_opt)| {
@@ -458,13 +428,12 @@ impl Module {
     ) -> LocalImplId {
         // TODO: ensure coherence
 
-        let (dictionary_ty, interface_hash) = self.computer_interface_hash(&emit_output.functions);
+        let dictionary_ty = self.computer_dictionary_ty(&emit_output.functions);
         // Build and insert the implementation.
         let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
         let imp = TraitImpl::new(
             emit_output.output_tys,
             emit_output.functions,
-            interface_hash,
             dictionary_value,
             dictionary_ty,
             true,
@@ -533,7 +502,7 @@ impl Module {
     /// Return the type for the source pos, if any.
     pub fn type_at(&self, pos: usize) -> Option<Type> {
         for function in self.functions.iter() {
-            let mut code = function.function.code.borrow_mut();
+            let mut code = function.code.borrow_mut();
             let ty = code
                 .as_script_mut()
                 .and_then(|script_fn| script_fn.code.type_at(pos));
@@ -730,23 +699,18 @@ impl Module {
     }
     */
 
-    fn computer_interface_hash(&self, function_ids: &[LocalFunctionId]) -> (Type, u64) {
-        let mut interface_hasher = DefaultHasher::new();
+    fn computer_dictionary_ty(&self, function_ids: &[LocalFunctionId]) -> Type {
         let tys: Vec<_> = function_ids
             .iter()
             .map(|id| {
-                let local_fn = &self
+                let function = &self
                     .functions
                     .get(id.as_index())
                     .expect("Invalid function ID");
-                local_fn.interface_hash.hash(&mut interface_hasher);
-                let function = &local_fn.function;
                 Type::function_type(function.definition.ty_scheme.ty.clone())
             })
             .collect();
-        let hash = interface_hasher.finish();
-        let dictionary_ty = Type::tuple(tys);
-        (dictionary_ty, hash)
+        Type::tuple(tys)
     }
 
     fn format_with_modules(
@@ -832,7 +796,6 @@ impl Module {
                 if !self.is_non_trait_local_function(name) {
                     continue;
                 }
-                let function = &function.function;
                 function
                     .definition
                     .fmt_with_name_and_module_env(f, name, "", &env)?;
@@ -855,8 +818,8 @@ impl Module {
 /// - Build dictionary values for trait implementations.
 /// - Resolve pending function values inside the module by attaching the module's weak reference.
 pub fn finalize_module(module_rc: &ModuleRc) {
-    for local_fn in &module_rc.functions {
-        let mut fn_mut = local_fn.function.code.borrow_mut();
+    for function in &module_rc.functions {
+        let mut fn_mut = function.code.borrow_mut();
         if let Some(script_fn) = fn_mut.as_script_mut() {
             script_fn.code.finalize_pending_values(module_rc);
         }
@@ -867,8 +830,8 @@ pub fn finalize_module(module_rc: &ModuleRc) {
             .methods
             .iter()
             .map(|fn_id| {
-                let local_fn = &module_rc.functions[fn_id.as_index()];
-                let code = local_fn.function.code.clone();
+                let function = &module_rc.functions[fn_id.as_index()];
+                let code = function.code.clone();
                 Value::PendingFunction(code.clone())
             })
             .collect::<SVec2<_>>();

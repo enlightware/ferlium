@@ -44,7 +44,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         match *self {
             FunctionId::Local(id) => {
-                let name = env.current.get_local_function_name_by_id(id).unwrap();
+                let name = env.current.get_function_name_by_id(id).unwrap();
                 write!(f, "local function {name} (#{id})")
             }
             FunctionId::Import(id) => {
@@ -95,26 +95,8 @@ pub struct ImportFunctionSlot {
     pub module: Path,
     /// The target function in that module
     pub target: ImportFunctionTarget,
-    /// Cached resolved function/module and its interface hash - updated during relinking
-    pub resolved: RefCell<Option<(FunctionRc, ModuleRc, u64)>>,
-}
-
-/// An entry in local functions
-#[derive(Debug, Clone)]
-pub struct LocalFunction {
-    /// Function code and definition
-    pub function: ModuleFunction,
-    /// Cached interface hash for quick compatibility checks
-    pub interface_hash: u64,
-}
-impl LocalFunction {
-    pub fn new_compute_interface_hash(function: ModuleFunction) -> Self {
-        let interface_hash = function.definition.signature_hash();
-        Self {
-            function,
-            interface_hash,
-        }
-    }
+    /// Cached resolved function/module - updated during relinking
+    pub resolved: RefCell<Option<(FunctionRc, ModuleRc)>>,
 }
 
 /// A module function argument span, with the span of the optional type ascription.

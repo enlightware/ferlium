@@ -7,13 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    fmt,
-    hash::{DefaultHasher, Hash, Hasher},
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, fmt, hash::Hash, rc::Rc};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -24,9 +18,7 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     function::{Function, FunctionDefinition, FunctionRc},
-    module::{
-        LocalFunction, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc, id::Id, path::Path,
-    },
+    module::{LocalFunctionId, ModuleEnv, ModuleFunction, ModuleRc, id::Id, path::Path},
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     type_inference::InstSubstitution,
@@ -82,10 +74,10 @@ pub struct ImportImplSlot {
     pub module: Path,
     /// The key of the trait impl in that module
     pub key: TraitKey,
-    /// Cached resolved dictionary/module and its interface hash - updated during relinking
+    /// Cached resolved dictionary/module - updated during relinking
     /// Note: we must hold the module to keep it alive, as otherwise the FunctionValue inside Value
     /// would have a module field that could fail to upgrade at runtime if the module would have been dropped.
-    pub resolved: RefCell<Option<(Value, ModuleRc, u64)>>,
+    pub resolved: RefCell<Option<(Value, ModuleRc)>>,
 }
 
 /// A vector of traits.
@@ -160,8 +152,6 @@ pub struct TraitImpl {
     pub output_tys: Vec<Type>,
     /// The implemented methods in the module.
     pub methods: Vec<LocalFunctionId>,
-    /// Global hash of the trait interface (name and type of methods).
-    pub interface_hash: u64,
     /// The implemented methods, in a tuple of first-class functions of the proper types.
     pub dictionary_value: RefCell<Value>,
     /// The type of the dictionary, a tuple of function types.
@@ -176,13 +166,13 @@ pub struct TraitImpl {
 pub struct FunctionCollector {
     pub initial_count: usize,
     #[new(default)]
-    pub new_elements: Vec<(Ustr, LocalFunction)>,
+    pub new_elements: Vec<(Ustr, ModuleFunction)>,
 }
 impl FunctionCollector {
     pub fn next_id(&self) -> LocalFunctionId {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
-    pub fn push(&mut self, name: Ustr, function: LocalFunction) {
+    pub fn push(&mut self, name: Ustr, function: ModuleFunction) {
         self.new_elements.push((name, function));
     }
 
@@ -266,19 +256,12 @@ impl TraitImpls {
                 .qualified_method_name(method_index, &input_tys)
                 .into()
         };
-        let (methods, dictionary_type, interface_hash) =
+        let (methods, dictionary_type) =
             Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
         let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
-        let imp = TraitImpl::new(
-            output_tys,
-            methods,
-            interface_hash,
-            dictionary_value,
-            dictionary_type,
-            true,
-        );
+        let imp = TraitImpl::new(output_tys, methods, dictionary_value, dictionary_type, true);
         let key = ConcreteTraitImplKey::new(trait_ref, input_tys);
         self.add_concrete_struct(key, imp)
     }
@@ -338,19 +321,12 @@ impl TraitImpls {
                 .qualified_method_name(method_index, &sub_key.input_tys)
                 .into()
         };
-        let (methods, dictionary_type, interface_hash) =
+        let (methods, dictionary_type) =
             Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
         let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
-        let imp = TraitImpl::new(
-            output_tys,
-            methods,
-            interface_hash,
-            dictionary_value,
-            dictionary_type,
-            true,
-        );
+        let imp = TraitImpl::new(output_tys, methods, dictionary_value, dictionary_type, true);
         let key = BlanketTraitImplKey::new(trait_ref, sub_key);
         self.add_blanket_struct(key, imp)
     }
@@ -372,23 +348,19 @@ impl TraitImpls {
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
         namer: impl Fn(usize) -> Ustr,
-    ) -> (Vec<LocalFunctionId>, Type, u64) {
-        let mut interface_hasher = DefaultHasher::new();
+    ) -> (Vec<LocalFunctionId>, Type) {
         let (methods, tys): (Vec<_>, Vec<_>) = functions
             .into_iter()
             .enumerate()
             .map(|(index, function)| {
                 let id = fn_collector.next_id();
                 let fn_ty = Type::function_type(function.definition.ty_scheme.ty.clone());
-                let local_fn = LocalFunction::new_compute_interface_hash(function);
-                local_fn.interface_hash.hash(&mut interface_hasher);
-                fn_collector.push(namer(index), local_fn);
+                fn_collector.push(namer(index), function);
                 (id, fn_ty)
             })
             .multiunzip();
-        let hash = interface_hasher.finish();
         let dictionary_ty = Type::tuple(tys);
-        (methods, dictionary_ty, hash)
+        (methods, dictionary_ty)
     }
 
     pub fn concrete(&self) -> &ConcreteImpls {
@@ -672,8 +644,8 @@ fn format_impl_fns(
     let subst = (subst, HashMap::new());
     writeln!(f, " {{")?;
     let impl_functions = imp.methods.iter().map(|&id| {
-        let function = &env.current.get_local_function_by_id(id).unwrap();
-        (&function.function, id)
+        let function = env.current.get_function_by_id(id).unwrap();
+        (function, id)
     });
     for ((name, _), (function, id)) in trait_ref.functions.iter().zip(impl_functions) {
         let def = &function.definition;

@@ -224,7 +224,7 @@ impl EvalCtx {
         let module_path;
         let fn_name = match function {
             Local(id) => {
-                let fn_name = self.module.get_local_function_name_by_id(id).unwrap();
+                let fn_name = self.module.get_function_name_by_id(id).unwrap();
                 module_path = self.get_last_module_path();
                 format!("{module_path}::{} (#{})", fn_name, id)
             }
@@ -475,7 +475,7 @@ impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
         match self.function_id {
             Some(function_id) => match function_id {
                 FunctionId::Local(id) => {
-                    let local_name = self.module.get_local_function_name_by_id(id).unwrap();
+                    let local_name = self.module.get_function_name_by_id(id).unwrap();
                     write!(f, "{module_path}::{local_name}")?
                 }
                 FunctionId::Import(id) => {

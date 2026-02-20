@@ -55,15 +55,10 @@ impl Modules {
                 continue; // Already linked
             }
             if let Some(target_module) = self.modules.get(&slot.module) {
-                let (function, hash) = match &slot.target {
+                let function = match &slot.target {
                     ImportFunctionTarget::NamedFunction(function_name) => {
-                        if let Some(target_function) =
-                            target_module.get_local_function(*function_name)
-                        {
-                            (
-                                &target_function.function.code,
-                                target_function.interface_hash,
-                            )
+                        if let Some(target_function) = target_module.get_function(*function_name) {
+                            &target_function.code
                         } else {
                             panic!(
                                 "Function {} not found in module {}",
@@ -86,11 +81,10 @@ impl Modules {
                         // Extract the method function by index from the tuple.
                         let imp = target_module.get_impl_data(*impl_id).unwrap();
                         let fn_id = imp.methods[*index as usize];
-                        let local_fn = &target_module.get_local_function_by_id(fn_id).unwrap();
-                        (&local_fn.function.code, local_fn.interface_hash)
+                        &target_module.get_function_by_id(fn_id).unwrap().code
                     }
                 };
-                *slot.resolved.borrow_mut() = Some((function.clone(), target_module.clone(), hash));
+                *slot.resolved.borrow_mut() = Some((function.clone(), target_module.clone()));
             } else {
                 panic!(
                     "Module {} not found for import function slot {}",
@@ -108,11 +102,8 @@ impl Modules {
                 let imp = target_module
                     .get_impl_data_by_trait_key(&slot.key)
                     .expect("Trait impl not found in target module for import impl slot");
-                *slot.resolved.borrow_mut() = Some((
-                    imp.dictionary_value.borrow().clone(),
-                    target_module.clone(),
-                    imp.interface_hash,
-                ));
+                *slot.resolved.borrow_mut() =
+                    Some((imp.dictionary_value.borrow().clone(), target_module.clone()));
             } else {
                 panic!(
                     "Module {} not found for import impl slot {}",

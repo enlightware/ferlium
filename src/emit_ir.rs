@@ -368,7 +368,7 @@ where
 
     // Fourth pass, substitute the mono type variables with the inferred types.
     for id in local_fns.iter() {
-        let descr = &mut output.functions[id.as_index()].function;
+        let descr = &mut output.functions[id.as_index()];
         ty_inf.substitute_in_module_function(descr);
 
         // Union duplicated effects from function arguments, and build a substitution for the
@@ -400,7 +400,7 @@ where
         // This ensures ABI consistency: the calling convention is determined by the trait definition.
         let trait_ref = &trait_ctx.unwrap().trait_ref;
         for (i, id) in local_fns.iter().enumerate() {
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             let (method_name, trait_fn_def) = &trait_ref.functions[i];
             let trait_effects = &trait_fn_def.ty_scheme.ty.effects;
             let impl_effects = &descr.definition.ty_scheme.ty.effects;
@@ -443,7 +443,7 @@ where
         // These are neither part of the function signature nor of the constraints.
         let bounds: Vec<_> = quantifiers.iter().chain(subst.keys()).cloned().collect();
         for id in local_fns.iter() {
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             let node = descr.get_node_mut().unwrap();
             let unbound = node.all_unbound_ty_vars();
             let uninstantiated_unbound = check_unbounds(unbound, &bounds)?;
@@ -478,7 +478,7 @@ where
         trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
         let mut module_inst_data = HashMap::new();
         for id in local_fns.iter() {
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
             // type scheme quantifiers will be updated later on
             let mut node = descr.get_node_mut().unwrap();
@@ -490,7 +490,7 @@ where
         // Sixth pass, run the borrow checker and elaborate dictionaries.
         for id in local_fns.iter() {
             let mut solver = trait_solver_from_module!(output, &others);
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             let mut function = descr.code.borrow_mut();
             let script_fn = function.as_script_mut().unwrap();
             script_fn.arg_names.splice(
@@ -520,14 +520,14 @@ where
             .map(|c| c.instantiate(&subst))
             .collect();
         for (function_index, id) in local_fns.iter().enumerate() {
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
             descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
             let eff_quantifiers = descr.definition.ty_scheme.ty.input_effect_vars();
             assert!(eff_quantifiers.is_empty());
             descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
             descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
             drop(node);
@@ -548,7 +548,7 @@ where
         let all_constraints = ty_inf.constraints();
         let mut used_constraints: HashSet<PubTypeConstraintPtr> = HashSet::new();
         for (function, id) in ast_functions().zip(local_fns.iter()) {
-            let descr = &output.functions[id.as_index()].function;
+            let descr = &output.functions[id.as_index()];
             let node = descr.get_node().unwrap();
 
             // Clean up constraints and validate them.
@@ -593,7 +593,7 @@ where
                 .collect::<Result<_, _>>()?;
             quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
             solver.commit(&mut output.functions, &mut output.def_table);
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
             drop(node);
@@ -639,14 +639,14 @@ where
         // Sixth pass, run the borrow checker and elaborate dictionaries.
         let mut module_inst_data = HashMap::new();
         for id in local_fns.iter() {
-            let descr = &output.functions[id.as_index()].function;
+            let descr = &output.functions[id.as_index()];
             let dicts = descr.definition.ty_scheme.extra_parameters();
             module_inst_data.insert(*id, dicts);
         }
         for id in local_fns.iter() {
             let dicts = module_inst_data.get(id).unwrap();
             let mut solver = trait_solver_from_module!(output, &others);
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             let mut function = descr.code.borrow_mut();
             let script_fn = function.as_script_mut().unwrap();
             script_fn.arg_names.splice(
@@ -667,7 +667,7 @@ where
 
         // Seventh pass, normalize the type schemes, substitute the types in the functions.
         for id in local_fns.iter() {
-            let descr = &mut output.functions[id.as_index()].function;
+            let descr = &mut output.functions[id.as_index()];
             // Note: after that normalization, the functions do not share the same
             // type variables anymore.
             let subst = descr.definition.ty_scheme.normalize();

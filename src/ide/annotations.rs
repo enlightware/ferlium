@@ -33,8 +33,7 @@ impl ModuleAndExpr {
         let mut annotations = vec![];
 
         // Function and expression bodies.
-        for local_fn in self.module.iter_functions() {
-            let function = &local_fn.function;
+        for function in self.module.iter_functions() {
             let spans = match &function.spans {
                 Some(spans) => spans,
                 None => continue,
@@ -56,8 +55,7 @@ impl ModuleAndExpr {
         }
 
         // Function signatures.
-        for local_fn in self.module.iter_functions() {
-            let function = &local_fn.function;
+        for function in self.module.iter_functions() {
             let spans = match &function.spans {
                 Some(spans) => spans,
                 None => continue,

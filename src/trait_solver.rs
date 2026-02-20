@@ -7,11 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{
-    cell::RefCell,
-    hash::{DefaultHasher, Hash, Hasher},
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use derive_new::new;
 use itertools::MultiUnzip;
@@ -29,9 +25,8 @@ use crate::{
     module::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
         FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
-        ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalFunction, LocalFunctionId,
-        LocalImplId, ModuleEnv, ModuleFunction, Modules, TraitImpl, TraitImplId, TraitImpls,
-        TraitKey, id::Id,
+        ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalFunctionId, LocalImplId,
+        ModuleEnv, ModuleFunction, Modules, TraitImpl, TraitImplId, TraitImpls, TraitKey, id::Id,
     },
     mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},
@@ -83,7 +78,7 @@ impl<'a> TraitSolver<'a> {
     /// Commit the newly created functions to the module.
     /// This must be called after trait solving is done,
     /// otherwise the created functions will be lost.
-    pub fn commit(mut self, functions: &mut Vec<LocalFunction>, def_table: &mut DefTable) {
+    pub fn commit(mut self, functions: &mut Vec<ModuleFunction>, def_table: &mut DefTable) {
         for (name, function) in self.fn_collector.new_elements.drain(..) {
             let id = LocalFunctionId::from_index(functions.len());
             def_table.insert(name, DefKind::Function(id));
@@ -224,7 +219,6 @@ impl<'a> TraitSolver<'a> {
                 let imp = TraitImpl {
                     output_tys: vec![output_ty],
                     methods: vec![],
-                    interface_hash: 0,
                     dictionary_value: RefCell::new(Value::empty_tuple()),
                     dictionary_ty: Type::tuple([]),
                     public: false,
@@ -391,7 +385,6 @@ impl<'a> TraitSolver<'a> {
                     TraitKey::Blanket(BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone()));
                 let definitions = trait_ref.instantiate_for_tys(input_tys, &output_tys);
                 let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
-                let mut interface_hasher = DefaultHasher::new();
                 let (methods, tys): (Vec<_>, Vec<_>) = gen_functions
                     .iter()
                     .zip(definitions.into_iter())
@@ -399,7 +392,6 @@ impl<'a> TraitSolver<'a> {
                     .map(|(method_index, (fn_id, def))| {
                         // Build the concrete function type and hash its signature.
                         let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
-                        def.signature_hash().hash(&mut interface_hasher);
 
                         // Is the generic function from another module, or do we need to pass constraint dictionaries?
                         let id = if constraint_dict_nodes.is_empty() && imp_mod_path.is_none() {
@@ -451,9 +443,8 @@ impl<'a> TraitSolver<'a> {
                                 "{}-thunk",
                                 trait_ref.qualified_method_name(method_index, input_tys)
                             ));
-                            let local_fn = LocalFunction::new_compute_interface_hash(function);
                             let id = self.fn_collector.next_id();
-                            self.fn_collector.push(name, local_fn);
+                            self.fn_collector.push(name, function);
                             id
                         };
 
@@ -462,17 +453,10 @@ impl<'a> TraitSolver<'a> {
                     .multiunzip();
 
                 // Build and insert the implementation.
-                let interface_hash = interface_hasher.finish();
                 let dictionary_ty = Type::tuple(tys);
                 let dictionary_value = RefCell::new(Value::unit()); // filled later in finalize
-                let imp = TraitImpl::new(
-                    output_tys,
-                    methods,
-                    interface_hash,
-                    dictionary_value,
-                    dictionary_ty,
-                    true,
-                );
+                let imp =
+                    TraitImpl::new(output_tys, methods, dictionary_value, dictionary_ty, true);
                 let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
                 let local_impl_id = self.impls.add_concrete_struct(key, imp);
 

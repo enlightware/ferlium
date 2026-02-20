@@ -756,19 +756,18 @@ fn run_interactive_repl() {
                                 println!("Function id is required.");
                                 continue;
                             };
-                            let local_fn = if let Some(local_fn) =
-                                module.get_local_function_by_id(fn_id)
+                            let function = if let Some(function) = module.get_function_by_id(fn_id)
                             {
-                                local_fn
+                                function
                             } else {
                                 println!("Function id {fn_id} not found in module {module_name}.");
                                 continue;
                             };
                             let env = ModuleEnv::new(&module, &other_modules, false);
                             let fn_name = module
-                                .get_local_function_name_by_id(fn_id)
+                                .get_function_name_by_id(fn_id)
                                 .unwrap_or_else(|| ustr("<anonymous function>"));
-                            println!("{}", (&local_fn.function, fn_name).format_with(&env));
+                            println!("{}", (function, fn_name).format_with(&env));
                             true
                         }
                         "history" => {

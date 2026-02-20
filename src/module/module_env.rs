@@ -154,13 +154,13 @@ impl<'m> ModuleEnv<'m> {
         // FIXME: this needs update
         self.current
             .iter_named_functions()
-            .find(|(_, local_fn)| Rc::ptr_eq(&local_fn.function.code, func))
+            .find(|(_, function)| Rc::ptr_eq(&function.code, func))
             .map_or_else(
                 || {
                     self.others.modules.iter().find_map(|(mod_name, module)| {
                         module
                             .iter_named_functions()
-                            .find(|(_, local_fn)| Rc::ptr_eq(&local_fn.function.code, func))
+                            .find(|(_, function)| Rc::ptr_eq(&function.code, func))
                             .map(|(fn_name, _)| {
                                 if self.current.uses(mod_name, fn_name) {
                                     fn_name.to_string()

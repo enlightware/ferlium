@@ -869,7 +869,7 @@ impl Compiler {
         let mut sigs = Vec::new();
         for module in &self.modules.modules {
             let mod_name = module.0;
-            for (sym_name, local_fn) in module.1.iter_named_functions() {
+            for (sym_name, func) in module.1.iter_named_functions() {
                 // skip trait methods
                 if !module.1.is_non_trait_local_function(sym_name) {
                     continue;
@@ -882,7 +882,6 @@ impl Compiler {
                 } else {
                     format!("{mod_name}::{sym_name}")
                 };
-                let func = &local_fn.function;
                 sigs.push(FunctionSignature {
                     name,
                     args: func
