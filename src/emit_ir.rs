@@ -21,7 +21,7 @@ use ustr::{Ustr, ustr};
 use crate::{
     Location,
     ast::{self, *},
-    containers::{b, iterable_to_string, sorted},
+    containers::{b, iterable_to_string},
     dictionary_passing::DictElaborationCtx,
     effects::EffType,
     error::InternalCompilationError,
@@ -660,8 +660,8 @@ where
                 .collect::<Result<_, _>>()?;
             quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
             solver.commit(&mut output.functions, &mut output.def_table);
-            // Apply substitution and finalize the type scheme for the parent function.
-            {
+            // Apply substitution and finalize the type scheme.
+            apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                 let descr = &mut output.functions[id.as_index()];
                 let mut node = descr.get_node_mut().unwrap();
                 node.instantiate(&subst);
@@ -672,30 +672,7 @@ where
                 descr.definition.ty_scheme.eff_quantifiers =
                     descr.definition.ty_scheme.ty.input_effect_vars();
                 descr.definition.ty_scheme.constraints = constraints.clone();
-                assert_eq!(
-                    sorted(descr.definition.ty_scheme.ty_quantifiers_from_signature()),
-                    sorted(quantifiers.clone())
-                );
-            }
-            // Apply substitution and finalize the type scheme for associated lambdas.
-            // Lambdas derive their own quantifiers from their own type, since they are
-            // closed over the parent's type variables and do not share the parent's generics.
-            if let Some(lambda_ids) = associated_lambdas.get(id) {
-                for lambda_id in lambda_ids.clone() {
-                    let descr = &mut output.functions[lambda_id.as_index()];
-                    let mut node = descr.get_node_mut().unwrap();
-                    node.instantiate(&subst);
-                    drop(node);
-                    // Lambdas have their constraints handled by the parent; clear them here.
-                    descr.definition.ty_scheme.constraints = vec![];
-                    // Derive quantifiers from the lambda's own type signature.
-                    let lambda_quantifiers =
-                        descr.definition.ty_scheme.ty_quantifiers_from_signature();
-                    descr.definition.ty_scheme.ty_quantifiers = lambda_quantifiers;
-                    descr.definition.ty_scheme.eff_quantifiers =
-                        descr.definition.ty_scheme.ty.input_effect_vars();
-                }
-            }
+            });
 
             // Log the dropped constraints.
             let module_env = ModuleEnv::new(output, others, within_std);
