@@ -899,16 +899,14 @@ pub fn emit_expr_unsafe(
     node.instantiate(&subst);
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
+        descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
         let mut node = descr.get_node_mut().unwrap();
         node.instantiate(&subst);
         drop(node);
-        // Lambdas have their constraints handled by the parent; clear them here.
-        descr.definition.ty_scheme.constraints = vec![];
-        // Derive quantifiers from the lambda's own type signature.
-        descr.definition.ty_scheme.ty_quantifiers =
-            descr.definition.ty_scheme.ty_quantifiers_from_signature();
+        descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
         descr.definition.ty_scheme.eff_quantifiers =
             descr.definition.ty_scheme.ty.input_effect_vars();
+        descr.definition.ty_scheme.constraints = constraints.clone();
     }
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = local.ty.instantiate(&subst);

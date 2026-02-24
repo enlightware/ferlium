@@ -651,6 +651,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     }
 
     /// Returns the type quantifiers of this type scheme.
+    #[allow(dead_code)]
     pub(crate) fn ty_quantifiers_from_signature(&self) -> Vec<TypeVar> {
         Self::list_ty_vars(&self.ty, self.constraints.iter())
     }
