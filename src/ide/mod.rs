@@ -23,7 +23,7 @@ use crate::{
     eval::{EvalCtx, ValOrMut},
     format::FormatWith,
     location::SourceTable,
-    module::{ModuleFunction, ModuleRc, Modules},
+    module::{Module, ModuleFunction, Modules},
     r#type::{FnArgType, Type, tuple_type},
     value::{NativeValue, Value},
 };
@@ -970,7 +970,7 @@ impl Compiler {
     fn run_fn<R>(
         &self,
         name: &str,
-        f: impl FnOnce(&ModuleFunction, &ModuleRc, &Modules) -> Result<R, String>,
+        f: impl FnOnce(&ModuleFunction, &Module, &Modules) -> Result<R, String>,
     ) -> Result<R, String> {
         let user_module = self
             .session

@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use ::std::rc::Rc;
+
 use std::new_module_using_std;
 
 use ast::{UnstableCollector, VisitExpr};
@@ -66,7 +66,7 @@ pub use ustr::{Ustr, ustr};
 
 use crate::{
     format::FormatWith,
-    module::{Module, ModuleId, ModuleRc, id::Id},
+    module::{Module, ModuleId, id::Id},
     r#type::Type,
 };
 
@@ -115,10 +115,8 @@ impl CompilerSession {
         let std_name = module::Path::single_str("std");
         modules.insert(std_name.clone(), std_module.clone());
         let empty_std_user = new_module_using_std(modules.next_id());
-        let empty_std_user = modules.insert(
-            module::Path::single_str("$empty_std_user"),
-            Rc::new(empty_std_user),
-        );
+        let empty_std_user =
+            modules.insert(module::Path::single_str("$empty_std_user"), empty_std_user);
         Self {
             source_table,
             modules,
@@ -138,12 +136,12 @@ impl CompilerSession {
     }
 
     /// Get a module by its ID, if it exists.
-    pub fn get_module_by_id(&self, id: ModuleId) -> Option<&ModuleRc> {
+    pub fn get_module_by_id(&self, id: ModuleId) -> Option<&Module> {
         self.modules.get(id)
     }
 
     /// Get a module by its path, if it exists.
-    pub fn get_module_by_path(&self, path: &module::Path) -> Option<&ModuleRc> {
+    pub fn get_module_by_path(&self, path: &module::Path) -> Option<&Module> {
         self.modules.get_by_name(path).map(|(_, module)| module)
     }
 
@@ -158,12 +156,12 @@ impl CompilerSession {
     }
 
     /// Get the standard library module.
-    pub fn std_module(&self) -> &ModuleRc {
+    pub fn std_module(&self) -> &Module {
         self.modules.get(self.std_module).unwrap()
     }
 
     /// Register a module in this compilation session and return its id.
-    pub fn register_module(&mut self, path: module::Path, module: ModuleRc) -> ModuleId {
+    pub fn register_module(&mut self, path: module::Path, module: Module) -> ModuleId {
         let module_id = self.modules.insert(path, module);
         log::debug!("Registered module with id {module_id}");
         module_id
@@ -315,10 +313,9 @@ impl CompilerSession {
         // We might not want this behavior.
 
         // Get the old module of the same name, replacing it with a dummy for the duration of the compilation.
-        let (module_id, old_module) = self.modules.replace(
-            module_path.clone(),
-            Rc::new(Module::new(self.modules.next_id())),
-        );
+        let (module_id, old_module) = self
+            .modules
+            .replace(module_path.clone(), Module::new(self.modules.next_id()));
 
         // Emit IR for the module.
         let mut module = emit_module(module_ast, module_id, &self.modules, Some(&module), false)
@@ -351,7 +348,6 @@ impl CompilerSession {
         };
 
         // Store the module.
-        let module = Rc::new(module);
         self.modules.replace(module_path, module);
 
         Ok(ModuleAndExpr { module_id, expr })

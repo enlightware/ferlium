@@ -14,7 +14,7 @@ use enum_as_inner::EnumAsInner;
 use ustr::{Ustr, ustr};
 
 #[cfg(debug_assertions)]
-use crate::module::Path;
+use crate::module::{Module, Path};
 use crate::{
     CompilerSession, Location, SourceId, SourceTable,
     containers::b,
@@ -22,7 +22,7 @@ use crate::{
     format::{FormatWith, write_with_separator},
     function::FunctionRc,
     ir::{Node, NodeKind},
-    module::{FunctionId, LocalFunctionId, ModuleId, ModuleRc, Modules, TraitImplId},
+    module::{FunctionId, LocalFunctionId, ModuleId, Modules, TraitImplId},
     std::array,
     r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},
@@ -249,7 +249,7 @@ impl<'a> EvalCtx<'a> {
     fn get_stack_entry_from_fn_and_mod(
         &self,
         function: &FunctionRc,
-        module: &ModuleRc,
+        module: &Module,
     ) -> StackEntry {
         let fn_name = format!("value function {:p}::{:p}", module, function);
         StackEntry::new(

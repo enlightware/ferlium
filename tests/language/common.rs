@@ -25,7 +25,7 @@ use ferlium::{
     r#type::{FnType, Type, variant_type},
     value::Value,
 };
-use std::{cell::RefCell, rc::Rc, sync::atomic::AtomicIsize};
+use std::{cell::RefCell, sync::atomic::AtomicIsize};
 use ustr::ustr;
 
 #[derive(Debug)]
@@ -205,15 +205,15 @@ impl TestSession {
         let mut compiler_session = CompilerSession::new();
         compiler_session.register_module(
             Path::single_str("testing"),
-            Rc::new(testing_module(compiler_session.modules().next_id())),
+            testing_module(compiler_session.modules().next_id()),
         );
         compiler_session.register_module(
             Path::single_str("effects"),
-            Rc::new(test_effect_module(compiler_session.modules().next_id())),
+            test_effect_module(compiler_session.modules().next_id()),
         );
         compiler_session.register_module(
             Path::single_str("props"),
-            Rc::new(test_property_module(compiler_session.modules().next_id())),
+            test_property_module(compiler_session.modules().next_id()),
         );
         add_deep_modules(&mut compiler_session);
         Self {

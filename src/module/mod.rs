@@ -17,7 +17,6 @@
 pub mod function;
 pub mod id;
 pub mod module_env;
-pub mod modules;
 pub mod path;
 pub mod trait_impl;
 pub mod uses;
@@ -25,7 +24,6 @@ pub mod uses;
 use enum_as_inner::EnumAsInner;
 pub use function::*;
 pub use module_env::*;
-pub use modules::*;
 pub use path::*;
 pub use trait_impl::*;
 pub use uses::*;
@@ -831,6 +829,10 @@ impl FormatWith<Modules> for Module {
         self.format_with_modules(f, data, false)
     }
 }
+
+/// A set of modules indexed both by name (Path) and by numeric ID (ModuleId).
+/// This is the canonical way to hold a collection of modules in a compilation session.
+pub type Modules = NamedIndexed<Path, ModuleId, Module>;
 
 pub struct ShowModuleDetails<'a>(pub &'a Modules);
 

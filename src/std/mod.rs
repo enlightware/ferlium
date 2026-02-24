@@ -6,12 +6,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{rc::Rc, str::FromStr};
+use std::str::FromStr;
 
 use crate::{
     Location,
     location::SourceTable,
-    module::{self, Module, ModuleId, ModuleRc},
+    module::{self, Module, ModuleId},
     r#type::{Type, TypeKind, bare_native_type},
     value::Value,
 };
@@ -39,29 +39,27 @@ pub mod serde;
 pub mod string;
 pub mod variant;
 
-pub fn std_module(source_table: &mut SourceTable, module_id: ModuleId) -> ModuleRc {
-    Rc::new({
-        let mut module = Module::new(module_id);
-        core::add_to_module(&mut module);
-        flow::add_to_module(&mut module);
-        cast::add_to_module(&mut module);
-        // mem::add_to_module(&mut module);
-        bits::add_to_module(&mut module);
-        logic::add_to_module(&mut module);
-        ordering::add_to_module(&mut module);
-        concat::add_to_module(&mut module);
-        contains::add_to_module(&mut module);
-        math::add_to_module(&mut module);
-        array::add_to_module(&mut module);
-        io::add_to_module(&mut module);
-        string::add_to_module(&mut module);
-        variant::add_to_module(&mut module);
-        iterator::add_to_module(&mut module);
-        serde::add_to_module(&mut module);
-        json::add_to_module(&mut module);
-        prelude::add_to_module(&mut module, source_table, module_id);
-        module
-    })
+pub fn std_module(source_table: &mut SourceTable, module_id: ModuleId) -> Module {
+    let mut module = Module::new(module_id);
+    core::add_to_module(&mut module);
+    flow::add_to_module(&mut module);
+    cast::add_to_module(&mut module);
+    // mem::add_to_module(&mut module);
+    bits::add_to_module(&mut module);
+    logic::add_to_module(&mut module);
+    ordering::add_to_module(&mut module);
+    concat::add_to_module(&mut module);
+    contains::add_to_module(&mut module);
+    math::add_to_module(&mut module);
+    array::add_to_module(&mut module);
+    io::add_to_module(&mut module);
+    string::add_to_module(&mut module);
+    variant::add_to_module(&mut module);
+    iterator::add_to_module(&mut module);
+    serde::add_to_module(&mut module);
+    json::add_to_module(&mut module);
+    prelude::add_to_module(&mut module, source_table, module_id);
+    module
 }
 
 pub fn new_module_using_std(module_id: ModuleId) -> Module {
