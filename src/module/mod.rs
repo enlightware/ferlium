@@ -127,6 +127,11 @@ impl Module {
         }
     }
 
+    /// Get this module's ID.
+    pub fn module_id(&self) -> ModuleId {
+        self.impls.module_id
+    }
+
     // Imports
 
     /// Get a function import slot by ID
