@@ -1,0 +1,45 @@
+/// Convert a Variant to a JSON string.
+fn to_json(v: Variant) -> string {
+	match (v) {
+		None => "null",
+		Bool(b) => if b { "true" } else { "false" },
+		Int(i) => to_string(i),
+		Float(f) => to_string(f),
+		String(s) => f"\"{s}\"",
+		Array(a) => {
+			let mut result = "[";
+			for i in 0..array_len(a) {
+				string_push_str(result, to_json(a[i]));
+				if i < array_len(a) - 1 {
+					string_push_str(result, ",");
+				}
+			};
+			string_push_str(result, "]");
+			result
+		},
+		Object(o) => {
+			let mut result = "{";
+			for i in 0..array_len(o) {
+				let entry = o[i];
+				let name = entry.0;
+				let value = to_json(entry.1);
+				string_push_str(result, f"\"{name}\":{value}");
+				if i < array_len(o) - 1 {
+					string_push_str(result, ",");
+				}
+			};
+			string_push_str(result, "}");
+			result
+		},
+	}
+}
+
+/// Encode a value to a JSON string. The value must implement the Serialize trait.
+fn json_encode(v) -> string {
+	to_json(serialize(v))
+}
+
+/// Decode a JSON string to a value of any type that implements the Deserialize trait. Panics if the string is not valid JSON or if the JSON does not match the expected type.
+fn json_decode(s) {
+	deserialize(parse_json(s))
+}

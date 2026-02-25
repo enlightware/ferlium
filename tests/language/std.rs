@@ -913,3 +913,96 @@ fn serialize_with_type_ascription() {
         variant_t1("Array", array![variant_t1("Int", int(0))])
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn json_serialization_roundtrip() {
+    let mut session = TestSession::new();
+    // bool, low-level JSON functions
+    assert_eq!(
+        session.run("(deserialize(parse_json(to_json(serialize(true)))): bool)"),
+        bool(true)
+    );
+    // bool
+    assert_eq!(
+        session.run("(json_decode(json_encode(true)): bool)"),
+        bool(true)
+    );
+    // unit
+    assert_eq!(
+        session.run("(json_decode(json_encode(())): ())"),
+        Value::unit()
+    );
+    // int
+    assert_eq!(session.run("(json_decode(json_encode(42)): int)"), int(42));
+    // float
+    assert_eq!(
+        session.run("(json_decode(json_encode(3.14)): float)"),
+        float(3.14)
+    );
+    // string
+    assert_eq!(
+        session.run(r#"(json_decode(json_encode("hello")): string)"#),
+        string("hello")
+    );
+    // array of ints
+    assert_eq!(
+        session.run("(json_decode(json_encode([1, 2, 3])): [int])"),
+        int_a![1, 2, 3]
+    );
+    // array of floats
+    assert_eq!(
+        session.run("(json_decode(json_encode([1.5, 2.5, 3.5])): [float])"),
+        float_a![1.5, 2.5, 3.5]
+    );
+    // None variant
+    assert_eq!(
+        session.run("(json_decode(json_encode(None)): None | Some(int))"),
+        none()
+    );
+    // Some(int) variant
+    assert_eq!(
+        session.run("(json_decode(json_encode(Some((42: int)))): None | Some(int))"),
+        some(int(42))
+    );
+    // tuple
+    assert_eq!(
+        session.run("(json_decode(json_encode((1, 2.0, true))): (int, float, bool))"),
+        tuple!(int(1), float(2.0), bool(true))
+    );
+    // record
+    assert_eq!(
+        session.run(r#"(json_decode(json_encode({a: 1, b: true})): {a: int, b: bool})"#),
+        tuple!(int(1), bool(true))
+    );
+    // raw JSON parsing - simple object
+    assert_eq!(
+        session.run(r#"(json_decode("{\"a\": 1, \"b\": true}"): {a: int, b: bool})"#),
+        tuple!(int(1), bool(true))
+    );
+    // complex object roundtrip with nested array
+    assert_eq!(
+        session.run(
+            r#"(
+                json_decode(json_encode({name: "Alice", age: 30, is_student: false, scores: [85.5, 92.0, 78.0]})):
+                {age: int, is_student: bool, name: string, scores: [float]}
+            )"#
+        ),
+        tuple!(int(30), bool(false), string("Alice"), float_a![85.5, 92.0, 78.0])
+    );
+    // raw JSON parsing - complex object with nested array
+    let json_str =
+        r#"{"name": "Alice", "age": 30, "is_student": false, "scores": [85.5, 92.0, 78.0]}"#;
+    assert_eq!(
+        session.run(&format!(
+            r#"(json_decode("{}"): {{age: int, is_student: bool, name: string, scores: [float]}})"#,
+            json_str.replace('"', "\\\"")
+        )),
+        tuple!(
+            int(30),
+            bool(false),
+            string("Alice"),
+            float_a![85.5, 92.0, 78.0]
+        )
+    );
+}

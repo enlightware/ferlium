@@ -28,9 +28,10 @@ pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable, module_id:
         prelude!("comparison.fer"),
         // Then most of the core traits.
         prelude!("core_traits.fer"),
-        // These functions depend on array iterator being available,
-        // so they are compiled in a next batch.
+        // These functions depend on array iterator being available.
         prelude!("core_traits_dependent.fer"),
+        // Json depends on expect_variant_object_entry being available.
+        prelude!("json.fer"),
     ];
     for (name, code) in codes {
         add_code_to_module(
