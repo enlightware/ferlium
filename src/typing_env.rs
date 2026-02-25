@@ -60,7 +60,7 @@ impl Local {
     }
 }
 
-pub type GetFunctionData<'a> = (&'a FunctionDefinition, FunctionId, Option<module::Path>);
+pub type GetFunctionData<'a> = (&'a FunctionDefinition, FunctionId, Option<ModuleId>);
 
 /// A typing environment, mapping local variable names to types.
 #[derive(new)]
@@ -154,34 +154,32 @@ impl<'m> TypingEnv<'m> {
             let module_path = module::Path::from_ast_segments(&segments[..segments.len() - 1]);
             self.module_env
                 .others
-                .get_value_by_name(&module_path)
-                .and_then(|m| {
+                .get_by_name(&module_path)
+                .and_then(|(module_id, m)| {
                     if m.get_local_function_id(fn_name).is_some() {
-                        Some(fn_name)
+                        Some((Some(module_id), fn_name))
                     } else {
                         None
                     }
                 })
-                .map(|function_name| (Some(module_path), function_name))
         };
 
         // Create the ProgramFunction from the resolved key
-        let (module_path_opt, function_name) = match key {
+        let (module_id_opt, function_name) = match key {
             Some(k) => k,
             None => return Ok(None),
         };
-        Ok(if let Some(module_path) = module_path_opt {
-            let module_id = self.module_env.others.get_id_by_name(&module_path).unwrap();
+        Ok(if let Some(module_id) = module_id_opt {
             let id = self.import_function(module_id, function_name);
             let definition = &self
                 .module_env
                 .others
-                .get_value_by_name(&module_path)
+                .get(module_id)
                 .unwrap()
                 .get_function(function_name)
                 .unwrap()
                 .definition;
-            Some((definition, FunctionId::Import(id), Some(module_path)))
+            Some((definition, FunctionId::Import(id), Some(module_id)))
         } else {
             let id = self
                 .module_env

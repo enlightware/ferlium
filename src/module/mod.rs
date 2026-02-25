@@ -536,25 +536,25 @@ impl Module {
         name: &'a str,
         others: &'a Modules,
         getter: &impl Fn(&'a str, &'a Self) -> Option<T>,
-    ) -> Result<Option<(Option<Path>, T)>, InternalCompilationError> {
+    ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
         if let Some(t) = getter(name, self) {
             return Ok(Some((None, t)));
         }
 
         let u_name = ustr(name);
         if let Some(use_data) = self.uses.explicits.get(&u_name) {
-            if let Some(module_ref) = others.get_value_by_name(&use_data.module) {
+            if let Some((module_id, module_ref)) = others.get_by_name(&use_data.module) {
                 if let Some(t) = getter(name, module_ref) {
-                    return Ok(Some((Some(use_data.module.clone()), t)));
+                    return Ok(Some((Some(module_id), t)));
                 }
             }
         }
 
         let mut matches = Vec::new();
         for wildcard_use in &self.uses.wildcards {
-            if let Some(module_ref) = others.get_value_by_name(&wildcard_use.module) {
+            if let Some((module_id, module_ref)) = others.get_by_name(&wildcard_use.module) {
                 if let Some(t) = getter(name, module_ref) {
-                    matches.push((wildcard_use, t));
+                    matches.push((wildcard_use, module_id, t));
                 }
             }
         }
@@ -562,13 +562,13 @@ impl Module {
         match matches.len() {
             0 => Ok(None),
             1 => {
-                let (wildcard_use, t) = matches.pop().unwrap();
-                Ok(Some((Some(wildcard_use.module.clone()), t)))
+                let (_, module_id, t) = matches.pop().unwrap();
+                Ok(Some((Some(module_id), t)))
             }
             _ => {
                 let occurrences = matches
                     .iter()
-                    .map(|(w, _)| ImportSite {
+                    .map(|(w, _, _)| ImportSite {
                         module: w.module.clone(),
                         span: w.span,
                         kind: ImportKind::Module,

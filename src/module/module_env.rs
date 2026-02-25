@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::{
     ast::{self, UstrSpan},
     error::InternalCompilationError,
-    module::{Module, ModuleFunction, Modules, path::Path},
+    module::{Module, ModuleFunction, ModuleId, Modules, path::Path},
     r#trait::TraitRef,
     r#type::TypeDefRef,
     typing_env::TraitFunctionDescription,
@@ -174,19 +174,19 @@ impl<'m> ModuleEnv<'m> {
             )
     }
 
-    /// Get a function from the current module, or other ones, return the name of the module if other.
+    /// Get a function from the current module, or other ones, return the ID of the module if other.
     pub fn get_function(
         &'m self,
         path: &'m [UstrSpan],
-    ) -> Result<Option<(Option<Path>, &'m ModuleFunction)>, InternalCompilationError> {
+    ) -> Result<Option<(Option<ModuleId>, &'m ModuleFunction)>, InternalCompilationError> {
         self.get_module_member(path, &|name, module| module.get_function(ustr(name)))
     }
 
-    /// Get a function from the current module, or other ones, return the name of the module if other.
+    /// Get a function from the current module, or other ones, return the ID of the module if other.
     pub fn get_program_function(
         &'m self,
         path: &'m [UstrSpan],
-    ) -> Result<Option<(Option<Path>, &'m ModuleFunction)>, InternalCompilationError> {
+    ) -> Result<Option<(Option<ModuleId>, &'m ModuleFunction)>, InternalCompilationError> {
         self.get_module_member(path, &|name, module| module.get_function(ustr(name)))
     }
 
@@ -208,11 +208,11 @@ impl<'m> ModuleEnv<'m> {
             .map(|(_, t)| t))
     }
 
-    /// Get a trait function from the current module, or other ones, return the name of the module if other.
+    /// Get a trait function from the current module, or other ones, return the ID of the module if other.
     pub fn get_trait_function(
         &'m self,
         path: &'m ast::Path,
-    ) -> Result<Option<(Option<Path>, TraitFunctionDescription<'m>)>, InternalCompilationError>
+    ) -> Result<Option<(Option<ModuleId>, TraitFunctionDescription<'m>)>, InternalCompilationError>
     {
         self.get_module_member(&path.segments, &|name, module| {
             module.trait_iter().find_map(|trait_ref| {
@@ -236,7 +236,7 @@ impl<'m> ModuleEnv<'m> {
         &'m self,
         segments: &'m [UstrSpan],
         getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
-    ) -> Result<Option<(Option<Path>, T)>, InternalCompilationError> {
+    ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
         if let [(name, _)] = segments {
             return self.current.get_member(name, self.others, getter);
         }
