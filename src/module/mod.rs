@@ -255,7 +255,7 @@ impl Module {
     /// Get a local function name by ID (slow, iterates over the def table)
     pub fn get_function_name_by_id(&self, id: LocalFunctionId) -> Option<Ustr> {
         self.def_table
-            .iter_values_and_names()
+            .iter()
             .find(|(def_kind, _)| {
                 def_kind
                     .as_function()
@@ -281,15 +281,13 @@ impl Module {
 
     /// Iterate over all named local functions in this module, returning their name and data.
     pub fn iter_named_functions(&self) -> impl Iterator<Item = (Ustr, &ModuleFunction)> {
-        self.def_table
-            .iter_values_and_names()
-            .filter_map(|(def_kind, name_opt)| {
-                let name = (*name_opt)?;
-                def_kind.as_function().map(|function_id| {
-                    let function = &self.functions[function_id.as_index()];
-                    (name, function)
-                })
+        self.def_table.iter().filter_map(|(def_kind, name_opt)| {
+            let name = (*name_opt)?;
+            def_kind.as_function().map(|function_id| {
+                let function = &self.functions[function_id.as_index()];
+                (name, function)
             })
+        })
     }
 
     /// Get the number of functions in this module.
@@ -623,7 +621,7 @@ impl Module {
             }
             let named_count = self
                 .def_table
-                .iter_values_and_names()
+                .iter()
                 .filter(|(kind, name)| {
                     if !kind.is_function() {
                         false

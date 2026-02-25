@@ -108,18 +108,18 @@ impl<'m> TypingEnv<'m> {
 
     fn import_function(
         &mut self,
-        module_path: &module::Path,
+        module_id: ModuleId,
         function_name: Ustr,
     ) -> ImportFunctionSlotId {
         self.module_env.current.iter_import_fn_slots()
-            .position(|slot| slot.module == *module_path &&
+            .position(|slot| slot.module == module_id &&
                 matches!(slot.target, ImportFunctionTarget::NamedFunction(name) if name == function_name)
             )
             .map(|index| ImportFunctionSlotId(index as u32))
             .unwrap_or_else(|| {
                 let slot_index = (self.module_env.current.import_fn_slot_count() + self.new_import_slots.len()) as u32;
                 self.new_import_slots.push(ImportFunctionSlot {
-                    module: module_path.clone(),
+                    module: module_id,
                     target: ImportFunctionTarget::NamedFunction(function_name),
                 });
                 ImportFunctionSlotId(slot_index)
@@ -171,7 +171,8 @@ impl<'m> TypingEnv<'m> {
             None => return Ok(None),
         };
         Ok(if let Some(module_path) = module_path_opt {
-            let id = self.import_function(&module_path, function_name);
+            let module_id = self.module_env.others.get_id_by_name(&module_path).unwrap();
+            let id = self.import_function(module_id, function_name);
             let definition = &self
                 .module_env
                 .others
@@ -190,16 +191,5 @@ impl<'m> TypingEnv<'m> {
             let function = self.module_env.current.get_function_by_id(id).unwrap();
             Some((&function.definition, FunctionId::Local(id), None))
         })
-    }
-
-    pub fn other_module_path(&self, function: FunctionId) -> Option<module::Path> {
-        match function {
-            FunctionId::Local(_) => None,
-            FunctionId::Import(id) => self
-                .module_env
-                .current
-                .get_import_fn_slot(id)
-                .map(|slot| slot.module.clone()),
-        }
     }
 }

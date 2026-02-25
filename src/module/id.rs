@@ -107,12 +107,19 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
             .and_then(|(_, name)| name.as_ref())
     }
 
-    pub fn iter_names(&self) -> impl Iterator<Item = &N> {
-        self.name_to_id.keys()
+    pub fn iter(&self) -> impl Iterator<Item = &(T, Option<N>)> {
+        self.data.iter()
     }
 
-    pub fn iter_values_and_names(&self) -> impl Iterator<Item = &(T, Option<N>)> {
-        self.data.iter()
+    pub fn enumerates(&self) -> impl Iterator<Item = (I, &T, &Option<N>)> {
+        self.data
+            .iter()
+            .enumerate()
+            .map(|(index, (data, name))| (I::from_index(index), data, name))
+    }
+
+    pub fn iter_names(&self) -> impl Iterator<Item = &N> {
+        self.name_to_id.keys()
     }
 
     /// Get a value by name, returning only the value (without the ID).

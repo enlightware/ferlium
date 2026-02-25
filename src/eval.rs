@@ -206,19 +206,19 @@ impl<'a> EvalCtx<'a> {
                 let slot = module
                     .get_import_fn_slot(id)
                     .unwrap_or_else(|| panic!("imported function slot not found: {}", id));
-                let module_path = &slot.module;
-                let (target_module_id, module) = self
+                let module_id = slot.module;
+                let module = self
                     .compiler_session
-                    .modules()
-                    .get_by_name(module_path)
-                    .unwrap_or_else(|| panic!("imported module not found: {}", module_path));
+                    .get_module_by_id(module_id)
+                    .unwrap_or_else(|| panic!("imported module not found: #{}", module_id));
+                let target_module_id = module_id;
                 use ImportFunctionTarget::*;
                 let local_id = match &slot.target {
                     TraitImplMethod { key, index } => {
                         let imp = module.get_impl_data_by_trait_key(key).unwrap_or_else(|| {
                             panic!(
-                                "imported trait impl not found: {:?} in module {}",
-                                key, module_path
+                                "imported trait impl not found: {:?} in module #{}",
+                                key, module_id
                             )
                         });
                         imp.methods[*index as usize]
@@ -226,8 +226,8 @@ impl<'a> EvalCtx<'a> {
                     &NamedFunction(fn_name) => {
                         module.get_local_function_id(fn_name).unwrap_or_else(|| {
                             panic!(
-                                "imported function not found: {} in module {}",
-                                fn_name, module_path
+                                "imported function not found: {} in module #{}",
+                                fn_name, module_id
                             )
                         })
                     }
@@ -279,7 +279,13 @@ impl<'a> EvalCtx<'a> {
                     .get_module_by_id(self.module_id)
                     .unwrap();
                 let slot = module.get_import_fn_slot(id).unwrap();
-                module_path = slot.module.clone();
+                let module_id = slot.module;
+                module_path = self
+                    .compiler_session
+                    .modules()
+                    .get_name(module_id)
+                    .cloned()
+                    .unwrap_or_else(|| Path::single_str("<unknown>"));
                 use ImportFunctionTarget::*;
                 match &slot.target {
                     TraitImplMethod { key, index } => {
@@ -312,10 +318,7 @@ impl<'a> EvalCtx<'a> {
                     .get_module_by_id(self.module_id)
                     .unwrap();
                 let slot = module.get_import_impl_slot(id).unwrap();
-                let module = self
-                    .compiler_session
-                    .get_module_by_path(&slot.module)
-                    .unwrap();
+                let module = self.compiler_session.get_module_by_id(slot.module).unwrap();
                 module
                     .get_impl_data_by_trait_key(&slot.key)
                     .unwrap()

@@ -18,7 +18,7 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     function::{Function, FunctionDefinition, FunctionRc},
-    module::{LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id, path::Path},
+    module::{LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id},
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     type_inference::InstSubstitution,
@@ -70,8 +70,8 @@ impl FormatWith<ModuleEnv<'_>> for TraitImplId {
 /// Import slot that can be resolved to a trait dictionary from another module
 #[derive(Debug, Clone)]
 pub struct ImportImplSlot {
-    /// Name of the module to import from
-    pub module: Path,
+    /// ID of the module to import from
+    pub module: ModuleId,
     /// The key of the trait impl in that module
     pub key: TraitKey,
 }
@@ -702,7 +702,7 @@ pub fn format_impl_header_by_import_slot(
     let key = &slot.key;
     let imp = &env
         .others
-        .get_value_by_name(&slot.module)
+        .get(slot.module)
         .expect("imported module not found")
         .get_impl_data_by_trait_key(key)
         .expect("imported trait impl not found");
