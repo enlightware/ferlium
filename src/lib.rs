@@ -66,7 +66,8 @@ pub use ustr::{Ustr, ustr};
 
 use crate::{
     format::FormatWith,
-    module::{Module, ModuleId, id::Id},
+    module::{Module, ModuleId},
+    std::STD_MODULE_ID,
     r#type::Type,
 };
 
@@ -100,8 +101,6 @@ pub struct CompilerSession {
     source_table: SourceTable,
     /// All compiled modules
     modules: Modules,
-    /// Pre-created standard library module.
-    std_module: ModuleId,
     /// Pre-created empty module just using the standard library, for debugging purposes.
     empty_std_user: ModuleId,
 }
@@ -111,16 +110,16 @@ impl CompilerSession {
     pub fn new() -> Self {
         let mut source_table = SourceTable::default();
         let mut modules = Modules::default();
-        let std_module = std::std_module(&mut source_table, modules.next_id());
+        assert_eq!(modules.next_id(), STD_MODULE_ID);
+        let std_module = std::std_module(&mut source_table);
         let std_name = module::Path::single_str("std");
-        modules.insert(std_name.clone(), std_module.clone());
+        modules.insert(std_name, std_module);
         let empty_std_user = new_module_using_std(modules.next_id());
         let empty_std_user =
             modules.insert(module::Path::single_str("$empty_std_user"), empty_std_user);
         Self {
             source_table,
             modules,
-            std_module: ModuleId::from_index(0),
             empty_std_user,
         }
     }
@@ -157,7 +156,7 @@ impl CompilerSession {
 
     /// Get the standard library module.
     pub fn std_module(&self) -> &Module {
-        self.modules.get(self.std_module).unwrap()
+        self.modules.get(STD_MODULE_ID).unwrap()
     }
 
     /// Register a module in this compilation session and return its id.

@@ -39,8 +39,10 @@ pub mod serde;
 pub mod string;
 pub mod variant;
 
-pub fn std_module(source_table: &mut SourceTable, module_id: ModuleId) -> Module {
-    let mut module = Module::new(module_id);
+pub(crate) static STD_MODULE_ID: ModuleId = ModuleId(0);
+
+pub fn std_module(source_table: &mut SourceTable) -> Module {
+    let mut module = Module::new(STD_MODULE_ID);
     core::add_to_module(&mut module);
     flow::add_to_module(&mut module);
     cast::add_to_module(&mut module);
@@ -58,7 +60,7 @@ pub fn std_module(source_table: &mut SourceTable, module_id: ModuleId) -> Module
     iterator::add_to_module(&mut module);
     serde::add_to_module(&mut module);
     json::add_to_module(&mut module);
-    prelude::add_to_module(&mut module, source_table, module_id);
+    prelude::add_to_module(&mut module, source_table, STD_MODULE_ID);
     module
 }
 
