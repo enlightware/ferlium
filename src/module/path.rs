@@ -32,8 +32,12 @@ impl Path {
             segments: vec![Ustr::from(name)],
         }
     }
+
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
+    }
+    pub fn is_single_named_str(&self, name: &str) -> bool {
+        self.segments.len() == 1 && self.segments[0] == name
     }
 
     pub fn from_ast_segments(segments: &[crate::ast::UstrSpan]) -> Self {
