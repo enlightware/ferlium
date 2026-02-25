@@ -39,7 +39,8 @@ fn json_encode(v) -> string {
 	to_json(serialize(v))
 }
 
-/// Decode a JSON string to a value of any type that implements the Deserialize trait. Panics if the string is not valid JSON or if the JSON does not match the expected type.
+/// Decode a JSON string to a value of any type that implements the Deserialize trait.
+/// Panics if the string is not valid JSON or if the JSON does not match the expected type.
 fn json_decode(s) {
 	deserialize(parse_json(s))
 }

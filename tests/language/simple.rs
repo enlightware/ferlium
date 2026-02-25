@@ -76,6 +76,24 @@ fn comments() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn doc_comments() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session
+            .compile_and_get_fn_def("/// function\nfn f() {}", "f")
+            .doc,
+        Some("function".into())
+    );
+    assert_eq!(
+        session
+            .compile_and_get_fn_def("/// function with\n/// two lines doc\nfn f() {}", "f")
+            .doc,
+        Some("function with\ntwo lines doc".into())
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn blocks() {
     let mut session = TestSession::new();
     assert_eq!(session.run("{}"), unit());

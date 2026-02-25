@@ -96,7 +96,9 @@ impl FunctionDefinition {
         env: &ModuleEnv<'_>,
     ) -> fmt::Result {
         if let Some(doc) = &self.doc {
-            writeln!(f, "{prefix}/// {doc}")?;
+            for line in doc.split("\n") {
+                writeln!(f, "{prefix}/// {line}")?;
+            }
         }
         write!(f, "{prefix}fn {name}")?;
         let mut quantifiers = self

@@ -231,7 +231,9 @@ impl Trait {
 impl FormatWith<ModuleEnv<'_>> for Trait {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> fmt::Result {
         if let Some(doc) = &self.doc {
-            writeln!(f, "/// {doc}")?;
+            for line in doc.split("\n") {
+                writeln!(f, "/// {line}")?;
+            }
         }
         write!(f, "trait {} <", self.name)?;
         let input_ty_count = self.input_type_count();

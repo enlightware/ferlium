@@ -638,7 +638,9 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for Module<P> {
                 } in functions.iter()
                 {
                     if let Some(doc) = doc {
-                        writeln!(f, "    /// {doc}")?;
+                        for line in doc.split("\n") {
+                            writeln!(f, "    /// {line}")?;
+                        }
                     }
                     write!(f, "    fn {}(", name.0,)?;
                     for (i, arg) in args.iter().enumerate() {
@@ -677,7 +679,9 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for Module<P> {
             } in self.functions.iter()
             {
                 if let Some(doc) = doc {
-                    writeln!(f, "  /// {doc}")?;
+                    for line in doc.split("\n") {
+                        writeln!(f, "  /// {line}")?;
+                    }
                 }
                 write!(f, "    fn {}(", name.0,)?;
                 for (i, arg) in args.iter().enumerate() {

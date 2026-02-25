@@ -319,9 +319,19 @@ pub(crate) fn ext_f<T>(e: T, v: Vec<T>) -> Vec<T> {
     result
 }
 
-/// Parse a single-line, Rust-style doc comment
-pub(crate) fn parse_doc_comments(comment: Option<&str>) -> Option<String> {
-    comment.map(|comment| comment.trim_start_matches("///").trim().to_string())
+/// Parse one or more consecutive Rust-style doc comment lines and join them with newlines.
+pub(crate) fn parse_doc_comments(comments: Vec<&str>) -> Option<String> {
+    if comments.is_empty() {
+        None
+    } else {
+        Some(
+            comments
+                .iter()
+                .map(|c| c.trim_start_matches("///").trim())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
 }
 
 /// Resolve token names using a static map

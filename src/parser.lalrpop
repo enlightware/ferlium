@@ -103,7 +103,7 @@ UseTree: UseTree = {
 }
 
 Function: ModuleFunction = {
-    <doc:DOC_COMMENT?> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
+    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
         ModuleFunction::new(name, args, span(al, ar, source_id), ret, body, span(l, r, source_id), parse_doc_comments(doc)),
 }
 
