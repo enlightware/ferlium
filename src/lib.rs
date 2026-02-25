@@ -149,7 +149,7 @@ impl CompilerSession {
     /// for debugging purposes.
     pub fn module_env(&self) -> ModuleEnv<'_> {
         ModuleEnv {
-            others: &self.modules,
+            modules: &self.modules,
             current: self.modules.get(self.empty_std_user).unwrap(),
             within_std: false,
         }

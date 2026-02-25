@@ -149,11 +149,11 @@ impl<'m> TypingEnv<'m> {
             };
             self.module_env
                 .current
-                .get_member(&fn_name, self.module_env.others, &get_fn)?
+                .get_member(&fn_name, self.module_env.modules, &get_fn)?
         } else {
             let module_path = module::Path::from_ast_segments(&segments[..segments.len() - 1]);
             self.module_env
-                .others
+                .modules
                 .get_by_name(&module_path)
                 .and_then(|(module_id, m)| {
                     if m.get_local_function_id(fn_name).is_some() {
@@ -173,7 +173,7 @@ impl<'m> TypingEnv<'m> {
             let id = self.import_function(module_id, function_name);
             let definition = &self
                 .module_env
-                .others
+                .modules
                 .get(module_id)
                 .unwrap()
                 .get_function(function_name)

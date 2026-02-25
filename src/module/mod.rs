@@ -799,7 +799,7 @@ impl Module {
                 .iter_named_functions()
                 .filter(|&(name, _)| self.is_non_trait_local_function(name))
                 .count();
-            writeln!(f, "Named functions ({}):\n", named_count)?;
+            writeln!(f, "Non-trait impl functions ({}):\n", named_count)?;
             for (i, (name, function)) in self.iter_named_functions().enumerate() {
                 if !self.is_non_trait_local_function(name) {
                     continue;

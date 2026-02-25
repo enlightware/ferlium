@@ -46,7 +46,7 @@ impl TypeDefLookupResult {
 #[derive(Clone, Copy, Debug, new)]
 pub struct ModuleEnv<'m> {
     pub(crate) current: &'m Module,
-    pub(crate) others: &'m Modules,
+    pub(crate) modules: &'m Modules,
     pub(crate) within_std: bool,
 }
 
@@ -54,7 +54,7 @@ impl<'m> ModuleEnv<'m> {
     pub fn type_alias_name(&self, ty: Type) -> Option<String> {
         self.current.type_aliases.get_name(ty).map_or_else(
             || {
-                self.others.iter_named().find_map(|(mod_path, module)| {
+                self.modules.iter_named().find_map(|(mod_path, module)| {
                     module.type_aliases.get_name(ty).map(|ty_name| {
                         if self.current.uses(mod_path, ty_name) {
                             ty_name.to_string()
@@ -74,7 +74,7 @@ impl<'m> ModuleEnv<'m> {
             .get_bare_native_name(native)
             .map_or_else(
                 || {
-                    self.others.iter_named().find_map(|(mod_name, module)| {
+                    self.modules.iter_named().find_map(|(mod_name, module)| {
                         module
                             .type_aliases
                             .get_bare_native_name(native)
@@ -157,7 +157,7 @@ impl<'m> ModuleEnv<'m> {
             .find(|(_, function)| Rc::ptr_eq(&function.code, func))
             .map_or_else(
                 || {
-                    self.others.iter_named().find_map(|(mod_name, module)| {
+                    self.modules.iter_named().find_map(|(mod_name, module)| {
                         module
                             .iter_named_functions()
                             .find(|(_, function)| Rc::ptr_eq(&function.code, func))
@@ -238,7 +238,7 @@ impl<'m> ModuleEnv<'m> {
         getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
     ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
         if let [(name, _)] = segments {
-            return self.current.get_member(name, self.others, getter);
+            return self.current.get_member(name, self.modules, getter);
         }
         if let Some(path) = segments.split_last() {
             let ((function_name, _), module) = path;
@@ -246,13 +246,13 @@ impl<'m> ModuleEnv<'m> {
                 && single_segment.0 == "std"
                 && self.within_std
             {
-                return self.current.get_member(function_name, self.others, getter);
+                return self.current.get_member(function_name, self.modules, getter);
             }
             let path = Path::new(module.iter().map(|(seg, _)| *seg).collect());
-            self.others
+            self.modules
                 .get_value_by_name(&path)
                 .map_or(Ok(None), |module| {
-                    module.get_member(function_name, self.others, getter)
+                    module.get_member(function_name, self.modules, getter)
                 })
         } else {
             Ok(None)

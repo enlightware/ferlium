@@ -58,7 +58,11 @@ impl FormatWith<ModuleEnv<'_>> for TraitImplId {
             }
             TraitImplId::Import(id) => {
                 let slot = env.current.get_import_impl_slot(id).unwrap();
-                let module_name = &slot.module;
+                let module_id = slot.module;
+                let module_name = env
+                    .modules
+                    .get_name(module_id)
+                    .unwrap_or_else(|| panic!("imported module {module_id} not found"));
                 write!(f, "imported dictionary {module_name}::<")?;
                 format_impl_header_by_import_slot(f, slot, env)?;
                 write!(f, "> (slot #{id})")
@@ -701,7 +705,7 @@ pub fn format_impl_header_by_import_slot(
 ) -> fmt::Result {
     let key = &slot.key;
     let imp = &env
-        .others
+        .modules
         .get(slot.module)
         .expect("imported module not found")
         .get_impl_data_by_trait_key(key)

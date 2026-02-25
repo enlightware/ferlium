@@ -51,7 +51,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                 let slot = &env.current.get_import_fn_slot(id).unwrap();
                 let module_id = slot.module;
                 let module_name = env
-                    .others
+                    .modules
                     .get_name(module_id)
                     .expect("imported module not found");
                 write!(f, "imported function {module_name}::")?;
@@ -59,7 +59,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                     ImportFunctionTarget::TraitImplMethod { key, index } => {
                         let name = key.trait_ref().functions[*index as usize].0;
                         let imp = env
-                            .others
+                            .modules
                             .get(module_id)
                             .expect("imported module not found")
                             .get_impl_data_by_trait_key(key)
