@@ -34,20 +34,12 @@ pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable, module_id:
         prelude!("json.fer"),
     ];
     for (name, code) in codes {
-        add_code_to_module(
-            name,
-            code,
-            to,
-            module_id,
-            &Modules::default(),
-            source_table,
-            true,
-        )
-        .unwrap_or_else(|e| {
-            panic!(
-                "Failed to add prelude to module: {}",
-                FormatWithData::new(&e, source_table)
-            )
-        });
+        add_code_to_module(name, code, to, module_id, &Modules::default(), source_table)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to add prelude to module: {}",
+                    FormatWithData::new(&e, source_table)
+                )
+            });
     }
 }

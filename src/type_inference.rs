@@ -381,7 +381,6 @@ impl TypeInference {
         let mut inner_env = TypingEnv::new(
             all_locals,
             env.new_import_slots,
-            env.module_id,
             env.module_env,
             Some((ret_ty, body.span)),
             env.lambda_functions,
@@ -418,7 +417,7 @@ impl TypeInference {
         };
         // TODO: Maybe consider generating the BuildClosure node here.
         let function_id = env.collect_lambda_module_function(function);
-        let value_fn = Value::function(function_id, env.module_id);
+        let value_fn = Value::function(function_id, env.current_module_id());
         let fn_node = N::new(
             K::Immediate(Immediate::new(value_fn)),
             fn_ty_wrapper,

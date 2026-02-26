@@ -17,6 +17,7 @@ use crate::{
         LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
     },
     mutability::MutType,
+    std::STD_MODULE_ID,
     r#trait::TraitRef,
     r#type::{FnArgType, Type},
 };
@@ -69,8 +70,6 @@ pub struct TypingEnv<'m> {
     pub(crate) locals: Vec<Local>,
     /// The extra import slots that can be filled during type checking.
     pub(crate) new_import_slots: &'m mut Vec<ImportFunctionSlot>,
-    /// The id of the current module being compiled, used for resolving imports and accesses to other modules.
-    pub(crate) module_id: ModuleId,
     /// The program and the module we are currently compiling.
     pub(crate) module_env: ModuleEnv<'m>,
     /// The expected return type of the enclosing function (for type-checking `return` statements).
@@ -82,6 +81,10 @@ pub struct TypingEnv<'m> {
 }
 
 impl<'m> TypingEnv<'m> {
+    pub fn current_module_id(&self) -> ModuleId {
+        self.module_env.current.module_id()
+    }
+
     pub fn get_locals_and_drop(self) -> Vec<Local> {
         self.locals
     }
@@ -137,7 +140,9 @@ impl<'m> TypingEnv<'m> {
         let segments = &path.segments;
         let fn_name = segments.last().unwrap().0;
         let is_local = segments.len() == 1
-            || (segments.len() == 2 && self.module_env.within_std && segments[0].0 == "std");
+            || (segments.len() == 2
+                && self.current_module_id() == STD_MODULE_ID
+                && segments[0].0 == "std");
         let key = if is_local {
             let get_fn = |name: &str, m: &Module| {
                 let name = ustr(name);

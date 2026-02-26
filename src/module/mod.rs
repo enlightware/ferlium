@@ -732,7 +732,7 @@ impl Module {
         modules: &Modules,
         show_details: bool,
     ) -> fmt::Result {
-        let env = ModuleEnv::new(self, modules, false);
+        let env = ModuleEnv::new(self, modules);
         if !self.uses.explicits.is_empty() {
             writeln!(
                 f,

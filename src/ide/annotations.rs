@@ -30,7 +30,7 @@ impl ModuleAndExpr {
     ) -> Vec<(usize, String)> {
         use DisplayStyle::*;
         let module = session.modules().get(self.module_id).unwrap();
-        let env = ModuleEnv::new(module, session.modules(), false);
+        let env = ModuleEnv::new(module, session.modules());
         let mut annotations = vec![];
 
         // Function and expression bodies.

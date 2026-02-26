@@ -12,6 +12,7 @@ use crate::{
     ast::{self, UstrSpan},
     error::InternalCompilationError,
     module::{Module, ModuleFunction, ModuleId, Modules, path::Path},
+    std::STD_MODULE_ID,
     r#trait::TraitRef,
     r#type::TypeDefRef,
     typing_env::TraitFunctionDescription,
@@ -47,7 +48,6 @@ impl TypeDefLookupResult {
 pub struct ModuleEnv<'m> {
     pub(crate) current: &'m Module,
     pub(crate) modules: &'m Modules,
-    pub(crate) within_std: bool,
 }
 
 impl<'m> ModuleEnv<'m> {
@@ -244,7 +244,7 @@ impl<'m> ModuleEnv<'m> {
             let ((function_name, _), module) = path;
             if let [single_segment] = module
                 && single_segment.0 == "std"
-                && self.within_std
+                && self.current.module_id() == STD_MODULE_ID
             {
                 return self.current.get_member(function_name, self.modules, getter);
             }

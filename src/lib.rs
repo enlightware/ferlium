@@ -150,7 +150,6 @@ impl CompilerSession {
         ModuleEnv {
             modules: &self.modules,
             current: self.modules.get(self.empty_std_user).unwrap(),
-            within_std: false,
         }
     }
 
@@ -255,7 +254,7 @@ impl CompilerSession {
             let dbg_module = module.clone();
             let ast_inspector =
                 |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>, modules: &Modules| {
-                    let env = ModuleEnv::new(&dbg_module, modules, false);
+                    let env = ModuleEnv::new(&dbg_module, modules);
                     log::debug!("Module AST\n{}", module_ast.format_with(&env));
                     if let Some(expr_ast) = expr_ast {
                         log::debug!("Expr AST\n{}", expr_ast.format_with(&env));
@@ -279,7 +278,7 @@ impl CompilerSession {
                 log::debug!("Module IR\n{}", module.format_with(&self.modules));
             }
             if let Some(expr) = output.expr.as_ref() {
-                let env = ModuleEnv::new(module, &self.modules, false);
+                let env = ModuleEnv::new(module, &self.modules);
                 log::debug!("Expr IR\n{}", expr.expr.format_with(&env));
             }
         }
@@ -317,8 +316,8 @@ impl CompilerSession {
             .replace(module_path.clone(), Module::new(self.modules.next_id()));
 
         // Emit IR for the module.
-        let mut module = emit_module(module_ast, module_id, &self.modules, Some(&module), false)
-            .map_err(|error| {
+        let mut module =
+            emit_module(module_ast, module_id, &self.modules, Some(&module)).map_err(|error| {
                 // Restore the old module in case of error, to avoid leaving the session in a broken state.
                 // Note: the clone on old_module is due to a limitation of the borrow checker not realizing this function
                 // is only called when the parent function is exited with the ? below.
@@ -326,19 +325,19 @@ impl CompilerSession {
                     .clone()
                     .map(|old_module| self.modules.replace(module_path.clone(), old_module));
                 // Resolve types in the error, to provide better error messages.
-                let env = ModuleEnv::new(&module, &self.modules, false);
+                let env = ModuleEnv::new(&module, &self.modules);
                 CompilationError::resolve_types(error, &env, &self.source_table)
             })?;
 
         // Emit IR for the expression, if any.
         let expr = if let Some(expr_ast) = expr_ast {
-            let compiled_expr = emit_expr(expr_ast, &mut module, module_id, &self.modules, vec![])
-                .map_err(|error| {
+            let compiled_expr =
+                emit_expr(expr_ast, &mut module, &self.modules, vec![]).map_err(|error| {
                     // Restore the old module in case of error, to avoid leaving the session in a broken state.
                     old_module
                         .map(|old_module| self.modules.replace(module_path.clone(), old_module));
                     // Resolve types in the error, to provide better error messages.
-                    let env = ModuleEnv::new(&module, &self.modules, false);
+                    let env = ModuleEnv::new(&module, &self.modules);
                     CompilationError::resolve_types(error, &env, &self.source_table)
                 })?;
             Some(compiled_expr)
@@ -404,7 +403,6 @@ pub(crate) fn add_code_to_module(
     module_id: ModuleId,
     other_modules: &Modules,
     source_table: &mut SourceTable,
-    within_std: bool,
 ) -> Result<SourceId, CompilationError> {
     // Parse the source code.
     let source_id = source_table.add_source(source_name.to_string(), code.to_string());
@@ -412,17 +410,15 @@ pub(crate) fn add_code_to_module(
         .map_err(|error| compilation_error!(ParsingFailed(error)))?;
     assert_eq!(module_ast.errors(), &[]);
     {
-        let env = ModuleEnv::new(to, other_modules, within_std);
+        let env = ModuleEnv::new(to, other_modules);
         log::debug!("Added module AST\n{}", module_ast.format_with(&env));
     }
 
     // Emit IR for the module.
-    let module = emit_module(module_ast, module_id, other_modules, Some(to), within_std).map_err(
-        |error| {
-            let env = ModuleEnv::new(to, other_modules, within_std);
-            CompilationError::resolve_types(error, &env, source_table)
-        },
-    )?;
+    let module = emit_module(module_ast, module_id, other_modules, Some(to)).map_err(|error| {
+        let env = ModuleEnv::new(to, other_modules);
+        CompilationError::resolve_types(error, &env, source_table)
+    })?;
 
     // Swap the new module with the old one.
     *to = module;

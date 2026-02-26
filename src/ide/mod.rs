@@ -802,7 +802,7 @@ impl Compiler {
             .ok()
             .flatten()
         {
-            let module_env = ModuleEnv::new(module, self.session.modules(), false);
+            let module_env = ModuleEnv::new(module, self.session.modules());
             Some(format!(
                 "{}",
                 func.definition.ty_scheme.display_rust_style(&module_env)
@@ -829,7 +829,7 @@ impl Compiler {
                         .modules()
                         .get(self.user_module.module_id)
                         .unwrap();
-                    let module_env = ModuleEnv::new(module, self.session.modules(), false);
+                    let module_env = ModuleEnv::new(module, self.session.modules());
                     let output = format!(
                         "{}: {}",
                         value.display_pretty(&expr.ty.ty),
@@ -1016,7 +1016,7 @@ impl Compiler {
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != Type::unit()
             {
-                let module_env = ModuleEnv::new(current, others, false);
+                let module_env = ModuleEnv::new(current, others);
                 Err(format!(
                     "Function {name} does not have type \"() -> ()\", it has \"{}\" instead",
                     func.definition.ty_scheme.display_rust_style(&module_env)
@@ -1040,7 +1040,7 @@ impl Compiler {
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
-                let module_env = ModuleEnv::new(current, others, false);
+                let module_env = ModuleEnv::new(current, others);
                 let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
@@ -1072,7 +1072,7 @@ impl Compiler {
                 || !func.definition.ty_scheme.ty.args.is_empty()
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
-                let module_env = ModuleEnv::new(current, others, false);
+                let module_env = ModuleEnv::new(current, others);
                 let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
@@ -1114,7 +1114,7 @@ impl Compiler {
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
-                let module_env = ModuleEnv::new(current, others, false);
+                let module_env = ModuleEnv::new(current, others);
                 let i_ty_fmt = i_ty.format_with(&module_env);
                 let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(
@@ -1151,7 +1151,7 @@ impl Compiler {
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != Type::unit()
             {
-                let module_env = ModuleEnv::new(current, others, false);
+                let module_env = ModuleEnv::new(current, others);
                 let i_ty_fmt = i_ty.format_with(&module_env);
                 Err(format!(
                     "Function {name} does not have type \"({}) -> ()\", it has \"{}\" instead",
@@ -1182,7 +1182,7 @@ impl Compiler {
                 || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
                 || func.definition.ty_scheme.ty.ret != o_ty
             {
-                let module_env = ModuleEnv::new(current, others, false);
+                let module_env = ModuleEnv::new(current, others);
                 let i_ty_fmt = i_ty.format_with(&module_env);
                 let o_ty_fmt = o_ty.format_with(&module_env);
                 Err(format!(

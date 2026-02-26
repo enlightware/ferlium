@@ -175,7 +175,7 @@ impl<'a> TraitSolver<'a> {
     fn log_debug_impls(&self, trait_ref: &TraitRef) {
         log::debug!("In current module:");
         let fake_current = new_module_using_std(self.others.next_id());
-        let env = ModuleEnv::new(&fake_current, self.others, false);
+        let env = ModuleEnv::new(&fake_current, self.others);
         self.impls.log_debug_impls_headers(trait_ref, env);
         for (module_path, module) in self.others.iter_named() {
             if module.impls.blanket_key_to_id.contains_key(trait_ref) {

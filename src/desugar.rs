@@ -273,7 +273,6 @@ impl PModule {
         self,
         output: &mut Module,
         others: &Modules,
-        within_std: bool,
     ) -> Result<(DModule, FnSccs), InternalCompilationError> {
         // Flatten uses from self and check for conflicts with local definitions.
         let local_names = self.name_iter().collect();
@@ -321,7 +320,7 @@ impl PModule {
         }
 
         // Build a module environment with the current module and the others.
-        let mut env = ModuleEnv::new(output, others, within_std);
+        let mut env = ModuleEnv::new(output, others);
 
         // Process types in order of their dependencies and resolve type aliases and type definitions.
         // Directly insert them into the output module once they are resolved.
@@ -338,7 +337,7 @@ impl PModule {
                     output.add_type_def(def.name.0, def.desugar(&env)?);
                 }
             }
-            env = ModuleEnv::new(output, others, within_std);
+            env = ModuleEnv::new(output, others);
         }
 
         // Desugar functions

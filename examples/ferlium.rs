@@ -476,7 +476,7 @@ fn process_input(
             if !is_repl {
                 return;
             }
-            let module_env = ModuleEnv::new(&dbg_module, modules, false);
+            let module_env = ModuleEnv::new(&dbg_module, modules);
             if !module_ast.is_empty() {
                 println!("Module AST:\n{}", module_ast.format_with(&module_env));
             }
@@ -508,7 +508,7 @@ fn process_input(
             module.format_with(&ShowModuleDetails(session.modules()))
         );
         if let Some(expr) = expr.as_ref() {
-            let module_env = ModuleEnv::new(&module, session.modules(), false);
+            let module_env = ModuleEnv::new(&module, session.modules());
             println!("Expr IR:\n{}", expr.expr.format_with(&module_env));
         }
     }
@@ -526,7 +526,7 @@ fn process_input(
             Ok(value) => {
                 let value = value.into_value();
                 let module = session.modules().get(module_id).unwrap();
-                let module_env = ModuleEnv::new(module, session.modules(), false);
+                let module_env = ModuleEnv::new(module, session.modules());
                 println!(
                     "{}: {}",
                     value.display_pretty(&compiled_expr.ty.ty),
@@ -675,7 +675,7 @@ fn run_interactive_repl() {
         } else {
             println!("Locals:");
             let module = session.modules().get(last_module).unwrap();
-            let env = ModuleEnv::new(module, session.modules(), false);
+            let env = ModuleEnv::new(module, session.modules());
             for (i, local) in locals.iter().enumerate() {
                 println!(
                     "{} {}: {} = {}",
@@ -769,7 +769,7 @@ fn run_interactive_repl() {
                                 println!("Function id {fn_id} not found in module {module_name}.");
                                 continue;
                             };
-                            let env = ModuleEnv::new(&module, session.modules(), false);
+                            let env = ModuleEnv::new(&module, session.modules());
                             let fn_name = module
                                 .get_function_name_by_id(fn_id)
                                 .unwrap_or_else(|| ustr("<anonymous function>"));

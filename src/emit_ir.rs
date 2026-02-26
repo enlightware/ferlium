@@ -73,7 +73,6 @@ pub fn emit_module(
     module_id: ModuleId,
     others: &Modules,
     merge_with: Option<&Module>,
-    within_std: bool,
 ) -> Result<Module, InternalCompilationError> {
     // Preliminary: Make sure no name is defined multiple times.
     validate_name_uniqueness(&source)?;
@@ -88,7 +87,7 @@ pub fn emit_module(
             module
         },
     );
-    let (source, sorted_sccs) = source.desugar(&mut output, others, within_std)?;
+    let (source, sorted_sccs) = source.desugar(&mut output, others)?;
 
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
@@ -105,13 +104,13 @@ pub fn emit_module(
         }
 
         // Emit the corresponding functions.
-        emit_functions(&mut output, functions, module_id, others, within_std, None)?;
+        emit_functions(&mut output, functions, others, None)?;
     }
 
     // Process trait implementations
     for imp in &source.impls {
         // Validate the function mapping.
-        let module_env = ModuleEnv::new(&output, others, within_std);
+        let module_env = ModuleEnv::new(&output, others);
         let trait_ref = module_env
             .get_trait_ref(imp.trait_name)?
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
@@ -164,20 +163,12 @@ pub fn emit_module(
             trait_ref: trait_ref.clone(),
             span: imp.span,
         };
-        let emit_output = emit_functions(
-            &mut output,
-            functions,
-            module_id,
-            others,
-            within_std,
-            Some(trait_ctx),
-        )?
-        .unwrap();
+        let emit_output = emit_functions(&mut output, functions, others, Some(trait_ctx))?.unwrap();
 
         // Add the implementation using the just emitted local functions.
         let is_concrete = emit_output.ty_var_count == 0;
         let local_impl_id = output.add_emitted_impl(trait_ref, emit_output);
-        let module_env = ModuleEnv::new(&output, others, within_std);
+        let module_env = ModuleEnv::new(&output, others);
         let header = output
             .impls
             .impl_header_to_string_by_id(local_impl_id, module_env);
@@ -205,9 +196,7 @@ pub(crate) struct EmitTraitOutput {
 fn emit_functions<'a, F, I>(
     output: &mut Module,
     ast_functions: F,
-    module_id: ModuleId,
     others: &Modules,
-    within_std: bool,
     trait_ctx: Option<EmitTraitCtx>,
 ) -> Result<Option<EmitTraitOutput>, InternalCompilationError>
 where
@@ -368,7 +357,7 @@ where
     // Second pass, infer types and emit function bodies.
     for (function, id) in ast_functions().zip(local_fns.iter()) {
         let descr = output.get_function_by_id(*id).unwrap();
-        let module_env = ModuleEnv::new(output, others, within_std);
+        let module_env = ModuleEnv::new(output, others);
         let arg_names: Vec<_> = function.args.iter().map(|arg| arg.name).collect();
         let mut new_import_slots = vec![];
         let expected_ret_ty = descr.definition.ty_scheme.ty.ret;
@@ -377,7 +366,6 @@ where
         let mut ty_env = TypingEnv::new(
             descr.definition.ty_scheme.ty.as_locals_no_bound(&arg_names),
             &mut new_import_slots,
-            module_id,
             module_env,
             Some((expected_ret_ty, expected_span)),
             &mut lambda_functions,
@@ -410,14 +398,14 @@ where
         ));
         output.import_fn_slots.extend(new_import_slots);
     }
-    let module_env = ModuleEnv::new(output, others, within_std);
+    let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_constraints(module_env);
 
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
     let mut ty_inf = ty_inf.unify(&mut solver)?;
     solver.commit(&mut output.functions, &mut output.def_table);
-    let module_env = ModuleEnv::new(output, others, within_std);
+    let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
 
@@ -675,7 +663,7 @@ where
             });
 
             // Log the dropped constraints.
-            let module_env = ModuleEnv::new(output, others, within_std);
+            let module_env = ModuleEnv::new(output, others);
             log_dropped_constraints_module(
                 function.name.0,
                 &all_constraints,
@@ -691,7 +679,7 @@ where
             .filter(|c| !used_constraints.contains(&constraint_ptr(c)) && !c.is_type_has_variant())
             .collect::<Vec<_>>();
         if !unused_constraints.is_empty() {
-            let module_env = ModuleEnv::new(output, others, within_std);
+            let module_env = ModuleEnv::new(output, others);
             let constraints = unused_constraints
                 .iter()
                 .map(|c| c.format_with(&module_env))
@@ -791,7 +779,6 @@ pub struct CompiledExpr {
 pub fn emit_expr_unsafe(
     source: ast::PExpr,
     module: &mut Module,
-    module_id: ModuleId,
     others: &Modules,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
@@ -804,7 +791,7 @@ pub fn emit_expr_unsafe(
     );
 
     // Create a list of all available trait implementations.
-    let module_env = ModuleEnv::new(module, others, false);
+    let module_env = ModuleEnv::new(module, others);
 
     // First desugar the expression.
     let source = source.desugar_with_empty_ctx(&module_env)?;
@@ -816,7 +803,6 @@ pub fn emit_expr_unsafe(
     let mut ty_env = TypingEnv::new(
         locals,
         &mut new_import_slots,
-        module_id,
         module_env,
         None,
         &mut lambda_functions,
@@ -840,7 +826,7 @@ pub fn emit_expr_unsafe(
     let mut solver = trait_solver_from_module!(module, others);
     let mut ty_inf = ty_inf.unify(&mut solver)?;
     solver.commit(&mut module.functions, &mut module.def_table);
-    let module_env = ModuleEnv::new(module, others, false);
+    let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
 
     // Substitute the result of the unification.
@@ -854,7 +840,7 @@ pub fn emit_expr_unsafe(
     }
 
     // Get the remaining constraints and collect the free variables.
-    let module_env = ModuleEnv::new(module, others, false);
+    let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_constraints(module_env);
     let mut constraints = ty_inf.constraints();
 
@@ -867,7 +853,7 @@ pub fn emit_expr_unsafe(
         ..
     } = validate_and_cleanup_constraints(&node.ty, &constraints, &node, true, &mut solver)?;
     solver.commit(&mut module.functions, &mut module.def_table);
-    let module_env = ModuleEnv::new(module, others, false);
+    let module_env = ModuleEnv::new(module, others);
     log_dropped_constraints_expr(
         &constraints,
         &retained_constraints,
@@ -974,13 +960,11 @@ pub fn emit_expr_unsafe(
 pub fn emit_expr(
     source: ast::PExpr,
     module: &mut Module,
-    module_id: ModuleId,
     others: &Modules,
     locals: Vec<Local>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     let span = source.span;
-    let CompiledExpr { ty, expr, locals } =
-        emit_expr_unsafe(source, module, module_id, others, locals)?;
+    let CompiledExpr { ty, expr, locals } = emit_expr_unsafe(source, module, others, locals)?;
     let ty_vars = ty.ty.inner_ty_vars();
     if !ty_vars.is_empty() {
         return Err(internal_compilation_error!(UnboundTypeVar {
@@ -1196,7 +1180,7 @@ fn validate_and_cleanup_constraints(
                 .filter(|c| other_orphans.contains(&constraint_ptr(c)))
                 .collect::<Vec<_>>();
             let fake_current = new_module_using_std(ModuleId(0));
-            let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
+            let env = ModuleEnv::new(&fake_current, trait_solver.others);
             return Err(internal_compilation_error!(Internal {
                 error: format!(
                     "Orphan constraints found in module fn: {}\nsubst: {}",
@@ -1435,7 +1419,7 @@ fn compute_num_trait_default_types(
                             // FIXME: This is due lack of unification when doing this part, in a way that is a similar bug to
                             // https://github.com/enlightware/ferlium/issues/59, a proper fix would likely solve both.
                             let fake_current = new_module_using_std(ModuleId(0));
-                            let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
+                            let env = ModuleEnv::new(&fake_current, trait_solver.others);
                             return Err(internal_compilation_error!(Internal {
                                 error: format!(
                                     "Type variable {ty_var} already exists in type substitution with type `{}`, but trying to use type `{}` instead",
@@ -1500,7 +1484,7 @@ fn compute_num_trait_default_types(
                         )?;
                         if output_tys != solved_output_tys {
                             let fake_current = new_module_using_std(ModuleId(0));
-                            let env = ModuleEnv::new(&fake_current, trait_solver.others, false);
+                            let env = ModuleEnv::new(&fake_current, trait_solver.others);
                             return Err(internal_compilation_error!(Internal {
                                 error: format!(
                                     "While defaulting Num types, a constraint ended up having invalid output types [{}] while the correct ones are [{}].",
