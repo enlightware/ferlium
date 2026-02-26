@@ -561,3 +561,28 @@ fn variant_type_alias_in_function_signature() {
         sig2
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_solver_recursion_limit() {
+    let mut session = TestSession::new();
+    let code = indoc! { r#"
+        fn buggy(s: string) -> Variant {
+            (deserialize(parse_json(s)) : Variant)
+        }
+    "# };
+    // We expect the solver to hit a cycle because Variant is a recursive type
+    // and its automatic derivation loops back into itself.
+    let err = session.fail_compilation(code);
+    use CompilationErrorImpl::*;
+    match err.into_inner() {
+        TraitImplNotFound { .. }
+        | TraitSolverCycleDetected { .. }
+        | TraitSolverRecursionLimitExceeded { .. } => {}
+        other => {
+            panic!(
+                "expected TraitImplNotFound or TraitSolverCycleDetected or TraitSolverRecursionLimitExceeded, got {other:?}"
+            )
+        }
+    }
+}

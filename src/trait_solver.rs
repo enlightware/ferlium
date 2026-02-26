@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use derive_new::new;
 use itertools::MultiUnzip;
@@ -40,8 +40,6 @@ use crate::{
 
 #[cfg(debug_assertions)]
 use crate::type_visitor::AllVarsCollector;
-#[cfg(debug_assertions)]
-use std::collections::HashSet;
 
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.
 #[derive(Debug, new)]
@@ -57,7 +55,15 @@ pub struct TraitSolver<'a> {
     pub fn_collector: FunctionCollector,
     /// Other modules available for fetching trait implementations and normal functions (read only).
     pub others: &'a Modules,
+    /// Current recursion depth of the trait solver.
+    #[new(default)]
+    pub recursion_depth: usize,
+    /// Current stack of trait implementations being solved, for cycle detection.
+    #[new(default)]
+    pub solving_stack: HashSet<(TraitRef, Vec<Type>)>,
 }
+
+const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
 
 /// Macro to create a trait solver from a module and a program.
 /// This cannot be a function because of lifetime issues, as we must
@@ -196,6 +202,43 @@ impl<'a> TraitSolver<'a> {
             "Getting trait implementation for non-constant input types"
         );
 
+        // Cycle detection
+        let key = (trait_ref.clone(), input_tys.to_vec());
+        if self.solving_stack.contains(&key) {
+            return Err(internal_compilation_error!(TraitSolverCycleDetected {
+                trait_ref: trait_ref.clone(),
+                input_tys: input_tys.to_vec(),
+                fn_span,
+            }));
+        }
+
+        // Recursion limit check
+        if self.recursion_depth > TRAIT_SOLVER_RECURSION_LIMIT {
+            return Err(internal_compilation_error!(
+                TraitSolverRecursionLimitExceeded {
+                    trait_ref: trait_ref.clone(),
+                    input_tys: input_tys.to_vec(),
+                    fn_span,
+                }
+            ));
+        }
+
+        self.recursion_depth += 1;
+        self.solving_stack.insert(key.clone());
+
+        let result = self.solve_impl_actual(trait_ref, input_tys, fn_span);
+
+        self.solving_stack.remove(&key);
+        self.recursion_depth -= 1;
+        result
+    }
+
+    fn solve_impl_actual(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        fn_span: Location,
+    ) -> Result<TraitImplId, InternalCompilationError> {
         // Special case for `Repr` trait.
         if trait_ref == &*REPR_TRAIT {
             let input_ty = input_tys[0];

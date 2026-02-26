@@ -459,6 +459,32 @@ fn compilation_error_to_data(
                 ),
             )]
         }
+        TraitSolverRecursionLimitExceeded {
+            trait_ref,
+            input_tys,
+            fn_span,
+        } => {
+            vec![error_data_from_location(
+                fn_span,
+                format!(
+                    "Recursion limit exceeded while solving trait implementation for `{trait_ref}` over types `{}`",
+                    input_tys.join(", ")
+                ),
+            )]
+        }
+        TraitSolverCycleDetected {
+            trait_ref,
+            input_tys,
+            fn_span,
+        } => {
+            vec![error_data_from_location(
+                fn_span,
+                format!(
+                    "Cycle detected while solving trait implementation for `{trait_ref}` over types `{}`",
+                    input_tys.join(", ")
+                ),
+            )]
+        }
         MethodsNotPartOfTrait { trait_ref, spans } => spans
             .iter()
             .map(|span| {

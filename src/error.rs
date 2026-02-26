@@ -310,6 +310,16 @@ pub enum CompilationErrorImpl<S: Scope> {
         input_tys: Vec<S::Type>,
         fn_span: Location,
     },
+    TraitSolverRecursionLimitExceeded {
+        trait_ref: S::TraitRef,
+        input_tys: Vec<S::Type>,
+        fn_span: Location,
+    },
+    TraitSolverCycleDetected {
+        trait_ref: S::TraitRef,
+        input_tys: Vec<S::Type>,
+        fn_span: Location,
+    },
     MethodsNotPartOfTrait {
         trait_ref: S::TraitRef,
         spans: Vec<Location>,
@@ -830,6 +840,32 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(fn_span)
                 )
             }
+            TraitSolverRecursionLimitExceeded {
+                trait_ref,
+                input_tys,
+                fn_span,
+            } => {
+                write!(
+                    f,
+                    "Recursion limit exceeded while solving trait implementation for `{}` over types `{}` (at {})",
+                    trait_ref,
+                    input_tys.join(", "),
+                    fmt_span(fn_span)
+                )
+            }
+            TraitSolverCycleDetected {
+                trait_ref,
+                input_tys,
+                fn_span,
+            } => {
+                write!(
+                    f,
+                    "Cycle detected while solving trait implementation for `{}` over types `{}` (at {})",
+                    trait_ref,
+                    input_tys.join(", "),
+                    fmt_span(fn_span)
+                )
+            }
             MethodsNotPartOfTrait { trait_ref, spans } => {
                 write!(
                     f,
@@ -1293,6 +1329,32 @@ impl CompilationError {
                 input_tys,
                 fn_span,
             } => compilation_error!(TraitImplNotFound {
+                trait_ref: trait_ref.name.to_string(),
+                input_tys: input_tys
+                    .iter()
+                    .zip(trait_ref.input_type_names.iter())
+                    .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
+                    .collect(),
+                fn_span,
+            }),
+            TraitSolverRecursionLimitExceeded {
+                trait_ref,
+                input_tys,
+                fn_span,
+            } => compilation_error!(TraitSolverRecursionLimitExceeded {
+                trait_ref: trait_ref.name.to_string(),
+                input_tys: input_tys
+                    .iter()
+                    .zip(trait_ref.input_type_names.iter())
+                    .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
+                    .collect(),
+                fn_span,
+            }),
+            TraitSolverCycleDetected {
+                trait_ref,
+                input_tys,
+                fn_span,
+            } => compilation_error!(TraitSolverCycleDetected {
                 trait_ref: trait_ref.name.to_string(),
                 input_tys: input_tys
                     .iter()
