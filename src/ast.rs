@@ -577,7 +577,7 @@ impl<P: Phase> Module<P> {
 }
 impl Module<Parsed> {
     /// Returns all the names defined in this module, including functions, type aliases, and type definitions.
-    pub fn name_iter(&self) -> impl Iterator<Item = UstrSpan> + '_ {
+    pub fn own_symbols(&self) -> impl Iterator<Item = UstrSpan> + '_ {
         self.functions
             .iter()
             .map(|f| f.name)

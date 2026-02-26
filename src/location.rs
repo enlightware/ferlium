@@ -291,8 +291,12 @@ pub struct SourceTable {
     sources: Vec<SourceEntry>,
 }
 impl SourceTable {
+    pub fn next_id(&self) -> SourceId {
+        SourceId::from_index(self.sources.len())
+    }
+
     pub fn add_source(&mut self, name: String, source: String) -> SourceId {
-        let id = SourceId::from_index(self.sources.len());
+        let id = self.next_id();
         self.sources.push(SourceEntry::new(name, source));
         id
     }

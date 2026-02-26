@@ -55,7 +55,7 @@ use crate::{
 
 fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompilationError> {
     let mut names = HashMap::new();
-    for (name, span) in source.name_iter() {
+    for (name, span) in source.own_symbols() {
         if let Some(first_occurrence) = names.insert(name, span) {
             return Err(internal_compilation_error!(NameDefinedMultipleTimes {
                 name,

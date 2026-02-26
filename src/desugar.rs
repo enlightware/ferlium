@@ -275,7 +275,7 @@ impl PModule {
         others: &Modules,
     ) -> Result<(DModule, FnSccs), InternalCompilationError> {
         // Flatten uses from self and check for conflicts with local definitions.
-        let local_names = self.name_iter().collect();
+        let local_names = self.own_symbols().collect();
         let resolver = ModulesResolver::new(others);
         resolve_imports(&self.uses, &local_names, &resolver, &mut output.uses)?;
 

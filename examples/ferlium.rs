@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
@@ -20,6 +20,7 @@ use ferlium::std::new_module_using_std;
 use ferlium::typing_env::Local;
 use ferlium::{
     CompilerSession, Location, ModuleAndExpr, SourceId, SourceTable, SubOrSameType, ast,
+    parse_module_and_expr,
 };
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
@@ -457,12 +458,36 @@ fn print_help() {
 fn process_input(
     name: &str,
     input: &str,
-    reverse_uses: HashMap<Ustr, Path>,
+    fill_use_until: usize,
     locals: &mut Vec<Local>,
     environment: &mut Vec<ValOrMut>,
     session: &mut CompilerSession,
     is_repl: bool,
 ) -> Result<ModuleId, i32> {
+    // Parse the input once to get the list of symbols this module defines.
+    let source_id = session.source_table().next_id();
+    let local_symbols = parse_module_and_expr(input, source_id, false).map_or_else(
+        |_| HashSet::new(),
+        |(module, _)| module.own_symbols().map(|(sym, _)| sym).collect(),
+    );
+
+    // Build use directives to import last modules as repl<counter>
+    let mut reverse_uses = HashMap::new();
+    for i in 0..fill_use_until {
+        let index = fill_use_until - i - 1;
+        let mod_name = format!("repl{index}");
+        if let Some(module) = session
+            .modules()
+            .get_value_by_name(&Path::single_str(&mod_name))
+        {
+            for sym in module.own_symbols() {
+                if !local_symbols.contains(&sym) && !reverse_uses.contains_key(&sym) {
+                    reverse_uses.insert(sym, Path::single_str(&mod_name));
+                }
+            }
+        }
+    }
+
     // Initialize module with use directives
     let mut module = new_module_using_std(session.modules().next_id());
     for (sym_name, mod_name) in reverse_uses {
@@ -581,7 +606,7 @@ fn process_pipe_input(print_module: bool) -> i32 {
     process_input(
         "<stdin>",
         &input,
-        HashMap::new(),
+        0,
         &mut locals,
         &mut environment,
         &mut session,
@@ -815,29 +840,12 @@ fn run_interactive_repl() {
             }
         };
 
-        // Build use directives to import last modules as repl<counter>
-        let mut reverse_uses = HashMap::new();
-        for i in 0..counter {
-            let index = counter - i - 1;
-            let mod_name = format!("repl{index}");
-            if let Some(module) = session
-                .modules()
-                .get_value_by_name(&Path::single_str(&mod_name))
-            {
-                for sym in module.own_symbols() {
-                    if !reverse_uses.contains_key(&sym) {
-                        reverse_uses.insert(sym, Path::single_str(&mod_name));
-                    }
-                }
-            }
-        }
-
         // Process the input using the shared function
         let name = &format!("repl{counter}");
         let result = process_input(
             &name,
             &src,
-            reverse_uses,
+            counter,
             &mut locals,
             &mut environment,
             &mut session,

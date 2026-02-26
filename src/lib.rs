@@ -377,7 +377,7 @@ fn parse_module(
 }
 
 /// Parse a module and an expression (if any) from a source code and return the corresponding ASTs.
-fn parse_module_and_expr(
+pub fn parse_module_and_expr(
     src: &str,
     source_id: SourceId,
     accept_unstable: bool,
