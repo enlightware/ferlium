@@ -30,6 +30,7 @@ use crate::define_id_type;
 use crate::format::FormatWith;
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
+use crate::module::LocalDecl;
 use crate::module::id::Id;
 use crate::mutability::FormatInFnArg;
 use crate::type_like::CastableToType;
@@ -58,7 +59,7 @@ use crate::module::ModuleEnv;
 use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
 
-use crate::typing_env::Local;
+// use crate::typing_env::Local;
 
 #[macro_export]
 macro_rules! cached_primitive_ty {
@@ -300,11 +301,13 @@ impl FnType {
         }
     }
 
-    pub fn as_locals_no_bound(&self, arg_names: &[UstrSpan]) -> Vec<Local> {
+    pub fn as_locals_no_bound<'a>(
+        &self,
+        arg_names: impl Iterator<Item = &'a UstrSpan>,
+    ) -> Vec<LocalDecl> {
         arg_names
-            .iter()
             .zip(self.args.iter())
-            .map(|((name, span), arg)| Local::new(*name, arg.mut_ty, arg.ty, *span))
+            .map(|(name, arg)| LocalDecl::new(*name, arg.mut_ty, arg.ty, None, name.1))
             .collect()
     }
 

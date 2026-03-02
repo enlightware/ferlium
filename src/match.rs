@@ -9,11 +9,17 @@
 use std::collections::HashMap;
 
 use crate::{
-    Location, ast::PatternVar, error::DuplicatedVariantContext, internal_compilation_error,
-    std::core::REPR_TRAIT, r#type::TypeKind,
+    Location,
+    ast::PatternVar,
+    error::DuplicatedVariantContext,
+    internal_compilation_error,
+    ir_syn::store_new,
+    module::{LocalDecl, LocalDeclId, id::Id},
+    mutability::MutVal,
+    std::core::REPR_TRAIT,
+    r#type::TypeKind,
 };
 use itertools::{Itertools, multiunzip};
-use ustr::ustr;
 
 use crate::{
     ast::{DExpr, Pattern, PatternKind, PatternType},
@@ -26,7 +32,7 @@ use crate::{
     r#type::Type,
     type_inference::TypeInference,
     type_scheme::PubTypeConstraint,
-    typing_env::{Local, TypingEnv},
+    typing_env::TypingEnv,
     value::Value,
 };
 
@@ -79,7 +85,7 @@ impl TypeInference {
 
         Ok(if is_variant {
             // Variant patterns
-            let initial_env_size = env.locals.len();
+            let initial_env_size = env.cur_locals.len();
 
             // Create a fresh type variable for the inner types, when there is a variable binding.
             let mut seen_tags = HashMap::new();
@@ -193,32 +199,27 @@ impl TypeInference {
                 .process_results(|iter| iter.unzip())?;
 
             // Code to store the variant value in the environment.
-            let match_condition_name = ustr("@match_condition");
-            let store_variant = K::EnvStore(b(EnvStore {
-                value: condition_node,
-                index: initial_env_size,
-                name: match_condition_name,
-                name_span: Location::new_synthesized(),
-                ty_span: None,
-            }));
+            let (store_variant, l_match_condition) = store_new(
+                condition_node,
+                initial_env_size,
+                "@match_condition",
+                MutVal::constant(),
+                pattern_ty,
+                env.all_locals,
+            );
             let store_variant_node = N::new(
                 store_variant,
                 Type::unit(),
                 cond_eff.clone(),
                 cond_expr.span,
             );
-            env.locals.push(Local::new(
-                match_condition_name,
-                MutType::constant(),
-                pattern_ty,
-                cond_expr.span,
-            ));
+            env.cur_locals.push(l_match_condition);
 
             // Code to load the variant and extract the tag
             let load_variant = N::new(
                 K::EnvLoad(b(EnvLoad {
                     index: initial_env_size,
-                    name: Some(match_condition_name),
+                    id: l_match_condition,
                 })),
                 pattern_ty,
                 no_effects(),
@@ -242,17 +243,24 @@ impl TypeInference {
                         let tag_value = Value::native(tag.as_char_ptr() as isize);
 
                         // Prepare the environment for the alternative by adapting the type of the variant value
-                        let alt_start_env_size = env.locals.len();
+                        let alt_start_env_size = env.cur_locals.len();
                         assert_eq!(inner_tys.len(), bind_var_names.len());
-                        for ((name, span), inner_ty) in bind_var_names.iter().zip(inner_tys.iter())
-                        {
-                            env.locals.push(Local::new(
-                                *name,
-                                MutType::constant(),
-                                *inner_ty,
-                                *span,
-                            ));
-                        }
+                        let l_bindings: Vec<_> = bind_var_names
+                            .iter()
+                            .zip(inner_tys.iter())
+                            .map(|(name, inner_ty)| {
+                                let id = LocalDeclId::from_index(env.all_locals.len());
+                                env.all_locals.push(LocalDecl::new(
+                                    *name,
+                                    MutType::constant(),
+                                    *inner_ty,
+                                    None,
+                                    expr.span,
+                                ));
+                                env.cur_locals.push(id);
+                                id
+                            })
+                            .collect();
 
                         // Type check the alternative and generate its code
                         let mut node = if let Some(return_ty) = return_ty {
@@ -304,9 +312,7 @@ impl TypeInference {
                                     K::EnvStore(b(EnvStore {
                                         value: project_inner,
                                         index: alt_start_env_size + i,
-                                        name: bind_var_names[i].0,
-                                        name_span: bind_var_names[i].1,
-                                        ty_span: None,
+                                        id: l_bindings[i],
                                     })),
                                     Type::unit(),
                                     no_effects(),
@@ -325,8 +331,8 @@ impl TypeInference {
                                 expr.span,
                             );
                         }
-                        assert!(env.locals.len() == alt_start_env_size + bind_var_names.len());
-                        env.locals.truncate(alt_start_env_size);
+                        assert!(env.cur_locals.len() == alt_start_env_size + bind_var_names.len());
+                        env.cur_locals.truncate(alt_start_env_size);
                         Result::<_, InternalCompilationError>::Ok((tag_value, node))
                     },
                 )
@@ -373,7 +379,7 @@ impl TypeInference {
                     .unwrap()
                     .1
             };
-            env.locals.truncate(initial_env_size);
+            env.cur_locals.truncate(initial_env_size);
 
             // Generate the final code node
             let case_eff = self.make_dependent_effect([&alt_eff, &default.effects]);

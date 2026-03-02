@@ -392,6 +392,25 @@ impl Module {
 
     // Trait implementations
 
+    /// Add a concrete trait implementation to this module, with raw functions and no local variables.
+    /// The definition will be retrieved by instantiating the trait method definitions with the given types.
+    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// and that the constraints are satisfied.
+    pub fn add_concrete_impl_no_locals(
+        &mut self,
+        trait_ref: TraitRef,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        let functions: Vec<_> = functions
+            .into()
+            .into_iter()
+            .map(|f| (f, Vec::new()))
+            .collect();
+        self.add_concrete_impl(trait_ref, input_tys, output_tys, functions);
+    }
+
     /// Add a concrete trait implementation to this module, with raw functions.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
     /// The caller is responsible to ensure that the input and output types match the trait reference
@@ -401,7 +420,7 @@ impl Module {
         trait_ref: TraitRef,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
-        functions: impl Into<Vec<Function>>,
+        functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
@@ -416,6 +435,25 @@ impl Module {
         self.add_collected_functions(fn_collector);
     }
 
+    /// Add a blanket trait implementation to this module, with raw functions and no local variables.
+    /// The definition will be retrieved by instantiating the trait method definitions with the given types.
+    /// The caller is responsible to ensure that the input and output types match the trait reference
+    /// and that the provided constraints are consistent with the trait definition.
+    pub fn add_blanket_impl_no_locals(
+        &mut self,
+        trait_ref: TraitRef,
+        sub_key: BlanketTraitImplSubKey,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        let functions: Vec<_> = functions
+            .into()
+            .into_iter()
+            .map(|f| (f, Vec::new()))
+            .collect();
+        self.add_blanket_impl(trait_ref, sub_key, output_tys, functions);
+    }
+
     /// Add a blanket trait implementation to this module, with raw functions.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
     /// The caller is responsible to ensure that the input and output types match the trait reference
@@ -425,7 +463,7 @@ impl Module {
         trait_ref: TraitRef,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
-        functions: impl Into<Vec<Function>>,
+        functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());

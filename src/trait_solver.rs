@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, iter::repeat, rc::Rc};
 
 use derive_new::new;
 use itertools::MultiUnzip;
@@ -25,9 +25,9 @@ use crate::{
     module::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
         FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
-        ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalFunctionId, LocalImplId,
-        ModuleEnv, ModuleFunction, ModuleId, Modules, TraitImpl, TraitImplId, TraitImpls, TraitKey,
-        id::Id,
+        ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
+        LocalFunctionId, LocalImplId, ModuleEnv, ModuleFunction, ModuleId, Modules, TraitImpl,
+        TraitImplId, TraitImpls, TraitKey, id::Id,
     },
     mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},
@@ -97,6 +97,7 @@ impl<'a> TraitSolver<'a> {
     pub fn add_concrete_impl_from_code(
         &mut self,
         code: Node,
+        locals: Vec<LocalDecl>,
         trait_ref: &TraitRef,
         input_types: impl Into<Vec<Type>>,
         output_types: impl Into<Vec<Type>>,
@@ -107,7 +108,7 @@ impl<'a> TraitSolver<'a> {
             trait_ref.clone(),
             input_types.into(),
             output_types.into(),
-            [function],
+            [(function, locals)],
             &mut self.fn_collector,
         )
     }
@@ -412,12 +413,16 @@ impl<'a> TraitSolver<'a> {
                 let output_tys = ty_inf.substitute_in_types(&imp.output_tys);
 
                 // Then build IR nodes for fetching each closed constraint dictionary.
-                // FIXME: using function span is quite incorrect here, think of a better span. Optional?
                 let constraint_dict_nodes = constraint_dict_ids
                     .into_iter()
                     .map(|dict_id| {
                         let ty = self.get_impl_data_by_id(dict_id).dictionary_ty;
-                        Node::new(get_dictionary(dict_id), ty, EffType::empty(), fn_span)
+                        Node::new(
+                            get_dictionary(dict_id),
+                            ty,
+                            EffType::empty(),
+                            Location::new_synthesized(),
+                        )
                     })
                     .collect::<Vec<_>>();
 
@@ -453,13 +458,25 @@ impl<'a> TraitSolver<'a> {
                                 None => FunctionId::Local(*fn_id),
                             };
 
+                            // Build the locals
+                            let locals = def.gen_locals_no_bounds(
+                                repeat(Location::new_synthesized()),
+                                Location::new_synthesized(),
+                            );
+
                             // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
                             let arguments: Vec<_> = constraint_dict_nodes
                                 .iter()
                                 .cloned()
                                 .chain(def.ty_scheme.ty.args.iter().enumerate().map(
                                     |(arg_i, arg_ty)| {
-                                        Node::new(load(arg_i), arg_ty.ty, EffType::empty(), fn_span)
+                                        let id = LocalDeclId::from_index(arg_i);
+                                        Node::new(
+                                            load(arg_i, id),
+                                            arg_ty.ty,
+                                            EffType::empty(),
+                                            fn_span,
+                                        )
                                     },
                                 ))
                                 .collect();
@@ -480,7 +497,7 @@ impl<'a> TraitSolver<'a> {
                                 def.arg_names.clone(),
                             ));
                             let code: FunctionRc = Rc::new(RefCell::new(code));
-                            let function = ModuleFunction::new_without_spans(def, code);
+                            let function = ModuleFunction::new(def, code, None, locals);
                             let name = Ustr::from(&format!(
                                 "{}-thunk",
                                 trait_ref.qualified_method_name(method_index, input_tys)

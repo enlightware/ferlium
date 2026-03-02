@@ -15,16 +15,17 @@ use ariadne::{Label, Source};
 use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
 use ferlium::module::id::Id;
-use ferlium::module::{LocalFunctionId, ModuleEnv, ModuleId, Modules, Path, ShowModuleDetails};
+use ferlium::module::{
+    LocalDecl, LocalFunctionId, ModuleEnv, ModuleId, Modules, Path, ShowModuleDetails,
+};
 use ferlium::std::new_module_using_std;
-use ferlium::typing_env::Local;
 use ferlium::{
     CompilerSession, Location, ModuleAndExpr, SourceId, SourceTable, SubOrSameType, ast,
     parse_module_and_expr,
 };
 use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
-use ustr::{Ustr, ustr};
+use ustr::ustr;
 
 use ferlium::eval::{EvalCtx, ValOrMut};
 
@@ -459,7 +460,7 @@ fn process_input(
     name: &str,
     input: &str,
     fill_use_until: usize,
-    locals: &mut Vec<Local>,
+    locals: &mut Vec<LocalDecl>,
     environment: &mut Vec<ValOrMut>,
     session: &mut CompilerSession,
     is_repl: bool,
@@ -534,19 +535,21 @@ fn process_input(
         );
         if let Some(expr) = expr.as_ref() {
             let module_env = ModuleEnv::new(&module, session.modules());
-            println!("Expr IR:\n{}", expr.expr.format_with(&module_env));
+            println!(
+                "Expr IR:\n{}",
+                expr.expr.format_with(&(&expr.locals, &module_env))
+            );
         }
     }
 
     // If there's an expression, evaluate it
-    if let Some(compiled_expr) = expr {
-        *locals = compiled_expr.locals;
-
+    if let Some(expr) = expr {
         // Evaluate expression
         let mut eval_ctx =
             EvalCtx::with_environment(module_id.clone(), environment.clone(), session);
         let old_size = eval_ctx.environment.len();
-        let result = compiled_expr.expr.eval_with_ctx(&mut eval_ctx);
+        let result = expr.expr.eval_with_ctx(&mut eval_ctx, &expr.locals);
+        *locals = expr.locals;
         match result {
             Ok(value) => {
                 let value = value.into_value();
@@ -554,8 +557,8 @@ fn process_input(
                 let module_env = ModuleEnv::new(module, session.modules());
                 println!(
                     "{}: {}",
-                    value.display_pretty(&compiled_expr.ty.ty),
-                    compiled_expr.ty.display_rust_style(&module_env)
+                    value.display_pretty(&expr.ty.ty),
+                    expr.ty.display_rust_style(&module_env)
                 );
             }
             Err(error) => {
@@ -599,7 +602,7 @@ fn process_pipe_input(print_module: bool) -> i32 {
 
     // Initialize ferlium contexts
     let mut session = CompilerSession::new();
-    let mut locals: Vec<Local> = vec![];
+    let mut locals: Vec<LocalDecl> = vec![];
     let mut environment: Vec<ValOrMut> = vec![];
 
     // Process the input
@@ -680,7 +683,7 @@ fn run_interactive_repl() {
     // ferlium emission and evaluation contexts
     let mut session = CompilerSession::new();
     let mut last_module = ModuleId::from_index(0); // start with the std module
-    let mut locals: Vec<Local> = vec![];
+    let mut locals: Vec<LocalDecl> = vec![];
     let mut environment: Vec<ValOrMut> = vec![];
     let mut counter: usize = 0;
 
@@ -705,11 +708,11 @@ fn run_interactive_repl() {
                 println!(
                     "{} {}: {} = {}",
                     local
-                        .mutable
+                        .mut_ty
                         .as_resolved()
                         .expect("unresolved mutability in local")
                         .var_def_string(),
-                    local.name,
+                    local.name.0,
                     local.ty.format_with(&env),
                     environment[i]
                         .as_val()

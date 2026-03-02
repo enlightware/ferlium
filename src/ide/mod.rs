@@ -821,7 +821,10 @@ impl Compiler {
 
     pub fn run_expr(&self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
-            match expr.expr.eval(self.user_module.module_id, &self.session) {
+            match expr
+                .expr
+                .eval(self.user_module.module_id, &expr.locals, &self.session)
+            {
                 Ok(value) => {
                     let value = value.into_value();
                     let module = self
@@ -1026,7 +1029,7 @@ impl Compiler {
                 let _ret = func
                     .code
                     .borrow()
-                    .call(vec![], &mut ctx)
+                    .call(vec![], &mut ctx, &func.locals)
                     .map_err(|err| format!("Execution error: {}", err.kind))?;
                 Ok(())
             }
@@ -1052,7 +1055,7 @@ impl Compiler {
                 let ret = func
                     .code
                     .borrow()
-                    .call(vec![], &mut ctx)
+                    .call(vec![], &mut ctx, &func.locals)
                     .map_err(|err| format!("Execution error: {}", err.kind))?
                     .into_value();
                 Ok(ret.into_primitive_ty::<O>().unwrap())
@@ -1084,7 +1087,7 @@ impl Compiler {
                 let ret = func
                     .code
                     .borrow()
-                    .call(vec![], &mut ctx)
+                    .call(vec![], &mut ctx, &func.locals)
                     .map_err(|err| format!("Execution error: {}", err.kind))?
                     .into_value();
                 let ret_tuple = ret.into_tuple().unwrap();
@@ -1128,7 +1131,11 @@ impl Compiler {
                 let ret = func
                     .code
                     .borrow()
-                    .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
+                    .call(
+                        vec![ValOrMut::from_primitive(input)],
+                        &mut ctx,
+                        &func.locals,
+                    )
                     .map_err(|err| format!("Execution error: {}", err.kind))?
                     .into_value();
                 let ret_tuple = ret.into_tuple().unwrap();
@@ -1163,7 +1170,11 @@ impl Compiler {
                 let _ret = func
                     .code
                     .borrow()
-                    .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
+                    .call(
+                        vec![ValOrMut::from_primitive(input)],
+                        &mut ctx,
+                        &func.locals,
+                    )
                     .map_err(|err| format!("Execution error: {}", err.kind))?;
                 Ok(())
             }
@@ -1196,7 +1207,11 @@ impl Compiler {
                 let ret = func
                     .code
                     .borrow()
-                    .call(vec![ValOrMut::from_primitive(input)], &mut ctx)
+                    .call(
+                        vec![ValOrMut::from_primitive(input)],
+                        &mut ctx,
+                        &func.locals,
+                    )
                     .map_err(|err| format!("Execution error: {}", err.kind))?
                     .into_value();
                 Ok(ret.into_primitive_ty::<O>().unwrap())

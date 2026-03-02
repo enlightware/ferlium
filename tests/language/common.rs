@@ -287,7 +287,7 @@ impl TestSession {
         // Run the expression if any.
         if let Some(expr) = expr {
             expr.expr
-                .eval(module, &self.session)
+                .eval(module, &expr.locals, &self.session)
                 .map(ControlFlow::into_value)
                 .map_err(Error::Runtime)
         } else {

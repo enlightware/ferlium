@@ -424,7 +424,7 @@ fn try_compile_and_run(
 
     if let Some(expr) = expr {
         expr.expr
-            .eval(module, session)
+            .eval(module, &expr.locals, session)
             .map(ControlFlow::into_value)
             .map_err(RunError::Runtime)?;
     }

@@ -66,7 +66,7 @@ pub fn add_to_module(to: &mut Module) {
     // Operations on booleans
     use BinaryNativeFnNNN as BinaryFn;
     use UnaryNativeFnNN as UnaryFn;
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         BITS_TRAIT.clone(),
         [bool_type()],
         [],

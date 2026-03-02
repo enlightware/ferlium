@@ -10,7 +10,7 @@ use crate::{
     Location,
     ast::{self, UnnamedArg},
     format::FormatWith,
-    module::{FunctionId, TraitImplId},
+    module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
     r#trait::TraitRef,
     r#type::TypeKind,
     type_like::{CastableToType, TypeLike},
@@ -141,9 +141,7 @@ impl TraitFnApplication {
 pub struct EnvStore {
     pub value: Node,
     pub index: usize,
-    pub name: Ustr,
-    pub name_span: Location,
-    pub ty_span: Option<(Location, bool)>,
+    pub id: LocalDeclId,
 }
 impl EnvStore {
     pub fn instantiate(&mut self, subst: &InstSubstitution) {
@@ -154,7 +152,7 @@ impl EnvStore {
 #[derive(Debug, Clone)]
 pub struct EnvLoad {
     pub index: usize,
-    pub name: Option<Ustr>,
+    pub id: LocalDeclId,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +232,7 @@ impl Node {
     pub fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
+        locals: &[LocalDecl],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -251,22 +250,23 @@ impl Node {
                 writeln!(f, "{indent_str}build closure of")?;
                 build_closure
                     .function
-                    .format_ind(f, env, spacing, indent + 1)?;
+                    .format_ind(f, locals, env, spacing, indent + 1)?;
                 writeln!(f, "{indent_str}by capturing [")?;
                 for capture in &build_closure.captures {
-                    capture.format_ind(f, env, spacing, indent + 1)?;
+                    capture.format_ind(f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}]")?;
             }
             Apply(app) => {
                 writeln!(f, "{indent_str}eval")?;
-                app.function.format_ind(f, env, spacing, indent + 1)?;
+                app.function
+                    .format_ind(f, locals, env, spacing, indent + 1)?;
                 if app.arguments.is_empty() {
                     writeln!(f, "{indent_str}and apply to ()")?;
                 } else {
                     writeln!(f, "{indent_str}and apply to (")?;
                     for arg in &app.arguments {
-                        arg.format_ind(f, env, spacing, indent + 1)?;
+                        arg.format_ind(f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -283,7 +283,7 @@ impl Node {
                         if !name.is_empty() {
                             writeln!(f, "{indent_str}  {name}:")?;
                         }
-                        arg.format_ind(f, env, spacing, indent + 1)?;
+                        arg.format_ind(f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -303,7 +303,7 @@ impl Node {
                     writeln!(f, "{indent_str}to (")?;
                     for (name, arg) in fn_def.arg_names.iter().zip(app.arguments.iter()) {
                         writeln!(f, "{indent_str}  {name}:")?;
-                        arg.format_ind(f, env, spacing, indent + 1)?;
+                        arg.format_ind(f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -319,42 +319,52 @@ impl Node {
                 )?;
             }
             EnvStore(node) => {
+                let name = locals[node.id.as_index()].name.0;
                 writeln!(
                     f,
                     "{indent_str}store {} at {} as \"{}\"",
                     node.value.ty.format_with(env),
                     node.index,
-                    node.name
+                    name,
                 )?;
-                node.value.format_ind(f, env, spacing, indent + 1)?;
+                node.value.format_ind(f, locals, env, spacing, indent + 1)?;
             }
-            EnvLoad(node) => writeln!(f, "{indent_str}load {}", node.index)?,
+            EnvLoad(node) => {
+                let name = locals[node.id.as_index()].name.0;
+                writeln!(f, "{indent_str}load {} as \"{}\"", node.index, name)?;
+            }
             Return(node) => {
                 writeln!(f, "{indent_str}return")?;
-                node.format_ind(f, env, spacing, indent + 1)?;
+                node.format_ind(f, locals, env, spacing, indent + 1)?;
             }
             Block(nodes) => {
                 writeln!(f, "{indent_str}block {{")?;
                 for node in nodes.iter() {
-                    node.format_ind(f, env, spacing, indent + 1)?;
+                    node.format_ind(f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}}}")?;
             }
             Assign(assignment) => {
                 writeln!(f, "{indent_str}assign")?;
-                assignment.place.format_ind(f, env, spacing, indent + 1)?;
-                assignment.value.format_ind(f, env, spacing, indent + 1)?;
+                assignment
+                    .place
+                    .format_ind(f, locals, env, spacing, indent + 1)?;
+                assignment
+                    .value
+                    .format_ind(f, locals, env, spacing, indent + 1)?;
             }
             Tuple(nodes) => {
                 writeln!(f, "{indent_str}build tuple (")?;
                 for node in nodes.iter() {
-                    node.format_ind(f, env, spacing, indent + 1)?;
+                    node.format_ind(f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str})")?;
             }
             Project(projection) => {
                 writeln!(f, "{indent_str}project")?;
-                projection.0.format_ind(f, env, spacing, indent + 1)?;
+                projection
+                    .0
+                    .format_ind(f, locals, env, spacing, indent + 1)?;
                 writeln!(f, "{indent_str}at {index}", index = projection.1)?;
             }
             Record(nodes) => {
@@ -373,55 +383,56 @@ impl Node {
                     .collect();
                 for (node, field) in nodes.iter().zip(fields) {
                     writeln!(f, "{indent_str}⎸ {field}:")?;
-                    node.format_ind(f, env, spacing, indent + 2)?;
+                    node.format_ind(f, locals, env, spacing, indent + 2)?;
                 }
                 writeln!(f, "{indent_str}}}")?;
             }
             FieldAccess(access) => {
                 writeln!(f, "{indent_str}access")?;
-                access.0.format_ind(f, env, spacing, indent + 1)?;
+                access.0.format_ind(f, locals, env, spacing, indent + 1)?;
                 writeln!(f, "{indent_str}at field {}", access.1)?;
             }
             ProjectAt(access) => {
                 writeln!(f, "{indent_str}access")?;
-                access.0.format_ind(f, env, spacing, indent + 1)?;
+                access.0.format_ind(f, locals, env, spacing, indent + 1)?;
                 writeln!(f, "{indent_str}at field referenced by local {}", access.1)?;
             }
             Variant(variant) => {
                 writeln!(f, "{indent_str}variant with tag: {}", variant.0)?;
-                variant.1.format_ind(f, env, spacing, indent + 1)?;
+                variant.1.format_ind(f, locals, env, spacing, indent + 1)?;
             }
             ExtractTag(node) => {
                 writeln!(f, "{indent_str}extract tag of")?;
-                node.format_ind(f, env, spacing, indent + 1)?;
+                node.format_ind(f, locals, env, spacing, indent + 1)?;
             }
             Array(nodes) => {
                 writeln!(f, "{indent_str}build array [")?;
                 for node in nodes.iter() {
-                    node.format_ind(f, env, spacing, indent + 1)?;
+                    node.format_ind(f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}]")?;
             }
             Index(array, index) => {
                 writeln!(f, "{indent_str}index")?;
-                array.format_ind(f, env, spacing, indent + 1)?;
-                index.format_ind(f, env, spacing, indent + 1)?;
+                array.format_ind(f, locals, env, spacing, indent + 1)?;
+                index.format_ind(f, locals, env, spacing, indent + 1)?;
             }
             Case(case) => {
                 writeln!(f, "{indent_str}match")?;
-                case.value.format_ind(f, env, spacing, indent + 1)?;
+                case.value.format_ind(f, locals, env, spacing, indent + 1)?;
                 for (alternative, node) in &case.alternatives {
                     write!(f, "{indent_str}case ",)?;
                     alternative.format_as_string_repr(f)?;
                     writeln!(f)?;
-                    node.format_ind(f, env, spacing, indent + 1)?;
+                    node.format_ind(f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}default")?;
-                case.default.format_ind(f, env, spacing, indent + 1)?;
+                case.default
+                    .format_ind(f, locals, env, spacing, indent + 1)?;
             }
             Loop(body) => {
                 writeln!(f, "{indent_str}loop")?;
-                body.format_ind(f, env, spacing, indent + 1)?;
+                body.format_ind(f, locals, env, spacing, indent + 1)?;
             }
             SoftBreak => {
                 writeln!(f, "{indent_str}soft break")?;
@@ -753,9 +764,13 @@ impl Node {
     }
 }
 
-impl FormatWith<ModuleEnv<'_>> for Node {
-    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        self.format_ind(f, env, 0, 0)
+impl FormatWith<(&[LocalDecl], &ModuleEnv<'_>)> for Node {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter,
+        locals_and_env: &(&[LocalDecl], &ModuleEnv<'_>),
+    ) -> std::fmt::Result {
+        self.format_ind(f, locals_and_env.0, locals_and_env.1, 0, 0)
     }
 }
 

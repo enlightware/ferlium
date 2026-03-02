@@ -11,7 +11,8 @@ use crate::{
     containers::{IntoSVec2, b},
     effects::EffType,
     ir::{self, Node},
-    module::{FunctionId, TraitImplId},
+    module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
+    mutability::{MutType, MutVal},
     std::{math::int_type, string::string_value},
     r#type::{FnType, Type},
     value::{NativeValue, Value},
@@ -69,22 +70,47 @@ pub fn static_apply_pure(
     )
 }
 
-pub fn store(value: Node, index: usize, name: Ustr) -> NodeKind {
-    K::EnvStore(b(ir::EnvStore {
-        value,
-        index,
-        name,
-        name_span: Location::new_synthesized(),
-        ty_span: None,
-    }))
+pub fn local(name: &str, ty: Type) -> LocalDecl {
+    LocalDecl::new(
+        (ustr(name), Location::new_synthesized()),
+        MutType::constant(),
+        ty,
+        None,
+        Location::new_synthesized(),
+    )
+}
+
+pub fn store_new(
+    value: Node,
+    index: usize,
+    name: &str,
+    mutable: MutVal,
+    ty: Type,
+    locals: &mut Vec<LocalDecl>,
+) -> (NodeKind, LocalDeclId) {
+    let id = LocalDeclId::from_index(locals.len());
+    let local = LocalDecl::new(
+        (ustr(name), Location::new_synthesized()),
+        MutType::resolved(mutable),
+        ty,
+        None,
+        Location::new_synthesized(),
+    );
+    locals.push(local);
+    (K::EnvStore(b(ir::EnvStore { value, index, id })), id)
+}
+
+#[allow(dead_code)]
+pub fn store_to(value: Node, index: usize, id: LocalDeclId) -> NodeKind {
+    K::EnvStore(b(ir::EnvStore { value, index, id }))
 }
 
 pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
     K::GetDictionary(ir::GetDictionary { dictionary })
 }
 
-pub fn load(index: usize) -> NodeKind {
-    K::EnvLoad(b(ir::EnvLoad { index, name: None }))
+pub fn load(index: usize, id: LocalDeclId) -> NodeKind {
+    K::EnvLoad(b(ir::EnvLoad { index, id }))
 }
 
 pub fn project(tuple: Node, index: usize) -> NodeKind {

@@ -14,7 +14,7 @@ use crate::{
     error::InternalCompilationError,
     format::FormatWith,
     ir_syn,
-    module::{FunctionId, LocalFunctionId, ModuleEnv},
+    module::{FunctionId, LocalDeclId, LocalFunctionId, ModuleEnv, id::Id},
     parser_helpers::EMPTY_USTR,
     r#trait::TraitRef,
     trait_solver::TraitSolver,
@@ -95,6 +95,17 @@ impl DictionaryReq {
             TraitImpl { trait_ref, .. } => {
                 format!("_d{i}_impl_{}", trait_ref.name)
             }
+        }
+    }
+
+    pub fn to_dict_type(&self) -> Type {
+        match self {
+            DictionaryReq::FieldIndex { .. } => int_type(),
+            DictionaryReq::TraitImpl {
+                trait_ref,
+                input_tys,
+                output_tys,
+            } => trait_ref.get_dictionary_type_for_tys(input_tys, output_tys),
         }
     }
 }
@@ -220,6 +231,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
     inst_data: &ir::FnInstData,
     span: Location,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
+    local_count: usize,
 ) -> Result<(Vec<Node>, Vec<FnArgType>), InternalCompilationError> {
     use NodeKind as K;
     use TypeKind::*;
@@ -244,7 +256,8 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                             let index = find_field_dict_index(ctx.dicts, var, name).unwrap_or_else(
                             || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                         );
-                            K::EnvLoad(b(ir::EnvLoad { index, name: None }))
+                            let id = LocalDeclId::from_index(local_count + index);
+                            K::EnvLoad(b(ir::EnvLoad { index, id }))
                         }
                         _ => {
                             panic!("FieldIndex dictionary should have a variable or record type");
@@ -265,8 +278,9 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                             .expect(
                             "Dictionary for trait impl not found, type inference should have failed",
                         );
+                        let id = LocalDeclId::from_index(local_count + index);
                         // Load the array of trait implementation functions from the dictionary
-                        ir_syn::load(index)
+                        ir_syn::load(index, id)
                     };
                     let ty = trait_ref.get_dictionary_type_for_tys(input_tys, output_tys);
                     (node_kind, ty)
@@ -284,6 +298,7 @@ fn extra_args_for_module_function(
     inst_data: &DictionariesReq,
     span: Location,
     dicts: &ExtraParameters,
+    local_count: usize,
 ) -> (Vec<Node>, Vec<FnArgType>) {
     inst_data
         .iter()
@@ -296,9 +311,10 @@ fn extra_args_for_module_function(
                 .iter()
                 .position(|d| d == dict)
                 .expect("Target dictionary not found in ours");
+            let id = LocalDeclId::from_index(local_count + index);
             (
                 Node::new(
-                    NodeKind::EnvLoad(b(ir::EnvLoad { index, name: None })),
+                    NodeKind::EnvLoad(b(ir::EnvLoad { index, id })),
                     int_type(),
                     no_effects(),
                     span,
@@ -333,6 +349,7 @@ impl Node {
     pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
         &mut self,
         ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
+        local_count: usize,
     ) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
         match &mut self.kind {
@@ -340,29 +357,22 @@ impl Node {
                 if immediate.value.is_function() {
                     // Build closure to capture the dictionaries of this function, if any.
                     if !ctx.dicts.is_empty() {
-                        let captures =
-                            ctx.dicts
-                                .requirements
-                                .iter()
-                                .enumerate()
-                                .map(|(index, req)| {
-                                    let ty = match req {
-                                        DictionaryReq::FieldIndex { .. } => int_type(),
-                                        DictionaryReq::TraitImpl {
-                                            trait_ref,
-                                            input_tys,
-                                            output_tys,
-                                        } => trait_ref
-                                            .get_dictionary_type_for_tys(input_tys, output_tys),
-                                    };
-                                    Node::new(
-                                        EnvLoad(b(ir::EnvLoad { index, name: None })),
-                                        ty,
-                                        no_effects(),
-                                        self.span,
-                                    )
-                                })
-                                .collect();
+                        let captures = ctx
+                            .dicts
+                            .requirements
+                            .iter()
+                            .enumerate()
+                            .map(|(index, req)| {
+                                let ty = req.to_dict_type();
+                                let id = LocalDeclId::from_index(local_count + index);
+                                Node::new(
+                                    EnvLoad(b(ir::EnvLoad { index, id })),
+                                    ty,
+                                    no_effects(),
+                                    self.span,
+                                )
+                            })
+                            .collect();
                         self.kind = BuildClosure(b(ir::BuildClosure {
                             function: self.clone(),
                             captures,
@@ -373,11 +383,13 @@ impl Node {
             BuildClosure(build_closure) => {
                 // Elaborate captures first (they are in outer scope).
                 for capture in &mut build_closure.captures {
-                    capture.elaborate_dictionaries(ctx)?;
+                    capture.elaborate_dictionaries(ctx, local_count)?;
                 }
 
                 // Elaborate the function (it is the closure body/value).
-                build_closure.function.elaborate_dictionaries(ctx)?;
+                build_closure
+                    .function
+                    .elaborate_dictionaries(ctx, local_count)?;
 
                 // Optimization: flatten nested BuildClosure
                 // Check if the function is a BuildClosure itself (due to dictionary capturing).
@@ -409,20 +421,20 @@ impl Node {
                 }
             }
             Apply(app) => {
-                app.function.elaborate_dictionaries(ctx)?;
+                app.function.elaborate_dictionaries(ctx, local_count)?;
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx)?;
+                    arg.elaborate_dictionaries(ctx, local_count)?;
                 }
             }
             StaticApply(app) => {
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx)?;
+                    arg.elaborate_dictionaries(ctx, local_count)?;
                 }
                 if !app.inst_data.dicts_req.is_empty() {
                     // Build the dictionary requirements for the function by adding extra arguments before normal arguments.
                     let span = app.function_span;
                     let (extra_args, extra_args_ty) =
-                        extra_args_from_inst_data(&app.inst_data, span, ctx)?;
+                        extra_args_from_inst_data(&app.inst_data, span, ctx, local_count)?;
                     // First add the extra parameters, then the original arguments.
                     app.argument_names
                         .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
@@ -438,8 +450,12 @@ impl Node {
                         {
                             let inst_data = &inst_data.requirements;
                             // Yes, build the dictionary requirements for the function.
-                            let (extra_args, extra_args_ty) =
-                                extra_args_for_module_function(inst_data, self.span, ctx.dicts);
+                            let (extra_args, extra_args_ty) = extra_args_for_module_function(
+                                inst_data,
+                                self.span,
+                                ctx.dicts,
+                                local_count,
+                            );
                             app.argument_names
                                 .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
                             app.arguments.splice(0..0, extra_args);
@@ -470,7 +486,7 @@ impl Node {
             }
             TraitFnApply(app) => {
                 for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx)?;
+                    arg.elaborate_dictionaries(ctx, local_count)?;
                 }
                 assert!(
                     app.inst_data.dicts_req.is_empty(),
@@ -509,18 +525,20 @@ impl Node {
                     );
                     // Build a tuple type where the app.function_index_th element is the function pointer
                     // and the rest never;
-                    let mut fns_tuple_ty = vec![Type::never(); app.trait_ref.functions.len()];
-                    let fn_ty = Type::function_type(app.ty.clone());
-                    fns_tuple_ty[app.function_index] = fn_ty;
-                    let fns_tuple_ty = Type::tuple(fns_tuple_ty);
+                    let fns_tuple_ty = ctx.dicts.requirements[fns_tuple_index].to_dict_type();
                     // Load that tuple from the correct local variable...
+                    let id = LocalDeclId::from_index(local_count + fns_tuple_index);
                     let load_fns_tuple = Node::new(
-                        ir_syn::load(fns_tuple_index),
+                        ir_syn::load(fns_tuple_index, id),
                         fns_tuple_ty,
                         no_effects(),
                         app.function_span,
                     );
                     // ...and from it the function pointer.
+                    let fn_ty = fns_tuple_ty
+                        .data()
+                        .as_tuple()
+                        .expect("Trait impl dict should be a tuple type")[app.function_index];
                     let project_fn = Node::new(
                         ir_syn::project(load_fns_tuple, app.function_index),
                         fn_ty,
@@ -549,8 +567,12 @@ impl Node {
                             if !inst_data.is_empty() {
                                 let inst_data = &inst_data.requirements;
                                 // We have an instantiation, so we need a closure to pass dictionary requirements.
-                                let (captures, _) =
-                                    extra_args_for_module_function(inst_data, self.span, ctx.dicts);
+                                let (captures, _) = extra_args_for_module_function(
+                                    inst_data,
+                                    self.span,
+                                    ctx.dicts,
+                                    local_count,
+                                );
                                 assert!(get_fn.inst_data.dicts_req.is_empty());
                                 self.kind = BuildClosure(b(ir::BuildClosure {
                                     function: self.clone(),
@@ -562,7 +584,7 @@ impl Node {
                 } else {
                     // We have an instantiation, so we need a closure to pass dictionary requirements.
                     let (captures, _) =
-                        extra_args_from_inst_data(&get_fn.inst_data, self.span, ctx)?;
+                        extra_args_from_inst_data(&get_fn.inst_data, self.span, ctx, local_count)?;
                     get_fn.inst_data.dicts_req.clear();
                     self.kind = BuildClosure(b(ir::BuildClosure {
                         function: self.clone(),
@@ -575,39 +597,39 @@ impl Node {
             }
             EnvStore(store) => {
                 store.index += ctx.dicts.len();
-                store.value.elaborate_dictionaries(ctx)?;
+                store.value.elaborate_dictionaries(ctx, local_count)?;
             }
             EnvLoad(load) => {
                 load.index += ctx.dicts.len();
             }
             Return(node) => {
-                node.elaborate_dictionaries(ctx)?;
+                node.elaborate_dictionaries(ctx, local_count)?;
             }
             Block(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx, local_count)?;
                 }
             }
             Assign(assignment) => {
-                assignment.place.elaborate_dictionaries(ctx)?;
-                assignment.value.elaborate_dictionaries(ctx)?;
+                assignment.place.elaborate_dictionaries(ctx, local_count)?;
+                assignment.value.elaborate_dictionaries(ctx, local_count)?;
             }
             Tuple(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx, local_count)?;
                 }
             }
             Project(projection) => {
-                projection.0.elaborate_dictionaries(ctx)?;
+                projection.0.elaborate_dictionaries(ctx, local_count)?;
             }
             Record(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx, local_count)?;
                 }
             }
             FieldAccess(access) => {
                 use TypeKind::*;
-                access.0.elaborate_dictionaries(ctx)?;
+                access.0.elaborate_dictionaries(ctx, local_count)?;
                 let name = access.1;
                 let span = access.0.span;
                 let ty = access.0.ty;
@@ -664,29 +686,29 @@ impl Node {
                 panic!("ProjectAt should not be present at this stage");
             }
             Variant(variant) => {
-                variant.1.elaborate_dictionaries(ctx)?;
+                variant.1.elaborate_dictionaries(ctx, local_count)?;
             }
             ExtractTag(node) => {
-                node.elaborate_dictionaries(ctx)?;
+                node.elaborate_dictionaries(ctx, local_count)?;
             }
             Array(nodes) => {
                 for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx, local_count)?;
                 }
             }
             Index(array, index) => {
-                array.elaborate_dictionaries(ctx)?;
-                index.elaborate_dictionaries(ctx)?;
+                array.elaborate_dictionaries(ctx, local_count)?;
+                index.elaborate_dictionaries(ctx, local_count)?;
             }
             Case(case) => {
-                case.value.elaborate_dictionaries(ctx)?;
+                case.value.elaborate_dictionaries(ctx, local_count)?;
                 for (_, node) in &mut case.alternatives {
-                    node.elaborate_dictionaries(ctx)?;
+                    node.elaborate_dictionaries(ctx, local_count)?;
                 }
-                case.default.elaborate_dictionaries(ctx)?;
+                case.default.elaborate_dictionaries(ctx, local_count)?;
             }
             Loop(body) => {
-                body.elaborate_dictionaries(ctx)?;
+                body.elaborate_dictionaries(ctx, local_count)?;
             }
             SoftBreak => {}
         }

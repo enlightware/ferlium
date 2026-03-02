@@ -28,7 +28,7 @@ use crate::{
     function::{FunctionDefinition, FunctionRc},
     internal_compilation_error,
     location::Location,
-    module::ModuleFunction,
+    module::{LocalDecl, LocalDeclId, ModuleFunction, id::Id},
     std::core::REPR_TRAIT,
     r#trait::TraitRef,
     trait_solver::TraitSolver,
@@ -55,7 +55,7 @@ use crate::{
     std::{array::array_type, math::int_type},
     r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
     type_scheme::PubTypeConstraint,
-    typing_env::{Local, TypingEnv},
+    typing_env::TypingEnv,
     value::Value,
 };
 
@@ -323,63 +323,81 @@ impl TypeInference {
 
         // 2. Identify captures from the current environment.
         let mut captures = Vec::new();
-        let mut capture_args = Vec::new();
+        let mut capture_args = Vec::new(); // inner Ids
 
         // Sort for deterministic order.
         let mut sorted_free_vars: Vec<_> = free_vars.into_iter().collect();
         sorted_free_vars.sort();
 
+        let mut fn_all_locals = Vec::new();
         for var_name in sorted_free_vars {
-            let found = env.get_variable_index_and_type_scheme(&var_name);
-            if let Some((index, ty, mut_ty)) = found {
+            let found = env.get_variable_index_and_id(&var_name);
+            if let Some((index, outer_id)) = found {
                 // It is a local variable in the current environment, capture it.
+                let local = &env.all_locals[outer_id.as_index()];
                 captures.push(N::new(
                     K::EnvLoad(b(ir::EnvLoad {
                         index,
-                        name: Some(var_name),
+                        id: outer_id,
                     })),
-                    ty,
+                    local.ty,
                     no_effects(),
                     span,
                 ));
-                capture_args.push(Local::new(var_name, mut_ty, ty, span));
+                let inner_id = LocalDeclId::from_index(fn_all_locals.len());
+                let mut inner_local = local.clone();
+                inner_local.scope = span; // the local's scope is the whole lambda
+                fn_all_locals.push(inner_local);
+                capture_args.push(inner_id);
             }
         }
 
         // 3. Determine explicit arguments types and return type.
+        // Local ids are inner to the lambda.
         let (explicit_locals, ret_ty, expected_effects) = if let Some(fn_ty) = &expected_fn_ty {
             let explicit_locals = args
                 .iter()
                 .zip(&fn_ty.args)
-                .map(|((name, span), arg_ty)| Local::new(*name, arg_ty.mut_ty, arg_ty.ty, *span))
+                .map(|(name, arg_ty)| {
+                    let id = LocalDeclId::from_index(fn_all_locals.len());
+                    fn_all_locals.push(LocalDecl::new(*name, arg_ty.mut_ty, arg_ty.ty, None, span));
+                    id
+                })
                 .collect::<Vec<_>>();
             (explicit_locals, fn_ty.ret, Some(fn_ty.effects.clone()))
         } else {
             let explicit_locals = args
                 .iter()
-                .map(|(name, span)| {
-                    Local::new(
+                .map(|name| {
+                    let id = LocalDeclId::from_index(fn_all_locals.len());
+                    fn_all_locals.push(LocalDecl::new(
                         *name,
                         self.fresh_mut_var_ty(),
                         self.fresh_type_var_ty(),
-                        *span,
-                    )
+                        None,
+                        span,
+                    ));
+                    id
                 })
                 .collect::<Vec<_>>();
             (explicit_locals, self.fresh_type_var_ty(), None)
         };
 
-        let args_ty = explicit_locals.iter().map(Local::as_fn_arg_type).collect();
-
-        // 4. Build environment for typing the function's body.
-        let all_locals = capture_args
+        let args_ty = explicit_locals
             .iter()
-            .cloned()
-            .chain(explicit_locals)
+            .map(|id| fn_all_locals[id.as_index()].as_fn_arg_type())
             .collect();
 
+        // 4. Build environment for typing the function's body.
+        let fn_cur_locals = capture_args.into_iter().chain(explicit_locals).collect();
+        let all_arg_names = fn_all_locals
+            .iter()
+            .map(|local| local.name.0)
+            .collect::<Vec<_>>();
+
         let mut inner_env = TypingEnv::new(
-            all_locals,
+            &mut fn_all_locals,
+            fn_cur_locals,
             env.new_import_slots,
             env.module_env,
             Some((ret_ty, body.span)),
@@ -400,20 +418,14 @@ impl TypeInference {
         // 6. Store and return the function's type.
         let fn_ty = FnType::new(args_ty, ret_ty, effects);
         let fn_ty_wrapper = Type::function_type(fn_ty.clone());
-
         let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
-        let all_arg_names: Vec<_> = capture_args
-            .iter()
-            .map(|l| l.name)
-            .chain(arg_names.iter().copied())
-            .collect();
-
         let code = ScriptFunction::new(code, all_arg_names);
         let ty_scheme = TypeScheme::new_just_type(fn_ty);
         let function = ModuleFunction {
             definition: FunctionDefinition::new(ty_scheme, arg_names, None),
             code: FunctionRc::new(RefCell::new(b(code))),
             spans: None, // FIXME: add spans
+            locals: fn_all_locals,
         };
         // TODO: Maybe consider generating the BuildClosure node here.
         let function_id = env.collect_lambda_module_function(function);
@@ -459,13 +471,11 @@ impl TypeInference {
             Identifier(path) => {
                 // Retrieve the index and the type of the variable from the environment, if it exists
                 if let [(name, _)] = &path.segments[..]
-                    && let Some((index, ty, mut_ty)) = env.get_variable_index_and_type_scheme(name)
+                    && let Some((index, id)) = env.get_variable_index_and_id(name)
                 {
-                    let node = K::EnvLoad(b(ir::EnvLoad {
-                        index,
-                        name: Some(*name),
-                    }));
-                    (node, ty, mut_ty, no_effects())
+                    let local = &env.all_locals[id.as_index()];
+                    let node = K::EnvLoad(b(ir::EnvLoad { index, id }));
+                    (node, local.ty, local.mut_ty, no_effects())
                 }
                 // Retrieve the trait method from the environment, if it exists
                 else if let Some((module_name, _trait_descr)) =
@@ -546,22 +556,24 @@ impl TypeInference {
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
-            Let((name, name_span), mutable, let_expr, ty_span) => {
+            Let(name, mutable, let_expr, ty_span) => {
                 let node = self.infer_expr_drop_mut(env, let_expr)?;
-                let index = env.locals.len();
-                env.locals.push(Local::new(
+                let local = LocalDecl::new(
                     *name,
                     MutType::resolved(*mutable),
                     node.ty,
+                    *ty_span,
                     expr.span,
-                ));
+                );
+                let index = env.cur_locals.len();
+                let id = LocalDeclId::from_index(env.all_locals.len());
+                env.all_locals.push(local);
+                env.cur_locals.push(id);
                 let effects = node.effects.clone();
                 let node = K::EnvStore(b(EnvStore {
                     value: node,
                     index,
-                    name: *name,
-                    name_span: *name_span,
-                    ty_span: *ty_span,
+                    id,
                 }));
                 (node, Type::unit(), MutType::constant(), effects)
             }
@@ -630,9 +642,20 @@ impl TypeInference {
             }
             Block(exprs) => {
                 assert!(!exprs.is_empty());
-                let env_size = env.locals.len();
+                let env_size = env.cur_locals.len();
                 let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
-                env.locals.truncate(env_size);
+                // Adjust the lexical scope of the variables declared in the block to end at the end of the block.
+                for local_id in env.cur_locals.iter().skip(env_size) {
+                    let local = &mut env.all_locals[local_id.as_index()];
+                    assert_eq!(local.scope.source_id(), expr.span.source_id());
+                    assert!(local.scope.end() <= expr.span.end());
+                    local.scope = Location::new(
+                        local.scope.start(),
+                        expr.span.end(),
+                        local.scope.source_id(),
+                    );
+                }
+                env.cur_locals.truncate(env_size);
                 let node = K::Block(b(SVec2::from_vec(nodes)));
                 let ty = types.last().copied().unwrap_or(Type::unit());
                 (node, ty, MutType::constant(), effects)
@@ -2929,6 +2952,10 @@ impl UnifiedTypeInference {
         if let Some(script_fn) = code.as_script_mut() {
             self.substitute_in_node(&mut script_fn.code);
         }
+        for local in &mut descr.locals {
+            local.ty = self.substitute_in_type(local.ty);
+            local.mut_ty = self.substitute_in_mut_type(local.mut_ty);
+        }
     }
 
     pub fn substitute_in_type(&mut self, ty: Type) -> Type {
@@ -2941,6 +2968,10 @@ impl UnifiedTypeInference {
 
     pub fn substitute_in_fn_type(&mut self, fn_ty: &FnType) -> FnType {
         substitute_fn_type(fn_ty, &mut SubstituteTypes(self))
+    }
+
+    pub fn substitute_in_mut_type(&mut self, mut_ty: MutType) -> MutType {
+        SubstituteTypes(self).substitute_mut_type(mut_ty)
     }
 
     pub fn lookup_type_var(&mut self, var: TypeVar) -> Type {

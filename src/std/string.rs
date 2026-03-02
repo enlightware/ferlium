@@ -288,7 +288,7 @@ pub fn string_value(s: &str) -> Value {
 pub fn add_to_module(to: &mut Module) {
     to.add_type_alias_str("string", string_type());
 
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         CONTAINS_TRAIT.clone(),
         [string_type()],
         [string_type()],

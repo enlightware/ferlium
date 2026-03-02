@@ -1464,6 +1464,10 @@ fn execution_errors() {
         session.fail_run("panic(\"oh no\")"),
         Aborted(Some("oh no".into()))
     );
+    assert_eq!(
+        session.fail_run("fn i(x) { let y = x + x; if y == 2 { panic(\"2\") } } i(1) "),
+        Aborted(Some("2".into()))
+    );
     assert_eq!(session.fail_run("1.0 / 0.0"), DivisionByZero);
     assert_eq!(
         session.fail_run("let v = || 0.0; 1.0 / v()"),

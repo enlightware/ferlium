@@ -14,12 +14,12 @@ use crate::{
     function::FunctionDefinition,
     module::{
         self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget,
-        LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
+        LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
+        id::Id,
     },
-    mutability::MutType,
     std::STD_MODULE_ID,
     r#trait::TraitRef,
-    r#type::{FnArgType, Type},
+    r#type::Type,
 };
 
 use derive_new::new;
@@ -28,46 +28,49 @@ use derive_new::new;
 /// The tuple contains the trait reference, the index of the function in the trait, and the function definition.
 pub type TraitFunctionDescription<'a> = (TraitRef, usize, &'a FunctionDefinition);
 
-/// A local variable within a typing environment.
-#[derive(Clone, Debug, new)]
-pub struct Local {
-    pub name: Ustr,
-    pub mutable: MutType,
-    pub ty: Type,
-    pub span: Location,
-}
+// /// A local variable within a typing environment.
+// #[derive(Clone, Debug, new)]
+// pub struct Local {
+//     pub name: Ustr,
+//     pub mutable: MutType,
+//     pub ty: Type,
+//     pub span: Location,
+// }
 
-impl Local {
-    pub fn new_var(name: Ustr, ty: Type, span: Location) -> Self {
-        Self {
-            name,
-            mutable: MutType::mutable(),
-            ty,
-            span,
-        }
-    }
+// impl Local {
+//     pub fn new_var(name: Ustr, ty: Type, span: Location) -> Self {
+//         Self {
+//             name,
+//             mutable: MutType::mutable(),
+//             ty,
+//             span,
+//         }
+//     }
 
-    pub fn new_let(name: Ustr, ty: Type, span: Location) -> Self {
-        Self {
-            name,
-            mutable: MutType::constant(),
-            ty,
-            span,
-        }
-    }
+//     pub fn new_let(name: Ustr, ty: Type, span: Location) -> Self {
+//         Self {
+//             name,
+//             mutable: MutType::constant(),
+//             ty,
+//             span,
+//         }
+//     }
 
-    pub fn as_fn_arg_type(&self) -> FnArgType {
-        FnArgType::new(self.ty, self.mutable)
-    }
-}
+//     pub fn as_fn_arg_type(&self) -> FnArgType {
+//         FnArgType::new(self.ty, self.mutable)
+//     }
+// }
 
 pub type GetFunctionData<'a> = (&'a FunctionDefinition, FunctionId, Option<ModuleId>);
 
 /// A typing environment, mapping local variable names to types.
 #[derive(new)]
 pub struct TypingEnv<'m> {
+    /// All local variables in the current function, including those from outer scopes.
+    /// The index of a local variable in this vector is its LocalDeclId.
+    pub(crate) all_locals: &'m mut Vec<LocalDecl>,
     /// The local variables existing in this environment.
-    pub(crate) locals: Vec<Local>,
+    pub(crate) cur_locals: Vec<LocalDeclId>,
     /// The extra import slots that can be filled during type checking.
     pub(crate) new_import_slots: &'m mut Vec<ImportFunctionSlot>,
     /// The program and the module we are currently compiling.
@@ -85,8 +88,8 @@ impl<'m> TypingEnv<'m> {
         self.module_env.current.module_id()
     }
 
-    pub fn get_locals_and_drop(self) -> Vec<Local> {
-        self.locals
+    pub fn get_all_locals_and_drop(self) -> Vec<LocalDecl> {
+        std::mem::take(self.all_locals)
     }
 
     pub fn collect_lambda_module_function(&mut self, function: ModuleFunction) -> LocalFunctionId {
@@ -97,16 +100,18 @@ impl<'m> TypingEnv<'m> {
     }
 
     pub fn has_variable_name(&self, name: Ustr) -> bool {
-        self.locals.iter().any(|local| local.name == name)
+        self.cur_locals
+            .iter()
+            .any(|local| self.all_locals[local.as_index()].name.0 == name)
     }
 
-    pub fn get_variable_index_and_type_scheme(&self, name: &str) -> Option<(usize, Type, MutType)> {
-        self.locals
+    pub fn get_variable_index_and_id(&self, name: &str) -> Option<(usize, LocalDeclId)> {
+        self.cur_locals
             .iter()
             .rev()
-            .position(|local| local.name == name)
-            .map(|rev_index| self.locals.len() - 1 - rev_index)
-            .map(|index| (index, self.locals[index].ty, self.locals[index].mutable))
+            .position(|local| self.all_locals[local.as_index()].name.0 == name)
+            .map(|rev_index| self.cur_locals.len() - 1 - rev_index)
+            .map(|index| (index, self.cur_locals[index]))
     }
 
     fn import_function(

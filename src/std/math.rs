@@ -317,7 +317,7 @@ pub fn add_to_module(to: &mut Module) {
     use std::ops;
 
     // int
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         NUM_TRAIT.clone(),
         [int_type()],
         [],
@@ -331,7 +331,7 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(identity::<Int>)) as Function,
         ],
     );
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         BITS_TRAIT.clone(),
         [int_type()],
         [],
@@ -352,7 +352,7 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(test_bit)) as Function,
         ],
     );
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         ORD_TRAIT.clone(),
         [int_type()],
         [],
@@ -420,7 +420,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // float
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         NUM_TRAIT.clone(),
         [float_type()],
         [],
@@ -434,13 +434,13 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(isize_to_not_nan)) as Function,
         ],
     );
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         ORD_TRAIT.clone(),
         [float_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
     );
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         DIV_TRAIT.clone(),
         [float_type()],
         [],
@@ -463,7 +463,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // conversions
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         CAST_TRAIT.clone(),
         [int_type(), float_type()],
         [],
@@ -471,7 +471,7 @@ pub fn add_to_module(to: &mut Module) {
             saturating_cast_int_to_notnan::<Int, f64>,
         )) as Function],
     );
-    to.add_concrete_impl(
+    to.add_concrete_impl_no_locals(
         CAST_TRAIT.clone(),
         [float_type(), int_type()],
         [],

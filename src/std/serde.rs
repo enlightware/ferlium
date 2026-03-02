@@ -19,7 +19,8 @@ use crate::{
     function::FunctionDefinition,
     ir::{self, Node},
     ir_syn,
-    module::{self, Module, TraitImplId},
+    module::{self, LocalDeclId, Module, TraitImplId, id::Id},
+    mutability::MutVal,
     std::{
         array::array_type,
         math::int_type,
@@ -66,28 +67,43 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         assert!(ty.is_constant());
 
         // helpers to synthesize IR
-        let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
+        let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), Location::new_synthesized());
 
         // helper to create the concrete trait implementation for sequences
-        let build_serialize_to_seq = |nodes, tag, solver: &mut TraitSolver| {
+        let build_serialize_to_seq = |nodes, tag, locals, solver: &mut TraitSolver| {
             let array_ty = array_type(variant_type());
             let array = n(array(nodes), array_ty);
             let payload_ty = tuple_type([array_ty]);
             let payload = n(tuple([array]), payload_ty);
             let code = n(variant(ustr(tag), payload), variant_type());
-            TraitImplId::Local(solver.add_concrete_impl_from_code(code, trait_ref, input_types, []))
+            TraitImplId::Local(solver.add_concrete_impl_from_code(
+                code,
+                locals,
+                trait_ref,
+                input_types,
+                [],
+            ))
         };
+
+        let locals = vec![local("self", ty)];
+        let l_self_id = LocalDeclId::from_index(0);
 
         // helper to build the serialization of a member of a tuple
         let mut build_serialize_i = |index, ty| {
             // load function parameter (that is a tuple in memory)
-            let load = n(load(0), ty);
+            let load = n(load(0, l_self_id), ty);
             // project the i-th element
             let project = n(project(load, index), ty);
             // serialize the i-th element
-            let function = solver.solve_impl_method(trait_ref, &[ty], 0, span)?;
+            let function =
+                solver.solve_impl_method(trait_ref, &[ty], 0, Location::new_synthesized())?;
             let apply = n(
-                static_apply_pure(function, [(project, ty)], variant_type(), span),
+                static_apply_pure(
+                    function,
+                    [(project, ty)],
+                    variant_type(),
+                    Location::new_synthesized(),
+                ),
                 variant_type(),
             );
             Ok(apply)
@@ -125,7 +141,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     build_serialize_i(index, ty_i)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Ok(Some(build_serialize_to_seq(nodes, "Array", solver)))
+            Ok(Some(build_serialize_to_seq(nodes, "Array", locals, solver)))
         } else if let TypeKind::Record(fields) = ty_data {
             /*
             Example source code for serialization of a record:
@@ -169,7 +185,9 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     Ok(entry)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Ok(Some(build_serialize_to_seq(nodes, "Object", solver)))
+            Ok(Some(build_serialize_to_seq(
+                nodes, "Object", locals, solver,
+            )))
         } else if let TypeKind::Variant(variants) = ty_data {
             // default to adjacently tagged into an object, with tag = "type", content = "data"
             /*
@@ -221,14 +239,14 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             // build the match node
-            let load = n(load(0), ty);
+            let load = n(load(0, l_self_id), ty);
             let extract_tag = n(extract_tag(load), int_type());
             let code = n(
                 case_from_complete_alternatives(extract_tag, alternatives),
                 variant_type(),
             );
             let local_impl_id =
-                solver.add_concrete_impl_from_code(code, trait_ref, input_types, []);
+                solver.add_concrete_impl_from_code(code, locals, trait_ref, input_types, []);
             Ok(Some(TraitImplId::Local(local_impl_id)))
         } else if let TypeKind::Named(named) = ty_data {
             let ty_def = named.def;
@@ -279,19 +297,27 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         assert!(ty.is_constant());
 
         // helpers to synthesize IR
-        let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
+        let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), Location::new_synthesized());
 
         // build the deserialization of a variant into a value of type `ty`
         let build_deserialize = |solver: &mut TraitSolver, variant: Node, ty: Type| {
             let function = solver.solve_impl_method(trait_ref, &[ty], 0, span)?;
             Ok(n(
-                static_apply_pure(function, [(variant, variant_type())], ty, span),
+                static_apply_pure(
+                    function,
+                    [(variant, variant_type())],
+                    ty,
+                    Location::new_synthesized(),
+                ),
                 ty,
             ))
         };
 
         // derive tuple, record, variant serialization
+        let mut locals = vec![local("variant", variant_type())];
+        let l_variant_id = LocalDeclId::from_index(0);
         let ty_data = ty.data().clone();
+        let load_variant = n(load(0, l_variant_id), variant_type());
         let node = if let TypeKind::Tuple(tys) = ty_data {
             /*
             Example source code for deserialization of a tuple:
@@ -306,18 +332,25 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             }
             */
             // extract the array payload of the array variant
-            let load_variant = n(load(0), variant_type());
-            let get_array = build_variant_to_array(solver, load_variant, span)?;
+            let get_array = build_variant_to_array(solver, load_variant)?;
             let array_ty = array_type(variant_type());
             // store it at 1
-            let store_array = n(store(get_array, 1, ustr("array")), Type::unit());
+            let (store_array, l_array_id) = store_new(
+                get_array,
+                1,
+                "array",
+                MutVal::constant(),
+                array_ty,
+                &mut locals,
+            );
+            let store_array = n(store_array, Type::unit());
             // build deserialization of each element
             let build_elements = tys
                 .into_iter()
                 .enumerate()
                 .map(|(i, ty_i)| {
                     // get the array payload of the array variant
-                    let get_array = n(load(1), array_ty);
+                    let get_array = n(load(1, l_array_id), array_ty);
                     // get the i-th element
                     let index = n(index_immediate(get_array, i as isize), variant_type());
                     // deserialize the i-th element
@@ -342,23 +375,35 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             }
             */
             // extract the array payload of the array variant
-            let load_variant = n(load(0), variant_type());
-            let get_object = build_variant_to_object(solver, load_variant, span)?;
+            let get_object = build_variant_to_object(solver, load_variant)?;
+            let object_ty = object_payload_type();
             // store it at 1
-            let store_object = n(store(get_object, 1, ustr("object")), Type::unit());
+            let (store_object, l_object_id) = store_new(
+                get_object,
+                1,
+                "object",
+                MutVal::constant(),
+                object_ty,
+                &mut locals,
+            );
+            let store_object = n(store_object, Type::unit());
             // build deserialization of each field
             let build_elements = fields
                 .into_iter()
                 .map(|(name, ty)| {
                     // get the payload of the object variant
-                    let load_object = n(load(1), object_payload_type());
+                    let load_object = n(load(1, l_object_id), object_payload_type());
                     // get the name-th element out of the object array
-                    let get_entry =
-                        build_expect_variant_object_entry(solver, load_object, &name, span)?;
+                    let get_entry = build_expect_variant_object_entry(solver, load_object, &name)?;
                     // deserialize the name-th element
                     let function = solver.solve_impl_method(trait_ref, &[ty], 0, span)?;
                     Ok(n(
-                        static_apply_pure(function, [(get_entry, variant_type())], ty, span),
+                        static_apply_pure(
+                            function,
+                            [(get_entry, variant_type())],
+                            ty,
+                            Location::new_synthesized(),
+                        ),
                         ty,
                     ))
                 })
@@ -384,16 +429,23 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             }
             */
             // extract the array payload of the array variant
-            let load_variant = n(load(0), variant_type());
-            let get_object = build_variant_to_object(solver, load_variant, span)?;
+            let get_object = build_variant_to_object(solver, load_variant)?;
+            let object_ty = object_payload_type();
             // store it at 1
-            let store_object = n(store(get_object, 1, ustr("object")), Type::unit());
+            let (store_object, l_object_id) = store_new(
+                get_object,
+                1,
+                "object",
+                MutVal::constant(),
+                object_ty,
+                &mut locals,
+            );
+            let store_object = n(store_object, Type::unit());
             // load the object payload from env 1
-            let load_object = n(load(1), object_payload_type());
+            let load_object = n(load(1, l_object_id), object_payload_type());
             // build the type string extraction
-            let get_type =
-                build_expect_variant_object_entry(solver, load_object.clone(), "type", span)?;
-            let get_string_type = build_variant_to_string(solver, get_type, span)?;
+            let get_type = build_expect_variant_object_entry(solver, load_object.clone(), "type")?;
+            let get_string_type = build_variant_to_string(solver, get_type)?;
             // build the data extraction for each variant.
             let variant_cases = variants
                 .into_iter()
@@ -401,12 +453,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     let tag_value = string_value(&tag);
                     let build_variant = if payload_ty != Type::unit() {
                         // variant with payload
-                        let get_data = build_expect_variant_object_entry(
-                            solver,
-                            load_object.clone(),
-                            "data",
-                            span,
-                        )?;
+                        let get_data =
+                            build_expect_variant_object_entry(solver, load_object.clone(), "data")?;
                         let deserialize = build_deserialize(solver, get_data, payload_ty)?;
                         n(variant(tag, deserialize), ty)
                     } else {
@@ -421,7 +469,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 case(
                     get_string_type,
                     variant_cases,
-                    build_panic(solver, span, "Unknown variant tag type")?,
+                    build_panic(solver, "Unknown variant tag type")?,
                 ),
                 ty,
             );
@@ -435,7 +483,13 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             None // deserialization of rest not yet supported
         };
         Ok(node.map(|n| {
-            TraitImplId::Local(solver.add_concrete_impl_from_code(n, trait_ref, input_types, []))
+            TraitImplId::Local(solver.add_concrete_impl_from_code(
+                n,
+                locals,
+                trait_ref,
+                input_types,
+                [],
+            ))
         }))
     }
 }
@@ -454,7 +508,7 @@ pub fn add_to_module(to: &mut Module) {
             SERIALIZE_FN_NAME,
             Def::new_infer_quantifiers(
                 FnType::new_by_val([var0_ty], variant_type(), EffType::empty()),
-                ["value"],
+                ["self"],
                 "Serialize this value into a variant.",
             ),
         )],
@@ -493,12 +547,10 @@ pub fn add_to_module(to: &mut Module) {
 }
 
 // Build a node that fetches the panic function node from the trait solver, importing it if necessary.
-fn build_panic(
-    solver: &mut TraitSolver,
-    span: Location,
-    message: &str,
-) -> Result<Node, InternalCompilationError> {
+fn build_panic(solver: &mut TraitSolver, message: &str) -> Result<Node, InternalCompilationError> {
     use ir_syn::*;
+    let span = Location::new_synthesized();
+
     // helpers to synthesize IR
     let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
@@ -518,31 +570,22 @@ fn build_panic(
 fn build_variant_to_array(
     solver: &mut TraitSolver,
     variant_node: Node,
-    span: Location,
 ) -> Result<Node, InternalCompilationError> {
-    build_variant_to_x(
-        solver,
-        "array",
-        array_type(variant_type()),
-        variant_node,
-        span,
-    )
+    build_variant_to_x(solver, "array", array_type(variant_type()), variant_node)
 }
 
 fn build_variant_to_object(
     solver: &mut TraitSolver,
     variant_node: Node,
-    span: Location,
 ) -> Result<Node, InternalCompilationError> {
-    build_variant_to_x(solver, "object", object_payload_type(), variant_node, span)
+    build_variant_to_x(solver, "object", object_payload_type(), variant_node)
 }
 
 fn build_variant_to_string(
     solver: &mut TraitSolver,
     variant_node: Node,
-    span: Location,
 ) -> Result<Node, InternalCompilationError> {
-    build_variant_to_x(solver, "string", string_type(), variant_node, span)
+    build_variant_to_x(solver, "string", string_type(), variant_node)
 }
 
 fn build_variant_to_x(
@@ -550,9 +593,10 @@ fn build_variant_to_x(
     what: &str,
     ret_ty: Type,
     variant_node: Node,
-    span: Location,
 ) -> Result<Node, InternalCompilationError> {
     use ir_syn::*;
+    let span = Location::new_synthesized();
+
     // helpers to synthesize IR
     let n = |kind, ty| ir::Node::new(kind, ty, EffType::empty(), span);
 
@@ -572,9 +616,9 @@ fn build_expect_variant_object_entry(
     solver: &mut TraitSolver,
     fields: Node,
     name: &str,
-    span: Location,
 ) -> Result<Node, InternalCompilationError> {
     use ir_syn::*;
+    let span = Location::new_synthesized();
 
     // types
     let element_ty = tuple_type([string_type(), variant_type()]);

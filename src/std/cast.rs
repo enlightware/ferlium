@@ -15,7 +15,7 @@ use crate::{
     error::InternalCompilationError,
     function::FunctionDefinition,
     ir, ir_syn,
-    module::{Module, TraitImplId},
+    module::{LocalDeclId, Module, TraitImplId, id::Id},
     r#trait::{Deriver, TraitRef},
     trait_solver::TraitSolver,
     r#type::{FnType, Type},
@@ -41,8 +41,11 @@ impl Deriver for SelfCastDeriver {
         }
 
         // No-op implementation
-        let code = ir::Node::new(load(0), from_ty, EffType::empty(), span);
-        let local_impl_id = solver.add_concrete_impl_from_code(code, trait_ref, input_types, []);
+        let locals = vec![local("self", from_ty)];
+        let id = LocalDeclId::from_index(0);
+        let code = ir::Node::new(load(0, id), from_ty, EffType::empty(), span);
+        let local_impl_id =
+            solver.add_concrete_impl_from_code(code, locals, trait_ref, input_types, []);
         Ok(Some(TraitImplId::Local(local_impl_id)))
 
         // TODO: optimize away the cast entirely in the compiler

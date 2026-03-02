@@ -17,8 +17,8 @@ use ustr::Ustr;
 use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
-    function::{Function, FunctionDefinition, FunctionRc},
-    module::{LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id},
+    function::Function,
+    module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id},
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     type_inference::InstSubstitution,
@@ -219,7 +219,7 @@ impl TraitImpls {
         trait_ref: TraitRef,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
-        functions: impl Into<Vec<Function>>,
+        functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let input_tys = input_tys.into();
@@ -232,8 +232,8 @@ impl TraitImpls {
         let functions: Vec<_> = definitions
             .into_iter()
             .zip(functions.into())
-            .map(|(def, function)| {
-                ModuleFunction::new_without_spans(def, Rc::new(RefCell::new(function)))
+            .map(|(def, (function, locals))| {
+                ModuleFunction::new(def, Rc::new(RefCell::new(function)), None, locals)
             })
             .collect();
 
@@ -288,7 +288,7 @@ impl TraitImpls {
         trait_ref: TraitRef,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
-        functions: impl Into<Vec<Function>>,
+        functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let output_tys = output_tys.into();
@@ -300,8 +300,8 @@ impl TraitImpls {
         let functions: Vec<_> = definitions
             .into_iter()
             .zip(functions.into())
-            .map(|(def, function)| {
-                ModuleFunction::new_without_spans(def, Rc::new(RefCell::new(function)))
+            .map(|(def, (function, locals))| {
+                ModuleFunction::new(def, Rc::new(RefCell::new(function)), None, locals)
             })
             .collect();
 
@@ -653,26 +653,21 @@ fn format_impl_fns(
         (function, id)
     });
     for ((name, _), (function, id)) in trait_ref.functions.iter().zip(impl_functions) {
-        let def = &function.definition;
-        let code = if show_code {
-            Some(&function.code)
-        } else {
-            None
-        };
-        format_impl_fn(*name, def, id, &subst, code, f, env)?;
+        format_impl_fn(*name, function, id, &subst, show_code, f, env)?;
     }
     writeln!(f, "}}")
 }
 
 fn format_impl_fn(
     name: Ustr,
-    def: &FunctionDefinition,
+    function: &ModuleFunction,
     id: LocalFunctionId,
     subst: &InstSubstitution,
-    fn_code: Option<&FunctionRc>,
+    show_code: bool,
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
+    let def = &function.definition;
     let ty = def.ty_scheme.ty.instantiate(subst);
     write!(f, "    fn {name}")?;
     fmt_fn_type_with_arg_names(&ty, &def.arg_names, f, env)?;
@@ -683,8 +678,11 @@ fn format_impl_fn(
         format_constraints_consolidated(&def.ty_scheme.constraints, f, env)?;
         writeln!(f, " (#{id})")?;
     }
-    if let Some(fn_code) = fn_code {
-        fn_code.borrow().format_ind(f, env, 2, 1)?;
+    if show_code {
+        function
+            .code
+            .borrow()
+            .format_ind(f, &function.locals, env, 2, 1)?;
     }
     Ok(())
 }

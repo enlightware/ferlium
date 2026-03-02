@@ -16,7 +16,7 @@ use std::{
 use indexmap::IndexMap;
 use itertools::Itertools;
 use log::log_enabled;
-use ustr::{Ustr, ustr};
+use ustr::Ustr;
 
 use crate::{
     Location,
@@ -30,8 +30,8 @@ use crate::{
     internal_compilation_error,
     ir::{self, Immediate, Node},
     module::{
-        ConcreteTraitImplKey, LocalFunctionId, Module, ModuleEnv, ModuleFunction,
-        ModuleFunctionSpans, ModuleId, Modules, id::Id,
+        ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv,
+        ModuleFunction, ModuleFunctionSpans, ModuleId, Modules, id::Id,
     },
     mutability::MutType,
     std::{
@@ -49,7 +49,7 @@ use crate::{
         normalize_types,
     },
     type_visitor::{TyVarsCollector, collect_ty_vars},
-    typing_env::{Local, TypingEnv},
+    typing_env::TypingEnv,
     value::Value,
 };
 
@@ -318,10 +318,12 @@ where
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
+        let definition = FunctionDefinition::new(ty_scheme, arg_names, doc.clone());
         let descr = ModuleFunction {
-            definition: FunctionDefinition::new(ty_scheme, arg_names, doc.clone()),
+            definition,
             code: Rc::new(RefCell::new(dummy_code)),
             spans: Some(spans),
+            locals: vec![],
         };
         let id = if trait_ctx.is_some() {
             output.add_function_anonymous(descr)
@@ -358,13 +360,15 @@ where
     for (function, id) in ast_functions().zip(local_fns.iter()) {
         let descr = output.get_function_by_id(*id).unwrap();
         let module_env = ModuleEnv::new(output, others);
-        let arg_names: Vec<_> = function.args.iter().map(|arg| arg.name).collect();
         let mut new_import_slots = vec![];
         let expected_ret_ty = descr.definition.ty_scheme.ty.ret;
         let expected_span = descr.spans.as_ref().unwrap().args_span;
         let mut lambda_functions = vec![];
+        let mut locals = descr.gen_locals_no_bounds();
+        let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
         let mut ty_env = TypingEnv::new(
-            descr.definition.ty_scheme.ty.as_locals_no_bound(&arg_names),
+            &mut locals,
+            cur_locals,
             &mut new_import_slots,
             module_env,
             Some((expected_ret_ty, expected_span)),
@@ -396,6 +400,7 @@ where
             fn_node,
             descr.definition.arg_names.clone(),
         ));
+        descr.locals = locals;
         output.import_fn_slots.extend(new_import_slots);
     }
     let module_env = ModuleEnv::new(output, others);
@@ -439,6 +444,7 @@ where
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
             let mut node = descr.get_node_mut().unwrap();
             node.instantiate(&subst);
+            // Note: we do not have effects in locals, so no need to substitute them there.
         });
     }
 
@@ -534,32 +540,23 @@ where
                 // type scheme quantifiers will be updated later on
                 let mut node = descr.get_node_mut().unwrap();
                 node.instantiate(&subst);
+                drop(node);
+                for local in &mut descr.locals {
+                    local.ty = local.ty.instantiate(&subst);
+                }
             });
         }
 
         // Sixth pass, run the borrow checker and elaborate dictionaries.
         for id in local_fns.iter() {
             let mut solver = trait_solver_from_module!(output, &others);
+            let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
             try_apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| -> Result<
                 (),
                 InternalCompilationError,
             > {
-                let descr = &output.functions[id.as_index()];
-                let mut function = descr.code.borrow_mut();
-                let script_fn = function.as_script_mut().unwrap();
-                script_fn.arg_names.splice(
-                    0..0,
-                    dicts
-                        .requirements
-                        .iter()
-                        .enumerate()
-                        .map(|(i, r)| ustr(&r.to_dict_name(i))),
-                );
-                let node = &mut script_fn.code;
-                node.check_borrows()?;
-                let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
-                node.elaborate_dictionaries(&mut ctx)?;
-                Ok(())
+                let descr = &mut output.functions[id.as_index()];
+                descr.check_borrows_and_elaborate_dictionaries(&mut ctx)
             });
             solver.commit(&mut output.functions, &mut output.def_table);
         }
@@ -585,6 +582,10 @@ where
                 let descr = &mut output.functions[id.as_index()];
                 let mut node = descr.get_node_mut().unwrap();
                 node.instantiate(&subst);
+                drop(node);
+                for local in &mut descr.locals {
+                    local.ty = local.ty.instantiate(&subst);
+                }
             });
 
             // Name the function
@@ -654,6 +655,9 @@ where
                 let mut node = descr.get_node_mut().unwrap();
                 node.instantiate(&subst);
                 drop(node);
+                for local in &mut descr.locals {
+                    local.ty = local.ty.instantiate(&subst);
+                }
 
                 // Write the final type scheme.
                 descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
@@ -700,26 +704,13 @@ where
         for id in local_fns.iter() {
             let dicts = module_inst_data.get(id).unwrap();
             let mut solver = trait_solver_from_module!(output, &others);
+            let mut ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), &mut solver);
             try_apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| -> Result<
                 (),
                 InternalCompilationError,
             > {
-                let descr = &output.functions[id.as_index()];
-                let mut function = descr.code.borrow_mut();
-                let script_fn = function.as_script_mut().unwrap();
-                script_fn.arg_names.splice(
-                    0..0,
-                    dicts
-                        .requirements
-                        .iter()
-                        .enumerate()
-                        .map(|(i, r)| ustr(&r.to_dict_name(i))),
-                );
-                let node = &mut script_fn.code;
-                node.check_borrows()?;
-                let mut ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), &mut solver);
-                node.elaborate_dictionaries(&mut ctx)?;
-                Ok(())
+                let descr = &mut output.functions[id.as_index()];
+                descr.check_borrows_and_elaborate_dictionaries(&mut ctx)
             });
             solver.commit(&mut output.functions, &mut output.def_table);
         }
@@ -733,6 +724,10 @@ where
                 let subst = descr.definition.ty_scheme.normalize();
                 let mut node = descr.get_node_mut().unwrap();
                 node.instantiate(&subst);
+                drop(node);
+                for local in &mut descr.locals {
+                    local.ty = local.ty.instantiate(&subst);
+                }
             });
         }
 
@@ -769,7 +764,7 @@ fn check_unbounds(
 pub struct CompiledExpr {
     pub expr: ir::Node,
     pub ty: TypeScheme<Type>,
-    pub locals: Vec<Local>,
+    pub locals: Vec<LocalDecl>,
 }
 
 /// Emit IR for an expression
@@ -780,7 +775,7 @@ pub fn emit_expr_unsafe(
     source: ast::PExpr,
     module: &mut Module,
     others: &Modules,
-    locals: Vec<Local>,
+    mut locals: Vec<LocalDecl>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     // Make sure that the locals' types have no type variables in them
     assert!(
@@ -800,8 +795,10 @@ pub fn emit_expr_unsafe(
     let initial_local_count = locals.len();
     let mut new_import_slots = vec![];
     let mut lambda_functions = vec![];
+    let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
     let mut ty_env = TypingEnv::new(
-        locals,
+        &mut locals,
+        cur_locals,
         &mut new_import_slots,
         module_env,
         None,
@@ -810,7 +807,7 @@ pub fn emit_expr_unsafe(
     );
     let mut ty_inf = TypeInference::new_empty();
     let (mut node, _) = ty_inf.infer_expr(&mut ty_env, &source)?;
-    let mut locals = ty_env.get_locals_and_drop();
+    let mut locals = ty_env.get_all_locals_and_drop();
     ty_inf.log_debug_constraints(module_env);
     let lambda_functions = lambda_functions
         .drain(..)
@@ -837,6 +834,7 @@ pub fn emit_expr_unsafe(
     }
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = ty_inf.substitute_in_type(local.ty);
+        local.mut_ty = ty_inf.substitute_in_mut_type(local.mut_ty);
     }
 
     // Get the remaining constraints and collect the free variables.
@@ -889,6 +887,9 @@ pub fn emit_expr_unsafe(
         let mut node = descr.get_node_mut().unwrap();
         node.instantiate(&subst);
         drop(node);
+        for local in &mut descr.locals {
+            local.ty = local.ty.instantiate(&subst);
+        }
         descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
         descr.definition.ty_scheme.eff_quantifiers =
             descr.definition.ty_scheme.ty.input_effect_vars();
@@ -924,6 +925,10 @@ pub fn emit_expr_unsafe(
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
         let mut node = descr.get_node_mut().unwrap();
         node.instantiate(&subst);
+        drop(node);
+        for local in &mut descr.locals {
+            local.ty = local.ty.instantiate(&subst);
+        }
     }
     ty_scheme.ty = ty_scheme.ty.instantiate(&subst);
     for local in locals.iter_mut().skip(initial_local_count) {
@@ -931,22 +936,18 @@ pub fn emit_expr_unsafe(
     }
 
     // Do borrow checking and dictionary elaboration.
-    node.check_borrows()?;
-    for lambda_id in lambda_functions.iter() {
-        let descr = &mut module.functions[lambda_id.as_index()];
-        let node = descr.get_node_mut().unwrap();
-        node.check_borrows()?;
-    }
     let dicts = ty_scheme.extra_parameters();
     let mut solver = trait_solver_from_module!(module, &others);
     let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
-    node.elaborate_dictionaries(&mut ctx)?;
+    node.check_borrows()?;
+    let local_count = locals.len();
+    node.elaborate_dictionaries(&mut ctx, local_count)?;
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
-        let mut node = descr.get_node_mut().unwrap();
-        node.elaborate_dictionaries(&mut ctx)?;
+        descr.check_borrows_and_elaborate_dictionaries(&mut ctx)?;
     }
     solver.commit(&mut module.functions, &mut module.def_table);
+    assert_eq!(locals.len(), local_count);
 
     Ok(CompiledExpr {
         expr: node,
@@ -961,7 +962,7 @@ pub fn emit_expr(
     source: ast::PExpr,
     module: &mut Module,
     others: &Modules,
-    locals: Vec<Local>,
+    locals: Vec<LocalDecl>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     let span = source.span;
     let CompiledExpr { ty, expr, locals } = emit_expr_unsafe(source, module, others, locals)?;

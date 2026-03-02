@@ -14,15 +14,16 @@ use enum_as_inner::EnumAsInner;
 use ustr::{Ustr, ustr};
 
 #[cfg(debug_assertions)]
-use crate::module::{Module, Path};
+use crate::module::id::Id;
 use crate::{
     CompilerSession, Location, SourceId, SourceTable,
     containers::b,
     error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
-    function::FunctionRc,
     ir::{Node, NodeKind},
-    module::{FunctionId, LocalFunctionId, ModuleId, Modules, TraitImplId},
+    module::{
+        FunctionId, LocalDecl, LocalFunctionId, ModuleFunction, ModuleId, Modules, TraitImplId,
+    },
     std::array,
     r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},
@@ -94,8 +95,8 @@ impl FormatWith<EvalCtx<'_>> for ValOrMut {
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone, new)]
 struct StackEntry {
-    fn_name: String,
-    mod_path: Path,
+    local_id: LocalFunctionId,
+    module_id: ModuleId,
     frame_base: usize,
 }
 
@@ -177,20 +178,17 @@ impl<'a> EvalCtx<'a> {
                 i -= 1;
                 eprintln!("  {}", self.environment_names[i]);
             }
-            eprintln!("- {}", entry.fn_name);
+            let module = self
+                .compiler_session
+                .get_module_by_id(entry.module_id)
+                .unwrap();
+            let fn_name = module.get_function_name_by_id(entry.local_id).unwrap();
+            eprintln!("- {}::{}", entry.module_id, fn_name);
         }
         while i > 0 {
             i -= 1;
             eprintln!("  {}", self.environment_names[i]);
         }
-    }
-
-    /// Get a function's code and module for a FunctionId at runtime.
-    pub fn get_function(&self, function: FunctionId) -> (FunctionRc, ModuleId) {
-        let (local_id, module_id) = self.get_function_local_id(function);
-        let module = self.compiler_session.get_module_by_id(module_id).unwrap();
-        let function = module.get_function_by_id(local_id).unwrap().code.clone();
-        (function, module_id)
     }
 
     /// Get a function's local id and module for a FunctionId at runtime.
@@ -237,68 +235,14 @@ impl<'a> EvalCtx<'a> {
         }
     }
 
-    #[cfg(debug_assertions)]
-    fn get_last_module_path(&self) -> Path {
-        self.stack_trace
-            .last()
-            .map(|entry| entry.mod_path.clone())
-            .unwrap_or(Path::single_str("<current>"))
-    }
-
-    #[cfg(debug_assertions)]
-    fn get_stack_entry_from_fn_and_mod(
+    /// Get a function's code and module for a FunctionId at runtime.
+    pub fn get_module_function(
         &self,
-        function: &FunctionRc,
-        module: &Module,
-    ) -> StackEntry {
-        let fn_name = format!("value function {:p}::{:p}", module, function);
-        StackEntry::new(
-            fn_name,
-            Path::single_str("<unknown>"),
-            self.environment.len(),
-        )
-    }
-
-    #[cfg(debug_assertions)]
-    fn get_stack_entry_from_function_id(&self, function: FunctionId) -> StackEntry {
-        use FunctionId::*;
-        let module_path;
-        let fn_name = match function {
-            Local(id) => {
-                let module = self
-                    .compiler_session
-                    .get_module_by_id(self.module_id)
-                    .unwrap();
-                let fn_name = module.get_function_name_by_id(id).unwrap();
-                module_path = self.get_last_module_path();
-                format!("{module_path}::{} (#{})", fn_name, id)
-            }
-            Import(id) => {
-                let module = self
-                    .compiler_session
-                    .get_module_by_id(self.module_id)
-                    .unwrap();
-                let slot = module.get_import_fn_slot(id).unwrap();
-                let module_id = slot.module;
-                module_path = self
-                    .compiler_session
-                    .modules()
-                    .get_name(module_id)
-                    .cloned()
-                    .unwrap_or_else(|| Path::single_str("<unknown>"));
-                use ImportFunctionTarget::*;
-                match &slot.target {
-                    TraitImplMethod { key, index } => {
-                        let trait_ref = key.trait_ref();
-                        trait_ref.qualified_method_name(*index as usize, key.input_tys())
-                    }
-                    NamedFunction(fn_name) => {
-                        format!("{module_path}::{fn_name}")
-                    }
-                }
-            }
-        };
-        StackEntry::new(fn_name, module_path, self.environment.len())
+        local_id: LocalFunctionId,
+        module_id: ModuleId,
+    ) -> &ModuleFunction {
+        let module = self.compiler_session.get_module_by_id(module_id).unwrap();
+        module.get_function_by_id(local_id).unwrap()
     }
 
     /// Get the dictionary value for a ImplId at runtime using module.
@@ -335,13 +279,13 @@ impl<'a> EvalCtx<'a> {
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
+        let local_id = function_value.function;
         let module_id = function_value.module;
-        let function_id = function_value.function;
-        let module = self.compiler_session.get_module_by_id(module_id).unwrap();
-        let function = &module.get_function_by_id(function_id).unwrap().code;
+
         #[cfg(debug_assertions)]
         self.stack_trace
-            .push(self.get_stack_entry_from_fn_and_mod(function, module));
+            .push(StackEntry::new(local_id, module_id, self.environment.len()));
+
         let arguments = if function_value.captured.is_empty() {
             arguments
         } else {
@@ -353,18 +297,21 @@ impl<'a> EvalCtx<'a> {
                 .chain(arguments)
                 .collect()
         };
+
         let result = self
-            .call_function(function, module_id, arguments)
+            .call_function(local_id, module_id, arguments)
             .map_err(|err| {
                 err.with_frame(
                     module_id,
-                    FunctionId::Local(function_id),
+                    FunctionId::Local(local_id),
                     self.environment.len(),
                     location,
                 )
             })?;
+
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
+
         Ok(result)
     }
 
@@ -375,33 +322,52 @@ impl<'a> EvalCtx<'a> {
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
-        let (function, module_id) = self.get_function(function_id);
+        let (local_id, module_id) = self.get_function_local_id(function_id);
+
         #[cfg(debug_assertions)]
         self.stack_trace
-            .push(self.get_stack_entry_from_function_id(function_id));
+            .push(StackEntry::new(local_id, module_id, self.environment.len()));
+
         let result = self
-            .call_function(&function, module_id, arguments)
+            .call_function(local_id, module_id, arguments)
             .map_err(|err| {
-                err.with_frame(module_id, function_id, self.environment.len(), location)
+                err.with_frame(
+                    self.module_id,
+                    function_id,
+                    self.environment.len(),
+                    location,
+                )
             })?;
+
         #[cfg(debug_assertions)]
         self.stack_trace.pop();
+
         Ok(result)
     }
 
     /// Call a function along with its correct module context.
     fn call_function(
         &mut self,
-        function: &FunctionRc,
+        local_id: LocalFunctionId,
         mut module_id: ModuleId,
         arguments: Vec<ValOrMut>,
     ) -> EvalControlFlowResult {
         // Use the new module for the duration of the function call.
         mem::swap(&mut self.module_id, &mut module_id);
+
         // Call the function.
-        let result = function.borrow().call(arguments, self);
+        let module = self
+            .compiler_session
+            .get_module_by_id(self.module_id)
+            .unwrap();
+        let function_data = module.get_function_by_id(local_id).unwrap();
+        let locals = &function_data.locals;
+        let function_ptr = function_data.code.clone();
+        let result = function_ptr.borrow().call(arguments, self, locals);
+
         // Restore the previous module.
         mem::swap(&mut self.module_id, &mut module_id);
+
         // Return the call result.
         result
     }
@@ -691,21 +657,25 @@ impl Node {
     pub fn eval(
         &self,
         module_id: ModuleId,
+        locals: &[LocalDecl],
         compiler_session: &CompilerSession,
     ) -> EvalControlFlowResult {
         let mut ctx = EvalCtx::new(module_id, compiler_session);
-        self.eval_with_ctx(&mut ctx)
+        self.eval_with_ctx(&mut ctx, locals)
     }
 
     /// Evaluate this node given the environment and return the result.
-    pub fn eval_with_ctx(&self, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+    pub fn eval_with_ctx(&self, ctx: &mut EvalCtx, locals: &[LocalDecl]) -> EvalControlFlowResult {
         use NodeKind::*;
         match &self.kind {
             Immediate(immediate) => cont(immediate.value.clone()),
             BuildClosure(build_closure) => {
-                let captured = eval_or_return!(eval_nodes(&build_closure.captures, ctx));
+                let captured = eval_or_return!(eval_nodes(&build_closure.captures, ctx, locals));
                 // Note: function should be GetFunction or similar immediate - returns not allowed here
-                let function_value = build_closure.function.eval_with_ctx(ctx)?.into_value();
+                let function_value = build_closure
+                    .function
+                    .eval_with_ctx(ctx, locals)?
+                    .into_value();
                 let function_value = function_value.into_function().unwrap();
                 let function_value =
                     FunctionValue::new(function_value.function, function_value.module, captured);
@@ -713,7 +683,7 @@ impl Node {
             }
             Apply(app) => {
                 // Evaluate left-to-right: function first, then arguments (matches Rust semantics)
-                let function_value = eval_or_return!(app.function.eval_with_ctx(ctx));
+                let function_value = eval_or_return!(app.function.eval_with_ctx(ctx, locals));
                 let function_value = function_value.as_function().unwrap();
                 let args_ty = {
                     app.function
@@ -724,11 +694,12 @@ impl Node {
                         .args
                         .clone()
                 };
-                let arguments = eval_or_return!(eval_args(&app.arguments, &args_ty, ctx));
+                let arguments = eval_or_return!(eval_args(&app.arguments, &args_ty, ctx, locals));
                 ctx.call_function_value(function_value, arguments, self.span)
             }
             StaticApply(app) => {
-                let arguments = eval_or_return!(eval_args(&app.arguments, &app.ty.args, ctx));
+                let arguments =
+                    eval_or_return!(eval_args(&app.arguments, &app.ty.args, ctx, locals));
                 ctx.call_function_id(app.function, arguments, self.span)
             }
             TraitFnApply(_) => {
@@ -745,10 +716,11 @@ impl Node {
                 cont(value)
             }
             EnvStore(node) => {
-                let value = eval_or_return!(node.value.eval_with_ctx(ctx));
+                let value = eval_or_return!(node.value.eval_with_ctx(ctx, locals));
                 ctx.environment.push(ValOrMut::Val(value));
                 #[cfg(debug_assertions)]
-                ctx.environment_names.push(node.name);
+                ctx.environment_names
+                    .push(locals[node.id.as_index()].name.0);
                 cont(Value::unit())
             }
             EnvLoad(node) => {
@@ -759,12 +731,12 @@ impl Node {
                         .map_err(|err| RuntimeError::new(err, Some(self.span)))?,
                 )
             }
-            Return(node) => ret(node.eval_with_ctx(ctx)?.into_value()),
+            Return(node) => ret(node.eval_with_ctx(ctx, locals)?.into_value()),
             Block(nodes) => {
                 let env_size = ctx.environment.len();
                 let mut last_value = Value::unit();
                 for node in nodes.iter() {
-                    match node.eval_with_ctx(ctx)? {
+                    match node.eval_with_ctx(ctx, locals)? {
                         ControlFlow::Return(val) => {
                             // Early return: clean up environment and propagate
                             ctx.environment.truncate(env_size);
@@ -785,8 +757,8 @@ impl Node {
             }
             Assign(assignment) => {
                 // Evaluate left-to-right: place first, then value (matches Rust semantics)
-                let place = eval_or_return!(assignment.place.as_place(ctx));
-                let value = eval_or_return!(assignment.value.eval_with_ctx(ctx));
+                let place = eval_or_return!(assignment.place.as_place(ctx, locals));
+                let value = eval_or_return!(assignment.value.eval_with_ctx(ctx, locals));
                 let target_ref = place
                     .target_mut(ctx)
                     .map_err(|err| RuntimeError::new(err, Some(self.span)))?;
@@ -795,11 +767,11 @@ impl Node {
             }
             Tuple(nodes) | Record(nodes) => {
                 // Note: record values are stored as tuples
-                let values = eval_or_return!(eval_nodes(nodes, ctx));
+                let values = eval_or_return!(eval_nodes(nodes, ctx, locals));
                 cont(Value::Tuple(b(values.into())))
             }
             Project(projection) => {
-                let value = eval_or_return!(projection.0.eval_with_ctx(ctx));
+                let value = eval_or_return!(projection.0.eval_with_ctx(ctx, locals));
                 cont(match value {
                     Value::Tuple(tuple) => tuple.into_iter().nth(projection.1).unwrap(),
                     Value::Variant(variant) => variant.value,
@@ -810,7 +782,7 @@ impl Node {
                 panic!("String projection should not be executed, but transformed to ProjectLocal");
             }
             ProjectAt(access) => {
-                let value = eval_or_return!(access.0.eval_with_ctx(ctx));
+                let value = eval_or_return!(access.0.eval_with_ctx(ctx, locals));
                 let index = ctx.frame_base + access.1;
                 let index = ctx.environment[index]
                     .as_value(ctx)
@@ -823,24 +795,24 @@ impl Node {
                 })
             }
             Variant(variant) => {
-                let value = eval_or_return!(variant.1.eval_with_ctx(ctx));
+                let value = eval_or_return!(variant.1.eval_with_ctx(ctx, locals));
                 cont(Value::raw_variant(variant.0, value))
             }
             ExtractTag(node) => {
-                let value = eval_or_return!(node.eval_with_ctx(ctx));
+                let value = eval_or_return!(node.eval_with_ctx(ctx, locals));
                 let variant = value.into_variant().unwrap();
                 cont(Value::native(variant.tag_as_isize()))
             }
             Array(nodes) => {
-                let values = eval_or_return!(eval_nodes(nodes, ctx));
+                let values = eval_or_return!(eval_nodes(nodes, ctx, locals));
                 cont(Value::native(array::Array::from_vec(values)))
             }
             Index(array, index) => {
                 // Evaluate left-to-right: array first, then index (matches Rust semantics)
-                let mut array = eval_or_return!(array.eval_with_ctx(ctx))
+                let mut array = eval_or_return!(array.eval_with_ctx(ctx, locals))
                     .into_primitive_ty::<array::Array>()
                     .unwrap();
-                let index = eval_or_return!(index.eval_with_ctx(ctx))
+                let index = eval_or_return!(index.eval_with_ctx(ctx, locals))
                     .into_primitive_ty::<isize>()
                     .unwrap();
                 match array.get_mut_signed(index) {
@@ -855,19 +827,19 @@ impl Node {
                 }
             }
             Case(case) => {
-                let value = eval_or_return!(case.value.eval_with_ctx(ctx));
+                let value = eval_or_return!(case.value.eval_with_ctx(ctx, locals));
                 for (alternative, node) in &case.alternatives {
                     if value == *alternative {
-                        return node.eval_with_ctx(ctx);
+                        return node.eval_with_ctx(ctx, locals);
                     }
                 }
-                case.default.eval_with_ctx(ctx)
+                case.default.eval_with_ctx(ctx, locals)
             }
             Loop(body) => {
                 let break_loop = ctx.break_loop;
                 ctx.break_loop = false;
                 while !ctx.break_loop {
-                    eval_or_return!(body.eval_with_ctx(ctx));
+                    eval_or_return!(body.eval_with_ctx(ctx, locals));
                 }
                 ctx.break_loop = break_loop;
                 cont(Value::unit())
@@ -880,22 +852,27 @@ impl Node {
     }
 
     /// Return this node as a place in the environment.
-    pub fn as_place(&self, ctx: &mut EvalCtx) -> Result<ControlFlow<Place>, RuntimeError> {
+    pub fn as_place(
+        &self,
+        ctx: &mut EvalCtx,
+        locals: &[LocalDecl],
+    ) -> Result<ControlFlow<Place>, RuntimeError> {
         fn resolve_node(
             node: &Node,
             ctx: &mut EvalCtx,
+            locals: &[LocalDecl],
         ) -> Result<ControlFlow<Place>, RuntimeError> {
             use NodeKind::*;
             Ok(ControlFlow::Continue(match &node.kind {
                 Project(projection) => {
                     let (ref node, index) = **projection;
-                    let mut place = eval_or_return!(resolve_node(node, ctx));
+                    let mut place = eval_or_return!(resolve_node(node, ctx, locals));
                     place.path.push(index as isize);
                     place
                 }
                 ProjectAt(projection) => {
                     let (ref node, index) = **projection;
-                    let mut place = eval_or_return!(resolve_node(node, ctx));
+                    let mut place = eval_or_return!(resolve_node(node, ctx, locals));
                     let index = ctx.frame_base + index;
                     let index_value = ctx.environment[index]
                         .as_value(ctx)
@@ -905,8 +882,8 @@ impl Node {
                     place
                 }
                 Index(array, index) => {
-                    let mut place = eval_or_return!(resolve_node(array, ctx));
-                    let index_value = eval_or_return!(index.eval_with_ctx(ctx));
+                    let mut place = eval_or_return!(resolve_node(array, ctx, locals));
+                    let index_value = eval_or_return!(index.eval_with_ctx(ctx, locals));
                     let index = index_value.into_primitive_ty::<isize>().unwrap();
                     place.path.push(index);
                     place
@@ -920,14 +897,18 @@ impl Node {
                 _ => panic!("Cannot resolve a non-place node"),
             }))
         }
-        resolve_node(self, ctx)
+        resolve_node(self, ctx, locals)
     }
 }
 
-fn eval_nodes(nodes: &[Node], ctx: &mut EvalCtx) -> Result<ControlFlow<Vec<Value>>, RuntimeError> {
+fn eval_nodes(
+    nodes: &[Node],
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<Vec<Value>>, RuntimeError> {
     let mut results = Vec::with_capacity(nodes.len());
     for node in nodes {
-        results.push(eval_or_return!(node.eval_with_ctx(ctx)));
+        results.push(eval_or_return!(node.eval_with_ctx(ctx, locals)));
     }
     Ok(ControlFlow::Continue(results))
 }
@@ -936,6 +917,7 @@ fn eval_args(
     args: &[Node],
     args_ty: &[FnArgType],
     ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<ValOrMut>>, RuntimeError> {
     // Automatically cast mutable references to values if the function expects values.
     let mut results = Vec::with_capacity(args.len());
@@ -947,9 +929,9 @@ fn eval_args(
             .expect("Unresolved mutability variable found during execution")
             .is_mutable();
         results.push(if is_mutable {
-            ValOrMut::Mut(eval_or_return!(arg.as_place(ctx)))
+            ValOrMut::Mut(eval_or_return!(arg.as_place(ctx, locals)))
         } else {
-            ValOrMut::Val(eval_or_return!(arg.eval_with_ctx(ctx)))
+            ValOrMut::Val(eval_or_return!(arg.eval_with_ctx(ctx, locals)))
         });
     }
     Ok(ControlFlow::Continue(results))

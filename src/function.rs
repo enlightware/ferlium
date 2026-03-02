@@ -20,12 +20,13 @@ use ustr::Ustr;
 use ferlium_macros::declare_native_fn_aliases;
 
 use crate::{
+    Location,
     effects::EffType,
     error::RuntimeErrorKind,
     eval::{ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, cont},
     format::FormatWith,
     ir::{self},
-    module::{ModuleEnv, ModuleFunction},
+    module::{LocalDecl, ModuleEnv, ModuleFunction},
     r#type::{FnType, Type, fmt_fn_type_with_arg_names},
     type_like::TypeLike,
     type_mapper::TypeMapper,
@@ -86,6 +87,21 @@ impl FunctionDefinition {
         let mut hasher = DefaultHasher::new();
         self.signature().hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// Generate the local variable declarations for the function arguments.
+    pub fn gen_locals_no_bounds(
+        &self,
+        arg_spans: impl Iterator<Item = Location>,
+        scope: Location,
+    ) -> Vec<LocalDecl> {
+        self.ty_scheme
+            .ty
+            .args
+            .iter()
+            .zip(self.arg_names.iter().copied().zip(arg_spans))
+            .map(|(arg, name)| LocalDecl::new(name, arg.mut_ty, arg.ty, None, scope))
+            .collect()
     }
 
     pub fn fmt_with_name_and_module_env(
@@ -150,7 +166,12 @@ type CallCtx<'a> = EvalCtx<'a>;
 
 /// A function that can be called
 pub trait Callable {
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult;
+    fn call(
+        &self,
+        args: Vec<ValOrMut>,
+        ctx: &mut CallCtx,
+        locals: &[LocalDecl],
+    ) -> EvalControlFlowResult;
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
@@ -163,6 +184,7 @@ pub trait Callable {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
+        locals: &[LocalDecl],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
@@ -239,7 +261,12 @@ pub struct ScriptFunction {
 }
 
 impl Callable for ScriptFunction {
-    fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult {
+    fn call(
+        &self,
+        args: Vec<ValOrMut>,
+        ctx: &mut CallCtx,
+        locals_arg: &[LocalDecl],
+    ) -> EvalControlFlowResult {
         let arg_count = args.len();
         let old_frame_base = ctx.frame_base;
         ctx.frame_base = ctx.environment.len();
@@ -266,7 +293,7 @@ impl Callable for ScriptFunction {
                 Some(self.code.span),
             ));
         }
-        let ret = self.code.eval_with_ctx(ctx)?;
+        let ret = self.code.eval_with_ctx(ctx, locals_arg)?;
         ctx.recursion -= 1;
         assert_eq!(ctx.environment.len(), ctx.frame_base + arg_count);
         ctx.environment.truncate(ctx.frame_base);
@@ -286,11 +313,12 @@ impl Callable for ScriptFunction {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
+        locals: &[LocalDecl],
         env: &ModuleEnv<'_>,
         spacing: usize,
         indent: usize,
     ) -> std::fmt::Result {
-        self.code.format_ind(f, env, spacing, indent)
+        self.code.format_ind(f, locals, env, spacing, indent)
     }
 }
 
@@ -484,6 +512,7 @@ macro_rules! n_ary_native_fn {
                     ),
                     code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
                     spans: None,
+                    locals: Vec::new(),
                 }
             }
 
@@ -520,7 +549,7 @@ macro_rules! n_ary_native_fn {
         {
             paste::paste! {
             #[allow(unused_variables)]
-            fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx) -> EvalControlFlowResult {
+            fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx, _locals: &[LocalDecl]) -> EvalControlFlowResult {
                 // Extract arguments by applying repetition for each ArgExtractor
                 #[allow(unused_variables, unused_mut)]
                 let mut args_iter = args.into_iter();
@@ -539,6 +568,7 @@ macro_rules! n_ary_native_fn {
             fn format_ind(
                 &self,
                 f: &mut std::fmt::Formatter,
+                _locals: &[LocalDecl],
                 _env: &ModuleEnv<'_>,
                 spacing: usize,
                 indent: usize,

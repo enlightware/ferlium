@@ -14,7 +14,7 @@ use crate::{
     CompilerSession, ModuleAndExpr, SourceId, ast,
     format::FormatWith,
     ir::{Node, NodeKind},
-    module::ModuleEnv,
+    module::{LocalDecl, ModuleEnv, id::Id},
     type_scheme::DisplayStyle,
 };
 
@@ -46,13 +46,14 @@ impl ModuleAndExpr {
             if let Some(script_fn) = code.as_script_mut() {
                 script_fn
                     .code
-                    .variable_type_annotations(&mut annotations, &env);
+                    .variable_type_annotations(&mut annotations, &function.locals, &env);
             }
         }
         if let Some(expr) = &self.expr
             && expr.expr.span.source_id == source_id
         {
-            expr.expr.variable_type_annotations(&mut annotations, &env);
+            expr.expr
+                .variable_type_annotations(&mut annotations, &expr.locals, &env);
         }
 
         // Function signatures.
@@ -217,20 +218,25 @@ impl ModuleAndExpr {
 }
 
 impl Node {
-    pub fn variable_type_annotations(&self, result: &mut Vec<(usize, String)>, env: &ModuleEnv) {
+    pub fn variable_type_annotations(
+        &self,
+        result: &mut Vec<(usize, String)>,
+        locals: &[LocalDecl],
+        env: &ModuleEnv,
+    ) {
         use NodeKind::*;
         match &self.kind {
             Immediate(_) => {}
             BuildClosure(build_closure) => {
                 build_closure
                     .function
-                    .variable_type_annotations(result, env);
+                    .variable_type_annotations(result, locals, env);
                 // We do not look into captures as they are generated code.
             }
             Apply(app) => {
-                app.function.variable_type_annotations(result, env);
+                app.function.variable_type_annotations(result, locals, env);
                 for arg in &app.arguments {
-                    arg.variable_type_annotations(result, env);
+                    arg.variable_type_annotations(result, locals, env);
                 }
             }
             StaticApply(app) => {
@@ -238,10 +244,10 @@ impl Node {
                 let is_synthesized = app.function_span.is_empty();
                 if !is_synthesized && let Some(path) = &app.function_path {
                     for (arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
-                        if !should_hide_arg_name_hint(path, arity, arg_name, arg) {
+                        if !should_hide_arg_name_hint(path, arity, arg_name, arg, locals) {
                             result.push((arg.span.start_usize(), format!("{arg_name}: ")));
                         }
-                        arg.variable_type_annotations(result, env);
+                        arg.variable_type_annotations(result, locals, env);
                     }
                 }
             }
@@ -253,8 +259,10 @@ impl Node {
             EnvStore(node) => {
                 // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.
                 // Note: synthesized let nodes have empty name span, so we ignore these.
-                if !node.name.starts_with("@") && !node.name_span.is_synthesized() {
-                    if let Some((ty_span, ty_constant)) = node.ty_span {
+                let local = &locals[node.id.as_index()];
+                let (name, name_span) = local.name;
+                if !name.starts_with("@") && !name_span.is_synthesized() {
+                    if let Some((ty_span, ty_constant)) = local.ty_span {
                         if !ty_constant {
                             result.push((
                                 ty_span.end_usize(),
@@ -263,48 +271,52 @@ impl Node {
                         }
                     } else {
                         result.push((
-                            node.name_span.end_usize(),
+                            name_span.end_usize(),
                             format!(": {}", node.value.ty.format_with(env)),
                         ));
                     }
                 }
-                node.value.variable_type_annotations(result, env);
+                node.value.variable_type_annotations(result, locals, env);
             }
             EnvLoad(_) => {}
-            Return(node) => node.variable_type_annotations(result, env),
+            Return(node) => node.variable_type_annotations(result, locals, env),
             Block(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(result, env)),
+                .for_each(|node| node.variable_type_annotations(result, locals, env)),
             Assign(assignment) => {
-                assignment.place.variable_type_annotations(result, env);
-                assignment.value.variable_type_annotations(result, env);
+                assignment
+                    .place
+                    .variable_type_annotations(result, locals, env);
+                assignment
+                    .value
+                    .variable_type_annotations(result, locals, env);
             }
             Tuple(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(result, env)),
-            Project(projection) => projection.0.variable_type_annotations(result, env),
+                .for_each(|node| node.variable_type_annotations(result, locals, env)),
+            Project(projection) => projection.0.variable_type_annotations(result, locals, env),
             Record(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(result, env)),
-            FieldAccess(access) => access.0.variable_type_annotations(result, env),
-            ProjectAt(access) => access.0.variable_type_annotations(result, env),
-            Variant(variant) => variant.1.variable_type_annotations(result, env),
-            ExtractTag(node) => node.variable_type_annotations(result, env),
+                .for_each(|node| node.variable_type_annotations(result, locals, env)),
+            FieldAccess(access) => access.0.variable_type_annotations(result, locals, env),
+            ProjectAt(access) => access.0.variable_type_annotations(result, locals, env),
+            Variant(variant) => variant.1.variable_type_annotations(result, locals, env),
+            ExtractTag(node) => node.variable_type_annotations(result, locals, env),
             Array(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(result, env)),
+                .for_each(|node| node.variable_type_annotations(result, locals, env)),
             Index(array, index) => {
-                array.variable_type_annotations(result, env);
-                index.variable_type_annotations(result, env);
+                array.variable_type_annotations(result, locals, env);
+                index.variable_type_annotations(result, locals, env);
             }
             Case(case) => {
-                case.value.variable_type_annotations(result, env);
+                case.value.variable_type_annotations(result, locals, env);
                 for (_, node) in &case.alternatives {
-                    node.variable_type_annotations(result, env);
+                    node.variable_type_annotations(result, locals, env);
                 }
-                case.default.variable_type_annotations(result, env);
+                case.default.variable_type_annotations(result, locals, env);
             }
-            Loop(body) => body.variable_type_annotations(result, env),
+            Loop(body) => body.variable_type_annotations(result, locals, env),
             SoftBreak => {}
         }
     }
@@ -316,6 +328,7 @@ fn should_hide_arg_name_hint(
     arity: usize,
     arg_name: &str,
     argument: &Node,
+    locals: &[LocalDecl],
 ) -> bool {
     if function_path
         .segments
@@ -345,7 +358,7 @@ fn should_hide_arg_name_hint(
 
     let function_name = function_path.segments.last().unwrap().0;
     is_arg_name_suffix_of_unary_fn_name(&function_name, arity, arg_name)
-        || is_argument_similar_to_arg_name(argument, arg_name)
+        || is_argument_similar_to_arg_name(argument, arg_name, locals)
         || (arity <= 2 && is_obvious_param(arg_name))
         || is_adt_constructor_similar_to_arg_name(argument, arg_name)
 }
@@ -368,13 +381,10 @@ fn is_arg_name_suffix_of_unary_fn_name(function_name: &str, arity: usize, arg_na
             })
 }
 
-fn is_argument_similar_to_arg_name(argument: &Node, arg_name: &str) -> bool {
+fn is_argument_similar_to_arg_name(argument: &Node, arg_name: &str, locals: &[LocalDecl]) -> bool {
     use NodeKind::*;
     let argument = match argument.kind {
-        EnvLoad(ref load) => match load.name {
-            Some(name) => name.as_str(),
-            None => return false,
-        },
+        EnvLoad(ref load) => locals[load.id.as_index()].name.0.as_str(),
         _ => return false,
     };
 
