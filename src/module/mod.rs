@@ -23,6 +23,7 @@ pub mod uses;
 
 use enum_as_inner::EnumAsInner;
 pub use function::*;
+use itertools::Itertools;
 pub use module_env::*;
 pub use path::*;
 pub use trait_impl::*;
@@ -30,6 +31,7 @@ pub use uses::*;
 
 use std::{
     cell::{Ref, RefMut},
+    collections::HashSet,
     fmt,
     hash::Hash,
 };
@@ -95,6 +97,8 @@ pub type DefTable = NamedIndexed<Ustr, LocalDefId, DefKind>;
 pub struct Module {
     pub(crate) import_fn_slots: Vec<ImportFunctionSlot>,
     pub(crate) import_impl_slots: Vec<ImportImplSlot>,
+    // Dependencies from type import
+    pub(crate) type_deps: HashSet<ModuleId>,
 
     pub(crate) uses: Uses,
 
@@ -117,6 +121,7 @@ impl Module {
         Self {
             import_fn_slots: Vec::new(),
             import_impl_slots: Vec::new(),
+            type_deps: HashSet::new(),
             uses: Uses::default(),
             def_table: DefTable::new(),
             functions: Vec::new(),
@@ -152,6 +157,16 @@ impl Module {
     /// Get a trait implementation import slot by ID
     pub fn get_import_impl_slot(&self, slot_id: ImportImplSlotId) -> Option<&ImportImplSlot> {
         self.import_impl_slots.get(slot_id.as_index())
+    }
+
+    /// Modules this module depends on
+    pub fn deps(&self) -> impl Iterator<Item = ModuleId> {
+        self.type_deps
+            .iter()
+            .copied()
+            .chain(self.import_fn_slots.iter().map(|slot| slot.module))
+            .chain(self.import_impl_slots.iter().map(|slot| slot.module))
+            .unique()
     }
 
     // Uses

@@ -361,6 +361,7 @@ where
         let descr = output.get_function_by_id(*id).unwrap();
         let module_env = ModuleEnv::new(output, others);
         let mut new_import_slots = vec![];
+        let mut new_type_deps = HashSet::new();
         let expected_ret_ty = descr.definition.ty_scheme.ty.ret;
         let expected_span = descr.spans.as_ref().unwrap().args_span;
         let mut lambda_functions = vec![];
@@ -370,6 +371,7 @@ where
             &mut locals,
             cur_locals,
             &mut new_import_slots,
+            &mut new_type_deps,
             module_env,
             Some((expected_ret_ty, expected_span)),
             &mut lambda_functions,
@@ -402,6 +404,7 @@ where
         ));
         descr.locals = locals;
         output.import_fn_slots.extend(new_import_slots);
+        output.type_deps.extend(new_type_deps.into_iter());
     }
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_constraints(module_env);
@@ -789,17 +792,20 @@ pub fn emit_expr_unsafe(
     let module_env = ModuleEnv::new(module, others);
 
     // First desugar the expression.
-    let source = source.desugar_with_empty_ctx(&module_env)?;
+    let mut modules_used = HashSet::new();
+    let source = source.desugar_with_empty_ctx(&module_env, &mut modules_used)?;
 
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
     let mut new_import_slots = vec![];
+    let mut new_type_deps = HashSet::new();
     let mut lambda_functions = vec![];
     let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
     let mut ty_env = TypingEnv::new(
         &mut locals,
         cur_locals,
         &mut new_import_slots,
+        &mut new_type_deps,
         module_env,
         None,
         &mut lambda_functions,
@@ -818,6 +824,8 @@ pub fn emit_expr_unsafe(
         })
         .collect::<Vec<_>>();
     module.import_fn_slots.extend(new_import_slots);
+    module.type_deps.extend(new_type_deps);
+    module.type_deps.extend(modules_used);
 
     // Perform the unification.
     let mut solver = trait_solver_from_module!(module, others);

@@ -254,6 +254,15 @@ impl TestSession {
             .compile(src, "<test>", Path::single_str("test"))
     }
 
+    /// Compile and run the src with a custom module name and return its module and expression
+    pub fn try_compile_module(
+        &mut self,
+        name: &str,
+        src: &str,
+    ) -> Result<ModuleAndExpr, CompilationError> {
+        self.session.compile(src, name, Path::single_str(name))
+    }
+
     /// Compile the src and return its module and expression
     pub fn compile(&mut self, src: &str) -> ModuleAndExpr {
         self.try_compile(src)

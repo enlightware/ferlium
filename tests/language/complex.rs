@@ -575,3 +575,33 @@ fn early_returns_in_unexpected_places() {
         int(1)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn circular_imports_functions() {
+    let mut session = TestSession::new();
+    session.try_compile_module("A", "fn f() {}").unwrap();
+    session
+        .try_compile_module("B", "fn g() { A::f() }")
+        .unwrap();
+    session
+        .try_compile_module("A", "fn f() { B::g() }")
+        .unwrap_err()
+        .as_circular_import_dependency()
+        .unwrap();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn circular_imports_type_defs() {
+    let mut session = TestSession::new();
+    session.try_compile_module("A", "struct S;").unwrap();
+    session.try_compile_module("B", "struct T(A::S)").unwrap();
+    session
+        .try_compile_module("A", "struct S(B::T)")
+        .unwrap_err()
+        .as_circular_import_dependency()
+        .unwrap();
+}
+
+// TODO: once one can define type alias in user code, add the relevant test here.

@@ -189,21 +189,155 @@ where
     sorted_sccs
 }
 
+/// Visitation state of a node during a depth-first search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisitState {
+    /// Not yet reached.
+    Unvisited,
+    /// Currently on the active DFS path — a back-edge to this node means a cycle.
+    OnStack,
+    /// Fully explored; all descendants have been processed.
+    Done,
+}
+
+/// Starting from `start`, perform an iterative DFS over `graph` and return the first cycle
+/// found as an ordered list of node indices, or `None` if the reachable subgraph is acyclic.
+///
+/// The returned `Vec` begins at the node where the back-edge closes back and lists every
+/// node on the cycle path in traversal order. For example, given edges `0→1→2→1` starting
+/// from `0`, the result is `Some([1, 2])`.
+///
+/// `start` must be a valid index into `graph`.
+pub(crate) fn find_cycle_from<N: Node>(graph: &[N], start: usize) -> Option<Vec<usize>>
+where
+    <<N as Node>::Index as TryInto<usize>>::Error: std::fmt::Debug,
+{
+    let mut state = vec![VisitState::Unvisited; graph.len()];
+
+    // Each stack frame holds (node_index, index_of_next_child_to_visit).
+    let mut dfs_stack: Vec<(usize, usize)> = vec![(start, 0)];
+    // `path` mirrors the live DFS recursion stack.
+    let mut path: Vec<usize> = vec![start];
+    state[start] = VisitState::OnStack;
+
+    while let Some((current, child_idx)) = dfs_stack.last_mut() {
+        let current = *current;
+        // Collect neighbors eagerly to avoid holding a borrow on `graph[current]`
+        // while we mutate `dfs_stack` and `path` below.
+        let neighbors: Vec<usize> = graph[current]
+            .neighbors()
+            .map(|nb| nb.try_into().unwrap())
+            .collect();
+
+        if *child_idx < neighbors.len() {
+            let neighbor = neighbors[*child_idx];
+            *child_idx += 1;
+
+            match state[neighbor] {
+                VisitState::Unvisited => {
+                    state[neighbor] = VisitState::OnStack;
+                    path.push(neighbor);
+                    dfs_stack.push((neighbor, 0));
+                }
+                VisitState::OnStack => {
+                    // Back-edge: collect the cycle portion of `path` starting at `neighbor`.
+                    let cycle = path
+                        .iter()
+                        .copied()
+                        .skip_while(|&id| id != neighbor)
+                        .collect();
+                    return Some(cycle);
+                }
+                VisitState::Done => {
+                    // Already fully explored; safe to skip.
+                }
+            }
+        } else {
+            // All neighbours processed; mark done and pop.
+            state[current] = VisitState::Done;
+            dfs_stack.pop();
+            path.pop();
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
 
-    struct Node(Vec<u32>);
-    impl super::Node for Node {
+    struct TestNode(Vec<u32>);
+    impl super::Node for TestNode {
         type Index = u32;
         fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
             self.0.iter().copied()
         }
     }
 
-    use Node as N;
+    use TestNode as N;
+
+    // ---- find_cycle_from ----
+
+    #[test]
+    fn cycle_from_no_edges() {
+        // Single isolated node — no cycle.
+        let graph = vec![N(vec![])];
+        assert_eq!(find_cycle_from(&graph, 0), None);
+    }
+
+    #[test]
+    fn cycle_from_linear_chain() {
+        // 0 → 1 → 2, no cycle.
+        let graph = vec![N(vec![1]), N(vec![2]), N(vec![])];
+        assert_eq!(find_cycle_from(&graph, 0), None);
+    }
+
+    #[test]
+    fn cycle_from_self_loop() {
+        // Node 1 points to itself; reachable from 0.
+        let graph = vec![N(vec![1]), N(vec![1]), N(vec![])];
+        assert_eq!(find_cycle_from(&graph, 0), Some(vec![1]));
+    }
+
+    #[test]
+    fn cycle_from_simple_cycle() {
+        // 0 → 1 → 2 → 0
+        let graph = vec![N(vec![1]), N(vec![2]), N(vec![0])];
+        assert_eq!(find_cycle_from(&graph, 0), Some(vec![0, 1, 2]));
+    }
+
+    #[test]
+    fn cycle_from_diamond_no_cycle() {
+        // Diamond: 0 → 1, 0 → 2, 1 → 3, 2 → 3 — shared dependency but no cycle.
+        let graph = vec![N(vec![1, 2]), N(vec![3]), N(vec![3]), N(vec![])];
+        assert_eq!(find_cycle_from(&graph, 0), None);
+    }
+
+    #[test]
+    fn cycle_from_start_not_in_cycle() {
+        // 0 → 1 → 2 → 1  (cycle is 1→2, start node 0 is outside it)
+        let graph = vec![N(vec![1]), N(vec![2]), N(vec![1])];
+        assert_eq!(find_cycle_from(&graph, 0), Some(vec![1, 2]));
+    }
+
+    #[test]
+    fn cycle_from_cycle_not_at_start() {
+        // 0 → 1 → 2 → 3 → 1  (cycle is 1→2→3, start node 0 is outside it)
+        let graph = vec![N(vec![1]), N(vec![2]), N(vec![3]), N(vec![1])];
+        assert_eq!(find_cycle_from(&graph, 0), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn cycle_from_unreachable_cycle() {
+        // 0 has no edges; cycle 1→2→1 is not reachable from 0.
+        let graph = vec![N(vec![]), N(vec![2]), N(vec![1])];
+        assert_eq!(find_cycle_from(&graph, 0), None);
+    }
+
+    // ---- find_disjoint_subgraphs ----
 
     #[test]
     fn single_disjoint_graph() {

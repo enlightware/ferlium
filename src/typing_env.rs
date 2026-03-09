@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 // Copyright 2026 Enlightware GmbH
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
@@ -15,7 +17,7 @@ use crate::{
     module::{
         self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget,
         LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
-        id::Id,
+        TypeDefLookupResult, id::Id,
     },
     std::STD_MODULE_ID,
     r#trait::TraitRef,
@@ -65,6 +67,7 @@ pub type GetFunctionData<'a> = (&'a FunctionDefinition, FunctionId, Option<Modul
 
 /// A typing environment, mapping local variable names to types.
 #[derive(new)]
+#[allow(clippy::too_many_arguments)]
 pub struct TypingEnv<'m> {
     /// All local variables in the current function, including those from outer scopes.
     /// The index of a local variable in this vector is its LocalDeclId.
@@ -73,6 +76,8 @@ pub struct TypingEnv<'m> {
     pub(crate) cur_locals: Vec<LocalDeclId>,
     /// The extra import slots that can be filled during type checking.
     pub(crate) new_import_slots: &'m mut Vec<ImportFunctionSlot>,
+    /// The type dependencies that can be filled during type checking.
+    pub(crate) new_type_deps: &'m mut HashSet<ModuleId>,
     /// The program and the module we are currently compiling.
     pub(crate) module_env: ModuleEnv<'m>,
     /// The expected return type of the enclosing function (for type-checking `return` statements).
@@ -199,5 +204,18 @@ impl<'m> TypingEnv<'m> {
             let function = self.module_env.current.get_function_by_id(id).unwrap();
             Some((&function.definition, FunctionId::Local(id), None))
         })
+    }
+
+    pub fn get_type_def(
+        &mut self,
+        path: &ast::Path,
+    ) -> Result<Option<TypeDefLookupResult>, InternalCompilationError> {
+        let result = self.module_env.type_def_for_construction(path)?;
+        Ok(result.map(|td| {
+            if let Some(module_id) = td.0 {
+                self.new_type_deps.insert(module_id);
+            }
+            td.1
+        }))
     }
 }

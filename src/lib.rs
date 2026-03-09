@@ -7,6 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use ::std::collections::HashSet;
 use std::new_module_using_std;
 
 use ast::{UnstableCollector, VisitExpr};
@@ -206,7 +207,8 @@ impl CompilerSession {
             .map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
         let span = Location::new_usize(0, src.len(), source_id);
         let env = self.module_env();
-        ast.desugar(span, false, &env)
+        let mut modules_used = HashSet::new();
+        ast.desugar(span, false, &env, &mut modules_used)
             .map_err(|error| CompilationError::resolve_types(error, &env, &self.source_table))
     }
 
@@ -239,7 +241,8 @@ impl CompilerSession {
             .map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
         let span = Location::new_usize(0, src.len(), source_id);
         let env = self.module_env();
-        ast.desugar(span, false, &env)
+        let mut modules_used = HashSet::new();
+        ast.desugar(span, false, &env, &mut modules_used)
             .map_err(|error| CompilationError::resolve_types(error, &env, &self.source_table))
     }
 
@@ -349,6 +352,7 @@ impl CompilerSession {
                 emit_expr(expr_ast, &mut module, &self.modules, vec![]).map_err(|error| {
                     // Restore the old module in case of error, to avoid leaving the session in a broken state.
                     old_module
+                        .clone()
                         .map(|old_module| self.modules.replace(module_path.clone(), old_module));
                     // Resolve types in the error, to provide better error messages.
                     let env = ModuleEnv::new(&module, &self.modules);
@@ -358,6 +362,46 @@ impl CompilerSession {
         } else {
             None
         };
+
+        // Detect circular imports and emit error in that case.
+        struct ModuleNode(Vec<ModuleId>);
+        impl graph::Node for ModuleNode {
+            type Index = ModuleId;
+            fn neighbors(&self) -> impl Iterator<Item = ModuleId> {
+                self.0.iter().copied()
+            }
+        }
+        // Note: `module_id`'s slot in `self.modules` still holds the temporary dummy module
+        // inserted at the start of `compile_to`. We must use the freshly-compiled `module`
+        // for that slot so its real dependencies are visible to the cycle detector.
+        let module_graph: Vec<_> = self
+            .modules
+            .iter_ids()
+            .map(|id| {
+                let deps = if id == module_id {
+                    module.deps().collect()
+                } else {
+                    self.modules.get(id).unwrap().deps().collect()
+                };
+                ModuleNode(deps)
+            })
+            .collect();
+        if let Some(cycle) = graph::find_cycle_from(&module_graph, module_id.as_index()) {
+            // Restore the old module in case of error, to avoid leaving the session in a broken state.
+            old_module.map(|old_module| self.modules.replace(module_path.clone(), old_module));
+            return Err(compilation_error!(CircularImportDependency {
+                origin: self.modules.get_name(module_id).unwrap().to_string(),
+                import_chain: cycle
+                    .into_iter()
+                    .map(|index| self
+                        .modules
+                        .get_name(ModuleId::from_index(index))
+                        .unwrap()
+                        .to_string())
+                    .collect(),
+                span: Location::new_synthesized(),
+            }));
+        }
 
         // Store the module.
         self.modules.replace(module_path, module);

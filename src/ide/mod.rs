@@ -663,6 +663,18 @@ fn compilation_error_to_data(
             )]
         }
         Unsupported { span, reason } => vec![error_data_from_location(span, reason.to_string())],
+        CircularImportDependency {
+            origin,
+            import_chain,
+            span,
+        } => vec![error_data_from_location(
+            span,
+            format!(
+                "Circular import dependency detected `{origin}`: {} -> `{}`",
+                import_chain.iter().map(|s| format!("`{s}`")).join(" -> "),
+                import_chain[0],
+            ),
+        )],
         Internal { span, error } => vec![error_data_from_location(
             span,
             format!("Internal compiler error: {error}"),

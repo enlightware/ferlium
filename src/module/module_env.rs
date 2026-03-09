@@ -102,36 +102,51 @@ impl<'m> ModuleEnv<'m> {
             .map(|(_, ty)| ty))
     }
 
+    /// Like [`type_alias_type`], but also returns the source [`ModuleId`] when the alias
+    /// is defined in another module (`None` means it belongs to the current module).
+    pub fn type_alias_type_with_module(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<(Option<ModuleId>, Type)>, InternalCompilationError> {
+        self.get_module_member(&path.segments, &|name, module| {
+            module.get_type_alias(ustr(name))
+        })
+    }
+
     pub fn type_def_for_construction(
         &self,
         path: &ast::Path,
-    ) -> Result<Option<TypeDefLookupResult>, InternalCompilationError> {
+    ) -> Result<Option<(Option<ModuleId>, TypeDefLookupResult)>, InternalCompilationError> {
         // First search for a matching enum
         let segments = &path.segments;
         let len = segments.len();
         if len >= 2 {
             let enum_segments = &segments[0..len - 1];
             let variant_name = segments[len - 1].0;
-            if let Some((_, ty_def)) = self.get_module_member(enum_segments, &|name, module| {
-                module.get_type_def(ustr(name))
-            })? {
+            if let Some((module_id, ty_def)) = self
+                .get_module_member(enum_segments, &|name, module| {
+                    module.get_type_def(ustr(name))
+                })?
+            {
                 if ty_def.is_enum() {
                     let ty_data = ty_def.shape.data();
                     let variants = ty_data.as_variant().unwrap();
                     let variant = variants.iter().find(|(name, _)| *name == variant_name);
                     if let Some((tag, ty)) = variant {
-                        return Ok(Some(TypeDefLookupResult::Enum(ty_def.clone(), *tag, *ty)));
+                        let td = TypeDefLookupResult::Enum(ty_def.clone(), *tag, *ty);
+                        return Ok(Some((module_id, td)));
                     }
                 }
             }
         }
         // Not found, search for a matching struct
         if len >= 1 {
-            if let Some((_, ty_def)) =
+            if let Some((module_id, ty_def)) =
                 self.get_module_member(segments, &|name, module| module.get_type_def(ustr(name)))?
             {
                 if ty_def.is_struct_like() {
-                    return Ok(Some(TypeDefLookupResult::Struct(ty_def.clone())));
+                    let td = TypeDefLookupResult::Struct(ty_def.clone());
+                    return Ok(Some((module_id, td)));
                 }
             }
         }
@@ -148,6 +163,19 @@ impl<'m> ModuleEnv<'m> {
                 module.get_type_def(ustr(name))
             })?
             .map(|(_, ty_def)| ty_def.as_type()))
+    }
+
+    /// Like [`type_def_type`], but also returns the source [`ModuleId`] when the type
+    /// is defined in another module (`None` means it belongs to the current module).
+    pub fn type_def_type_with_module(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<(Option<ModuleId>, Type)>, InternalCompilationError> {
+        Ok(self
+            .get_module_member(&path.segments, &|name, module| {
+                module.get_type_def(ustr(name))
+            })?
+            .map(|(module_id, ty_def)| (module_id, ty_def.as_type())))
     }
 
     pub fn function_name(&self, func: &FunctionRc) -> Option<String> {
@@ -237,23 +265,31 @@ impl<'m> ModuleEnv<'m> {
         segments: &'m [UstrSpan],
         getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
     ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
+        // If the name is not qualified, look in the current module.
         if let [(name, _)] = segments {
             return self.current.get_member(name, self.modules, getter);
         }
+        // The name is qualified, split between path and symbol name.
         if let Some(path) = segments.split_last() {
-            let ((function_name, _), module) = path;
+            let ((sym_name, _), module) = path;
+            // Special case when compiling std.
             if let [single_segment] = module
                 && single_segment.0 == "std"
                 && self.current.module_id() == STD_MODULE_ID
             {
-                return self.current.get_member(function_name, self.modules, getter);
+                return self.current.get_member(sym_name, self.modules, getter);
             }
-            let path = Path::new(module.iter().map(|(seg, _)| *seg).collect());
-            self.modules
-                .get_value_by_name(&path)
-                .map_or(Ok(None), |module| {
-                    module.get_member(function_name, self.modules, getter)
-                })
+            // Look into the foreign module, if it exists.
+            let path = Path::from_ast_segments(module);
+            Ok(
+                if let Some((foreign_id, foreign_module)) = self.modules.get_by_name(&path) {
+                    getter(sym_name, foreign_module)
+                        .map(|t| Some((Some(foreign_id), t)))
+                        .unwrap_or(None)
+                } else {
+                    None
+                },
+            )
         } else {
             Ok(None)
         }

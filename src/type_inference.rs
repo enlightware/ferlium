@@ -399,6 +399,7 @@ impl TypeInference {
             &mut fn_all_locals,
             fn_cur_locals,
             env.new_import_slots,
+            env.new_type_deps,
             env.module_env,
             Some((ret_ty, body.span)),
             env.lambda_functions,
@@ -512,7 +513,7 @@ impl TypeInference {
                     )
                 }
                 // Retrieve the struct constructor, if it exists
-                else if let Some(type_def) = env.module_env.type_def_for_construction(path)? {
+                else if let Some(type_def) = env.get_type_def(path)? {
                     // Retrieve the payload type and the tag, if it is an enum.
                     let (type_def, payload_ty, tag) = type_def.lookup_payload();
                     if payload_ty != Type::unit() {
@@ -741,7 +742,7 @@ impl TypeInference {
                     DuplicatedFieldContext::Struct,
                 )?;
                 // First check if the path is a known type definition.
-                if let Some(type_def) = env.module_env.type_def_for_construction(path)? {
+                if let Some(type_def) = env.get_type_def(path)? {
                     // Then resolve the layout of the struct.
                     let (type_def, payload_ty, tag) = type_def.lookup_payload();
                     // Check that it is a record.
@@ -1112,7 +1113,7 @@ impl TypeInference {
                     inst_data,
                 }));
                 (node, ret_ty, MutType::constant(), combined_effects)
-            } else if let Some(type_def) = env.module_env.type_def_for_construction(path)? {
+            } else if let Some(type_def) = env.get_type_def(path)? {
                 // Retrieve the payload type and the tag, if it is an enum.
                 let (type_def, payload_ty, tag) = type_def.lookup_payload();
                 // Compute the arity from the payload type.

@@ -39,6 +39,11 @@ macro_rules! define_id_type {
                 write!(f, "{}", self.0)
             }
         }
+        impl From<$name> for usize {
+            fn from(id: $name) -> Self {
+                id.0 as usize
+            }
+        }
     };
 }
 
@@ -115,6 +120,10 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
 
     pub fn iter(&self) -> impl Iterator<Item = &(T, Option<N>)> {
         self.data.iter()
+    }
+
+    pub fn iter_ids(&self) -> impl Iterator<Item = I> {
+        (0..self.data.len()).map(I::from_index)
     }
 
     pub fn enumerates(&self) -> impl Iterator<Item = (I, &T, &Option<N>)> {

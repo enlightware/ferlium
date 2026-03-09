@@ -27,7 +27,7 @@ use crate::{
     graph::{find_strongly_connected_components, topological_sort_sccs},
     import_resolver::{ModulesResolver, resolve_imports},
     internal_compilation_error,
-    module::{Module, ModuleEnv, Modules},
+    module::{Module, ModuleEnv, ModuleId, Modules},
     mutability::{MutType, MutVal},
     parser_helpers::syn_static_apply,
     std::{array::array_type, math::int_type},
@@ -52,8 +52,12 @@ type FnDeps = HashSet<usize>;
 pub type FnSccs = Vec<Vec<usize>>;
 
 impl ast::PFnArgType {
-    pub fn desugar(&self, env: &ModuleEnv<'_>) -> Result<FnArgType, InternalCompilationError> {
-        let ty = self.ty.0.desugar(self.ty.1, false, env)?;
+    pub fn desugar(
+        &self,
+        env: &ModuleEnv<'_>,
+        modules_used: &mut HashSet<ModuleId>,
+    ) -> Result<FnArgType, InternalCompilationError> {
+        let ty = self.ty.0.desugar(self.ty.1, false, env, modules_used)?;
         let mut_ty = match self.mut_ty {
             Some(mut_ty) => match mut_ty {
                 ast::PMutType::Mut => MutType::mutable(),
@@ -67,13 +71,17 @@ impl ast::PFnArgType {
 }
 
 impl ast::PFnType {
-    pub fn desugar(&self, env: &ModuleEnv<'_>) -> Result<FnType, InternalCompilationError> {
+    pub fn desugar(
+        &self,
+        env: &ModuleEnv<'_>,
+        modules_used: &mut HashSet<ModuleId>,
+    ) -> Result<FnType, InternalCompilationError> {
         let args = self
             .args
             .iter()
-            .map(|arg| arg.desugar(env))
+            .map(|arg| arg.desugar(env, modules_used))
             .collect::<Result<Vec<_>, _>>()?;
-        let ret = self.ret.0.desugar(self.ret.1, false, env)?;
+        let ret = self.ret.0.desugar(self.ret.1, false, env, modules_used)?;
         // if this function has generic effects, always emit variable id 0 that will be replaced by fresh variables in type inference
         let effects = if self.effects {
             EffType::single_variable_id(0)
@@ -90,6 +98,7 @@ impl ast::PType {
         span: Location,
         in_ty_def: bool,
         env: &ModuleEnv<'_>,
+        modules_used: &mut HashSet<ModuleId>,
     ) -> Result<Type, InternalCompilationError> {
         use ast::PType::*;
         Ok(match self {
@@ -98,9 +107,15 @@ impl ast::PType {
             Resolved(ty) => *ty,
             Infer => Type::variable_id(0), // always emit variable id 0 that will be replaced by fresh variables in type inference
             Path(path) => {
-                if let Some(ty) = env.type_alias_type(path)? {
+                if let Some((module_id, ty)) = env.type_alias_type_with_module(path)? {
+                    if let Some(module_id) = module_id {
+                        modules_used.insert(module_id);
+                    }
                     ty
-                } else if let Some(ty) = env.type_def_type(path)? {
+                } else if let Some((module_id, ty)) = env.type_def_type_with_module(path)? {
+                    if let Some(module_id) = module_id {
+                        modules_used.insert(module_id);
+                    }
                     ty
                 } else if let [(name, _)] = &path.segments[..] {
                     Type::variant([(*name, Type::unit())])
@@ -127,7 +142,7 @@ impl ast::PType {
                                 }))
                             } else {
                                 seen.insert(name, *name_span);
-                                Ok((*name, ty.desugar(*ty_span, false, env)?))
+                                Ok((*name, ty.desugar(*ty_span, false, env, modules_used)?))
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?,
@@ -136,7 +151,7 @@ impl ast::PType {
             Tuple(elements) => Type::tuple(
                 elements
                     .iter()
-                    .map(|(ty, span)| ty.desugar(*span, false, env))
+                    .map(|(ty, span)| ty.desugar(*span, false, env, modules_used))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Record(fields) => {
@@ -158,23 +173,27 @@ impl ast::PType {
                                 }))
                             } else {
                                 seen.insert(name, *name_span);
-                                Ok((*name, ty.desugar(*ty_span, false, env)?))
+                                Ok((*name, ty.desugar(*ty_span, false, env, modules_used)?))
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 )
             }
-            Array(array) => array_type(array.0.desugar(array.1, false, env)?),
-            Function(fn_type) => Type::function_type(fn_type.desugar(env)?),
+            Array(array) => array_type(array.0.desugar(array.1, false, env, modules_used)?),
+            Function(fn_type) => Type::function_type(fn_type.desugar(env, modules_used)?),
         })
     }
 }
 
 impl PTypeDef {
-    pub fn desugar(&self, env: &ModuleEnv<'_>) -> Result<TypeDefRef, InternalCompilationError> {
+    pub fn desugar(
+        &self,
+        env: &ModuleEnv<'_>,
+        modules_used: &mut HashSet<ModuleId>,
+    ) -> Result<TypeDefRef, InternalCompilationError> {
         assert!(self.generic_params.is_empty());
         assert!(self.doc_comments.is_empty());
-        let shape = self.shape.desugar(self.span, true, env)?;
+        let shape = self.shape.desugar(self.span, true, env, modules_used)?;
         Ok(TypeDefRef::new(crate::r#type::TypeDef {
             name: self.name.0,
             param_names: vec![],
@@ -189,6 +208,7 @@ impl PModuleFunctionArg {
     pub fn desugar(
         self,
         env: &ModuleEnv<'_>,
+        modules_used: &mut HashSet<ModuleId>,
     ) -> Result<DModuleFunctionArg, InternalCompilationError> {
         let ty = self
             .ty
@@ -199,7 +219,7 @@ impl PModuleFunctionArg {
                         // if placeholder, always emit variable id 0 that will be replaced by fresh variables in type inference
                         ast::PMutType::Infer => MutType::variable_id(0),
                     }),
-                    ty.desugar(span, false, env)?,
+                    ty.desugar(span, false, env, modules_used)?,
                     span,
                 ))
             })
@@ -212,7 +232,11 @@ impl PModuleFunctionArg {
 }
 
 impl PTraitImpl {
-    pub fn desugar(self, env: &ModuleEnv<'_>) -> Result<DTraitImpl, InternalCompilationError> {
+    pub fn desugar(
+        self,
+        env: &ModuleEnv<'_>,
+        modules_used: &mut HashSet<ModuleId>,
+    ) -> Result<DTraitImpl, InternalCompilationError> {
         let fn_map = self
             .functions
             .iter()
@@ -222,7 +246,10 @@ impl PTraitImpl {
         let functions = self
             .functions
             .into_iter()
-            .map(|f| f.desugar(&fn_map, env).map(|(f, _dep_graph)| f))
+            .map(|f| {
+                f.desugar(&fn_map, env, modules_used)
+                    .map(|(f, _dep_graph)| f)
+            })
             .collect::<Result<_, _>>()?;
         Ok(DTraitImpl {
             span: self.span,
@@ -325,16 +352,17 @@ impl PModule {
         // Process types in order of their dependencies and resolve type aliases and type definitions.
         // Directly insert them into the output module once they are resolved.
         let sorted_sccs = topological_sort_sccs(&ty_dep_graph, &sccs);
+        let mut modules_used = HashSet::<ModuleId>::new();
         for scc in sorted_sccs.into_iter().rev() {
             assert_eq!(scc.len(), 1);
             let ty_ref = &ty_refs[scc[0]];
             match ty_ref {
                 NamedTypeData::Alias(name, alias) => {
-                    let ty = alias.0.desugar(alias.1, false, &env)?;
+                    let ty = alias.0.desugar(alias.1, false, &env, &mut modules_used)?;
                     output.add_type_alias(name.0, ty);
                 }
                 NamedTypeData::Def(def) => {
-                    output.add_type_def(def.name.0, def.desugar(&env)?);
+                    output.add_type_def(def.name.0, def.desugar(&env, &mut modules_used)?);
                 }
             }
             env = ModuleEnv::new(output, others);
@@ -348,7 +376,9 @@ impl PModule {
             .map(|(index, func)| (func.name.0, index))
             .collect::<HashMap<_, _>>();
         let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
-            self.functions.into_iter().map(|f| f.desugar(&fn_map, &env)),
+            self.functions
+                .into_iter()
+                .map(|f| f.desugar(&fn_map, &env, &mut modules_used)),
             |iter| iter.unzip(),
         )?;
         let sccs = find_strongly_connected_components(&fn_dep_graph);
@@ -358,10 +388,11 @@ impl PModule {
         let impls = self
             .impls
             .into_iter()
-            .map(|i| i.desugar(&env))
+            .map(|i| i.desugar(&env, &mut modules_used))
             .collect::<Result<_, _>>()?;
 
         // Build result
+        output.type_deps.extend(modules_used);
         let module = DModule {
             functions,
             impls,
@@ -378,19 +409,20 @@ impl PModuleFunction {
         self,
         fn_map: &FnMap,
         env: &ModuleEnv<'_>,
+        modules_used: &mut HashSet<ModuleId>,
     ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
         let locals = self.args.iter().map(|arg| arg.name.0).collect();
         let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env);
-        let body = self.body.desugar(&mut ctx)?;
+        let body = self.body.desugar(&mut ctx, modules_used)?;
         let args = self
             .args
             .into_iter()
-            .map(|arg| arg.desugar(env))
+            .map(|arg| arg.desugar(env, modules_used))
             .collect::<Result<Vec<_>, _>>()?;
         // Collect function dependencies
         let ret_ty = self
             .ret_ty
-            .map(|(ty, span)| Ok((ty.desugar(span, false, env)?, span)))
+            .map(|(ty, span)| Ok((ty.desugar(span, false, env, modules_used)?, span)))
             .transpose()?;
         let function = ModuleFunction {
             name: self.name,
@@ -447,13 +479,18 @@ impl PExpr {
     pub fn desugar_with_empty_ctx(
         self,
         module_env: &ModuleEnv<'_>,
+        modules_used: &mut HashSet<ModuleId>,
     ) -> Result<DExpr, InternalCompilationError> {
         let empty_fn_map = HashMap::new();
         let mut ctx = DesugarCtx::new(&empty_fn_map, module_env);
-        self.desugar(&mut ctx)
+        self.desugar(&mut ctx, modules_used)
     }
 
-    fn desugar(self, ctx: &mut DesugarCtx) -> Result<DExpr, InternalCompilationError> {
+    fn desugar(
+        self,
+        ctx: &mut DesugarCtx,
+        modules_used: &mut HashSet<ModuleId>,
+    ) -> Result<DExpr, InternalCompilationError> {
         use ExprKind::*;
         let kind = match self.kind {
             Literal(value, ty) => {
@@ -486,7 +523,7 @@ impl PExpr {
                 Identifier(path)
             }
             Let(name, mut_val, expr, ty_ascription) => {
-                let expr = expr.desugar_boxed(ctx)?;
+                let expr = expr.desugar_boxed(ctx, modules_used)?;
                 // Look inside the type ascription node to see if the type is constant, to be used later for display.
                 let ty_ascription = ty_ascription.map(|(span, _)| {
                     let ty = expr
@@ -501,27 +538,29 @@ impl PExpr {
                 ctx.locals.push(name.0);
                 expr
             }
-            Return(expr) => Return(expr.desugar_boxed(ctx)?),
+            Return(expr) => Return(expr.desugar_boxed(ctx, modules_used)?),
             Abstract(args, expr) => {
                 // we swap the locals with the lambda arguments, as we do not capture the outer scope
                 let mut other_vars = args.iter().map(|(name, _)| *name).collect::<Vec<_>>();
                 mem::swap(&mut other_vars, &mut ctx.locals);
-                let expr = Abstract(args, expr.desugar_boxed(ctx)?);
+                let expr = Abstract(args, expr.desugar_boxed(ctx, modules_used)?);
                 mem::swap(&mut other_vars, &mut ctx.locals);
                 expr
             }
-            Apply(expr, args, synthesized) => {
-                Apply(expr.desugar_boxed(ctx)?, desugar(args, ctx)?, synthesized)
-            }
+            Apply(expr, args, synthesized) => Apply(
+                expr.desugar_boxed(ctx, modules_used)?,
+                desugar(args, ctx, modules_used)?,
+                synthesized,
+            ),
             Block(stmts) => {
                 let env_size = ctx.locals.len();
-                let block = Block(desugar(stmts, ctx)?);
+                let block = Block(desugar(stmts, ctx, modules_used)?);
                 ctx.locals.truncate(env_size);
                 block
             }
             Assign(place, sign_loc, value) => {
-                let place = place.desugar_boxed(ctx)?;
-                let value = value.desugar_boxed(ctx)?;
+                let place = place.desugar_boxed(ctx, modules_used)?;
+                let value = value.desugar_boxed(ctx, modules_used)?;
                 if let Some(index) = place.kind.as_index() {
                     if index.0.kind.is_property_path() {
                         /*
@@ -569,32 +608,32 @@ impl PExpr {
                 Assign(place, sign_loc, value)
             }
             PropertyPath(scope, var) => PropertyPath(scope, var),
-            Tuple(elements) => Tuple(desugar(elements, ctx)?),
-            Project(expr, index) => Project(expr.desugar_boxed(ctx)?, index),
+            Tuple(elements) => Tuple(desugar(elements, ctx, modules_used)?),
+            Project(expr, index) => Project(expr.desugar_boxed(ctx, modules_used)?, index),
             StructLiteral(name, elements) => StructLiteral(
                 name,
                 elements
                     .into_iter()
-                    .map(|(k, v)| Ok((k, v.desugar(ctx)?)))
+                    .map(|(k, v)| Ok((k, v.desugar(ctx, modules_used)?)))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Record(elements) => Record(
                 elements
                     .into_iter()
-                    .map(|(k, v)| Ok((k, v.desugar(ctx)?)))
+                    .map(|(k, v)| Ok((k, v.desugar(ctx, modules_used)?)))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-            FieldAccess(expr, name) => FieldAccess(expr.desugar_boxed(ctx)?, name),
-            Array(elements) => Array(desugar(elements, ctx)?),
+            FieldAccess(expr, name) => FieldAccess(expr.desugar_boxed(ctx, modules_used)?, name),
+            Array(elements) => Array(desugar(elements, ctx, modules_used)?),
             Index(array, index) => {
                 let index = match index.kind {
                     Literal(value, ty) => b(DExpr::new(Literal(value, ty), index.span)),
-                    _ => index.desugar_boxed(ctx)?,
+                    _ => index.desugar_boxed(ctx, modules_used)?,
                 };
-                Index(array.desugar_boxed(ctx)?, index)
+                Index(array.desugar_boxed(ctx, modules_used)?, index)
             }
             Match(expr, alternatives, default) => Match(
-                expr.desugar_boxed(ctx)?,
+                expr.desugar_boxed(ctx, modules_used)?,
                 alternatives
                     .into_iter()
                     .map(|(pat, expr)| {
@@ -606,12 +645,14 @@ impl PExpr {
                                 }
                             }
                         }
-                        let expr = expr.desugar(ctx)?;
+                        let expr = expr.desugar(ctx, modules_used)?;
                         ctx.locals.truncate(env_size);
                         Ok((pat, expr))
                     })
                     .collect::<Result<Vec<_>, _>>()?,
-                default.map(|e| e.desugar_boxed(ctx)).transpose()?,
+                default
+                    .map(|e| e.desugar_boxed(ctx, modules_used))
+                    .transpose()?,
             ),
             ForLoop(for_loop) => {
                 let crate::ast::ForLoop {
@@ -629,7 +670,7 @@ impl PExpr {
                     Let(
                         (ustr("@it"), iterator_start_span),
                         MutVal::mutable(),
-                        iterator.desugar_boxed(ctx)?,
+                        iterator.desugar_boxed(ctx, modules_used)?,
                         None,
                     ),
                     iterator_start_span,
@@ -653,7 +694,7 @@ impl PExpr {
                                     ),
                                     var_name.1,
                                 ),
-                                body.desugar(ctx)?,
+                                body.desugar(ctx, modules_used)?,
                             ),
                             (
                                 Pattern::new(
@@ -670,10 +711,10 @@ impl PExpr {
                 let loop_expr = Expr::new(Loop(b(it_match)), body_span);
                 Block(vec![it_store, loop_expr])
             }
-            Loop(body) => Loop(body.desugar_boxed(ctx)?),
+            Loop(body) => Loop(body.desugar_boxed(ctx, modules_used)?),
             SoftBreak => SoftBreak,
             TypeAscription(expr, ty, span) => {
-                let ty = ty.desugar(span, false, ctx.module_env)?;
+                let ty = ty.desugar(span, false, ctx.module_env, modules_used)?;
                 if let Some((value, lit_ty)) = expr.kind.as_literal() {
                     // If the expression is a literal and the type of the literal matches
                     // the type we want to ascribe, we can just emit the literal.
@@ -681,11 +722,11 @@ impl PExpr {
                         Literal(value.clone(), *lit_ty)
                     } else {
                         // Otherwise, we need to emit a type ascription node.
-                        TypeAscription(expr.desugar_boxed(ctx)?, ty, span)
+                        TypeAscription(expr.desugar_boxed(ctx, modules_used)?, ty, span)
                     }
                 } else {
                     // Otherwise, we need to emit a type ascription node.
-                    TypeAscription(expr.desugar_boxed(ctx)?, ty, span)
+                    TypeAscription(expr.desugar_boxed(ctx, modules_used)?, ty, span)
                 }
             }
             Error => Error,
@@ -696,13 +737,21 @@ impl PExpr {
         })
     }
 
-    fn desugar_boxed(self, ctx: &mut DesugarCtx) -> Result<B<DExpr>, InternalCompilationError> {
-        self.desugar(ctx).map(b)
+    fn desugar_boxed(
+        self,
+        ctx: &mut DesugarCtx,
+        modules_used: &mut HashSet<ModuleId>,
+    ) -> Result<B<DExpr>, InternalCompilationError> {
+        self.desugar(ctx, modules_used).map(b)
     }
 }
 
-fn desugar(args: Vec<PExpr>, ctx: &mut DesugarCtx) -> Result<Vec<DExpr>, InternalCompilationError> {
+fn desugar(
+    args: Vec<PExpr>,
+    ctx: &mut DesugarCtx,
+    modules_used: &mut HashSet<ModuleId>,
+) -> Result<Vec<DExpr>, InternalCompilationError> {
     args.into_iter()
-        .map(|arg| PExpr::desugar(arg, ctx))
+        .map(|arg| PExpr::desugar(arg, ctx, modules_used))
         .collect()
 }

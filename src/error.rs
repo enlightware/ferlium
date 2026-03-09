@@ -400,11 +400,12 @@ pub enum CompilationErrorImpl<S: Scope> {
         expected_signature: String,
         got_signature: String,
         span: Location,
-    },
+    },*/
     CircularImportDependency {
+        origin: String,
         import_chain: Vec<String>,
         span: Location,
-    },*/
+    },
     Internal {
         span: Location,
         error: String,
@@ -1049,18 +1050,19 @@ impl FormatWith<SourceTable> for CompilationError {
                     got_signature,
                     fmt_span(span)
                 )
-            }
+            }*/
             CircularImportDependency {
+                origin,
                 import_chain,
                 span,
-            } => {
-                write!(
-                    f,
-                    "Circular import dependency: {} in `{}`",
-                    import_chain.join(" -> "),
-                    fmt_span(span)
-                )
-            }*/
+            } => write!(
+                f,
+                "Circular import dependency from {}: {} -> {} in `{}`",
+                origin,
+                import_chain.iter().join(" -> "),
+                import_chain[0],
+                fmt_span(span)
+            ),
             Internal { span, error } => write!(f, "ICE: {} in {}", error, fmt_span(span)),
         }
     }
@@ -1493,10 +1495,18 @@ impl CompilationError {
                 expected_signature,
                 got_signature,
                 span,
-            }),
-            CircularImportDependency { import_chain, span } => {
-                compilation_error!(CircularImportDependency { import_chain, span })
-            }*/
+            }),*/
+            CircularImportDependency {
+                origin,
+                import_chain,
+                span,
+            } => {
+                compilation_error!(CircularImportDependency {
+                    origin,
+                    import_chain,
+                    span
+                })
+            }
             Internal { span, error } => compilation_error!(Internal { span, error }),
         }
     }
