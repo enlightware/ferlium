@@ -343,7 +343,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(
         ustr("string_is_empty"),
         UnaryNativeFnNN::description_with_default_ty(
-            |a: String| a.is_empty() as isize,
+            |a: String| a.is_empty(),
             ["string"],
             "Returns `true` if the string is empty, otherwise `false`.",
             no_effects(),
