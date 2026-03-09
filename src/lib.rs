@@ -66,7 +66,7 @@ pub use ustr::{Ustr, ustr};
 
 use crate::{
     format::FormatWith,
-    module::{Module, ModuleId},
+    module::{Module, ModuleId, id::Id},
     std::STD_MODULE_ID,
     r#type::Type,
 };
@@ -94,6 +94,8 @@ impl ModuleAndExpr {
 
 pub type AstInspectorCb<'a> = &'a dyn Fn(&ast::PModule, &Option<ast::PExpr>, &Modules);
 
+static FIRST_USER_MODULE_ID: ModuleId = ModuleId(2);
+
 /// A compilation session, that contains a source table and the standard library.
 #[derive(Debug)]
 pub struct CompilerSession {
@@ -103,6 +105,8 @@ pub struct CompilerSession {
     modules: Modules,
     /// Pre-created empty module just using the standard library, for debugging purposes.
     empty_std_user: ModuleId,
+    /// Initial size of the source table, for reset().
+    initial_source_table_size: usize,
 }
 
 impl CompilerSession {
@@ -117,10 +121,13 @@ impl CompilerSession {
         let empty_std_user = new_module_using_std(modules.next_id());
         let empty_std_user =
             modules.insert(module::Path::single_str("$empty_std_user"), empty_std_user);
+        assert_eq!(modules.next_id(), FIRST_USER_MODULE_ID);
+        let initial_source_table_size = source_table.len();
         Self {
             source_table,
             modules,
             empty_std_user,
+            initial_source_table_size,
         }
     }
 
@@ -156,6 +163,13 @@ impl CompilerSession {
     /// Get the standard library module.
     pub fn std_module(&self) -> &Module {
         self.modules.get(STD_MODULE_ID).unwrap()
+    }
+
+    /// Reset the compiler session to its initial state, without rebuilding std.
+    pub fn reset(&mut self) {
+        // We only keep std and $empty_std_user and drop the rest.
+        self.modules.truncate(FIRST_USER_MODULE_ID.as_index());
+        self.source_table.truncate(self.initial_source_table_size);
     }
 
     /// Register a module in this compilation session and return its id.

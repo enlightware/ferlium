@@ -86,6 +86,12 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
         }
     }
 
+    /// Keep the len first data and drop the rest.
+    pub fn truncate(&mut self, len: usize) {
+        self.name_to_id.retain(|_k, v| v.as_index() < len);
+        self.data.truncate(len);
+    }
+
     /// Get the next ID that would be assigned to a new entry.
     pub fn next_id(&self) -> I {
         I::from_index(self.data.len())

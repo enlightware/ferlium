@@ -291,14 +291,26 @@ pub struct SourceTable {
     sources: Vec<SourceEntry>,
 }
 impl SourceTable {
-    pub fn next_id(&self) -> SourceId {
-        SourceId::from_index(self.sources.len())
-    }
-
     pub fn add_source(&mut self, name: String, source: String) -> SourceId {
         let id = self.next_id();
         self.sources.push(SourceEntry::new(name, source));
         id
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        self.sources.truncate(len);
+    }
+
+    pub fn len(&self) -> usize {
+        self.sources.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+
+    pub fn next_id(&self) -> SourceId {
+        SourceId::from_index(self.sources.len())
     }
 
     pub fn get_source_entry(&self, index: SourceId) -> Option<&SourceEntry> {
