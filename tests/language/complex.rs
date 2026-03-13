@@ -593,6 +593,147 @@ fn circular_imports_functions() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn oop_style_dispatch_via_first_class_fns_in_records() {
+    let mut session = TestSession::new();
+
+    // A "shape" object is an anonymous record whose fields are first-class
+    // functions acting as methods.  Different concrete shapes share the same
+    // interface (same field names) but carry different closure implementations.
+
+    // Basic dispatch: call `.area` directly on a locally-bound object.
+    assert_eq!(
+        session.run(indoc! { r#"
+            let circle = { area: || 3, describe: || 1 };
+            circle.area()
+        "# }),
+        int(3)
+    );
+
+    // Closures capture their own data, giving each "instance" its own state.
+    assert_eq!(
+        session.run(indoc! { r#"
+            let r = 5;
+            let circle = { area: || r * r };
+            let w = 4;
+            let h = 3;
+            let rect = { area: || w * h };
+            circle.area() + rect.area()
+        "# }),
+        int(37)
+    );
+
+    // A named helper function that accepts any record with an `.area` field
+    // and calls it — the structural-typing equivalent of an interface.
+    // Each call dispatches to a different closure implementation at runtime.
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn total_area(shape) { shape.area() }
+            let r = 7;
+            let circle = { area: || r * r };
+            let w = 4;
+            let h = 3;
+            let rect   = { area: || w * h };
+            total_area(circle) + total_area(rect)
+        "# }),
+        int(61)
+    );
+
+    // Accumulating areas from an array of heterogeneous "objects" by
+    // indexing each element — each slot carries its own closure, so
+    // every `.area()` call dispatches to a different implementation.
+    // Note: the `-> int` anotation works around a limitation of Num defaulting propagation.
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn sum_areas(shapes) -> int {
+                let mut total = 0;
+                for shape in shapes {
+                    total = total + shape.area()
+                };
+                total
+            }
+            let r = 3;
+            let circle = { area: || r * r };
+            let w = 4;
+            let h = 2;
+            let rect   = { area: || w * h };
+            let s = 5;
+            let square = { area: || s * s };
+            let shapes = [circle, rect, square];
+            sum_areas(shapes)
+        "# }),
+        int(42)
+    );
+
+    // "Inheritance-like" extension: build a richer object by reusing a method
+    // from a base object and adding a new one.  Both methods work correctly.
+    assert_eq!(
+        session.run(indoc! { r#"
+            let side = 4;
+            let base     = { area: || side * side };
+            let extended = { area: base.area, perimeter: || side * 4 };
+            extended.area() + extended.perimeter()
+        "# }),
+        int(32)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn calling_fn_field_on_named_fn_record_parameter() {
+    let mut session = TestSession::new();
+
+    // Simplest case: a named function with one record parameter whose sole
+    // field is a nullary closure, called at a concrete call site.
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn invoke(obj) { obj.f() }
+            invoke({ f: || 42 })
+        "# }),
+        int(42)
+    );
+
+    // The function can be called multiple times with records that carry
+    // different closure implementations.
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn invoke(obj) { obj.f() }
+            invoke({ f: || 1 }) + invoke({ f: || 2 })
+        "# }),
+        int(3)
+    );
+
+    // Works for closures that capture variables from their enclosing scope.
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn invoke(obj) { obj.f() }
+            let x = 10;
+            invoke({ f: || x * x })
+        "# }),
+        int(100)
+    );
+
+    // Works for closures that take arguments.
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn apply(obj, n) { obj.transform(n) }
+            apply({ transform: |x| x + 1 }, 5)
+        "# }),
+        int(6)
+    );
+
+    // Works when the record carries additional non-function fields alongside
+    // the function field (structural / row-polymorphic access).
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn get_label(obj) { obj.label() }
+            get_label({ value: 99, label: || 7 })
+        "# }),
+        int(7)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn circular_imports_type_defs() {
     let mut session = TestSession::new();
     session.try_compile_module("A", "struct S;").unwrap();

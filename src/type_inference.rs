@@ -2131,6 +2131,17 @@ impl UnifiedTypeInference {
         self.remaining_ty_constraints
     }
 
+    /// Extract the remaining constraints, applying the full unification substitution
+    /// to each one before returning them.
+    pub fn substitute_and_take_constraints(mut self) -> Vec<PubTypeConstraint> {
+        // FIXME: refactor type_inference to avoid the clone here.
+        self.remaining_ty_constraints
+            .clone()
+            .iter()
+            .map(|c| self.substitute_in_constraint(c))
+            .collect()
+    }
+
     fn normalize_type(&mut self, ty: Type) -> Type {
         substitute_type(ty, &mut NormalizeTypes(self))
     }

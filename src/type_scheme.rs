@@ -1078,9 +1078,10 @@ pub(crate) fn extra_parameters_from_constraints(
                 record_ty, field, ..
             } => {
                 if !record_ty.data().is_variable() {
-                    panic!("Type scheme with non-variable record type in constraints")
+                    None // This can happen when a record had only an effect variable, that later got resolved.
+                } else {
+                    Some(DictionaryReq::new_field_index(*record_ty, *field))
                 }
-                Some(DictionaryReq::new_field_index(*record_ty, *field))
             }
             HaveTrait {
                 trait_ref,

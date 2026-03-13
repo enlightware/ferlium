@@ -604,7 +604,7 @@ where
         // We are emitting normal module functions.
 
         // Limit each function to its own constants and type variables
-        let all_constraints = ty_inf.constraints();
+        let all_constraints = ty_inf.substitute_and_take_constraints();
         let mut used_constraints: HashSet<PubTypeConstraintPtr> = HashSet::new();
         for (function, id) in ast_functions().zip(local_fns.iter()) {
             let descr = &output.functions[id.as_index()];
@@ -845,10 +845,10 @@ pub fn emit_expr_unsafe(
         local.mut_ty = ty_inf.substitute_in_mut_type(local.mut_ty);
     }
 
-    // Get the remaining constraints and collect the free variables.
+    // Get the remaining substituted constraints and collect the free variables.
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_constraints(module_env);
-    let mut constraints = ty_inf.constraints();
+    let mut constraints = ty_inf.substitute_and_take_constraints();
 
     // Clean-up constraints and validate them.
     let mut solver = trait_solver_from_module!(module, others);
