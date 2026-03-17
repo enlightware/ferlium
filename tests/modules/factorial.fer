@@ -1,0 +1,23 @@
+fn factorial_rec(n) {
+    if n <= 1 {
+        1
+    } else {
+        n * factorial_rec(n - 1)
+    }
+}
+
+fn factorial_rec_int(n: int) -> int {
+    factorial_rec(n)
+}
+
+fn factorial_iter(n) {
+    let mut result = 1;
+    for i in 2..=n {
+        result = result * i
+    };
+    result
+}
+
+fn factorial_iter_int(n: int) -> int {
+    factorial_iter(n)
+}

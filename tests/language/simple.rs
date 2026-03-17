@@ -10,12 +10,9 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::common::{
-    get_array_property_value, set_array_property_value, variant_0, variant_t1, variant_tn,
-};
-
-use super::common::{
-    TestSession, bool, float, get_property_value, int, set_property_value, string, unit,
+use crate::harness::{
+    TestSession, bool, float, get_array_property_value, get_property_value, int,
+    set_array_property_value, set_property_value, string, unit, variant_0, variant_t1, variant_tn,
 };
 use ferlium::{
     error::{DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeErrorKind},

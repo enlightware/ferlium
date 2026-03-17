@@ -190,7 +190,7 @@ fn add_deep_modules(session: &mut CompilerSession) {
         ferlium!("deep::deeper::level2", "deep_module2.fer"),
     ] {
         let path = Path::new(name.split("::").map(ustr).collect());
-        session.compile(code, file, path.clone()).unwrap();
+        session.compile(code, file, path).unwrap();
     }
 }
 
@@ -219,6 +219,11 @@ impl TestSession {
         Self {
             session: compiler_session,
         }
+    }
+
+    /// Get the compiler session of this test session.
+    pub fn session(&self) -> &CompilerSession {
+        &self.session
     }
 
     /// Get the modules of this compilation session.

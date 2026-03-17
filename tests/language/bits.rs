@@ -8,7 +8,7 @@
 //
 use test_log::test;
 
-use super::common::{TestSession, bool, int};
+use crate::harness::{TestSession, bool, int};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

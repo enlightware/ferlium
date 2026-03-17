@@ -8,9 +8,9 @@
 //
 use test_log::test;
 
-use crate::{common::variant_0, effects::test_mod as test_mod_for_effects};
+use crate::effects::test_mod as test_mod_for_effects;
 
-use super::common::{TestSession, bool, float, int, string, variant_t1};
+use crate::harness::{TestSession, bool, float, int, string, variant_0, variant_t1};
 use ferlium::{
     effects::{PrimitiveEffect, effect, no_effects},
     std::option::{none, some},

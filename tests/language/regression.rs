@@ -14,7 +14,7 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::common::{TestSession, int};
+use crate::harness::{TestSession, int};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

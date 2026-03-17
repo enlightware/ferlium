@@ -26,10 +26,10 @@ use indoc::indoc;
 
 use ustr::ustr;
 
+use crate::harness::{TestSession, float, int};
+
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
-
-use crate::common::{TestSession, float, int};
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

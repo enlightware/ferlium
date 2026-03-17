@@ -8,7 +8,8 @@
 //
 
 #[macro_use]
-mod common;
+#[path = "../harness/mod.rs"]
+mod harness;
 mod algorithm;
 mod bits;
 mod complex;

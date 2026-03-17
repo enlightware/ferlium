@@ -10,7 +10,7 @@ use test_log::test;
 
 use ustr::ustr;
 
-use super::common::TestSession;
+use crate::harness::TestSession;
 use ferlium::{
     effects::*,
     module::{LocalImplId, id::Id},

@@ -1,0 +1,18 @@
+fn fibonacci_iter(n) -> int {
+    let mut a = 0;
+    let mut b = 1;
+    for _i in 0..n {
+        let old_a = a;
+        a = b;
+        b = old_a + b
+    };
+    a
+}
+
+fn fibonacci_rec(n) -> int {
+    if n <= 1 {
+        n
+    } else {
+        fibonacci_rec(n - 1) + fibonacci_rec(n - 2)
+    }
+}

@@ -1,0 +1,44 @@
+fn primes_up_to(n) {
+    if n < 2 {
+        []
+    } else {
+        let mut sieve = [];
+        for i in 0..=n {
+            array_append(sieve, true)
+        };
+        sieve[0] = false;
+        sieve[1] = false;
+        for i in 2..=n {
+            // Guard: idiv(n, i) must be >= 2, otherwise the range goes backward
+            if sieve[i] and n >= 2 * i {
+                for k in 2..=idiv(n, i) {
+                    sieve[i * k] = false
+                }
+            }
+        };
+        let mut result = [];
+        for i in 2..=n {
+            if sieve[i] {
+                array_append(result, i)
+            }
+        };
+        result
+    }
+}
+
+fn is_prime(n) {
+    if n < 2 {
+        false
+    } else {
+        let primes = primes_up_to(n);
+        primes[len(primes) - 1] == n
+    }
+}
+
+fn prime_count(n) {
+    if n < 2 {
+        0
+    } else {
+        len(primes_up_to(n))
+    }
+}

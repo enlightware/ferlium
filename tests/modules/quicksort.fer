@@ -1,0 +1,37 @@
+fn swap(a, i, j) {
+    let temp = a[i];
+    a[i] = a[j];
+    a[j] = temp
+}
+
+fn partition(a, lo, hi) {
+    let pivot = a[hi];
+    let mut i = lo;
+
+    for j in lo..hi {
+        if a[j] < pivot {
+            swap(a, i, j);
+            i = i + 1
+        }
+    };
+
+    swap(a, i, hi);
+
+    i
+}
+
+fn quicksort(a, lo, hi) {
+    if lo >= hi or lo < 0 {
+        ()
+    } else {
+        let p = partition(a, lo, hi);
+        quicksort(a, lo, p - 1);
+        quicksort(a, p + 1, hi)
+    }
+}
+
+fn quicksort_int_a(a: [int]) {
+    let mut temp = a;
+    quicksort(temp, 0, len(temp) - 1);
+    temp
+}

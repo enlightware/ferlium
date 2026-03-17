@@ -15,16 +15,15 @@ use std::{
 
 use crate::{
     CompilationError, CompilerSession, DisplayStyle, Location, ModuleAndExpr, ModuleEnv, Path,
-    SourceId,
+    SourceId, call_fn,
     error::{
         CompilationErrorImpl, ImportKind, MutabilityMustBeWhat, WhatIsNotAProductType,
         WhichProductTypeIsNot,
     },
-    eval::{EvalCtx, ValOrMut},
     format::FormatWith,
     location::SourceTable,
-    module::{Module, ModuleFunction, Modules},
-    r#type::{FnArgType, Type, tuple_type},
+    run_fn_native,
+    r#type::{Type, tuple_type},
     value::{NativeValue, Value},
 };
 use enum_as_inner::EnumAsInner;
@@ -1008,107 +1007,25 @@ impl Compiler {
         })
     }
 
-    fn run_fn<R>(
-        &self,
-        name: &str,
-        f: impl FnOnce(&ModuleFunction, &Module, &Modules) -> Result<R, String>,
-    ) -> Result<R, String> {
-        let user_module = self
-            .session
-            .modules()
-            .get(self.user_module.module_id)
-            .unwrap();
-        match user_module.lookup_function(name, self.session.modules()) {
-            Ok(Some(func)) => f(func, user_module, self.session.modules()),
-            Ok(None) => Err(format!("Function {name} not found")),
-            Err(e) => Err(format!("Lookup error for {name}: {e:?}")),
-        }
-    }
-
     pub fn run_fn_unit_unit(&self, name: &str) -> Result<(), String> {
-        self.run_fn(name, |func, current, others| {
-            if !func.definition.ty_scheme.is_just_type_and_effects()
-                || !func.definition.ty_scheme.ty.args.is_empty()
-                || func.definition.ty_scheme.ty.ret != Type::unit()
-            {
-                let module_env = ModuleEnv::new(current, others);
-                Err(format!(
-                    "Function {name} does not have type \"() -> ()\", it has \"{}\" instead",
-                    func.definition.ty_scheme.display_rust_style(&module_env)
-                ))
-            } else {
-                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
-                let _ret = func
-                    .code
-                    .borrow()
-                    .call(vec![], &mut ctx, &func.locals)
-                    .map_err(|err| format!("Execution error: {}", err.kind))?;
-                Ok(())
-            }
-        })
+        run_fn_native!(&self.session, self.user_module.module_id, name, [])
     }
 
     pub fn run_fn_unit_o<O: NativeValue + Clone>(&self, name: &str) -> Result<O, String> {
-        self.run_fn(name, |func, current, others| {
-            let o_ty = Type::primitive::<O>();
-            if !func.definition.ty_scheme.is_just_type_and_effects()
-                || !func.definition.ty_scheme.ty.args.is_empty()
-                || func.definition.ty_scheme.ty.ret != o_ty
-            {
-                let module_env = ModuleEnv::new(current, others);
-                let o_ty_fmt = o_ty.format_with(&module_env);
-                Err(format!(
-                    "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
-                    o_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(&module_env)
-                ))
-            } else {
-                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
-                let ret = func
-                    .code
-                    .borrow()
-                    .call(vec![], &mut ctx, &func.locals)
-                    .map_err(|err| format!("Execution error: {}", err.kind))?
-                    .into_value();
-                Ok(ret.into_primitive_ty::<O>().unwrap())
-            }
-        })
+        run_fn_native!(&self.session, self.user_module.module_id, name, [] -> O)
     }
 
     pub fn run_fn_unit_tuple<OA: NativeValue + Clone, OB: NativeValue + Clone>(
         &self,
         name: &str,
     ) -> Result<(OA, OB), String> {
-        self.run_fn(name, |func, current, others| {
-            let oa_ty = Type::primitive::<OA>();
-            let ob_ty = Type::primitive::<OB>();
-            let o_ty = tuple_type([oa_ty, ob_ty]);
-            if !func.definition.ty_scheme.is_just_type_and_effects()
-                || !func.definition.ty_scheme.ty.args.is_empty()
-                || func.definition.ty_scheme.ty.ret != o_ty
-            {
-                let module_env = ModuleEnv::new(current, others);
-                let o_ty_fmt = o_ty.format_with(&module_env);
-                Err(format!(
-                    "Function {name} does not have type \"() -> {}\", it has \"{}\" instead",
-                    o_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(&module_env)
-                ))
-            } else {
-                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
-                let ret = func
-                    .code
-                    .borrow()
-                    .call(vec![], &mut ctx, &func.locals)
-                    .map_err(|err| format!("Execution error: {}", err.kind))?
-                    .into_value();
-                let ret_tuple = ret.into_tuple().unwrap();
-                let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
-                let oa = oa.into_primitive_ty::<OA>().unwrap();
-                let ob = ob.into_primitive_ty::<OB>().unwrap();
-                Ok((oa, ob))
-            }
-        })
+        let ret = call_fn!(&self.session, self.user_module.module_id, name, [] -> tuple_type([Type::primitive::<OA>(), Type::primitive::<OB>()]))?;
+        let ret_tuple = ret.into_tuple().unwrap();
+        let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
+        Ok((
+            oa.into_primitive_ty::<OA>().unwrap(),
+            ob.into_primitive_ty::<OB>().unwrap(),
+        ))
     }
 
     pub fn run_fn_i_tuple<
@@ -1120,43 +1037,14 @@ impl Compiler {
         name: &str,
         input: I,
     ) -> Result<(OA, OB), String> {
-        self.run_fn(name, |func, current, others| {
-            let i_ty = Type::primitive::<I>();
-            let oa_ty = Type::primitive::<OA>();
-            let ob_ty = Type::primitive::<OB>();
-            let o_ty = tuple_type([oa_ty, ob_ty]);
-            if !func.definition.ty_scheme.is_just_type_and_effects()
-                || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
-                || func.definition.ty_scheme.ty.ret != o_ty
-            {
-                let module_env = ModuleEnv::new(current, others);
-                let i_ty_fmt = i_ty.format_with(&module_env);
-                let o_ty_fmt = o_ty.format_with(&module_env);
-                Err(format!(
-                    "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
-                    i_ty_fmt,
-                    o_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(&module_env)
-                ))
-            } else {
-                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
-                let ret = func
-                    .code
-                    .borrow()
-                    .call(
-                        vec![ValOrMut::from_primitive(input)],
-                        &mut ctx,
-                        &func.locals,
-                    )
-                    .map_err(|err| format!("Execution error: {}", err.kind))?
-                    .into_value();
-                let ret_tuple = ret.into_tuple().unwrap();
-                let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
-                let oa = oa.into_primitive_ty::<OA>().unwrap();
-                let ob = ob.into_primitive_ty::<OB>().unwrap();
-                Ok((oa, ob))
-            }
-        })
+        let input_val = Value::native(input.clone());
+        let ret = call_fn!(&self.session, self.user_module.module_id, name, [input_val => Type::primitive::<I>()] -> tuple_type([Type::primitive::<OA>(), Type::primitive::<OB>()]))?;
+        let ret_tuple = ret.into_tuple().unwrap();
+        let [oa, ob]: [Value; 2] = ret_tuple.into_vec().try_into().unwrap();
+        Ok((
+            oa.into_primitive_ty::<OA>().unwrap(),
+            ob.into_primitive_ty::<OB>().unwrap(),
+        ))
     }
 
     pub fn run_fn_i_unit<I: NativeValue + Clone>(
@@ -1164,33 +1052,7 @@ impl Compiler {
         name: &str,
         input: I,
     ) -> Result<(), String> {
-        self.run_fn(name, |func, current, others| {
-            let i_ty = Type::primitive::<I>();
-            if !func.definition.ty_scheme.is_just_type_and_effects()
-                || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
-                || func.definition.ty_scheme.ty.ret != Type::unit()
-            {
-                let module_env = ModuleEnv::new(current, others);
-                let i_ty_fmt = i_ty.format_with(&module_env);
-                Err(format!(
-                    "Function {name} does not have type \"({}) -> ()\", it has \"{}\" instead",
-                    i_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(&module_env)
-                ))
-            } else {
-                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
-                let _ret = func
-                    .code
-                    .borrow()
-                    .call(
-                        vec![ValOrMut::from_primitive(input)],
-                        &mut ctx,
-                        &func.locals,
-                    )
-                    .map_err(|err| format!("Execution error: {}", err.kind))?;
-                Ok(())
-            }
-        })
+        run_fn_native!(&self.session, self.user_module.module_id, name, [input => I])
     }
 
     pub fn run_fn_i_o<I: NativeValue + Clone, O: NativeValue + Clone>(
@@ -1198,37 +1060,7 @@ impl Compiler {
         name: &str,
         input: I,
     ) -> Result<O, String> {
-        self.run_fn(name, |func, current, others| {
-            let i_ty = Type::primitive::<I>();
-            let o_ty = Type::primitive::<O>();
-            if !func.definition.ty_scheme.is_just_type_and_effects()
-                || func.definition.ty_scheme.ty.args != vec![FnArgType::new_by_val(i_ty)]
-                || func.definition.ty_scheme.ty.ret != o_ty
-            {
-                let module_env = ModuleEnv::new(current, others);
-                let i_ty_fmt = i_ty.format_with(&module_env);
-                let o_ty_fmt = o_ty.format_with(&module_env);
-                Err(format!(
-                    "Function {name} does not have type \"({}) -> {}\", it has \"{}\" instead",
-                    i_ty_fmt,
-                    o_ty_fmt,
-                    func.definition.ty_scheme.display_rust_style(&module_env)
-                ))
-            } else {
-                let mut ctx = EvalCtx::new(self.user_module.module_id, &self.session);
-                let ret = func
-                    .code
-                    .borrow()
-                    .call(
-                        vec![ValOrMut::from_primitive(input)],
-                        &mut ctx,
-                        &func.locals,
-                    )
-                    .map_err(|err| format!("Execution error: {}", err.kind))?
-                    .into_value();
-                Ok(ret.into_primitive_ty::<O>().unwrap())
-            }
-        })
+        run_fn_native!(&self.session, self.user_module.module_id, name, [input => I] -> O)
     }
 }
 

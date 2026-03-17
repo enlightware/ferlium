@@ -10,9 +10,7 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::common::float;
-
-use super::common::{TestSession, bool, int, unit};
+use crate::harness::{TestSession, bool, float, int, unit};
 use ferlium::{error::MutabilityMustBeWhat, value::Value};
 
 #[cfg(target_arch = "wasm32")]

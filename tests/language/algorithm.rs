@@ -9,11 +9,15 @@
 
 use test_log::test;
 
-use indoc::indoc;
+use crate::harness::{TestSession, int};
 
-use crate::common::{TestSession, int};
-
-use ferlium::value::Value;
+use ferlium::{
+    call_fn,
+    module::ModuleId,
+    run_fn_native,
+    std::{array::array_type, math::int_type},
+    value::Value,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -22,19 +26,33 @@ use wasm_bindgen_test::*;
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn factorial() {
     let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/factorial.fer"))
+        .module_id;
     assert_eq!(
-        session.run(indoc! { r#"
-            fn factorial(n) {
-                if n <= 1 {
-                    1
-                } else {
-                    n * factorial(n - 1)
-                }
-            }
+        run_native_int_int(&session, module_id, "factorial_rec_int", 5),
+        120,
+    );
+    assert_eq!(
+        run_native_int_int(&session, module_id, "factorial_iter_int", 5),
+        120,
+    );
+}
 
-            factorial(5)
-            "# }),
-        int(120),
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn fibonacci() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/fibonacci.fer"))
+        .module_id;
+    assert_eq!(
+        run_native_int_int(&session, module_id, "fibonacci_iter", 16),
+        987,
+    );
+    assert_eq!(
+        run_native_int_int(&session, module_id, "fibonacci_rec", 16),
+        987,
     );
 }
 
@@ -42,43 +60,67 @@ fn factorial() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn quicksort() {
     let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/quicksort.fer"))
+        .module_id;
+    let array_ty = array_type(int_type());
+    let input = int_a![5, 3, 8, 1, 2, 7, 4, 11, 0];
     assert_eq!(
-        session.run(indoc! { r#"
-            fn swap(a, i, j) {
-                let temp = a[i];
-                a[i] = a[j];
-                a[j] = temp
-            }
-
-            fn quicksort(a, lo, hi) {
-                if lo >= hi or lo < 0 {
-                    ()
-                } else {
-                    let p = partition(a, lo, hi);
-                    quicksort(a, lo, p - 1);
-                    quicksort(a, p + 1, hi)
-                }
-            }
-
-            fn partition(a, lo, hi) {
-                let pivot = a[hi];
-                let mut i = lo;
-
-                for j in lo..hi {
-                    if a[j] < pivot {
-                        swap(a, i, j);
-                        i = i + 1
-                    }
-                };
-
-                swap(a, i, hi);
-
-                i
-            }
-
-            let mut a = [5, 4, 11, 3, 2, 1, 0, 7];
-            quicksort(a, 0, array_len(a) - 1);
-            a"# }),
-        int_a![0, 1, 2, 3, 4, 5, 7, 11],
+        call_fn!(session.session(), module_id, "quicksort_int_a", [input => array_ty] -> array_ty)
+            .unwrap(),
+        int_a![0, 1, 2, 3, 4, 5, 7, 8, 11],
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn sieve() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/sieve.fer"))
+        .module_id;
+
+    let array_ty = array_type(int_type());
+    let primes_up_to = |n| {
+        call_fn!(session.session(), module_id, "primes_up_to", [n => int_type()] -> array_ty)
+            .unwrap()
+    };
+    assert_eq!(primes_up_to(int(10)), int_a![2, 3, 5, 7]);
+    assert_eq!(
+        primes_up_to(int(30)),
+        int_a![2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
+    );
+
+    let is_prime = |n| run_native_int_bool(&session, module_id, "is_prime", n);
+    assert_eq!(is_prime(1), false);
+    assert_eq!(is_prime(4), false);
+    assert_eq!(is_prime(100), false);
+    assert_eq!(is_prime(2), true);
+    assert_eq!(is_prime(97), true);
+
+    let prime_count = |n| run_native_int_int(&session, module_id, "prime_count", n);
+    assert_eq!(prime_count(10), 4);
+    assert_eq!(prime_count(100), 25);
+    // assert_eq!(prime_count(1_000), 168);
+    // assert_eq!(prime_count(10_000), 1229);
+}
+
+// helpers for calling Ferlium functions from Rust
+
+fn run_native_int_int(
+    session: &TestSession,
+    module_id: ModuleId,
+    name: &str,
+    input: isize,
+) -> isize {
+    run_fn_native!(session.session(), module_id, name, [input => isize] -> isize).unwrap()
+}
+
+fn run_native_int_bool(
+    session: &TestSession,
+    module_id: ModuleId,
+    name: &str,
+    input: isize,
+) -> bool {
+    run_fn_native!(session.session(), module_id, name, [input => isize] -> bool).unwrap()
 }
