@@ -87,7 +87,13 @@ This use [`nextest`](https://nexte.st/) which is way faster than `cargo test`.
 Currently the compiler can only be used from a single thread to avoid deadlocks when accessing the interned type universe.
 Currently the compiler will panic if the corresponding lock is held when being accessed in write.
 
-## License
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to contribute.
+
+## License and trademark
 
 Ferlium is copyrighted by Enlightware GmbH and licensed under the [Apache 2.0 license](LICENSE).
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+"Ferlium" is a trademark of Enlightware GmbH.
+See [TRADEMARK.md](TRADEMARK.md) for permitted uses.
