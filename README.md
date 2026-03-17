@@ -97,3 +97,5 @@ Ferlium is copyrighted by Enlightware GmbH and licensed under the [Apache 2.0 li
 
 "Ferlium" is a trademark of Enlightware GmbH.
 See [TRADEMARK.md](TRADEMARK.md) for permitted uses.
+
+The tests in `tests/language/` constitute the official [Ferlium Conformance Suite](CONFORMANCE.md).
