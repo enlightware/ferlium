@@ -482,7 +482,13 @@ fn process_input(
             .get_value_by_name(&Path::single_str(&mod_name))
         {
             for sym in module.own_symbols() {
-                if !local_symbols.contains(&sym) && !reverse_uses.contains_key(&sym) {
+                if !local_symbols.contains(&sym)
+                    && !reverse_uses.contains_key(&sym)
+                    // exclude lambda functions
+                    && !sym.starts_with("$")
+                    // exclude trait implementations
+                    && !sym.contains("::")
+                {
                     reverse_uses.insert(sym, Path::single_str(&mod_name));
                 }
             }
@@ -491,8 +497,8 @@ fn process_input(
 
     // Initialize module with use directives
     let mut module = new_module_using_std(session.modules().next_id());
-    for (sym_name, mod_name) in reverse_uses {
-        module.add_explicit_use(sym_name, mod_name, Location::new_synthesized());
+    for (sym, path) in reverse_uses {
+        module.add_explicit_use(sym, path, Location::new_synthesized());
     }
 
     // AST debug output for REPL
