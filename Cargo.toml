@@ -21,6 +21,7 @@ test-log = "0.2.16"
 pulldown-cmark = "0.13"
 directories = "6"
 sha2 = "0.10"
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 rustyline = "17.0.0"
@@ -67,3 +68,7 @@ wasm-bindgen = "0.2.97"
 [lints.rust]
 # As we are developing, some assignments may be unused temporarily.
 unused_assignments = "allow"
+
+[[bench]]
+name = "benches"
+harness = false
