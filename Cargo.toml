@@ -21,12 +21,12 @@ test-log = "0.2.16"
 pulldown-cmark = "0.13"
 directories = "6"
 sha2 = "0.10"
-criterion = { version = "0.8", features = ["html_reports"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 rustyline = "17.0.0"
 ariadne = "0.6"
 env_logger ="0.11.5"
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.50"
