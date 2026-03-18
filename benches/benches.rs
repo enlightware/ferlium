@@ -10,7 +10,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use ferlium::{
     CompilerSession, Path, call_fn, run_fn_native,
-    std::{array::array_type, math::int_type},
+    std::{array::array_type, math::int_type, string::String as Str},
     value::Value,
 };
 
@@ -104,6 +104,26 @@ fn bench_sieve(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_csv(c: &mut Criterion) {
+    // Prepare
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            include_str!("../tests/modules/csv.fer"),
+            "csv.fer",
+            Path::single_str("csv"),
+        )
+        .unwrap()
+        .module_id;
+
+    // Bench evaluation
+    let mut group = c.benchmark_group("runtime");
+    group.bench_function("csv_table(500)", |b| {
+        b.iter(|| run_fn_native!(&session, module_id, "csv_table", [500 => isize] -> Str).unwrap())
+    });
+    group.finish();
+}
+
 fn int_a(values: impl Into<Vec<isize>>) -> Value {
     Value::native(ferlium::std::array::Array::from_vec(
         values.into().into_iter().map(Value::native).collect(),
@@ -123,6 +143,6 @@ fn lcg_seq(n: usize, seed: usize) -> Vec<isize> {
 criterion_group!(
     name = runtime;
     config = Criterion::default().sample_size(50);
-    targets = bench_new_session, bench_quicksort, bench_fibonacci, bench_sieve
+    targets = bench_new_session, bench_quicksort, bench_fibonacci, bench_sieve, bench_csv
 );
 criterion_main!(runtime);

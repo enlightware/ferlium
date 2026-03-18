@@ -82,6 +82,13 @@ make test-local
 
 This use [`nextest`](https://nexte.st/) which is way faster than `cargo test`.
 
+## Running benchmarks
+
+To run the benchmarks locally, use:
+```
+cargo bench
+```
+
 ## Limitations
 
 Currently the compiler can only be used from a single thread to avoid deadlocks when accessing the interned type universe.

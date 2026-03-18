@@ -1,0 +1,13 @@
+fn csv_row(id, name, value) {
+    f"{id},{name},{value}\n"
+}
+
+fn csv_table(n) {
+    let mut out = "id,name,value\n";
+    for i in 1..=n {
+        let item_name = f"item_{i}";
+        let new_row = csv_row(i, item_name, i * i);
+        out = f"{out}{new_row}"
+    };
+    out
+}

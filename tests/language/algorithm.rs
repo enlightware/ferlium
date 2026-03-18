@@ -15,7 +15,7 @@ use ferlium::{
     call_fn,
     module::ModuleId,
     run_fn_native,
-    std::{array::array_type, math::int_type},
+    std::{array::array_type, math::int_type, string::String as Str},
     value::Value,
 };
 
@@ -105,6 +105,20 @@ fn sieve() {
     // assert_eq!(prime_count(10_000), 1229);
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn csv() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/csv.fer"))
+        .module_id;
+
+    assert_eq!(
+        run_native_int_string(&session, module_id, "csv_table", 3).as_ref(),
+        "id,name,value\n1,item_1,1\n2,item_2,4\n3,item_3,9\n",
+    );
+}
+
 // helpers for calling Ferlium functions from Rust
 
 fn run_native_int_int(
@@ -123,4 +137,13 @@ fn run_native_int_bool(
     input: isize,
 ) -> bool {
     run_fn_native!(session.session(), module_id, name, [input => isize] -> bool).unwrap()
+}
+
+fn run_native_int_string(
+    session: &TestSession,
+    module_id: ModuleId,
+    name: &str,
+    input: isize,
+) -> Str {
+    run_fn_native!(session.session(), module_id, name, [input => isize] -> Str).unwrap()
 }
