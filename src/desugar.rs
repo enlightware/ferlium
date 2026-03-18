@@ -694,7 +694,13 @@ impl PExpr {
                                     ),
                                     var_name.1,
                                 ),
-                                body.desugar(ctx, modules_used)?,
+                                {
+                                    let env_size = ctx.locals.len();
+                                    ctx.locals.push(var_name.0);
+                                    let desugared_body = body.desugar(ctx, modules_used)?;
+                                    ctx.locals.truncate(env_size);
+                                    desugared_body
+                                },
                             ),
                             (
                                 Pattern::new(

@@ -1640,6 +1640,16 @@ fn string_formatting() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_formatting_in_loops() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(r#"let mut s = ""; for i in 0..2 { s = f"{s}{i}" }; s"#),
+        string("01")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn to_string() {
     let mut session = TestSession::new();
     assert_eq!(session.run("to_string(true)"), string("true"));
