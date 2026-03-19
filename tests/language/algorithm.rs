@@ -109,6 +109,20 @@ fn sieve() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn rle_encode() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/rle_encode.fer"))
+        .module_id;
+
+    assert_eq!(
+        run_native_string_string(&session, module_id, "rle_encode_string", "aabccccdde").as_ref(),
+        "a2b1c4d2e1",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn csv() {
     let mut session = TestSession::new();
     let module_id = session
@@ -175,4 +189,14 @@ fn run_native_int_string(
     input: isize,
 ) -> Str {
     run_fn_native!(session.session(), module_id, name, [input => isize] -> Str).unwrap()
+}
+
+fn run_native_string_string(
+    session: &TestSession,
+    module_id: ModuleId,
+    name: &str,
+    input: &str,
+) -> Str {
+    let input = Str::new(input);
+    run_fn_native!(session.session(), module_id, name, [input => Str] -> Str).unwrap()
 }

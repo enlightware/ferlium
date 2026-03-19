@@ -109,6 +109,30 @@ fn bench_sieve(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_rle_encode(c: &mut Criterion) {
+    // Prepare
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            include_str!("../tests/modules/rle_encode.fer"),
+            "rle_encode.fer",
+            Path::single_str("rle_encode"),
+        )
+        .unwrap()
+        .module_id;
+    let input = Str::new(&"aabccccccc".repeat(50));
+
+    // Bench evaluation
+    let mut group = c.benchmark_group("runtime");
+    group.bench_function("rle_encode(500)", |b| {
+        b.iter(|| {
+            let input = input.clone();
+            run_fn_native!(&session, module_id, "rle_encode_string", [input => Str] -> Str).unwrap()
+        })
+    });
+    group.finish();
+}
+
 fn bench_csv(c: &mut Criterion) {
     // Prepare
     let mut session = CompilerSession::new();
@@ -204,6 +228,6 @@ fn lcg_seq(n: usize, seed: usize) -> Vec<isize> {
 criterion_group!(
     name = runtime;
     config = Criterion::default().sample_size(50);
-    targets = bench_new_session, bench_quicksort, bench_fibonacci, bench_sieve, bench_csv, bench_bank_account
+    targets = bench_new_session, bench_quicksort, bench_fibonacci, bench_sieve, bench_rle_encode, bench_csv, bench_bank_account
 );
 criterion_main!(runtime);
