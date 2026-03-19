@@ -263,7 +263,7 @@ pub fn emit_module(
         let header = output
             .impls
             .impl_header_to_string_by_id(local_impl_id, module_env);
-        let header = header.strip_suffix("\n").unwrap();
+        let header = header.strip_suffix("\n").unwrap_or_else(|| &header);
         let impl_type = if is_concrete { "Concrete" } else { "Blanket" };
         log::debug!("Emitted {impl_type} {header}");
     }
