@@ -251,9 +251,21 @@ impl PTraitImpl {
                     .map(|(f, _dep_graph)| f)
             })
             .collect::<Result<_, _>>()?;
+        let for_ty = self
+            .for_tys
+            .map(|tys| {
+                tys.into_iter()
+                    .map(|(ty, span)| {
+                        ty.desugar(span, false, env, modules_used)
+                            .map(|t| (t, span))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         Ok(DTraitImpl {
             span: self.span,
             trait_name: self.trait_name,
+            for_tys: for_ty,
             functions,
         })
     }

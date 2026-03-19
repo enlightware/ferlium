@@ -119,6 +119,11 @@ pub trait TypeLike {
             && self.inner_mut_ty_vars().is_empty()
             && self.inner_effect_vars().is_empty()
     }
+
+    /// Return true if the type contains at least one type or effect variable
+    fn is_variable(&self) -> bool {
+        !self.is_constant()
+    }
 }
 
 pub fn instantiate_types<T: TypeLike>(tys: &[T], subst: &InstSubstitution) -> Vec<T> {

@@ -498,6 +498,9 @@ pub type DModuleFunction = ModuleFunction<Desugared>;
 #[derive(Debug, Clone)]
 pub struct TraitImpl<P: Phase> {
     pub trait_name: UstrSpan,
+    /// Explicit concrete types for the implementation, e.g. `impl Ord for S`.
+    /// When `None`, the types are fully inferred from the functions signatures.
+    pub for_tys: Option<Vec<TypeSpan<P>>>,
     pub functions: Vec<ModuleFunction<P>>,
     pub span: Location,
 }
@@ -623,11 +626,30 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for Module<P> {
             writeln!(f, "Trait implementations:")?;
             for TraitImpl {
                 trait_name,
+                for_tys: for_ty,
                 functions,
                 ..
             } in self.impls.iter()
             {
-                writeln!(f, "  impl {} {{", trait_name.0)?;
+                if let Some(tys) = for_ty {
+                    if let [ty] = &tys[..] {
+                        writeln!(
+                            f,
+                            "  impl {} for {} {{",
+                            trait_name.0,
+                            ty.0.format_with(env)
+                        )?;
+                    } else {
+                        writeln!(
+                            f,
+                            "  impl {} for <{}> {{",
+                            trait_name.0,
+                            tys.iter().map(|ty| ty.0.format_with(env)).join(", ")
+                        )?;
+                    }
+                } else {
+                    writeln!(f, "  impl {} {{", trait_name.0)?;
+                }
                 for ModuleFunction {
                     name,
                     args,

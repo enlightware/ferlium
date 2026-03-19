@@ -63,10 +63,24 @@ TraitImpl: TraitImpl = {
     <l:@L> "impl" <trait_name:Sp<UIdentifier>> "{" <functions:Function*> "}" <r:@R> => {
         TraitImpl {
             trait_name,
+            for_tys: None,
             functions,
             span: span(l, r, source_id),
         }
-    }
+    },
+    <l:@L> "impl" <trait_name:Sp<UIdentifier>> "for" <for_tys:TraitImplForType> "{" <functions:Function*> "}" <r:@R> => {
+        TraitImpl {
+            trait_name,
+            for_tys: Some(for_tys),
+            functions,
+            span: span(l, r, source_id),
+        }
+    },
+}
+
+TraitImplForType: Vec<TypeSpan> = {
+    "<" <tys:Sep<Sp<Type<"", "">>, ",">> ">" => tys,
+    <ty:Sp<Type<"", "">>> => vec![ty],
 }
 
 ModuleFunction: Module = {
@@ -123,6 +137,7 @@ pub HoledType: Type = {
     Type<"P", "R">
 }
 
+// P: placeholder allowed, R: return type context
 Type<P, R>: Type = {
     PlaceholderType if P != "",
     PathType,

@@ -30,8 +30,8 @@ use crate::{
     internal_compilation_error,
     ir::{self, Immediate, Node},
     module::{
-        ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv,
-        ModuleFunction, ModuleFunctionSpans, ModuleId, Modules, id::Id,
+        ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module,
+        ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, Modules, TraitImpl, id::Id,
     },
     mutability::MutType,
     std::{
@@ -50,7 +50,7 @@ use crate::{
     },
     type_visitor::{TyVarsCollector, collect_ty_vars},
     typing_env::TypingEnv,
-    value::Value,
+    value::{Value, build_dictionary_value},
 };
 
 fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompilationError> {
@@ -67,6 +67,13 @@ fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompila
     Ok(())
 }
 
+/// Data for a pre-registered stub implementation for `impl Trait for ConcreteType`.
+struct ImplStubData {
+    id: LocalImplId,
+    input_tys: Vec<Type>,
+    method_ids: Vec<LocalFunctionId>,
+}
+
 /// Emit IR for the given module
 pub fn emit_module(
     source: ast::PModule,
@@ -74,6 +81,9 @@ pub fn emit_module(
     others: &Modules,
     merge_with: Option<&Module>,
 ) -> Result<Module, InternalCompilationError> {
+    use ir::Node as N;
+    use ir::NodeKind as K;
+
     // Preliminary: Make sure no name is defined multiple times.
     validate_name_uniqueness(&source)?;
 
@@ -88,6 +98,72 @@ pub fn emit_module(
         },
     );
     let (source, sorted_sccs) = source.desugar(&mut output, others)?;
+
+    // Pre-registration pass: for trait impls with an explicit `for ConcreteType` annotation,
+    // register a stub implementation before processing any function SCCs. This allows module
+    // functions to use trait methods from these impls regardless of source order.
+    let mut concrete_impl_stubs: HashMap<usize, ImplStubData> = HashMap::new();
+    for (imp_idx, imp) in source.impls.iter().enumerate() {
+        if let Some(tys) = &imp.for_tys {
+            let input_tys: Vec<_> = tys.iter().map(|(ty, _)| *ty).collect();
+            if input_tys.iter().any(Type::is_variable) {
+                panic!("Generic type found in impl for concrete type.");
+            }
+            let module_env = ModuleEnv::new(&output, others);
+            let Some(trait_ref) = module_env.get_trait_ref(imp.trait_name)? else {
+                continue; // Trait not found; the error will be reported in the main impl loop
+            };
+            if trait_ref.output_type_count() != 0 {
+                return Err(internal_compilation_error!(Unsupported {
+                    span: imp.span,
+                    reason:
+                        "Trait with output types are not yet supported for manual specification"
+                            .to_string()
+                }));
+            }
+            let output_tys = vec![];
+            // Pre-allocate placeholder functions for each trait method.
+            let fn_defs = trait_ref.instantiate_for_tys(&input_tys, &output_tys);
+            let mut method_ids = Vec::with_capacity(fn_defs.len());
+            for def in fn_defs {
+                // Placeholder ModuleFunction that will be replaced later.
+                let placeholder = b(ScriptFunction::new(
+                    N::new(
+                        K::Immediate(Immediate::new(Value::unit())),
+                        def.ty_scheme.ty.ret,
+                        def.ty_scheme.ty.effects.clone(),
+                        Location::new_synthesized(),
+                    ),
+                    def.arg_names.clone(),
+                ));
+                let module_fn = ModuleFunction::new_without_spans_nor_locals(
+                    def,
+                    Rc::new(RefCell::new(placeholder)),
+                );
+                method_ids.push(output.add_function_anonymous(module_fn));
+            }
+            // Build the trait impl and fill it with placeholders.
+            let dictionary_value = build_dictionary_value(&method_ids, output.impls.module_id);
+            let dictionary_ty = output.computer_dictionary_ty(&method_ids);
+            let stub = TraitImpl::new(
+                output_tys,
+                method_ids.clone(),
+                dictionary_value,
+                dictionary_ty,
+                true,
+            );
+            let key = ConcreteTraitImplKey::new(trait_ref, input_tys.clone());
+            let id = output.impls.add_concrete_struct(key, stub);
+            concrete_impl_stubs.insert(
+                imp_idx,
+                ImplStubData {
+                    id,
+                    method_ids,
+                    input_tys,
+                },
+            );
+        }
+    }
 
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
@@ -108,7 +184,7 @@ pub fn emit_module(
     }
 
     // Process trait implementations
-    for imp in &source.impls {
+    for (imp_idx, imp) in source.impls.iter().enumerate() {
         // Validate the function mapping.
         let module_env = ModuleEnv::new(&output, others);
         let trait_ref = module_env
@@ -162,12 +238,27 @@ pub fn emit_module(
         let trait_ctx = EmitTraitCtx {
             trait_ref: trait_ref.clone(),
             span: imp.span,
+            stub_data: concrete_impl_stubs.get(&imp_idx),
         };
         let emit_output = emit_functions(&mut output, functions, others, Some(trait_ctx))?.unwrap();
 
-        // Add the implementation using the just emitted local functions.
+        // Register or update the implementation.
         let is_concrete = emit_output.ty_var_count == 0;
-        let local_impl_id = output.add_emitted_impl(trait_ref, emit_output);
+        let local_impl_id = if let Some(stub_data) = concrete_impl_stubs.get(&imp_idx) {
+            assert_eq!(
+                &emit_output.functions,
+                &output.impls.data[stub_data.id.as_index()].methods
+            );
+            // output_tys must be empty — stubs are only pre-registered for traits with no output types.
+            assert!(emit_output.output_tys.is_empty());
+            // Recompute dictionary_ty now that the function definitions hold the real concrete types.
+            let new_dictionary_ty = output.computer_dictionary_ty(&emit_output.functions);
+            let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
+            assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
+            stub_data.id
+        } else {
+            output.add_emitted_impl(trait_ref, emit_output)
+        };
         let module_env = ModuleEnv::new(&output, others);
         let header = output
             .impls
@@ -180,9 +271,11 @@ pub fn emit_module(
     Ok(output)
 }
 
-struct EmitTraitCtx {
+/// Context passed to emit_functions when a trait implementation is being emitted.
+struct EmitTraitCtx<'a> {
     trait_ref: TraitRef,
     span: Location,
+    stub_data: Option<&'a ImplStubData>,
 }
 
 pub(crate) struct EmitTraitOutput {
@@ -214,6 +307,18 @@ where
     let trait_output = if let Some(trait_ctx) = &trait_ctx {
         let trait_ref = &trait_ctx.trait_ref;
         let input_tys = ty_inf.fresh_type_var_tys(trait_ref.input_type_count() as usize);
+        if let Some(stub_data) = trait_ctx.stub_data {
+            // For a stub implementation, equate the fresh input types with the concrete types from the impl annotation.
+            assert_eq!(input_tys.len(), stub_data.input_tys.len());
+            for (ty_var, concrete_ty) in input_tys.iter().zip(stub_data.input_tys.iter()) {
+                ty_inf.add_same_type_constraint(
+                    *ty_var,
+                    trait_ctx.span,
+                    *concrete_ty,
+                    trait_ctx.span,
+                );
+            }
+        }
         let output_tys = ty_inf.fresh_type_var_tys(trait_ref.output_type_count() as usize);
         for constraint in &trait_ctx.trait_ref.constraints {
             ty_inf.add_pub_constraint(constraint.instantiate_location_cloned(trait_ctx.span));
@@ -325,7 +430,15 @@ where
             spans: Some(spans),
             locals: vec![],
         };
-        let id = if trait_ctx.is_some() {
+        let id = if let Some(placeholder_ids) = trait_ctx
+            .as_ref()
+            .and_then(|tc| tc.stub_data.as_ref().map(|tys| &tys.method_ids))
+        {
+            // Reuse the pre-allocated stub slot so existing StaticApply nodes remain valid.
+            let placeholder_id = placeholder_ids[local_fns.len()];
+            output.functions[placeholder_id.as_index()] = descr;
+            placeholder_id
+        } else if trait_ctx.is_some() {
             output.add_function_anonymous(descr)
         } else {
             output.add_function(name.0, descr)

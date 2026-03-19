@@ -26,7 +26,7 @@ use indoc::indoc;
 
 use ustr::ustr;
 
-use crate::harness::{TestSession, float, int};
+use crate::harness::{TestSession, float, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -564,6 +564,29 @@ fn variant_type_alias_in_function_signature() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impl_for_specified() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct S(string)
+            impl Ord for S {
+                fn cmp(self, other: S) {
+                    cmp(len(self.0), len(other.0))
+                }
+            }
+            impl Cast for <int, S> {
+                fn cast(self) -> S {
+                    S(f"hello {self}")
+                }
+            }
+            ((1: int) as S).0
+        "# }),
+        string("hello 1")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_solver_recursion_limit() {
     let mut session = TestSession::new();
     let code = indoc! { r#"
@@ -585,4 +608,26 @@ fn trait_solver_recursion_limit() {
             )
         }
     }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_fn_circular_deps() {
+    let mut session = TestSession::new();
+    session.compile(indoc! { r#"
+        struct S(string)
+        impl Ord for S {
+            fn cmp(self, other: S) {
+                cmp(ls(self.0), ls(other.0))
+            }
+        }
+        fn ls(s: string) -> int {
+            len(s)
+        }
+        fn test() {
+            let a = S("hello");
+            let b = S("world!");
+            cmp(a, b)
+        }
+    "# });
 }

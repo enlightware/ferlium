@@ -765,7 +765,7 @@ impl Module {
     }
     */
 
-    fn computer_dictionary_ty(&self, function_ids: &[LocalFunctionId]) -> Type {
+    pub(crate) fn computer_dictionary_ty(&self, function_ids: &[LocalFunctionId]) -> Type {
         let tys: Vec<_> = function_ids
             .iter()
             .map(|id| {

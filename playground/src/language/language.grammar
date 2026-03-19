@@ -49,7 +49,12 @@ Function {
 }
 
 TraitImpl {
-    kw<'impl'> Identifier '{' Function* '}'
+    kw<'impl'> Identifier (kw<'for'> traitImplForType)? '{' Function* '}'
+}
+
+traitImplForType {
+    TypeNoRecordVariant
+    | '<' (TypeNoRecordVariant ',')* TypeNoRecordVariant? '>'
 }
 
 TypeDef {
