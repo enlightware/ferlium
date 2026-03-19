@@ -1,0 +1,98 @@
+struct Account {
+	name: string,
+	birthdate: int,
+	amount: int,
+	transactions: [{ type: Debit | Credit, amount: int }]
+}
+
+impl Ord {
+	fn cmp(lhs: Account, rhs: Account) {
+		cmp(lhs.name, rhs.name)
+	}
+}
+
+fn richest(accounts) {
+	let mut name = "";
+	let mut amount = 0;
+	for account in accounts {
+		if account.amount > amount {
+			name = account.name;
+			amount = account.amount;
+		}
+	};
+	name
+}
+
+fn most_active(accounts) {
+	let mut name = "";
+	let mut activity = 0;
+	for account in accounts {
+		let count = len(account.transactions);
+		if count > activity {
+			name = account.name;
+			activity = count;
+		}
+	};
+	name
+}
+
+fn test_data() {
+	[
+		Account {
+			name: "Bob",
+			birthdate: 1978,
+			amount: 20,
+			transactions: [
+				{ type: Credit, amount: 10 },
+				{ type: Debit, amount: 2 },
+				{ type: Credit, amount: 5 },
+				{ type: Credit, amount: 7 },
+			]
+		},
+        Account {
+			name: "Eve",
+			birthdate: 1984,
+			amount: 1,
+			transactions: [
+				{ type: Credit, amount: 15 },
+				{ type: Debit, amount: 2 },
+                { type: Debit, amount: 3 },
+                { type: Debit, amount: 4 },
+                { type: Debit, amount: 5 },
+			]
+		},
+        Account {
+			name: "Alice",
+			birthdate: 1982,
+			amount: 2,
+			transactions: [
+				{ type: Credit, amount: 4 },
+				{ type: Debit, amount: 2 },
+			]
+		},
+	]
+}
+
+fn richest_person() {
+	richest(test_data())
+}
+
+fn most_active_person() {
+	most_active(test_data())
+}
+
+fn assert_consistency() {
+    for account in test_data() {
+        let mut balance = 0;
+        for transaction in account.transactions {
+            match transaction.type {
+                Credit => balance = balance + transaction.amount,
+                Debit => balance = balance - transaction.amount,
+            }
+        };
+        if balance != account.amount {
+            let name = account.name;
+            panic(f"Inconsistent account data for {name}")
+        }
+    };
+}

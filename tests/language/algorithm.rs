@@ -9,7 +9,9 @@
 
 use test_log::test;
 
-use crate::harness::{TestSession, int};
+use indoc::indoc;
+
+use crate::harness::{TestSession, int, string};
 
 use ferlium::{
     call_fn,
@@ -116,6 +118,33 @@ fn csv() {
     assert_eq!(
         run_native_int_string(&session, module_id, "csv_table", 3).as_ref(),
         "id,name,value\n1,item_1,1\n2,item_2,4\n3,item_3,9\n",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn bank_account() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module("quicksort", include_str!("../modules/quicksort.fer"))
+        .unwrap();
+    session
+        .try_compile_module("account", include_str!("../modules/bank_account.fer"))
+        .unwrap();
+
+    session.run("account::assert_consistency()");
+    assert_eq!(session.run("account::richest_person()"), string("Bob"));
+    assert_eq!(session.run("account::most_active_person()"), string("Eve"));
+    // FIXME: this cannot be in bank_account.fer due to issue #111
+    assert_eq!(
+        session.run(indoc! { r#"
+            let data = account::test_data();
+            let json = json_encode(data);
+            let decoded: [account::Account] = json_decode(json);
+            let sorted = quicksort::quicksort_array(decoded);
+            sorted[len(sorted) - 1].name
+		"# }),
+        string("Eve")
     );
 }
 

@@ -30,8 +30,12 @@ fn quicksort(a, lo, hi) {
     }
 }
 
-fn quicksort_int_a(a: [int]) {
+fn quicksort_array(a) {
     let mut temp = a;
     quicksort(temp, 0, len(temp) - 1);
     temp
+}
+
+fn quicksort_int_a(a: [int]) {
+    quicksort_array(a)
 }

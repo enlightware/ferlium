@@ -8,11 +8,16 @@
 //
 
 use criterion::{Criterion, criterion_group, criterion_main};
+
+use indoc::indoc;
+
 use ferlium::{
     CompilerSession, Path, call_fn, run_fn_native,
     std::{array::array_type, math::int_type, string::String as Str},
     value::Value,
 };
+
+// Benchmarks
 
 fn bench_new_session(c: &mut Criterion) {
     let mut group = c.benchmark_group("compilation");
@@ -124,6 +129,60 @@ fn bench_csv(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_bank_account(c: &mut Criterion) {
+    // Prepare
+    let mut session = CompilerSession::new();
+    let compile = |session: &mut CompilerSession| {
+        session
+            .compile(
+                include_str!("../tests/modules/quicksort.fer"),
+                "quicksort.fer",
+                Path::single_str("quicksort"),
+            )
+            .unwrap();
+        session
+            .compile(
+                include_str!("../tests/modules/bank_account.fer"),
+                "bank_account.fer",
+                Path::single_str("account"),
+            )
+            .unwrap();
+        // FIXME: this cannot be in bank_account.fer due to issue #111
+        session
+            .compile(
+                indoc! { r#"
+                    fn test() {
+                        let data = account::test_data();
+                        let json = json_encode(data);
+                        let decoded: [account::Account] = json_decode(json);
+                        let sorted = quicksort::quicksort_array(decoded);
+                        sorted[len(sorted) - 1].name
+                    }
+                "# },
+                "test.fer",
+                Path::single_str("test"),
+            )
+            .unwrap()
+            .module_id
+    };
+
+    // Bench compilation
+    let mut group = c.benchmark_group("compilation");
+    group.bench_function("bank_account", |b| b.iter(|| compile(&mut session)));
+    group.finish();
+
+    // Bench evaluation
+    let mut group = c.benchmark_group("runtime");
+    group.sample_size(20);
+    let module_id = compile(&mut session);
+    group.bench_function("bank_account", |b| {
+        b.iter(|| run_fn_native!(&session, module_id, "test", [] -> Str).unwrap())
+    });
+    group.finish();
+}
+
+// Support functions
+
 fn int_a(values: impl Into<Vec<isize>>) -> Value {
     Value::native(ferlium::std::array::Array::from_vec(
         values.into().into_iter().map(Value::native).collect(),
@@ -140,9 +199,11 @@ fn lcg_seq(n: usize, seed: usize) -> Vec<isize> {
         .collect()
 }
 
+// Criterion setup
+
 criterion_group!(
     name = runtime;
     config = Criterion::default().sample_size(50);
-    targets = bench_new_session, bench_quicksort, bench_fibonacci, bench_sieve, bench_csv
+    targets = bench_new_session, bench_quicksort, bench_fibonacci, bench_sieve, bench_csv, bench_bank_account
 );
 criterion_main!(runtime);
