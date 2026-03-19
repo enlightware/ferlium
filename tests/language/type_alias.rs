@@ -118,3 +118,10 @@ fn type_aliases() {
     "# });
     assert!(module.get_type_alias(ustr("MyInt")).is_some());
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn keyword_type_is_acceptable() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run("({type: 1}: {type: int}).type"), int(1));
+}

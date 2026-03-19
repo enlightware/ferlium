@@ -206,7 +206,7 @@ RecordTypeFields<P>: Type = {
 }
 
 RecordTypeField<P>: (UstrSpan, TypeSpan) = {
-    <n:Sp<UIdentifier>> ":" <t:Sp<Type<P, "">>> => (n, t),
+    <n:Sp<FieldIdentifier>> ":" <t:Sp<Type<P, "">>> => (n, t),
 }
 
 VariantType<P, R>: Type = {
@@ -471,7 +471,7 @@ UnaryExpr<NoStruct> = {
 
 SuffixExpr<NoStruct> = {
     AtomExpr<NoStruct>,
-    <e:Es<SuffixExpr<NoStruct>>> "." <f:Sp<UIdentifier>> => FieldAccess(boxed(e), f),
+    <e:Es<SuffixExpr<NoStruct>>> "." <f:Sp<FieldIdentifier>> => FieldAccess(boxed(e), f),
     <e:Es<SuffixExpr<NoStruct>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
     <e:Es<SuffixExpr<NoStruct>>> "[" <i:Expr> "]" => Index(boxed(e), boxed(i)),
     <e:Es<SuffixExpr<NoStruct>>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => Apply(boxed(e), a, UnnamedArg::None),
@@ -588,7 +588,7 @@ RecordLiteralPattern: (LiteralValue, IrType) = {
 }
 
 RecordLiteralField: (UstrSpan, (LiteralValue, IrType)) = {
-    <n:Sp<UIdentifier>> ":" <p:LiteralPattern> => (n, p),
+    <n:Sp<FieldIdentifier>> ":" <p:LiteralPattern> => (n, p),
 }
 
 ScalarLiteralPattern: (LiteralValue, IrType) = {
@@ -658,11 +658,11 @@ RecordField: (UstrSpan, Expr) = {
 }
 
 RecordExplicitField: (UstrSpan, Expr) = {
-    <n:Sp<UIdentifier>> ":" <e:Expr> => (n, e),
+    <n:Sp<FieldIdentifier>> ":" <e:Expr> => (n, e),
 }
 
 RecordAbbrevField: (UstrSpan, Expr) = {
-    <n:Sp<UIdentifier>> => (n, Expr::new(Identifier(Path::single_tuple(n)), n.1)),
+    <n:Sp<FieldIdentifier>> => (n, Expr::new(Identifier(Path::single_tuple(n)), n.1)),
 }
 
 // Struct literals support both explicit and shorthand field syntax
@@ -673,9 +673,9 @@ StructExprImpl: Vec<(UstrSpan, Expr)> = {
 
 StructField: (UstrSpan, Expr) = {
     // Explicit field assignment: field_name: expression
-    <n:Sp<UIdentifier>> ":" <e:Expr> => (n, e),
+    <n:Sp<FieldIdentifier>> ":" <e:Expr> => (n, e),
     // Shorthand syntax: field_name (equivalent to field_name: field_name)
-    <n:Sp<UIdentifier>> => (n, Expr::new(Identifier(Path::single_tuple(n)), n.1)),
+    <n:Sp<FieldIdentifier>> => (n, Expr::new(Identifier(Path::single_tuple(n)), n.1)),
 }
 
 PropertyPath: (Path, Ustr) = {
@@ -797,6 +797,12 @@ LogicalAndOp: () = {
 LogicalOrOp: () = {
     "or" => (),
     <l:@L> "||" <r:@R> =>? error("for readability, use the \"or\" keyword instead of the C-style || operator".into(), span(l, r, source_id)),
+}
+
+// Like UIdentifier, but also accepts some contextual keywords valid as field names.
+FieldIdentifier: Ustr = {
+    UIdentifier => <>,
+    "type" => ustr("type"),
 }
 
 UIdentifier: Ustr = {

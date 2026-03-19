@@ -157,7 +157,7 @@ recordType {
 }
 
 recordTypeField {
-    FieldName { Identifier } ':' TypeNoRecordVariant
+    FieldName { fieldIdentifier } ':' TypeNoRecordVariant
 }
 
 variantTypeAllowRecord {
@@ -309,7 +309,7 @@ suffixExpr {
 }
 
 Projection {
-    suffixExpr '.' Identifier
+    suffixExpr '.' fieldIdentifier
     | suffixExpr '.' UInt
 }
 
@@ -383,11 +383,11 @@ RecordField {
 }
 
 recordExplicitField {
-    FieldName { Identifier } ':' expr
+    FieldName { fieldIdentifier } ':' expr
 }
 
 recordAbbrevField {
-    FieldName { Identifier }
+    FieldName { fieldIdentifier }
 }
 
 exprOptComma {
@@ -413,6 +413,10 @@ identifiersOrMoreOptComma {
 
 identifierOrMore {
     Identifier | '..'
+}
+
+fieldIdentifier {
+    Identifier | kw<'type'>
 }
 
 exprArgsOptComma {
@@ -474,7 +478,7 @@ recordLiteralPattern {
 }
 
 recordLiteralField {
-    FieldName { Identifier } ':' literalPattern
+    FieldName { fieldIdentifier } ':' literalPattern
 }
 
 Literal {
