@@ -25,7 +25,7 @@ use crate::{
     std::{
         bits::BITS_TRAIT,
         cast::CAST_TRAIT,
-        ordering::{ORD_TRAIT, ORDERING_EQUAL, ORDERING_GREATER, ORDERING_LESS},
+        ordering::{ORD_TRAIT, compare},
     },
     r#trait::TraitRef,
     r#type::{FnType, Type},
@@ -67,18 +67,6 @@ impl NativeDisplay for NotNan<f64> {
 fn isize_to_not_nan(value: isize) -> NotNan<f64> {
     // Safe because an `isize` is always a valid `f64`
     NotNan::new(value as f64).expect("Conversion from isize to NotNan<f64> should not fail")
-}
-
-fn compare<T>(lhs: T, rhs: T) -> Value
-where
-    T: std::cmp::Ord,
-{
-    use std::cmp::Ordering::*;
-    match lhs.cmp(&rhs) {
-        Less => Value::unit_variant(ustr(ORDERING_LESS)),
-        Equal => Value::unit_variant(ustr(ORDERING_EQUAL)),
-        Greater => Value::unit_variant(ustr(ORDERING_GREATER)),
-    }
 }
 
 /// Integer → float with finite saturation, wrapped in NotNan.

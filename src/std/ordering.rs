@@ -8,6 +8,7 @@
 //
 
 use std::sync::LazyLock;
+use ustr::ustr;
 
 use crate::{
     cached_ty,
@@ -16,6 +17,7 @@ use crate::{
     module::Module,
     r#trait::TraitRef,
     r#type::{FnType, Type, variant_type},
+    value::Value,
 };
 
 pub const ORDERING_LESS: &str = "Less";
@@ -28,6 +30,18 @@ pub fn ordering_type() -> Type {
         (ORDERING_EQUAL, Type::unit()),
         (ORDERING_GREATER, Type::unit()),
     ]))
+}
+
+pub(crate) fn compare<T>(lhs: T, rhs: T) -> Value
+where
+    T: std::cmp::Ord,
+{
+    use std::cmp::Ordering::*;
+    match lhs.cmp(&rhs) {
+        Less => Value::unit_variant(ustr(ORDERING_LESS)),
+        Equal => Value::unit_variant(ustr(ORDERING_EQUAL)),
+        Greater => Value::unit_variant(ustr(ORDERING_GREATER)),
+    }
 }
 
 use FunctionDefinition as Def;

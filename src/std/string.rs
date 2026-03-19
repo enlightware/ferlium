@@ -22,11 +22,14 @@ use crate::{
     containers::b,
     effects::no_effects,
     function::{
-        BinaryNativeFnMNN, BinaryNativeFnNNN, Function, TernaryNativeFnNNNN, UnaryNativeFnMV,
-        UnaryNativeFnNN, UnaryNativeFnVN,
+        BinaryNativeFnMNN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, TernaryNativeFnNNNN,
+        UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnVN,
     },
     module::{Module, ModuleFunction},
-    std::contains::CONTAINS_TRAIT,
+    std::{
+        contains::CONTAINS_TRAIT,
+        ordering::{ORD_TRAIT, compare},
+    },
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
     value::{NativeDisplay, Value},
@@ -35,7 +38,7 @@ use crate::{
 use super::option::{none, option_type, some};
 
 /// A UTF-8 encoded string type that supports Unicode grapheme clusters and normalization.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct String(
     /// Referenced-counted and normalized UTF-8 string data.
     Rc<std::string::String>,
@@ -285,6 +288,13 @@ pub fn add_to_module(to: &mut Module) {
         [string_type()],
         [string_type()],
         [b(BinaryNativeFnNNN::new(String::contains)) as Function],
+    );
+
+    to.add_concrete_impl_no_locals(
+        ORD_TRAIT.clone(),
+        [string_type()],
+        [],
+        [b(BinaryNativeFnNNV::new(compare::<String>)) as Function],
     );
 
     to.add_function(
