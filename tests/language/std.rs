@@ -687,6 +687,70 @@ fn string_case_conversion() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_normalization() {
+    let mut session = TestSession::new();
+    // Strings are stored in NFC form. U+0065 (e) + U+0301 (combining acute) in
+    // NFD is 3 bytes; its NFC precomposed form U+00E9 (é) is 2 bytes.
+    // string_byte_len distinguishes the two forms.
+    assert_eq!(
+        session.run("string_byte_len(\"e\\u{0301}\")"),
+        int(2) // NFC: U+00E9 → 2 bytes, not NFD 3 bytes
+    );
+    // A string literal with a combining mark is equal to the precomposed form.
+    assert_eq!(session.run("\"e\\u{0301}\" == \"\\u{00E9}\""), bool(true));
+    // string_concat: combining mark at the junction is absorbed into NFC.
+    // "cafe" + "\u{0301}" → NFC "caf\u{00E9}" = 5 bytes, not un-normalized 6.
+    assert_eq!(
+        session.run("string_byte_len(string_concat(\"cafe\", \"\\u{0301}\"))"),
+        int(5)
+    );
+    assert_eq!(
+        session.run("string_concat(\"cafe\", \"\\u{0301}\") == \"caf\\u{00E9}\""),
+        bool(true)
+    );
+    // string_push_str: combining mark appended to a base character normalizes.
+    assert_eq!(
+        session.run("let mut s = \"cafe\"; string_push_str(s, \"\\u{0301}\"); string_byte_len(s)"),
+        int(5)
+    );
+    assert_eq!(
+        session
+            .run("let mut s = \"cafe\"; string_push_str(s, \"\\u{0301}\"); s == \"caf\\u{00E9}\""),
+        bool(true)
+    );
+    // string_replace: the replacement result is NFC normalized.
+    // Replacing "e" with NFD "e\u{0301}" in "hello" yields NFC "h\u{00E9}llo" = 6 bytes.
+    assert_eq!(
+        session.run("string_byte_len(string_replace(\"hello\", \"e\", \"e\\u{0301}\"))"),
+        int(6)
+    );
+    assert_eq!(
+        session.run("string_replace(\"hello\", \"e\", \"e\\u{0301}\") == \"h\\u{00E9}llo\""),
+        bool(true)
+    );
+    // uppercase and lowercase keep the result in NFC.
+    // U+00E9 (é) uppercases to U+00C9 (É), which is 2 bytes in UTF-8.
+    assert_eq!(
+        session.run("string_byte_len(uppercase(\"e\\u{0301}\"))"),
+        int(2)
+    );
+    assert_eq!(
+        session.run("uppercase(\"e\\u{0301}\") == \"\\u{00C9}\""),
+        bool(true)
+    );
+    assert_eq!(
+        session.run("lowercase(\"E\\u{0301}\") == \"\\u{00E9}\""),
+        bool(true)
+    );
+    // string_slice of an NFC string stays NFC.
+    assert_eq!(
+        session.run("string_byte_len(string_slice(\"caf\\u{00E9}\", 3, 4))"),
+        int(2) // the é slice is still the 2-byte NFC form
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn serde_serialize() {
     let mut session = TestSession::new();
     // basic types
