@@ -89,6 +89,11 @@ To run the benchmarks locally, use:
 cargo bench
 ```
 
+On Linux x86-64, if you have `sudo` access and `cpupower` installed, you can use the following Make command to run the benchmarks with dynamic frequency disabled for more stable results:
+```
+make bench
+```
+
 ## Limitations
 
 Currently the compiler can only be used from a single thread to avoid deadlocks when accessing the interned type universe.
