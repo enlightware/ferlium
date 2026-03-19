@@ -66,7 +66,7 @@ pub fn emit_format_string_ast(
             (ustr("@s"), span),
             MutVal::mutable(),
             b(Expr::new(
-                ExprKind::Literal(Value::native(String::new()), string_type()),
+                ExprKind::Literal(Value::native(String::default()), string_type()),
                 span,
             )),
             None,

@@ -13,6 +13,7 @@ use std::{
     str::FromStr,
 };
 
+use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 use ustr::ustr;
 
@@ -33,26 +34,39 @@ use crate::{
 
 use super::option::{none, option_type, some};
 
+/// A UTF-8 encoded string type that supports Unicode grapheme clusters and normalization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct String(Rc<std::string::String>);
+pub struct String(
+    /// Referenced-counted and normalized UTF-8 string data.
+    Rc<std::string::String>,
+);
 
 impl String {
-    pub fn new() -> Self {
-        Self(Rc::new(std::string::String::new()))
+    pub fn new(s: &str) -> Self {
+        Self(Rc::new(s.nfc().collect()))
     }
 
     pub fn any_to_string(value: Value) -> Self {
-        Self(Rc::new(value.to_string_repr()))
+        Self::new(&value.to_string_repr())
     }
 
     pub fn push_str(&mut self, value: Self) {
-        Rc::make_mut(&mut self.0).push_str(value.0.as_str());
+        let needs_normalization = value
+            .0
+            .chars()
+            .next()
+            .map(unicode_normalization::char::is_combining_mark)
+            .unwrap_or(false);
+
+        if needs_normalization {
+            self.0 = Rc::new(self.0.chars().chain(value.0.chars()).nfc().collect());
+        } else {
+            Rc::make_mut(&mut self.0).push_str(value.0.as_str());
+        }
     }
 
     pub fn concat(l: &Self, r: &Self) -> Self {
-        let mut new = l.clone();
-        new.push_str(r.clone());
-        new
+        Self(Rc::new(l.0.chars().chain(r.0.chars()).nfc().collect()))
     }
 
     /// Returns the number of grapheme clusters (user-perceived characters) in the string.
@@ -81,9 +95,12 @@ impl String {
         let end = Self::normalize_index(end, len);
 
         if end <= start {
-            Self::new()
+            Self::default()
         } else {
-            let result: std::string::String = graphemes[start..end].concat();
+            // Our initial string is already normalized to NFC,
+            // and slicing by grapheme clusters won't break that normalization,
+            // so we can safely return the slice as-is without re-normalizing.
+            let result = graphemes[start..end].concat();
             Self(Rc::new(result))
         }
     }
@@ -96,43 +113,18 @@ impl String {
         }
     }
 
-    pub fn sub_string(&self, start: isize, end: isize) -> Self {
-        let start = self.index_to_unsigned(start).min(self.byte_len());
-        let end = self.index_to_unsigned(end).min(self.byte_len());
-
-        let start = self.floor_char_boundary(start);
-        let end = self.floor_char_boundary(end);
-
-        if end <= start {
-            Self::new()
-        } else {
-            let new = self.0[start..end].to_string();
-            Self(Rc::new(new))
-        }
-    }
-
-    fn floor_char_boundary(&self, index: usize) -> usize {
-        let mut index = index;
-        while index > 0 && !self.0.is_char_boundary(index) {
-            index -= 1;
-        }
-        index
+    pub fn replace(&self, from: Self, to: Self) -> Self {
+        Self(Rc::new(
+            self.0.replace(from.as_ref(), to.as_ref()).nfc().collect(),
+        ))
     }
 
     pub fn uppercase(&self) -> Self {
-        Self(Rc::new(self.0.to_uppercase()))
+        Self::new(&self.0.to_uppercase())
     }
 
     pub fn lowercase(&self) -> Self {
-        Self(Rc::new(self.0.to_lowercase()))
-    }
-
-    fn index_to_unsigned(&self, index: isize) -> usize {
-        if index < 0 {
-            (self.grapheme_count() as isize + index) as usize
-        } else {
-            index as usize
-        }
+        Self::new(&self.0.to_lowercase())
     }
 
     fn contains(s: Self, substring: Self) -> bool {
@@ -169,13 +161,13 @@ impl FromStr for String {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(Rc::new(s.to_string())))
+        Ok(Self::new(s))
     }
 }
 
 impl From<std::string::String> for String {
-    fn from(value: std::string::String) -> Self {
-        Self(Rc::new(value))
+    fn from(s: std::string::String) -> Self {
+        Self::new(&s)
     }
 }
 
@@ -199,7 +191,7 @@ impl Display for String {
 
 impl Default for String {
     fn default() -> Self {
-        Self::new()
+        Self(Rc::new(std::string::String::new()))
     }
 }
 
@@ -352,11 +344,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(
         ustr("string_replace"),
         TernaryNativeFnNNNN::description_with_default_ty(
-            |s: String, from: String, to: String| {
-                let mut new = s.clone();
-                new.0 = Rc::new(new.0.replace(from.as_ref(), to.as_ref()));
-                new
-            },
+            |s: String, from: String, to: String| s.replace(from, to),
             ["string", "from", "to"],
             "Returns a new string with all occurrences of `from` replaced by `to`.",
             no_effects(),
