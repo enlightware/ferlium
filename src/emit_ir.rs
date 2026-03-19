@@ -242,16 +242,14 @@ pub fn emit_module(
         };
         let emit_output = emit_functions(&mut output, functions, others, Some(trait_ctx))?.unwrap();
 
-        // Register or update the implementation.
+        // Register the implementation if no stub was present.
         let is_concrete = emit_output.ty_var_count == 0;
         let local_impl_id = if let Some(stub_data) = concrete_impl_stubs.get(&imp_idx) {
             assert_eq!(
                 &emit_output.functions,
                 &output.impls.data[stub_data.id.as_index()].methods
             );
-            // output_tys must be empty — stubs are only pre-registered for traits with no output types.
             assert!(emit_output.output_tys.is_empty());
-            // Recompute dictionary_ty now that the function definitions hold the real concrete types.
             let new_dictionary_ty = output.computer_dictionary_ty(&emit_output.functions);
             let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
             assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
