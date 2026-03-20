@@ -16,11 +16,13 @@ use ustr::{Ustr, ustr};
 use crate::{
     Location,
     ast::{
-        self, DExpr, DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, Expr, ExprKind,
-        ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction, PModuleFunctionArg,
-        PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, PatternVar, UnnamedArg, UstrSpan,
+        self, AbstractData, ApplyData, AssignData, DExpr, DModule, DModuleFunction,
+        DModuleFunctionArg, DTraitImpl, Expr, ExprKind, FieldAccessData, ForLoopData, IndexData,
+        LetData, MatchData, ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction,
+        PModuleFunctionArg, PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, PatternVar,
+        ProjectData, StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
     },
-    containers::{B, b},
+    containers::b,
     effects::EffType,
     error::{DuplicatedFieldContext, DuplicatedVariantContext, InternalCompilationError},
     format_string::emit_format_string_ast,
@@ -508,9 +510,9 @@ impl PExpr {
             Literal(value, ty) => {
                 if ty == int_type() {
                     // Convert integer literals to from_int(literal).
-                    Apply(
-                        b(DExpr::single_identifier(ustr("from_int"), self.span)),
-                        vec![DExpr::new(Literal(value, ty), self.span)],
+                    ExprKind::apply(
+                        DExpr::single_identifier(ustr("from_int"), self.span),
+                        vec![DExpr::new(ExprKind::literal(value, ty), self.span)],
                         UnnamedArg::All,
                     )
                 } else {
@@ -534,47 +536,67 @@ impl PExpr {
                 }
                 Identifier(path)
             }
-            Let(name, mut_val, expr, ty_ascription) => {
-                let expr = expr.desugar_boxed(ctx, modules_used)?;
+            Let(data) => {
+                let LetData {
+                    name,
+                    mut_val,
+                    expr,
+                    ty_ascription,
+                } = *data;
+                let expr = expr.desugar(ctx, modules_used)?;
                 // Look inside the type ascription node to see if the type is constant, to be used later for display.
                 let ty_ascription = ty_ascription.map(|(span, _)| {
                     let ty = expr
                         .kind
                         .as_type_ascription()
-                        .map(|ty_asc| ty_asc.1)
-                        .unwrap_or_else(|| expr.kind.as_literal().unwrap().1);
+                        .map(|ty_asc| ty_asc.ty)
+                        .unwrap_or_else(|| *expr.kind.as_literal().unwrap().1);
                     let is_constant = ty.is_constant();
                     (span, is_constant)
                 });
-                let expr = Let(name, mut_val, expr, ty_ascription);
+                let result = ExprKind::let_(name, mut_val, expr, ty_ascription);
                 ctx.locals.push(name.0);
-                expr
+                result
             }
-            Return(expr) => Return(expr.desugar_boxed(ctx, modules_used)?),
-            Abstract(args, expr) => {
+            Return(expr) => ExprKind::return_(expr.desugar(ctx, modules_used)?),
+            Abstract(data) => {
+                let AbstractData { args, body } = *data;
                 // we swap the locals with the lambda arguments, as we do not capture the outer scope
                 let mut other_vars = args.iter().map(|(name, _)| *name).collect::<Vec<_>>();
                 mem::swap(&mut other_vars, &mut ctx.locals);
-                let expr = Abstract(args, expr.desugar_boxed(ctx, modules_used)?);
+                let body = body.desugar(ctx, modules_used)?;
+                let result = ExprKind::abstract_(args, body);
                 mem::swap(&mut other_vars, &mut ctx.locals);
-                expr
+                result
             }
-            Apply(expr, args, synthesized) => Apply(
-                expr.desugar_boxed(ctx, modules_used)?,
-                desugar(args, ctx, modules_used)?,
-                synthesized,
-            ),
+            Apply(data) => {
+                let ApplyData {
+                    func,
+                    args,
+                    unnamed_arg,
+                } = *data;
+                ExprKind::apply(
+                    func.desugar(ctx, modules_used)?,
+                    desugar(args, ctx, modules_used)?,
+                    unnamed_arg,
+                )
+            }
             Block(stmts) => {
                 let env_size = ctx.locals.len();
                 let block = Block(desugar(stmts, ctx, modules_used)?);
                 ctx.locals.truncate(env_size);
                 block
             }
-            Assign(place, sign_loc, value) => {
-                let place = place.desugar_boxed(ctx, modules_used)?;
-                let value = value.desugar_boxed(ctx, modules_used)?;
+            Assign(data) => {
+                let AssignData {
+                    place,
+                    sign_span: sign_loc,
+                    value,
+                } = *data;
+                let place = place.desugar(ctx, modules_used)?;
+                let value = value.desugar(ctx, modules_used)?;
                 if let Some(index) = place.kind.as_index() {
-                    if index.0.kind.is_property_path() {
+                    if index.array.kind.is_property_path() {
                         /*
                             Desugar:
                                 @scope.property[expr1] = expr2
@@ -586,28 +608,28 @@ impl PExpr {
                                 }
                         */
                         let let_stmt = Expr::new(
-                            Let(
+                            ExprKind::let_(
                                 (ustr("tmp"), self.span),
                                 MutVal::mutable(),
-                                index.0.clone(),
+                                index.array.clone(),
                                 None,
                             ),
                             self.span,
                         );
                         let index_expr = Expr::new(
-                            Index(
-                                b(Expr::single_identifier(ustr("tmp"), self.span)),
-                                index.1.clone(),
+                            ExprKind::index(
+                                Expr::single_identifier(ustr("tmp"), self.span),
+                                index.index.clone(),
                             ),
                             self.span,
                         );
                         let assign_tmp_stmt =
-                            Expr::new(Assign(b(index_expr), sign_loc, value), self.span);
+                            Expr::new(ExprKind::assign(index_expr, sign_loc, value), self.span);
                         let assign_back_stmt = Expr::new(
-                            Assign(
-                                index.0.clone(),
+                            ExprKind::assign(
+                                index.array.clone(),
                                 sign_loc,
-                                b(Expr::single_identifier(ustr("tmp"), self.span)),
+                                Expr::single_identifier(ustr("tmp"), self.span),
                             ),
                             self.span,
                         );
@@ -617,61 +639,77 @@ impl PExpr {
                         ));
                     }
                 }
-                Assign(place, sign_loc, value)
+                ExprKind::assign(place, sign_loc, value)
             }
-            PropertyPath(scope, var) => PropertyPath(scope, var),
+            PropertyPath(data) => PropertyPath(data),
             Tuple(elements) => Tuple(desugar(elements, ctx, modules_used)?),
-            Project(expr, index) => Project(expr.desugar_boxed(ctx, modules_used)?, index),
-            StructLiteral(name, elements) => StructLiteral(
-                name,
-                elements
-                    .into_iter()
-                    .map(|(k, v)| Ok((k, v.desugar(ctx, modules_used)?)))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
+            Project(data) => {
+                let ProjectData { expr, index } = *data;
+                ExprKind::project(expr.desugar(ctx, modules_used)?, index)
+            }
+            StructLiteral(data) => {
+                let StructLiteralData { path, fields } = *data;
+                ExprKind::struct_literal(
+                    path,
+                    fields
+                        .into_iter()
+                        .map(|(k, v)| Ok((k, v.desugar(ctx, modules_used)?)))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
             Record(elements) => Record(
                 elements
                     .into_iter()
                     .map(|(k, v)| Ok((k, v.desugar(ctx, modules_used)?)))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-            FieldAccess(expr, name) => FieldAccess(expr.desugar_boxed(ctx, modules_used)?, name),
-            Array(elements) => Array(desugar(elements, ctx, modules_used)?),
-            Index(array, index) => {
-                let index = match index.kind {
-                    Literal(value, ty) => b(DExpr::new(Literal(value, ty), index.span)),
-                    _ => index.desugar_boxed(ctx, modules_used)?,
-                };
-                Index(array.desugar_boxed(ctx, modules_used)?, index)
+            FieldAccess(data) => {
+                let FieldAccessData { expr, name } = *data;
+                ExprKind::field_access(expr.desugar(ctx, modules_used)?, name)
             }
-            Match(expr, alternatives, default) => Match(
-                expr.desugar_boxed(ctx, modules_used)?,
-                alternatives
-                    .into_iter()
-                    .map(|(pat, expr)| {
-                        let env_size = ctx.locals.len();
-                        if let Some((_tag, _kind, vars)) = pat.kind.as_variant() {
-                            for var in vars {
-                                if let Some(name) = var.as_named() {
-                                    ctx.locals.push(name.0);
+            Array(elements) => Array(desugar(elements, ctx, modules_used)?),
+            Index(data) => {
+                let IndexData { array, index } = *data;
+                let index_span = index.span;
+                let desugared_index = match index.kind {
+                    Literal(value, ty) => DExpr::new(Literal(value, ty), index_span),
+                    kind => Expr::new(kind, index_span).desugar(ctx, modules_used)?,
+                };
+                ExprKind::index(array.desugar(ctx, modules_used)?, desugared_index)
+            }
+            Match(data) => {
+                let MatchData {
+                    cond_expr: expr,
+                    alternatives,
+                    default,
+                } = *data;
+                ExprKind::match_(
+                    expr.desugar(ctx, modules_used)?,
+                    alternatives
+                        .into_iter()
+                        .map(|(pat, expr)| {
+                            let env_size = ctx.locals.len();
+                            if let Some((_tag, _kind, vars)) = pat.kind.as_variant() {
+                                for var in vars {
+                                    if let Some(name) = var.as_named() {
+                                        ctx.locals.push(name.0);
+                                    }
                                 }
                             }
-                        }
-                        let expr = expr.desugar(ctx, modules_used)?;
-                        ctx.locals.truncate(env_size);
-                        Ok((pat, expr))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-                default
-                    .map(|e| e.desugar_boxed(ctx, modules_used))
-                    .transpose()?,
-            ),
+                            let expr = expr.desugar(ctx, modules_used)?;
+                            ctx.locals.truncate(env_size);
+                            Ok((pat, expr))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    default.map(|e| e.desugar(ctx, modules_used)).transpose()?,
+                )
+            }
             ForLoop(for_loop) => {
-                let crate::ast::ForLoop {
+                let ForLoopData {
                     var_name,
                     iterator,
                     body,
-                } = for_loop;
+                } = *for_loop;
                 let iterator_start_span = iterator.span;
                 let body_span: Location = body.span;
                 let body_start_span =
@@ -679,10 +717,10 @@ impl PExpr {
                 let body_end_span =
                     Location::new(body_span.end(), body_span.end(), body_span.source_id());
                 let it_store = Expr::new(
-                    Let(
+                    ExprKind::let_(
                         (ustr("@it"), iterator_start_span),
                         MutVal::mutable(),
-                        iterator.desugar_boxed(ctx, modules_used)?,
+                        iterator.desugar(ctx, modules_used)?,
                         None,
                     ),
                     iterator_start_span,
@@ -695,8 +733,8 @@ impl PExpr {
                     body_start_span,
                 );
                 let it_match = Expr::new(
-                    Match(
-                        b(it_next),
+                    ExprKind::match_(
+                        it_next,
                         vec![
                             (
                                 Pattern::new(
@@ -719,19 +757,20 @@ impl PExpr {
                                     PatternKind::empty_tuple_variant((ustr("None"), body_end_span)),
                                     body_end_span,
                                 ),
-                                Expr::new(SoftBreak, body_end_span),
+                                Expr::new(ExprKind::soft_break(), body_end_span),
                             ),
                         ],
                         None,
                     ),
                     body_span,
                 );
-                let loop_expr = Expr::new(Loop(b(it_match)), body_span);
+                let loop_expr = Expr::new(ExprKind::loop_(it_match), body_span);
                 Block(vec![it_store, loop_expr])
             }
-            Loop(body) => Loop(body.desugar_boxed(ctx, modules_used)?),
+            Loop(body) => ExprKind::loop_(body.desugar(ctx, modules_used)?),
             SoftBreak => SoftBreak,
-            TypeAscription(expr, ty, span) => {
+            TypeAscription(data) => {
+                let TypeAscriptionData { expr, ty, span } = *data;
                 let ty = ty.desugar(span, false, ctx.module_env, modules_used)?;
                 if let Some((value, lit_ty)) = expr.kind.as_literal() {
                     // If the expression is a literal and the type of the literal matches
@@ -740,11 +779,11 @@ impl PExpr {
                         Literal(value.clone(), *lit_ty)
                     } else {
                         // Otherwise, we need to emit a type ascription node.
-                        TypeAscription(expr.desugar_boxed(ctx, modules_used)?, ty, span)
+                        ExprKind::type_ascription(expr.desugar(ctx, modules_used)?, ty, span)
                     }
                 } else {
                     // Otherwise, we need to emit a type ascription node.
-                    TypeAscription(expr.desugar_boxed(ctx, modules_used)?, ty, span)
+                    ExprKind::type_ascription(expr.desugar(ctx, modules_used)?, ty, span)
                 }
             }
             Error => Error,
@@ -753,14 +792,6 @@ impl PExpr {
             kind,
             span: self.span,
         })
-    }
-
-    fn desugar_boxed(
-        self,
-        ctx: &mut DesugarCtx,
-        modules_used: &mut HashSet<ModuleId>,
-    ) -> Result<B<DExpr>, InternalCompilationError> {
-        self.desugar(ctx, modules_used).map(b)
     }
 }
 

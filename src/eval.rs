@@ -679,7 +679,7 @@ impl Node {
                 let function_value = function_value.into_function().unwrap();
                 let function_value =
                     FunctionValue::new(function_value.function, function_value.module, captured);
-                cont(Value::Function(function_value))
+                cont(Value::Function(b(function_value)))
             }
             Apply(app) => {
                 // Evaluate left-to-right: function first, then arguments (matches Rust semantics)

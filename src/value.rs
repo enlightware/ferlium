@@ -134,7 +134,7 @@ pub enum Value {
     /// A tuple of values, or the data of a record
     Tuple(B<SVec2<Value>>),
     /// A first-class function
-    Function(FunctionValue),
+    Function(B<FunctionValue>),
 }
 
 // Note: later we will not need that as Eq will be implemented through a trait
@@ -186,7 +186,7 @@ impl Value {
     }
 
     pub fn function(function: LocalFunctionId, module: ModuleId) -> Self {
-        Self::Function(FunctionValue::new(function, module, vec![]))
+        Self::Function(b(FunctionValue::new(function, module, vec![])))
     }
 
     pub fn into_primitive_ty<T: 'static>(self) -> Option<T> {

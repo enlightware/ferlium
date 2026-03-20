@@ -13,7 +13,6 @@ use crate::{Location, internal_compilation_error};
 use regex::Regex;
 use ustr::{Ustr, ustr};
 
-use crate::containers::b;
 use crate::mutability::MutVal;
 use crate::std::string::String;
 use crate::{
@@ -26,7 +25,7 @@ use crate::{
 fn string_literal(string: &str, span: Location) -> Expr {
     let string = String::from_str(string).unwrap();
     Expr::new(
-        ExprKind::Literal(Value::native(string), string_type()),
+        ExprKind::literal(Value::native(string), string_type()),
         span,
     )
 }
@@ -62,13 +61,13 @@ pub fn emit_format_string_ast(
 
     // Start with an empty mutable string.
     let mut exprs = vec![Expr::new(
-        ExprKind::Let(
+        ExprKind::let_(
             (ustr("@s"), span),
             MutVal::mutable(),
-            b(Expr::new(
-                ExprKind::Literal(Value::native(String::default()), string_type()),
+            Expr::new(
+                ExprKind::literal(Value::native(String::default()), string_type()),
                 span,
-            )),
+            ),
             None,
         ),
         span,
@@ -137,5 +136,5 @@ pub fn emit_format_string_ast(
     let end_span = Location::new(span.end(), span.end(), span.source_id());
     exprs.push(Expr::single_identifier(ustr("@s"), end_span));
 
-    Ok(ExprKind::Block(exprs))
+    Ok(ExprKind::block(exprs))
 }

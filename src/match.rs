@@ -43,7 +43,7 @@ impl TypeInference {
         match_span: Location,
         cond_expr: &DExpr,
         alternatives: &[(Pattern, DExpr)],
-        default: &Option<Box<DExpr>>,
+        default: &Option<DExpr>,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
