@@ -52,7 +52,6 @@ fn bench_quicksort(c: &mut Criterion) {
 
     // Bench evaluation
     let mut group = c.benchmark_group("runtime");
-    group.sample_size(20);
     let module_id = compile(&mut session);
     group.bench_function("quicksort(500)", |b| {
         b.iter(|| {
@@ -78,7 +77,6 @@ fn bench_fibonacci(c: &mut Criterion) {
 
     // Bench evaluation
     let mut group = c.benchmark_group("runtime");
-    group.sample_size(20);
     group.bench_function("fibonacci_rec(22)", |b| {
         b.iter(|| {
             run_fn_native!(&session, module_id, "fibonacci_rec", [22 => isize] -> isize).unwrap()
@@ -197,7 +195,6 @@ fn bench_bank_account(c: &mut Criterion) {
 
     // Bench evaluation
     let mut group = c.benchmark_group("runtime");
-    group.sample_size(20);
     let module_id = compile(&mut session);
     group.bench_function("bank_account", |b| {
         b.iter(|| run_fn_native!(&session, module_id, "test", [] -> Str).unwrap())
