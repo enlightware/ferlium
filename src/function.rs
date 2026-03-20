@@ -11,7 +11,7 @@ use std::{
     fmt::{self, Debug},
     hash::DefaultHasher,
     marker::PhantomData,
-    rc::{Rc, Weak},
+    rc::Rc,
 };
 
 use derive_new::new;
@@ -200,57 +200,7 @@ impl Debug for dyn Callable {
 // Function access types
 
 pub type Function = Box<dyn Callable>;
-pub type FunctionPtr = *mut Function;
 pub type FunctionRc = Rc<RefCell<Function>>;
-pub type FunctionWeak = Weak<RefCell<Function>>;
-
-/// A reference to a function
-#[derive(Clone)]
-pub enum FunctionRef {
-    /// Strong references are used for first-class functions, that cannot be recursive
-    Strong(FunctionRc),
-    /// Weak references are used to avoid cycles in recursive functions
-    Weak(FunctionWeak),
-}
-
-impl FunctionRef {
-    pub fn new_strong(function: &FunctionRc) -> Self {
-        FunctionRef::Strong(function.clone())
-    }
-    pub fn new_weak(function: &FunctionRc) -> Self {
-        FunctionRef::Weak(Rc::downgrade(function))
-    }
-    pub fn get(&self) -> FunctionRc {
-        match self {
-            FunctionRef::Strong(function) => function.clone(),
-            FunctionRef::Weak(function) => function
-                .upgrade()
-                .expect("Failed to upgrade weak function ref"),
-        }
-    }
-    pub fn weak_ref(&self) -> FunctionWeak {
-        match self {
-            FunctionRef::Strong(function) => Rc::downgrade(function),
-            FunctionRef::Weak(function) => function.clone(),
-        }
-    }
-}
-
-impl Debug for FunctionRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.get().try_borrow() {
-            Ok(func) => write!(f, "{func:?}"),
-            Err(_) => write!(f, "self"),
-        }
-    }
-}
-
-impl PartialEq for FunctionRef {
-    fn eq(&self, other: &Self) -> bool {
-        Weak::ptr_eq(&self.weak_ref(), &other.weak_ref())
-    }
-}
-impl Eq for FunctionRef {}
 
 /// A function holding user-defined code.
 #[derive(Debug, Clone, new)]
