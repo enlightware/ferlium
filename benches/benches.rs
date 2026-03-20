@@ -43,7 +43,7 @@ fn bench_quicksort(c: &mut Criterion) {
             .module_id
     };
     let array_ty = array_type(int_type());
-    let random_data = lcg_seq(500, 42);
+    let random_data = lcg_seq(300, 42);
 
     // Bench compilation
     let mut group = c.benchmark_group("compilation");
@@ -53,7 +53,7 @@ fn bench_quicksort(c: &mut Criterion) {
     // Bench evaluation
     let mut group = c.benchmark_group("runtime");
     let module_id = compile(&mut session);
-    group.bench_function("quicksort(500)", |b| {
+    group.bench_function("quicksort(300)", |b| {
         b.iter(|| {
             let input = int_a(random_data.clone());
             call_fn!(&session, module_id, "quicksort_int_a", [input => array_ty] -> array_ty)
@@ -77,9 +77,9 @@ fn bench_fibonacci(c: &mut Criterion) {
 
     // Bench evaluation
     let mut group = c.benchmark_group("runtime");
-    group.bench_function("fibonacci_rec(22)", |b| {
+    group.bench_function("fibonacci_rec(20)", |b| {
         b.iter(|| {
-            run_fn_native!(&session, module_id, "fibonacci_rec", [22 => isize] -> isize).unwrap()
+            run_fn_native!(&session, module_id, "fibonacci_rec", [20 => isize] -> isize).unwrap()
         })
     });
     group.finish();
@@ -99,9 +99,9 @@ fn bench_sieve(c: &mut Criterion) {
 
     // Bench evaluation
     let mut group = c.benchmark_group("runtime");
-    group.bench_function("prime_count(1000)", |b| {
+    group.bench_function("prime_count(500)", |b| {
         b.iter(|| {
-            run_fn_native!(&session, module_id, "prime_count", [1000 => isize] -> isize).unwrap()
+            run_fn_native!(&session, module_id, "prime_count", [500 => isize] -> isize).unwrap()
         })
     });
     group.finish();
