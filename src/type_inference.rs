@@ -21,6 +21,7 @@ use crate::{
         RecordField, RecordFields, UnnamedArg,
     },
     containers::continuous_hashmap_to_vec,
+    effects::{PrimitiveEffect, effect},
     error::{
         DuplicatedFieldContext, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
@@ -979,8 +980,11 @@ impl TypeInference {
                     sp(data.index),
                 )?;
                 // Build the index node and return it
-                let combined_effects =
-                    self.make_dependent_effect([&array_node.effects, &index_node.effects]);
+                let combined_effects = self.make_dependent_effect([
+                    &effect(PrimitiveEffect::Fallible),
+                    &array_node.effects,
+                    &index_node.effects,
+                ]);
                 let node = K::Index(b(array_node), b(index_node));
                 (node, element_ty, array_expr_mut, combined_effects)
             }

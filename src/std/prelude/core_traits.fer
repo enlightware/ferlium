@@ -441,10 +441,10 @@ impl Deserialize {
 
 // Serde for arrays
 impl Serialize {
-	fn serialize(a) {
+	fn serialize(a: [_]) {
 		let mut result = [];
-		for i in 0..array_len(a) {
-			array_append(result, serialize(a[i]));
+		for value in a {
+			array_append(result, serialize(value));
 		};
 		Array(result)
 	}

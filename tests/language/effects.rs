@@ -239,6 +239,26 @@ fn effects_in_fn_type_ascription() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_access_must_be_fallible() {
+    use PrimitiveEffect::*;
+    let mut session = TestSession::new();
+
+    test_mod(
+        &mut session,
+        "fn f(a: [_]) { a[0] } ",
+        "f",
+        effect(Fallible),
+    );
+    test_mod(
+        &mut session,
+        "fn f() { let mut a = []; a[0] = 1; } ",
+        "f",
+        effect(Fallible),
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_impl_effect_must_not_have_more_than_def_effects() {
     use PrimitiveEffect::*;
 
