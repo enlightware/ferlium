@@ -1,5 +1,6 @@
 install-deps:
 	cargo install cargo-nextest --locked
+	cargo install --version 0.17.2 gungraun-runner
 
 test-local:
 	RUST_LOG=ferlium=debug cargo nextest run
@@ -10,20 +11,7 @@ test-wasm:
 test: test-local test-wasm
 
 bench:
-	PREV_GOV=$$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor); \
-	sudo cpupower frequency-set --governor performance; \
-	if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then \
-		echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo > /dev/null; \
-	elif [ -f /sys/devices/system/cpu/cpufreq/boost ]; then \
-		echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost > /dev/null; \
-	fi; \
-	cargo bench; \
-	if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then \
-		echo 0 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo > /dev/null; \
-	elif [ -f /sys/devices/system/cpu/cpufreq/boost ]; then \
-		echo 1 | sudo tee /sys/devices/system/cpu/cpufreq/boost > /dev/null; \
-	fi; \
-	sudo cpupower frequency-set --governor "$$PREV_GOV"
+	cargo bench
 
 repl:
 	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium

@@ -84,15 +84,19 @@ This use [`nextest`](https://nexte.st/) which is way faster than `cargo test`.
 
 ## Running benchmarks
 
-To run the benchmarks locally, use:
+We use [Gungraun](https://gungraun.github.io/gungraun/latest/html/index.html) for benchmarking, which provides high-precision measurements using Valgrind.
+
+To run the benchmarks locally, first ensure you have Valgrind and the Gungraun runner installed:
+```
+make install-deps
+```
+
+Then run the benchmarks:
 ```
 cargo bench
 ```
 
-On Linux x86-64, if you have `sudo` access and `cpupower` installed, you can use the following Make command to run the benchmarks with dynamic frequency disabled for more stable results:
-```
-make bench
-```
+Gungraun measures instruction counts and other metrics to detect small optimizations and regressions reliably, even in noisy environments.
 
 ## Limitations
 

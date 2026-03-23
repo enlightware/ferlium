@@ -7,64 +7,56 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use criterion::{Criterion, criterion_group, criterion_main};
-
+use gungraun::{library_benchmark, library_benchmark_group, main};
 use indoc::indoc;
+use std::hint::black_box;
 
 use ferlium::{
-    CompilerSession, Path, call_fn, run_fn_native,
+    CompilerSession, Path, call_fn,
+    module::ModuleId,
+    run_fn_native,
     std::{array::array_type, math::int_type, string::String as Str},
     value::Value,
 };
 
-// Benchmarks
+// --- Benchmark Functions ---
 
-fn bench_new_session(c: &mut Criterion) {
-    let mut group = c.benchmark_group("compilation");
-    group.bench_function("CompilerSession::new", |b| {
-        b.iter(|| {
-            CompilerSession::new();
-        })
-    });
-    group.finish();
+#[library_benchmark]
+fn bench_new_session() {
+    CompilerSession::new();
 }
 
-fn bench_quicksort(c: &mut Criterion) {
-    // Prepare
+fn compile_quicksort() -> (CompilerSession, ModuleId) {
     let mut session = CompilerSession::new();
-    let compile = |session: &mut CompilerSession| {
-        session
-            .compile(
-                include_str!("../tests/modules/quicksort.fer"),
-                "quicksort.fer",
-                Path::single_str("quicksort"),
-            )
-            .unwrap()
-            .module_id
-    };
+    let module_id = session
+        .compile(
+            include_str!("../tests/modules/quicksort.fer"),
+            "quicksort.fer",
+            Path::single_str("quicksort"),
+        )
+        .unwrap()
+        .module_id;
+    (session, module_id)
+}
+
+#[library_benchmark]
+fn bench_quicksort_compile() {
+    compile_quicksort();
+}
+
+#[library_benchmark]
+fn bench_quicksort_run() {
+    let (session, module_id) = compile_quicksort();
+
     let array_ty = array_type(int_type());
     let random_data = lcg_seq(300, 42);
+    let input = int_a(random_data);
 
-    // Bench compilation
-    let mut group = c.benchmark_group("compilation");
-    group.bench_function("quicksort", |b| b.iter(|| compile(&mut session)));
-    group.finish();
-
-    // Bench evaluation
-    let mut group = c.benchmark_group("runtime");
-    let module_id = compile(&mut session);
-    group.bench_function("quicksort(300)", |b| {
-        b.iter(|| {
-            let input = int_a(random_data.clone());
-            call_fn!(&session, module_id, "quicksort_int_a", [input => array_ty] -> array_ty)
-                .unwrap();
-        })
-    });
-    group.finish();
+    call_fn!(&session, module_id, "quicksort_int_a", [input => array_ty] -> array_ty).unwrap();
 }
 
-fn bench_fibonacci(c: &mut Criterion) {
-    // Prepare
+#[library_benchmark]
+fn bench_fibonacci() {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -75,18 +67,12 @@ fn bench_fibonacci(c: &mut Criterion) {
         .unwrap()
         .module_id;
 
-    // Bench evaluation
-    let mut group = c.benchmark_group("runtime");
-    group.bench_function("fibonacci_rec(20)", |b| {
-        b.iter(|| {
-            run_fn_native!(&session, module_id, "fibonacci_rec", [20 => isize] -> isize).unwrap()
-        })
-    });
-    group.finish();
+    run_fn_native!(&session, module_id, "fibonacci_rec", [black_box(20) => isize] -> isize)
+        .unwrap();
 }
 
-fn bench_sieve(c: &mut Criterion) {
-    // Prepare
+#[library_benchmark]
+fn bench_sieve() {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -97,18 +83,11 @@ fn bench_sieve(c: &mut Criterion) {
         .unwrap()
         .module_id;
 
-    // Bench evaluation
-    let mut group = c.benchmark_group("runtime");
-    group.bench_function("prime_count(500)", |b| {
-        b.iter(|| {
-            run_fn_native!(&session, module_id, "prime_count", [500 => isize] -> isize).unwrap()
-        })
-    });
-    group.finish();
+    run_fn_native!(&session, module_id, "prime_count", [black_box(500) => isize] -> isize).unwrap();
 }
 
-fn bench_rle_encode(c: &mut Criterion) {
-    // Prepare
+#[library_benchmark]
+fn bench_rle_encode() {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -120,19 +99,11 @@ fn bench_rle_encode(c: &mut Criterion) {
         .module_id;
     let input = Str::new(&"aabccccccc".repeat(50));
 
-    // Bench evaluation
-    let mut group = c.benchmark_group("runtime");
-    group.bench_function("rle_encode(500)", |b| {
-        b.iter(|| {
-            let input = input.clone();
-            run_fn_native!(&session, module_id, "rle_encode_string", [input => Str] -> Str).unwrap()
-        })
-    });
-    group.finish();
+    run_fn_native!(&session, module_id, "rle_encode_string", [input => Str] -> Str).unwrap();
 }
 
-fn bench_csv(c: &mut Criterion) {
-    // Prepare
+#[library_benchmark]
+fn bench_csv() {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -143,66 +114,53 @@ fn bench_csv(c: &mut Criterion) {
         .unwrap()
         .module_id;
 
-    // Bench evaluation
-    let mut group = c.benchmark_group("runtime");
-    group.bench_function("csv_table(500)", |b| {
-        b.iter(|| run_fn_native!(&session, module_id, "csv_table", [500 => isize] -> Str).unwrap())
-    });
-    group.finish();
+    run_fn_native!(&session, module_id, "csv_table", [black_box(500) => isize] -> Str).unwrap();
 }
 
-fn bench_bank_account(c: &mut Criterion) {
-    // Prepare
+fn compile_bank_account() -> (CompilerSession, ModuleId) {
     let mut session = CompilerSession::new();
-    let compile = |session: &mut CompilerSession| {
-        session
-            .compile(
-                include_str!("../tests/modules/quicksort.fer"),
-                "quicksort.fer",
-                Path::single_str("quicksort"),
-            )
-            .unwrap();
-        session
-            .compile(
-                include_str!("../tests/modules/bank_account.fer"),
-                "bank_account.fer",
-                Path::single_str("account"),
-            )
-            .unwrap();
-        // FIXME: this cannot be in bank_account.fer due to issue #111
-        session
-            .compile(
-                indoc! { r#"
-                    fn test() {
-                        let data = account::test_data();
-                        let json = json_encode(data);
-                        let decoded: [account::Account] = json_decode(json);
-                        let sorted = quicksort::quicksort_array(decoded);
-                        sorted[len(sorted) - 1].name
-                    }
-                "# },
-                "test.fer",
-                Path::single_str("test"),
-            )
-            .unwrap()
-            .module_id
-    };
-
-    // Bench compilation
-    let mut group = c.benchmark_group("compilation");
-    group.bench_function("bank_account", |b| b.iter(|| compile(&mut session)));
-    group.finish();
-
-    // Bench evaluation
-    let mut group = c.benchmark_group("runtime");
-    let module_id = compile(&mut session);
-    group.bench_function("bank_account", |b| {
-        b.iter(|| run_fn_native!(&session, module_id, "test", [] -> Str).unwrap())
-    });
-    group.finish();
+    let _ = session.compile(
+        include_str!("../tests/modules/quicksort.fer"),
+        "quicksort.fer",
+        Path::single_str("quicksort"),
+    );
+    let _ = session.compile(
+        include_str!("../tests/modules/bank_account.fer"),
+        "bank_account.fer",
+        Path::single_str("account"),
+    );
+    let module_id = session
+        .compile(
+            indoc! { r#"
+            fn test() {
+                let data = account::test_data();
+                let json = json_encode(data);
+                let decoded: [account::Account] = json_decode(json);
+                let sorted = quicksort::quicksort_array(decoded);
+                sorted[len(sorted) - 1].name
+            }
+        "# },
+            "test.fer",
+            Path::single_str("test"),
+        )
+        .unwrap()
+        .module_id;
+    (session, module_id)
 }
 
-// Support functions
+#[library_benchmark]
+fn bench_bank_account_compile() {
+    compile_bank_account();
+}
+
+#[library_benchmark]
+fn bench_bank_account_run() {
+    let (session, module_id) = compile_bank_account();
+
+    run_fn_native!(&session, module_id, "test", [] -> Str).unwrap();
+}
+
+// --- Support functions ---
 
 fn int_a(values: impl Into<Vec<isize>>) -> Value {
     Value::native(ferlium::std::array::Array::from_vec(
@@ -220,11 +178,27 @@ fn lcg_seq(n: usize, seed: usize) -> Vec<isize> {
         .collect()
 }
 
-// Criterion setup
+// --- Gungraun Setup ---
 
-criterion_group!(
-    name = runtime;
-    config = Criterion::default().sample_size(50);
-    targets = bench_new_session, bench_quicksort, bench_fibonacci, bench_sieve, bench_rle_encode, bench_csv, bench_bank_account
+library_benchmark_group!(
+    name = compilation,
+    benchmarks = [
+        bench_new_session,
+        bench_quicksort_compile,
+        bench_bank_account_compile
+    ]
 );
-criterion_main!(runtime);
+
+library_benchmark_group!(
+    name = runtime,
+    benchmarks = [
+        bench_quicksort_run,
+        bench_fibonacci,
+        bench_sieve,
+        bench_rle_encode,
+        bench_csv,
+        bench_bank_account_run
+    ]
+);
+
+main!(library_benchmark_groups = [compilation, runtime]);
