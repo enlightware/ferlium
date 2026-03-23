@@ -44,19 +44,21 @@ fn bench_quicksort_compile() {
     compile_quicksort();
 }
 
-#[library_benchmark]
-fn bench_quicksort_run() {
+fn setup_quicksort() -> (CompilerSession, ModuleId, Vec<isize>) {
     let (session, module_id) = compile_quicksort();
-
-    let array_ty = array_type(int_type());
     let random_data = lcg_seq(300, 42);
+    (session, module_id, random_data)
+}
+
+#[library_benchmark(setup = setup_quicksort)]
+fn bench_quicksort_run((session, module_id, random_data): (CompilerSession, ModuleId, Vec<isize>)) {
+    let array_ty = array_type(int_type());
     let input = int_a(random_data);
 
     call_fn!(&session, module_id, "quicksort_int_a", [input => array_ty] -> array_ty).unwrap();
 }
 
-#[library_benchmark]
-fn bench_fibonacci() {
+fn setup_fibonacci() -> (CompilerSession, ModuleId) {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -66,13 +68,16 @@ fn bench_fibonacci() {
         )
         .unwrap()
         .module_id;
+    (session, module_id)
+}
 
+#[library_benchmark(setup = setup_fibonacci)]
+fn bench_fibonacci((session, module_id): (CompilerSession, ModuleId)) {
     run_fn_native!(&session, module_id, "fibonacci_rec", [black_box(20) => isize] -> isize)
         .unwrap();
 }
 
-#[library_benchmark]
-fn bench_sieve() {
+fn setup_sieve() -> (CompilerSession, ModuleId) {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -82,12 +87,15 @@ fn bench_sieve() {
         )
         .unwrap()
         .module_id;
+    (session, module_id)
+}
 
+#[library_benchmark(setup = setup_sieve)]
+fn bench_sieve((session, module_id): (CompilerSession, ModuleId)) {
     run_fn_native!(&session, module_id, "prime_count", [black_box(500) => isize] -> isize).unwrap();
 }
 
-#[library_benchmark]
-fn bench_rle_encode() {
+fn setup_rle_encode() -> (CompilerSession, ModuleId, Str) {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -98,12 +106,15 @@ fn bench_rle_encode() {
         .unwrap()
         .module_id;
     let input = Str::new(&"aabccccccc".repeat(50));
+    (session, module_id, input)
+}
 
+#[library_benchmark(setup = setup_rle_encode)]
+fn bench_rle_encode((session, module_id, input): (CompilerSession, ModuleId, Str)) {
     run_fn_native!(&session, module_id, "rle_encode_string", [input => Str] -> Str).unwrap();
 }
 
-#[library_benchmark]
-fn bench_csv() {
+fn setup_csv() -> (CompilerSession, ModuleId) {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -113,7 +124,11 @@ fn bench_csv() {
         )
         .unwrap()
         .module_id;
+    (session, module_id)
+}
 
+#[library_benchmark(setup = setup_csv)]
+fn bench_csv((session, module_id): (CompilerSession, ModuleId)) {
     run_fn_native!(&session, module_id, "csv_table", [black_box(500) => isize] -> Str).unwrap();
 }
 
@@ -153,10 +168,8 @@ fn bench_bank_account_compile() {
     compile_bank_account();
 }
 
-#[library_benchmark]
-fn bench_bank_account_run() {
-    let (session, module_id) = compile_bank_account();
-
+#[library_benchmark(setup = compile_bank_account)]
+fn bench_bank_account_run((session, module_id): (CompilerSession, ModuleId)) {
     run_fn_native!(&session, module_id, "test", [] -> Str).unwrap();
 }
 
