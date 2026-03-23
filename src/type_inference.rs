@@ -9,13 +9,13 @@
 use std::{
     borrow::Borrow,
     cell::RefCell,
-    collections::{HashMap, HashSet},
     fmt::{self, Display},
     iter::once,
     mem,
 };
 
 use crate::{
+    FxHashMap, FxHashSet,
     ast::{
         self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternKind, PatternVar,
         RecordField, RecordFields, UnnamedArg,
@@ -287,7 +287,7 @@ impl TypeInference {
             .collect()
     }
 
-    pub fn fresh_effect_var_subst(&mut self, source: &HashSet<EffectVar>) -> EffectsSubstitution {
+    pub fn fresh_effect_var_subst(&mut self, source: &FxHashSet<EffectVar>) -> EffectsSubstitution {
         source
             .iter()
             .map(|&eff_var| (eff_var, self.fresh_effect_var_ty()))
@@ -315,8 +315,8 @@ impl TypeInference {
         use ir::NodeKind as K;
 
         // 1. Collect free variables in the body.
-        let mut free_vars = HashSet::new();
-        let mut bound_vars = vec![HashSet::new()];
+        let mut free_vars = FxHashSet::default();
+        let mut bound_vars = vec![FxHashSet::default()];
         for (arg, _) in args {
             bound_vars[0].insert(*arg);
         }
@@ -1360,7 +1360,7 @@ impl TypeInference {
         ctx: DuplicatedFieldContext,
     ) -> Result<Vec<&RecordField<Desugared>>, InternalCompilationError> {
         // Check that all fields are unique.
-        let mut names_seen = HashMap::new();
+        let mut names_seen = FxHashMap::default();
         for ((name, span), _) in fields.iter() {
             if let Some(prev_span) = names_seen.insert(name, span) {
                 return Err(internal_compilation_error!(DuplicatedField {
@@ -1649,7 +1649,7 @@ impl TypeInference {
         let (primitives, variables) = deps
             .iter()
             .flat_map(|eff| eff.borrow().iter())
-            .partition::<HashSet<_>, _>(|eff| eff.is_primitive());
+            .partition::<FxHashSet<_>, _>(|eff| eff.is_primitive());
 
         // If all effects are primitive, we can just return them.
         if variables.is_empty() {
@@ -1741,7 +1741,7 @@ pub struct UnifiedTypeInference {
     remaining_ty_constraints: Vec<PubTypeConstraint>,
     mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     effect_unification_table: InPlaceUnificationTable<EffectVarKey>,
-    effect_constraints_inv: HashMap<EffType, EffectVarKey>,
+    effect_constraints_inv: FxHashMap<EffType, EffectVarKey>,
 }
 
 impl UnifiedTypeInference {
@@ -1771,9 +1771,9 @@ impl UnifiedTypeInference {
             remaining_ty_constraints: vec![],
             mut_unification_table,
             effect_unification_table,
-            effect_constraints_inv: HashMap::new(),
+            effect_constraints_inv: FxHashMap::default(),
         };
-        let mut remaining_constraints = HashSet::new();
+        let mut remaining_constraints = FxHashSet::default();
 
         // First, resolve mutability constraints.
         for constraint in mut_constraints {
@@ -1903,14 +1903,14 @@ impl UnifiedTypeInference {
 
                 // Perform simplification for algebraic data type constraints.
                 // Check for incompatible constraints as well.
-                let mut tuples_at_index_is: HashMap<Type, HashMap<usize, (Type, Location)>> =
-                    HashMap::new();
-                let mut records_field_is: HashMap<Type, HashMap<Ustr, (Type, Location)>> =
-                    HashMap::new();
-                let mut variants_are: HashMap<Type, HashMap<Ustr, (Type, Location)>> =
-                    HashMap::new();
-                let mut have_traits: HashMap<(TraitRef, Vec<Type>), (Vec<Type>, Location)> =
-                    HashMap::new();
+                let mut tuples_at_index_is: FxHashMap<Type, FxHashMap<usize, (Type, Location)>> =
+                    FxHashMap::default();
+                let mut records_field_is: FxHashMap<Type, FxHashMap<Ustr, (Type, Location)>> =
+                    FxHashMap::default();
+                let mut variants_are: FxHashMap<Type, FxHashMap<Ustr, (Type, Location)>> =
+                    FxHashMap::default();
+                let mut have_traits: FxHashMap<(TraitRef, Vec<Type>), (Vec<Type>, Location)> =
+                    FxHashMap::default();
                 for constraint in &remaining_constraints {
                     use PubTypeConstraint::*;
                     match constraint {
@@ -1954,7 +1954,7 @@ impl UnifiedTypeInference {
                                     tuple.insert(*index, (element_ty, span));
                                 }
                             } else {
-                                let tuple = HashMap::from([(*index, (element_ty, span))]);
+                                let tuple = FxHashMap::from_iter([(*index, (element_ty, span))]);
                                 tuples_at_index_is.insert(tuple_ty, tuple);
                             }
                         }
@@ -1998,7 +1998,7 @@ impl UnifiedTypeInference {
                                     record.insert(*field, (element_ty, span));
                                 }
                             } else {
-                                let record = HashMap::from([(*field, (element_ty, span))]);
+                                let record = FxHashMap::from_iter([(*field, (element_ty, span))]);
                                 records_field_is.insert(record_ty, record);
                             }
                         }
@@ -2042,8 +2042,10 @@ impl UnifiedTypeInference {
                                     variants.insert(*tag, (payload_ty, span));
                                 }
                             } else {
-                                let variant =
-                                    HashMap::from([(*tag, (payload_ty, payload_span.use_site))]);
+                                let variant = FxHashMap::from_iter([(
+                                    *tag,
+                                    (payload_ty, payload_span.use_site),
+                                )]);
                                 variants_are.insert(variant_ty, variant);
                             }
                         }
@@ -2076,7 +2078,7 @@ impl UnifiedTypeInference {
                 }
 
                 // Perform unification.
-                let mut new_remaining_constraints = HashSet::new();
+                let mut new_remaining_constraints = FxHashSet::default();
                 let old_constraint_count = remaining_constraints.len();
                 for constraint in remaining_constraints {
                     use PubTypeConstraint::*;
@@ -3316,7 +3318,7 @@ impl TypeSubstituer for SubstituteTypes<'_> {
 
         // Thread-local hash-map for cycle detection
         thread_local! {
-            static VAR_VISITED: RefCell<HashSet<EffectVar>> = RefCell::new(HashSet::new());
+            static VAR_VISITED: RefCell<FxHashSet<EffectVar>> = RefCell::new(FxHashSet::default());
         }
 
         EffType::from_iter(eff_ty.iter().flat_map(|eff| {
@@ -3374,8 +3376,8 @@ impl TypeSubstituer for NormalizeTypes<'_> {
 fn collect_free_variables(
     expr_id: DExprId,
     arena: &DExprArena,
-    bound: &mut Vec<HashSet<ustr::Ustr>>,
-    free: &mut HashSet<ustr::Ustr>,
+    bound: &mut Vec<FxHashSet<ustr::Ustr>>,
+    free: &mut FxHashSet<ustr::Ustr>,
 ) {
     let expr = &arena[expr_id];
     use ExprKind::*;
@@ -3395,7 +3397,7 @@ fn collect_free_variables(
             }
         }
         Abstract(data) => {
-            let mut scope = HashSet::new();
+            let mut scope = FxHashSet::default();
             for (arg, _) in &data.args {
                 scope.insert(*arg);
             }
@@ -3404,7 +3406,7 @@ fn collect_free_variables(
             bound.pop();
         }
         Block(exprs) => {
-            bound.push(HashSet::new());
+            bound.push(FxHashSet::default());
             for expr in exprs {
                 collect_free_variables(*expr, arena, bound, free);
             }
@@ -3413,7 +3415,7 @@ fn collect_free_variables(
         Match(data) => {
             collect_free_variables(data.cond_expr, arena, bound, free);
             for (pattern, body) in &data.alternatives {
-                let mut scope = HashSet::new();
+                let mut scope = FxHashSet::default();
                 collect_pattern_vars(pattern, &mut scope);
                 bound.push(scope);
                 collect_free_variables(*body, arena, bound, free);
@@ -3466,7 +3468,7 @@ fn collect_free_variables(
     }
 }
 
-fn collect_pattern_vars(pattern: &Pattern, bound: &mut HashSet<ustr::Ustr>) {
+fn collect_pattern_vars(pattern: &Pattern, bound: &mut FxHashSet<ustr::Ustr>) {
     use PatternKind::*;
     if let Variant { vars, .. } = &pattern.kind {
         for var in vars {

@@ -7,15 +7,14 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
-    collections::{HashMap, HashSet},
     fmt::{self, Display},
     ops::Deref,
     sync::LazyLock,
 };
 
 use crate::{
-    CompilationError, CompilerSession, DisplayStyle, Location, ModuleAndExpr, ModuleEnv, Path,
-    SourceId, call_fn,
+    CompilationError, CompilerSession, DisplayStyle, FxHashMap, FxHashSet, Location, ModuleAndExpr,
+    ModuleEnv, Path, SourceId, call_fn,
     error::{
         CompilationErrorImpl, ImportKind, MutabilityMustBeWhat, WhatIsNotAProductType,
         WhichProductTypeIsNot,
@@ -754,7 +753,7 @@ impl ExecutionResult {
 pub struct Compiler {
     session: CompilerSession,
     user_module: ModuleAndExpr,
-    char_index_lookup: HashMap<SourceId, CharIndexLookup>,
+    char_index_lookup: FxHashMap<SourceId, CharIndexLookup>,
 }
 
 const SRC_NAME: &str = "<ide>";
@@ -772,7 +771,7 @@ impl Compiler {
         Self {
             session,
             user_module,
-            char_index_lookup: HashMap::new(),
+            char_index_lookup: FxHashMap::default(),
         }
     }
 
@@ -949,8 +948,8 @@ impl Compiler {
 
     pub fn list_module_props(&self) -> Vec<String> {
         static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@(get|set) (.*)$").unwrap());
-        let mut getters = HashSet::new();
-        let mut setters = HashSet::new();
+        let mut getters = FxHashSet::default();
+        let mut setters = FxHashSet::default();
         let user_module = self
             .session
             .modules()

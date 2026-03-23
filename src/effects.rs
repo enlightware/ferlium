@@ -6,10 +6,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Display,
-};
+use std::fmt::Display;
+
+use crate::{FxHashMap, FxHashSet};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -217,7 +216,7 @@ impl EffType {
         }
     }
 
-    pub fn fill_with_inner_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+    pub fn fill_with_inner_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
         for effect in self.0.iter() {
             match effect {
                 Effect::Primitive(_) => {}
@@ -300,7 +299,7 @@ pub fn effect_vars(vars: &[u32]) -> EffType {
     EffType::multiple_variable(&vars.iter().copied().map(EffectVar::new).collect::<Vec<_>>())
 }
 
-pub type EffectsSubstitution = HashMap<EffectVar, EffType>;
+pub type EffectsSubstitution = FxHashMap<EffectVar, EffType>;
 
 #[cfg(test)]
 mod tests {

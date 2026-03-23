@@ -7,7 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{collections::HashMap, mem};
+use std::mem;
+
+use crate::FxHashMap;
 
 use crate::{
     Location,
@@ -171,7 +173,7 @@ pub struct ExtraParameters {
     pub requirements: Vec<DictionaryReq>,
     /// A map from type variables to other type variables containing their representation type.
     /// This is used to resolve type variables when looking up field dict indices.
-    pub repr_map: HashMap<TypeVar, TypeVar>,
+    pub repr_map: FxHashMap<TypeVar, TypeVar>,
 }
 
 impl ExtraParameters {
@@ -329,7 +331,7 @@ fn extra_args_for_module_function(
 /// This is a map from function pointers to the dictionaries required by the function.
 /// This is necessary as recursive functions in the current modules could not get their
 /// dictionary requirements during type inference as they were not known yet.
-pub type ModuleInstData = HashMap<LocalFunctionId, ExtraParameters>;
+pub type ModuleInstData = FxHashMap<LocalFunctionId, ExtraParameters>;
 
 /// The context for elaborating dictionaries.
 /// All necessary information to perform dictionary elaboration.

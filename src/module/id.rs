@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::collections::HashMap;
+use crate::FxHashMap;
 use std::hash::Hash;
 use std::mem::swap;
 
@@ -51,13 +51,13 @@ macro_rules! define_id_type {
 #[derive(Debug, Clone)]
 pub struct NamedIndexed<N: Clone + Eq + Hash, I: Id, T> {
     data: Vec<(T, Option<N>)>,
-    name_to_id: HashMap<N, I>,
+    name_to_id: FxHashMap<N, I>,
 }
 impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
-            name_to_id: HashMap::new(),
+            name_to_id: FxHashMap::default(),
         }
     }
 

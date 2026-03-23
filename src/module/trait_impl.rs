@@ -7,7 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{cell::RefCell, collections::HashMap, fmt, hash::Hash, rc::Rc};
+use std::{cell::RefCell, fmt, hash::Hash, rc::Rc};
+
+use crate::FxHashMap;
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -192,9 +194,9 @@ pub(crate) enum DisplayFilter {
     MethodCode,
 }
 
-pub(crate) type ConcreteImpls = HashMap<ConcreteTraitImplKey, LocalImplId>;
-pub(crate) type BlanketTraitImpls = HashMap<BlanketTraitImplSubKey, LocalImplId>;
-pub(crate) type BlanketImpls = HashMap<TraitRef, BlanketTraitImpls>;
+pub(crate) type ConcreteImpls = FxHashMap<ConcreteTraitImplKey, LocalImplId>;
+pub(crate) type BlanketTraitImpls = FxHashMap<BlanketTraitImplSubKey, LocalImplId>;
+pub(crate) type BlanketImpls = FxHashMap<TraitRef, BlanketTraitImpls>;
 
 /// All trait implementations in a module or in a given context.
 #[derive(Clone, Debug, new)]
@@ -460,9 +462,9 @@ impl TraitImpls {
                 // For blanket impls, the function types already use the correct type variables,
                 // so we don't need to apply any substitution.
                 if level == DisplayFilter::MethodDefinitions {
-                    format_impl_fns(&key.trait_ref, TypeSubstitution::new(), imp, false, f, env)?;
+                    format_impl_fns(&key.trait_ref, TypeSubstitution::default(), imp, false, f, env)?;
                 } else if level == DisplayFilter::MethodCode {
-                    format_impl_fns(&key.trait_ref, TypeSubstitution::new(), imp, true, f, env)?;
+                    format_impl_fns(&key.trait_ref, TypeSubstitution::default(), imp, true, f, env)?;
                 }
                 writeln!(f)?;
             }
@@ -545,7 +547,7 @@ pub fn format_blanket_impl(
     format_blanket_impl_header(key, &imp.output_tys, f, env)?;
     // For blanket impls, the function types already use the correct type variables,
     // so we don't need to apply any substitution.
-    format_impl_fns(&key.trait_ref, TypeSubstitution::new(), imp, false, f, env)
+    format_impl_fns(&key.trait_ref, TypeSubstitution::default(), imp, false, f, env)
 }
 
 pub fn format_impl_header_by_key(
@@ -628,7 +630,7 @@ fn format_impl_header_expanded(
         )?;
     }
     write!(f, ">")?;
-    let mut subst = TypeSubstitution::new();
+    let mut subst = TypeSubstitution::default();
     for (i, ty) in input_tys.iter().enumerate() {
         subst.insert(TypeVar::new(i as u32), *ty);
     }
@@ -646,7 +648,7 @@ fn format_impl_fns(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
-    let subst = (subst, HashMap::new());
+    let subst = (subst, FxHashMap::default());
     writeln!(f, " {{")?;
     let impl_functions = imp.methods.iter().map(|&id| {
         let function = env.current.get_function_by_id(id).unwrap();

@@ -6,7 +6,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
+
+use crate::FxHashSet;
 
 pub(crate) trait Node {
     type Index: TryInto<usize> + Copy;
@@ -148,7 +150,7 @@ where
     }
 
     // Build the condensed graph of SCC dependencies
-    let mut scc_graph: Vec<HashSet<usize>> = vec![HashSet::new(); sccs.len()];
+    let mut scc_graph: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); sccs.len()];
     let mut in_degree = vec![0; sccs.len()];
 
     for (i, scc) in sccs.iter().enumerate() {

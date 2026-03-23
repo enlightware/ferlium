@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 // Copyright 2026 Enlightware GmbH
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
@@ -11,7 +9,7 @@ use std::collections::HashSet;
 use ustr::{Ustr, ustr};
 
 use crate::{
-    Location,
+    FxHashSet, Location,
     ast::{self, DExprArena},
     error::InternalCompilationError,
     function::FunctionDefinition,
@@ -78,7 +76,7 @@ pub struct TypingEnv<'m> {
     /// The extra import slots that can be filled during type checking.
     pub(crate) new_import_slots: &'m mut Vec<ImportFunctionSlot>,
     /// The type dependencies that can be filled during type checking.
-    pub(crate) new_type_deps: &'m mut HashSet<ModuleId>,
+    pub(crate) new_type_deps: &'m mut FxHashSet<ModuleId>,
     /// The program and the module we are currently compiling.
     pub(crate) module_env: ModuleEnv<'m>,
     /// The expected return type of the enclosing function (for type-checking `return` statements).

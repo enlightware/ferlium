@@ -11,7 +11,7 @@ use std::fmt::{self, Display};
 
 use derive_new::new;
 
-use crate::never::Never;
+use crate::{FxHashMap, never::Never};
 
 /// A wrapper to fmt::Display types that depend on third-party data
 #[derive(new)]
@@ -79,7 +79,7 @@ where
     }
 }
 
-impl<K, V, X> FormatWith<X> for std::collections::HashMap<K, V>
+impl<K, V, X> FormatWith<X> for FxHashMap<K, V>
 where
     K: Display,
     V: FormatWith<X>,

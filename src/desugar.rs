@@ -7,10 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use itertools::process_results;
-use std::{
-    collections::{HashMap, HashSet},
-    mem,
-};
+use std::mem;
+
+use crate::{FxHashMap, FxHashSet};
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -48,8 +47,8 @@ impl crate::graph::Node for DepGraphNode {
     }
 }
 
-type FnMap = HashMap<Ustr, usize>;
-type FnDeps = HashSet<usize>;
+type FnMap = FxHashMap<Ustr, usize>;
+type FnDeps = FxHashSet<usize>;
 
 pub type FnSccs = Vec<Vec<usize>>;
 
@@ -57,7 +56,7 @@ impl ast::PFnArgType {
     pub fn desugar(
         &self,
         env: &ModuleEnv<'_>,
-        modules_used: &mut HashSet<ModuleId>,
+        modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<FnArgType, InternalCompilationError> {
         let ty = self.ty.0.desugar(self.ty.1, false, env, modules_used)?;
         let mut_ty = match self.mut_ty {
@@ -76,7 +75,7 @@ impl ast::PFnType {
     pub fn desugar(
         &self,
         env: &ModuleEnv<'_>,
-        modules_used: &mut HashSet<ModuleId>,
+        modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<FnType, InternalCompilationError> {
         let args = self
             .args
@@ -100,7 +99,7 @@ impl ast::PType {
         span: Location,
         in_ty_def: bool,
         env: &ModuleEnv<'_>,
-        modules_used: &mut HashSet<ModuleId>,
+        modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<Type, InternalCompilationError> {
         use ast::PType::*;
         Ok(match self {
@@ -126,7 +125,7 @@ impl ast::PType {
                 }
             }
             Variant(types) => {
-                let mut seen = HashMap::new();
+                let mut seen = FxHashMap::default();
                 Type::variant(
                     types
                         .iter()
@@ -157,7 +156,7 @@ impl ast::PType {
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Record(fields) => {
-                let mut seen = HashMap::new();
+                let mut seen = FxHashMap::default();
                 Type::record(
                     fields
                         .iter()
@@ -191,7 +190,7 @@ impl PTypeDef {
     pub fn desugar(
         &self,
         env: &ModuleEnv<'_>,
-        modules_used: &mut HashSet<ModuleId>,
+        modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<TypeDefRef, InternalCompilationError> {
         assert!(self.generic_params.is_empty());
         assert!(self.doc_comments.is_empty());
@@ -210,7 +209,7 @@ impl PModuleFunctionArg {
     pub fn desugar(
         self,
         env: &ModuleEnv<'_>,
-        modules_used: &mut HashSet<ModuleId>,
+        modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<DModuleFunctionArg, InternalCompilationError> {
         let ty = self
             .ty
@@ -239,14 +238,14 @@ impl PTraitImpl {
         env: &ModuleEnv<'_>,
         parsed_arena: &PExprArena,
         desugared_arena: &mut DExprArena,
-        modules_used: &mut HashSet<ModuleId>,
+        modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<DTraitImpl, InternalCompilationError> {
         let fn_map = self
             .functions
             .iter()
             .enumerate()
             .map(|(index, func)| (func.name.0, index))
-            .collect::<HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
         let functions = self
             .functions
             .into_iter()
@@ -283,8 +282,8 @@ enum NamedTypeData {
 impl NamedTypeData {
     fn collect_refs(
         &self,
-        ty_names: &HashMap<Ustr, usize>,
-        collected: &mut HashSet<usize>,
+        ty_names: &FxHashMap<Ustr, usize>,
+        collected: &mut FxHashSet<usize>,
     ) -> Result<(), InternalCompilationError> {
         use NamedTypeData::*;
         match self {
@@ -325,7 +324,7 @@ impl PModule {
 
         // Build a map of type names to their location and definitions or aliases.
         // The ty_names map holds indices to the ty_refs vector, which contains the data.
-        let (ty_names, ty_refs): (HashMap<_, _>, Vec<_>) = self
+        let (ty_names, ty_refs): (FxHashMap<_, _>, Vec<_>) = self
             .type_aliases
             .into_iter()
             .map(|alias| (alias.name.0, NamedTypeData::Alias(alias.name, alias.ty)))
@@ -342,7 +341,7 @@ impl PModule {
         let ty_dep_graph = ty_refs
             .iter()
             .map(|ty_ref| {
-                let mut collected = HashSet::new();
+                let mut collected = FxHashSet::default();
                 ty_ref.collect_refs(&ty_names, &mut collected)?;
                 Ok(DepGraphNode(collected.into_iter().collect()))
             })
@@ -369,7 +368,7 @@ impl PModule {
         // Process types in order of their dependencies and resolve type aliases and type definitions.
         // Directly insert them into the output module once they are resolved.
         let sorted_sccs = topological_sort_sccs(&ty_dep_graph, &sccs);
-        let mut modules_used = HashSet::<ModuleId>::new();
+        let mut modules_used = FxHashSet::<ModuleId>::default();
         for scc in sorted_sccs.into_iter().rev() {
             assert_eq!(scc.len(), 1);
             let ty_ref = &ty_refs[scc[0]];
@@ -391,7 +390,7 @@ impl PModule {
             .iter()
             .enumerate()
             .map(|(index, func)| (func.name.0, index))
-            .collect::<HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
         let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
         let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
             self.functions.into_iter().map(|f| {
@@ -435,7 +434,7 @@ impl PModuleFunction {
         env: &ModuleEnv<'_>,
         parsed_arena: &PExprArena,
         desugared_arena: &mut DExprArena,
-        modules_used: &mut HashSet<ModuleId>,
+        modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
         let locals = self.args.iter().map(|arg| arg.name.0).collect();
         let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env);
@@ -487,7 +486,7 @@ impl<'a> DesugarCtx<'a> {
     fn new(fn_map: &'a FnMap, module_env: &'a ModuleEnv<'a>) -> Self {
         Self {
             fn_map,
-            fn_deps: HashSet::new(),
+            fn_deps: FxHashSet::default(),
             locals: Vec::new(),
             module_env,
         }
@@ -499,7 +498,7 @@ impl<'a> DesugarCtx<'a> {
     ) -> Self {
         Self {
             fn_map,
-            fn_deps: HashSet::new(),
+            fn_deps: FxHashSet::default(),
             locals,
             module_env,
         }
@@ -512,9 +511,9 @@ pub fn desugar_expr_with_empty_ctx(
     id: ExprId<Parsed>,
     parsed_arena: &PExprArena,
     module_env: &ModuleEnv<'_>,
-    modules_used: &mut HashSet<ModuleId>,
+    modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<(DExprId, DExprArena), InternalCompilationError> {
-    let empty_fn_map = HashMap::new();
+    let empty_fn_map = FxHashMap::default();
     let mut ctx = DesugarCtx::new(&empty_fn_map, module_env);
     let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
     let result = desugar(
@@ -533,7 +532,7 @@ fn desugar(
     ctx: &mut DesugarCtx,
     parsed_arena: &PExprArena,
     desugared_arena: &mut DExprArena,
-    modules_used: &mut HashSet<ModuleId>,
+    modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<DExprId, InternalCompilationError> {
     use ExprKind::*;
     // Clone the kind and span so we can release the borrow on parsed_arena
@@ -896,7 +895,7 @@ fn desugar_exprs(
     ctx: &mut DesugarCtx,
     parsed_arena: &PExprArena,
     desugared_arena: &mut DExprArena,
-    modules_used: &mut HashSet<ModuleId>,
+    modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<Vec<DExprId>, InternalCompilationError> {
     ids.into_iter()
         .map(|id| desugar(id, ctx, parsed_arena, desugared_arena, modules_used))

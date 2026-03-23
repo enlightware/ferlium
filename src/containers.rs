@@ -6,8 +6,10 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use std::cmp;
 use std::hash::Hash;
-use std::{cmp, collections::HashMap};
+
+use crate::FxHashMap;
 
 /// Box alias to keep code shorter
 pub(crate) type B<T> = Box<T>;
@@ -99,7 +101,7 @@ pub fn iterable_to_string(
 
 /// In a Hashmap, find a key that has a value equal to the given value.
 pub fn find_key_for_value_property<'a, K, V, P, F>(
-    map: &'a HashMap<K, V>,
+    map: &'a FxHashMap<K, V>,
     value: &P,
     compare: F,
 ) -> Option<&'a K>
@@ -139,7 +141,7 @@ pub trait FromIndex: std::cmp::Eq + std::hash::Hash {
 /// Consumes a HashMap with continuous indices starting at 0 and returns a Vec with the values in order.
 /// If the indices are not continuous, an error is returned.
 pub fn continuous_hashmap_to_vec<K: FromIndex, T>(
-    mut map: HashMap<K, T>,
+    mut map: FxHashMap<K, T>,
 ) -> Result<Vec<T>, &'static str> {
     let len = map.len();
 

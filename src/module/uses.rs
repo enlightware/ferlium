@@ -8,7 +8,7 @@
 //
 //! Use directives
 
-use std::collections::HashMap;
+use crate::FxHashMap;
 
 use derive_new::new;
 use ustr::Ustr;
@@ -24,11 +24,11 @@ pub struct UseData {
 /// Use directives of a module, separated into explicit and wildcard uses
 #[derive(Debug, Clone, new)]
 pub struct Uses {
-    pub explicits: HashMap<Ustr, UseData>,
+    pub explicits: FxHashMap<Ustr, UseData>,
     pub wildcards: Vec<UseData>,
 }
 impl Default for Uses {
     fn default() -> Self {
-        Self::new(HashMap::new(), vec![])
+        Self::new(FxHashMap::default(), vec![])
     }
 }

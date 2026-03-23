@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::collections::{HashMap, HashSet};
+use ferlium::{FxHashMap, FxHashSet};
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
@@ -51,13 +51,13 @@ impl ariadne::Span for Span {
 
 /// A wrapper around SourceTable to implement ariadne::Cache
 struct Cache<'src> {
-    cache: HashMap<SourceId, Source<&'src String>>,
+    cache: FxHashMap<SourceId, Source<&'src String>>,
     source_table: &'src SourceTable,
 }
 impl Cache<'_> {
     pub fn new(source_table: &SourceTable) -> Cache<'_> {
         Cache {
-            cache: HashMap::new(),
+            cache: FxHashMap::default(),
             source_table,
         }
     }
@@ -469,12 +469,12 @@ fn process_input(
     // Parse the input once to get the list of symbols this module defines.
     let source_id = session.source_table().next_id();
     let local_symbols = parse_module_and_expr(input, source_id, false).map_or_else(
-        |_| HashSet::new(),
+        |_| FxHashSet::default(),
         |(module, _, _)| module.own_symbols().map(|(sym, _)| sym).collect(),
     );
 
     // Build use directives to import last modules as repl<counter>
-    let mut reverse_uses = HashMap::new();
+    let mut reverse_uses = FxHashMap::default();
     for i in 0..fill_use_until {
         let index = fill_use_until - i - 1;
         let mod_name = format!("repl{index}");

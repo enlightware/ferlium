@@ -6,12 +6,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{
-    borrow::Borrow,
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    rc::Rc,
-};
+use std::{borrow::Borrow, cell::RefCell, rc::Rc};
+
+use crate::{FxHashMap, FxHashSet};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -55,7 +52,7 @@ use crate::{
 };
 
 fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompilationError> {
-    let mut names = HashMap::new();
+    let mut names = FxHashMap::default();
     for (name, span) in source.own_symbols() {
         if let Some(first_occurrence) = names.insert(name, span) {
             return Err(internal_compilation_error!(NameDefinedMultipleTimes {
@@ -105,7 +102,7 @@ pub fn emit_module(
     // Pre-registration pass: for trait impls with an explicit `for ConcreteType` annotation,
     // register a stub implementation before processing any function SCCs. This allows module
     // functions to use trait methods from these impls regardless of source order.
-    let mut concrete_impl_stubs: HashMap<usize, ImplStubData> = HashMap::new();
+    let mut concrete_impl_stubs: FxHashMap<usize, ImplStubData> = FxHashMap::default();
     for (imp_idx, imp) in source.impls.iter().enumerate() {
         if let Some(tys) = &imp.for_tys {
             let input_tys: Vec<_> = tys.iter().map(|(ty, _)| *ty).collect();
@@ -456,7 +453,7 @@ where
     }
 
     // Associated lambdas and macro to call and id and its associated lambdas
-    let mut associated_lambdas = HashMap::new();
+    let mut associated_lambdas = FxHashMap::default();
     macro_rules! apply_to_function_and_associated_lambdas {
         ($id:expr, $f:expr) => {
             $f($id);
@@ -483,7 +480,7 @@ where
         let descr = output.get_function_by_id(*id).unwrap();
         let module_env = ModuleEnv::new(output, others);
         let mut new_import_slots = vec![];
-        let mut new_type_deps = HashSet::new();
+        let mut new_type_deps = FxHashSet::default();
         let expected_ret_ty = descr.definition.ty_scheme.ty.ret;
         let expected_span = descr.spans.as_ref().unwrap().args_span;
         let mut lambda_functions = vec![];
@@ -564,7 +561,7 @@ where
             })
             .collect();
 
-        let subst = (HashMap::new(), effect_subst);
+        let subst = (FxHashMap::default(), effect_subst);
         apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
             let descr = &mut output.functions[id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
@@ -638,7 +635,7 @@ where
         // Update quantifiers and constraints with substitution.
         quantifiers.retain(|ty_var| !subst.contains_key(ty_var));
         trait_output.ty_var_count = quantifiers.len() as u32;
-        let mut subst = (subst, HashMap::new());
+        let mut subst = (subst, FxHashMap::default());
         let subst_size = subst.0.len();
         let mut solver = trait_solver_from_module!(output, others);
         trait_output.constraints = constraints
@@ -657,7 +654,7 @@ where
         // Update node code with substitution and build the module instantiation data
         trait_output.input_tys = instantiate_types(&trait_output.input_tys, &subst);
         trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
-        let mut module_inst_data = HashMap::new();
+        let mut module_inst_data = FxHashMap::default();
         for id in local_fns.iter() {
             module_inst_data.insert(*id, dicts.clone());
             apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
@@ -688,7 +685,7 @@ where
         }
 
         // Seventh pass, normalize the input types, substitute the types in the functions and input/output types.
-        let subst = (normalize_types(&mut quantifiers), HashMap::new());
+        let subst = (normalize_types(&mut quantifiers), FxHashMap::default());
         trait_output.input_tys = instantiate_types(&trait_output.input_tys, &subst);
         trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
         trait_output.constraints = trait_output
@@ -728,7 +725,7 @@ where
 
         // Limit each function to its own constants and type variables
         let all_constraints = ty_inf.substitute_and_take_constraints();
-        let mut used_constraints: HashSet<PubTypeConstraintPtr> = HashSet::new();
+        let mut used_constraints: FxHashSet<PubTypeConstraintPtr> = FxHashSet::default();
         for (function, id) in ast_functions().zip(local_fns.iter()) {
             let descr = &output.functions[id.as_index()];
             let node = descr.get_node().unwrap();
@@ -764,7 +761,7 @@ where
 
             // Substitute the constraint-originating types in the node.
             let mut solver = trait_solver_from_module!(output, others);
-            let mut subst = (constraint_subst, HashMap::new());
+            let mut subst = (constraint_subst, FxHashMap::default());
             constraints = constraints
                 .iter()
                 .filter_map(|constraint| {
@@ -821,7 +818,7 @@ where
         }
 
         // Sixth pass, run the borrow checker and elaborate dictionaries.
-        let mut module_inst_data = HashMap::new();
+        let mut module_inst_data = FxHashMap::default();
         for id in local_fns.iter() {
             let descr = &output.functions[id.as_index()];
             let dicts = descr.definition.ty_scheme.extra_parameters();
@@ -866,8 +863,8 @@ where
 fn check_unbounds(
     unbound: IndexMap<TypeVar, ir::UnboundTyCtxs>,
     bounds: &[TypeVar],
-) -> Result<HashSet<TypeVar>, InternalCompilationError> {
-    let mut uninstantiated_unbound = HashSet::new();
+) -> Result<FxHashSet<TypeVar>, InternalCompilationError> {
+    let mut uninstantiated_unbound = FxHashSet::default();
     for (ty_var, ctxs) in unbound {
         if !bounds.contains(&ty_var) {
             if ctxs.seen_only_in_variants(ty_var) {
@@ -916,14 +913,14 @@ pub fn emit_expr_unsafe(
     let module_env = ModuleEnv::new(module, others);
 
     // First desugar the expression.
-    let mut modules_used = HashSet::new();
+    let mut modules_used = FxHashSet::default();
     let (source, desugared_arena) =
         desugar_expr_with_empty_ctx(source, parsed_arena, &module_env, &mut modules_used)?;
 
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
     let mut new_import_slots = vec![];
-    let mut new_type_deps = HashSet::new();
+    let mut new_type_deps = FxHashSet::default();
     let mut lambda_functions = vec![];
     let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
     let mut ty_env = TypingEnv::new(
@@ -996,7 +993,7 @@ pub fn emit_expr_unsafe(
     assert_eq!(constraints.len(), retained_constraints.len());
 
     // Apply the constraint-originating substitution.
-    let mut subst = (constraint_subst, HashMap::new());
+    let mut subst = (constraint_subst, FxHashMap::default());
     let mut progress = true;
     let mut solver = trait_solver_from_module!(module, others);
     while progress {
@@ -1150,8 +1147,8 @@ fn select_constraints_accessible_from<'c: 'r, 'r, C, T>(
     constraints: &'r C,
     ty_vars: &[TypeVar],
 ) -> (
-    HashSet<&'c PubTypeConstraint>,
-    HashSet<&'c PubTypeConstraint>,
+    FxHashSet<&'c PubTypeConstraint>,
+    FxHashSet<&'c PubTypeConstraint>,
 )
 where
     &'r C: IntoIterator<Item = &'c T>,
@@ -1162,8 +1159,8 @@ where
         constraints: &'r C,
         ty_vars: &[TypeVar],
     ) -> (
-        HashSet<&'c PubTypeConstraint>,
-        HashSet<&'c PubTypeConstraint>,
+        FxHashSet<&'c PubTypeConstraint>,
+        FxHashSet<&'c PubTypeConstraint>,
     )
     where
         &'r C: IntoIterator<Item = &'c T>,
@@ -1203,10 +1200,10 @@ where
 /// Partition the orphan variant constraints and the others, and for the variant constraints,
 /// create a substitution into a minimalist variant type.
 fn partition_variant_constraints(
-    constraints: &HashSet<&PubTypeConstraint>,
-) -> (TypeSubstitution, HashSet<PubTypeConstraintPtr>) {
+    constraints: &FxHashSet<&PubTypeConstraint>,
+) -> (TypeSubstitution, FxHashSet<PubTypeConstraintPtr>) {
     // First, collect the type variables that are invalid for variant simplification.
-    let mut invalid_ty_vars = HashSet::<TypeVar>::new();
+    let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
     for constraint in constraints {
         if let Some(has_variant) = constraint.as_type_has_variant() {
             invalid_ty_vars.extend(has_variant.3.inner_ty_vars())
@@ -1217,8 +1214,8 @@ fn partition_variant_constraints(
 
     // Then, extract the variant constraints and partition them by type variable,
     // if the type variable is not in invalid_ty_vars.
-    let mut variants: HashMap<TypeVar, VariantConstraint> = HashMap::new();
-    let mut others = HashSet::new();
+    let mut variants: FxHashMap<TypeVar, VariantConstraint> = FxHashMap::default();
+    let mut others = FxHashSet::default();
     for constraint in constraints {
         match constraint {
             PubTypeConstraint::TypeHasVariant {
@@ -1266,8 +1263,8 @@ fn constraint_ptr(c: &PubTypeConstraint) -> PubTypeConstraintPtr {
 
 struct ConstraintValidationOutput {
     quantifiers: Vec<TypeVar>,
-    related_constraints: HashSet<PubTypeConstraintPtr>,
-    retained_constraints: HashSet<PubTypeConstraintPtr>,
+    related_constraints: FxHashSet<PubTypeConstraintPtr>,
+    retained_constraints: FxHashSet<PubTypeConstraintPtr>,
     constraint_subst: TypeSubstitution,
 }
 
@@ -1337,7 +1334,7 @@ fn validate_and_cleanup_constraints(
     // These are neither part of the function signature nor of the constraints.
     let bounds: Vec<_> = quantifiers.iter().chain(subst.keys()).cloned().collect();
     let uninstantiated_unbound = check_unbounds(unbound, &bounds)?;
-    let mut constraint_subst: HashMap<_, _> = subst
+    let mut constraint_subst: FxHashMap<_, _> = subst
         .into_iter()
         .chain(
             uninstantiated_unbound
@@ -1345,7 +1342,7 @@ fn validate_and_cleanup_constraints(
                 .map(|ty_var| (ty_var, Type::never())),
         )
         .collect();
-    let mut retained_constraints: HashSet<_> =
+    let mut retained_constraints: FxHashSet<_> =
         constraints.iter().map(|c| constraint_ptr(c)).collect();
 
     // In expressions, default Num types to Int or Float if not specified.
@@ -1413,15 +1410,15 @@ fn validate_and_simplify_trait_imp_constraints(
 /// Compute which constraints in selected_constraints can be defaulted to int or float.
 /// Update both selected_constraints and subst.
 fn compute_num_trait_default_types(
-    all_constraints: &HashSet<&PubTypeConstraint>,
-    selected_constraints: &mut HashSet<PubTypeConstraintPtr>,
+    all_constraints: &FxHashSet<&PubTypeConstraint>,
+    selected_constraints: &mut FxHashSet<PubTypeConstraintPtr>,
     subst: &mut TypeSubstitution,
     trait_solver: &mut TraitSolver,
 ) -> Result<(), InternalCompilationError> {
     // In debug, check that all_constraints contains all selected_constraints.
     #[cfg(debug_assertions)]
     {
-        let all_constraints: HashSet<PubTypeConstraintPtr> = all_constraints
+        let all_constraints: FxHashSet<PubTypeConstraintPtr> = all_constraints
             .iter()
             .copied()
             .map(constraint_ptr)
@@ -1442,8 +1439,8 @@ fn compute_num_trait_default_types(
         // First, collect the type variables that are invalid for defaulting.
         // These include the ones that appear in non-trait constraints or in traits with
         // more than one input types or having output types.
-        let mut invalid_ty_vars = HashSet::<TypeVar>::new();
-        let mut num_ty_vars = HashSet::<TypeVar>::new();
+        let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
+        let mut num_ty_vars = FxHashSet::<TypeVar>::default();
         for constraint in all_constraints {
             if !selected_constraints.contains(&constraint_ptr(constraint)) {
                 continue;
@@ -1470,7 +1467,7 @@ fn compute_num_trait_default_types(
             }
         }
 
-        let mut defaulted_ty_vars = HashMap::<TypeVar, usize>::new();
+        let mut defaulted_ty_vars = FxHashMap::<TypeVar, usize>::default();
         // Process trait constraint type variables.
         for constraint in all_constraints.iter() {
             if !selected_constraints.contains(&constraint_ptr(constraint))
@@ -1523,7 +1520,7 @@ fn compute_num_trait_default_types(
                 continue;
             }
             // FIXME: this is really inefficient.
-            let subst = (subst.clone(), HashMap::new());
+            let subst = (subst.clone(), FxHashMap::default());
             let subst_constraint = constraint.instantiate(&subst);
             if let PubTypeConstraint::HaveTrait {
                 input_tys,
@@ -1583,7 +1580,7 @@ fn compute_num_trait_default_types(
             }
             // FIXME: this is inefficient.
             // FIXME: Use real unification rather than this limited substitution-based approach.
-            let inst_subst = (subst.clone(), HashMap::new());
+            let inst_subst = (subst.clone(), FxHashMap::default());
             let subst_constraint = constraint.instantiate(&inst_subst);
             if let PubTypeConstraint::HaveTrait {
                 trait_ref,
@@ -1644,14 +1641,14 @@ fn compute_num_trait_default_types(
 
 fn log_dropped_constraints_expr(
     all: &[PubTypeConstraint],
-    retained: &HashSet<PubTypeConstraintPtr>,
+    retained: &FxHashSet<PubTypeConstraintPtr>,
     subst: &TypeSubstitution,
     module_env: ModuleEnv,
 ) {
     if retained.len() == all.len() {
         return;
     }
-    let mut ty_vars_in_dropped = HashSet::new();
+    let mut ty_vars_in_dropped = FxHashSet::default();
     let dropped = all
         .iter()
         .filter(|c| {
@@ -1678,8 +1675,8 @@ fn log_dropped_constraints_expr(
 fn log_dropped_constraints_module(
     ctx: Ustr,
     all: &[PubTypeConstraint],
-    related: &HashSet<PubTypeConstraintPtr>,
-    retained: &HashSet<PubTypeConstraintPtr>,
+    related: &FxHashSet<PubTypeConstraintPtr>,
+    retained: &FxHashSet<PubTypeConstraintPtr>,
     module_env: ModuleEnv,
 ) {
     if retained.len() == related.len() {

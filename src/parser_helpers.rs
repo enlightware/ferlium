@@ -40,9 +40,10 @@ use lalrpop_util::lexer::Token;
 use num_traits::bounds::Bounded;
 use ordered_float::NotNan;
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
+
+use crate::FxHashMap;
 use std::sync::LazyLock;
 use ustr::{Ustr, ustr};
 
@@ -362,8 +363,8 @@ pub(crate) fn parse_doc_comments(comments: Vec<&str>) -> Option<String> {
 /// Resolve token names using a static map
 /// TODO: Go through intermediate data structure to allow for translation
 fn resolve_token_names(names: Vec<String>) -> Vec<String> {
-    static NAME_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
-        let mut m = HashMap::new();
+    static NAME_MAP: LazyLock<FxHashMap<&'static str, &'static str>> = LazyLock::new(|| {
+        let mut m = FxHashMap::default();
         m.insert(r##"r#"[1-9][0-9]*|0"#"##, "natural number");
         m.insert(r##"r#"[\\p{L}_][\\p{L}\\p{N}_]*"#"##, "identifier");
         m.insert(r##"r#"\\\"([^\\\\\\\"]|\\\\.)*\\\""#"##, "string literal");

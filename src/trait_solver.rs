@@ -7,7 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{cell::RefCell, collections::HashSet, iter::repeat, rc::Rc};
+use std::{cell::RefCell, iter::repeat, rc::Rc};
+
+use crate::FxHashSet;
 
 use derive_new::new;
 use itertools::MultiUnzip;
@@ -60,7 +62,7 @@ pub struct TraitSolver<'a> {
     pub recursion_depth: usize,
     /// Current stack of trait implementations being solved, for cycle detection.
     #[new(default)]
-    pub solving_stack: HashSet<(TraitRef, Vec<Type>)>,
+    pub solving_stack: FxHashSet<(TraitRef, Vec<Type>)>,
 }
 
 const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
@@ -294,9 +296,9 @@ impl<'a> TraitSolver<'a> {
                 #[cfg(debug_assertions)]
                 {
                     assert_eq!(imp_input_tys.len(), input_tys.len());
-                    let mut ty_vars = HashSet::new();
-                    let mut mut_vars = HashSet::new();
-                    let mut eff_vars = HashSet::new();
+                    let mut ty_vars = FxHashSet::default();
+                    let mut mut_vars = FxHashSet::default();
+                    let mut eff_vars = FxHashSet::default();
                     let mut collector = AllVarsCollector {
                         ty_vars: &mut ty_vars,
                         mut_vars: &mut mut_vars,

@@ -6,10 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::collections::HashMap;
-
 use crate::{
-    Location,
+    FxHashMap, Location,
     ast::{DExprId, PatternVar},
     error::DuplicatedVariantContext,
     internal_compilation_error,
@@ -88,7 +86,7 @@ impl TypeInference {
             let initial_env_size = env.cur_locals.len();
 
             // Create a fresh type variable for the inner types, when there is a variable binding.
-            let mut seen_tags = HashMap::new();
+            let mut seen_tags = FxHashMap::default();
             let (types, exprs): (Vec<_>, Vec<_>) = alternatives
                 .iter()
                 .map(|(pattern, expr)| {
@@ -104,7 +102,7 @@ impl TypeInference {
                             }));
                         }
                         // Detect invalid wildcard and duplicate variable names in the pattern.
-                        let mut seen_identifier = HashMap::new();
+                        let mut seen_identifier = FxHashMap::default();
                         let mut has_wildcard = false;
                         let named_vars = vars
                             .iter()
@@ -470,7 +468,7 @@ impl TypeInference {
         expected_return_type: Type,
         expected_return_span: Location,
     ) -> Result<(Vec<(Value, ir::Node)>, EffType), InternalCompilationError> {
-        let mut seen_values = HashMap::new();
+        let mut seen_values = FxHashMap::default();
         let (pairs, effects): (Vec<_>, Vec<_>) = pairs
             .iter()
             .map(|(pattern, expr)| {

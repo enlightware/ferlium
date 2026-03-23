@@ -31,7 +31,6 @@ pub use uses::*;
 
 use std::{
     cell::{Ref, RefMut},
-    collections::HashSet,
     fmt,
     hash::Hash,
 };
@@ -39,7 +38,7 @@ use std::{
 use ustr::{Ustr, ustr};
 
 use crate::{
-    Location, define_id_type,
+    FxHashSet, Location, define_id_type,
     emit_ir::EmitTraitOutput,
     error::{ImportKind, ImportSite, InternalCompilationError},
     format::FormatWith,
@@ -98,7 +97,7 @@ pub struct Module {
     pub(crate) import_fn_slots: Vec<ImportFunctionSlot>,
     pub(crate) import_impl_slots: Vec<ImportImplSlot>,
     // Dependencies from type import
-    pub(crate) type_deps: HashSet<ModuleId>,
+    pub(crate) type_deps: FxHashSet<ModuleId>,
 
     pub(crate) uses: Uses,
 
@@ -121,7 +120,7 @@ impl Module {
         Self {
             import_fn_slots: Vec::new(),
             import_impl_slots: Vec::new(),
-            type_deps: HashSet::new(),
+            type_deps: FxHashSet::default(),
             uses: Uses::default(),
             def_table: DefTable::new(),
             functions: Vec::new(),

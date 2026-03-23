@@ -7,12 +7,13 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
-    collections::{HashMap, HashSet},
     fmt::{self, Debug},
     hash::{Hash, Hasher},
     ops::Deref,
     sync::Arc,
 };
+
+use crate::{FxHashMap, FxHashSet};
 
 use dyn_clone::DynClone;
 use ustr::Ustr;
@@ -157,7 +158,7 @@ impl Trait {
             // the function type, in a single pass.
             // The single pass is important because in TraitImpls::get_impl()
             // we assume that we can get all output type variables in a single pass over the constraints.
-            let mut quantifiers: HashSet<_> =
+            let mut quantifiers: FxHashSet<_> =
                 function.ty_scheme.ty_quantifiers.iter().copied().collect();
             for (i, constraint) in self.constraints.iter().enumerate() {
                 let (_, input_tys, output_tys, _) = constraint
@@ -173,7 +174,7 @@ impl Trait {
                     i,
                     name
                 );
-                let mut additional_ty_vars = HashSet::new();
+                let mut additional_ty_vars = FxHashSet::default();
                 let mut collector = TyVarsCollector(&mut additional_ty_vars);
                 output_tys.iter().for_each(|ty| ty.visit(&mut collector));
                 quantifiers.extend(additional_ty_vars);
@@ -188,7 +189,7 @@ impl Trait {
         output_tys: &[Type],
     ) -> Vec<FunctionDefinition> {
         let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
-        let inst_subst = (ty_subst, HashMap::new());
+        let inst_subst = (ty_subst, FxHashMap::default());
         self.functions
             .iter()
             .map(|(_, def)| {
@@ -203,7 +204,7 @@ impl Trait {
     /// Only the types are substituted, the constraints are not considered.
     pub fn get_dictionary_type_for_tys(&self, input_tys: &[Type], output_tys: &[Type]) -> Type {
         let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
-        let inst_subst = (ty_subst, HashMap::new());
+        let inst_subst = (ty_subst, FxHashMap::default());
         Type::tuple(
             self.functions
                 .iter()
@@ -224,7 +225,7 @@ impl Trait {
             .chain(output_tys.iter())
             .enumerate()
             .map(|(i, ty)| (TypeVar::new(i as u32), *ty))
-            .collect::<HashMap<_, _>>()
+            .collect::<FxHashMap<_, _>>()
     }
 }
 

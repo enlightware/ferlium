@@ -7,7 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ::std::collections::HashSet;
+pub use rustc_hash::{FxHashMap, FxHashSet};
+
 use std::new_module_using_std;
 
 use ast::{UnstableCollector, VisitExpr};
@@ -302,7 +303,7 @@ impl CompilerSession {
             .map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
         let span = Location::new_usize(0, src.len(), source_id);
         let env = self.module_env();
-        let mut modules_used = HashSet::new();
+        let mut modules_used = FxHashSet::default();
         ast.desugar(span, false, &env, &mut modules_used)
             .map_err(|error| CompilationError::resolve_types(error, &env, &self.source_table))
     }
@@ -337,7 +338,7 @@ impl CompilerSession {
             .map_err(|error| compilation_error!(ParsingFailed(vec![error])))?;
         let span = Location::new_usize(0, src.len(), source_id);
         let env = self.module_env();
-        let mut modules_used = HashSet::new();
+        let mut modules_used = FxHashSet::default();
         ast.desugar(span, false, &env, &mut modules_used)
             .map_err(|error| CompilationError::resolve_types(error, &env, &self.source_table))
     }

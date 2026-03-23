@@ -10,8 +10,6 @@ use std::any::TypeId;
 use std::any::type_name;
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fmt::Display;
 use std::fmt::{self, Debug};
 use std::hash::Hash;
@@ -22,7 +20,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
-use crate::Location;
 use crate::ast::Attribute;
 use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
@@ -38,6 +35,7 @@ use crate::type_like::TypeLike;
 use crate::type_mapper::TypeMapper;
 use crate::type_visitor::TypeInnerVisitor;
 use crate::value::Value;
+use crate::{FxHashMap, FxHashSet, Location};
 use derive_new::new;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
@@ -346,14 +344,14 @@ impl TypeLike for FnType {
         }
     }
 
-    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+    fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
         for arg in &self.args {
             arg.ty.fill_with_inner_effect_vars(vars);
         }
         self.ret.fill_with_inner_effect_vars(vars);
     }
 
-    fn fill_with_output_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+    fn fill_with_output_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
         self.effects.fill_with_inner_effect_vars(vars);
     }
 }
@@ -556,7 +554,7 @@ impl Type {
     {
         // Thread-local hash-map for cycle detection
         thread_local! {
-            static TYPE_VISITED: RefCell<HashSet<Type>> = RefCell::new(HashSet::new());
+            static TYPE_VISITED: RefCell<FxHashSet<Type>> = RefCell::new(FxHashSet::default());
         }
 
         // Check for cycle and insert the type into the HashSet
@@ -640,7 +638,7 @@ impl PartialOrd for Type {
     }
 }
 
-pub type TypeSubstitution = HashMap<TypeVar, Type>;
+pub type TypeSubstitution = FxHashMap<TypeVar, Type>;
 
 define_id_type!(
     /// ID of a type alias definition within a module
@@ -651,9 +649,9 @@ define_id_type!(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TypeAliases {
     types: Vec<Type>,
-    type_to_name: HashMap<Type, Ustr>,
+    type_to_name: FxHashMap<Type, Ustr>,
     /// Names for the native part of generic native types, used for formatting
-    bare_native_to_name: HashMap<B<dyn BareNativeType>, Ustr>,
+    bare_native_to_name: FxHashMap<B<dyn BareNativeType>, Ustr>,
 }
 impl TypeAliases {
     pub fn set(&mut self, alias: Ustr, ty: Type) {
@@ -1068,7 +1066,7 @@ impl TypeKind {
     }
 
     /// Substitute the indices of local types using subst
-    fn substitute_locals(&mut self, subst: &HashMap<u32, u32>) {
+    fn substitute_locals(&mut self, subst: &FxHashMap<u32, u32>) {
         self.inner_types_mut().for_each(|ty| {
             if ty.world().is_none() {
                 ty.index = *subst.get(&ty.index).unwrap_or_else(|| {
@@ -1287,7 +1285,7 @@ fn find_world_isomorphism(
     // Try to build mapping greedily by matching types
     // Start with types that have the fewest candidates
     let mut mapping: Vec<Option<usize>> = vec![None; n];
-    let mut reverse_mapping: HashMap<usize, usize> = HashMap::new();
+    let mut reverse_mapping: FxHashMap<usize, usize> = FxHashMap::default();
 
     // For each local type, find all possible matches in existing_world
     let mut candidates: Vec<(usize, Vec<usize>)> = (0..n)
@@ -1314,7 +1312,7 @@ fn find_world_isomorphism(
         world_idx: usize,
         candidates: &[(usize, Vec<usize>)],
         mapping: &mut Vec<Option<usize>>,
-        reverse_mapping: &mut HashMap<usize, usize>,
+        reverse_mapping: &mut FxHashMap<usize, usize>,
         depth: usize,
     ) -> bool {
         if depth == candidates.len() {
@@ -1456,14 +1454,14 @@ struct TypeUniverse {
     worlds: Vec<TypeWorld>,
     /// A cache mapping local worlds to their corresponding global world and index mapping.
     /// This is used to intern types efficiently.
-    local_to_world: HashMap<Vec<TypeKind>, WorldMapping>,
+    local_to_world: FxHashMap<Vec<TypeKind>, WorldMapping>,
 }
 
 impl TypeUniverse {
     fn new_empty() -> Self {
         Self {
             worlds: vec![IndexSet::new()],
-            local_to_world: HashMap::new(),
+            local_to_world: FxHashMap::default(),
         }
     }
 
@@ -1485,7 +1483,7 @@ impl TypeUniverse {
         // Note: Using local types as placeholders to build the array without having to
         // get a recursive lock on the universe.
         let mut types = vec![Type::new_local(0); kinds.len()];
-        let mut resolved = HashMap::<usize, Type>::new();
+        let mut resolved = FxHashMap::<usize, Type>::default();
         sorted_sccs
             .into_iter()
             .flat_map(|mut input_indices| {
@@ -1557,7 +1555,7 @@ impl TypeUniverse {
                 });
 
                 // Renormalize local indices and store into local world.
-                let subst_to_local: HashMap<_, _> = input_indices
+                let subst_to_local: FxHashMap<_, _> = input_indices
                     .iter()
                     .enumerate()
                     .map(|(local_index, &input_index)| (input_index as u32, local_index as u32))
@@ -1754,8 +1752,8 @@ impl std::ops::Deref for TypeDataRef<'_> {
 }
 
 pub struct TypeNames {
-    pub names_to_types: HashMap<Ustr, Type>,
-    pub types_to_names: HashMap<Type, Ustr>,
+    pub names_to_types: FxHashMap<Ustr, Type>,
+    pub types_to_names: FxHashMap<Type, Ustr>,
 }
 
 #[cfg(test)]

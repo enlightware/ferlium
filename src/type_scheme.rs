@@ -8,9 +8,11 @@
 //
 use std::{
     borrow::Borrow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::BTreeMap,
     hash::{Hash, Hasher},
 };
+
+use crate::{FxHashMap, FxHashSet};
 
 use crate::{
     Location,
@@ -272,7 +274,7 @@ impl PubTypeConstraint {
                                     (inner_ty_vars[ty_var as usize], Type::variable_id(ty_var))
                                 })
                                 .collect::<TypeSubstitution>();
-                            let local_subst = (ty_subst, EffectsSubstitution::new());
+                            let local_subst = (ty_subst, EffectsSubstitution::default());
                             let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(ty_var_count);
                             let output_ty = output_ty.instantiate(&local_subst);
                             ty_inf
@@ -607,7 +609,7 @@ pub struct TypeScheme<Ty: TypeLike> {
     // for a compiled module, quantifiers should be equal to the type variables in the type
     // and the constraints.
     pub ty_quantifiers: Vec<TypeVar>,
-    pub eff_quantifiers: HashSet<EffectVar>,
+    pub eff_quantifiers: FxHashSet<EffectVar>,
     pub ty: Ty,
     pub constraints: Vec<PubTypeConstraint>,
 }
@@ -617,7 +619,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     pub fn new_just_type(ty: Ty) -> Self {
         Self {
             ty_quantifiers: vec![],
-            eff_quantifiers: HashSet::new(),
+            eff_quantifiers: FxHashSet::default(),
             ty,
             constraints: vec![],
         }
@@ -687,7 +689,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         let mut ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
         let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
         if let Some(ty_var_count) = ty_var_count {
-            let mut ext_subst = HashMap::new();
+            let mut ext_subst = FxHashMap::default();
             for ty_var_index in 0..ty_var_count {
                 let ty_var = TypeVar::new(ty_var_index);
                 if !ty_subst.contains_key(&ty_var) {
@@ -723,7 +725,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
     pub(crate) fn list_eff_vars(
         ty: &Ty,
         constraints: impl Iterator<Item = impl Borrow<PubTypeConstraint>>,
-    ) -> HashSet<EffectVar> {
+    ) -> FxHashSet<EffectVar> {
         ty.inner_effect_vars()
             .into_iter()
             .chain(constraints.flat_map(|constraint| constraint.borrow().inner_effect_vars()))
@@ -738,7 +740,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         // Build a substitution that maps each input effect quantifier to a fresh effect variable from 0.,
         // Note: in case of recursive functions, we might have output-only effects.
         // In this case, replace them with empty effects.
-        let mut eff_subst = EffectsSubstitution::new();
+        let mut eff_subst = EffectsSubstitution::default();
         let input_effect_vars = self.ty.input_effect_vars();
         self.ty.output_effect_vars().iter().for_each(|var| {
             if !input_effect_vars.contains(var) {
@@ -1020,7 +1022,7 @@ pub fn format_have_trait(
 
 // Build a substitution that maps each type variable to a fresh type variable from 0.
 pub(crate) fn normalize_types(tys: &mut [TypeVar]) -> TypeSubstitution {
-    let mut ty_subst: std::collections::HashMap<TypeVar, Type> = TypeSubstitution::new();
+    let mut ty_subst: FxHashMap<TypeVar, Type> = TypeSubstitution::default();
     tys.iter_mut().enumerate().for_each(|(i, quantifier)| {
         let new_var = TypeVar::new(i as u32);
         ty_subst.insert(*quantifier, Type::variable(new_var));
@@ -1036,7 +1038,7 @@ pub(crate) fn extra_parameters_from_constraints(
     use PubTypeConstraint::*;
 
     // Build a map from input type variables to their next representation type.
-    let mut repr_map_shallow = HashMap::new();
+    let mut repr_map_shallow = FxHashMap::default();
     for constraint in constraints {
         if let HaveTrait {
             trait_ref,
@@ -1061,7 +1063,7 @@ pub(crate) fn extra_parameters_from_constraints(
     }
 
     // Resolve for each input type variable their deepest representation type.
-    let mut repr_map = HashMap::new();
+    let mut repr_map = FxHashMap::default();
     for (in_var, out_var) in repr_map_shallow.iter() {
         let mut next = *out_var;
         while let Some(next_out_var) = repr_map_shallow.get(&next) {

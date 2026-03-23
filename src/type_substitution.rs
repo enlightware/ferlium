@@ -7,9 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::collections::HashMap;
-
 use crate::{
+    FxHashMap,
     containers::b,
     effects::EffType,
     mutability::MutType,
@@ -27,7 +26,7 @@ pub trait TypeSubstituer {
 /// Recursively substitute all inner types in a type, using the given substituer.
 pub fn substitute_type(ty: Type, substituer: &mut impl TypeSubstituer) -> Type {
     let mut kinds = Vec::new();
-    let mut seen = HashMap::new();
+    let mut seen = FxHashMap::default();
     substitute_type_rec(ty, substituer, &mut kinds, &mut seen);
     store_types(&kinds)[0]
 }
@@ -35,7 +34,7 @@ pub fn substitute_type(ty: Type, substituer: &mut impl TypeSubstituer) -> Type {
 /// Recursively substitute all inner types in a list of types, using the given substituer.
 pub fn substitute_types(tys: &[Type], substituer: &mut impl TypeSubstituer) -> Vec<Type> {
     let mut kinds = Vec::new();
-    let mut seen = HashMap::new();
+    let mut seen = FxHashMap::default();
     let tys = substitute_types_rec(tys, substituer, &mut kinds, &mut seen);
     let new_tys = store_types(&kinds);
     // Map all local types to their new world types in the list of types
@@ -50,7 +49,7 @@ pub fn substitute_types(tys: &[Type], substituer: &mut impl TypeSubstituer) -> V
 /// Recursively substitute all inner types in a function type, using the given substituer.
 pub fn substitute_fn_type(fn_ty: &FnType, substituer: &mut impl TypeSubstituer) -> FnType {
     let mut kinds = Vec::new();
-    let mut seen = HashMap::new();
+    let mut seen = FxHashMap::default();
     let mut fn_ty = substitute_fn_type_rec(fn_ty, substituer, &mut kinds, &mut seen);
     let new_tys = store_types(&kinds);
     // Map all local types to their new world types in the function type
@@ -71,7 +70,7 @@ fn substitute_type_rec(
     ty: Type,
     substituer: &mut impl TypeSubstituer,
     output: &mut Vec<TypeKind>,
-    seen: &mut HashMap<Type, u32>,
+    seen: &mut FxHashMap<Type, u32>,
 ) -> Type {
     // Do substitution for this specific type
     let ty = substituer.substitute_type(ty);
@@ -130,7 +129,7 @@ fn substitute_types_rec(
     tys: &[Type],
     substituer: &mut impl TypeSubstituer,
     output: &mut Vec<TypeKind>,
-    seen: &mut HashMap<Type, u32>,
+    seen: &mut FxHashMap<Type, u32>,
 ) -> Vec<Type> {
     tys.iter()
         .map(|ty| substitute_type_rec(*ty, substituer, output, seen))
@@ -141,7 +140,7 @@ fn substitute_fn_type_rec(
     fn_ty: &FnType,
     substituer: &mut impl TypeSubstituer,
     output: &mut Vec<TypeKind>,
-    seen: &mut HashMap<Type, u32>,
+    seen: &mut FxHashMap<Type, u32>,
 ) -> FnType {
     let args = fn_ty
         .args

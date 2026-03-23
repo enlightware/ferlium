@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::collections::HashSet;
+use crate::FxHashSet;
 
 use itertools::Itertools;
 
@@ -58,38 +58,38 @@ pub trait TypeLike {
     }
 
     /// Return all effect variables contained as input (i.e. must be retained)
-    fn fill_with_input_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+    fn fill_with_input_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
         self.visit(&mut EffectVarsCollector(vars));
     }
 
     /// Return all effect variables contained as input (i.e. must be retained)
-    fn input_effect_vars(&self) -> HashSet<EffectVar> {
-        let mut vars = HashSet::new();
+    fn input_effect_vars(&self) -> FxHashSet<EffectVar> {
+        let mut vars = FxHashSet::default();
         self.fill_with_input_effect_vars(&mut vars);
         vars
     }
 
     /// Return all effect variables contained as output (i.e. can be dropped if not used as input)
-    fn fill_with_output_effect_vars(&self, _vars: &mut HashSet<EffectVar>) {
+    fn fill_with_output_effect_vars(&self, _vars: &mut FxHashSet<EffectVar>) {
         // default no output effect variables
     }
 
     /// Return all effect variables contained as output (i.e. can be dropped if not used as input)
-    fn output_effect_vars(&self) -> HashSet<EffectVar> {
-        let mut vars = HashSet::new();
+    fn output_effect_vars(&self) -> FxHashSet<EffectVar> {
+        let mut vars = FxHashSet::default();
         self.fill_with_output_effect_vars(&mut vars);
         vars
     }
 
     /// Fill the given set with all effect variables contained in this type, union of input and output ones
-    fn fill_with_inner_effect_vars(&self, vars: &mut HashSet<EffectVar>) {
+    fn fill_with_inner_effect_vars(&self, vars: &mut FxHashSet<EffectVar>) {
         self.fill_with_input_effect_vars(vars);
         self.fill_with_output_effect_vars(vars);
     }
 
     /// Return all effect variables contained in this type, union of input and output ones
-    fn inner_effect_vars(&self) -> HashSet<EffectVar> {
-        let mut vars = HashSet::new();
+    fn inner_effect_vars(&self) -> FxHashSet<EffectVar> {
+        let mut vars = FxHashSet::default();
         self.fill_with_inner_effect_vars(&mut vars);
         vars
     }

@@ -6,7 +6,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{collections::HashSet, sync::LazyLock};
+use std::sync::LazyLock;
+
+use crate::FxHashSet;
 
 use heck::ToSnakeCase;
 
@@ -343,7 +345,7 @@ fn should_hide_arg_name_hint(
         return true;
     }
 
-    static PATHS_TO_HIDE: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    static PATHS_TO_HIDE: LazyLock<FxHashSet<&'static str>> = LazyLock::new(|| {
         [
             "std::eq", "std::ne", "std::le", "std::lt", "std::ge", "std::gt", "std::not",
             "std::neg", "std::add", "std::sub", "std::mul", "std::div", "std::rem",

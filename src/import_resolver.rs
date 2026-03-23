@@ -8,11 +8,10 @@
 //
 
 use derive_new::new;
-use std::collections::HashMap;
 use ustr::Ustr;
 
 use crate::{
-    Location,
+    FxHashMap, Location,
     ast::{Path as AstPath, UseTree},
     error::{ImportKind, ImportSite, InternalCompilationError},
     internal_compilation_error,
@@ -52,12 +51,12 @@ impl ModulesResolver<'_> {
 /// - `Glob` entries are flattened into `Use::All(...)` but NOT expanded.
 pub fn resolve_imports(
     trees: &[UseTree],
-    local_names: &HashMap<Ustr, Location>,
+    local_names: &FxHashMap<Ustr, Location>,
     resolver: &ModulesResolver<'_>,
     uses: &mut Uses,
 ) -> Result<(), InternalCompilationError> {
     // Track names introduced by explicit imports for conflict checking.
-    let mut seen: HashMap<Ustr, ImportSite> = HashMap::new();
+    let mut seen: FxHashMap<Ustr, ImportSite> = FxHashMap::default();
     prefill_seen_from_existing_uses(uses, local_names, &mut seen)?;
 
     for t in trees {
@@ -69,8 +68,8 @@ pub fn resolve_imports(
 
 fn prefill_seen_from_existing_uses(
     existing_uses: &Uses,
-    defined_names: &HashMap<Ustr, Location>,
-    seen: &mut HashMap<Ustr, ImportSite>,
+    defined_names: &FxHashMap<Ustr, Location>,
+    seen: &mut FxHashMap<Ustr, ImportSite>,
 ) -> Result<(), InternalCompilationError> {
     for (&symbol, use_data) in &existing_uses.explicits {
         let site = ImportSite {
@@ -86,8 +85,8 @@ fn prefill_seen_from_existing_uses(
 fn resolve_one(
     tree: &UseTree,
     base: Option<&AstPath>,
-    local_names: &HashMap<Ustr, Location>,
-    seen: &mut HashMap<Ustr, ImportSite>,
+    local_names: &FxHashMap<Ustr, Location>,
+    seen: &mut FxHashMap<Ustr, ImportSite>,
     uses: &mut Uses,
     resolver: &ModulesResolver<'_>,
 ) -> Result<(), InternalCompilationError> {
@@ -158,8 +157,8 @@ fn resolve_one(
 fn register_import(
     name: Ustr,
     site: ImportSite,
-    defined_names: &HashMap<Ustr, Location>,
-    seen: &mut HashMap<Ustr, ImportSite>,
+    defined_names: &FxHashMap<Ustr, Location>,
+    seen: &mut FxHashMap<Ustr, ImportSite>,
 ) -> Result<(), InternalCompilationError> {
     // Only check for Explicit imports.
     // Glob imports do not conflict with anything at this stage.

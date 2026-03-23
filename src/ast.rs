@@ -11,10 +11,9 @@ use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use la_arena::{Arena, Idx};
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::{self, Debug, Display},
-};
+use std::fmt::{self, Debug, Display};
+
+use crate::{FxHashMap, FxHashSet};
 
 use ustr::Ustr;
 
@@ -212,8 +211,8 @@ impl PFnType {
     pub fn collect_refs(
         &self,
         name: Ustr,
-        ty_names: &HashMap<Ustr, usize>,
-        collected: &mut HashSet<usize>,
+        ty_names: &FxHashMap<Ustr, usize>,
+        collected: &mut FxHashSet<usize>,
     ) -> Result<(), InternalCompilationError> {
         for arg in &self.args {
             arg.ty.0.collect_refs(name, ty_names, collected)?;
@@ -270,8 +269,8 @@ impl PType {
     pub fn collect_refs(
         &self,
         name: Ustr,
-        ty_names: &HashMap<Ustr, usize>,
-        collected: &mut HashSet<usize>,
+        ty_names: &FxHashMap<Ustr, usize>,
+        collected: &mut FxHashSet<usize>,
     ) -> Result<(), InternalCompilationError> {
         use PType::*;
         match self {
