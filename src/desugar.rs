@@ -739,7 +739,7 @@ fn desugar(
             modules_used,
         )?),
         Index(data) => {
-            let IndexData { array, index } = *data;
+            let IndexData { array, index } = data;
             // Check if the index is a literal directly, to avoid re-desugaring
             let index_kind = parsed_arena[index].kind.clone();
             let index_span = parsed_arena[index].span;

@@ -904,7 +904,7 @@ pub enum ExprKind<P: Phase> {
     StructLiteral(B<StructLiteralData<P>>),
     FieldAccess(B<FieldAccessData<P>>),
     Array(Vec<ExprId<P>>),
-    Index(B<IndexData<P>>),
+    Index(IndexData<P>),
     Match(B<MatchData<P>>),
     ForLoop(P::ForLoop),
     Loop(ExprId<P>),
@@ -1014,7 +1014,7 @@ impl<P: Phase> ExprKind<P> {
 
     /// Construct an [`Index`](ExprKind::Index) expression (array indexing).
     pub fn index(array: ExprId<P>, index: ExprId<P>) -> Self {
-        ExprKind::Index(b(IndexData { array, index }))
+        ExprKind::Index(IndexData { array, index })
     }
 
     /// Construct a [`Match`](ExprKind::Match) expression.
