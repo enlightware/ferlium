@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::{
     Location,
-    ast::PatternVar,
+    ast::{DExprId, PatternVar},
     error::DuplicatedVariantContext,
     internal_compilation_error,
     ir_syn::store_new,
@@ -22,7 +22,7 @@ use crate::{
 use itertools::{Itertools, multiunzip};
 
 use crate::{
-    ast::{DExpr, Pattern, PatternKind, PatternType},
+    ast::{Pattern, PatternKind, PatternType},
     containers::{SVec2, b},
     effects::{EffType, no_effects},
     error::InternalCompilationError,
@@ -41,9 +41,9 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         match_span: Location,
-        cond_expr: &DExpr,
-        alternatives: &[(Pattern, DExpr)],
-        default: &Option<DExpr>,
+        cond_expr: DExprId,
+        alternatives: &[(Pattern, DExprId)],
+        default: &Option<DExprId>,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
@@ -51,7 +51,7 @@ impl TypeInference {
         // Do we have a degenerate match with no alternative?
         if alternatives.is_empty() {
             if let Some(default) = default {
-                let (node, mut_ty) = self.infer_expr(env, default)?;
+                let (node, mut_ty) = self.infer_expr(env, *default)?;
                 return Ok((node.kind, node.ty, mut_ty, node.effects));
             } else {
                 return Err(internal_compilation_error!(EmptyMatchBody {
@@ -79,7 +79,7 @@ impl TypeInference {
         let is_variant = first_alternative.0.kind.is_variant();
         let alternatives_span = Location::fuse([
             alternatives.first().unwrap().0.span,
-            alternatives.last().unwrap().1.span,
+            env.arena[alternatives.last().unwrap().1].span,
         ])
         .unwrap();
 
@@ -211,7 +211,7 @@ impl TypeInference {
                 store_variant,
                 Type::unit(),
                 cond_eff.clone(),
-                cond_expr.span,
+                env.arena[cond_expr].span,
             );
             env.cur_locals.push(l_match_condition);
 
@@ -223,13 +223,13 @@ impl TypeInference {
                 })),
                 pattern_ty,
                 no_effects(),
-                cond_expr.span,
+                env.arena[cond_expr].span,
             );
             let extract_tag = N::new(
                 K::ExtractTag(b(load_variant.clone())),
                 int_type(),
                 no_effects(),
-                cond_expr.span,
+                env.arena[cond_expr].span,
             );
 
             // Generate code for each alternative
@@ -255,7 +255,7 @@ impl TypeInference {
                                     MutType::constant(),
                                     *inner_ty,
                                     None,
-                                    expr.span,
+                                    env.arena[*expr].span,
                                 ));
                                 env.cur_locals.push(id);
                                 id
@@ -266,15 +266,15 @@ impl TypeInference {
                         let mut node = if let Some(return_ty) = return_ty {
                             self.check_expr(
                                 env,
-                                expr,
+                                *expr,
                                 return_ty,
                                 MutType::constant(),
                                 return_ty_span,
                             )?
                         } else {
-                            let (node, _) = self.infer_expr(env, expr)?;
+                            let (node, _) = self.infer_expr(env, *expr)?;
                             return_ty = Some(node.ty);
-                            return_ty_span = expr.span;
+                            return_ty_span = env.arena[*expr].span;
                             node
                         };
 
@@ -286,7 +286,7 @@ impl TypeInference {
                                     K::Project(b((load_variant.clone(), 0))),
                                     *variant_inner_ty,
                                     no_effects(),
-                                    expr.span,
+                                    env.arena[*expr].span,
                                 );
                                 let inner_ty = inner_tys[i];
                                 let project_index = if variant_inner_ty.data().is_tuple() {
@@ -306,8 +306,12 @@ impl TypeInference {
                                 } else {
                                     K::FieldAccess(b((project_variant_inner, bind_var_names[i].0)))
                                 };
-                                let project_inner =
-                                    N::new(project_inner_kind, inner_ty, no_effects(), expr.span);
+                                let project_inner = N::new(
+                                    project_inner_kind,
+                                    inner_ty,
+                                    no_effects(),
+                                    env.arena[*expr].span,
+                                );
                                 let store_projected_inner = N::new(
                                     K::EnvStore(b(EnvStore {
                                         value: project_inner,
@@ -316,7 +320,7 @@ impl TypeInference {
                                     })),
                                     Type::unit(),
                                     no_effects(),
-                                    expr.span,
+                                    env.arena[*expr].span,
                                 );
                                 project_nodes.push(store_projected_inner);
                             }
@@ -328,7 +332,7 @@ impl TypeInference {
                                 K::Block(b(SVec2::from_vec(project_nodes))),
                                 return_ty.unwrap(),
                                 proj_effects,
-                                expr.span,
+                                env.arena[*expr].span,
                             );
                         }
                         assert!(env.cur_locals.len() == alt_start_env_size + bind_var_names.len());
@@ -351,7 +355,7 @@ impl TypeInference {
                 for (tag, _, variant_inner_ty) in types {
                     self.add_pub_constraint(PubTypeConstraint::new_type_has_variant(
                         pattern_ty,
-                        cond_expr.span,
+                        env.arena[cond_expr].span,
                         tag,
                         variant_inner_ty,
                         alternatives_span,
@@ -359,7 +363,13 @@ impl TypeInference {
                 }
 
                 // Generate the default code node
-                self.check_expr(env, default, return_ty, MutType::constant(), return_ty_span)?
+                self.check_expr(
+                    env,
+                    *default,
+                    return_ty,
+                    MutType::constant(),
+                    return_ty_span,
+                )?
             } else {
                 // No default, compute a full variant type.
                 let variant_inner_tys: Vec<_> =
@@ -367,7 +377,7 @@ impl TypeInference {
                 let variant_ty = Type::variant(variant_inner_tys);
                 self.add_sub_type_constraint(
                     pattern_ty,
-                    cond_expr.span,
+                    env.arena[cond_expr].span,
                     variant_ty,
                     alternatives_span,
                 );
@@ -398,13 +408,13 @@ impl TypeInference {
             let return_ty = self.fresh_type_var_ty();
             let (node, return_ty, effects) = if let Some(default) = default {
                 let default =
-                    self.check_expr(env, default, return_ty, MutType::constant(), match_span)?;
+                    self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
                 let (alternatives, alt_eff) = self.check_literal_patterns(
                     env,
                     alternatives,
                     first_alternative_span,
                     pattern_ty,
-                    cond_expr.span,
+                    env.arena[cond_expr].span,
                     return_ty,
                     match_span,
                 )?;
@@ -424,7 +434,7 @@ impl TypeInference {
                     alternatives,
                     first_alternative_span,
                     pattern_ty,
-                    cond_expr.span,
+                    env.arena[cond_expr].span,
                     return_ty,
                     match_span,
                 )?;
@@ -453,7 +463,7 @@ impl TypeInference {
     fn check_literal_patterns(
         &mut self,
         env: &mut TypingEnv,
-        pairs: &[(Pattern, DExpr)],
+        pairs: &[(Pattern, DExprId)],
         first_pattern_span: Location,
         expected_pattern_type: Type,
         expected_pattern_span: Location,
@@ -481,7 +491,7 @@ impl TypeInference {
                     );
                     let node = self.check_expr(
                         env,
-                        expr,
+                        *expr,
                         expected_return_type,
                         MutType::constant(),
                         expected_return_span,
@@ -493,7 +503,7 @@ impl TypeInference {
                         a_type: PatternType::Literal,
                         a_span: first_pattern_span,
                         b_type: pattern.kind.r#type(),
-                        b_span: expr.span,
+                        b_span: env.arena[*expr].span,
                     }))
                 }
             })

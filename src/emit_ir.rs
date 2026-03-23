@@ -22,6 +22,7 @@ use crate::{
     Location,
     ast::{self, *},
     containers::{b, iterable_to_string},
+    desugar::desugar_expr_with_empty_ctx,
     dictionary_passing::DictElaborationCtx,
     effects::EffType,
     error::InternalCompilationError,
@@ -77,6 +78,7 @@ struct ImplStubData {
 /// Emit IR for the given module
 pub fn emit_module(
     source: ast::PModule,
+    parsed_arena: &PExprArena,
     module_id: ModuleId,
     others: &Modules,
     merge_with: Option<&Module>,
@@ -97,7 +99,8 @@ pub fn emit_module(
             module
         },
     );
-    let (source, sorted_sccs) = source.desugar(&mut output, others)?;
+    let (source, desugared_arena, sorted_sccs) =
+        source.desugar(&mut output, others, parsed_arena)?;
 
     // Pre-registration pass: for trait impls with an explicit `for ConcreteType` annotation,
     // register a stub implementation before processing any function SCCs. This allows module
@@ -180,7 +183,7 @@ pub fn emit_module(
         }
 
         // Emit the corresponding functions.
-        emit_functions(&mut output, functions, others, None)?;
+        emit_functions(&mut output, functions, &desugared_arena, others, None)?;
     }
 
     // Process trait implementations
@@ -240,7 +243,14 @@ pub fn emit_module(
             span: imp.span,
             stub_data: concrete_impl_stubs.get(&imp_idx),
         };
-        let emit_output = emit_functions(&mut output, functions, others, Some(trait_ctx))?.unwrap();
+        let emit_output = emit_functions(
+            &mut output,
+            functions,
+            &desugared_arena,
+            others,
+            Some(trait_ctx),
+        )?
+        .unwrap();
 
         // Register the implementation if no stub was present.
         let is_concrete = emit_output.ty_var_count == 0;
@@ -287,6 +297,7 @@ pub(crate) struct EmitTraitOutput {
 fn emit_functions<'a, F, I>(
     output: &mut Module,
     ast_functions: F,
+    desugared_arena: &DExprArena,
     others: &Modules,
     trait_ctx: Option<EmitTraitCtx>,
 ) -> Result<Option<EmitTraitOutput>, InternalCompilationError>
@@ -487,10 +498,11 @@ where
             Some((expected_ret_ty, expected_span)),
             &mut lambda_functions,
             output.functions.len() as u32,
+            desugared_arena,
         );
         let fn_node = ty_inf.check_expr(
             &mut ty_env,
-            &function.body,
+            function.body,
             descr.definition.ty_scheme.ty.ret,
             MutType::constant(),
             expected_span,
@@ -886,7 +898,8 @@ pub struct CompiledExpr {
 /// referring to lower-generation type variables.
 /// Note: the expression might not be safe to use if it has unbound constraints or type variables.
 pub fn emit_expr_unsafe(
-    source: ast::PExpr,
+    source: PExprId,
+    parsed_arena: &PExprArena,
     module: &mut Module,
     others: &Modules,
     mut locals: Vec<LocalDecl>,
@@ -904,7 +917,8 @@ pub fn emit_expr_unsafe(
 
     // First desugar the expression.
     let mut modules_used = HashSet::new();
-    let source = source.desugar_with_empty_ctx(&module_env, &mut modules_used)?;
+    let (source, desugared_arena) =
+        desugar_expr_with_empty_ctx(source, parsed_arena, &module_env, &mut modules_used)?;
 
     // Infer the expression with the existing locals.
     let initial_local_count = locals.len();
@@ -921,9 +935,10 @@ pub fn emit_expr_unsafe(
         None,
         &mut lambda_functions,
         module.functions.len() as u32,
+        &desugared_arena,
     );
     let mut ty_inf = TypeInference::new_empty();
-    let (mut node, _) = ty_inf.infer_expr(&mut ty_env, &source)?;
+    let (mut node, _) = ty_inf.infer_expr(&mut ty_env, source)?;
     let mut locals = ty_env.get_all_locals_and_drop();
     ty_inf.log_debug_constraints(module_env);
     let lambda_functions = lambda_functions
@@ -1078,13 +1093,15 @@ pub fn emit_expr_unsafe(
 /// Emit IR for an expression, and fails if there are any unbound type variables or constraints.
 /// If the expression imports functions from the Program, module's imports will be updated.
 pub fn emit_expr(
-    source: ast::PExpr,
+    source: PExprId,
+    parsed_arena: &PExprArena,
     module: &mut Module,
     others: &Modules,
     locals: Vec<LocalDecl>,
 ) -> Result<CompiledExpr, InternalCompilationError> {
-    let span = source.span;
-    let CompiledExpr { ty, expr, locals } = emit_expr_unsafe(source, module, others, locals)?;
+    let span = parsed_arena[source].span;
+    let CompiledExpr { ty, expr, locals } =
+        emit_expr_unsafe(source, parsed_arena, module, others, locals)?;
     let ty_vars = ty.ty.inner_ty_vars();
     if !ty_vars.is_empty() {
         return Err(internal_compilation_error!(UnboundTypeVar {

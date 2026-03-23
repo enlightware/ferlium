@@ -11,7 +11,8 @@ use std::collections::HashSet;
 use ustr::{Ustr, ustr};
 
 use crate::{
-    Location, ast,
+    Location,
+    ast::{self, DExprArena},
     error::InternalCompilationError,
     function::FunctionDefinition,
     module::{
@@ -86,6 +87,8 @@ pub struct TypingEnv<'m> {
     pub(crate) lambda_functions: &'m mut Vec<ModuleFunction>,
     /// The next index for a new module function created from a lambda
     pub(crate) base_local_function_index: u32,
+    /// The desugared expression arena, used to look up child expression nodes by ID.
+    pub(crate) arena: &'m DExprArena,
 }
 
 impl<'m> TypingEnv<'m> {

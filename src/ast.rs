@@ -1,4 +1,3 @@
-use derive_new::new;
 // Copyright 2026 Enlightware GmbH
 //
 // Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
@@ -7,8 +6,11 @@ use derive_new::new;
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+
+use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
+use la_arena::{Arena, Idx};
 use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Debug, Display},
@@ -30,6 +32,12 @@ use crate::{
     type_like::TypeLike,
     value::{LiteralValue, Value},
 };
+
+/// An index into an expression arena
+pub type ExprId<P> = Idx<Expr<P>>;
+
+/// An arena of expressions
+pub type ExprArena<P> = Arena<Expr<P>>;
 
 /// A spanned Ustr
 pub type UstrSpan = (Ustr, Location);
@@ -116,7 +124,7 @@ pub type PMutTypeTypeSpan = MutTypeTypeSpan<Parsed>;
 /// A phase in the AST processing pipeline
 pub trait Phase: Sized {
     type FormattedString: Debug + Clone + Display;
-    type ForLoop: Debug + Clone + FormatWithIndent + VisitExpr<Self>;
+    type ForLoop: Debug + Clone + FormatWithIndent<Self> + VisitExpr<Self>;
     type Type: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
@@ -357,21 +365,23 @@ impl FormatWith<ModuleEnv<'_>> for PType {
     }
 }
 
-/// Trait for formatting with a module environment
-pub trait FormatWithIndent {
+/// Trait for formatting with a module environment and expression arena
+pub trait FormatWithIndent<P: Phase = Parsed> {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv,
+        arena: &ExprArena<P>,
         indent: usize,
     ) -> std::fmt::Result;
 }
 
-impl FormatWithIndent for Never {
+impl<P: Phase> FormatWithIndent<P> for Never {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
         _env: &ModuleEnv,
+        _arena: &ExprArena<P>,
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
@@ -379,30 +389,46 @@ impl FormatWithIndent for Never {
     }
 }
 
+/// A visitor pattern for expressions
+pub trait ExprVisitor<P: Phase> {
+    fn visit_start(&mut self, _expr: &Expr<P>) {}
+    fn visit_end(&mut self, _expr: &Expr<P>) {}
+
+    fn visit_exprs<'e>(&mut self, exprs: impl Iterator<Item = ExprId<P>>, arena: &ExprArena<P>)
+    where
+        Self: Sized,
+        P: 'e,
+    {
+        for expr in exprs {
+            arena[expr].visit(self, arena);
+        }
+    }
+}
+
 /// Trait for visiting expressions
 pub trait VisitExpr<P: Phase> {
-    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V);
+    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V, arena: &ExprArena<P>);
 
-    fn visit_with<V: ExprVisitor<P>>(&self, mut visitor: V) -> V {
-        self.visit(&mut visitor);
+    fn visit_with<V: ExprVisitor<P>>(&self, mut visitor: V, arena: &ExprArena<P>) -> V {
+        self.visit(&mut visitor, arena);
         visitor
     }
 }
 
 impl<P: Phase> VisitExpr<P> for Never {
-    fn visit<V: ExprVisitor<P>>(&self, _visitor: &mut V) {}
+    fn visit<V: ExprVisitor<P>>(&self, _visitor: &mut V, _arena: &ExprArena<P>) {}
 }
 
 /// The data of a for loop
 #[derive(Clone, Debug)]
 pub struct ForLoopData {
     pub var_name: UstrSpan,
-    pub iterator: Expr<Parsed>,
-    pub body: Expr<Parsed>,
+    pub iterator: PExprId,
+    pub body: PExprId,
 }
 
 impl ForLoopData {
-    pub fn new(var_name: UstrSpan, iterator: Expr<Parsed>, body: Expr<Parsed>) -> Self {
+    pub fn new(var_name: UstrSpan, iterator: PExprId, body: PExprId) -> Self {
         Self {
             var_name,
             iterator,
@@ -411,25 +437,26 @@ impl ForLoopData {
     }
 }
 
-impl FormatWithIndent for B<ForLoopData> {
+impl FormatWithIndent<Parsed> for B<ForLoopData> {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv,
+        arena: &PExprArena,
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
         writeln!(f, "{indent_str}for {} in", self.var_name.0)?;
-        self.iterator.format_ind(f, env, indent + 1)?;
+        arena[self.iterator].format_ind(f, env, arena, indent + 1)?;
         writeln!(f, "{indent_str}do")?;
-        self.body.format_ind(f, env, indent + 1)
+        arena[self.body].format_ind(f, env, arena, indent + 1)
     }
 }
 
 impl VisitExpr<Parsed> for B<ForLoopData> {
-    fn visit<V: ExprVisitor<Parsed>>(&self, visitor: &mut V) {
-        self.iterator.visit(visitor);
-        self.body.visit(visitor);
+    fn visit<V: ExprVisitor<Parsed>>(&self, visitor: &mut V, arena: &PExprArena) {
+        arena[self.iterator].visit(visitor, arena);
+        arena[self.body].visit(visitor, arena);
     }
 }
 
@@ -462,7 +489,7 @@ pub struct ModuleFunction<P: Phase> {
     pub args: Vec<ModuleFunctionArg<P>>,
     pub args_span: Location,
     pub ret_ty: Option<TypeSpan<P>>,
-    pub body: B<Expr<P>>,
+    pub body: ExprId<P>,
     pub span: Location,
     pub doc: Option<String>,
 }
@@ -472,7 +499,7 @@ impl<P: Phase> ModuleFunction<P> {
         args: Vec<ModuleFunctionArg<P>>,
         args_span: Location,
         ret_ty: Option<TypeSpan<P>>,
-        body: Expr<P>,
+        body: ExprId<P>,
         span: Location,
         doc: Option<String>,
     ) -> Self {
@@ -481,7 +508,7 @@ impl<P: Phase> ModuleFunction<P> {
             args,
             args_span,
             ret_ty,
-            body: b(body),
+            body,
             span,
             doc,
         }
@@ -566,8 +593,8 @@ impl<P: Phase> Module<P> {
         self
     }
 
-    pub fn errors(&self) -> Vec<LocatedError> {
-        self.visit_with(ErrorCollector::default()).0
+    pub fn errors(&self, arena: &ExprArena<P>) -> Vec<LocatedError> {
+        self.visit_with(ErrorCollector::default(), arena).0
     }
 
     pub fn is_empty(&self) -> bool {
@@ -602,34 +629,43 @@ impl<P: Phase> Default for Module<P> {
 }
 
 impl<P: Phase> VisitExpr<P> for Module<P> {
-    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V) {
+    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V, arena: &ExprArena<P>) {
         for ModuleFunction { body, .. } in self.functions.iter() {
-            body.visit(visitor);
+            arena[*body].visit(visitor, arena);
         }
         for imp in self.impls.iter() {
             for ModuleFunction { body, .. } in imp.functions.iter() {
-                body.visit(visitor);
+                arena[*body].visit(visitor, arena);
             }
         }
     }
 }
 
-impl<P: Phase> FormatWith<ModuleEnv<'_>> for Module<P> {
+/// A wrapper for displaying a module with its expression arena
+#[derive(new)]
+pub struct ModuleDisplay<'a, P: Phase> {
+    pub module: &'a Module<P>,
+    pub arena: &'a ExprArena<P>,
+}
+
+impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, P> {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
-        if !self.type_aliases.is_empty() {
+        let module = self.module;
+        let arena = self.arena;
+        if !module.type_aliases.is_empty() {
             writeln!(f, "Types:")?;
-            for alias in self.type_aliases.iter() {
+            for alias in module.type_aliases.iter() {
                 writeln!(f, "  {}", alias.format_with(env))?;
             }
         }
-        if !self.impls.is_empty() {
+        if !module.impls.is_empty() {
             writeln!(f, "Trait implementations:")?;
             for TraitImpl {
                 trait_name,
                 for_tys: for_ty,
                 functions,
                 ..
-            } in self.impls.iter()
+            } in module.impls.iter()
             {
                 if let Some(tys) = for_ty {
                     if let [ty] = &tys[..] {
@@ -684,12 +720,12 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for Module<P> {
                         write!(f, " → {}", ret_ty.format_with(env))?;
                     }
                     writeln!(f)?;
-                    body.format_ind(f, env, 3)?;
+                    arena[*body].format_ind(f, env, arena, 3)?;
                 }
                 writeln!(f, "  }}")?;
             }
         }
-        if !self.functions.is_empty() {
+        if !module.functions.is_empty() {
             writeln!(f, "Functions:")?;
             for ModuleFunction {
                 name,
@@ -698,7 +734,7 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for Module<P> {
                 body,
                 doc,
                 ..
-            } in self.functions.iter()
+            } in module.functions.iter()
             {
                 if let Some(doc) = doc {
                     for line in doc.split("\n") {
@@ -725,7 +761,7 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for Module<P> {
                     write!(f, " → {}", ret_ty.format_with(env))?;
                 }
                 writeln!(f)?;
-                body.format_ind(f, env, 2)?;
+                arena[*body].format_ind(f, env, arena, 2)?;
             }
         }
         Ok(())
@@ -739,7 +775,7 @@ pub type PModule = Module<Parsed>;
 pub type DModule = Module<Desugared>;
 
 /// A record field in an expression
-pub type RecordField<P> = (UstrSpan, Expr<P>);
+pub type RecordField<P> = (UstrSpan, ExprId<P>);
 
 /// A collection of record fields in an expression
 pub type RecordFields<P> = Vec<RecordField<P>>;
@@ -771,7 +807,7 @@ impl UnnamedArg {
 pub struct LetData<P: Phase> {
     pub name: UstrSpan,
     pub mut_val: MutVal,
-    pub expr: Expr<P>,
+    pub expr: ExprId<P>,
     pub ty_ascription: Option<(Location, P::LetTyAscriptionComplete)>,
 }
 
@@ -779,29 +815,29 @@ pub struct LetData<P: Phase> {
 #[derive(Debug, Clone)]
 pub struct AbstractData<P: Phase> {
     pub args: Vec<UstrSpan>,
-    pub body: Expr<P>,
+    pub body: ExprId<P>,
 }
 
 /// Data for the [`ExprKind::Apply`] variant: function application
 #[derive(Debug, Clone)]
 pub struct ApplyData<P: Phase> {
-    pub func: Expr<P>,
-    pub args: Vec<Expr<P>>,
+    pub func: ExprId<P>,
+    pub args: Vec<ExprId<P>>,
     pub unnamed_arg: UnnamedArg,
 }
 
 /// Data for the [`ExprKind::Assign`] variant: assignment
 #[derive(Debug, Clone)]
 pub struct AssignData<P: Phase> {
-    pub place: Expr<P>,
+    pub place: ExprId<P>,
     pub sign_span: Location,
-    pub value: Expr<P>,
+    pub value: ExprId<P>,
 }
 
 /// Data for the [`ExprKind::Project`] variant: tuple projection
 #[derive(Debug, Clone)]
 pub struct ProjectData<P: Phase> {
-    pub expr: Expr<P>,
+    pub expr: ExprId<P>,
     pub index: (usize, Location),
 }
 
@@ -815,29 +851,29 @@ pub struct StructLiteralData<P: Phase> {
 /// Data for the [`ExprKind::FieldAccess`] variant: record field access
 #[derive(Debug, Clone)]
 pub struct FieldAccessData<P: Phase> {
-    pub expr: Expr<P>,
+    pub expr: ExprId<P>,
     pub name: UstrSpan,
 }
 
 /// Data for the [`ExprKind::Index`] variant: array indexing
 #[derive(Debug, Clone)]
 pub struct IndexData<P: Phase> {
-    pub array: Expr<P>,
-    pub index: Expr<P>,
+    pub array: ExprId<P>,
+    pub index: ExprId<P>,
 }
 
 /// Data for the [`ExprKind::Match`] variant: pattern matching
 #[derive(Debug, Clone)]
 pub struct MatchData<P: Phase> {
-    pub cond_expr: Expr<P>,
-    pub alternatives: Vec<(Pattern, Expr<P>)>,
-    pub default: Option<Expr<P>>,
+    pub cond_expr: ExprId<P>,
+    pub alternatives: Vec<(Pattern, ExprId<P>)>,
+    pub default: Option<ExprId<P>>,
 }
 
 /// Data for the [`ExprKind::TypeAscription`] variant: type annotation
 #[derive(Debug, Clone)]
 pub struct TypeAscriptionData<P: Phase> {
-    pub expr: Expr<P>,
+    pub expr: ExprId<P>,
     pub ty: P::Type,
     pub span: Location,
 }
@@ -857,22 +893,22 @@ pub enum ExprKind<P: Phase> {
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Path),
     Let(B<LetData<P>>),
-    Return(B<Expr<P>>),
+    Return(ExprId<P>),
     Abstract(B<AbstractData<P>>),
     Apply(B<ApplyData<P>>),
-    Block(Vec<Expr<P>>),
+    Block(Vec<ExprId<P>>),
     Assign(B<AssignData<P>>),
     PropertyPath(B<PropertyPathData>),
-    Tuple(Vec<Expr<P>>),
+    Tuple(Vec<ExprId<P>>),
     Project(B<ProjectData<P>>),
     Record(RecordFields<P>),
     StructLiteral(B<StructLiteralData<P>>),
     FieldAccess(B<FieldAccessData<P>>),
-    Array(Vec<Expr<P>>),
+    Array(Vec<ExprId<P>>),
     Index(B<IndexData<P>>),
     Match(B<MatchData<P>>),
     ForLoop(P::ForLoop),
-    Loop(B<Expr<P>>),
+    Loop(ExprId<P>),
     SoftBreak,
     TypeAscription(B<TypeAscriptionData<P>>),
     Error,
@@ -898,7 +934,7 @@ impl<P: Phase> ExprKind<P> {
     pub fn let_(
         name: UstrSpan,
         mut_val: MutVal,
-        expr: Expr<P>,
+        expr: ExprId<P>,
         ty_ascription: Option<(Location, P::LetTyAscriptionComplete)>,
     ) -> Self {
         ExprKind::Let(b(LetData {
@@ -910,17 +946,17 @@ impl<P: Phase> ExprKind<P> {
     }
 
     /// Construct a [`Return`](ExprKind::Return) expression.
-    pub fn return_(expr: Expr<P>) -> Self {
-        ExprKind::Return(b(expr))
+    pub fn return_(expr: ExprId<P>) -> Self {
+        ExprKind::Return(expr)
     }
 
     /// Construct an [`Abstract`](ExprKind::Abstract) expression (anonymous function / lambda).
-    pub fn abstract_(args: Vec<UstrSpan>, body: Expr<P>) -> Self {
+    pub fn abstract_(args: Vec<UstrSpan>, body: ExprId<P>) -> Self {
         ExprKind::Abstract(b(AbstractData { args, body }))
     }
 
     /// Construct an [`Apply`](ExprKind::Apply) expression (function application).
-    pub fn apply(func: Expr<P>, args: Vec<Expr<P>>, unnamed_arg: UnnamedArg) -> Self {
+    pub fn apply(func: ExprId<P>, args: Vec<ExprId<P>>, unnamed_arg: UnnamedArg) -> Self {
         ExprKind::Apply(b(ApplyData {
             func,
             args,
@@ -929,12 +965,12 @@ impl<P: Phase> ExprKind<P> {
     }
 
     /// Construct a [`Block`](ExprKind::Block) expression.
-    pub fn block(stmts: Vec<Expr<P>>) -> Self {
+    pub fn block(stmts: Vec<ExprId<P>>) -> Self {
         ExprKind::Block(stmts)
     }
 
     /// Construct an [`Assign`](ExprKind::Assign) expression.
-    pub fn assign(place: Expr<P>, sign_span: Location, value: Expr<P>) -> Self {
+    pub fn assign(place: ExprId<P>, sign_span: Location, value: ExprId<P>) -> Self {
         ExprKind::Assign(b(AssignData {
             place,
             sign_span,
@@ -948,12 +984,12 @@ impl<P: Phase> ExprKind<P> {
     }
 
     /// Construct a [`Tuple`](ExprKind::Tuple) expression.
-    pub fn tuple(elements: Vec<Expr<P>>) -> Self {
+    pub fn tuple(elements: Vec<ExprId<P>>) -> Self {
         ExprKind::Tuple(elements)
     }
 
     /// Construct a [`Project`](ExprKind::Project) expression (tuple element projection).
-    pub fn project(expr: Expr<P>, index: (usize, Location)) -> Self {
+    pub fn project(expr: ExprId<P>, index: (usize, Location)) -> Self {
         ExprKind::Project(b(ProjectData { expr, index }))
     }
 
@@ -968,25 +1004,25 @@ impl<P: Phase> ExprKind<P> {
     }
 
     /// Construct a [`FieldAccess`](ExprKind::FieldAccess) expression.
-    pub fn field_access(expr: Expr<P>, name: UstrSpan) -> Self {
+    pub fn field_access(expr: ExprId<P>, name: UstrSpan) -> Self {
         ExprKind::FieldAccess(b(FieldAccessData { expr, name }))
     }
 
     /// Construct an [`Array`](ExprKind::Array) expression.
-    pub fn array(elements: Vec<Expr<P>>) -> Self {
+    pub fn array(elements: Vec<ExprId<P>>) -> Self {
         ExprKind::Array(elements)
     }
 
     /// Construct an [`Index`](ExprKind::Index) expression (array indexing).
-    pub fn index(array: Expr<P>, index: Expr<P>) -> Self {
+    pub fn index(array: ExprId<P>, index: ExprId<P>) -> Self {
         ExprKind::Index(b(IndexData { array, index }))
     }
 
     /// Construct a [`Match`](ExprKind::Match) expression.
     pub fn match_(
-        expr: Expr<P>,
-        alternatives: Vec<(Pattern, Expr<P>)>,
-        default: Option<Expr<P>>,
+        expr: ExprId<P>,
+        alternatives: Vec<(Pattern, ExprId<P>)>,
+        default: Option<ExprId<P>>,
     ) -> Self {
         ExprKind::Match(b(MatchData {
             cond_expr: expr,
@@ -1001,8 +1037,8 @@ impl<P: Phase> ExprKind<P> {
     }
 
     /// Construct a [`Loop`](ExprKind::Loop) expression.
-    pub fn loop_(body: Expr<P>) -> Self {
-        ExprKind::Loop(b(body))
+    pub fn loop_(body: ExprId<P>) -> Self {
+        ExprKind::Loop(body)
     }
 
     /// Construct a [`SoftBreak`](ExprKind::SoftBreak) expression.
@@ -1011,13 +1047,19 @@ impl<P: Phase> ExprKind<P> {
     }
 
     /// Construct a [`TypeAscription`](ExprKind::TypeAscription) expression.
-    pub fn type_ascription(expr: Expr<P>, ty: P::Type, span: Location) -> Self {
+    pub fn type_ascription(expr: ExprId<P>, ty: P::Type, span: Location) -> Self {
         ExprKind::TypeAscription(b(TypeAscriptionData { expr, ty, span }))
     }
 
     /// Construct an [`Error`](ExprKind::Error) expression.
     pub fn error() -> Self {
         ExprKind::Error
+    }
+}
+
+impl<P: Phase> Expr<P> {
+    pub fn single_identifier(name: Ustr, span: Location) -> Self {
+        Expr::new(ExprKind::Identifier(Path::single(name, span)), span)
     }
 }
 
@@ -1028,17 +1070,14 @@ pub struct Expr<P: Phase> {
     pub span: Location,
 }
 
-impl<P: Phase> Expr<P> {
-    pub fn single_identifier(name: Ustr, span: Location) -> Self {
-        Expr::new(ExprKind::Identifier(Path::single(name, span)), span)
-    }
-}
+impl<P: Phase> Expr<P> {}
 
-impl<P: Phase> FormatWithIndent for Expr<P> {
+impl<P: Phase> FormatWithIndent<P> for Expr<P> {
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,
         env: &ModuleEnv<'_>,
+        arena: &ExprArena<P>,
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
@@ -1050,11 +1089,11 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
             Let(data) => {
                 let kw = data.mut_val.var_def_string();
                 writeln!(f, "{indent_str}{kw} {} =", data.name.0)?;
-                data.expr.format_ind(f, env, indent + 1)
+                arena[data.expr].format_ind(f, env, arena, indent + 1)
             }
             Return(expr) => {
                 writeln!(f, "{indent_str}return")?;
-                expr.format_ind(f, env, indent + 1)
+                arena[*expr].format_ind(f, env, arena, indent + 1)
             }
             Abstract(data) => {
                 write!(f, "{indent_str}|")?;
@@ -1062,48 +1101,48 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
                     write!(f, "{arg}, ")?;
                 }
                 writeln!(f, "|")?;
-                data.body.format_ind(f, env, indent + 1)
+                arena[data.body].format_ind(f, env, arena, indent + 1)
             }
             Apply(data) => {
                 writeln!(f, "{indent_str}eval")?;
-                data.func.format_ind(f, env, indent + 1)?;
+                arena[data.func].format_ind(f, env, arena, indent + 1)?;
                 if data.args.is_empty() {
                     writeln!(f, "{indent_str}and apply to ()")
                 } else {
                     writeln!(f, "{indent_str}and apply to (")?;
-                    for arg in &data.args {
-                        arg.format_ind(f, env, indent + 1)?;
+                    for &arg in &data.args {
+                        arena[arg].format_ind(f, env, arena, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")
                 }
             }
             Block(exprs) => {
-                for expr in exprs.iter() {
-                    expr.format_ind(f, env, indent)?;
+                for &expr in exprs.iter() {
+                    arena[expr].format_ind(f, env, arena, indent)?;
                 }
                 Ok(())
             }
             Assign(data) => {
                 writeln!(f, "{indent_str}assign")?;
-                data.place.format_ind(f, env, indent + 1)?;
-                data.value.format_ind(f, env, indent + 1)
+                arena[data.place].format_ind(f, env, arena, indent + 1)?;
+                arena[data.value].format_ind(f, env, arena, indent + 1)
             }
             Tuple(args) => {
                 writeln!(f, "{indent_str}(")?;
-                for arg in args.iter() {
-                    arg.format_ind(f, env, indent + 1)?;
+                for &arg in args.iter() {
+                    arena[arg].format_ind(f, env, arena, indent + 1)?;
                 }
                 writeln!(f, "{indent_str})")
             }
             Project(data) => {
-                data.expr.format_ind(f, env, indent)?;
+                arena[data.expr].format_ind(f, env, arena, indent)?;
                 writeln!(f, "{indent_str}  .{}", data.index.0)
             }
             StructLiteral(data) => {
                 writeln!(f, "{indent_str}{} {{", data.path)?;
                 for ((name, _), value) in data.fields.iter() {
                     writeln!(f, "{indent_str}  {name}:")?;
-                    value.format_ind(f, env, indent + 2)?;
+                    arena[*value].format_ind(f, env, arena, indent + 2)?;
                     writeln!(f, "{indent_str}  ,")?;
                 }
                 writeln!(f, "{indent_str}}}")
@@ -1112,13 +1151,13 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
                 writeln!(f, "{indent_str}{{")?;
                 for ((name, _), value) in fields.iter() {
                     writeln!(f, "{indent_str}  {name}:")?;
-                    value.format_ind(f, env, indent + 2)?;
+                    arena[*value].format_ind(f, env, arena, indent + 2)?;
                     writeln!(f, "{indent_str}  ,")?;
                 }
                 writeln!(f, "{indent_str}}}")
             }
             FieldAccess(data) => {
-                data.expr.format_ind(f, env, indent)?;
+                arena[data.expr].format_ind(f, env, arena, indent)?;
                 writeln!(f, "{indent_str}  .{}", data.name.0)
             }
             Array(args) => {
@@ -1126,42 +1165,42 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
                     writeln!(f, "{indent_str}[]")
                 } else {
                     writeln!(f, "{indent_str}[")?;
-                    for arg in args.iter() {
-                        arg.format_ind(f, env, indent + 1)?;
+                    for &arg in args.iter() {
+                        arena[arg].format_ind(f, env, arena, indent + 1)?;
                     }
                     writeln!(f, "{indent_str}]")
                 }
             }
             Index(data) => {
-                data.array.format_ind(f, env, indent)?;
+                arena[data.array].format_ind(f, env, arena, indent)?;
                 writeln!(f, "{indent_str}[")?;
-                data.index.format_ind(f, env, indent + 1)?;
+                arena[data.index].format_ind(f, env, arena, indent + 1)?;
                 writeln!(f, "{indent_str}]")
             }
             Match(data) => {
                 writeln!(f, "{indent_str}match")?;
-                data.cond_expr.format_ind(f, env, indent + 1)?;
+                arena[data.cond_expr].format_ind(f, env, arena, indent + 1)?;
                 for (value, case) in data.alternatives.iter() {
                     writeln!(f, "{indent_str}case")?;
                     value.format_ind(f, indent + 1)?;
                     writeln!(f, "{indent_str}=>")?;
-                    case.format_ind(f, env, indent + 1)?;
+                    arena[*case].format_ind(f, env, arena, indent + 1)?;
                 }
-                if let Some(default) = &data.default {
+                if let Some(default) = data.default {
                     writeln!(f, "{indent_str}case _ =>")?;
-                    default.format_ind(f, env, indent + 1)?;
+                    arena[default].format_ind(f, env, arena, indent + 1)?;
                 }
                 Ok(())
             }
-            ForLoop(for_loop) => for_loop.format_ind(f, env, indent),
+            ForLoop(for_loop) => for_loop.format_ind(f, env, arena, indent),
             Loop(body) => {
                 writeln!(f, "{indent_str}loop")?;
-                body.format_ind(f, env, indent + 1)
+                arena[*body].format_ind(f, env, arena, indent + 1)
             }
             SoftBreak => writeln!(f, "{indent_str}SoftBreak"),
             PropertyPath(data) => writeln!(f, "{indent_str}@{}.{}", data.path, data.name),
             TypeAscription(data) => {
-                data.expr.format_ind(f, env, indent)?;
+                arena[data.expr].format_ind(f, env, arena, indent)?;
                 writeln!(f, "{indent_str}: {}", data.ty.format_with(env))
             }
             Error => writeln!(f, "{indent_str}Error"),
@@ -1171,40 +1210,44 @@ impl<P: Phase> FormatWithIndent for Expr<P> {
 
 impl<P: Phase> VisitExpr<P> for Expr<P> {
     /// Visit all nodes of the expression tree
-    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V) {
+    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V, arena: &ExprArena<P>) {
         visitor.visit_start(self);
         use ExprKind::*;
         match &self.kind {
-            Let(data) => data.expr.visit(visitor),
-            Abstract(data) => data.body.visit(visitor),
+            Let(data) => arena[data.expr].visit(visitor, arena),
+            Abstract(data) => arena[data.body].visit(visitor, arena),
             Apply(data) => {
-                data.func.visit(visitor);
-                visitor.visit_exprs(data.args.iter());
+                arena[data.func].visit(visitor, arena);
+                visitor.visit_exprs(data.args.iter().copied(), arena);
             }
-            Block(exprs) => visitor.visit_exprs(exprs.iter()),
+            Block(exprs) => visitor.visit_exprs(exprs.iter().copied(), arena),
             Assign(data) => {
-                data.place.visit(visitor);
-                data.value.visit(visitor);
+                arena[data.place].visit(visitor, arena);
+                arena[data.value].visit(visitor, arena);
             }
-            Tuple(args) => visitor.visit_exprs(args.iter()),
-            Project(data) => data.expr.visit(visitor),
-            StructLiteral(data) => visitor.visit_exprs(data.fields.iter().map(|(_, expr)| expr)),
-            Record(fields) => visitor.visit_exprs(fields.iter().map(|(_, expr)| expr)),
-            FieldAccess(data) => data.expr.visit(visitor),
-            Array(args) => visitor.visit_exprs(args.iter()),
+            Tuple(args) => visitor.visit_exprs(args.iter().copied(), arena),
+            Project(data) => arena[data.expr].visit(visitor, arena),
+            StructLiteral(data) => {
+                visitor.visit_exprs(data.fields.iter().map(|(_, expr)| *expr), arena)
+            }
+            Record(fields) => visitor.visit_exprs(fields.iter().map(|(_, id)| *id), arena),
+            FieldAccess(data) => arena[data.expr].visit(visitor, arena),
+            Array(args) => visitor.visit_exprs(args.iter().copied(), arena),
             Index(data) => {
-                data.array.visit(visitor);
-                data.index.visit(visitor);
+                arena[data.array].visit(visitor, arena);
+                arena[data.index].visit(visitor, arena);
             }
             Match(data) => {
-                data.cond_expr.visit(visitor);
-                visitor.visit_exprs(data.alternatives.iter().map(|(_, expr)| expr));
-                if let Some(default) = &data.default {
-                    default.visit(visitor);
+                arena[data.cond_expr].visit(visitor, arena);
+                visitor.visit_exprs(data.alternatives.iter().map(|(_, expr)| *expr), arena);
+                if let Some(default) = data.default {
+                    arena[default].visit(visitor, arena);
                 }
             }
-            ForLoop(for_loop) => for_loop.visit(visitor),
-            TypeAscription(data) => data.expr.visit(visitor),
+            ForLoop(for_loop) => for_loop.visit(visitor, arena),
+            Return(expr) => arena[*expr].visit(visitor, arena),
+            Loop(body) => arena[*body].visit(visitor, arena),
+            TypeAscription(data) => arena[data.expr].visit(visitor, arena),
             _ => {}
         }
         visitor.visit_end(self);
@@ -1213,9 +1256,16 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
     // TODO: use the visitor to collect the dependency graph
 }
 
-impl<P: Phase> FormatWith<ModuleEnv<'_>> for Expr<P> {
+/// A wrapper for displaying an expression with its expression arena
+#[derive(new)]
+pub struct ExprDisplay<'a, P: Phase> {
+    pub id: ExprId<P>,
+    pub arena: &'a ExprArena<P>,
+}
+
+impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ExprDisplay<'a, P> {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        self.format_ind(f, env, 0)
+        self.arena[self.id].format_ind(f, env, self.arena, 0)
     }
 }
 
@@ -1225,27 +1275,23 @@ pub type PExprKind = ExprKind<Parsed>;
 /// An AST expression just after parsing
 pub type PExpr = Expr<Parsed>;
 
+/// An AST node id just after parsing
+pub type PExprId = ExprId<Parsed>;
+
+/// An AST arena just after parsing
+pub type PExprArena = ExprArena<Parsed>;
+
 /// An AST expression kind after desugaring
 pub type DExprKind = ExprKind<Desugared>;
 
 /// An AST expression after desugaring
 pub type DExpr = Expr<Desugared>;
 
-/// A visitor pattern for expressions
-pub trait ExprVisitor<P: Phase> {
-    fn visit_start(&mut self, _expr: &Expr<P>) {}
-    fn visit_end(&mut self, _expr: &Expr<P>) {}
+/// An AST node id after desugaring
+pub type DExprId = ExprId<Desugared>;
 
-    fn visit_exprs<'e>(&mut self, exprs: impl Iterator<Item = &'e Expr<P>>)
-    where
-        Self: Sized,
-        P: 'e,
-    {
-        for expr in exprs {
-            expr.visit(self);
-        }
-    }
-}
+/// An AST arena after desugaring
+pub type DExprArena = ExprArena<Desugared>;
 
 #[derive(Default)]
 struct ErrorCollector(Vec<LocatedError>);

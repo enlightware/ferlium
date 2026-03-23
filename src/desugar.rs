@@ -16,13 +16,13 @@ use ustr::{Ustr, ustr};
 use crate::{
     Location,
     ast::{
-        self, AbstractData, ApplyData, AssignData, DExpr, DModule, DModuleFunction,
-        DModuleFunctionArg, DTraitImpl, Expr, ExprKind, FieldAccessData, ForLoopData, IndexData,
-        LetData, MatchData, ModuleFunction, ModuleFunctionArg, PExpr, PModule, PModuleFunction,
-        PModuleFunctionArg, PTraitImpl, PTypeDef, PTypeSpan, Pattern, PatternKind, PatternVar,
-        ProjectData, StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
+        self, AbstractData, ApplyData, AssignData, DExpr, DExprArena, DExprId, DModule,
+        DModuleFunction, DModuleFunctionArg, DTraitImpl, ExprId, ExprKind, FieldAccessData,
+        ForLoopData, IndexData, LetData, MatchData, ModuleFunction, ModuleFunctionArg, PExprArena,
+        PModule, PModuleFunction, PModuleFunctionArg, PTraitImpl, PTypeDef, PTypeSpan, Parsed,
+        Pattern, PatternKind, PatternVar, ProjectData, StructLiteralData, TypeAscriptionData,
+        UnnamedArg, UstrSpan,
     },
-    containers::b,
     effects::EffType,
     error::{DuplicatedFieldContext, DuplicatedVariantContext, InternalCompilationError},
     format_string::emit_format_string_ast,
@@ -237,6 +237,8 @@ impl PTraitImpl {
     pub fn desugar(
         self,
         env: &ModuleEnv<'_>,
+        parsed_arena: &PExprArena,
+        desugared_arena: &mut DExprArena,
         modules_used: &mut HashSet<ModuleId>,
     ) -> Result<DTraitImpl, InternalCompilationError> {
         let fn_map = self
@@ -249,7 +251,7 @@ impl PTraitImpl {
             .functions
             .into_iter()
             .map(|f| {
-                f.desugar(&fn_map, env, modules_used)
+                f.desugar(&fn_map, env, parsed_arena, desugared_arena, modules_used)
                     .map(|(f, _dep_graph)| f)
             })
             .collect::<Result<_, _>>()?;
@@ -308,13 +310,14 @@ impl NamedTypeData {
 
 impl PModule {
     /// Desugars a parsed module and resolve its types and write them into output.
-    /// Returns a desugared AST and a list of strongly connected components of its
-    /// function dependency graph, sorted topologically.
+    /// Returns a desugared AST, the desugared expression arena, and a list of
+    /// strongly connected components of its function dependency graph, sorted topologically.
     pub fn desugar(
         self,
         output: &mut Module,
         others: &Modules,
-    ) -> Result<(DModule, FnSccs), InternalCompilationError> {
+        parsed_arena: &PExprArena,
+    ) -> Result<(DModule, DExprArena, FnSccs), InternalCompilationError> {
         // Flatten uses from self and check for conflicts with local definitions.
         let local_names = self.own_symbols().collect();
         let resolver = ModulesResolver::new(others);
@@ -389,10 +392,17 @@ impl PModule {
             .enumerate()
             .map(|(index, func)| (func.name.0, index))
             .collect::<HashMap<_, _>>();
+        let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
         let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
-            self.functions
-                .into_iter()
-                .map(|f| f.desugar(&fn_map, &env, &mut modules_used)),
+            self.functions.into_iter().map(|f| {
+                f.desugar(
+                    &fn_map,
+                    &env,
+                    parsed_arena,
+                    &mut desugared_arena,
+                    &mut modules_used,
+                )
+            }),
             |iter| iter.unzip(),
         )?;
         let sccs = find_strongly_connected_components(&fn_dep_graph);
@@ -402,7 +412,7 @@ impl PModule {
         let impls = self
             .impls
             .into_iter()
-            .map(|i| i.desugar(&env, &mut modules_used))
+            .map(|i| i.desugar(&env, parsed_arena, &mut desugared_arena, &mut modules_used))
             .collect::<Result<_, _>>()?;
 
         // Build result
@@ -414,7 +424,7 @@ impl PModule {
             type_defs: vec![],
             uses: self.uses,
         };
-        Ok((module, sorted_sccs))
+        Ok((module, desugared_arena, sorted_sccs))
     }
 }
 
@@ -423,11 +433,19 @@ impl PModuleFunction {
         self,
         fn_map: &FnMap,
         env: &ModuleEnv<'_>,
+        parsed_arena: &PExprArena,
+        desugared_arena: &mut DExprArena,
         modules_used: &mut HashSet<ModuleId>,
     ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
         let locals = self.args.iter().map(|arg| arg.name.0).collect();
         let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env);
-        let body = self.body.desugar(&mut ctx, modules_used)?;
+        let body = desugar(
+            self.body,
+            &mut ctx,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )?;
         let args = self
             .args
             .into_iter()
@@ -443,7 +461,7 @@ impl PModuleFunction {
             args,
             args_span: self.args_span,
             ret_ty,
-            body: b(body),
+            body,
             span: self.span,
             doc: self.doc,
         };
@@ -488,319 +506,405 @@ impl<'a> DesugarCtx<'a> {
     }
 }
 
-impl PExpr {
-    /// Desugar without a context, to be used outside modules.
-    pub fn desugar_with_empty_ctx(
-        self,
-        module_env: &ModuleEnv<'_>,
-        modules_used: &mut HashSet<ModuleId>,
-    ) -> Result<DExpr, InternalCompilationError> {
-        let empty_fn_map = HashMap::new();
-        let mut ctx = DesugarCtx::new(&empty_fn_map, module_env);
-        self.desugar(&mut ctx, modules_used)
-    }
-
-    fn desugar(
-        self,
-        ctx: &mut DesugarCtx,
-        modules_used: &mut HashSet<ModuleId>,
-    ) -> Result<DExpr, InternalCompilationError> {
-        use ExprKind::*;
-        let kind = match self.kind {
-            Literal(value, ty) => {
-                if ty == int_type() {
-                    // Convert integer literals to from_int(literal).
-                    ExprKind::apply(
-                        DExpr::single_identifier(ustr("from_int"), self.span),
-                        vec![DExpr::new(ExprKind::literal(value, ty), self.span)],
-                        UnnamedArg::All,
-                    )
-                } else {
-                    Literal(value, ty)
-                }
-            }
-            FormattedString(s) => emit_format_string_ast(&s, self.span, &ctx.locals)?,
-            Identifier(path) => {
-                let is_local = match path.segments.as_slice() {
-                    [(name, _)] => ctx.locals.contains(name),
-                    _ => false,
-                };
-                if !is_local {
-                    // There is *NOT* a local variable shadowing a function definition.
-                    if let [(name, _)] = &path.segments[..]
-                        && let Some(index) = ctx.fn_map.get(name)
-                    {
-                        // This is a known function part of this module.
-                        ctx.fn_deps.insert(*index);
-                    }
-                }
-                Identifier(path)
-            }
-            Let(data) => {
-                let LetData {
-                    name,
-                    mut_val,
-                    expr,
-                    ty_ascription,
-                } = *data;
-                let expr = expr.desugar(ctx, modules_used)?;
-                // Look inside the type ascription node to see if the type is constant, to be used later for display.
-                let ty_ascription = ty_ascription.map(|(span, _)| {
-                    let ty = expr
-                        .kind
-                        .as_type_ascription()
-                        .map(|ty_asc| ty_asc.ty)
-                        .unwrap_or_else(|| *expr.kind.as_literal().unwrap().1);
-                    let is_constant = ty.is_constant();
-                    (span, is_constant)
-                });
-                let result = ExprKind::let_(name, mut_val, expr, ty_ascription);
-                ctx.locals.push(name.0);
-                result
-            }
-            Return(expr) => ExprKind::return_(expr.desugar(ctx, modules_used)?),
-            Abstract(data) => {
-                let AbstractData { args, body } = *data;
-                // we swap the locals with the lambda arguments, as we do not capture the outer scope
-                let mut other_vars = args.iter().map(|(name, _)| *name).collect::<Vec<_>>();
-                mem::swap(&mut other_vars, &mut ctx.locals);
-                let body = body.desugar(ctx, modules_used)?;
-                let result = ExprKind::abstract_(args, body);
-                mem::swap(&mut other_vars, &mut ctx.locals);
-                result
-            }
-            Apply(data) => {
-                let ApplyData {
-                    func,
-                    args,
-                    unnamed_arg,
-                } = *data;
-                ExprKind::apply(
-                    func.desugar(ctx, modules_used)?,
-                    desugar(args, ctx, modules_used)?,
-                    unnamed_arg,
-                )
-            }
-            Block(stmts) => {
-                let env_size = ctx.locals.len();
-                let block = Block(desugar(stmts, ctx, modules_used)?);
-                ctx.locals.truncate(env_size);
-                block
-            }
-            Assign(data) => {
-                let AssignData {
-                    place,
-                    sign_span: sign_loc,
-                    value,
-                } = *data;
-                let place = place.desugar(ctx, modules_used)?;
-                let value = value.desugar(ctx, modules_used)?;
-                if let Some(index) = place.kind.as_index() {
-                    if index.array.kind.is_property_path() {
-                        /*
-                            Desugar:
-                                @scope.property[expr1] = expr2
-                            into:
-                                {
-                                    let mut tmp = @scope.property;
-                                    tmp[expr1] = expr2;
-                                    @scope.property = tmp;
-                                }
-                        */
-                        let let_stmt = Expr::new(
-                            ExprKind::let_(
-                                (ustr("tmp"), self.span),
-                                MutVal::mutable(),
-                                index.array.clone(),
-                                None,
-                            ),
-                            self.span,
-                        );
-                        let index_expr = Expr::new(
-                            ExprKind::index(
-                                Expr::single_identifier(ustr("tmp"), self.span),
-                                index.index.clone(),
-                            ),
-                            self.span,
-                        );
-                        let assign_tmp_stmt =
-                            Expr::new(ExprKind::assign(index_expr, sign_loc, value), self.span);
-                        let assign_back_stmt = Expr::new(
-                            ExprKind::assign(
-                                index.array.clone(),
-                                sign_loc,
-                                Expr::single_identifier(ustr("tmp"), self.span),
-                            ),
-                            self.span,
-                        );
-                        return Ok(Expr::new(
-                            Block(vec![let_stmt, assign_tmp_stmt, assign_back_stmt]),
-                            self.span,
-                        ));
-                    }
-                }
-                ExprKind::assign(place, sign_loc, value)
-            }
-            PropertyPath(data) => PropertyPath(data),
-            Tuple(elements) => Tuple(desugar(elements, ctx, modules_used)?),
-            Project(data) => {
-                let ProjectData { expr, index } = *data;
-                ExprKind::project(expr.desugar(ctx, modules_used)?, index)
-            }
-            StructLiteral(data) => {
-                let StructLiteralData { path, fields } = *data;
-                ExprKind::struct_literal(
-                    path,
-                    fields
-                        .into_iter()
-                        .map(|(k, v)| Ok((k, v.desugar(ctx, modules_used)?)))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-            }
-            Record(elements) => Record(
-                elements
-                    .into_iter()
-                    .map(|(k, v)| Ok((k, v.desugar(ctx, modules_used)?)))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            FieldAccess(data) => {
-                let FieldAccessData { expr, name } = *data;
-                ExprKind::field_access(expr.desugar(ctx, modules_used)?, name)
-            }
-            Array(elements) => Array(desugar(elements, ctx, modules_used)?),
-            Index(data) => {
-                let IndexData { array, index } = *data;
-                let index_span = index.span;
-                let desugared_index = match index.kind {
-                    Literal(value, ty) => DExpr::new(Literal(value, ty), index_span),
-                    kind => Expr::new(kind, index_span).desugar(ctx, modules_used)?,
-                };
-                ExprKind::index(array.desugar(ctx, modules_used)?, desugared_index)
-            }
-            Match(data) => {
-                let MatchData {
-                    cond_expr: expr,
-                    alternatives,
-                    default,
-                } = *data;
-                ExprKind::match_(
-                    expr.desugar(ctx, modules_used)?,
-                    alternatives
-                        .into_iter()
-                        .map(|(pat, expr)| {
-                            let env_size = ctx.locals.len();
-                            if let Some((_tag, _kind, vars)) = pat.kind.as_variant() {
-                                for var in vars {
-                                    if let Some(name) = var.as_named() {
-                                        ctx.locals.push(name.0);
-                                    }
-                                }
-                            }
-                            let expr = expr.desugar(ctx, modules_used)?;
-                            ctx.locals.truncate(env_size);
-                            Ok((pat, expr))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    default.map(|e| e.desugar(ctx, modules_used)).transpose()?,
-                )
-            }
-            ForLoop(for_loop) => {
-                let ForLoopData {
-                    var_name,
-                    iterator,
-                    body,
-                } = *for_loop;
-                let iterator_start_span = iterator.span;
-                let body_span: Location = body.span;
-                let body_start_span =
-                    Location::new(body_span.start(), body_span.start(), body_span.source_id());
-                let body_end_span =
-                    Location::new(body_span.end(), body_span.end(), body_span.source_id());
-                let it_store = Expr::new(
-                    ExprKind::let_(
-                        (ustr("@it"), iterator_start_span),
-                        MutVal::mutable(),
-                        iterator.desugar(ctx, modules_used)?,
-                        None,
-                    ),
-                    iterator_start_span,
-                );
-                let it_next = Expr::new(
-                    syn_static_apply(
-                        (ustr("next"), body_start_span),
-                        vec![Expr::single_identifier(ustr("@it"), body_start_span)],
-                    ),
-                    body_start_span,
-                );
-                let it_match = Expr::new(
-                    ExprKind::match_(
-                        it_next,
-                        vec![
-                            (
-                                Pattern::new(
-                                    PatternKind::tuple_variant(
-                                        (ustr("Some"), body_start_span),
-                                        vec![PatternVar::Named(var_name)],
-                                    ),
-                                    var_name.1,
-                                ),
-                                {
-                                    let env_size = ctx.locals.len();
-                                    ctx.locals.push(var_name.0);
-                                    let desugared_body = body.desugar(ctx, modules_used)?;
-                                    ctx.locals.truncate(env_size);
-                                    desugared_body
-                                },
-                            ),
-                            (
-                                Pattern::new(
-                                    PatternKind::empty_tuple_variant((ustr("None"), body_end_span)),
-                                    body_end_span,
-                                ),
-                                Expr::new(ExprKind::soft_break(), body_end_span),
-                            ),
-                        ],
-                        None,
-                    ),
-                    body_span,
-                );
-                let loop_expr = Expr::new(ExprKind::loop_(it_match), body_span);
-                Block(vec![it_store, loop_expr])
-            }
-            Loop(body) => ExprKind::loop_(body.desugar(ctx, modules_used)?),
-            SoftBreak => SoftBreak,
-            TypeAscription(data) => {
-                let TypeAscriptionData { expr, ty, span } = *data;
-                let ty = ty.desugar(span, false, ctx.module_env, modules_used)?;
-                if let Some((value, lit_ty)) = expr.kind.as_literal() {
-                    // If the expression is a literal and the type of the literal matches
-                    // the type we want to ascribe, we can just emit the literal.
-                    if *lit_ty == ty {
-                        Literal(value.clone(), *lit_ty)
-                    } else {
-                        // Otherwise, we need to emit a type ascription node.
-                        ExprKind::type_ascription(expr.desugar(ctx, modules_used)?, ty, span)
-                    }
-                } else {
-                    // Otherwise, we need to emit a type ascription node.
-                    ExprKind::type_ascription(expr.desugar(ctx, modules_used)?, ty, span)
-                }
-            }
-            Error => Error,
-        };
-        Ok(DExpr {
-            kind,
-            span: self.span,
-        })
-    }
+/// Desugar a single parsed expression ID into a desugared expression ID.
+/// Reads from `parsed_arena` and writes into `desugared_arena`.
+pub fn desugar_expr_with_empty_ctx(
+    id: ExprId<Parsed>,
+    parsed_arena: &PExprArena,
+    module_env: &ModuleEnv<'_>,
+    modules_used: &mut HashSet<ModuleId>,
+) -> Result<(DExprId, DExprArena), InternalCompilationError> {
+    let empty_fn_map = HashMap::new();
+    let mut ctx = DesugarCtx::new(&empty_fn_map, module_env);
+    let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
+    let result = desugar(
+        id,
+        &mut ctx,
+        parsed_arena,
+        &mut desugared_arena,
+        modules_used,
+    )?;
+    Ok((result, desugared_arena))
 }
 
+/// Desugar an expression
 fn desugar(
-    args: Vec<PExpr>,
+    id: ExprId<Parsed>,
     ctx: &mut DesugarCtx,
+    parsed_arena: &PExprArena,
+    desugared_arena: &mut DExprArena,
     modules_used: &mut HashSet<ModuleId>,
-) -> Result<Vec<DExpr>, InternalCompilationError> {
-    args.into_iter()
-        .map(|arg| PExpr::desugar(arg, ctx, modules_used))
+) -> Result<DExprId, InternalCompilationError> {
+    use ExprKind::*;
+    // Clone the kind and span so we can release the borrow on parsed_arena
+    let expr_span = parsed_arena[id].span;
+    let expr_kind = parsed_arena[id].kind.clone();
+    let kind = match expr_kind {
+        Literal(value, ty) => {
+            if ty == int_type() {
+                // Convert integer literals to from_int(literal).
+                let lit =
+                    desugared_arena.alloc(DExpr::new(ExprKind::literal(value, ty), expr_span));
+                let from_int =
+                    desugared_arena.alloc(DExpr::single_identifier(ustr("from_int"), expr_span));
+                ExprKind::apply(from_int, vec![lit], UnnamedArg::All)
+            } else {
+                Literal(value, ty)
+            }
+        }
+        FormattedString(s) => emit_format_string_ast(&s, expr_span, &ctx.locals, desugared_arena)?,
+        Identifier(path) => {
+            let is_local = match path.segments.as_slice() {
+                [(name, _)] => ctx.locals.contains(name),
+                _ => false,
+            };
+            if !is_local {
+                // There is *NOT* a local variable shadowing a function definition.
+                if let [(name, _)] = &path.segments[..]
+                    && let Some(index) = ctx.fn_map.get(name)
+                {
+                    // This is a known function part of this module.
+                    ctx.fn_deps.insert(*index);
+                }
+            }
+            Identifier(path)
+        }
+        Let(data) => {
+            let LetData {
+                name,
+                mut_val,
+                expr,
+                ty_ascription,
+            } = *data;
+            let expr = desugar(expr, ctx, parsed_arena, desugared_arena, modules_used)?;
+            // Look inside the type ascription node to see if the type is constant, to be used later for display.
+            let ty_ascription = ty_ascription.map(|(span, _)| {
+                let ty = desugared_arena[expr]
+                    .kind
+                    .as_type_ascription()
+                    .map(|ty_asc| ty_asc.ty)
+                    .unwrap_or_else(|| *desugared_arena[expr].kind.as_literal().unwrap().1);
+                let is_constant = ty.is_constant();
+                (span, is_constant)
+            });
+            let result = ExprKind::let_(name, mut_val, expr, ty_ascription);
+            ctx.locals.push(name.0);
+            result
+        }
+        Return(expr) => ExprKind::return_(desugar(
+            expr,
+            ctx,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )?),
+        Abstract(data) => {
+            let AbstractData { args, body } = *data;
+            // we swap the locals with the lambda arguments, as we do not capture the outer scope
+            let mut other_vars = args.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+            mem::swap(&mut other_vars, &mut ctx.locals);
+            let body = desugar(body, ctx, parsed_arena, desugared_arena, modules_used)?;
+            let result = ExprKind::abstract_(args, body);
+            mem::swap(&mut other_vars, &mut ctx.locals);
+            result
+        }
+        Apply(data) => {
+            let ApplyData {
+                func,
+                args,
+                unnamed_arg,
+            } = *data;
+            ExprKind::apply(
+                desugar(func, ctx, parsed_arena, desugared_arena, modules_used)?,
+                desugar_exprs(args, ctx, parsed_arena, desugared_arena, modules_used)?,
+                unnamed_arg,
+            )
+        }
+        Block(stmts) => {
+            let env_size = ctx.locals.len();
+            let block = Block(desugar_exprs(
+                stmts,
+                ctx,
+                parsed_arena,
+                desugared_arena,
+                modules_used,
+            )?);
+            ctx.locals.truncate(env_size);
+            block
+        }
+        Assign(data) => {
+            let AssignData {
+                place,
+                sign_span,
+                value,
+            } = *data;
+            let place = desugar(place, ctx, parsed_arena, desugared_arena, modules_used)?;
+            let value = desugar(value, ctx, parsed_arena, desugared_arena, modules_used)?;
+            let index_data = desugared_arena[place].kind.as_index().cloned();
+            if let Some(index) = index_data {
+                if desugared_arena[index.array].kind.is_property_path() {
+                    /*
+                        Desugar:
+                            @scope.property[expr1] = expr2
+                        into:
+                            {
+                                let mut tmp = @scope.property;
+                                tmp[expr1] = expr2;
+                                @scope.property = tmp;
+                            }
+                    */
+                    let let_stmt = desugared_arena.alloc(DExpr::new(
+                        ExprKind::let_(
+                            (ustr("tmp"), expr_span),
+                            MutVal::mutable(),
+                            index.array,
+                            None,
+                        ),
+                        expr_span,
+                    ));
+                    let tmp_expr =
+                        desugared_arena.alloc(DExpr::single_identifier(ustr("tmp"), expr_span));
+                    let index_expr = desugared_arena.alloc(DExpr::new(
+                        ExprKind::index(tmp_expr, index.index),
+                        expr_span,
+                    ));
+                    let assign_tmp_stmt = desugared_arena.alloc(DExpr::new(
+                        ExprKind::assign(index_expr, sign_span, value),
+                        expr_span,
+                    ));
+                    let assign_back_stmt = desugared_arena.alloc(DExpr::new(
+                        ExprKind::assign(index.array, sign_span, tmp_expr),
+                        expr_span,
+                    ));
+                    return Ok(desugared_arena.alloc(DExpr::new(
+                        Block(vec![let_stmt, assign_tmp_stmt, assign_back_stmt]),
+                        expr_span,
+                    )));
+                }
+            }
+            ExprKind::assign(place, sign_span, value)
+        }
+        PropertyPath(data) => PropertyPath(data),
+        Tuple(elements) => Tuple(desugar_exprs(
+            elements,
+            ctx,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )?),
+        Project(data) => {
+            let ProjectData { expr, index } = *data;
+            ExprKind::project(
+                desugar(expr, ctx, parsed_arena, desugared_arena, modules_used)?,
+                index,
+            )
+        }
+        StructLiteral(data) => {
+            let StructLiteralData { path, fields } = *data;
+            ExprKind::struct_literal(
+                path,
+                fields
+                    .into_iter()
+                    .map(|(k, v)| {
+                        Ok((
+                            k,
+                            desugar(v, ctx, parsed_arena, desugared_arena, modules_used)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        Record(elements) => Record(
+            elements
+                .into_iter()
+                .map(|(k, v)| {
+                    Ok((
+                        k,
+                        desugar(v, ctx, parsed_arena, desugared_arena, modules_used)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        FieldAccess(data) => {
+            let FieldAccessData { expr, name } = *data;
+            ExprKind::field_access(
+                desugar(expr, ctx, parsed_arena, desugared_arena, modules_used)?,
+                name,
+            )
+        }
+        Array(elements) => Array(desugar_exprs(
+            elements,
+            ctx,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )?),
+        Index(data) => {
+            let IndexData { array, index } = *data;
+            // Check if the index is a literal directly, to avoid re-desugaring
+            let index_kind = parsed_arena[index].kind.clone();
+            let index_span = parsed_arena[index].span;
+            let desugared_index = match index_kind {
+                // To avoid generating from_int for array access, we process literals directly here.
+                Literal(value, ty) => {
+                    desugared_arena.alloc(DExpr::new(Literal(value, ty), index_span))
+                }
+                _ => desugar(index, ctx, parsed_arena, desugared_arena, modules_used)?,
+            };
+            ExprKind::index(
+                desugar(array, ctx, parsed_arena, desugared_arena, modules_used)?,
+                desugared_index,
+            )
+        }
+        Match(data) => {
+            let MatchData {
+                cond_expr: expr,
+                alternatives,
+                default,
+            } = *data;
+            ExprKind::match_(
+                desugar(expr, ctx, parsed_arena, desugared_arena, modules_used)?,
+                alternatives
+                    .into_iter()
+                    .map(|(pat, expr_id)| {
+                        let env_size = ctx.locals.len();
+                        if let Some((_tag, _kind, vars)) = pat.kind.as_variant() {
+                            for var in vars {
+                                if let Some(name) = var.as_named() {
+                                    ctx.locals.push(name.0);
+                                }
+                            }
+                        }
+                        let expr =
+                            desugar(expr_id, ctx, parsed_arena, desugared_arena, modules_used)?;
+                        ctx.locals.truncate(env_size);
+                        Ok((pat, expr))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                default
+                    .map(|e| desugar(e, ctx, parsed_arena, desugared_arena, modules_used))
+                    .transpose()?,
+            )
+        }
+        ForLoop(for_loop) => {
+            let ForLoopData {
+                var_name,
+                iterator,
+                body,
+            } = *for_loop;
+            let iterator_start_span = parsed_arena[iterator].span;
+            let body_span: Location = parsed_arena[body].span;
+            let body_start_span =
+                Location::new(body_span.start(), body_span.start(), body_span.source_id());
+            let body_end_span =
+                Location::new(body_span.end(), body_span.end(), body_span.source_id());
+            let desugared_iter =
+                desugar(iterator, ctx, parsed_arena, desugared_arena, modules_used)?;
+            let it_store = desugared_arena.alloc(DExpr::new(
+                ExprKind::let_(
+                    (ustr("@it"), iterator_start_span),
+                    MutVal::mutable(),
+                    desugared_iter,
+                    None,
+                ),
+                iterator_start_span,
+            ));
+            let it_name =
+                desugared_arena.alloc(DExpr::single_identifier(ustr("@it"), body_start_span));
+            let it_next = syn_static_apply(
+                (ustr("next"), body_start_span),
+                vec![it_name],
+                desugared_arena,
+            );
+            let it_next = desugared_arena.alloc(DExpr::new(it_next, body_start_span));
+            let desugared_body = {
+                let env_size = ctx.locals.len();
+                ctx.locals.push(var_name.0);
+                let desugared_body =
+                    desugar(body, ctx, parsed_arena, desugared_arena, modules_used)?;
+                ctx.locals.truncate(env_size);
+                desugared_body
+            };
+            let soft_break =
+                desugared_arena.alloc(DExpr::new(ExprKind::soft_break(), body_end_span));
+            let it_match = desugared_arena.alloc(DExpr::new(
+                ExprKind::match_(
+                    it_next,
+                    vec![
+                        (
+                            Pattern::new(
+                                PatternKind::tuple_variant(
+                                    (ustr("Some"), body_start_span),
+                                    vec![PatternVar::Named(var_name)],
+                                ),
+                                var_name.1,
+                            ),
+                            desugared_body,
+                        ),
+                        (
+                            Pattern::new(
+                                PatternKind::empty_tuple_variant((ustr("None"), body_end_span)),
+                                body_end_span,
+                            ),
+                            soft_break,
+                        ),
+                    ],
+                    None,
+                ),
+                body_span,
+            ));
+            let loop_id = desugared_arena.alloc(DExpr::new(ExprKind::loop_(it_match), body_span));
+            Block(vec![it_store, loop_id])
+        }
+        Loop(body) => ExprKind::loop_(desugar(
+            body,
+            ctx,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )?),
+        SoftBreak => SoftBreak,
+        TypeAscription(data) => {
+            let TypeAscriptionData { expr, ty, span } = *data;
+            let ty = ty.desugar(span, false, ctx.module_env, modules_used)?;
+            let expr_node = &parsed_arena[expr];
+            if let Some((value, lit_ty)) = expr_node.kind.as_literal() {
+                // If the expression is a literal and the type of the literal matches
+                // the type we want to ascribe, we can just emit the literal.
+                if *lit_ty == ty {
+                    Literal(value.clone(), *lit_ty)
+                } else {
+                    // Otherwise, we need to emit a type ascription node.
+                    let desugared_expr =
+                        desugar(expr, ctx, parsed_arena, desugared_arena, modules_used)?;
+                    ExprKind::type_ascription(desugared_expr, ty, span)
+                }
+            } else {
+                // Otherwise, emit a type ascription node.
+                let desugared_expr =
+                    desugar(expr, ctx, parsed_arena, desugared_arena, modules_used)?;
+                ExprKind::type_ascription(desugared_expr, ty, span)
+            }
+        }
+        Error => Error,
+    };
+    Ok(desugared_arena.alloc(DExpr::new(kind, expr_span)))
+}
+
+fn desugar_exprs(
+    ids: Vec<ExprId<Parsed>>,
+    ctx: &mut DesugarCtx,
+    parsed_arena: &PExprArena,
+    desugared_arena: &mut DExprArena,
+    modules_used: &mut HashSet<ModuleId>,
+) -> Result<Vec<DExprId>, InternalCompilationError> {
+    ids.into_iter()
+        .map(|id| desugar(id, ctx, parsed_arena, desugared_arena, modules_used))
         .collect()
+}
+
+fn new_desugared_arena_sized_from_parsed_arena(parsed_arena: &PExprArena) -> DExprArena {
+    // We estimate we need 20% more nodes due to desugaring.
+    let estimated_node_cound = parsed_arena.len() * 12 / 10;
+    DExprArena::with_capacity(estimated_node_cound)
 }

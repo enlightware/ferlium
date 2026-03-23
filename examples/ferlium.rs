@@ -12,6 +12,7 @@ use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
 
 use ariadne::{Label, Source};
+use ferlium::ast::{PExprArena, PExprId, PModule};
 use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
 use ferlium::format::FormatWith;
 use ferlium::module::id::Id;
@@ -469,7 +470,7 @@ fn process_input(
     let source_id = session.source_table().next_id();
     let local_symbols = parse_module_and_expr(input, source_id, false).map_or_else(
         |_| HashSet::new(),
-        |(module, _)| module.own_symbols().map(|(sym, _)| sym).collect(),
+        |(module, _, _)| module.own_symbols().map(|(sym, _)| sym).collect(),
     );
 
     // Build use directives to import last modules as repl<counter>
@@ -504,16 +505,22 @@ fn process_input(
     // AST debug output for REPL
     let dbg_module = module.clone();
     let ast_inspector =
-        |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>, modules: &Modules| {
+        |module_ast: &PModule, expr_ast: Option<PExprId>, arena: &PExprArena, modules: &Modules| {
             if !is_repl {
                 return;
             }
             let module_env = ModuleEnv::new(&dbg_module, modules);
             if !module_ast.is_empty() {
-                println!("Module AST:\n{}", module_ast.format_with(&module_env));
+                println!(
+                    "Module AST:\n{}",
+                    ast::ModuleDisplay::new(module_ast, arena).format_with(&module_env)
+                );
             }
-            if let Some(expr_ast) = expr_ast.as_ref() {
-                println!("Expr AST:\n{}", expr_ast.format_with(&module_env));
+            if let Some(expr_ast) = expr_ast {
+                println!(
+                    "Expr AST:\n{}",
+                    ast::ExprDisplay::new(expr_ast, arena).format_with(&module_env)
+                );
             }
         };
 

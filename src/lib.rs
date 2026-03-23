@@ -66,6 +66,7 @@ use type_scheme::DisplayStyle;
 pub use ustr::{Ustr, ustr};
 
 use crate::{
+    ast::PExprArena,
     format::FormatWith,
     module::{Module, ModuleFunction, ModuleId, id::Id},
     std::STD_MODULE_ID,
@@ -185,7 +186,8 @@ impl ModuleAndExpr {
     }
 }
 
-pub type AstInspectorCb<'a> = &'a dyn Fn(&ast::PModule, &Option<ast::PExpr>, &Modules);
+pub type AstInspectorCb<'a> =
+    &'a dyn Fn(&ast::PModule, Option<ast::PExprId>, &ast::PExprArena, &Modules);
 
 static FIRST_USER_MODULE_ID: ModuleId = ModuleId(2);
 
@@ -279,11 +281,12 @@ impl CompilerSession {
         src: &str,
     ) -> Result<(ast::PType, SourceId), LocatedError> {
         let mut errors = Vec::new();
+        let mut arena = new_ast_arena_sized_from_source(src);
         let source_id = self
             .source_table
             .add_source(name.to_string(), src.to_string());
         let ty = parser::DefinedTypeParser::new()
-            .parse(source_id, &mut errors, src)
+            .parse(source_id, &mut errors, &mut arena, src)
             .map_err(|e| describe_parse_error(e, source_id))?;
         Ok((ty, source_id))
     }
@@ -312,11 +315,12 @@ impl CompilerSession {
         src: &str,
     ) -> Result<(ast::PType, SourceId), LocatedError> {
         let mut errors = Vec::new();
+        let mut arena = new_ast_arena_sized_from_source(src);
         let source_id = self
             .source_table
             .add_source(name.to_string(), src.to_string());
         let ty = parser::HoledTypeParser::new()
-            .parse(source_id, &mut errors, src)
+            .parse(source_id, &mut errors, &mut arena, src)
             .map_err(|e| describe_parse_error(e, source_id))?;
         Ok((ty, source_id))
     }
@@ -361,14 +365,18 @@ impl CompilerSession {
         // If debug logging is enabled, prepare an AST inspector that logs the ASTs.
         let output = if log::log_enabled!(log::Level::Debug) {
             let dbg_module = module.clone();
-            let ast_inspector =
-                |module_ast: &ast::PModule, expr_ast: &Option<ast::PExpr>, modules: &Modules| {
-                    let env = ModuleEnv::new(&dbg_module, modules);
-                    log::debug!("Module AST\n{}", module_ast.format_with(&env));
-                    if let Some(expr_ast) = expr_ast {
-                        log::debug!("Expr AST\n{}", expr_ast.format_with(&env));
-                    }
-                };
+            let ast_inspector = |module_ast: &ast::PModule,
+                                 expr_ast: Option<ast::PExprId>,
+                                 arena: &ast::PExprArena,
+                                 modules: &Modules| {
+                let env = ModuleEnv::new(&dbg_module, modules);
+                let ast = ast::ModuleDisplay::new(module_ast, arena);
+                log::debug!("Module AST\n{}", ast.format_with(&env));
+                if let Some(expr_ast) = expr_ast {
+                    let ast = ast::ExprDisplay::new(expr_ast, arena);
+                    log::debug!("Expr AST\n{}", ast.format_with(&env));
+                }
+            };
             self.compile_to(
                 src_code,
                 source_name,
@@ -410,10 +418,10 @@ impl CompilerSession {
         let source_id = self
             .source_table
             .add_source(source_name.to_string(), src_code.to_string());
-        let (module_ast, expr_ast) = parse_module_and_expr(src_code, source_id, false)
+        let (module_ast, expr_ast, arena) = parse_module_and_expr(src_code, source_id, false)
             .map_err(|error| compilation_error!(ParsingFailed(error)))?;
         if let Some(ast_inspector) = ast_inspector {
-            ast_inspector(&module_ast, &expr_ast, &self.modules);
+            ast_inspector(&module_ast, expr_ast, &arena, &self.modules);
         }
 
         // FIXME: this always associates a ModuleId, even if the module was not there yet and the compilation fails.
@@ -425,23 +433,23 @@ impl CompilerSession {
             .replace(module_path.clone(), Module::new(self.modules.next_id()));
 
         // Emit IR for the module.
-        let mut module =
-            emit_module(module_ast, module_id, &self.modules, Some(&module)).map_err(|error| {
-                // Restore the old module in case of error, to avoid leaving the session in a broken state.
-                // Note: the clone on old_module is due to a limitation of the borrow checker not realizing this function
-                // is only called when the parent function is exited with the ? below.
-                old_module
-                    .clone()
-                    .map(|old_module| self.modules.replace(module_path.clone(), old_module));
-                // Resolve types in the error, to provide better error messages.
-                let env = ModuleEnv::new(&module, &self.modules);
-                CompilationError::resolve_types(error, &env, &self.source_table)
-            })?;
+        let mut module = emit_module(module_ast, &arena, module_id, &self.modules, Some(&module))
+            .map_err(|error| {
+            // Restore the old module in case of error, to avoid leaving the session in a broken state.
+            // Note: the clone on old_module is due to a limitation of the borrow checker not realizing this function
+            // is only called when the parent function is exited with the ? below.
+            old_module
+                .clone()
+                .map(|old_module| self.modules.replace(module_path.clone(), old_module));
+            // Resolve types in the error, to provide better error messages.
+            let env = ModuleEnv::new(&module, &self.modules);
+            CompilationError::resolve_types(error, &env, &self.source_table)
+        })?;
 
         // Emit IR for the expression, if any.
         let expr = if let Some(expr_ast) = expr_ast {
-            let compiled_expr =
-                emit_expr(expr_ast, &mut module, &self.modules, vec![]).map_err(|error| {
+            let compiled_expr = emit_expr(expr_ast, &arena, &mut module, &self.modules, vec![])
+                .map_err(|error| {
                     // Restore the old module in case of error, to avoid leaving the session in a broken state.
                     old_module
                         .clone()
@@ -531,17 +539,18 @@ fn parse_module(
     src: &str,
     source_id: SourceId,
     accept_unstable: bool,
-) -> Result<ast::PModule, Vec<LocatedError>> {
+) -> Result<(ast::PModule, ast::PExprArena), Vec<LocatedError>> {
     let mut errors = Vec::new();
+    let mut arena = new_ast_arena_sized_from_source(src);
     let module = parser::ModuleParser::new()
-        .parse(source_id, &mut errors, src)
+        .parse(source_id, &mut errors, &mut arena, src)
         .map_err(|error| vec![describe_parse_error(error, source_id)])?;
     describe_recovered_errors(errors, source_id)?;
     // TODO: change the last line to an unwrap once the grammar is fully error-tolerant.
     if !accept_unstable {
-        validate_no_unstable(&module, [].iter())?;
+        validate_no_unstable(&module, [].iter(), &arena)?;
     }
-    Ok(module)
+    Ok((module, arena))
 }
 
 /// Parse a module and an expression (if any) from a source code and return the corresponding ASTs.
@@ -549,17 +558,18 @@ pub fn parse_module_and_expr(
     src: &str,
     source_id: SourceId,
     accept_unstable: bool,
-) -> Result<(ast::PModule, Option<ast::PExpr>), Vec<LocatedError>> {
+) -> Result<(ast::PModule, Option<ast::PExprId>, ast::PExprArena), Vec<LocatedError>> {
     let mut errors = Vec::new();
+    let mut arena = new_ast_arena_sized_from_source(src);
     let module_and_expr = parser::ModuleAndBlockContentParser::new()
-        .parse(source_id, &mut errors, src)
+        .parse(source_id, &mut errors, &mut arena, src)
         .map_err(|error| vec![describe_parse_error(error, source_id)])?;
     describe_recovered_errors(errors, source_id)?;
     // TODO: revisit once the grammar is fully error-tolerant.
     if !accept_unstable {
-        validate_no_unstable(&module_and_expr.0, module_and_expr.1.iter())?;
+        validate_no_unstable(&module_and_expr.0, module_and_expr.1.iter(), &arena)?;
     }
-    Ok((module_and_expr.0, module_and_expr.1))
+    Ok((module_and_expr.0, module_and_expr.1, arena))
 }
 
 /// Compile a source code, given some other Modules, and it to an existing module, or an error.
@@ -574,23 +584,33 @@ pub(crate) fn add_code_to_module(
 ) -> Result<SourceId, CompilationError> {
     // Parse the source code.
     let source_id = source_table.add_source(source_name.to_string(), code.to_string());
-    let module_ast = parse_module(code, source_id, true)
+    let (module_ast, arena) = parse_module(code, source_id, true)
         .map_err(|error| compilation_error!(ParsingFailed(error)))?;
-    assert_eq!(module_ast.errors(), &[]);
+    assert_eq!(module_ast.errors(&arena), &[]);
     {
         let env = ModuleEnv::new(to, other_modules);
-        log::debug!("Added module AST\n{}", module_ast.format_with(&env));
+        log::debug!(
+            "Added module AST\n{}",
+            ast::ModuleDisplay::new(&module_ast, &arena).format_with(&env)
+        );
     }
 
     // Emit IR for the module.
-    let module = emit_module(module_ast, module_id, other_modules, Some(to)).map_err(|error| {
-        let env = ModuleEnv::new(to, other_modules);
-        CompilationError::resolve_types(error, &env, source_table)
-    })?;
+    let module =
+        emit_module(module_ast, &arena, module_id, other_modules, Some(to)).map_err(|error| {
+            let env = ModuleEnv::new(to, other_modules);
+            CompilationError::resolve_types(error, &env, source_table)
+        })?;
 
     // Swap the new module with the old one.
     *to = module;
     Ok(source_id)
+}
+
+/// Create a new arena for src, estimating the number of nodes needed and pre-allocating the memory.
+fn new_ast_arena_sized_from_source(src: &str) -> PExprArena {
+    let estimated_node_count = src.len() / 8;
+    ast::ExprArena::with_capacity(estimated_node_count)
 }
 
 /// Transform parse error into LocatedError.
@@ -612,11 +632,12 @@ fn describe_recovered_errors(
 /// Validate that a module and some expressions do not use unstable features.
 fn validate_no_unstable<'a>(
     module: &ast::PModule,
-    exprs: impl Iterator<Item = &'a ast::PExpr>,
+    exprs: impl Iterator<Item = &'a ast::ExprId<ast::Parsed>>,
+    arena: &ast::PExprArena,
 ) -> Result<(), Vec<LocatedError>> {
-    let mut unstables = module.visit_with(UnstableCollector::default());
+    let mut unstables = module.visit_with(UnstableCollector::default(), arena);
     for expr in exprs {
-        unstables = expr.visit_with(unstables);
+        unstables = arena[*expr].visit_with(unstables, arena);
     }
     if unstables.0.is_empty() {
         Ok(())

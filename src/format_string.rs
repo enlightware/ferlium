@@ -8,6 +8,7 @@
 //
 use std::{str::FromStr, sync::LazyLock};
 
+use crate::ast::{DExprArena, DExprId};
 use crate::parser_helpers::syn_static_apply_path;
 use crate::{Location, internal_compilation_error};
 use regex::Regex;
@@ -22,12 +23,12 @@ use crate::{
     value::Value,
 };
 
-fn string_literal(string: &str, span: Location) -> Expr {
+fn string_literal(string: &str, span: Location, arena: &mut DExprArena) -> DExprId {
     let string = String::from_str(string).unwrap();
-    Expr::new(
+    arena.alloc(Expr::new(
         ExprKind::literal(Value::native(string), string_type()),
         span,
-    )
+    ))
 }
 
 fn variable_to_string(
@@ -35,7 +36,8 @@ fn variable_to_string(
     var_span: Location,
     string_span: Location,
     locals: &[Ustr],
-) -> Result<Expr, InternalCompilationError> {
+    arena: &mut DExprArena,
+) -> Result<DExprId, InternalCompilationError> {
     if !locals.iter().rev().any(|&name| name == var_name) {
         return Err(internal_compilation_error!(
             UndefinedVarInStringFormatting {
@@ -44,48 +46,47 @@ fn variable_to_string(
             }
         ));
     };
-    let var_expr = Expr::single_identifier(ustr(var_name), var_span);
-    Ok(Expr::new(
-        syn_static_apply_path(["std", "to_string"], var_span, vec![var_expr]),
+    let var_expr = arena.alloc(Expr::new(
+        ExprKind::Identifier(crate::ast::Path::single(ustr(var_name), var_span)),
         var_span,
-    ))
+    ));
+    let kind = syn_static_apply_path(["std", "to_string"], var_span, vec![var_expr], arena);
+    Ok(arena.alloc(Expr::new(kind, var_span)))
 }
 
 pub fn emit_format_string_ast(
     input: &str,
     span: Location,
     locals: &[Ustr],
+    arena: &mut DExprArena,
 ) -> Result<ExprKind, InternalCompilationError> {
     static REGEX: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\{([\p{L}_][\p{L}\p{N}_]*)\}").unwrap());
 
     // Start with an empty mutable string.
-    let mut exprs = vec![Expr::new(
-        ExprKind::let_(
-            (ustr("@s"), span),
-            MutVal::mutable(),
-            Expr::new(
-                ExprKind::literal(Value::native(String::default()), string_type()),
-                span,
-            ),
-            None,
-        ),
+    let empty_string = arena.alloc(Expr::new(
+        ExprKind::literal(Value::native(String::default()), string_type()),
         span,
-    )];
+    ));
+    let let_stmt = arena.alloc(Expr::new(
+        ExprKind::let_((ustr("@s"), span), MutVal::mutable(), empty_string, None),
+        span,
+    ));
+    let mut exprs = vec![let_stmt];
     let start_pos = span.start_usize() + 2; // starting of input in source code
 
     // Helper to extend that string with another one.
-    let mut extend_exprs_with = |expr: Expr| {
-        let span = expr.span;
-        let extend_expr = Expr::new(
-            syn_static_apply_path(
-                ["std", "string_push_str"],
-                span,
-                vec![Expr::single_identifier(ustr("@s"), span), expr],
-            ),
-            span,
+    let mut extend_exprs_with = |expr_id: DExprId, arena: &mut DExprArena| {
+        let expr_span = arena[expr_id].span;
+        let s_id = arena.alloc(Expr::single_identifier(ustr("@s"), span));
+        let kind = syn_static_apply_path(
+            ["std", "string_push_str"],
+            expr_span,
+            vec![s_id, expr_id],
+            arena,
         );
-        exprs.push(extend_expr);
+        let extend_id = arena.alloc(Expr::new(kind, expr_span));
+        exprs.push(extend_id);
     };
 
     // Iterate over all captures and assemble the AST.
@@ -97,15 +98,14 @@ pub fn emit_format_string_ast(
 
         // Push the literal text before the match.
         if match_start > last_end {
-            // Push the literal text before the match.
             let string_span = Location::new_usize(
                 start_pos + last_end,
                 start_pos + match_start,
                 span.source_id(),
             );
             let string = &input[last_end..match_start];
-            let expr = string_literal(string, string_span);
-            extend_exprs_with(expr);
+            let expr = string_literal(string, string_span, arena);
+            extend_exprs_with(expr, arena);
         }
 
         // Push the variable name found within the braces.
@@ -115,8 +115,8 @@ pub fn emit_format_string_ast(
             span.source_id(),
         );
         let var_name = &input[match_start + 1..match_end - 1];
-        let expr = variable_to_string(var_name, var_span, span, locals)?;
-        extend_exprs_with(expr);
+        let expr = variable_to_string(var_name, var_span, span, locals, arena)?;
+        extend_exprs_with(expr, arena);
 
         last_end = match_end;
     }
@@ -128,13 +128,14 @@ pub fn emit_format_string_ast(
             span.source_id(),
         );
         let string = &input[last_end..];
-        let expr = string_literal(string, string_span);
-        extend_exprs_with(expr);
+        let expr = string_literal(string, string_span, arena);
+        extend_exprs_with(expr, arena);
     }
 
     // Evaluate the mutable string and return it.
     let end_span = Location::new(span.end(), span.end(), span.source_id());
-    exprs.push(Expr::single_identifier(ustr("@s"), end_span));
+    let get_s = arena.alloc(Expr::single_identifier(ustr("@s"), end_span));
+    exprs.push(get_s);
 
     Ok(ExprKind::block(exprs))
 }

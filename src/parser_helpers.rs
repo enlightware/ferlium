@@ -9,9 +9,13 @@
 use crate::Location;
 use crate::SourceId;
 use crate::ast::Expr;
+use crate::ast::ExprArena;
+use crate::ast::ExprId;
 use crate::ast::ExprKind;
 use crate::ast::ForLoopData;
 use crate::ast::PExpr;
+use crate::ast::PExprArena;
+use crate::ast::PExprId;
 use crate::ast::PExprKind;
 use crate::ast::PType;
 use crate::ast::Path;
@@ -73,20 +77,23 @@ where
     (LiteralValue::new_native(value), Type::primitive::<T>())
 }
 
-/// Make a literal expression
-pub(crate) fn literal_expr<T>(value: T, span: Location) -> PExpr
+/// Make a literal expression and allocate it in the arena
+pub(crate) fn literal_expr<T>(value: T, span: Location, arena: &mut PExprArena) -> PExprId
 where
     T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
-    PExpr::new(
+    arena.alloc(PExpr::new(
         PExprKind::Literal(Value::native(value), Type::primitive::<T>()),
         span,
-    )
+    ))
 }
 
-/// Make a unit literal
-pub(crate) fn unit_literal_expr(span: Location) -> PExpr {
-    PExpr::new(PExprKind::Literal(Value::native(()), Type::unit()), span)
+/// Make a unit literal and allocate it in the arena
+pub(crate) fn unit_literal_expr(span: Location, arena: &mut PExprArena) -> PExprId {
+    arena.alloc(PExpr::new(
+        PExprKind::Literal(Value::native(()), Type::unit()),
+        span,
+    ))
 }
 
 /// Make a literal
@@ -156,29 +163,39 @@ where
 
 /// Create a projection, or a float literal if the lhs is a number
 pub(crate) fn proj_or_float<L, T>(
-    lhs: PExpr,
+    lhs: PExprId,
     rhs: (usize, Location),
+    arena: &PExprArena,
 ) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
     use ExprKind::*;
-    if let Literal(literal, _ty) = &lhs.kind {
-        if let Some(value) = literal.clone().into_primitive_ty::<isize>() {
-            let index = rhs.0;
-            let float_value = format!("{value}.{index}");
-            return parse_num_literal::<NotNan<f64>, L, T>(&float_value, rhs.1);
-        }
+    // Extract the integer literal value without holding a borrow across the match
+    let int_val = if let Literal(literal, _ty) = &arena[lhs].kind {
+        literal.clone().into_primitive_ty::<isize>()
+    } else {
+        None
+    };
+    if let Some(value) = int_val {
+        let index = rhs.0;
+        let float_value = format!("{value}.{index}");
+        return parse_num_literal::<NotNan<f64>, L, T>(&float_value, rhs.1);
     }
     Ok(ExprKind::project(lhs, rhs))
 }
 
-pub(crate) fn syn_static_apply<P: Phase>(identifier: UstrSpan, args: Vec<Expr<P>>) -> ExprKind<P> {
-    let func = Expr::<P>::single_identifier(identifier.0, identifier.1);
+pub(crate) fn syn_static_apply<P: Phase>(
+    identifier: UstrSpan,
+    args: Vec<ExprId<P>>,
+    arena: &mut ExprArena<P>,
+) -> ExprKind<P> {
+    let func = arena.alloc(Expr::<P>::single_identifier(identifier.0, identifier.1));
     ExprKind::apply(func, args, UnnamedArg::All)
 }
 
 pub(crate) fn syn_static_apply_path<P: Phase>(
     identifiers: impl Into<Vec<&'static str>>,
     identifier_span: Location,
-    args: Vec<Expr<P>>,
+    args: Vec<ExprId<P>>,
+    arena: &mut ExprArena<P>,
 ) -> ExprKind<P> {
     let path = Path::new(
         identifiers
@@ -187,41 +204,43 @@ pub(crate) fn syn_static_apply_path<P: Phase>(
             .map(|s| (ustr(s), identifier_span))
             .collect(),
     );
-    let func = Expr::new(ExprKind::identifier(path), identifier_span);
+    let func = arena.alloc(Expr::new(ExprKind::identifier(path), identifier_span));
     ExprKind::apply(func, args, UnnamedArg::All)
 }
 
 pub(crate) fn assign_op(
     identifiers: impl Into<Vec<&'static str>>,
     identifier_span: Location,
-    lhs: PExpr,
-    rhs: PExpr,
+    lhs: PExprId,
+    rhs: PExprId,
+    arena: &mut PExprArena,
 ) -> PExprKind {
-    let span = Location::fuse([lhs.span, rhs.span]).unwrap();
-    let apply = Expr::new(
-        syn_static_apply_path(identifiers, identifier_span, vec![lhs.clone(), rhs]),
-        span,
-    );
+    let lhs_span = arena[lhs].span;
+    let rhs_span = arena[rhs].span;
+    let span = Location::fuse([lhs_span, rhs_span]).unwrap();
+    let apply_kind = syn_static_apply_path(identifiers, identifier_span, vec![lhs, rhs], arena);
+    let apply = arena.alloc(Expr::new(apply_kind, span));
     ExprKind::assign(lhs, identifier_span, apply)
 }
 
 pub(crate) fn build_range(
     identifiers: impl Into<Vec<&'static str>>,
     identifier_span: Location,
-    start: PExpr,
-    end: PExpr,
+    start: PExprId,
+    end: PExprId,
+    arena: &mut PExprArena,
 ) -> PExprKind {
     // Forces not using the from_int method when int literals are used
-    let start_span = start.span;
-    let start = PExpr::new(
+    let start_span = arena[start].span;
+    let start_asc = arena.alloc(PExpr::new(
         ExprKind::type_ascription(start, PType::Resolved(int_type()), start_span),
         start_span,
-    );
-    let end_span = end.span;
-    let end = PExpr::new(
+    ));
+    let end_span = arena[end].span;
+    let end_asc = arena.alloc(PExpr::new(
         ExprKind::type_ascription(end, PType::Resolved(int_type()), end_span),
         end_span,
-    );
+    ));
     let path = Path::new(
         identifiers
             .into()
@@ -232,18 +251,18 @@ pub(crate) fn build_range(
     ExprKind::struct_literal(
         path,
         vec![
-            ((ustr("start"), start.span), start),
-            ((ustr("end"), end.span), end),
+            ((ustr("start"), start_span), start_asc),
+            ((ustr("end"), end_span), end_asc),
         ],
     )
 }
 
 /// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor
-pub(crate) fn tuple(args: Vec<PExpr>) -> PExprKind {
+pub(crate) fn tuple(args: Vec<PExprId>, arena: &PExprArena) -> PExprKind {
     use ExprKind::*;
     let mut values_and_tys = Vec::new();
-    for arg in &args {
-        if let Literal(val, ty) = &arg.kind {
+    for &arg in &args {
+        if let Literal(val, ty) = &arena[arg].kind {
             values_and_tys.push((val.clone(), *ty));
         } else {
             return ExprKind::tuple(args);
@@ -271,8 +290,13 @@ pub(crate) fn record_literal_pattern(
 }
 
 /// Create an if else block.
-pub(crate) fn cond_if_else(cond: PExpr, if_true: PExpr, if_false: PExpr) -> PExprKind {
-    let cond_span = cond.span;
+pub(crate) fn cond_if_else(
+    cond: PExprId,
+    if_true: PExprId,
+    if_false: PExprId,
+    arena: &PExprArena,
+) -> PExprKind {
+    let cond_span = arena[cond].span;
     ExprKind::match_(
         cond,
         vec![(literal_pattern(true, cond_span), if_true)],
@@ -281,10 +305,10 @@ pub(crate) fn cond_if_else(cond: PExpr, if_true: PExpr, if_false: PExpr) -> PExp
 }
 
 /// Create an if block without an else, make it return ().
-pub(crate) fn cond_if(cond: PExpr, if_true: PExpr) -> PExprKind {
-    let cond_span = cond.span;
-    let if_true_span = if_true.span;
-    let unit_val = unit_literal_expr(if_true_span);
+pub(crate) fn cond_if(cond: PExprId, if_true: PExprId, arena: &mut PExprArena) -> PExprKind {
+    let cond_span = arena[cond].span;
+    let if_true_span = arena[if_true].span;
+    let unit_val = unit_literal_expr(if_true_span, arena);
     ExprKind::match_(
         cond,
         vec![(literal_pattern(true, cond_span), if_true)],
@@ -293,13 +317,16 @@ pub(crate) fn cond_if(cond: PExpr, if_true: PExpr) -> PExprKind {
 }
 
 /// Create a for loop
-pub(crate) fn for_loop(var_name: UstrSpan, seq: PExpr, body: PExpr) -> PExprKind {
-    let seq_span = seq.span;
-    let seq_span_start = seq.span.start_location();
-    let iterator = PExpr::new(
-        syn_static_apply((ustr("iter"), seq_span_start), vec![seq]),
-        seq_span,
-    );
+pub(crate) fn for_loop(
+    var_name: UstrSpan,
+    seq: PExprId,
+    body: PExprId,
+    arena: &mut PExprArena,
+) -> PExprKind {
+    let seq_span = arena[seq].span;
+    let seq_span_start = seq_span.start_location();
+    let iter_kind = syn_static_apply((ustr("iter"), seq_span_start), vec![seq], arena);
+    let iterator = arena.alloc(PExpr::new(iter_kind, seq_span));
     ExprKind::for_loop(b(ForLoopData::new(var_name, iterator, body)))
 }
 

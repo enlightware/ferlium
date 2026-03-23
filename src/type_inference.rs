@@ -17,8 +17,8 @@ use std::{
 
 use crate::{
     ast::{
-        self, DExpr, Desugared, ExprKind, Pattern, PatternKind, PatternVar, RecordField,
-        RecordFields, UnnamedArg,
+        self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternKind, PatternVar,
+        RecordField, RecordFields, UnnamedArg,
     },
     containers::continuous_hashmap_to_vec,
     error::{
@@ -306,7 +306,7 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         args: &[(Ustr, Location)],
-        body: &DExpr,
+        body: DExprId,
         expected_fn_ty: Option<FnType>,
         span: Location,
     ) -> Result<(ir::Node, Type, MutType, EffType), InternalCompilationError> {
@@ -319,7 +319,7 @@ impl TypeInference {
         for (arg, _) in args {
             bound_vars[0].insert(*arg);
         }
-        collect_free_variables(body, &mut bound_vars, &mut free_vars);
+        collect_free_variables(body, env.arena, &mut bound_vars, &mut free_vars);
 
         // 2. Identify captures from the current environment.
         let mut captures = Vec::new();
@@ -401,13 +401,20 @@ impl TypeInference {
             env.new_import_slots,
             env.new_type_deps,
             env.module_env,
-            Some((ret_ty, body.span)),
+            Some((ret_ty, env.arena[body].span)),
             env.lambda_functions,
             env.base_local_function_index,
+            env.arena,
         );
 
         // 5. Infer the body's type.
-        let code = self.check_expr(&mut inner_env, body, ret_ty, MutType::constant(), body.span)?;
+        let code = self.check_expr(
+            &mut inner_env,
+            body,
+            ret_ty,
+            MutType::constant(),
+            env.arena[body].span,
+        )?;
 
         // Unify effects if expected
         let effects = if let Some(expected_effects) = expected_effects {
@@ -454,11 +461,14 @@ impl TypeInference {
     pub fn infer_expr(
         &mut self,
         env: &mut TypingEnv,
-        expr: &DExpr,
+        expr_id: DExprId,
     ) -> Result<(Node, MutType), InternalCompilationError> {
         use ExprKind::*;
         use ir::Node as N;
         use ir::NodeKind as K;
+        let expr = &env.arena[expr_id];
+        let expr_span = expr.span;
+        let sp = |id: DExprId| env.arena[id].span;
         let (node, ty, mut_ty, effects) = match &expr.kind {
             Literal(value, ty) => (
                 K::Immediate(Immediate::new(value.clone())),
@@ -488,7 +498,7 @@ impl TypeInference {
                         None => "current module".to_string(),
                     };
                     return Err(internal_compilation_error!(Unsupported {
-                        span: expr.span,
+                        span: expr_span,
                         reason: format!(
                             "First-class trait method is unsupported: method {path} in {module_text} cannot be used"
                         )
@@ -498,11 +508,11 @@ impl TypeInference {
                 else if let Some((definition, function, _module_name)) = env.get_function(path)? {
                     let (fn_ty, inst_data, _subst) = definition
                         .ty_scheme
-                        .instantiate_with_fresh_vars(self, expr.span, None);
+                        .instantiate_with_fresh_vars(self, expr_span, None);
                     let node = K::GetFunction(b(ir::GetFunction {
                         function,
                         function_path: path.clone(),
-                        function_span: expr.span,
+                        function_span: expr_span,
                         inst_data,
                     }));
                     (
@@ -521,7 +531,7 @@ impl TypeInference {
                             which: WhichProductTypeIsNot::Unit,
                             type_def: type_def.clone(),
                             what: WhatIsNotAProductType::from_tag(tag),
-                            instantiation_span: expr.span,
+                            instantiation_span: expr_span,
                         }));
                     }
                     // The type of the node is the named type.
@@ -540,7 +550,7 @@ impl TypeInference {
                     // Variants cannot be paths
                     if path.segments.len() > 1 {
                         return Err(internal_compilation_error!(InvalidVariantConstructor {
-                            span: expr.span,
+                            span: expr_span,
                         }));
                     }
                     // Create a fresh type and add a constraint for that type to include this variant.
@@ -549,7 +559,7 @@ impl TypeInference {
                     let tag = path.segments[0].0;
                     self.ty_constraints.push(TypeConstraint::Pub(
                         PubTypeConstraint::new_type_has_variant(
-                            variant_ty, expr.span, tag, payload_ty, expr.span,
+                            variant_ty, expr_span, tag, payload_ty, expr_span,
                         ),
                     ));
                     // Build the variant value.
@@ -558,13 +568,13 @@ impl TypeInference {
                 }
             }
             Let(data) => {
-                let node = self.infer_expr_drop_mut(env, &data.expr)?;
+                let node = self.infer_expr_drop_mut(env, data.expr)?;
                 let local = LocalDecl::new(
                     data.name,
                     MutType::resolved(data.mut_val),
                     node.ty,
                     data.ty_ascription,
-                    expr.span,
+                    expr_span,
                 );
                 let index = env.cur_locals.len();
                 let id = LocalDeclId::from_index(env.all_locals.len());
@@ -583,25 +593,25 @@ impl TypeInference {
                     Some(ret_ty) => ret_ty,
                     None => {
                         return Err(internal_compilation_error!(ReturnOutsideFunction {
-                            span: expr.span,
+                            span: expr_span,
                         }));
                     }
                 };
-                let node = self.infer_expr_drop_mut(env, expr)?;
+                let node = self.infer_expr_drop_mut(env, *expr)?;
                 let ty = node.ty;
-                self.add_same_type_constraint(ty, expr.span, outer_ty, outer_span);
+                self.add_same_type_constraint(ty, sp(*expr), outer_ty, outer_span);
                 let effects = node.effects.clone();
                 let node = K::Return(b(node));
                 (node, Type::never(), MutType::constant(), effects)
             }
             Abstract(data) => {
                 let (node, ty, mut_ty, effects) =
-                    self.infer_abstract(env, &data.args, &data.body, None, expr.span)?;
+                    self.infer_abstract(env, &data.args, data.body, None, expr_span)?;
                 (node.kind, ty, mut_ty, effects)
             }
             Apply(data) => {
                 // Do we have a global function or variant?
-                if let Identifier(path) = &data.func.kind {
+                if let Identifier(path) = &env.arena[data.func].kind {
                     let is_variable = match &path.segments[..] {
                         [(name, _)] => env.has_variable_name(*name),
                         _ => false,
@@ -610,12 +620,12 @@ impl TypeInference {
                         let (node, ty, mut_ty, effects) = self.infer_static_apply(
                             env,
                             path,
-                            data.func.span,
+                            sp(data.func),
                             &data.args,
-                            expr.span,
+                            expr_span,
                             data.unnamed_arg,
                         )?;
-                        return Ok((N::new(node, ty, effects, expr.span), mut_ty));
+                        return Ok((N::new(node, ty, effects, expr_span), mut_ty));
                     }
                 }
                 // No, we emit code to evaluate function
@@ -630,7 +640,7 @@ impl TypeInference {
                     Type::function_type(FnType::new(args_tys, ret_ty, call_effects.clone()));
                 // Check the function against its function type
                 let func_node =
-                    self.check_expr(env, &data.func, func_ty, MutType::constant(), expr.span)?;
+                    self.check_expr(env, data.func, func_ty, MutType::constant(), expr_span)?;
                 // Unify effects
                 let combined_effects =
                     self.make_dependent_effect([&args_effects, &func_node.effects, &call_effects]);
@@ -648,11 +658,11 @@ impl TypeInference {
                 // Adjust the lexical scope of the variables declared in the block to end at the end of the block.
                 for local_id in env.cur_locals.iter().skip(env_size) {
                     let local = &mut env.all_locals[local_id.as_index()];
-                    assert_eq!(local.scope.source_id(), expr.span.source_id());
-                    assert!(local.scope.end() <= expr.span.end());
+                    assert_eq!(local.scope.source_id(), expr_span.source_id());
+                    assert!(local.scope.end() <= expr_span.end());
                     local.scope = Location::new(
                         local.scope.start(),
-                        expr.span.end(),
+                        expr_span.end(),
                         local.scope.source_id(),
                     );
                 }
@@ -662,26 +672,26 @@ impl TypeInference {
                 (node, ty, MutType::constant(), effects)
             }
             Assign(data) => {
-                if let Some(pp_data) = data.place.kind.as_property_path() {
+                if let Some(pp_data) = env.arena[data.place].kind.as_property_path() {
                     let fn_path = property_to_fn_path(
                         &pp_data.path,
                         &pp_data.name,
                         PropertyAccess::Set,
-                        expr.span,
+                        expr_span,
                         env,
                     )?;
                     let (node, ty, mut_ty, effects) = self.infer_static_apply(
                         env,
                         &fn_path,
-                        data.place.span,
-                        &[&data.value],
-                        expr.span,
+                        sp(data.place),
+                        &[data.value],
+                        expr_span,
                         UnnamedArg::All,
                     )?;
-                    return Ok((N::new(node, ty, effects, expr.span), mut_ty));
+                    return Ok((N::new(node, ty, effects, expr_span), mut_ty));
                 }
-                let value = self.infer_expr_drop_mut(env, &data.value)?;
-                let (place, place_mut) = self.infer_expr(env, &data.place)?;
+                let value = self.infer_expr_drop_mut(env, data.value)?;
+                let (place, place_mut) = self.infer_expr(env, data.place)?;
                 self.add_mut_be_at_least_constraint(
                     place_mut,
                     place.span,
@@ -707,7 +717,7 @@ impl TypeInference {
                 // Generates the following constraints:
                 // Project(tuple_expr: T, index) -> V
                 //     where T: Coercible<Target = U>, TupleHasField(U, V, index)
-                let (tuple_node, tuple_mut) = self.infer_expr(env, &data.expr)?;
+                let (tuple_node, tuple_mut) = self.infer_expr(env, data.expr)?;
                 // Note: tuple_node.ty is T
                 let tuple_ty = self.fresh_type_var_ty(); // U
                 let (index, index_span) = data.index;
@@ -720,7 +730,7 @@ impl TypeInference {
                 let element_ty = self.fresh_type_var_ty(); // V
                 self.add_pub_constraint(PubTypeConstraint::new_tuple_at_index_is(
                     tuple_ty,
-                    data.expr.span,
+                    sp(data.expr),
                     index,
                     index_span,
                     element_ty,
@@ -733,7 +743,7 @@ impl TypeInference {
                 // Check that all fields are unique and collect their expressions and names.
                 let fields = Self::check_and_sort_record_fields(
                     fields,
-                    expr.span,
+                    expr_span,
                     DuplicatedFieldContext::Record,
                 )?;
                 // Infer the types of the nodes.
@@ -744,7 +754,7 @@ impl TypeInference {
                 // Check that all fields are unique and collect their expressions and names.
                 let fields = Self::check_and_sort_record_fields(
                     &data.fields,
-                    expr.span,
+                    expr_span,
                     DuplicatedFieldContext::Struct,
                 )?;
                 // First check if the path is a known type definition.
@@ -757,7 +767,7 @@ impl TypeInference {
                             which: WhichProductTypeIsNot::Record,
                             type_def: type_def.clone(),
                             what: WhatIsNotAProductType::from_tag(tag),
-                            instantiation_span: expr.span,
+                            instantiation_span: expr_span,
                         }));
                     }
                     // Validate the fields towards the record layout.
@@ -774,7 +784,7 @@ impl TypeInference {
                             return Err(internal_compilation_error!(MissingStructField {
                                 type_def,
                                 field_name: layout_field.0,
-                                instantiation_span: expr.span,
+                                instantiation_span: expr_span,
                             }));
                         } else if &layout_field_name > field_name {
                             // Extra record entry
@@ -782,7 +792,7 @@ impl TypeInference {
                                 type_def,
                                 field_name: *field_name,
                                 field_span: *field_span,
-                                instantiation_span: expr.span,
+                                instantiation_span: expr_span,
                             }));
                         }
                     }
@@ -792,7 +802,7 @@ impl TypeInference {
                         return Err(internal_compilation_error!(MissingStructField {
                             type_def,
                             field_name: layout_field.0,
-                            instantiation_span: expr.span,
+                            instantiation_span: expr_span,
                         }));
                     } else if layout_size < fields_size {
                         // Record still has entries: Extra record entry
@@ -801,7 +811,7 @@ impl TypeInference {
                             type_def,
                             field_name: field.0.0,
                             field_span: field.0.1,
-                            instantiation_span: expr.span,
+                            instantiation_span: expr_span,
                         }));
                     }
                     // Here we know that we have the right fields, validate the types.
@@ -816,10 +826,10 @@ impl TypeInference {
                             );
                             let node = self.check_expr(
                                 env,
-                                &field.1,
+                                field.1,
                                 layout_field.1,
                                 MutType::constant(),
-                                field.1.span,
+                                sp(field.1),
                             )?;
                             effects = effects.union(&node.effects);
                             Ok(node)
@@ -839,7 +849,7 @@ impl TypeInference {
                                 K::Record(b(SVec2::from_vec(nodes))),
                                 payload_ty,
                                 effects.clone(),
-                                expr.span,
+                                expr_span,
                             );
                             K::Variant(b((tag, node)))
                         }
@@ -866,7 +876,7 @@ impl TypeInference {
                     self.ty_constraints.push(TypeConstraint::Pub(
                         PubTypeConstraint::new_type_has_variant(
                             variant_ty,
-                            expr.span,
+                            expr_span,
                             tag,
                             record_ty,
                             payload_node.span,
@@ -886,7 +896,7 @@ impl TypeInference {
                 // Generates the following constraints:
                 // FieldAccess(record_expr: T, field) -> V
                 //     where T: Coercible<Target = U>, RecordFieldIs(U, V, field)
-                let (record_node, record_mut) = self.infer_expr(env, &data.expr)?;
+                let (record_node, record_mut) = self.infer_expr(env, data.expr)?;
                 // Note: record_node.ty is T
                 let record_ty = self.fresh_type_var_ty(); // U
                 let (field, field_span) = data.name;
@@ -899,7 +909,7 @@ impl TypeInference {
                 let element_ty = self.fresh_type_var_ty(); // V
                 self.add_pub_constraint(PubTypeConstraint::new_record_field_is(
                     record_ty,
-                    data.expr.span,
+                    sp(data.expr),
                     field,
                     field_span,
                     element_ty,
@@ -923,14 +933,14 @@ impl TypeInference {
                     )
                 } else {
                     // The element type is the first element's type
-                    let first_node = self.infer_expr_drop_mut(env, &exprs[0])?;
+                    let first_node = self.infer_expr_drop_mut(env, exprs[0])?;
                     // Infer the type of the elements and collect their code and constraints
                     let (other_nodes, types, other_effects) =
                         self.infer_exprs_drop_mut(env, &exprs[1..])?;
                     // All elements must be of the first element's type
                     let element_ty = first_node.ty;
                     for (ty, expr) in types.into_iter().zip(exprs.iter().skip(1)) {
-                        self.add_sub_type_constraint(ty, expr.span, element_ty, exprs[0].span);
+                        self.add_sub_type_constraint(ty, sp(*expr), element_ty, sp(exprs[0]));
                     }
                     // Unify effects
                     let combined_effects =
@@ -953,20 +963,20 @@ impl TypeInference {
                 let element_ty = self.fresh_type_var_ty();
                 let array_ty = array_type(element_ty);
                 // Infer type of the array expression and make sure it is an array
-                let (array_node, array_expr_mut) = self.infer_expr(env, &data.array)?;
+                let (array_node, array_expr_mut) = self.infer_expr(env, data.array)?;
                 self.add_sub_type_constraint(
                     array_node.ty,
-                    data.array.span,
+                    sp(data.array),
                     array_ty,
-                    data.array.span,
+                    sp(data.array),
                 );
                 // Check type of the index expression to be int
                 let index_node = self.check_expr(
                     env,
-                    &data.index,
+                    data.index,
                     int_type(),
                     MutType::constant(),
-                    data.index.span,
+                    sp(data.index),
                 )?;
                 // Build the index node and return it
                 let combined_effects =
@@ -977,8 +987,8 @@ impl TypeInference {
             Match(data) => {
                 let (node, ty, mut_ty, effects) = self.infer_match(
                     env,
-                    expr.span,
-                    &data.cond_expr,
+                    expr_span,
+                    data.cond_expr,
                     &data.alternatives,
                     &data.default,
                 )?;
@@ -989,7 +999,7 @@ impl TypeInference {
             }
             Loop(body) => {
                 let body =
-                    self.check_expr(env, body, Type::unit(), MutType::constant(), body.span)?;
+                    self.check_expr(env, *body, Type::unit(), MutType::constant(), sp(*body))?;
                 let effects = body.effects.clone();
                 // FIXME: The type of the loop actually depends on whether there is a soft break inside
                 // If so, the type should be unit, otherwise it should be never.
@@ -1006,35 +1016,35 @@ impl TypeInference {
                     &data.path,
                     &data.name,
                     PropertyAccess::Get,
-                    expr.span,
+                    expr_span,
                     env,
                 )?;
                 self.infer_static_apply(
                     env,
                     &fn_path,
-                    expr.span,
-                    &[] as &[DExpr],
-                    expr.span,
+                    expr_span,
+                    &[] as &[DExprId],
+                    expr_span,
                     UnnamedArg::All,
                 )?
             }
             TypeAscription(data) => {
-                let (node, mut_type) = self.infer_expr(env, &data.expr)?;
+                let (node, mut_type) = self.infer_expr(env, data.expr)?;
                 let ty = data.ty.map(&mut FreshVariableTypeMapper::new(self));
-                self.add_same_type_constraint(node.ty, data.expr.span, ty, data.span);
+                self.add_same_type_constraint(node.ty, sp(data.expr), ty, data.span);
                 return Ok((node, mut_type));
             }
             Error => {
                 panic!("attempted to infer type for error node");
             }
         };
-        Ok((N::new(node, ty, effects.clone(), expr.span), mut_ty))
+        Ok((N::new(node, ty, effects.clone(), expr_span), mut_ty))
     }
 
     fn infer_expr_drop_mut(
         &mut self,
         env: &mut TypingEnv,
-        expr: &DExpr,
+        expr: DExprId,
     ) -> Result<Node, InternalCompilationError> {
         Ok(self.infer_expr(env, expr)?.0)
     }
@@ -1044,14 +1054,14 @@ impl TypeInference {
         env: &mut TypingEnv,
         path: &ast::Path,
         path_span: Location,
-        args: &[impl Borrow<DExpr>],
+        args: &[DExprId],
         expr_span: Location,
         arguments_unnamed: UnnamedArg,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
         use ir::Node as N;
         use ir::NodeKind as K;
         let args_span =
-            || Location::fuse(args.iter().map(|arg| arg.borrow().span)).unwrap_or(path_span);
+            || Location::fuse(args.iter().map(|arg| env.arena[*arg].span)).unwrap_or(path_span);
         // Get the function and its type from the environment.
         Ok(
             if let Some((_module_name, trait_descr)) = env.module_env.get_trait_function(path)? {
@@ -1179,10 +1189,10 @@ impl TypeInference {
                     .map(|(ty, arg)| {
                         let node = self.check_expr(
                             env,
-                            arg.borrow(),
+                            *arg,
                             *ty,
                             MutType::constant(),
-                            arg.borrow().span,
+                            env.arena[*arg].span,
                         )?;
                         effects = effects.union(&node.effects);
                         Ok(node)
@@ -1266,12 +1276,12 @@ impl TypeInference {
     fn infer_exprs_drop_mut(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[impl Borrow<DExpr>],
+        exprs: &[DExprId],
     ) -> Result<(Vec<ir::Node>, Vec<Type>, EffType), InternalCompilationError> {
         let (nodes, tys, effects): (_, _, Vec<_>) = exprs
             .iter()
             .map(|arg| {
-                let node = self.infer_expr_drop_mut(env, arg.borrow())?;
+                let node = self.infer_expr_drop_mut(env, *arg)?;
                 let ty = node.ty;
                 let effects = node.effects.clone();
                 Ok::<(ir::Node, Type, EffType), InternalCompilationError>((node, ty, effects))
@@ -1287,7 +1297,7 @@ impl TypeInference {
         env: &mut TypingEnv,
         fields: &[&RecordField<Desugared>],
     ) -> Result<(NodeKind, Type, EffType), InternalCompilationError> {
-        let exprs = fields.iter().map(|(_, expr)| expr).collect::<Vec<_>>();
+        let exprs = fields.iter().map(|(_, expr)| *expr).collect::<Vec<_>>();
         let (nodes, types, effects) = self.infer_exprs_drop_mut(env, &exprs)?;
         let payload_ty = fields_to_record_type(fields, types);
         let payload_node = if let Some(values) = nodes_as_bare_immediate(&nodes) {
@@ -1301,13 +1311,13 @@ impl TypeInference {
     // fn infer_exprs_drop_mut_zipped(
     //     &mut self,
     //     env: &mut TypingEnv,
-    //     exprs: &[impl Borrow<DExpr>],
+    //     exprs: &[DExprId],
     // ) -> Result<(Vec<(ir::Node, Type)>, EffType), InternalCompilationError> {
     //     let mut effects = Vec::with_capacity(exprs.len());
     //     let nodes_and_tys = exprs
     //         .iter()
     //         .map(|arg| {
-    //             let node = self.infer_expr_drop_mut(env, arg.borrow())?;
+    //             let node = self.infer_expr_drop_mut(env, *arg)?;
     //             let ty = node.ty;
     //             effects.push(node.effects.clone());
     //             Ok::<(ir::Node, Type), InternalCompilationError>((node, ty))
@@ -1321,12 +1331,12 @@ impl TypeInference {
     fn infer_exprs_ret_arg_ty(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[impl Borrow<DExpr>],
+        exprs: &[DExprId],
     ) -> Result<(Vec<ir::Node>, Vec<FnArgType>, EffType), InternalCompilationError> {
         let (nodes, tys, effects): (_, _, Vec<_>) = exprs
             .iter()
             .map(|arg| {
-                let (node, mut_ty) = self.infer_expr(env, arg.borrow())?;
+                let (node, mut_ty) = self.infer_expr(env, *arg)?;
                 let ty = node.ty;
                 let effects = node.effects.clone();
                 Ok::<(ir::Node, FnArgType, EffType), InternalCompilationError>((
@@ -1366,7 +1376,7 @@ impl TypeInference {
     fn check_exprs(
         &mut self,
         env: &mut TypingEnv,
-        exprs: &[impl Borrow<DExpr>],
+        exprs: &[DExprId],
         expected_tys: &[FnArgType],
         expected_span: Location,
     ) -> Result<(Vec<ir::Node>, EffType), InternalCompilationError> {
@@ -1374,8 +1384,7 @@ impl TypeInference {
             .iter()
             .zip(expected_tys)
             .map(|(arg, arg_ty)| {
-                let node =
-                    self.check_expr(env, arg.borrow(), arg_ty.ty, arg_ty.mut_ty, expected_span)?;
+                let node = self.check_expr(env, *arg, arg_ty.ty, arg_ty.mut_ty, expected_span)?;
                 let effects = node.effects.clone();
                 Ok((node, effects))
             })
@@ -1387,11 +1396,13 @@ impl TypeInference {
     pub fn check_expr(
         &mut self,
         env: &mut TypingEnv,
-        expr: &DExpr,
+        expr_id: DExprId,
         expected_ty: Type,
         expected_mut: MutType,
         expected_span: Location,
     ) -> Result<Node, InternalCompilationError> {
+        let expr = &env.arena[expr_id];
+        let expr_span = expr.span;
         use ExprKind::*;
         use ir::Node as N;
         use ir::NodeKind as K;
@@ -1400,7 +1411,7 @@ impl TypeInference {
         if let Literal(value, ty) = &expr.kind {
             if *ty == expected_ty {
                 let node = K::Immediate(Immediate::new(value.clone()));
-                return Ok(N::new(node, expected_ty, no_effects(), expr.span));
+                return Ok(N::new(node, expected_ty, no_effects(), expr_span));
             }
         }
 
@@ -1409,15 +1420,15 @@ impl TypeInference {
             let ty_data = { expected_ty.data().clone() };
             if let TypeKind::Function(fn_ty) = ty_data {
                 let (node, _, _, _) =
-                    self.infer_abstract(env, &data.args, &data.body, Some(*fn_ty), expr.span)?;
+                    self.infer_abstract(env, &data.args, data.body, Some(*fn_ty), expr_span)?;
                 return Ok(node);
             }
         }
 
         // Other cases, infer and add constraints
-        let (node, actual_mut) = self.infer_expr(env, expr)?;
-        self.add_sub_type_constraint(node.ty, expr.span, expected_ty, expected_span);
-        self.add_mut_be_at_least_constraint(actual_mut, expr.span, expected_mut, expected_span);
+        let (node, actual_mut) = self.infer_expr(env, expr_id)?;
+        self.add_sub_type_constraint(node.ty, expr_span, expected_ty, expected_span);
+        self.add_mut_be_at_least_constraint(actual_mut, expr_span, expected_mut, expected_span);
         Ok(node)
     }
 
@@ -3357,10 +3368,12 @@ impl TypeSubstituer for NormalizeTypes<'_> {
 }
 
 fn collect_free_variables(
-    expr: &DExpr,
+    expr_id: DExprId,
+    arena: &DExprArena,
     bound: &mut Vec<HashSet<ustr::Ustr>>,
     free: &mut HashSet<ustr::Ustr>,
 ) {
+    let expr = &arena[expr_id];
     use ExprKind::*;
     match &expr.kind {
         Identifier(path) => {
@@ -3372,7 +3385,7 @@ fn collect_free_variables(
             }
         }
         Let(data) => {
-            collect_free_variables(&data.expr, bound, free);
+            collect_free_variables(data.expr, arena, bound, free);
             if let Some(scope) = bound.last_mut() {
                 scope.insert(data.name.0);
             }
@@ -3383,27 +3396,27 @@ fn collect_free_variables(
                 scope.insert(*arg);
             }
             bound.push(scope);
-            collect_free_variables(&data.body, bound, free);
+            collect_free_variables(data.body, arena, bound, free);
             bound.pop();
         }
         Block(exprs) => {
             bound.push(HashSet::new());
             for expr in exprs {
-                collect_free_variables(expr, bound, free);
+                collect_free_variables(*expr, arena, bound, free);
             }
             bound.pop();
         }
         Match(data) => {
-            collect_free_variables(&data.cond_expr, bound, free);
+            collect_free_variables(data.cond_expr, arena, bound, free);
             for (pattern, body) in &data.alternatives {
                 let mut scope = HashSet::new();
                 collect_pattern_vars(pattern, &mut scope);
                 bound.push(scope);
-                collect_free_variables(body, bound, free);
+                collect_free_variables(*body, arena, bound, free);
                 bound.pop();
             }
             if let Some(default) = &data.default {
-                collect_free_variables(default, bound, free);
+                collect_free_variables(*default, arena, bound, free);
             }
         }
         ForLoop(_) => {
@@ -3411,39 +3424,39 @@ fn collect_free_variables(
             unreachable!("ForLoop should be desugared")
         }
         Apply(data) => {
-            collect_free_variables(&data.func, bound, free);
+            collect_free_variables(data.func, arena, bound, free);
             for arg in &data.args {
-                collect_free_variables(arg, bound, free);
+                collect_free_variables(*arg, arena, bound, free);
             }
         }
         Assign(data) => {
-            collect_free_variables(&data.place, bound, free);
-            collect_free_variables(&data.value, bound, free);
+            collect_free_variables(data.place, arena, bound, free);
+            collect_free_variables(data.value, arena, bound, free);
         }
         Tuple(args) | Array(args) => {
             for arg in args {
-                collect_free_variables(arg, bound, free);
+                collect_free_variables(*arg, arena, bound, free);
             }
         }
-        Project(data) => collect_free_variables(&data.expr, bound, free),
-        FieldAccess(data) => collect_free_variables(&data.expr, bound, free),
-        TypeAscription(data) => collect_free_variables(&data.expr, bound, free),
+        Project(data) => collect_free_variables(data.expr, arena, bound, free),
+        FieldAccess(data) => collect_free_variables(data.expr, arena, bound, free),
+        TypeAscription(data) => collect_free_variables(data.expr, arena, bound, free),
         Return(expr) | Loop(expr) => {
-            collect_free_variables(expr, bound, free);
+            collect_free_variables(*expr, arena, bound, free);
         }
         Record(fields) => {
             for (_, expr) in fields {
-                collect_free_variables(expr, bound, free);
+                collect_free_variables(*expr, arena, bound, free);
             }
         }
         StructLiteral(data) => {
             for (_, expr) in &data.fields {
-                collect_free_variables(expr, bound, free);
+                collect_free_variables(*expr, arena, bound, free);
             }
         }
         Index(data) => {
-            collect_free_variables(&data.array, bound, free);
-            collect_free_variables(&data.index, bound, free);
+            collect_free_variables(data.array, arena, bound, free);
+            collect_free_variables(data.index, arena, bound, free);
         }
         Literal(_, _) | FormattedString(_) | PropertyPath(_) | SoftBreak | Error => {}
     }

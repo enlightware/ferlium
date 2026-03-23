@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -11,29 +11,30 @@ use ustr::{Ustr, ustr};
 
 use lalrpop_util::ErrorRecovery;
 
-grammar<'err>(
+grammar<'err, 'arena>(
     source_id: SourceId,
-    errors: &'err mut Vec<ErrorRecovery<usize, Token<'input>, LocatedError>>
+    errors: &'err mut Vec<ErrorRecovery<usize, Token<'input>, LocatedError>>,
+    arena: &'arena mut PExprArena
 );
 
 extern {
     type Error = LocatedError;
 }
 
-pub ModuleAndExpr: (Module, Option<Expr>) = {
+pub ModuleAndExpr: (Module, Option<PExprId>) = {
     <m:Module> <e:Es<ExtraExpr>?> => (m, e),
 }
 
-pub ModuleAndBlockContent: (Module, Option<Expr>) = {
+pub ModuleAndBlockContent: (Module, Option<PExprId>) = {
     <m:Module> <l:@L> <s:Stmts> <r:@R> => {
         if s.is_empty() {
             (m, None)
         } else {
-            (m, Some(Expr::new(ExprKind::block(s), span(l, r, source_id))))
+            (m, Some(arena.alloc(Expr::new(ExprKind::block(s), span(l, r, source_id)))))
         }
     },
     <m:Module> <l:@L> <s:Stmts> <e:Expr> <r:@R> => {
-        (m, Some(Expr::new(ExprKind::block(ext_b(s, e)), span(l, r, source_id))))
+        (m, Some(arena.alloc(Expr::new(ExprKind::block(ext_b(s, e)), span(l, r, source_id)))))
     },
 }
 
@@ -409,7 +410,7 @@ TopExpr<NoStruct> = {
 
 AssignExpr<NoStruct>: ExprKind = {
     <le:Es<PipeExpr<NoStruct>>> <ls:@L> "=" <rs:@R> <re:Es<TopExpr<NoStruct>>> => ExprKind::assign(le, span(ls, rs, source_id), re),
-    <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op.0, op.1, le, re),
+    <le:Es<PipeExpr<NoStruct>>> <ls:@L> <op:Sp<OpEqual>> <rs:@R> <re:Es<TopExpr<NoStruct>>> => assign_op(op.0, op.1, le, re, arena),
 }
 
 ReturnExpr<NoStruct>: ExprKind = {
@@ -427,17 +428,17 @@ PipeExpr<NoStruct>: ExprKind = {
 }
 
 RangeExpr<NoStruct>: ExprKind = {
-    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => build_range(o.0, o.1, l, r),
+    <l:Es<UnaryExpr<NoStruct>>> <o:Sp<RangeOp>> <r:Es<UnaryExpr<NoStruct>>> => build_range(o.0, o.1, l, r, arena),
     LogicOrExpr<NoStruct>,
 }
 
 LogicOrExpr<NoStruct>: ExprKind = {
-    <l:Es<LogicOrExpr<NoStruct>>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr<NoStruct>>> => cond_if_else(l, literal_expr(true, o.1), r),
+    <l:Es<LogicOrExpr<NoStruct>>> <o:Sp<LogicalOrOp>> <r:Es<LogicAndExpr<NoStruct>>> => cond_if_else(l, literal_expr(true, o.1, arena), r, arena),
     LogicAndExpr<NoStruct>,
 }
 
 LogicAndExpr<NoStruct>: ExprKind = {
-    <l:Es<LogicAndExpr<NoStruct>>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr<NoStruct>>> => cond_if_else(l, r, literal_expr(false, o.1)),
+    <l:Es<LogicAndExpr<NoStruct>>> <o:Sp<LogicalAndOp>> <r:Es<CompExpr<NoStruct>>> => cond_if_else(l, r, literal_expr(false, o.1, arena), arena),
     CompExpr<NoStruct>,
 }
 
@@ -449,16 +450,17 @@ MulExpr<NoStruct> = BinOpLeftAssoc<MulOp, CastExpr<NoStruct>>;
 
 CastExpr<NoStruct>: ExprKind = {
     <e:Es<CastExpr<NoStruct>>> <l:@L> "as" <ty:Sp<CastTargetType>> <r:@R> => {
-        let e_span = e.span;
-        let cast_expr = Expr::new(
+        let e_span = arena[e].span;
+        let cast_expr = arena.alloc(Expr::new(
             ExprKind::identifier(Path::single_str("cast", e_span)),
             span(l, r, source_id)
-        );
+        ));
+        let apply_expr = arena.alloc(Expr::new(
+            ExprKind::apply(cast_expr, vec![e], UnnamedArg::All),
+            e_span
+        ));
         ExprKind::type_ascription(
-            Expr::new(
-                ExprKind::apply(cast_expr, vec![e], UnnamedArg::All),
-                e_span
-            ),
+            apply_expr,
             ty.0,
             ty.1,
         )
@@ -481,13 +483,13 @@ CastTargetTypeParens: Type = {
 
 UnaryExpr<NoStruct> = {
     SuffixExpr<NoStruct>,
-    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => syn_static_apply_path(o.0, o.1, vec![e]),
+    <o:Sp<UnaryOp>> <e:Es<UnaryExpr<NoStruct>>> => syn_static_apply_path(o.0, o.1, vec![e], arena),
 }
 
 SuffixExpr<NoStruct> = {
     AtomExpr<NoStruct>,
     <e:Es<SuffixExpr<NoStruct>>> "." <f:Sp<FieldIdentifier>> => ExprKind::field_access(e, f),
-    <e:Es<SuffixExpr<NoStruct>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i),
+    <e:Es<SuffixExpr<NoStruct>>> "." <i:Sp<UIntValue>> =>? proj_or_float(e, i, arena),
     <e:Es<SuffixExpr<NoStruct>>> "[" <i:Expr> "]" => ExprKind::index(e, i),
     <e:Es<SuffixExpr<NoStruct>>> "(" <a:Sep<Es<TopExpr<"">>, ",">> ")" => ExprKind::apply(e, a, UnnamedArg::None),
 }
@@ -516,7 +518,7 @@ StmtLikeExpr = {
 
 ParExpr: ExprKind = {
     "(" <e:Expr> <ty:TypeAscription> ")" => ExprKind::type_ascription(e, ty.0, ty.1),
-    "(" <e:Expr> ")" => e.kind,
+    "(" <e:Expr> ")" => arena[e].kind.clone(), // FIXME: have a parenthesis node in the AST
 }
 
 PathOrStructExpr<NoStruct>: ExprKind = {
@@ -548,13 +550,13 @@ PathIdentifier<E>: Ustr = {
 
 ForExpr: ExprKind = {
     "for" <id:Sp<UIdentifier>> "in" <seq:Es<TopExpr<"NoStruct">>> <body:Es<Block>> =>
-        for_loop(id, seq, body),
+        for_loop(id, seq, body, arena),
 }
 
 IfExpr: ExprKind = {
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f),
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<Block>> => cond_if_else(c, t, f),
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> => cond_if(c, t),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f, arena),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<Block>> => cond_if_else(c, t, f, arena),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> => cond_if(c, t, arena),
 }
 
 MatchExpr: ExprKind = {
@@ -564,7 +566,7 @@ MatchExpr: ExprKind = {
         ExprKind::match_(e, m, Some(d)),
 }
 
-MatchArg: (Pattern, Expr) = {
+MatchArg: (Pattern, PExprId) = {
     <p:Pattern> "=>" <e:Expr> => (p, e),
 }
 
@@ -635,12 +637,12 @@ LiteralValue = {
 };
 
 TupleExpr: ExprKind = {
-    "(" <a:TupleArgs> ")" => tuple(a),
+    "(" <a:TupleArgs> ")" => tuple(a, arena),
 }
 
 // Note: we need this to make the difference between a parenthesized expression
 // and a tuple with a single element
-TupleArgs: Vec<Expr> = {
+TupleArgs: Vec<PExprId> = {
     <f:Expr> "," <r:Sep<Expr, ",">> => ext_f(f, r),
 }
 
@@ -656,7 +658,7 @@ RecordExpr: ExprKind = {
 // For a single abbreviated field (e.g., {a}), a trailing comma is required ({a,})
 // to distinguish from a block returning a value.
 // For explicit field syntax (e.g., {a: 1}), no trailing comma is needed.
-RecordExprImpl: Vec<(UstrSpan, Expr)> = {
+RecordExprImpl: Vec<(UstrSpan, PExprId)> = {
     // Single explicit field: {a: 1}
     "{" <f:RecordExplicitField> "}" => vec![f],
     // Single abbreviated field with trailing comma: {a,}
@@ -667,30 +669,29 @@ RecordExprImpl: Vec<(UstrSpan, Expr)> = {
     "{" <f:RecordAbbrevField> "," <s:RecordField> <r:("," <RecordField>)*> ","? "}" => ext_f(f, ext_f(s, r)),
 }
 
-RecordField: (UstrSpan, Expr) = {
+RecordField: (UstrSpan, PExprId) = {
     RecordExplicitField,
     RecordAbbrevField,
 }
 
-RecordExplicitField: (UstrSpan, Expr) = {
+RecordExplicitField: (UstrSpan, PExprId) = {
     <n:Sp<FieldIdentifier>> ":" <e:Expr> => (n, e),
 }
 
-RecordAbbrevField: (UstrSpan, Expr) = {
-    <n:Sp<FieldIdentifier>> => (n, Expr::new(ExprKind::identifier(Path::single_tuple(n)), n.1)),
+RecordAbbrevField: (UstrSpan, PExprId) = {
+    <n:Sp<FieldIdentifier>> => (n, arena.alloc(Expr::new(ExprKind::identifier(Path::single_tuple(n)), n.1))),
 }
 
 // Struct literals support both explicit and shorthand field syntax
-StructExprImpl: Vec<(UstrSpan, Expr)> = {
+StructExprImpl: Vec<(UstrSpan, PExprId)> = {
     "{" <f:StructField> "}" => vec![f],
     "{" <f:StructField> "," <r:Sep<StructField, ",">> "}" => ext_f(f, r),
 }
 
-StructField: (UstrSpan, Expr) = {
-    // Explicit field assignment: field_name: expression
+StructField: (UstrSpan, PExprId) = {
     <n:Sp<FieldIdentifier>> ":" <e:Expr> => (n, e),
     // Shorthand syntax: field_name (equivalent to field_name: field_name)
-    <n:Sp<FieldIdentifier>> => (n, Expr::new(ExprKind::identifier(Path::single_tuple(n)), n.1)),
+    <n:Sp<FieldIdentifier>> => (n, arena.alloc(Expr::new(ExprKind::identifier(Path::single_tuple(n)), n.1))),
 }
 
 PropertyPath: (Path, Ustr) = {
@@ -707,7 +708,7 @@ SoftBreakExpr: ExprKind = {
 
 Block: ExprKind = {
     "{" <e:Stmts> <r:Expr> "}" => ExprKind::block(ext_b(e, r)),
-    "{" <e:Stmts> <r:Loc<"}">> => ExprKind::block(ext_b(e, unit_literal_expr(r))),
+    "{" <e:Stmts> <r:Loc<"}">> => ExprKind::block(ext_b(e, unit_literal_expr(r, arena))),
 }
 
 #[inline]
@@ -726,9 +727,9 @@ LetStmt: ExprKind = {
             MutVal::constant()
         };
         let (e, ty_span_and_complete) = if let Some((ty, ty_span)) = ty {
-            let span = e.span;
+            let e_span = arena[e].span;
             (
-                Expr::new(ExprKind::type_ascription(e, ty, ty_span), span),
+                arena.alloc(Expr::new(ExprKind::type_ascription(e, ty, ty_span), e_span)),
                 Some((ty_span, ()))
             )
         } else {
@@ -738,7 +739,7 @@ LetStmt: ExprKind = {
     }
 }
 
-ExprStmt: Expr = {
+ExprStmt: PExprId = {
     <e:Expr> ";" => e,
 }
 
@@ -868,8 +869,8 @@ OpEqual: Vec<&'static str> = {
 
 // Build an Expr out of an ExprKind by adding its span
 #[inline]
-Es<K>: Expr = {
-    Sp<K> => Expr::new(<>.0, <>.1),
+Es<K>: PExprId = {
+    Sp<K> => arena.alloc(Expr::new(<>.0, <>.1)),
 };
 
 // Build a Pattern out of an PatternKind by adding its span
@@ -902,7 +903,7 @@ Sep<T, S>: Vec<T> = {
 // A tier of expression, for a binary operation, left-associative
 #[inline]
 BinOpLeftAssoc<Op, NextTier>: ExprKind = {
-    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => syn_static_apply_path(o.0, o.1, vec![l, r]),
+    <l:Es<BinOpLeftAssoc<Op, NextTier>>> <o:Sp<Op>> <r:Es<NextTier>> => syn_static_apply_path(o.0, o.1, vec![l, r], arena),
     NextTier
 };
 
