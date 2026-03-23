@@ -462,9 +462,23 @@ impl TraitImpls {
                 // For blanket impls, the function types already use the correct type variables,
                 // so we don't need to apply any substitution.
                 if level == DisplayFilter::MethodDefinitions {
-                    format_impl_fns(&key.trait_ref, TypeSubstitution::default(), imp, false, f, env)?;
+                    format_impl_fns(
+                        &key.trait_ref,
+                        TypeSubstitution::default(),
+                        imp,
+                        false,
+                        f,
+                        env,
+                    )?;
                 } else if level == DisplayFilter::MethodCode {
-                    format_impl_fns(&key.trait_ref, TypeSubstitution::default(), imp, true, f, env)?;
+                    format_impl_fns(
+                        &key.trait_ref,
+                        TypeSubstitution::default(),
+                        imp,
+                        true,
+                        f,
+                        env,
+                    )?;
                 }
                 writeln!(f)?;
             }
@@ -547,7 +561,14 @@ pub fn format_blanket_impl(
     format_blanket_impl_header(key, &imp.output_tys, f, env)?;
     // For blanket impls, the function types already use the correct type variables,
     // so we don't need to apply any substitution.
-    format_impl_fns(&key.trait_ref, TypeSubstitution::default(), imp, false, f, env)
+    format_impl_fns(
+        &key.trait_ref,
+        TypeSubstitution::default(),
+        imp,
+        false,
+        f,
+        env,
+    )
 }
 
 pub fn format_impl_header_by_key(
