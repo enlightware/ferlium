@@ -13,6 +13,7 @@ use enum_as_inner::EnumAsInner;
 #[cfg(debug_assertions)]
 use ustr::{Ustr, ustr};
 
+use crate::ir::{NodeArena, NodeId, NodeKind};
 #[cfg(debug_assertions)]
 use crate::module::id::Id;
 use crate::{
@@ -20,7 +21,6 @@ use crate::{
     containers::b,
     error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
-    ir::{Node, NodeKind},
     module::{
         FunctionId, LocalDecl, LocalFunctionId, ModuleFunction, ModuleId, Modules, TraitImplId,
     },
@@ -652,269 +652,282 @@ macro_rules! eval_or_return {
     };
 }
 
-impl Node {
-    /// Evaluate this node and return the result.
-    pub fn eval(
-        &self,
-        module_id: ModuleId,
-        locals: &[LocalDecl],
-        compiler_session: &CompilerSession,
-    ) -> EvalControlFlowResult {
-        let mut ctx = EvalCtx::new(module_id, compiler_session);
-        self.eval_with_ctx(&mut ctx, locals)
-    }
+/// Evaluate this node and return the result.
+pub fn eval_node(
+    arena: &NodeArena,
+    id: NodeId,
+    module_id: ModuleId,
+    locals: &[LocalDecl],
+    compiler_session: &CompilerSession,
+) -> EvalControlFlowResult {
+    let mut ctx = EvalCtx::new(module_id, compiler_session);
+    eval_node_with_ctx(arena, id, &mut ctx, locals)
+}
 
-    /// Evaluate this node given the environment and return the result.
-    pub fn eval_with_ctx(&self, ctx: &mut EvalCtx, locals: &[LocalDecl]) -> EvalControlFlowResult {
-        use NodeKind::*;
-        match &self.kind {
-            Immediate(immediate) => cont(immediate.value.clone()),
-            BuildClosure(build_closure) => {
-                let captured = eval_or_return!(eval_nodes(&build_closure.captures, ctx, locals));
-                // Note: function should be GetFunction or similar immediate - returns not allowed here
-                let function_value = build_closure
-                    .function
-                    .eval_with_ctx(ctx, locals)?
-                    .into_value();
-                let function_value = function_value.into_function().unwrap();
-                let function_value =
-                    FunctionValue::new(function_value.function, function_value.module, captured);
-                cont(Value::Function(b(function_value)))
-            }
-            Apply(app) => {
-                // Evaluate left-to-right: function first, then arguments (matches Rust semantics)
-                let function_value = eval_or_return!(app.function.eval_with_ctx(ctx, locals));
-                let function_value = function_value.as_function().unwrap();
-                let args_ty = {
-                    app.function
-                        .ty
-                        .data()
-                        .as_function()
-                        .expect("Apply needs a function type")
-                        .args
-                        .clone()
-                };
-                let arguments = eval_or_return!(eval_args(&app.arguments, &args_ty, ctx, locals));
-                ctx.call_function_value(function_value, arguments, self.span)
-            }
-            StaticApply(app) => {
-                let arguments =
-                    eval_or_return!(eval_args(&app.arguments, &app.ty.args, ctx, locals));
-                ctx.call_function_id(app.function, arguments, self.span)
-            }
-            TraitFnApply(_) => {
-                panic!(
-                    "Trait function application should not be executed, but transformed to StaticApply"
-                );
-            }
-            GetFunction(get_fn) => {
-                let (function, module_id) = ctx.get_function_local_id(get_fn.function);
-                cont(Value::function(function, module_id))
-            }
-            GetDictionary(get_dict) => {
-                let value = ctx.get_dictionary(get_dict.dictionary);
-                cont(value)
-            }
-            EnvStore(node) => {
-                let value = eval_or_return!(node.value.eval_with_ctx(ctx, locals));
-                ctx.environment.push(ValOrMut::Val(value));
-                #[cfg(debug_assertions)]
-                ctx.environment_names
-                    .push(locals[node.id.as_index()].name.0);
-                cont(Value::unit())
-            }
-            EnvLoad(node) => {
-                let index = ctx.frame_base + node.index;
-                cont(
-                    ctx.environment[index]
-                        .as_value(ctx)
-                        .map_err(|err| RuntimeError::new(err, Some(self.span)))?,
-                )
-            }
-            Return(node) => ret(node.eval_with_ctx(ctx, locals)?.into_value()),
-            Block(nodes) => {
-                let env_size = ctx.environment.len();
-                let mut last_value = Value::unit();
-                for node in nodes.iter() {
-                    match node.eval_with_ctx(ctx, locals)? {
-                        ControlFlow::Return(val) => {
-                            // Early return: clean up environment and propagate
-                            ctx.environment.truncate(env_size);
-                            #[cfg(debug_assertions)]
-                            ctx.environment_names.truncate(env_size);
-                            return Ok(ControlFlow::Return(val));
-                        }
-                        ControlFlow::Continue(val) => {
-                            last_value = val;
-                        }
-                    }
-                }
-                // Normal block completion
-                ctx.environment.truncate(env_size);
-                #[cfg(debug_assertions)]
-                ctx.environment_names.truncate(env_size);
-                cont(last_value)
-            }
-            Assign(assignment) => {
-                // Evaluate left-to-right: place first, then value (matches Rust semantics)
-                let place = eval_or_return!(assignment.place.as_place(ctx, locals));
-                let value = eval_or_return!(assignment.value.eval_with_ctx(ctx, locals));
-                let target_ref = place
-                    .target_mut(ctx)
-                    .map_err(|err| RuntimeError::new(err, Some(self.span)))?;
-                *target_ref = value;
-                cont(Value::unit())
-            }
-            Tuple(nodes) | Record(nodes) => {
-                // Note: record values are stored as tuples
-                let values = eval_or_return!(eval_nodes(nodes, ctx, locals));
-                cont(Value::Tuple(b(values.into())))
-            }
-            Project(projection) => {
-                let value = eval_or_return!(projection.0.eval_with_ctx(ctx, locals));
-                cont(match value {
-                    Value::Tuple(tuple) => tuple.into_iter().nth(projection.1).unwrap(),
-                    Value::Variant(variant) => variant.value,
-                    _ => panic!("Cannot project from a non-compound value"),
-                })
-            }
-            FieldAccess(_) => {
-                panic!("String projection should not be executed, but transformed to ProjectLocal");
-            }
-            ProjectAt(access) => {
-                let value = eval_or_return!(access.0.eval_with_ctx(ctx, locals));
-                let index = ctx.frame_base + access.1;
-                let index = ctx.environment[index]
+/// Evaluate this node given the environment and return the result.
+pub fn eval_node_with_ctx(
+    arena: &NodeArena,
+    id: NodeId,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    use NodeKind::*;
+    let node = &arena[id];
+    match &node.kind {
+        Immediate(immediate) => cont(immediate.value.clone()),
+        BuildClosure(build_closure) => {
+            let captured = eval_or_return!(eval_nodes(arena, &build_closure.captures, ctx, locals));
+            // Note: function should be GetFunction or similar immediate - returns not allowed here
+            let function_value =
+                eval_node_with_ctx(arena, build_closure.function, ctx, locals)?.into_value();
+            let function_value = function_value.into_function().unwrap();
+            let function_value =
+                FunctionValue::new(function_value.function, function_value.module, captured);
+            cont(Value::Function(b(function_value)))
+        }
+        Apply(app) => {
+            // Evaluate left-to-right: function first, then arguments (matches Rust semantics)
+            let function_value =
+                eval_or_return!(eval_node_with_ctx(arena, app.function, ctx, locals));
+            let function_value = function_value.as_function().unwrap();
+            let args_ty = {
+                arena[app.function]
+                    .ty
+                    .data()
+                    .as_function()
+                    .expect("Apply needs a function type")
+                    .args
+                    .clone()
+            };
+            let arguments =
+                eval_or_return!(eval_args(arena, &app.arguments, &args_ty, ctx, locals));
+            ctx.call_function_value(function_value, arguments, node.span)
+        }
+        StaticApply(app) => {
+            let arguments =
+                eval_or_return!(eval_args(arena, &app.arguments, &app.ty.args, ctx, locals));
+            ctx.call_function_id(app.function, arguments, node.span)
+        }
+        TraitFnApply(_) => {
+            panic!(
+                "Trait function application should not be executed, but transformed to StaticApply"
+            );
+        }
+        GetFunction(get_fn) => {
+            let (function, module_id) = ctx.get_function_local_id(get_fn.function);
+            cont(Value::function(function, module_id))
+        }
+        GetDictionary(get_dict) => {
+            let value = ctx.get_dictionary(get_dict.dictionary);
+            cont(value)
+        }
+        EnvStore(node) => {
+            let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
+            ctx.environment.push(ValOrMut::Val(value));
+            #[cfg(debug_assertions)]
+            ctx.environment_names
+                .push(locals[node.id.as_index()].name.0);
+            cont(Value::unit())
+        }
+        EnvLoad(node) => {
+            let index = ctx.frame_base + node.index;
+            cont(
+                ctx.environment[index]
                     .as_value(ctx)
-                    .map_err(|err| RuntimeError::new(err, Some(self.span)))?
-                    .into_primitive_ty::<isize>()
-                    .unwrap();
-                cont(match value {
-                    Value::Tuple(tuple) => tuple.into_iter().nth(index as usize).unwrap(),
-                    _ => panic!("Cannot access field from a non-compound value"),
-                })
-            }
-            Variant(variant) => {
-                let value = eval_or_return!(variant.1.eval_with_ctx(ctx, locals));
-                cont(Value::raw_variant(variant.0, value))
-            }
-            ExtractTag(node) => {
-                let value = eval_or_return!(node.eval_with_ctx(ctx, locals));
-                let variant = value.into_variant().unwrap();
-                cont(Value::native(variant.tag_as_isize()))
-            }
-            Array(nodes) => {
-                let values = eval_or_return!(eval_nodes(nodes, ctx, locals));
-                cont(Value::native(array::Array::from_vec(values)))
-            }
-            Index(array, index) => {
-                // Evaluate left-to-right: array first, then index (matches Rust semantics)
-                let mut array = eval_or_return!(array.eval_with_ctx(ctx, locals))
-                    .into_primitive_ty::<array::Array>()
-                    .unwrap();
-                let index = eval_or_return!(index.eval_with_ctx(ctx, locals))
-                    .into_primitive_ty::<isize>()
-                    .unwrap();
-                match array.get_mut_signed(index) {
-                    Some(value) => cont(value.clone()),
-                    None => {
-                        let len = array.len();
-                        Err(RuntimeError::new(
-                            RuntimeErrorKind::ArrayAccessOutOfBounds { index, len },
-                            Some(self.span),
-                        ))
+                    .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?,
+            )
+        }
+        Return(node) => ret(eval_node_with_ctx(arena, *node, ctx, locals)?.into_value()),
+        Block(nodes) => {
+            let env_size = ctx.environment.len();
+            let mut last_value = Value::unit();
+            for node in nodes.iter() {
+                match eval_node_with_ctx(arena, *node, ctx, locals)? {
+                    ControlFlow::Return(val) => {
+                        // Early return: clean up environment and propagate
+                        ctx.environment.truncate(env_size);
+                        #[cfg(debug_assertions)]
+                        ctx.environment_names.truncate(env_size);
+                        return Ok(ControlFlow::Return(val));
+                    }
+                    ControlFlow::Continue(val) => {
+                        last_value = val;
                     }
                 }
             }
-            Case(case) => {
-                let value = eval_or_return!(case.value.eval_with_ctx(ctx, locals));
-                for (alternative, node) in &case.alternatives {
-                    if value == *alternative {
-                        return node.eval_with_ctx(ctx, locals);
-                    }
+            // Normal block completion
+            ctx.environment.truncate(env_size);
+            #[cfg(debug_assertions)]
+            ctx.environment_names.truncate(env_size);
+            cont(last_value)
+        }
+        Assign(assignment) => {
+            // Evaluate left-to-right: place first, then value (matches Rust semantics)
+            let place = eval_or_return!(resolve_node_place(arena, assignment.place, ctx, locals));
+            let value = eval_or_return!(eval_node_with_ctx(arena, assignment.value, ctx, locals));
+            let target_ref = place
+                .target_mut(ctx)
+                .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?;
+            *target_ref = value;
+            cont(Value::unit())
+        }
+        Tuple(nodes) | Record(nodes) => {
+            // Note: record values are stored as tuples
+            let values = eval_or_return!(eval_nodes(arena, nodes, ctx, locals));
+            cont(Value::Tuple(b(values.into())))
+        }
+        Project(data, index) => {
+            let value = eval_or_return!(eval_node_with_ctx(arena, *data, ctx, locals));
+            cont(match value {
+                Value::Tuple(tuple) => tuple.into_iter().nth(*index).unwrap(),
+                Value::Variant(variant) => variant.value,
+                _ => panic!("Cannot project from a non-compound value"),
+            })
+        }
+        FieldAccess(_, _) => {
+            panic!("String projection should not be executed, but transformed to ProjectLocal");
+        }
+        ProjectAt(data, index) => {
+            let value = eval_or_return!(eval_node_with_ctx(arena, *data, ctx, locals));
+            let index = ctx.frame_base + *index;
+            let index = ctx.environment[index]
+                .as_value(ctx)
+                .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
+                .into_primitive_ty::<isize>()
+                .unwrap();
+            cont(match value {
+                Value::Tuple(tuple) => tuple.into_iter().nth(index as usize).unwrap(),
+                _ => panic!("Cannot access field from a non-compound value"),
+            })
+        }
+        Variant(tag, payload) => {
+            let value = eval_or_return!(eval_node_with_ctx(arena, *payload, ctx, locals));
+            cont(Value::raw_variant(*tag, value))
+        }
+        ExtractTag(node) => {
+            let value = eval_or_return!(eval_node_with_ctx(arena, *node, ctx, locals));
+            let variant = value.into_variant().unwrap();
+            cont(Value::native(variant.tag_as_isize()))
+        }
+        Array(nodes) => {
+            let values = eval_or_return!(eval_nodes(arena, nodes, ctx, locals));
+            cont(Value::native(array::Array::from_vec(values)))
+        }
+        Index(array, index) => {
+            // Evaluate left-to-right: array first, then index (matches Rust semantics)
+            let mut array = eval_or_return!(eval_node_with_ctx(arena, *array, ctx, locals))
+                .into_primitive_ty::<array::Array>()
+                .unwrap();
+            let index = eval_or_return!(eval_node_with_ctx(arena, *index, ctx, locals))
+                .into_primitive_ty::<isize>()
+                .unwrap();
+            match array.get_mut_signed(index) {
+                Some(value) => cont(value.clone()),
+                None => {
+                    let len = array.len();
+                    Err(RuntimeError::new(
+                        RuntimeErrorKind::ArrayAccessOutOfBounds { index, len },
+                        Some(arena[id].span),
+                    ))
                 }
-                case.default.eval_with_ctx(ctx, locals)
-            }
-            Loop(body) => {
-                let break_loop = ctx.break_loop;
-                ctx.break_loop = false;
-                while !ctx.break_loop {
-                    eval_or_return!(body.eval_with_ctx(ctx, locals));
-                }
-                ctx.break_loop = break_loop;
-                cont(Value::unit())
-            }
-            SoftBreak => {
-                ctx.break_loop = true;
-                cont(Value::unit())
             }
         }
-    }
-
-    /// Return this node as a place in the environment.
-    pub fn as_place(
-        &self,
-        ctx: &mut EvalCtx,
-        locals: &[LocalDecl],
-    ) -> Result<ControlFlow<Place>, RuntimeError> {
-        fn resolve_node(
-            node: &Node,
-            ctx: &mut EvalCtx,
-            locals: &[LocalDecl],
-        ) -> Result<ControlFlow<Place>, RuntimeError> {
-            use NodeKind::*;
-            Ok(ControlFlow::Continue(match &node.kind {
-                Project(projection) => {
-                    let (ref node, index) = **projection;
-                    let mut place = eval_or_return!(resolve_node(node, ctx, locals));
-                    place.path.push(index as isize);
-                    place
+        Case(case) => {
+            let value = eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals));
+            for (alternative, node) in &case.alternatives {
+                if value == *alternative {
+                    return eval_node_with_ctx(arena, *node, ctx, locals);
                 }
-                ProjectAt(projection) => {
-                    let (ref node, index) = **projection;
-                    let mut place = eval_or_return!(resolve_node(node, ctx, locals));
-                    let index = ctx.frame_base + index;
-                    let index_value = ctx.environment[index]
-                        .as_value(ctx)
-                        .map_err(|err| RuntimeError::new(err, Some(node.span)))?;
-                    let index = index_value.into_primitive_ty::<isize>().unwrap();
-                    place.path.push(index);
-                    place
-                }
-                Index(array, index) => {
-                    let mut place = eval_or_return!(resolve_node(array, ctx, locals));
-                    let index_value = eval_or_return!(index.eval_with_ctx(ctx, locals));
-                    let index = index_value.into_primitive_ty::<isize>().unwrap();
-                    place.path.push(index);
-                    place
-                }
-                EnvLoad(node) => Place {
-                    // By using frame_base here, we allow to access parent frames
-                    // when the ResolvedPlace is used in a child function.
-                    target: ctx.frame_base + node.index,
-                    path: Vec::new(),
-                },
-                _ => panic!("Cannot resolve a non-place node"),
-            }))
+            }
+            eval_node_with_ctx(arena, case.default, ctx, locals)
         }
-        resolve_node(self, ctx, locals)
+        Loop(body) => {
+            let break_loop = ctx.break_loop;
+            ctx.break_loop = false;
+            while !ctx.break_loop {
+                eval_or_return!(eval_node_with_ctx(arena, *body, ctx, locals));
+            }
+            ctx.break_loop = break_loop;
+            cont(Value::unit())
+        }
+        SoftBreak => {
+            ctx.break_loop = true;
+            cont(Value::unit())
+        }
+        Unimplemented => {
+            panic!("Unimplemented IR node executed!")
+        }
     }
 }
 
+/// Return this node as a place in the environment.
+pub fn resolve_node_place(
+    arena: &NodeArena,
+    id: NodeId,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<Place>, RuntimeError> {
+    fn resolve_node(
+        arena: &NodeArena,
+        id: NodeId,
+        ctx: &mut EvalCtx,
+        locals: &[LocalDecl],
+    ) -> Result<ControlFlow<Place>, RuntimeError> {
+        let node = &arena[id];
+        use NodeKind::*;
+        Ok(ControlFlow::Continue(match &node.kind {
+            Project(node, index) => {
+                let mut place = eval_or_return!(resolve_node(arena, *node, ctx, locals));
+                place.path.push(*index as isize);
+                place
+            }
+            ProjectAt(node, index) => {
+                let mut place = eval_or_return!(resolve_node(arena, *node, ctx, locals));
+                let index = ctx.frame_base + *index;
+                let index_value = ctx.environment[index]
+                    .as_value(ctx)
+                    .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?;
+                let index = index_value.into_primitive_ty::<isize>().unwrap();
+                place.path.push(index);
+                place
+            }
+            Index(array, index) => {
+                let mut place = eval_or_return!(resolve_node(arena, *array, ctx, locals));
+                let index_value = eval_or_return!(eval_node_with_ctx(arena, *index, ctx, locals));
+                let index = index_value.into_primitive_ty::<isize>().unwrap();
+                place.path.push(index);
+                place
+            }
+            EnvLoad(node) => Place {
+                // By using frame_base here, we allow to access parent frames
+                // when the ResolvedPlace is used in a child function.
+                target: ctx.frame_base + node.index,
+                path: Vec::new(),
+            },
+            _ => panic!("Cannot resolve a non-place node"),
+        }))
+    }
+    resolve_node(arena, id, ctx, locals)
+}
+
 fn eval_nodes(
-    nodes: &[Node],
+    arena: &NodeArena,
+    nodes: &[NodeId],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<Value>>, RuntimeError> {
     let mut results = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        results.push(eval_or_return!(node.eval_with_ctx(ctx, locals)));
+    for &node in nodes {
+        results.push(eval_or_return!(eval_node_with_ctx(
+            arena, node, ctx, locals
+        )));
     }
     Ok(ControlFlow::Continue(results))
 }
 
 fn eval_args(
-    args: &[Node],
+    arena: &NodeArena,
+    args: &[NodeId],
     args_ty: &[FnArgType],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -929,9 +942,13 @@ fn eval_args(
             .expect("Unresolved mutability variable found during execution")
             .is_mutable();
         results.push(if is_mutable {
-            ValOrMut::Mut(eval_or_return!(arg.as_place(ctx, locals)))
+            ValOrMut::Mut(eval_or_return!(resolve_node_place(
+                arena, *arg, ctx, locals
+            )))
         } else {
-            ValOrMut::Val(eval_or_return!(arg.eval_with_ctx(ctx, locals)))
+            ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
+                arena, *arg, ctx, locals
+            )))
         });
     }
     Ok(ControlFlow::Continue(results))

@@ -34,7 +34,8 @@ pub fn test_mod(session: &mut TestSession, src: &str, f: &str, exp_eff: EffType)
 
 fn test_expr(session: &mut TestSession, src: &str, exp_eff: EffType) {
     let module_and_expr = session.compile(src);
-    let effects = module_and_expr.expr.unwrap().expr.effects.clone();
+    let expr = module_and_expr.expr.unwrap();
+    let effects = expr.expr.arena[expr.expr.root].effects.clone();
     assert_eq!(effects, exp_eff);
 }
 

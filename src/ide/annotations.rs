@@ -15,7 +15,7 @@ use heck::ToSnakeCase;
 use crate::{
     CompilerSession, ModuleAndExpr, SourceId, ast,
     format::FormatWith,
-    ir::{Node, NodeKind},
+    ir::{Node, NodeArena, NodeId, NodeKind},
     module::{LocalDecl, ModuleEnv, id::Id},
     type_scheme::DisplayStyle,
 };
@@ -44,18 +44,28 @@ impl ModuleAndExpr {
             if spans.span.source_id != source_id {
                 continue;
             }
-            let mut code = function.code.borrow_mut();
-            if let Some(script_fn) = code.as_script_mut() {
-                script_fn
-                    .code
-                    .variable_type_annotations(&mut annotations, &function.locals, &env);
+            let code = function.code.borrow();
+            if let Some(script_fn) = code.as_script() {
+                variable_type_annotations(
+                    &script_fn.code.arena,
+                    script_fn.code.root,
+                    &mut annotations,
+                    &function.locals,
+                    &env,
+                );
             }
         }
-        if let Some(expr) = &self.expr
-            && expr.expr.span.source_id == source_id
-        {
-            expr.expr
-                .variable_type_annotations(&mut annotations, &expr.locals, &env);
+        if let Some(expr) = &self.expr {
+            let root_span = expr.expr.arena[expr.expr.root].span;
+            if root_span.source_id == source_id {
+                variable_type_annotations(
+                    &expr.expr.arena,
+                    expr.expr.root,
+                    &mut annotations,
+                    &expr.locals,
+                    &env,
+                );
+            }
         }
 
         // Function signatures.
@@ -182,8 +192,9 @@ impl ModuleAndExpr {
 
         // Return type of the expression, if any.
         if let Some(expr) = &self.expr {
+            let root_span = expr.expr.arena[expr.expr.root].span;
             annotations.push((
-                expr.expr.span.end_usize(),
+                root_span.end_usize(),
                 match style {
                     Mathematical => format!(": {}", expr.ty.display_math_style(&env)),
                     Rust => format!(": {}", expr.ty.display_rust_style(&env)),
@@ -219,9 +230,20 @@ impl ModuleAndExpr {
     }
 }
 
+pub fn variable_type_annotations(
+    arena: &NodeArena,
+    id: NodeId,
+    result: &mut Vec<(usize, String)>,
+    locals: &[LocalDecl],
+    env: &ModuleEnv,
+) {
+    arena[id].variable_type_annotations(arena, result, locals, env)
+}
+
 impl Node {
     pub fn variable_type_annotations(
         &self,
+        arena: &NodeArena,
         result: &mut Vec<(usize, String)>,
         locals: &[LocalDecl],
         env: &ModuleEnv,
@@ -230,26 +252,24 @@ impl Node {
         match &self.kind {
             Immediate(_) => {}
             BuildClosure(build_closure) => {
-                build_closure
-                    .function
-                    .variable_type_annotations(result, locals, env);
+                variable_type_annotations(arena, build_closure.function, result, locals, env);
                 // We do not look into captures as they are generated code.
             }
             Apply(app) => {
-                app.function.variable_type_annotations(result, locals, env);
-                for arg in &app.arguments {
-                    arg.variable_type_annotations(result, locals, env);
+                variable_type_annotations(arena, app.function, result, locals, env);
+                for &arg in &app.arguments {
+                    variable_type_annotations(arena, arg, result, locals, env);
                 }
             }
             StaticApply(app) => {
                 let arity = app.argument_names.len();
                 let is_synthesized = app.function_span.is_empty();
                 if !is_synthesized && let Some(path) = &app.function_path {
-                    for (arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
-                        if !should_hide_arg_name_hint(path, arity, arg_name, arg, locals) {
-                            result.push((arg.span.start_usize(), format!("{arg_name}: ")));
+                    for (&arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
+                        if !should_hide_arg_name_hint(arena, path, arity, arg_name, arg, locals) {
+                            result.push((arena[arg].span.start_usize(), format!("{arg_name}: ")));
                         }
-                        arg.variable_type_annotations(result, locals, env);
+                        variable_type_annotations(arena, arg, result, locals, env);
                     }
                 }
             }
@@ -264,72 +284,70 @@ impl Node {
                 let local = &locals[node.id.as_index()];
                 let (name, name_span) = local.name;
                 if !name.starts_with("@") && !name_span.is_synthesized() {
+                    let value_ty = arena[node.value].ty;
                     if let Some((ty_span, ty_constant)) = local.ty_span {
                         if !ty_constant {
                             result.push((
                                 ty_span.end_usize(),
-                                format!(" ⇨ {}", node.value.ty.format_with(env)),
+                                format!(" ⇨ {}", value_ty.format_with(env)),
                             ));
                         }
                     } else {
                         result.push((
                             name_span.end_usize(),
-                            format!(": {}", node.value.ty.format_with(env)),
+                            format!(": {}", value_ty.format_with(env)),
                         ));
                     }
                 }
-                node.value.variable_type_annotations(result, locals, env);
+                variable_type_annotations(arena, node.value, result, locals, env);
             }
             EnvLoad(_) => {}
-            Return(node) => node.variable_type_annotations(result, locals, env),
+            Return(node) => variable_type_annotations(arena, *node, result, locals, env),
             Block(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(result, locals, env)),
+                .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
             Assign(assignment) => {
-                assignment
-                    .place
-                    .variable_type_annotations(result, locals, env);
-                assignment
-                    .value
-                    .variable_type_annotations(result, locals, env);
+                variable_type_annotations(arena, assignment.place, result, locals, env);
+                variable_type_annotations(arena, assignment.value, result, locals, env);
             }
             Tuple(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(result, locals, env)),
-            Project(projection) => projection.0.variable_type_annotations(result, locals, env),
+                .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
+            Project(data, _) => variable_type_annotations(arena, *data, result, locals, env),
             Record(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(result, locals, env)),
-            FieldAccess(access) => access.0.variable_type_annotations(result, locals, env),
-            ProjectAt(access) => access.0.variable_type_annotations(result, locals, env),
-            Variant(variant) => variant.1.variable_type_annotations(result, locals, env),
-            ExtractTag(node) => node.variable_type_annotations(result, locals, env),
+                .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
+            FieldAccess(data, _) => variable_type_annotations(arena, *data, result, locals, env),
+            ProjectAt(data, _) => variable_type_annotations(arena, *data, result, locals, env),
+            Variant(_, payload) => variable_type_annotations(arena, *payload, result, locals, env),
+            ExtractTag(node) => variable_type_annotations(arena, *node, result, locals, env),
             Array(nodes) => nodes
                 .iter()
-                .for_each(|node| node.variable_type_annotations(result, locals, env)),
+                .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
             Index(array, index) => {
-                array.variable_type_annotations(result, locals, env);
-                index.variable_type_annotations(result, locals, env);
+                variable_type_annotations(arena, *array, result, locals, env);
+                variable_type_annotations(arena, *index, result, locals, env);
             }
             Case(case) => {
-                case.value.variable_type_annotations(result, locals, env);
-                for (_, node) in &case.alternatives {
-                    node.variable_type_annotations(result, locals, env);
+                variable_type_annotations(arena, case.value, result, locals, env);
+                for &(_, alt_id) in &case.alternatives {
+                    variable_type_annotations(arena, alt_id, result, locals, env);
                 }
-                case.default.variable_type_annotations(result, locals, env);
+                variable_type_annotations(arena, case.default, result, locals, env);
             }
-            Loop(body) => body.variable_type_annotations(result, locals, env),
-            SoftBreak => {}
+            Loop(body) => variable_type_annotations(arena, *body, result, locals, env),
+            SoftBreak | Unimplemented => {}
         }
     }
 }
 
 // Essentially implement a similar logic as rust-analyzer's "should_hide_param_name_hint" fn
 fn should_hide_arg_name_hint(
+    arena: &NodeArena,
     function_path: &ast::Path,
     arity: usize,
     arg_name: &str,
-    argument: &Node,
+    argument: NodeId,
     locals: &[LocalDecl],
 ) -> bool {
     if function_path
@@ -360,9 +378,9 @@ fn should_hide_arg_name_hint(
 
     let function_name = function_path.segments.last().unwrap().0;
     is_arg_name_suffix_of_unary_fn_name(&function_name, arity, arg_name)
-        || is_argument_similar_to_arg_name(argument, arg_name, locals)
+        || is_argument_similar_to_arg_name(arena, argument, arg_name, locals)
         || (arity <= 2 && is_obvious_param(arg_name))
-        || is_adt_constructor_similar_to_arg_name(argument, arg_name)
+        || is_adt_constructor_similar_to_arg_name(arena, argument, arg_name)
 }
 
 fn is_arg_name_suffix_of_unary_fn_name(function_name: &str, arity: usize, arg_name: &str) -> bool {
@@ -383,9 +401,14 @@ fn is_arg_name_suffix_of_unary_fn_name(function_name: &str, arity: usize, arg_na
             })
 }
 
-fn is_argument_similar_to_arg_name(argument: &Node, arg_name: &str, locals: &[LocalDecl]) -> bool {
+fn is_argument_similar_to_arg_name(
+    arena: &NodeArena,
+    argument: NodeId,
+    arg_name: &str,
+    locals: &[LocalDecl],
+) -> bool {
     use NodeKind::*;
-    let argument = match argument.kind {
+    let argument = match arena[argument].kind {
         EnvLoad(ref load) => locals[load.id.as_index()].name.0.as_str(),
         _ => return false,
     };
@@ -422,16 +445,21 @@ fn is_obvious_param(arg_name: &str) -> bool {
     arg_name.len() == 1 || is_obvious_param_name
 }
 
-fn is_adt_constructor_similar_to_arg_name(argument: &Node, arg_name: &str) -> bool {
+fn is_adt_constructor_similar_to_arg_name(
+    arena: &NodeArena,
+    argument: NodeId,
+    arg_name: &str,
+) -> bool {
     use NodeKind::*;
-    let tag = match &argument.kind {
+    let node = &arena[argument];
+    let tag = match &node.kind {
         Immediate(value) => {
-            if !argument.ty.data().is_variant() {
+            if !node.ty.data().is_variant() {
                 return false;
             }
             value.value.as_variant().unwrap().tag
         }
-        Variant(variant) => variant.0,
+        Variant(tag, _) => *tag,
         _ => return false,
     };
     tag.to_snake_case() == arg_name

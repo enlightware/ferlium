@@ -24,7 +24,7 @@ use crate::{
     containers::{SVec2, b},
     effects::{EffType, no_effects},
     error::InternalCompilationError,
-    ir::{self, EnvLoad, EnvStore, NodeKind},
+    ir::{self, EnvLoad, EnvStore, NodeId, NodeKind},
     mutability::MutType,
     std::math::int_type,
     r#type::Type,
@@ -46,11 +46,17 @@ impl TypeInference {
         use ir::Node as N;
         use ir::NodeKind as K;
 
+        let sp = |id: DExprId| env.ast_arena[id].span;
+
         // Do we have a degenerate match with no alternative?
         if alternatives.is_empty() {
             if let Some(default) = default {
-                let (node, mut_ty) = self.infer_expr(env, *default)?;
-                return Ok((node.kind, node.ty, mut_ty, node.effects));
+                let (node_id, mut_ty) = self.infer_expr(env, *default)?;
+                let node = &env.ir_arena[node_id];
+                let kind = node.kind.clone();
+                let ty = node.ty;
+                let effects = node.effects.clone();
+                return Ok((kind, ty, mut_ty, effects));
             } else {
                 return Err(internal_compilation_error!(EmptyMatchBody {
                     span: match_span
@@ -60,7 +66,8 @@ impl TypeInference {
 
         // Infer the condition expression and get the pattern type.
         // Currently the type must be the same for all alternatives.
-        let (condition_node, _) = self.infer_expr(env, cond_expr)?;
+        let (condition_node_id, _) = self.infer_expr(env, cond_expr)?;
+        let condition_node = &env.ir_arena[condition_node_id];
         let cond_eff = condition_node.effects.clone();
 
         // Generate a repr projection to get a condition_node.ty: Repr<Is = U> type
@@ -77,7 +84,7 @@ impl TypeInference {
         let is_variant = first_alternative.0.kind.is_variant();
         let alternatives_span = Location::fuse([
             alternatives.first().unwrap().0.span,
-            env.arena[alternatives.last().unwrap().1].span,
+            sp(alternatives.last().unwrap().1),
         ])
         .unwrap();
 
@@ -198,37 +205,39 @@ impl TypeInference {
 
             // Code to store the variant value in the environment.
             let (store_variant, l_match_condition) = store_new(
-                condition_node,
+                condition_node_id,
                 initial_env_size,
                 "@match_condition",
                 MutVal::constant(),
                 pattern_ty,
                 env.all_locals,
             );
-            let store_variant_node = N::new(
+            let store_variant_node_id = env.ir_arena.alloc(N::new(
                 store_variant,
                 Type::unit(),
                 cond_eff.clone(),
-                env.arena[cond_expr].span,
-            );
+                sp(cond_expr),
+            ));
             env.cur_locals.push(l_match_condition);
 
             // Code to load the variant and extract the tag
-            let load_variant = N::new(
+
+            let load_variant_node = N::new(
                 K::EnvLoad(b(EnvLoad {
                     index: initial_env_size,
                     id: l_match_condition,
                 })),
                 pattern_ty,
                 no_effects(),
-                env.arena[cond_expr].span,
+                sp(cond_expr),
             );
-            let extract_tag = N::new(
-                K::ExtractTag(b(load_variant.clone())),
+            let load_variant_id = env.ir_arena.alloc(load_variant_node.clone());
+            let extract_tag_id = env.ir_arena.alloc(N::new(
+                K::ExtractTag(load_variant_id),
                 int_type(),
                 no_effects(),
-                env.arena[cond_expr].span,
-            );
+                sp(cond_expr),
+            ));
 
             // Generate code for each alternative
             let mut return_ty = None;
@@ -253,7 +262,7 @@ impl TypeInference {
                                     MutType::constant(),
                                     *inner_ty,
                                     None,
-                                    env.arena[*expr].span,
+                                    sp(*expr),
                                 ));
                                 env.cur_locals.push(id);
                                 id
@@ -261,7 +270,7 @@ impl TypeInference {
                             .collect();
 
                         // Type check the alternative and generate its code
-                        let mut node = if let Some(return_ty) = return_ty {
+                        let mut node_id = if let Some(return_ty) = return_ty {
                             self.check_expr(
                                 env,
                                 *expr,
@@ -270,22 +279,24 @@ impl TypeInference {
                                 return_ty_span,
                             )?
                         } else {
-                            let (node, _) = self.infer_expr(env, *expr)?;
-                            return_ty = Some(node.ty);
-                            return_ty_span = env.arena[*expr].span;
-                            node
+                            let (node_id, _) = self.infer_expr(env, *expr)?;
+                            return_ty = Some(env.ir_arena[node_id].ty);
+                            return_ty_span = sp(*expr);
+                            node_id
                         };
 
                         // Generate the variable binding code
                         if !bind_var_names.is_empty() {
-                            let mut project_nodes = Vec::new();
+                            let mut project_node_ids = Vec::new();
                             for i in 0..inner_tys.len() {
-                                let project_variant_inner = N::new(
-                                    K::Project(b((load_variant.clone(), 0))),
+                                let load_variant_id_inner =
+                                    env.ir_arena.alloc(load_variant_node.clone());
+                                let project_variant_inner_id = env.ir_arena.alloc(N::new(
+                                    K::Project(load_variant_id_inner, 0),
                                     *variant_inner_ty,
                                     no_effects(),
-                                    env.arena[*expr].span,
-                                );
+                                    sp(*expr),
+                                ));
                                 let inner_ty = inner_tys[i];
                                 let project_index = if variant_inner_ty.data().is_tuple() {
                                     Some(i)
@@ -300,42 +311,45 @@ impl TypeInference {
                                     None
                                 };
                                 let project_inner_kind = if let Some(index) = project_index {
-                                    K::Project(b((project_variant_inner, index)))
+                                    K::Project(project_variant_inner_id, index)
                                 } else {
-                                    K::FieldAccess(b((project_variant_inner, bind_var_names[i].0)))
+                                    K::FieldAccess(project_variant_inner_id, bind_var_names[i].0)
                                 };
-                                let project_inner = N::new(
+                                let project_inner_id = env.ir_arena.alloc(N::new(
                                     project_inner_kind,
                                     inner_ty,
                                     no_effects(),
-                                    env.arena[*expr].span,
-                                );
-                                let store_projected_inner = N::new(
+                                    sp(*expr),
+                                ));
+                                let store_projected_inner_id = env.ir_arena.alloc(N::new(
                                     K::EnvStore(b(EnvStore {
-                                        value: project_inner,
+                                        value: project_inner_id,
                                         index: alt_start_env_size + i,
                                         id: l_bindings[i],
                                     })),
                                     Type::unit(),
                                     no_effects(),
-                                    env.arena[*expr].span,
-                                );
-                                project_nodes.push(store_projected_inner);
+                                    sp(*expr),
+                                ));
+                                project_node_ids.push(store_projected_inner_id);
                             }
-                            project_nodes.push(node);
+                            project_node_ids.push(node_id);
                             let proj_effects = self.make_dependent_effect(
-                                project_nodes.iter().map(|n| &n.effects).collect::<Vec<_>>(),
+                                project_node_ids
+                                    .iter()
+                                    .map(|id| &env.ir_arena[*id].effects)
+                                    .collect::<Vec<_>>(),
                             );
-                            node = N::new(
-                                K::Block(b(SVec2::from_vec(project_nodes))),
+                            node_id = env.ir_arena.alloc(N::new(
+                                K::Block(b(SVec2::from_vec(project_node_ids))),
                                 return_ty.unwrap(),
                                 proj_effects,
-                                env.arena[*expr].span,
-                            );
+                                sp(*expr),
+                            ));
                         }
                         assert!(env.cur_locals.len() == alt_start_env_size + bind_var_names.len());
                         env.cur_locals.truncate(alt_start_env_size);
-                        Result::<_, InternalCompilationError>::Ok((tag_value, node))
+                        Result::<_, InternalCompilationError>::Ok((tag_value, node_id))
                     },
                 )
                 .collect::<Result<Vec<_>, _>>()?;
@@ -343,7 +357,7 @@ impl TypeInference {
             let alt_eff = self.make_dependent_effect(
                 alternatives
                     .iter()
-                    .map(|(_, n)| &n.effects)
+                    .map(|(_, id)| &env.ir_arena[*id].effects)
                     .collect::<Vec<_>>(),
             );
 
@@ -353,7 +367,7 @@ impl TypeInference {
                 for (tag, _, variant_inner_ty) in types {
                     self.add_pub_constraint(PubTypeConstraint::new_type_has_variant(
                         pattern_ty,
-                        env.arena[cond_expr].span,
+                        sp(cond_expr),
                         tag,
                         variant_inner_ty,
                         alternatives_span,
@@ -375,7 +389,7 @@ impl TypeInference {
                 let variant_ty = Type::variant(variant_inner_tys);
                 self.add_sub_type_constraint(
                     pattern_ty,
-                    env.arena[cond_expr].span,
+                    sp(cond_expr),
                     variant_ty,
                     alternatives_span,
                 );
@@ -390,38 +404,46 @@ impl TypeInference {
             env.cur_locals.truncate(initial_env_size);
 
             // Generate the final code node
-            let case_eff = self.make_dependent_effect([&alt_eff, &default.effects]);
+            let default_eff = env.ir_arena[default].effects.clone();
+            let case_eff = self.make_dependent_effect([&alt_eff, &default_eff]);
             let case = K::Case(b(ir::Case {
-                value: extract_tag,
+                value: extract_tag_id,
                 alternatives,
                 default,
             }));
-            let case_node = N::new(case, return_ty, case_eff, match_span);
-            let effects =
-                self.make_dependent_effect([&store_variant_node.effects, &case_node.effects]);
-            let node = K::Block(b(SVec2::from_vec(vec![store_variant_node, case_node])));
+            let case_node_id = env
+                .ir_arena
+                .alloc(N::new(case, return_ty, case_eff, match_span));
+            let store_eff = &env.ir_arena[store_variant_node_id].effects;
+            let case_node_eff = &env.ir_arena[case_node_id].effects;
+            let effects = self.make_dependent_effect([store_eff, case_node_eff]);
+            let node = K::Block(b(SVec2::from_vec(vec![
+                store_variant_node_id,
+                case_node_id,
+            ])));
             (node, return_ty, MutType::constant(), effects)
         } else {
             // Literal patterns, convert optional default to mandatory one
             let return_ty = self.fresh_type_var_ty();
             let (node, return_ty, effects) = if let Some(default) = default {
-                let default =
+                let default_id =
                     self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
                 let (alternatives, alt_eff) = self.check_literal_patterns(
                     env,
                     alternatives,
                     first_alternative_span,
                     pattern_ty,
-                    env.arena[cond_expr].span,
+                    sp(cond_expr),
                     return_ty,
                     match_span,
                 )?;
-                let effects = self.make_dependent_effect([&cond_eff, &alt_eff, &default.effects]);
+                let default_eff = &env.ir_arena[default_id].effects;
+                let effects = self.make_dependent_effect([&cond_eff, &alt_eff, default_eff]);
                 (
                     K::Case(b(ir::Case {
-                        value: condition_node,
+                        value: condition_node_id,
                         alternatives,
-                        default,
+                        default: default_id,
                     })),
                     return_ty,
                     effects,
@@ -432,7 +454,7 @@ impl TypeInference {
                     alternatives,
                     first_alternative_span,
                     pattern_ty,
-                    env.arena[cond_expr].span,
+                    sp(cond_expr),
                     return_ty,
                     match_span,
                 )?;
@@ -442,12 +464,12 @@ impl TypeInference {
                     alternatives.iter().map(|(v, _)| v.clone()).collect(),
                 );
                 let effects = self.make_dependent_effect([cond_eff, alt_eff]);
-                let default = alternatives.pop().unwrap().1;
+                let default_id = alternatives.pop().unwrap().1;
                 (
                     K::Case(b(ir::Case {
-                        value: condition_node,
+                        value: condition_node_id,
                         alternatives,
-                        default,
+                        default: default_id,
                     })),
                     return_ty,
                     effects,
@@ -467,7 +489,7 @@ impl TypeInference {
         expected_pattern_span: Location,
         expected_return_type: Type,
         expected_return_span: Location,
-    ) -> Result<(Vec<(Value, ir::Node)>, EffType), InternalCompilationError> {
+    ) -> Result<(Vec<(Value, NodeId)>, EffType), InternalCompilationError> {
         let mut seen_values = FxHashMap::default();
         let (pairs, effects): (Vec<_>, Vec<_>) = pairs
             .iter()
@@ -487,21 +509,21 @@ impl TypeInference {
                         expected_pattern_type,
                         expected_pattern_span,
                     );
-                    let node = self.check_expr(
+                    let node_id = self.check_expr(
                         env,
                         *expr,
                         expected_return_type,
                         MutType::constant(),
                         expected_return_span,
                     )?;
-                    let effects = node.effects.clone();
-                    Ok(((literal.clone().into_value(), node), effects))
+                    let effects = env.ir_arena[node_id].effects.clone();
+                    Ok(((literal.clone().into_value(), node_id), effects))
                 } else {
                     Err(internal_compilation_error!(InconsistentPattern {
                         a_type: PatternType::Literal,
                         a_span: first_pattern_span,
                         b_type: pattern.kind.r#type(),
-                        b_span: env.arena[*expr].span,
+                        b_span: env.ast_arena[*expr].span,
                     }))
                 }
             })

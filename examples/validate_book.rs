@@ -17,6 +17,7 @@ use std::process;
 
 use directories::ProjectDirs;
 use ferlium::error::CompilationError;
+use ferlium::eval::eval_node;
 use ferlium::eval::{ControlFlow, RuntimeError};
 use ferlium::{CompilerSession, ModuleAndExpr};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
@@ -423,10 +424,15 @@ fn try_compile_and_run(
         .map_err(RunError::Compilation)?;
 
     if let Some(expr) = expr {
-        expr.expr
-            .eval(module, &expr.locals, session)
-            .map(ControlFlow::into_value)
-            .map_err(RunError::Runtime)?;
+        eval_node(
+            &expr.expr.arena,
+            expr.expr.root,
+            module,
+            &expr.locals,
+            session,
+        )
+        .map(ControlFlow::into_value)
+        .map_err(RunError::Runtime)?;
     }
 
     Ok(())

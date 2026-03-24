@@ -19,6 +19,7 @@ use crate::{
         CompilationErrorImpl, ImportKind, MutabilityMustBeWhat, WhatIsNotAProductType,
         WhichProductTypeIsNot,
     },
+    eval::eval_node,
     format::FormatWith,
     location::SourceTable,
     run_fn_native,
@@ -831,10 +832,13 @@ impl Compiler {
 
     pub fn run_expr(&self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
-            match expr
-                .expr
-                .eval(self.user_module.module_id, &expr.locals, &self.session)
-            {
+            match eval_node(
+                &expr.expr.arena,
+                expr.expr.root,
+                self.user_module.module_id,
+                &expr.locals,
+                &self.session,
+            ) {
                 Ok(value) => {
                     let value = value.into_value();
                     let module = self

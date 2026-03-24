@@ -1910,13 +1910,17 @@ fn type_ascription() {
     assert_eq!(session.run("(5: float)"), float(5.0));
     // Optimisation
     let mut compile_expr = |s: &str| session.compile(s).expr.unwrap().expr;
+    let body = compile_expr("1");
+    let root = &body.arena[body.root];
     assert!(
-        compile_expr("1").kind.as_block().unwrap()[0]
+        body.arena[root.kind.as_block().unwrap()[0]]
             .kind
             .is_static_apply()
     );
+    let body = compile_expr("(1: int)");
+    let root = &body.arena[body.root];
     assert!(
-        compile_expr("(1: int)").kind.as_block().unwrap()[0]
+        body.arena[root.kind.as_block().unwrap()[0]]
             .kind
             .is_immediate()
     );

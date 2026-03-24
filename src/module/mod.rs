@@ -44,7 +44,7 @@ use crate::{
     format::FormatWith,
     function::Function,
     internal_compilation_error,
-    ir::Node,
+    ir::{self, IrBody},
     module::id::{Id, NamedIndexed},
     r#trait::TraitRef,
     r#type::{LocalTypeAliasId, Type, TypeAliases, TypeDefRef},
@@ -261,14 +261,14 @@ impl Module {
         self.functions.get_mut(id.as_index()).map(|f| (id, f))
     }
 
-    /// Get a function by name only in this module and return its script node, if it is a script function.
-    pub fn get_function_node(&mut self, name: Ustr) -> Option<Ref<'_, Node>> {
-        self.get_function(name)?.get_node()
+    /// Get a function by name only in this module and return its IR body, if it is a script function.
+    pub fn get_function_ir_body(&self, name: Ustr) -> Option<Ref<'_, IrBody>> {
+        self.get_function(name)?.get_ir_body()
     }
 
-    /// Gets a function by name only in this module and return its mutable script node, if it is a script function.
-    pub fn get_function_node_mut(&mut self, name: Ustr) -> Option<RefMut<'_, Node>> {
-        self.get_function_mut(name)?.get_node_mut()
+    /// Gets a function by name only in this module and return its mutable IR body, if it is a script function.
+    pub fn get_function_ir_body_mut(&mut self, name: Ustr) -> Option<RefMut<'_, IrBody>> {
+        self.get_function_mut(name)?.get_ir_body_mut()
     }
 
     /// Get a local function name by ID (slow, iterates over the def table)
@@ -567,10 +567,10 @@ impl Module {
     /// Return the type for the source pos, if any.
     pub fn type_at(&self, pos: usize) -> Option<Type> {
         for function in self.functions.iter() {
-            let mut code = function.code.borrow_mut();
+            let code = function.code.borrow();
             let ty = code
-                .as_script_mut()
-                .and_then(|script_fn| script_fn.code.type_at(pos));
+                .as_script()
+                .and_then(|script_fn| ir::type_at(&script_fn.code.arena, script_fn.code.root, pos));
             if ty.is_some() {
                 return ty;
             }

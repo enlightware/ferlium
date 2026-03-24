@@ -43,9 +43,14 @@ impl Deriver for SelfCastDeriver {
         // No-op implementation
         let locals = vec![local("self", from_ty)];
         let id = LocalDeclId::from_index(0);
-        let code = ir::Node::new(load(0, id), from_ty, EffType::empty(), span);
+        let mut arena = ir::NodeArena::with_capacity(1);
+        let code_id = arena.alloc(ir::Node::new(load(0, id), from_ty, EffType::empty(), span));
+        let ir_body = ir::IrBody {
+            arena,
+            root: code_id,
+        };
         let local_impl_id =
-            solver.add_concrete_impl_from_code(code, locals, trait_ref, input_types, []);
+            solver.add_concrete_impl_from_code(ir_body, locals, trait_ref, input_types, []);
         Ok(Some(TraitImplId::Local(local_impl_id)))
 
         // TODO: optimize away the cast entirely in the compiler

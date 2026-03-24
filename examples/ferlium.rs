@@ -6,6 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use ferlium::ir;
 use ferlium::{FxHashMap, FxHashSet};
 use std::env;
 use std::io::{self, IsTerminal, Read};
@@ -28,7 +29,7 @@ use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 use ustr::ustr;
 
-use ferlium::eval::{EvalCtx, ValOrMut};
+use ferlium::eval::{EvalCtx, ValOrMut, eval_node_with_ctx};
 
 /// A wrapper around location to implement ariadne::Span
 #[derive(Debug, Clone, Copy)]
@@ -550,7 +551,7 @@ fn process_input(
             let module_env = ModuleEnv::new(&module, session.modules());
             println!(
                 "Expr IR:\n{}",
-                expr.expr.format_with(&(&expr.locals, &module_env))
+                ir::IrBodyDisplay::new(&expr.expr, &expr.locals).format_with(&module_env)
             );
         }
     }
@@ -561,7 +562,12 @@ fn process_input(
         let mut eval_ctx =
             EvalCtx::with_environment(module_id.clone(), environment.clone(), session);
         let old_size = eval_ctx.environment.len();
-        let result = expr.expr.eval_with_ctx(&mut eval_ctx, &expr.locals);
+        let result = eval_node_with_ctx(
+            &expr.expr.arena,
+            expr.expr.root,
+            &mut eval_ctx,
+            &expr.locals,
+        );
         *locals = expr.locals;
         match result {
             Ok(value) => {

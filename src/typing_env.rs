@@ -13,6 +13,7 @@ use crate::{
     ast::{self, DExprArena},
     error::InternalCompilationError,
     function::FunctionDefinition,
+    ir::NodeArena,
     module::{
         self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget,
         LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
@@ -86,7 +87,9 @@ pub struct TypingEnv<'m> {
     /// The next index for a new module function created from a lambda
     pub(crate) base_local_function_index: u32,
     /// The desugared expression arena, used to look up child expression nodes by ID.
-    pub(crate) arena: &'m DExprArena,
+    pub(crate) ast_arena: &'m DExprArena,
+    /// The IR node arena, used to allocate IR nodes during type inference.
+    pub(crate) ir_arena: &'m mut NodeArena,
 }
 
 impl<'m> TypingEnv<'m> {

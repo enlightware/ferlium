@@ -18,6 +18,7 @@ use crate::{
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexMap;
+use la_arena::{Arena, Idx};
 use ustr::Ustr;
 
 use crate::{
@@ -29,6 +30,19 @@ use crate::{
     type_inference::InstSubstitution,
     value::Value,
 };
+
+/// An index to a node in the IR arena
+pub type NodeId = Idx<Node>;
+
+/// An arena of IR nodes
+pub type NodeArena = Arena<Node>;
+
+/// A self-contained IR body with its arena and root node
+#[derive(Debug, Clone, new)]
+pub struct IrBody {
+    pub arena: NodeArena,
+    pub root: NodeId,
+}
 
 /// Function instantiation data that are needed to fill dictionaries
 #[derive(Debug, Clone, new)]
@@ -94,14 +108,14 @@ impl Immediate {
 
 #[derive(Debug, Clone)]
 pub struct BuildClosure {
-    pub function: Node,
-    pub captures: Vec<Node>,
+    pub function: NodeId,
+    pub captures: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Application {
-    pub function: Node,
-    pub arguments: Vec<Node>,
+    pub function: NodeId,
+    pub arguments: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +123,7 @@ pub struct StaticApplication {
     pub function: FunctionId,
     pub function_path: Option<ast::Path>,
     pub function_span: Location,
-    pub arguments: Vec<Node>,
+    pub arguments: Vec<NodeId>,
     pub argument_names: Vec<Ustr>,
     pub ty: FnType,
     pub inst_data: FnInstData,
@@ -121,7 +135,7 @@ pub struct TraitFnApplication {
     pub function_index: usize,
     pub function_path: ast::Path,
     pub function_span: Location,
-    pub arguments: Vec<Node>,
+    pub arguments: Vec<NodeId>,
     pub arguments_unnamed: UnnamedArg,
     pub ty: FnType,
     pub input_tys: Vec<Type>,
@@ -131,22 +145,13 @@ impl TraitFnApplication {
     pub fn argument_names(&self) -> &[Ustr] {
         &self.trait_ref.functions[self.function_index].1.arg_names
     }
-
-    pub fn argument_types(&self) -> impl Iterator<Item = Type> + '_ {
-        self.arguments.iter().map(|node| node.ty)
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct EnvStore {
-    pub value: Node,
+    pub value: NodeId,
     pub index: usize,
     pub id: LocalDeclId,
-}
-impl EnvStore {
-    pub fn instantiate(&mut self, subst: &InstSubstitution) {
-        self.value.instantiate(subst);
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,15 +162,15 @@ pub struct EnvLoad {
 
 #[derive(Debug, Clone)]
 pub struct Assignment {
-    pub place: Node,
-    pub value: Node,
+    pub place: NodeId,
+    pub value: NodeId,
 }
 
 #[derive(Debug, Clone)]
 pub struct Case {
-    pub value: Node,
-    pub alternatives: Vec<(Value, Node)>,
-    pub default: Node,
+    pub value: NodeId,
+    pub alternatives: Vec<(Value, NodeId)>,
+    pub default: NodeId,
 }
 
 #[derive(Debug, Clone)]
@@ -194,25 +199,62 @@ pub enum NodeKind {
     GetDictionary(GetDictionary),
     EnvStore(B<EnvStore>),
     EnvLoad(B<EnvLoad>),
-    Return(B<Node>),
-    Block(B<SVec2<Node>>),
+    Return(NodeId),
+    Block(B<SVec2<NodeId>>),
     Assign(B<Assignment>),
-    Tuple(B<SVec2<Node>>),
-    Project(B<(Node, usize)>),
-    Record(B<SVec2<Node>>),
+    Tuple(B<SVec2<NodeId>>),
+    Project(NodeId, usize),
+    Record(B<SVec2<NodeId>>),
     // Note: this should only exist transiently in the IR and never be executed
-    FieldAccess(B<(Node, Ustr)>),
+    FieldAccess(NodeId, Ustr),
     /// Access a tuple value using a local variable as index, after dictionary passing phase
-    ProjectAt(B<(Node, usize)>),
+    ProjectAt(NodeId, usize),
     /// Build a variant (tagged union) with a name and a value
-    Variant(B<(Ustr, Node)>),
+    Variant(Ustr, NodeId),
     /// Extract the tag of a variant as an isize, by casting the pointer to the string
-    ExtractTag(B<Node>),
-    Array(B<SVec2<Node>>),
-    Index(B<Node>, B<Node>),
+    ExtractTag(NodeId),
+    Array(B<SVec2<NodeId>>),
+    Index(NodeId, NodeId),
     Case(B<Case>),
-    Loop(B<Node>),
+    Loop(NodeId),
     SoftBreak,
+    Unimplemented,
+}
+
+impl NodeKind {
+    pub fn child_node_ids(&self) -> Vec<NodeId> {
+        use NodeKind::*;
+        match self {
+            Immediate(_) | GetFunction(_) | GetDictionary(_) | EnvLoad(_) | SoftBreak
+            | Unimplemented => vec![],
+            BuildClosure(bc) => {
+                let mut v = vec![bc.function];
+                v.extend_from_slice(&bc.captures);
+                v
+            }
+            Apply(app) => {
+                let mut v = vec![app.function];
+                v.extend_from_slice(&app.arguments);
+                v
+            }
+            StaticApply(app) => app.arguments.clone(),
+            TraitFnApply(app) => app.arguments.clone(),
+            EnvStore(store) => vec![store.value],
+            Return(node) | ExtractTag(node) | Loop(node) => vec![*node],
+            Block(nodes) | Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.to_vec(),
+            Assign(a) => vec![a.place, a.value],
+            Project(n, _) | ProjectAt(n, _) => vec![*n],
+            FieldAccess(fa, _) => vec![*fa],
+            Variant(_, n) => vec![*n],
+            Index(a, b) => vec![*a, *b],
+            Case(case) => {
+                let mut v = vec![case.value];
+                v.extend(case.alternatives.iter().map(|(_, n)| *n));
+                v.push(case.default);
+                v
+            }
+        }
+    }
 }
 
 /// A node of the expression-based execution tree
@@ -228,9 +270,41 @@ pub struct Node {
     pub span: Location,
 }
 
+pub fn format_ind(
+    arena: &NodeArena,
+    id: NodeId,
+    f: &mut std::fmt::Formatter,
+    locals: &[LocalDecl],
+    env: &ModuleEnv<'_>,
+    spacing: usize,
+    indent: usize,
+) -> std::fmt::Result {
+    arena[id].format_ind(arena, f, locals, env, spacing, indent)
+}
+
+pub fn type_at(arena: &NodeArena, node_id: NodeId, pos: usize) -> Option<Type> {
+    arena[node_id].type_at(arena, pos)
+}
+
+pub(crate) fn all_unbound_ty_vars(arena: &NodeArena, id: NodeId) -> UnboundTyVars {
+    let mut unbound = IndexMap::new();
+    unbound_ty_vars(arena, id, &mut unbound, &[]);
+    unbound
+}
+
+pub(crate) fn unbound_ty_vars(
+    arena: &NodeArena,
+    node_id: NodeId,
+    result: &mut UnboundTyVars,
+    ignore: &[TypeVar],
+) {
+    arena[node_id].unbound_ty_vars(arena, result, ignore)
+}
+
 impl Node {
     pub fn format_ind(
         &self,
+        arena: &NodeArena,
         f: &mut std::fmt::Formatter,
         locals: &[LocalDecl],
         env: &ModuleEnv<'_>,
@@ -248,25 +322,30 @@ impl Node {
             }
             BuildClosure(build_closure) => {
                 writeln!(f, "{indent_str}build closure of")?;
-                build_closure
-                    .function
-                    .format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(
+                    arena,
+                    build_closure.function,
+                    f,
+                    locals,
+                    env,
+                    spacing,
+                    indent + 1,
+                )?;
                 writeln!(f, "{indent_str}by capturing [")?;
-                for capture in &build_closure.captures {
-                    capture.format_ind(f, locals, env, spacing, indent + 1)?;
+                for &capture in &build_closure.captures {
+                    format_ind(arena, capture, f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}]")?;
             }
             Apply(app) => {
                 writeln!(f, "{indent_str}eval")?;
-                app.function
-                    .format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, app.function, f, locals, env, spacing, indent + 1)?;
                 if app.arguments.is_empty() {
                     writeln!(f, "{indent_str}and apply to ()")?;
                 } else {
                     writeln!(f, "{indent_str}and apply to (")?;
-                    for arg in &app.arguments {
-                        arg.format_ind(f, locals, env, spacing, indent + 1)?;
+                    for &arg in &app.arguments {
+                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -279,11 +358,11 @@ impl Node {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for (name, arg) in app.argument_names.iter().zip(app.arguments.iter()) {
+                    for (name, &arg) in app.argument_names.iter().zip(app.arguments.iter()) {
                         if !name.is_empty() {
                             writeln!(f, "{indent_str}  {name}:")?;
                         }
-                        arg.format_ind(f, locals, env, spacing, indent + 1)?;
+                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -301,9 +380,9 @@ impl Node {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for (name, arg) in fn_def.arg_names.iter().zip(app.arguments.iter()) {
+                    for (name, &arg) in fn_def.arg_names.iter().zip(app.arguments.iter()) {
                         writeln!(f, "{indent_str}  {name}:")?;
-                        arg.format_ind(f, locals, env, spacing, indent + 1)?;
+                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -323,11 +402,11 @@ impl Node {
                 writeln!(
                     f,
                     "{indent_str}store {} at {} as \"{}\"",
-                    node.value.ty.format_with(env),
+                    arena[node.value].ty.format_with(env),
                     node.index,
                     name,
                 )?;
-                node.value.format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
             }
             EnvLoad(node) => {
                 let name = locals[node.id.as_index()].name.0;
@@ -335,37 +414,31 @@ impl Node {
             }
             Return(node) => {
                 writeln!(f, "{indent_str}return")?;
-                node.format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, *node, f, locals, env, spacing, indent + 1)?;
             }
             Block(nodes) => {
                 writeln!(f, "{indent_str}block {{")?;
-                for node in nodes.iter() {
-                    node.format_ind(f, locals, env, spacing, indent + 1)?;
+                for &node in nodes.iter() {
+                    format_ind(arena, node, f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}}}")?;
             }
             Assign(assignment) => {
                 writeln!(f, "{indent_str}assign")?;
-                assignment
-                    .place
-                    .format_ind(f, locals, env, spacing, indent + 1)?;
-                assignment
-                    .value
-                    .format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, assignment.place, f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, assignment.value, f, locals, env, spacing, indent + 1)?;
             }
             Tuple(nodes) => {
                 writeln!(f, "{indent_str}build tuple (")?;
-                for node in nodes.iter() {
-                    node.format_ind(f, locals, env, spacing, indent + 1)?;
+                for &node in nodes.iter() {
+                    format_ind(arena, node, f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str})")?;
             }
-            Project(projection) => {
+            Project(data, index) => {
                 writeln!(f, "{indent_str}project")?;
-                projection
-                    .0
-                    .format_ind(f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}at {index}", index = projection.1)?;
+                format_ind(arena, *data, f, locals, env, spacing, indent + 1)?;
+                writeln!(f, "{indent_str}at {}", *index)?;
             }
             Record(nodes) => {
                 let inner_ty = if let TypeKind::Named(named) = &*self.ty.data() {
@@ -381,61 +454,63 @@ impl Node {
                     .iter()
                     .map(|(name, _)| *name)
                     .collect();
-                for (node, field) in nodes.iter().zip(fields) {
+                for (&node, field) in nodes.iter().zip(fields) {
                     writeln!(f, "{indent_str}⎸ {field}:")?;
-                    node.format_ind(f, locals, env, spacing, indent + 2)?;
+                    format_ind(arena, node, f, locals, env, spacing, indent + 2)?;
                 }
                 writeln!(f, "{indent_str}}}")?;
             }
-            FieldAccess(access) => {
+            FieldAccess(data, field) => {
                 writeln!(f, "{indent_str}access")?;
-                access.0.format_ind(f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}at field {}", access.1)?;
+                format_ind(arena, *data, f, locals, env, spacing, indent + 1)?;
+                writeln!(f, "{indent_str}at field {}", field)?;
             }
-            ProjectAt(access) => {
+            ProjectAt(data, index) => {
                 writeln!(f, "{indent_str}access")?;
-                access.0.format_ind(f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}at field referenced by local {}", access.1)?;
+                format_ind(arena, *data, f, locals, env, spacing, indent + 1)?;
+                writeln!(f, "{indent_str}at field referenced by local {}", *index)?;
             }
-            Variant(variant) => {
-                writeln!(f, "{indent_str}variant with tag: {}", variant.0)?;
-                variant.1.format_ind(f, locals, env, spacing, indent + 1)?;
+            Variant(tag, payload) => {
+                writeln!(f, "{indent_str}variant with tag: {}", *tag)?;
+                format_ind(arena, *payload, f, locals, env, spacing, indent + 1)?;
             }
             ExtractTag(node) => {
                 writeln!(f, "{indent_str}extract tag of")?;
-                node.format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, *node, f, locals, env, spacing, indent + 1)?;
             }
             Array(nodes) => {
                 writeln!(f, "{indent_str}build array [")?;
-                for node in nodes.iter() {
-                    node.format_ind(f, locals, env, spacing, indent + 1)?;
+                for &node in nodes.iter() {
+                    format_ind(arena, node, f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}]")?;
             }
             Index(array, index) => {
                 writeln!(f, "{indent_str}index")?;
-                array.format_ind(f, locals, env, spacing, indent + 1)?;
-                index.format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, *array, f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, *index, f, locals, env, spacing, indent + 1)?;
             }
             Case(case) => {
                 writeln!(f, "{indent_str}match")?;
-                case.value.format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, case.value, f, locals, env, spacing, indent + 1)?;
                 for (alternative, node) in &case.alternatives {
                     write!(f, "{indent_str}case ",)?;
                     alternative.format_as_string_repr(f)?;
                     writeln!(f)?;
-                    node.format_ind(f, locals, env, spacing, indent + 1)?;
+                    format_ind(arena, *node, f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}default")?;
-                case.default
-                    .format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, case.default, f, locals, env, spacing, indent + 1)?;
             }
             Loop(body) => {
                 writeln!(f, "{indent_str}loop")?;
-                body.format_ind(f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, *body, f, locals, env, spacing, indent + 1)?;
             }
             SoftBreak => {
                 writeln!(f, "{indent_str}soft break")?;
+            }
+            Unimplemented => {
+                writeln!(f, "{indent_str}unimplemented")?;
             }
         };
         write!(f, "{indent_str}↳ {}", self.ty.format_with(env))?;
@@ -445,7 +520,7 @@ impl Node {
         writeln!(f)
     }
 
-    pub fn type_at(&self, pos: usize) -> Option<Type> {
+    pub fn type_at(&self, arena: &NodeArena, pos: usize) -> Option<Type> {
         // Early exit if the position is outside the node's span.
         if pos < self.span.start_usize() || pos >= self.span.end_usize() {
             return None;
@@ -456,31 +531,31 @@ impl Node {
         match &self.kind {
             Immediate(_) => {}
             BuildClosure(build_closure) => {
-                if let Some(ty) = build_closure.function.type_at(pos) {
+                if let Some(ty) = type_at(arena, build_closure.function, pos) {
                     return Some(ty);
                 }
                 // We do not look into captures as they are generated code.
             }
             Apply(app) => {
-                if let Some(ty) = app.function.type_at(pos) {
+                if let Some(ty) = type_at(arena, app.function, pos) {
                     return Some(ty);
                 }
-                for arg in &app.arguments {
-                    if let Some(ty) = arg.type_at(pos) {
+                for &arg in &app.arguments {
+                    if let Some(ty) = type_at(arena, arg, pos) {
                         return Some(ty);
                     }
                 }
             }
             StaticApply(app) => {
-                for arg in &app.arguments {
-                    if let Some(ty) = arg.type_at(pos) {
+                for &arg in &app.arguments {
+                    if let Some(ty) = type_at(arena, arg, pos) {
                         return Some(ty);
                     }
                 }
             }
             TraitFnApply(app) => {
-                for arg in &app.arguments {
-                    if let Some(ty) = arg.type_at(pos) {
+                for &arg in &app.arguments {
+                    if let Some(ty) = type_at(arena, arg, pos) {
                         return Some(ty);
                     }
                 }
@@ -491,118 +566,117 @@ impl Node {
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
             }
-            EnvStore(node) => {
-                if let Some(ty) = node.value.type_at(pos) {
+            EnvStore(store) => {
+                if let Some(ty) = type_at(arena, store.value, pos) {
                     return Some(ty);
                 }
             }
             EnvLoad(_) => {}
             Return(node) => {
-                if let Some(ty) = node.type_at(pos) {
+                if let Some(ty) = type_at(arena, *node, pos) {
                     return Some(ty);
                 }
             }
             Block(nodes) => {
-                for node in nodes.iter() {
-                    if let Some(ty) = node.type_at(pos) {
+                for &child in nodes.iter() {
+                    if let Some(ty) = type_at(arena, child, pos) {
                         return Some(ty);
                     }
                 }
             }
             Assign(assignment) => {
-                if let Some(ty) = assignment.place.type_at(pos) {
+                if let Some(ty) = type_at(arena, assignment.place, pos) {
                     return Some(ty);
                 }
-                if let Some(ty) = assignment.value.type_at(pos) {
+                if let Some(ty) = type_at(arena, assignment.value, pos) {
                     return Some(ty);
                 }
             }
             Tuple(nodes) => {
-                for node in nodes.iter() {
-                    if let Some(ty) = node.type_at(pos) {
+                for &child in nodes.iter() {
+                    if let Some(ty) = type_at(arena, child, pos) {
                         return Some(ty);
                     }
                 }
             }
-            Project(projection) => {
-                if let Some(ty) = projection.0.type_at(pos) {
+            Project(data, _) => {
+                if let Some(ty) = type_at(arena, *data, pos) {
                     return Some(ty);
                 }
             }
             Record(nodes) => {
-                for node in nodes.iter() {
-                    if let Some(ty) = node.type_at(pos) {
+                for &child in nodes.iter() {
+                    if let Some(ty) = type_at(arena, child, pos) {
                         return Some(ty);
                     }
                 }
             }
-            FieldAccess(access) => {
-                if let Some(ty) = access.0.type_at(pos) {
+            FieldAccess(data, _) => {
+                if let Some(ty) = type_at(arena, *data, pos) {
                     return Some(ty);
                 }
             }
-            ProjectAt(access) => {
-                if let Some(ty) = access.0.type_at(pos) {
+            ProjectAt(data, _) => {
+                if let Some(ty) = type_at(arena, *data, pos) {
                     return Some(ty);
                 }
             }
-            Variant(variant) => {
-                if let Some(ty) = variant.1.type_at(pos) {
+            Variant(_, payload) => {
+                if let Some(ty) = type_at(arena, *payload, pos) {
                     return Some(ty);
                 }
             }
             ExtractTag(node) => {
-                if let Some(ty) = node.type_at(pos) {
+                if let Some(ty) = type_at(arena, *node, pos) {
                     return Some(ty);
                 }
             }
             Array(nodes) => {
-                for node in nodes.iter() {
-                    if let Some(ty) = node.type_at(pos) {
+                for &node in nodes.iter() {
+                    if let Some(ty) = type_at(arena, node, pos) {
                         return Some(ty);
                     }
                 }
             }
             Index(array, index) => {
-                if let Some(ty) = array.type_at(pos) {
+                if let Some(ty) = type_at(arena, *array, pos) {
                     return Some(ty);
                 }
-                if let Some(ty) = index.type_at(pos) {
+                if let Some(ty) = type_at(arena, *index, pos) {
                     return Some(ty);
                 }
             }
             Case(case) => {
-                if let Some(ty) = case.value.type_at(pos) {
+                if let Some(ty) = type_at(arena, case.value, pos) {
                     return Some(ty);
                 }
                 for (_, node) in &case.alternatives {
-                    if let Some(ty) = node.type_at(pos) {
+                    if let Some(ty) = type_at(arena, *node, pos) {
                         return Some(ty);
                     }
                 }
-                if let Some(ty) = case.default.type_at(pos) {
+                if let Some(ty) = type_at(arena, case.default, pos) {
                     return Some(ty);
                 }
             }
             Loop(body) => {
-                if let Some(ty) = body.type_at(pos) {
+                if let Some(ty) = type_at(arena, *body, pos) {
                     return Some(ty);
                 }
             }
-            SoftBreak => {}
+            SoftBreak | Unimplemented => {}
         }
 
         // No children has this position, return our type.
         Some(self.ty)
     }
 
-    pub(crate) fn all_unbound_ty_vars(&self) -> UnboundTyVars {
-        let mut unbound = IndexMap::new();
-        self.unbound_ty_vars(&mut unbound, &[]);
-        unbound
-    }
-
-    pub(crate) fn unbound_ty_vars(&self, result: &mut UnboundTyVars, ignore: &[TypeVar]) {
+    pub(crate) fn unbound_ty_vars(
+        &self,
+        arena: &NodeArena,
+        result: &mut UnboundTyVars,
+        ignore: &[TypeVar],
+    ) {
         use NodeKind::*;
         // Add type variables for this node.
         self.unbound_ty_vars_in_ty(&self.ty, result, ignore);
@@ -613,21 +687,21 @@ impl Node {
                 // no need to look into the value's type as it is already in this node's type
             }
             Apply(app) => {
-                app.function.unbound_ty_vars(result, ignore);
-                for arg in &app.arguments {
-                    arg.unbound_ty_vars(result, ignore);
+                unbound_ty_vars(arena, app.function, result, ignore);
+                for &arg in &app.arguments {
+                    unbound_ty_vars(arena, arg, result, ignore);
                 }
             }
             StaticApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
-                for arg in &app.arguments {
-                    arg.unbound_ty_vars(result, ignore);
+                for &arg in &app.arguments {
+                    unbound_ty_vars(arena, arg, result, ignore);
                 }
             }
             TraitFnApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
-                for arg in &app.arguments {
-                    arg.unbound_ty_vars(result, ignore);
+                for &arg in &app.arguments {
+                    unbound_ty_vars(arena, arg, result, ignore);
                 }
             }
             GetFunction(_) => {
@@ -636,47 +710,47 @@ impl Node {
             GetDictionary(_) => {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
-            EnvStore(node) => node.value.unbound_ty_vars(result, ignore),
+            EnvStore(node) => unbound_ty_vars(arena, node.value, result, ignore),
             EnvLoad(_) => {}
-            Return(node) => node.unbound_ty_vars(result, ignore),
+            Return(node) => unbound_ty_vars(arena, *node, result, ignore),
             Block(nodes) => nodes
                 .iter()
-                .for_each(|node| node.unbound_ty_vars(result, ignore)),
+                .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
             Assign(assignment) => {
-                assignment.place.unbound_ty_vars(result, ignore);
-                assignment.value.unbound_ty_vars(result, ignore);
+                unbound_ty_vars(arena, assignment.place, result, ignore);
+                unbound_ty_vars(arena, assignment.value, result, ignore);
             }
             Tuple(nodes) => nodes
                 .iter()
-                .for_each(|node| node.unbound_ty_vars(result, ignore)),
-            Project(projection) => projection.0.unbound_ty_vars(result, ignore),
+                .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
+            Project(data, _) => unbound_ty_vars(arena, *data, result, ignore),
             Record(nodes) => nodes
                 .iter()
-                .for_each(|node| node.unbound_ty_vars(result, ignore)),
-            FieldAccess(access) => access.0.unbound_ty_vars(result, ignore),
-            ProjectAt(_) => {
+                .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
+            FieldAccess(data, _) => unbound_ty_vars(arena, *data, result, ignore),
+            ProjectAt(_, _) => {
                 panic!("ProjectAt should not be in the IR at this point");
             }
-            Variant(variant) => variant.1.unbound_ty_vars(result, ignore),
-            ExtractTag(node) => node.unbound_ty_vars(result, ignore),
+            Variant(_, payload) => unbound_ty_vars(arena, *payload, result, ignore),
+            ExtractTag(node) => unbound_ty_vars(arena, *node, result, ignore),
             Array(nodes) => nodes
                 .iter()
-                .for_each(|node| node.unbound_ty_vars(result, ignore)),
+                .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
             Index(array, index) => {
-                array.unbound_ty_vars(result, ignore);
-                index.unbound_ty_vars(result, ignore);
+                unbound_ty_vars(arena, *array, result, ignore);
+                unbound_ty_vars(arena, *index, result, ignore);
             }
             Case(case) => {
-                case.value.unbound_ty_vars(result, ignore);
-                case.alternatives.iter().for_each(|(_alternative, node)| {
-                    node.unbound_ty_vars(result, ignore);
+                unbound_ty_vars(arena, case.value, result, ignore);
+                case.alternatives.iter().for_each(|(_, node)| {
+                    unbound_ty_vars(arena, *node, result, ignore);
                 });
-                case.default.unbound_ty_vars(result, ignore);
+                unbound_ty_vars(arena, case.default, result, ignore);
             }
             Loop(body) => {
-                body.unbound_ty_vars(result, ignore);
+                unbound_ty_vars(arena, *body, result, ignore);
             }
-            SoftBreak => {}
+            SoftBreak | Unimplemented => {}
         }
     }
 
@@ -695,87 +769,47 @@ impl Node {
             }
         });
     }
+}
 
-    pub fn instantiate(&mut self, subst: &InstSubstitution) {
-        use NodeKind::*;
-        match &mut self.kind {
-            Immediate(_) => {}
-            BuildClosure(build_closure) => {
-                build_closure.function.instantiate(subst);
-                instantiate_nodes(&mut build_closure.captures, subst);
-            }
-            Apply(app) => {
-                app.function.instantiate(subst);
-                instantiate_nodes(&mut app.arguments, subst);
-            }
-            StaticApply(app) => {
-                app.ty = app.ty.instantiate(subst);
-                app.inst_data.instantiate(subst);
-                instantiate_nodes(&mut app.arguments, subst);
-            }
-            TraitFnApply(app) => {
-                app.ty = app.ty.instantiate(subst);
-                app.input_tys = app
-                    .input_tys
-                    .iter()
-                    .map(|ty| ty.instantiate(subst))
-                    .collect();
-                app.inst_data.instantiate(subst);
-                instantiate_nodes(&mut app.arguments, subst);
-            }
-            GetFunction(get_fn) => {
-                get_fn.inst_data.instantiate(subst);
-            }
-            GetDictionary(_) => {
-                // nothing to instantiate
-            }
-            EnvStore(node) => node.instantiate(subst),
-            EnvLoad(_) => {}
-            Return(node) => node.instantiate(subst),
-            Block(nodes) => instantiate_nodes(nodes, subst),
-            Assign(assignment) => {
-                assignment.place.instantiate(subst);
-                assignment.value.instantiate(subst);
-            }
-            Tuple(nodes) => instantiate_nodes(nodes, subst),
-            Project(projection) => projection.0.instantiate(subst),
-            Record(nodes) => instantiate_nodes(nodes, subst),
-            FieldAccess(access) => access.0.instantiate(subst),
-            ProjectAt(projection) => projection.0.instantiate(subst),
-            Variant(variant) => variant.1.instantiate(subst),
-            ExtractTag(node) => node.instantiate(subst),
-            Array(nodes) => instantiate_nodes(nodes, subst),
-            Index(array, index) => {
-                array.instantiate(subst);
-                index.instantiate(subst);
-            }
-            Case(case) => {
-                case.value.instantiate(subst);
-                for alternative in case.alternatives.iter_mut() {
-                    alternative.1.instantiate(subst);
-                }
-                case.default.instantiate(subst);
-            }
-            Loop(body) => body.instantiate(subst),
-            SoftBreak => {}
+pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitution) {
+    use NodeKind::*;
+    // Instantiate children first
+    let children = arena[id].kind.child_node_ids();
+    for child in children {
+        instantiate_node(arena, child, subst);
+    }
+    // Then modify this node's kind-specific data
+    match &mut arena[id].kind {
+        StaticApply(app) => {
+            app.ty = app.ty.instantiate(subst);
+            app.inst_data.instantiate(subst);
         }
-        self.ty = self.ty.instantiate(subst);
-        self.effects = self.effects.instantiate(&subst.1);
+        TraitFnApply(app) => {
+            app.ty = app.ty.instantiate(subst);
+            app.input_tys = app
+                .input_tys
+                .iter()
+                .map(|ty| ty.instantiate(subst))
+                .collect();
+            app.inst_data.instantiate(subst);
+        }
+        GetFunction(get_fn) => {
+            get_fn.inst_data.instantiate(subst);
+        }
+        _ => {}
     }
+    arena[id].ty = arena[id].ty.instantiate(subst);
+    arena[id].effects = arena[id].effects.instantiate(&subst.1);
 }
 
-impl FormatWith<(&[LocalDecl], &ModuleEnv<'_>)> for Node {
-    fn fmt_with(
-        &self,
-        f: &mut std::fmt::Formatter,
-        locals_and_env: &(&[LocalDecl], &ModuleEnv<'_>),
-    ) -> std::fmt::Result {
-        self.format_ind(f, locals_and_env.0, locals_and_env.1, 0, 0)
-    }
+#[derive(new)]
+pub struct IrBodyDisplay<'a> {
+    pub body: &'a IrBody,
+    pub locals: &'a [LocalDecl],
 }
 
-pub(crate) fn instantiate_nodes(nodes: &mut [Node], subst: &InstSubstitution) {
-    for node in nodes {
-        node.instantiate(subst);
+impl FormatWith<ModuleEnv<'_>> for IrBodyDisplay<'_> {
+    fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
+        format_ind(&self.body.arena, self.body.root, f, self.locals, env, 0, 0)
     }
 }

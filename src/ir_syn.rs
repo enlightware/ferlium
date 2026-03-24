@@ -10,7 +10,7 @@ use crate::{
     Location,
     containers::{IntoSVec2, b},
     effects::EffType,
-    ir::{self, Node},
+    ir::{self, NodeArena, NodeId},
     module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
     mutability::{MutType, MutVal},
     std::{math::int_type, string::string_value},
@@ -38,7 +38,7 @@ pub fn immediate(value: Value) -> NodeKind {
 pub fn static_apply(
     function: FunctionId,
     ty: FnType,
-    arguments: impl Into<Vec<Node>>,
+    arguments: impl Into<Vec<NodeId>>,
     span: Location,
 ) -> NodeKind {
     let arguments = arguments.into();
@@ -57,7 +57,7 @@ pub fn static_apply(
 
 pub fn static_apply_pure(
     function: FunctionId,
-    arguments: impl IntoIterator<Item = (Node, Type)>,
+    arguments: impl IntoIterator<Item = (NodeId, Type)>,
     ret_ty: Type,
     span: Location,
 ) -> NodeKind {
@@ -81,7 +81,7 @@ pub fn local(name: &str, ty: Type) -> LocalDecl {
 }
 
 pub fn store_new(
-    value: Node,
+    value: NodeId,
     index: usize,
     name: &str,
     mutable: MutVal,
@@ -101,7 +101,7 @@ pub fn store_new(
 }
 
 #[allow(dead_code)]
-pub fn store_to(value: Node, index: usize, id: LocalDeclId) -> NodeKind {
+pub fn store_to(value: NodeId, index: usize, id: LocalDeclId) -> NodeKind {
     K::EnvStore(b(ir::EnvStore { value, index, id }))
 }
 
@@ -113,45 +113,46 @@ pub fn load(index: usize, id: LocalDeclId) -> NodeKind {
     K::EnvLoad(b(ir::EnvLoad { index, id }))
 }
 
-pub fn project(tuple: Node, index: usize) -> NodeKind {
-    K::Project(b((tuple, index)))
+pub fn project(tuple: NodeId, index: usize) -> NodeKind {
+    K::Project(tuple, index)
 }
 
-pub fn index_immediate(array: Node, index: isize) -> NodeKind {
-    let index_node = Node::new(
+pub fn index_immediate(arena: &mut NodeArena, array: NodeId, index: isize) -> NodeKind {
+    let array_span = arena[array].span;
+    let index_node = arena.alloc(ir::Node::new(
         immediate(Value::native(index)),
         int_type(),
         EffType::empty(),
-        array.span,
-    );
-    K::Index(b(array), b(index_node))
+        array_span,
+    ));
+    K::Index(array, index_node)
 }
 
-pub fn extract_tag(variant: Node) -> NodeKind {
-    K::ExtractTag(b(variant))
+pub fn extract_tag(variant: NodeId) -> NodeKind {
+    K::ExtractTag(variant)
 }
 
-pub fn variant(tag: Ustr, payload: Node) -> NodeKind {
-    K::Variant(b((tag, payload)))
+pub fn variant(tag: Ustr, payload: NodeId) -> NodeKind {
+    K::Variant(tag, payload)
 }
 
 pub fn unit_variant(tag: Ustr) -> NodeKind {
     immediate(Value::unit_variant(tag))
 }
 
-pub fn tuple(values: impl IntoSVec2<Node>) -> NodeKind {
+pub fn tuple(values: impl IntoSVec2<NodeId>) -> NodeKind {
     K::Tuple(b(values.into_svec2()))
 }
 
-pub fn record(values: impl IntoSVec2<Node>) -> NodeKind {
+pub fn record(values: impl IntoSVec2<NodeId>) -> NodeKind {
     K::Record(b(values.into_svec2()))
 }
 
-pub fn array(values: impl IntoSVec2<Node>) -> NodeKind {
+pub fn array(values: impl IntoSVec2<NodeId>) -> NodeKind {
     K::Array(b(values.into_svec2()))
 }
 
-pub fn case(value: Node, alternatives: Vec<(Value, Node)>, default: Node) -> NodeKind {
+pub fn case(value: NodeId, alternatives: Vec<(Value, NodeId)>, default: NodeId) -> NodeKind {
     K::Case(b(ir::Case {
         value,
         alternatives,
@@ -160,8 +161,8 @@ pub fn case(value: Node, alternatives: Vec<(Value, Node)>, default: Node) -> Nod
 }
 
 pub fn case_from_complete_alternatives(
-    value: Node,
-    mut alternatives: Vec<(Value, Node)>,
+    value: NodeId,
+    mut alternatives: Vec<(Value, NodeId)>,
 ) -> NodeKind {
     let default = alternatives.pop().unwrap().1;
     K::Case(b(ir::Case {
@@ -171,6 +172,6 @@ pub fn case_from_complete_alternatives(
     }))
 }
 
-pub fn block(statements: impl IntoSVec2<Node>) -> NodeKind {
+pub fn block(statements: impl IntoSVec2<NodeId>) -> NodeKind {
     K::Block(b(statements.into_svec2()))
 }

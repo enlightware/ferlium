@@ -23,7 +23,10 @@ use crate::{
     Location,
     effects::EffType,
     error::RuntimeErrorKind,
-    eval::{ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, cont},
+    eval::{
+        ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, cont,
+        eval_node_with_ctx,
+    },
     format::FormatWith,
     ir::{self},
     module::{LocalDecl, ModuleEnv, ModuleFunction},
@@ -202,10 +205,36 @@ impl Debug for dyn Callable {
 pub type Function = Box<dyn Callable>;
 pub type FunctionRc = Rc<RefCell<Function>>;
 
+/// An empty dummy function returning (), used as placeholder
+pub struct VoidFunction;
+
+impl Callable for VoidFunction {
+    fn call(
+        &self,
+        _args: Vec<ValOrMut>,
+        _ctx: &mut CallCtx,
+        _locals: &[LocalDecl],
+    ) -> EvalControlFlowResult {
+        Ok(ControlFlow::Continue(Value::unit()))
+    }
+
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _locals: &[LocalDecl],
+        _env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
+        write!(f, "{indent_str}VoidFunction")
+    }
+}
+
 /// A function holding user-defined code.
 #[derive(Debug, Clone, new)]
 pub struct ScriptFunction {
-    pub code: ir::Node,
+    pub code: ir::IrBody,
     pub arg_names: Vec<Ustr>,
     // pub monomorphised: HashMap<Vec<Type>, ir::Node>,
 }
@@ -240,10 +269,10 @@ impl Callable for ScriptFunction {
                 RuntimeErrorKind::RecursionLimitExceeded {
                     limit: ctx.recursion_limit,
                 },
-                Some(self.code.span),
+                Some(self.code.arena[self.code.root].span),
             ));
         }
-        let ret = self.code.eval_with_ctx(ctx, locals_arg)?;
+        let ret = eval_node_with_ctx(&self.code.arena, self.code.root, ctx, locals_arg)?;
         ctx.recursion -= 1;
         assert_eq!(ctx.environment.len(), ctx.frame_base + arg_count);
         ctx.environment.truncate(ctx.frame_base);
@@ -268,7 +297,15 @@ impl Callable for ScriptFunction {
         spacing: usize,
         indent: usize,
     ) -> std::fmt::Result {
-        self.code.format_ind(f, locals, env, spacing, indent)
+        ir::format_ind(
+            &self.code.arena,
+            self.code.root,
+            f,
+            locals,
+            env,
+            spacing,
+            indent,
+        )
     }
 }
 

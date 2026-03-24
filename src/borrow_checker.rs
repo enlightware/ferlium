@@ -12,7 +12,7 @@ use crate::{
     Location,
     error::InternalCompilationError,
     internal_compilation_error,
-    ir::{Node, NodeKind},
+    ir::{Node, NodeArena, NodeId, NodeKind},
     r#type::FnArgType,
 };
 
@@ -31,24 +31,23 @@ struct Path {
 
 impl Path {
     /// Builds a path for this node, assuming it is a place node, panicking otherwise.
-    fn from_node(node: &Node) -> Self {
+    fn from_node(arena: &NodeArena, id: NodeId) -> Self {
+        let node = &arena[id];
         use NodeKind::*;
         match &node.kind {
-            Project(projection) => {
-                let (ref node, index) = **projection;
-                let mut path = Self::from_node(node);
-                path.parts.push(PathPart::Projection(index));
+            Project(data, index) => {
+                let mut path = Self::from_node(arena, *data);
+                path.parts.push(PathPart::Projection(*index));
                 path
             }
-            FieldAccess(access) => {
-                let (ref node, field) = **access;
-                let mut path = Self::from_node(node);
-                path.parts.push(PathPart::FieldAccess(field));
+            FieldAccess(data, field) => {
+                let mut path = Self::from_node(arena, *data);
+                path.parts.push(PathPart::FieldAccess(*field));
                 path
             }
             Index(array, index) => {
-                let mut path = Self::from_node(array);
-                if let NodeKind::Immediate(immediate) = &index.kind {
+                let mut path = Self::from_node(arena, *array);
+                if let NodeKind::Immediate(immediate) = &arena[*index].kind {
                     let index = *immediate.value.as_primitive_ty::<isize>().unwrap();
                     if index >= 0 {
                         path.parts.push(PathPart::IndexStatic(index as usize));
@@ -102,7 +101,8 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
 /// Implements borrow checking logic by comparing the paths of mutable arguments.
 fn check_arguments(
     arg_types: &[FnArgType],
-    arguments: &[Node],
+    arguments: &[NodeId],
+    arena: &NodeArena,
     fn_span: Location,
 ) -> Result<(), InternalCompilationError> {
     // Collect all mutable arguments indices and their paths.
@@ -111,7 +111,7 @@ fn check_arguments(
         .enumerate()
         .filter_map(|(i, ty)| {
             if ty.mut_ty.is_mutable() {
-                Some((i, Path::from_node(&arguments[i])))
+                Some((i, Path::from_node(arena, arguments[i])))
             } else {
                 None
             }
@@ -122,8 +122,8 @@ fn check_arguments(
         for arg_j in in_out_args.iter().skip(i + 1) {
             if do_paths_overlap(&arg_i.1, &arg_j.1) {
                 return Err(internal_compilation_error!(MutablePathsOverlap {
-                    a_span: arguments[arg_i.0].span,
-                    b_span: arguments[arg_j.0].span,
+                    a_span: arena[arguments[arg_i.0]].span,
+                    b_span: arena[arguments[arg_j.0]].span,
                     fn_span,
                 }));
             }
@@ -132,101 +132,110 @@ fn check_arguments(
     Ok(())
 }
 
+pub fn check_borrows(arena: &NodeArena, id: NodeId) -> Result<(), InternalCompilationError> {
+    arena[id].check_borrows(arena)
+}
+
 impl Node {
-    pub fn check_borrows(&self) -> Result<(), InternalCompilationError> {
+    pub fn check_borrows(&self, arena: &NodeArena) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
         match &self.kind {
             Immediate(_) => {}
             BuildClosure(build_closure) => {
-                build_closure.function.check_borrows()?;
-                for capture in &build_closure.captures {
-                    capture.check_borrows()?;
+                check_borrows(arena, build_closure.function)?;
+                for &capture in &build_closure.captures {
+                    check_borrows(arena, capture)?;
                 }
             }
             Apply(app) => {
-                app.function.check_borrows()?;
-                for arg in &app.arguments {
-                    arg.check_borrows()?;
+                check_borrows(arena, app.function)?;
+                for &arg in &app.arguments {
+                    check_borrows(arena, arg)?;
                 }
-                let fn_type = app.function.ty.data();
+                let fn_type = arena[app.function].ty.data();
                 let fn_type = fn_type.as_function().unwrap();
-                check_arguments(&fn_type.args, &app.arguments, app.function.span)?;
+                check_arguments(
+                    &fn_type.args,
+                    &app.arguments,
+                    arena,
+                    arena[app.function].span,
+                )?;
             }
             StaticApply(app) => {
-                for arg in &app.arguments {
-                    arg.check_borrows()?;
+                for &arg in &app.arguments {
+                    check_borrows(arena, arg)?;
                 }
-                check_arguments(&app.ty.args, &app.arguments, app.function_span)?;
+                check_arguments(&app.ty.args, &app.arguments, arena, app.function_span)?;
             }
             TraitFnApply(app) => {
-                for arg in &app.arguments {
-                    arg.check_borrows()?;
+                for &arg in &app.arguments {
+                    check_borrows(arena, arg)?;
                 }
-                check_arguments(&app.ty.args, &app.arguments, app.function_span)?;
+                check_arguments(&app.ty.args, &app.arguments, arena, app.function_span)?;
             }
             GetFunction(_) => {}
             GetDictionary(_) => {}
             EnvStore(node) => {
-                node.value.check_borrows()?;
+                check_borrows(arena, node.value)?;
             }
             EnvLoad(_) => {}
-            Return(node) => {
-                node.check_borrows()?;
+            Return(node_id) => {
+                check_borrows(arena, *node_id)?;
             }
             Block(nodes) => {
-                for node in nodes.iter() {
-                    node.check_borrows()?;
+                for &node_id in nodes.iter() {
+                    check_borrows(arena, node_id)?;
                 }
             }
             Assign(assignment) => {
-                assignment.place.check_borrows()?;
-                assignment.value.check_borrows()?;
+                check_borrows(arena, assignment.place)?;
+                check_borrows(arena, assignment.value)?;
             }
             Tuple(nodes) => {
-                for node in nodes.iter() {
-                    node.check_borrows()?;
+                for &node_id in nodes.iter() {
+                    check_borrows(arena, node_id)?;
                 }
             }
-            Project(projection) => {
-                projection.0.check_borrows()?;
+            Project(data, _) => {
+                check_borrows(arena, *data)?;
             }
-            ProjectAt(_) => {
+            ProjectAt(_, _) => {
                 panic!("ProjectAt should not be in the IR at this point");
             }
-            Variant(variant) => {
-                variant.1.check_borrows()?;
+            Variant(_, payload) => {
+                check_borrows(arena, *payload)?;
             }
-            ExtractTag(node) => {
-                node.check_borrows()?;
+            ExtractTag(node_id) => {
+                check_borrows(arena, *node_id)?;
             }
             Record(nodes) => {
-                for node in nodes.iter() {
-                    node.check_borrows()?;
+                for &node_id in nodes.iter() {
+                    check_borrows(arena, node_id)?;
                 }
             }
-            FieldAccess(access) => {
-                access.0.check_borrows()?;
+            FieldAccess(data, _) => {
+                check_borrows(arena, *data)?;
             }
             Array(nodes) => {
-                for node in nodes.iter() {
-                    node.check_borrows()?;
+                for &node_id in nodes.iter() {
+                    check_borrows(arena, node_id)?;
                 }
             }
             Index(array, index) => {
-                array.check_borrows()?;
-                index.check_borrows()?;
+                check_borrows(arena, *array)?;
+                check_borrows(arena, *index)?;
             }
             Case(case) => {
-                case.value.check_borrows()?;
-                for (_, node) in case.alternatives.iter() {
-                    node.check_borrows()?;
+                check_borrows(arena, case.value)?;
+                for &(_, node_id) in case.alternatives.iter() {
+                    check_borrows(arena, node_id)?;
                 }
-                case.default.check_borrows()?;
+                check_borrows(arena, case.default)?;
             }
             Loop(body) => {
-                body.check_borrows()?;
+                check_borrows(arena, *body)?;
             }
-            SoftBreak => {}
+            SoftBreak | Unimplemented => {}
         }
         Ok(())
     }

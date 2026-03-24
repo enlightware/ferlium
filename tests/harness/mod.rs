@@ -11,7 +11,7 @@ use ferlium::{
     containers::IntoSVec2,
     effects::{PrimitiveEffect, effect, effects, no_effects},
     error::{CompilationError, RuntimeErrorKind},
-    eval::{ControlFlow, EvalResult, RuntimeError},
+    eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     function::{
         BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
         UnaryNativeFnVN,
@@ -300,10 +300,15 @@ impl TestSession {
 
         // Run the expression if any.
         if let Some(expr) = expr {
-            expr.expr
-                .eval(module, &expr.locals, &self.session)
-                .map(ControlFlow::into_value)
-                .map_err(Error::Runtime)
+            eval_node(
+                &expr.expr.arena,
+                expr.expr.root,
+                module,
+                &expr.locals,
+                &self.session,
+            )
+            .map(ControlFlow::into_value)
+            .map_err(Error::Runtime)
         } else {
             Ok(Value::unit())
         }

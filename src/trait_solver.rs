@@ -22,7 +22,7 @@ use crate::{
     error::InternalCompilationError,
     function::{Function, FunctionRc, ScriptFunction},
     internal_compilation_error,
-    ir::Node,
+    ir::{self, Node},
     ir_syn::{get_dictionary, load, static_apply},
     module::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
@@ -95,10 +95,10 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
-    /// Add a concrete trait implementation from the given code node, for single-function traits.
+    /// Add a concrete trait implementation from the given code body, for single-function traits.
     pub fn add_concrete_impl_from_code(
         &mut self,
-        code: Node,
+        code: ir::IrBody,
         locals: Vec<LocalDecl>,
         trait_ref: &TraitRef,
         input_types: impl Into<Vec<Type>>,
@@ -414,17 +414,13 @@ impl<'a> TraitSolver<'a> {
                 let imp = &impls.data[impl_id.as_index()];
                 let output_tys = ty_inf.substitute_in_types(&imp.output_tys);
 
-                // Then build IR nodes for fetching each closed constraint dictionary.
-                let constraint_dict_nodes = constraint_dict_ids
+                // Then collect constraint dictionary info for building thunk nodes later.
+                // Each thunk gets its own arena, so we store (NodeKind, Type) pairs to re-create them.
+                let constraint_dict_infos = constraint_dict_ids
                     .into_iter()
                     .map(|dict_id| {
                         let ty = self.get_impl_data_by_id(dict_id).dictionary_ty;
-                        Node::new(
-                            get_dictionary(dict_id),
-                            ty,
-                            EffType::empty(),
-                            Location::new_synthesized(),
-                        )
+                        (get_dictionary(dict_id), ty)
                     })
                     .collect::<Vec<_>>();
 
@@ -443,7 +439,7 @@ impl<'a> TraitSolver<'a> {
                         let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
 
                         // Is the generic function from another module, or do we need to pass constraint dictionaries?
-                        let id = if constraint_dict_nodes.is_empty() && imp_module_id.is_none() {
+                        let id = if constraint_dict_infos.is_empty() && imp_module_id.is_none() {
                             // No, so we can just use the generic function as is.
                             *fn_id
                         } else {
@@ -466,19 +462,35 @@ impl<'a> TraitSolver<'a> {
                                 Location::new_synthesized(),
                             );
 
+                            // Build a per-thunk arena and allocate constraint dictionary nodes into it.
+                            let node_count =
+                                constraint_dict_infos.len() * 2 + def.ty_scheme.ty.args.len() + 1;
+                            let mut thunk_arena = ir::NodeArena::with_capacity(node_count);
+                            let constraint_dict_nodes: Vec<_> = constraint_dict_infos
+                                .iter()
+                                .map(|(kind, ty)| {
+                                    thunk_arena.alloc(Node::new(
+                                        kind.clone(),
+                                        *ty,
+                                        EffType::empty(),
+                                        Location::new_synthesized(),
+                                    ))
+                                })
+                                .collect();
+
                             // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
                             let arguments: Vec<_> = constraint_dict_nodes
                                 .iter()
-                                .cloned()
+                                .copied()
                                 .chain(def.ty_scheme.ty.args.iter().enumerate().map(
                                     |(arg_i, arg_ty)| {
                                         let id = LocalDeclId::from_index(arg_i);
-                                        Node::new(
+                                        thunk_arena.alloc(Node::new(
                                             load(arg_i, id),
                                             arg_ty.ty,
                                             EffType::empty(),
                                             fn_span,
-                                        )
+                                        ))
                                     },
                                 ))
                                 .collect();
@@ -487,17 +499,21 @@ impl<'a> TraitSolver<'a> {
                             let mut ext_fn_ty = def.ty_scheme.ty.clone();
                             ext_fn_ty.args.splice(
                                 0..0,
-                                constraint_dict_nodes
+                                constraint_dict_infos
                                     .iter()
-                                    .map(|n| FnArgType::new(n.ty, MutType::constant())),
+                                    .map(|(_, ty)| FnArgType::new(*ty, MutType::constant())),
                             );
 
                             // Build the application node.
                             let apply = static_apply(function_id, ext_fn_ty, arguments, fn_span);
-                            let code = b(ScriptFunction::new(
-                                Node::new(apply, def.ty_scheme.ty.ret, EffType::empty(), fn_span),
-                                def.arg_names.clone(),
+                            let apply_id = thunk_arena.alloc(Node::new(
+                                apply,
+                                def.ty_scheme.ty.ret,
+                                EffType::empty(),
+                                fn_span,
                             ));
+                            let ir_body = ir::IrBody::new(thunk_arena, apply_id);
+                            let code = b(ScriptFunction::new(ir_body, def.arg_names.clone()));
                             let code: FunctionRc = Rc::new(RefCell::new(code));
                             let function = ModuleFunction::new(def, code, None, locals);
                             let name = Ustr::from(&format!(

@@ -397,7 +397,10 @@ impl CompilerSession {
             }
             if let Some(expr) = output.expr.as_ref() {
                 let env = ModuleEnv::new(module, &self.modules);
-                log::debug!("Expr IR\n{}", expr.expr.format_with(&(&expr.locals, &env)));
+                log::debug!(
+                    "Expr IR\n{}",
+                    ir::IrBodyDisplay::new(&expr.expr, &expr.locals).format_with(&env)
+                );
             }
         }
 

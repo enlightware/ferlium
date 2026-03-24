@@ -14,13 +14,14 @@ use std::cell::{Ref, RefMut};
 use crate::{
     Location,
     ast::UstrSpan,
+    borrow_checker::check_borrows,
     containers::b,
     define_id_type,
-    dictionary_passing::DictElaborationCtx,
+    dictionary_passing::{DictElaborationCtx, elaborate_dictionaries},
     error::InternalCompilationError,
     format::FormatWith,
     function::{FunctionDefinition, FunctionRc},
-    ir::Node,
+    ir::IrBody,
     module::{ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
     mutability::MutType,
     r#type::{FnArgType, Type},
@@ -167,12 +168,12 @@ impl ModuleFunction {
             .collect()
     }
 
-    pub fn get_node(&self) -> Option<Ref<'_, Node>> {
+    pub fn get_ir_body(&self) -> Option<Ref<'_, IrBody>> {
         let code = self.code.borrow();
         Ref::filter_map(code, |code| code.as_script().map(|s| &s.code)).ok()
     }
 
-    pub fn get_node_mut(&mut self) -> Option<RefMut<'_, Node>> {
+    pub fn get_ir_body_mut(&mut self) -> Option<RefMut<'_, IrBody>> {
         let code = self.code.borrow_mut();
         RefMut::filter_map(code, |code| code.as_script_mut().map(|s| &mut s.code)).ok()
     }
@@ -208,8 +209,8 @@ impl ModuleFunction {
     ) -> Result<(), InternalCompilationError> {
         let mut function = self.code.borrow_mut();
         let script_fn = function.as_script_mut().unwrap();
-        let node = &mut script_fn.code;
-        node.check_borrows()?;
+        let body = &mut script_fn.code;
+        check_borrows(&body.arena, body.root)?;
         // Extend the argument list and the local variable declarations with the dictionaries
         // for the requirements, which are passed as extra arguments to the function.
         // The dictionaries are added at the beginning of the argument list, before the user-defined arguments.
@@ -233,7 +234,7 @@ impl ModuleFunction {
                     scope,
                 )
             }));
-        node.elaborate_dictionaries(ctx, local_count)
+        elaborate_dictionaries(&mut body.arena, body.root, ctx, local_count)
     }
 
     pub(crate) fn fmt_code(

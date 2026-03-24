@@ -31,7 +31,7 @@ use ustr::Ustr;
 use crate::{
     containers::b,
     effects::no_effects,
-    ir::{self, Node, NodeKind},
+    ir::{self, Node, NodeArena, NodeId, NodeKind},
     mutability::MutType,
     std::math::int_type,
     r#type::{FnArgType, Type, TypeKind},
@@ -230,11 +230,12 @@ pub fn instantiate_dictionaries_req(
 }
 
 fn extra_args_from_inst_data<'d, 'sr, 'sm>(
+    arena: &mut NodeArena,
     inst_data: &ir::FnInstData,
     span: Location,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
     local_count: usize,
-) -> Result<(Vec<Node>, Vec<FnArgType>), InternalCompilationError> {
+) -> Result<(Vec<NodeId>, Vec<FnArgType>), InternalCompilationError> {
     use NodeKind as K;
     use TypeKind::*;
     process_results(inst_data
@@ -289,7 +290,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                 }
             };
             Ok((
-                Node::new(node_kind, node_ty, no_effects(), span),
+                arena.alloc(Node::new(node_kind, node_ty, no_effects(), span)),
                 FnArgType::new(node_ty, MutType::constant()),
             ))
         }), |iter| iter.unzip()
@@ -297,11 +298,12 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
 }
 
 fn extra_args_for_module_function(
+    arena: &mut NodeArena,
     inst_data: &DictionariesReq,
     span: Location,
     dicts: &ExtraParameters,
     local_count: usize,
-) -> (Vec<Node>, Vec<FnArgType>) {
+) -> (Vec<NodeId>, Vec<FnArgType>) {
     inst_data
         .iter()
         .map(|dict| {
@@ -315,12 +317,12 @@ fn extra_args_for_module_function(
                 .expect("Target dictionary not found in ours");
             let id = LocalDeclId::from_index(local_count + index);
             (
-                Node::new(
+                arena.alloc(Node::new(
                     NodeKind::EnvLoad(b(ir::EnvLoad { index, id })),
                     int_type(),
                     no_effects(),
                     span,
-                ),
+                )),
                 FnArgType::new(int_type(), MutType::constant()),
             )
         })
@@ -347,14 +349,31 @@ pub struct DictElaborationCtx<'d, 'sr, 'sm> {
     pub trait_solver: &'sr mut TraitSolver<'sm>,
 }
 
+pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
+    arena: &mut NodeArena,
+    node_id: NodeId,
+    ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
+    local_count: usize,
+) -> Result<(), InternalCompilationError> {
+    Node::elaborate_dictionaries(arena, node_id, ctx, local_count)
+}
+
 impl Node {
     pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
-        &mut self,
+        arena: &mut NodeArena,
+        node_id: NodeId,
         ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
         local_count: usize,
     ) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
-        match &mut self.kind {
+
+        let node_span = arena[node_id].span;
+        let node_ty = arena[node_id].ty;
+        let node_effects = arena[node_id].effects.clone();
+        // Put a placeholder in the arena while we are mutating ourself and adding new nodes.
+        let mut kind = mem::replace(&mut arena[node_id].kind, NodeKind::Unimplemented);
+
+        match &mut kind {
             Immediate(immediate) => {
                 if immediate.value.is_function() {
                     // Build closure to capture the dictionaries of this function, if any.
@@ -367,16 +386,19 @@ impl Node {
                             .map(|(index, req)| {
                                 let ty = req.to_dict_type();
                                 let id = LocalDeclId::from_index(local_count + index);
-                                Node::new(
+                                arena.alloc(Node::new(
                                     EnvLoad(b(ir::EnvLoad { index, id })),
                                     ty,
                                     no_effects(),
-                                    self.span,
-                                )
+                                    node_span,
+                                ))
                             })
                             .collect();
-                        self.kind = BuildClosure(b(ir::BuildClosure {
-                            function: self.clone(),
+                        let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
+                        let function_id =
+                            arena.alloc(Node::new(original_kind, node_ty, node_effects, node_span));
+                        kind = BuildClosure(b(ir::BuildClosure {
+                            function: function_id,
                             captures,
                         }));
                     }
@@ -384,38 +406,27 @@ impl Node {
             }
             BuildClosure(build_closure) => {
                 // Elaborate captures first (they are in outer scope).
-                for capture in &mut build_closure.captures {
-                    capture.elaborate_dictionaries(ctx, local_count)?;
+                for &capture_id in &build_closure.captures {
+                    elaborate_dictionaries(arena, capture_id, ctx, local_count)?;
                 }
 
                 // Elaborate the function (it is the closure body/value).
-                build_closure
-                    .function
-                    .elaborate_dictionaries(ctx, local_count)?;
+                let function_id = build_closure.function;
+                elaborate_dictionaries(arena, function_id, ctx, local_count)?;
 
                 // Optimization: flatten nested BuildClosure
                 // Check if the function is a BuildClosure itself (due to dictionary capturing).
-                let is_nested = matches!(build_closure.function.kind, NodeKind::BuildClosure(_));
+                let is_nested = matches!(arena[function_id].kind, NodeKind::BuildClosure(_));
 
                 if is_nested {
                     // Extract the inner BuildClosure.
-                    let inner_node = mem::replace(
-                        &mut build_closure.function,
-                        Node::new(
-                            NodeKind::SoftBreak, // dummy
-                            Type::unit(),
-                            no_effects(),
-                            self.span,
-                        ),
-                    );
-
-                    let inner_build = inner_node
-                        .kind
+                    let inner_kind =
+                        mem::replace(&mut arena[function_id].kind, NodeKind::Unimplemented);
+                    let inner_build = inner_kind
                         .into_build_closure()
                         .expect("is_nested check failed");
                     // inner_build.captures are the dictionary captures (should be first)
                     // build_closure.captures are the variable captures (should be second)
-                    let inner_build = *inner_build;
                     let mut new_captures = inner_build.captures;
                     new_captures.append(&mut build_closure.captures);
                     build_closure.captures = new_captures;
@@ -423,20 +434,20 @@ impl Node {
                 }
             }
             Apply(app) => {
-                app.function.elaborate_dictionaries(ctx, local_count)?;
-                for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx, local_count)?;
+                elaborate_dictionaries(arena, app.function, ctx, local_count)?;
+                for &arg_id in &app.arguments {
+                    elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
                 }
             }
             StaticApply(app) => {
-                for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx, local_count)?;
+                for &arg_id in &app.arguments {
+                    elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
                 }
                 if !app.inst_data.dicts_req.is_empty() {
                     // Build the dictionary requirements for the function by adding extra arguments before normal arguments.
                     let span = app.function_span;
                     let (extra_args, extra_args_ty) =
-                        extra_args_from_inst_data(&app.inst_data, span, ctx, local_count)?;
+                        extra_args_from_inst_data(arena, &app.inst_data, span, ctx, local_count)?;
                     // First add the extra parameters, then the original arguments.
                     app.argument_names
                         .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
@@ -453,8 +464,9 @@ impl Node {
                             let inst_data = &inst_data.requirements;
                             // Yes, build the dictionary requirements for the function.
                             let (extra_args, extra_args_ty) = extra_args_for_module_function(
+                                arena,
                                 inst_data,
-                                self.span,
+                                node_span,
                                 ctx.dicts,
                                 local_count,
                             );
@@ -462,33 +474,13 @@ impl Node {
                                 .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
                             app.arguments.splice(0..0, extra_args);
                             app.ty.args.splice(0..0, extra_args_ty);
-
-                            // Debug dump
-                            // let current = new_module_with_prelude();
-                            // let others = crate::std::new_std_module_env();
-                            // let module_env = crate::module::ModuleEnv::new(&current, &others);
-                            // println!(
-                            //     "StaticApply app fn type: {}",
-                            //     app.ty.format_with(&module_env)
-                            // );
-                            // // TODO: use function ty
-                            // print!("Extra params for that function: ");
-                            // for param in extra_params {
-                            //     print!("{}, ", param.format_with(&module_env));
-                            // }
-                            // println!();
-                            // print!("Extra params for cur function: ");
-                            // for dict in dicts {
-                            //     print!("{}, ", dict.format_with(&module_env));
-                            // }
-                            // println!();
                         }
                     }
                 }
             }
             TraitFnApply(app) => {
-                for arg in &mut app.arguments {
-                    arg.elaborate_dictionaries(ctx, local_count)?;
+                for &arg_id in &app.arguments {
+                    elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
                 }
                 assert!(
                     app.inst_data.dicts_req.is_empty(),
@@ -506,13 +498,17 @@ impl Node {
                     )?;
                     let definition = &app.trait_ref.functions[app.function_index].1;
                     let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
-                    self.kind = StaticApply(b(ir::StaticApplication {
+                    let function_path = Some(app.function_path.clone());
+                    let function_span = app.function_span;
+                    let ty = app.ty.clone();
+                    let arguments = mem::take(&mut app.arguments);
+                    kind = StaticApply(b(ir::StaticApplication {
                         function,
-                        function_path: Some(app.function_path.clone()),
-                        function_span: app.function_span,
-                        arguments: mem::take(&mut app.arguments),
+                        function_path,
+                        function_span,
+                        arguments,
                         argument_names,
-                        ty: app.ty.clone(),
+                        ty,
                         inst_data: ir::FnInstData::none(),
                     }));
                 } else {
@@ -528,29 +524,31 @@ impl Node {
                     // Build a tuple type where the app.function_index_th element is the function pointer
                     // and the rest never;
                     let fns_tuple_ty = ctx.dicts.requirements[fns_tuple_index].to_dict_type();
+                    let function_span = app.function_span;
+                    let function_index = app.function_index;
                     // Load that tuple from the correct local variable...
-                    let id = LocalDeclId::from_index(local_count + fns_tuple_index);
-                    let load_fns_tuple = Node::new(
-                        ir_syn::load(fns_tuple_index, id),
+                    let load_id = LocalDeclId::from_index(local_count + fns_tuple_index);
+                    let load_fns_tuple_id = arena.alloc(Node::new(
+                        ir_syn::load(fns_tuple_index, load_id),
                         fns_tuple_ty,
                         no_effects(),
-                        app.function_span,
-                    );
+                        function_span,
+                    ));
                     // ...and from it the function pointer.
                     let fn_ty = fns_tuple_ty
                         .data()
                         .as_tuple()
-                        .expect("Trait impl dict should be a tuple type")[app.function_index];
-                    let project_fn = Node::new(
-                        ir_syn::project(load_fns_tuple, app.function_index),
+                        .expect("Trait impl dict should be a tuple type")[function_index];
+                    let project_fn_id = arena.alloc(Node::new(
+                        Project(load_fns_tuple_id, function_index),
                         fn_ty,
                         no_effects(),
-                        app.function_span,
-                    );
+                        function_span,
+                    ));
                     // Finally use the function pointer to call the function.
                     let arguments = mem::take(&mut app.arguments);
-                    self.kind = Apply(b(ir::Application {
-                        function: project_fn,
+                    kind = Apply(b(ir::Application {
+                        function: project_fn_id,
                         arguments,
                     }));
                 }
@@ -559,25 +557,34 @@ impl Node {
                 // Is it a function to instantiate?
                 if get_fn.inst_data.dicts_req.is_empty() {
                     // No instantiation, check if it is a module function
-                    if let FunctionId::Local(id) = get_fn.function {
+                    if let FunctionId::Local(fn_local_id) = get_fn.function {
                         // Is the function part of the current module being compiled?
                         if let Some(inst_data) = ctx
                             .module_inst_data
-                            .and_then(|inst_data| inst_data.get(&id))
+                            .and_then(|inst_data| inst_data.get(&fn_local_id))
                         {
                             // Yes, build the dictionary requirements for the function if it has non-empty inst data
                             if !inst_data.is_empty() {
                                 let inst_data = &inst_data.requirements;
                                 // We have an instantiation, so we need a closure to pass dictionary requirements.
                                 let (captures, _) = extra_args_for_module_function(
+                                    arena,
                                     inst_data,
-                                    self.span,
+                                    node_span,
                                     ctx.dicts,
                                     local_count,
                                 );
                                 assert!(get_fn.inst_data.dicts_req.is_empty());
-                                self.kind = BuildClosure(b(ir::BuildClosure {
-                                    function: self.clone(),
+                                let original_kind =
+                                    mem::replace(&mut kind, NodeKind::Unimplemented);
+                                let function_id = arena.alloc(Node::new(
+                                    original_kind,
+                                    node_ty,
+                                    node_effects.clone(),
+                                    node_span,
+                                ));
+                                kind = BuildClosure(b(ir::BuildClosure {
+                                    function: function_id,
                                     captures,
                                 }));
                             }
@@ -585,11 +592,23 @@ impl Node {
                     }
                 } else {
                     // We have an instantiation, so we need a closure to pass dictionary requirements.
-                    let (captures, _) =
-                        extra_args_from_inst_data(&get_fn.inst_data, self.span, ctx, local_count)?;
+                    let (captures, _) = extra_args_from_inst_data(
+                        arena,
+                        &get_fn.inst_data,
+                        node_span,
+                        ctx,
+                        local_count,
+                    )?;
                     get_fn.inst_data.dicts_req.clear();
-                    self.kind = BuildClosure(b(ir::BuildClosure {
-                        function: self.clone(),
+                    let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
+                    let function_id = arena.alloc(Node::new(
+                        original_kind,
+                        node_ty,
+                        node_effects.clone(),
+                        node_span,
+                    ));
+                    kind = BuildClosure(b(ir::BuildClosure {
+                        function: function_id,
                         captures,
                     }));
                 }
@@ -599,43 +618,43 @@ impl Node {
             }
             EnvStore(store) => {
                 store.index += ctx.dicts.len();
-                store.value.elaborate_dictionaries(ctx, local_count)?;
+                elaborate_dictionaries(arena, store.value, ctx, local_count)?;
             }
             EnvLoad(load) => {
                 load.index += ctx.dicts.len();
             }
-            Return(node) => {
-                node.elaborate_dictionaries(ctx, local_count)?;
+            Return(node_id) => {
+                elaborate_dictionaries(arena, *node_id, ctx, local_count)?;
             }
             Block(nodes) => {
-                for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx, local_count)?;
+                for &node_id in nodes.iter() {
+                    elaborate_dictionaries(arena, node_id, ctx, local_count)?;
                 }
             }
             Assign(assignment) => {
-                assignment.place.elaborate_dictionaries(ctx, local_count)?;
-                assignment.value.elaborate_dictionaries(ctx, local_count)?;
+                elaborate_dictionaries(arena, assignment.place, ctx, local_count)?;
+                elaborate_dictionaries(arena, assignment.value, ctx, local_count)?;
             }
             Tuple(nodes) => {
-                for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx, local_count)?;
+                for &node_id in nodes.iter() {
+                    elaborate_dictionaries(arena, node_id, ctx, local_count)?;
                 }
             }
-            Project(projection) => {
-                projection.0.elaborate_dictionaries(ctx, local_count)?;
+            Project(data, _) => {
+                elaborate_dictionaries(arena, *data, ctx, local_count)?;
             }
             Record(nodes) => {
-                for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx, local_count)?;
+                for &node_id in nodes.iter() {
+                    elaborate_dictionaries(arena, node_id, ctx, local_count)?;
                 }
             }
-            FieldAccess(access) => {
+            FieldAccess(data, field) => {
                 use TypeKind::*;
-                access.0.elaborate_dictionaries(ctx, local_count)?;
-                let name = access.1;
-                let span = access.0.span;
-                let ty = access.0.ty;
-                let ty_data = ty.data().clone();
+                let child_id = *data;
+                let field_name = *field;
+                elaborate_dictionaries(arena, child_id, ctx, local_count)?;
+                let child_ty = arena[child_id].ty;
+                let ty_data = child_ty.data().clone();
                 let ty_data = if let Some(named) = ty_data.as_named() {
                     assert!(
                         named.params.is_empty(),
@@ -650,70 +669,54 @@ impl Node {
                         // Known type, get the index from the type and replace the IR instruction.
                         let index = record
                             .iter()
-                            .position(|field| field.0 == name)
+                            .position(|field| field.0 == field_name)
                             .expect("Field not found in type, type inference should have failed");
-                        let node = mem::replace(
-                            &mut access.as_mut().0,
-                            Node::new(
-                                Immediate(ir::Immediate::new(Value::unit())),
-                                Type::unit(),
-                                no_effects(),
-                                span,
-                            ),
-                        );
-                        self.kind = Project(b((node, index)));
+                        kind = Project(child_id, index);
                     }
                     Variable(var) => {
                         // Variable type, it must be in the type scheme, use the dictionary to lookup local variable.
-                        let index = find_field_dict_index(ctx.dicts, var, &name).unwrap_or_else(
-                            || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
+                        let index = find_field_dict_index(ctx.dicts, var, &field_name).unwrap_or_else(
+                            || panic!("Dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
                         );
-                        let node = mem::replace(
-                            &mut access.as_mut().0,
-                            Node::new(
-                                Immediate(ir::Immediate::new(Value::unit())),
-                                Type::unit(),
-                                no_effects(),
-                                span,
-                            ),
-                        );
-                        self.kind = ProjectAt(b((node, index)));
+                        kind = ProjectAt(child_id, index);
                     }
                     _ => {
                         panic!("FieldAccess should have a record or variable type");
                     }
                 }
             }
-            ProjectAt(_) => {
+            ProjectAt(_, _) => {
                 panic!("ProjectAt should not be present at this stage");
             }
-            Variant(variant) => {
-                variant.1.elaborate_dictionaries(ctx, local_count)?;
+            Variant(_, payload) => {
+                elaborate_dictionaries(arena, *payload, ctx, local_count)?;
             }
-            ExtractTag(node) => {
-                node.elaborate_dictionaries(ctx, local_count)?;
+            ExtractTag(node_id) => {
+                elaborate_dictionaries(arena, *node_id, ctx, local_count)?;
             }
             Array(nodes) => {
-                for node in nodes.iter_mut() {
-                    node.elaborate_dictionaries(ctx, local_count)?;
+                for &node_id in nodes.iter() {
+                    elaborate_dictionaries(arena, node_id, ctx, local_count)?;
                 }
             }
-            Index(array, index) => {
-                array.elaborate_dictionaries(ctx, local_count)?;
-                index.elaborate_dictionaries(ctx, local_count)?;
+            Index(array_id, index_id) => {
+                elaborate_dictionaries(arena, *array_id, ctx, local_count)?;
+                elaborate_dictionaries(arena, *index_id, ctx, local_count)?;
             }
             Case(case) => {
-                case.value.elaborate_dictionaries(ctx, local_count)?;
-                for (_, node) in &mut case.alternatives {
-                    node.elaborate_dictionaries(ctx, local_count)?;
+                elaborate_dictionaries(arena, case.value, ctx, local_count)?;
+                for &(_, alt_id) in case.alternatives.iter() {
+                    elaborate_dictionaries(arena, alt_id, ctx, local_count)?;
                 }
-                case.default.elaborate_dictionaries(ctx, local_count)?;
+                elaborate_dictionaries(arena, case.default, ctx, local_count)?;
             }
-            Loop(body) => {
-                body.elaborate_dictionaries(ctx, local_count)?;
+            Loop(body_id) => {
+                elaborate_dictionaries(arena, *body_id, ctx, local_count)?;
             }
-            SoftBreak => {}
+            SoftBreak | Unimplemented => {}
         }
+
+        arena[node_id].kind = kind;
         Ok(())
     }
 }
