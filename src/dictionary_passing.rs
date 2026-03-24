@@ -260,7 +260,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                             || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                         );
                             let id = LocalDeclId::from_index(local_count + index);
-                            K::EnvLoad(b(ir::EnvLoad { index, id }))
+                            K::EnvLoad(ir::EnvLoad { index: index as u32, id })
                         }
                         _ => {
                             panic!("FieldIndex dictionary should have a variable or record type");
@@ -318,7 +318,10 @@ fn extra_args_for_module_function(
             let id = LocalDeclId::from_index(local_count + index);
             (
                 arena.alloc(Node::new(
-                    NodeKind::EnvLoad(b(ir::EnvLoad { index, id })),
+                    NodeKind::EnvLoad(ir::EnvLoad {
+                        index: index as u32,
+                        id,
+                    }),
                     int_type(),
                     no_effects(),
                     span,
@@ -369,7 +372,8 @@ impl Node {
 
         let node_span = arena[node_id].span;
         let node_ty = arena[node_id].ty;
-        let node_effects = arena[node_id].effects.clone();
+        // Note: node_effects is cloned lazily only in the two branches that need it
+        // (Immediate and GetFunction), to avoid an unconditional Vec clone on every node.
         // Put a placeholder in the arena while we are mutating ourself and adding new nodes.
         let mut kind = mem::replace(&mut arena[node_id].kind, NodeKind::Unimplemented);
 
@@ -387,13 +391,17 @@ impl Node {
                                 let ty = req.to_dict_type();
                                 let id = LocalDeclId::from_index(local_count + index);
                                 arena.alloc(Node::new(
-                                    EnvLoad(b(ir::EnvLoad { index, id })),
+                                    EnvLoad(ir::EnvLoad {
+                                        index: index as u32,
+                                        id,
+                                    }),
                                     ty,
                                     no_effects(),
                                     node_span,
                                 ))
                             })
                             .collect();
+                        let node_effects = arena[node_id].effects.clone();
                         let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
                         let function_id =
                             arena.alloc(Node::new(original_kind, node_ty, node_effects, node_span));
@@ -575,12 +583,13 @@ impl Node {
                                     local_count,
                                 );
                                 assert!(get_fn.inst_data.dicts_req.is_empty());
+                                let node_effects = arena[node_id].effects.clone();
                                 let original_kind =
                                     mem::replace(&mut kind, NodeKind::Unimplemented);
                                 let function_id = arena.alloc(Node::new(
                                     original_kind,
                                     node_ty,
-                                    node_effects.clone(),
+                                    node_effects,
                                     node_span,
                                 ));
                                 kind = BuildClosure(b(ir::BuildClosure {
@@ -600,13 +609,10 @@ impl Node {
                         local_count,
                     )?;
                     get_fn.inst_data.dicts_req.clear();
+                    let node_effects = arena[node_id].effects.clone();
                     let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
-                    let function_id = arena.alloc(Node::new(
-                        original_kind,
-                        node_ty,
-                        node_effects.clone(),
-                        node_span,
-                    ));
+                    let function_id =
+                        arena.alloc(Node::new(original_kind, node_ty, node_effects, node_span));
                     kind = BuildClosure(b(ir::BuildClosure {
                         function: function_id,
                         captures,
@@ -617,11 +623,11 @@ impl Node {
                 // nothing to do
             }
             EnvStore(store) => {
-                store.index += ctx.dicts.len();
+                store.index += ctx.dicts.len() as u32;
                 elaborate_dictionaries(arena, store.value, ctx, local_count)?;
             }
             EnvLoad(load) => {
-                load.index += ctx.dicts.len();
+                load.index += ctx.dicts.len() as u32;
             }
             Return(node_id) => {
                 elaborate_dictionaries(arena, *node_id, ctx, local_count)?;

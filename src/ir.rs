@@ -22,7 +22,7 @@ use la_arena::{Arena, Idx};
 use ustr::Ustr;
 
 use crate::{
-    containers::{B, SVec2, b},
+    containers::{B, SVec2, SVec4, b},
     dictionary_passing::DictionariesReq,
     effects::EffType,
     module::ModuleEnv,
@@ -150,13 +150,13 @@ impl TraitFnApplication {
 #[derive(Debug, Clone)]
 pub struct EnvStore {
     pub value: NodeId,
-    pub index: usize,
+    pub index: u32,
     pub id: LocalDeclId,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnvLoad {
-    pub index: usize,
+    pub index: u32,
     pub id: LocalDeclId,
 }
 
@@ -197,11 +197,11 @@ pub enum NodeKind {
     TraitFnApply(B<TraitFnApplication>),
     GetFunction(B<GetFunction>),
     GetDictionary(GetDictionary),
-    EnvStore(B<EnvStore>),
-    EnvLoad(B<EnvLoad>),
+    EnvStore(EnvStore),
+    EnvLoad(EnvLoad),
     Return(NodeId),
     Block(B<SVec2<NodeId>>),
-    Assign(B<Assignment>),
+    Assign(Assignment),
     Tuple(B<SVec2<NodeId>>),
     Project(NodeId, usize),
     Record(B<SVec2<NodeId>>),
@@ -222,33 +222,37 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
-    pub fn child_node_ids(&self) -> Vec<NodeId> {
+    pub fn child_node_ids(&self) -> SVec4<NodeId> {
         use NodeKind::*;
+        use smallvec::smallvec;
         match self {
             Immediate(_) | GetFunction(_) | GetDictionary(_) | EnvLoad(_) | SoftBreak
-            | Unimplemented => vec![],
+            | Unimplemented => smallvec![],
             BuildClosure(bc) => {
-                let mut v = vec![bc.function];
+                let mut v: SVec4<NodeId> = smallvec![bc.function];
                 v.extend_from_slice(&bc.captures);
                 v
             }
             Apply(app) => {
-                let mut v = vec![app.function];
+                let mut v: SVec4<NodeId> = smallvec![app.function];
                 v.extend_from_slice(&app.arguments);
                 v
             }
-            StaticApply(app) => app.arguments.clone(),
-            TraitFnApply(app) => app.arguments.clone(),
-            EnvStore(store) => vec![store.value],
-            Return(node) | ExtractTag(node) | Loop(node) => vec![*node],
-            Block(nodes) | Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.to_vec(),
-            Assign(a) => vec![a.place, a.value],
-            Project(n, _) | ProjectAt(n, _) => vec![*n],
-            FieldAccess(fa, _) => vec![*fa],
-            Variant(_, n) => vec![*n],
-            Index(a, b) => vec![*a, *b],
+            StaticApply(app) => app.arguments.iter().copied().collect(),
+            TraitFnApply(app) => app.arguments.iter().copied().collect(),
+            EnvStore(store) => smallvec![store.value],
+            Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
+            Block(nodes) | Tuple(nodes) | Record(nodes) | Array(nodes) => {
+                nodes.iter().copied().collect()
+            }
+            Assign(a) => smallvec![a.place, a.value],
+            Project(n, _) | ProjectAt(n, _) => smallvec![*n],
+            FieldAccess(fa, _) => smallvec![*fa],
+            Variant(_, n) => smallvec![*n],
+            Index(a, b) => smallvec![*a, *b],
             Case(case) => {
-                let mut v = vec![case.value];
+                let mut v: SVec4<NodeId> = SVec4::with_capacity(2 + case.alternatives.len());
+                v.push(case.value);
                 v.extend(case.alternatives.iter().map(|(_, n)| *n));
                 v.push(case.default);
                 v

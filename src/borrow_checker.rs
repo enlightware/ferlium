@@ -60,7 +60,7 @@ impl Path {
                 path
             }
             EnvLoad(node) => Path {
-                variable: node.index,
+                variable: node.index as usize,
                 parts: Vec::new(),
             },
             _ => panic!("Cannot resolve a non-place node"),

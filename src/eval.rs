@@ -730,7 +730,7 @@ pub fn eval_node_with_ctx(
             cont(Value::unit())
         }
         EnvLoad(node) => {
-            let index = ctx.frame_base + node.index;
+            let index = ctx.frame_base + node.index as usize;
             cont(
                 ctx.environment[index]
                     .as_value(ctx)
@@ -901,7 +901,7 @@ pub fn resolve_node_place(
             EnvLoad(node) => Place {
                 // By using frame_base here, we allow to access parent frames
                 // when the ResolvedPlace is used in a child function.
-                target: ctx.frame_base + node.index,
+                target: ctx.frame_base + node.index as usize,
                 path: Vec::new(),
             },
             _ => panic!("Cannot resolve a non-place node"),

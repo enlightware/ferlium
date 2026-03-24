@@ -97,12 +97,23 @@ pub fn store_new(
         Location::new_synthesized(),
     );
     locals.push(local);
-    (K::EnvStore(b(ir::EnvStore { value, index, id })), id)
+    (
+        K::EnvStore(ir::EnvStore {
+            value,
+            index: index as u32,
+            id,
+        }),
+        id,
+    )
 }
 
 #[allow(dead_code)]
 pub fn store_to(value: NodeId, index: usize, id: LocalDeclId) -> NodeKind {
-    K::EnvStore(b(ir::EnvStore { value, index, id }))
+    K::EnvStore(ir::EnvStore {
+        value,
+        index: index as u32,
+        id,
+    })
 }
 
 pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
@@ -110,7 +121,10 @@ pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
 }
 
 pub fn load(index: usize, id: LocalDeclId) -> NodeKind {
-    K::EnvLoad(b(ir::EnvLoad { index, id }))
+    K::EnvLoad(ir::EnvLoad {
+        index: index as u32,
+        id,
+    })
 }
 
 pub fn project(tuple: NodeId, index: usize) -> NodeKind {

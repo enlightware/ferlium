@@ -22,6 +22,9 @@ pub(crate) fn b<T>(t: T) -> B<T> {
 /// Small vector having two elements inline
 pub type SVec2<T> = smallvec::SmallVec<[T; 2]>;
 
+/// Small vector having four elements inline
+pub type SVec4<T> = smallvec::SmallVec<[T; 4]>;
+
 // A trait that knows how to turn either an owned T or a &T into a T
 pub trait IntoOwned<T> {
     fn into_owned(self) -> T;

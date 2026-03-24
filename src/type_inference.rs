@@ -337,10 +337,10 @@ impl TypeInference {
                 // It is a local variable in the current environment, capture it.
                 let local = &env.all_locals[outer_id.as_index()];
                 let capture_id = env.ir_arena.alloc(N::new(
-                    K::EnvLoad(b(ir::EnvLoad {
-                        index,
+                    K::EnvLoad(ir::EnvLoad {
+                        index: index as u32,
                         id: outer_id,
-                    })),
+                    }),
                     local.ty,
                     no_effects(),
                     span,
@@ -398,7 +398,7 @@ impl TypeInference {
             .collect::<Vec<_>>();
 
         // The lambda gets its own separate IR arena.
-        let mut lambda_arena = NodeArena::with_capacity(8);
+        let mut lambda_arena = NodeArena::with_capacity(32);
         let mut inner_env = TypingEnv::new(
             &mut fn_all_locals,
             fn_cur_locals,
@@ -493,7 +493,10 @@ impl TypeInference {
                     && let Some((index, id)) = env.get_variable_index_and_id(name)
                 {
                     let local = &env.all_locals[id.as_index()];
-                    let node = K::EnvLoad(b(ir::EnvLoad { index, id }));
+                    let node = K::EnvLoad(ir::EnvLoad {
+                        index: index as u32,
+                        id,
+                    });
                     (node, local.ty, local.mut_ty, no_effects())
                 }
                 // Retrieve the trait method from the environment, if it exists
@@ -590,11 +593,11 @@ impl TypeInference {
                 let id = LocalDeclId::from_index(env.all_locals.len());
                 env.all_locals.push(local);
                 env.cur_locals.push(id);
-                let node = K::EnvStore(b(EnvStore {
+                let node = K::EnvStore(EnvStore {
                     value: node_id,
-                    index,
+                    index: index as u32,
                     id,
-                }));
+                });
                 (node, Type::unit(), MutType::constant(), node_effects)
             }
             Return(expr) => {
@@ -718,10 +721,10 @@ impl TypeInference {
                 let value_effects = &env.ir_arena[value_id].effects;
                 let place_effects = &env.ir_arena[place_id].effects;
                 let combined_effects = self.make_dependent_effect([value_effects, place_effects]);
-                let node = K::Assign(b(ir::Assignment {
+                let node = K::Assign(ir::Assignment {
                     place: place_id,
                     value: value_id,
-                }));
+                });
                 (node, Type::unit(), MutType::constant(), combined_effects)
             }
             Tuple(exprs) => {

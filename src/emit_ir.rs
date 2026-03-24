@@ -466,7 +466,7 @@ where
         let mut lambda_functions = vec![];
         let mut locals = descr.gen_locals_no_bounds();
         let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
-        let mut ir_arena = NodeArena::with_capacity(8);
+        let mut ir_arena = NodeArena::with_capacity(32);
         let mut ty_env = TypingEnv::new(
             &mut locals,
             cur_locals,
@@ -914,7 +914,7 @@ pub fn emit_expr_unsafe(
     let mut new_type_deps = FxHashSet::default();
     let mut lambda_functions = vec![];
     let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
-    let mut ir_arena = NodeArena::with_capacity(8);
+    let mut ir_arena = NodeArena::with_capacity(32);
     let mut ty_env = TypingEnv::new(
         &mut locals,
         cur_locals,

@@ -223,10 +223,10 @@ impl TypeInference {
             // Code to load the variant and extract the tag
 
             let load_variant_node = N::new(
-                K::EnvLoad(b(EnvLoad {
-                    index: initial_env_size,
+                K::EnvLoad(EnvLoad {
+                    index: initial_env_size as u32,
                     id: l_match_condition,
-                })),
+                }),
                 pattern_ty,
                 no_effects(),
                 sp(cond_expr),
@@ -322,11 +322,11 @@ impl TypeInference {
                                     sp(*expr),
                                 ));
                                 let store_projected_inner_id = env.ir_arena.alloc(N::new(
-                                    K::EnvStore(b(EnvStore {
+                                    K::EnvStore(EnvStore {
                                         value: project_inner_id,
-                                        index: alt_start_env_size + i,
+                                        index: (alt_start_env_size + i) as u32,
                                         id: l_bindings[i],
-                                    })),
+                                    }),
                                     Type::unit(),
                                     no_effects(),
                                     sp(*expr),
