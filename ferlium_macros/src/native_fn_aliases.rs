@@ -66,7 +66,7 @@ pub(crate) fn generate_fn_type(
 
     (
         syn::parse_quote! {
-            #fn_type_name<#(#arg_types,)* #output_type, F>
+            #fn_type_name<#(#arg_types,)* #output_type>
         },
         need_lifetime,
     )
@@ -104,6 +104,5 @@ pub(crate) fn generate_generic_params(arg_codes: &[&str], output_code: &str) -> 
     if output_code == "N" || output_code == "FN" {
         params.push(format_ident!("O"));
     }
-    params.push(format_ident!("F"));
     params
 }
