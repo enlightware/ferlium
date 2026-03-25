@@ -6,8 +6,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::rc::Rc;
-
 use crate::{
     ast::{self, UstrSpan},
     error::InternalCompilationError,
@@ -22,7 +20,6 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     containers::B,
-    function::FunctionRc,
     r#type::{BareNativeType, Type},
 };
 
@@ -176,30 +173,6 @@ impl<'m> ModuleEnv<'m> {
                 module.get_type_def(ustr(name))
             })?
             .map(|(module_id, ty_def)| (module_id, ty_def.as_type())))
-    }
-
-    pub fn function_name(&self, func: &FunctionRc) -> Option<String> {
-        // FIXME: this needs update
-        self.current
-            .iter_named_functions()
-            .find(|(_, function)| Rc::ptr_eq(&function.code, func))
-            .map_or_else(
-                || {
-                    self.modules.iter_named().find_map(|(mod_name, module)| {
-                        module
-                            .iter_named_functions()
-                            .find(|(_, function)| Rc::ptr_eq(&function.code, func))
-                            .map(|(fn_name, _)| {
-                                if self.current.uses(mod_name, fn_name) {
-                                    fn_name.to_string()
-                                } else {
-                                    format!("{mod_name}::{fn_name}")
-                                }
-                            })
-                    })
-                },
-                |(name, _)| Some(name.to_string()),
-            )
     }
 
     /// Get a function from the current module, or other ones, return the ID of the module if other.

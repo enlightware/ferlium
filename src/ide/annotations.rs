@@ -44,8 +44,7 @@ impl ModuleAndExpr {
             if spans.span.source_id != source_id {
                 continue;
             }
-            let code = function.code.borrow();
-            if let Some(script_fn) = code.as_script() {
+            if let Some(script_fn) = function.code.as_script() {
                 variable_type_annotations(
                     &module.ir_arena,
                     script_fn.entry_node_id,

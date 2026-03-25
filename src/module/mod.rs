@@ -574,8 +574,8 @@ impl Module {
     /// Return the type for the source pos, if any.
     pub fn type_at(&self, pos: usize) -> Option<Type> {
         for function in self.functions.iter() {
-            let code = function.code.borrow();
-            let ty = code
+            let ty = function
+                .code
                 .as_script()
                 .and_then(|script_fn| ir::type_at(&self.ir_arena, script_fn.entry_node_id, pos));
             if ty.is_some() {

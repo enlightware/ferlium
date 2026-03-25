@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{borrow::Borrow, cell::RefCell, mem, rc::Rc};
+use std::{borrow::Borrow, mem};
 
 use crate::{
     FxHashMap, FxHashSet, borrow_checker::check_borrows, containers::B,
@@ -132,10 +132,7 @@ pub fn emit_module(
             for def in fn_defs {
                 // Placeholder ModuleFunction that will be replaced later.
                 let placeholder = b(VoidFunction);
-                let module_fn = ModuleFunction::new_without_spans_nor_locals(
-                    def,
-                    Rc::new(RefCell::new(placeholder)),
-                );
+                let module_fn = ModuleFunction::new_without_spans_nor_locals(def, placeholder);
                 method_ids.push(output.add_function_anonymous(module_fn));
             }
             // Build the trait impl and fill it with placeholders.
@@ -431,7 +428,7 @@ where
         let definition = FunctionDefinition::new(ty_scheme, arg_names, doc.clone());
         let descr = ModuleFunction {
             definition,
-            code: Rc::new(RefCell::new(b(VoidFunction))),
+            code: b(VoidFunction),
             spans: Some(spans),
             locals: vec![],
         };
@@ -520,7 +517,7 @@ where
             &ir_arena[fn_node_id].effects,
             &descr.definition.ty_scheme.ty.effects,
         );
-        *descr.code.borrow_mut() = b(ScriptFunction::new(
+        descr.code = b(ScriptFunction::new(
             fn_node_id,
             descr.definition.arg_names.clone(),
         ));

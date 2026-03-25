@@ -7,12 +7,12 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use std::{
-    cell::RefCell,
     fmt::{self, Debug},
     hash::DefaultHasher,
     marker::PhantomData,
-    rc::Rc,
 };
+
+use dyn_clone::DynClone;
 
 use derive_new::new;
 use ustr::Ustr;
@@ -168,7 +168,7 @@ impl FormatWith<ModuleEnv<'_>> for (&FunctionDefinition, Ustr) {
 type CallCtx<'a> = EvalCtx<'a>;
 
 /// A function that can be called
-pub trait Callable {
+pub trait Callable: DynClone {
     fn call(
         &self,
         args: Vec<ValOrMut>,
@@ -200,12 +200,14 @@ impl Debug for dyn Callable {
     }
 }
 
+dyn_clone::clone_trait_object!(Callable);
+
 // Function access types
 
 pub type Function = Box<dyn Callable>;
-pub type FunctionRc = Rc<RefCell<Function>>;
 
 /// An empty dummy function returning (), used as placeholder
+#[derive(Clone)]
 pub struct VoidFunction;
 
 impl Callable for VoidFunction {
@@ -525,7 +527,7 @@ macro_rules! n_ary_native_fn {
                         arg_names.into_iter().map(Ustr::from).collect(),
                         Some(String::from(doc)),
                     ),
-                    code: Rc::new(RefCell::new(Box::new(Self::new(f)))),
+                    code: Box::new(Self::new(f)),
                     spans: None,
                     locals: Vec::new(),
                 }

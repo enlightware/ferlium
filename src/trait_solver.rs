@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{cell::RefCell, iter::repeat, rc::Rc};
+use std::iter::repeat;
 
 use crate::FxHashSet;
 
@@ -20,7 +20,7 @@ use crate::{
     containers::b,
     effects::EffType,
     error::InternalCompilationError,
-    function::{Function, FunctionRc, ScriptFunction},
+    function::{Function, ScriptFunction},
     internal_compilation_error,
     ir::{self, Node, NodeArena},
     ir_syn::{get_dictionary, load, static_apply},
@@ -511,8 +511,8 @@ impl<'a> TraitSolver<'a> {
                                 EffType::empty(),
                                 fn_span,
                             ));
-                            let code = b(ScriptFunction::new(apply_id, def.arg_names.clone()));
-                            let code: FunctionRc = Rc::new(RefCell::new(code));
+                            let code: Function =
+                                b(ScriptFunction::new(apply_id, def.arg_names.clone()));
                             let function = ModuleFunction::new(def, code, None, locals);
                             let name = Ustr::from(&format!(
                                 "{}-thunk",

@@ -128,7 +128,6 @@ macro_rules! call_fn {
                 let args_vec = vec![ $( $crate::eval::ValOrMut::Val($val) ),* ];
                 let ret = func
                     .code
-                    .borrow()
                     .call(args_vec, &mut ctx, &func.locals)
                     .map_err(|err| format!("Execution error: {}", err.kind()))?
                     .into_value();

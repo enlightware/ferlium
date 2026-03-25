@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{cell::RefCell, fmt, hash::Hash, rc::Rc};
+use std::{fmt, hash::Hash};
 
 use crate::FxHashMap;
 
@@ -234,9 +234,7 @@ impl TraitImpls {
         let functions: Vec<_> = definitions
             .into_iter()
             .zip(functions.into())
-            .map(|(def, (function, locals))| {
-                ModuleFunction::new(def, Rc::new(RefCell::new(function)), None, locals)
-            })
+            .map(|(def, (function, locals))| ModuleFunction::new(def, function, None, locals))
             .collect();
 
         // Add the impl, collecting new functions.
@@ -302,9 +300,7 @@ impl TraitImpls {
         let functions: Vec<_> = definitions
             .into_iter()
             .zip(functions.into())
-            .map(|(def, (function, locals))| {
-                ModuleFunction::new(def, Rc::new(RefCell::new(function)), None, locals)
-            })
+            .map(|(def, (function, locals))| ModuleFunction::new(def, function, None, locals))
             .collect();
 
         // Add the impl, collecting new functions.
@@ -702,10 +698,7 @@ fn format_impl_fn(
         writeln!(f, " (#{id})")?;
     }
     if show_code {
-        function
-            .code
-            .borrow()
-            .format_ind(f, &function.locals, env, 2, 1)?;
+        function.code.format_ind(f, &function.locals, env, 2, 1)?;
     }
     Ok(())
 }

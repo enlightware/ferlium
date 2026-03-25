@@ -26,7 +26,7 @@ use crate::{
         DuplicatedFieldContext, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     format::FormatWith,
-    function::{FunctionDefinition, FunctionRc},
+    function::{Function, FunctionDefinition},
     internal_compilation_error,
     location::Location,
     module::{LocalDecl, LocalDeclId, ModuleFunction, id::Id},
@@ -436,7 +436,7 @@ impl TypeInference {
         let ty_scheme = TypeScheme::new_just_type(fn_ty);
         let function = ModuleFunction {
             definition: FunctionDefinition::new(ty_scheme, arg_names, None),
-            code: FunctionRc::new(RefCell::new(b(code))),
+            code: b(code) as Function,
             spans: None, // FIXME: add spans
             locals: fn_all_locals,
         };

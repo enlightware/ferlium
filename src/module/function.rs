@@ -18,7 +18,7 @@ use crate::{
     dictionary_passing::{DictElaborationCtx, elaborate_dictionaries},
     error::InternalCompilationError,
     format::FormatWith,
-    function::{FunctionDefinition, FunctionRc},
+    function::{Function, FunctionDefinition},
     ir::{NodeArena, NodeId},
     module::{ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
     mutability::MutType,
@@ -145,13 +145,13 @@ define_id_type!(
 #[derive(Debug, Clone, new)]
 pub struct ModuleFunction {
     pub definition: FunctionDefinition,
-    pub code: FunctionRc,
+    pub code: Function,
     pub spans: Option<ModuleFunctionSpans>,
     /// Local variable declarations for the function body, including arguments and any variables declared within the function.
     pub locals: Vec<LocalDecl>,
 }
 impl ModuleFunction {
-    pub fn new_without_spans_nor_locals(definition: FunctionDefinition, code: FunctionRc) -> Self {
+    pub fn new_without_spans_nor_locals(definition: FunctionDefinition, code: Function) -> Self {
         Self {
             definition,
             code,
@@ -167,8 +167,7 @@ impl ModuleFunction {
     }
 
     pub fn get_code_entry(&self) -> Option<NodeId> {
-        let code = self.code.borrow();
-        code.as_script().map(|s| s.entry_node_id)
+        self.code.as_script().map(|s| s.entry_node_id)
     }
 
     /// Span of the function definition, or synthesized if not available.
@@ -206,8 +205,7 @@ impl ModuleFunction {
         // Extend the argument list and the local variable declarations with the dictionaries
         // for the requirements, which are passed as extra arguments to the function.
         // The dictionaries are added at the beginning of the argument list, before the user-defined arguments.
-        let mut function = self.code.borrow_mut();
-        let script_fn = function.as_script_mut().unwrap();
+        let script_fn = self.code.as_script_mut().unwrap();
         script_fn.arg_names.splice(
             0..0,
             ctx.dicts
@@ -246,7 +244,7 @@ impl ModuleFunction {
                 requirements.format_with(env)
             )?;
         }
-        self.code.borrow().format_ind(f, &self.locals, env, 0, 1)
+        self.code.format_ind(f, &self.locals, env, 0, 1)
     }
 }
 

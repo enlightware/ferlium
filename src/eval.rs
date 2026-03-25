@@ -367,8 +367,7 @@ impl<'a> EvalCtx<'a> {
             .unwrap();
         let function_data = module.get_function_by_id(local_id).unwrap();
         let locals = &function_data.locals;
-        let function_ptr = function_data.code.clone();
-        let result = function_ptr.borrow().call(arguments, self, locals);
+        let result = function_data.code.call(arguments, self, locals);
 
         // Restore the previous module.
         mem::swap(&mut self.module_id, &mut module_id);
