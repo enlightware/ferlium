@@ -18,7 +18,8 @@ use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, Mutab
 use ferlium::format::FormatWith;
 use ferlium::module::id::Id;
 use ferlium::module::{
-    LocalDecl, LocalFunctionId, ModuleEnv, ModuleId, Modules, Path, ShowModuleDetails,
+    LocalDecl, LocalFunctionId, ModuleEnv, ModuleId, Modules, Path, ShowModuleDetails, UseData,
+    Uses,
 };
 use ferlium::std::new_module_using_std;
 use ferlium::{
@@ -498,18 +499,20 @@ fn process_input(
     }
 
     // Initialize module with use directives
-    let mut module = new_module_using_std(session.modules().next_id());
+    let mut uses = Uses::new_with_std();
     for (sym, path) in reverse_uses {
-        module.add_explicit_use(sym, path, Location::new_synthesized());
+        uses.explicits
+            .insert(sym, UseData::new(path, Location::new_synthesized()));
     }
 
     // AST debug output for REPL
-    let dbg_module = module.clone();
+    let next_module_id = session.modules().next_id();
     let ast_inspector =
         |module_ast: &PModule, expr_ast: Option<PExprId>, arena: &PExprArena, modules: &Modules| {
             if !is_repl {
                 return;
             }
+            let dbg_module = new_module_using_std(next_module_id);
             let module_env = ModuleEnv::new(&dbg_module, modules);
             if !module_ast.is_empty() {
                 println!(
@@ -531,7 +534,7 @@ fn process_input(
             input,
             name,
             Path::single_str(name),
-            module,
+            uses,
             Some(&ast_inspector),
         )
         .map_err(|e| {
@@ -551,7 +554,7 @@ fn process_input(
             let module_env = ModuleEnv::new(&module, session.modules());
             println!(
                 "Expr IR:\n{}",
-                ir::IrBodyDisplay::new(&expr.expr, &expr.locals).format_with(&module_env)
+                ir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&module_env)
             );
         }
     }
@@ -562,12 +565,12 @@ fn process_input(
         let mut eval_ctx =
             EvalCtx::with_environment(module_id.clone(), environment.clone(), session);
         let old_size = eval_ctx.environment.len();
-        let result = eval_node_with_ctx(
-            &expr.expr.arena,
-            expr.expr.root,
-            &mut eval_ctx,
-            &expr.locals,
-        );
+        let arena = &eval_ctx
+            .compiler_session()
+            .get_module_by_id(module_id)
+            .unwrap()
+            .ir_arena;
+        let result = eval_node_with_ctx(arena, expr.expr, &mut eval_ctx, &expr.locals);
         *locals = expr.locals;
         match result {
             Ok(value) => {

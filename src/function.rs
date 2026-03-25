@@ -28,7 +28,7 @@ use crate::{
         eval_node_with_ctx,
     },
     format::FormatWith,
-    ir::{self},
+    ir::{self, NodeId},
     module::{LocalDecl, ModuleEnv, ModuleFunction},
     r#type::{FnType, Type, fmt_fn_type_with_arg_names},
     type_like::TypeLike,
@@ -234,7 +234,7 @@ impl Callable for VoidFunction {
 /// A function holding user-defined code.
 #[derive(Debug, Clone, new)]
 pub struct ScriptFunction {
-    pub code: ir::IrBody,
+    pub entry_node_id: NodeId,
     pub arg_names: Vec<Ustr>,
     // pub monomorphised: HashMap<Vec<Type>, ir::Node>,
 }
@@ -264,15 +264,20 @@ impl Callable for ScriptFunction {
         #[cfg(debug_assertions)]
         ctx.environment_names.extend(self.arg_names.iter().copied());
         ctx.recursion += 1;
+        let arena = &ctx
+            .compiler_session()
+            .get_module_by_id(ctx.module_id)
+            .expect("module not found during script function call")
+            .ir_arena;
         if ctx.recursion >= ctx.recursion_limit {
             return Err(RuntimeError::new(
                 RuntimeErrorKind::RecursionLimitExceeded {
                     limit: ctx.recursion_limit,
                 },
-                Some(self.code.arena[self.code.root].span),
+                Some(arena[self.entry_node_id].span),
             ));
         }
-        let ret = eval_node_with_ctx(&self.code.arena, self.code.root, ctx, locals_arg)?;
+        let ret = eval_node_with_ctx(arena, self.entry_node_id, ctx, locals_arg)?;
         ctx.recursion -= 1;
         assert_eq!(ctx.environment.len(), ctx.frame_base + arg_count);
         ctx.environment.truncate(ctx.frame_base);
@@ -298,8 +303,8 @@ impl Callable for ScriptFunction {
         indent: usize,
     ) -> std::fmt::Result {
         ir::format_ind(
-            &self.code.arena,
-            self.code.root,
+            &env.current.ir_arena,
+            self.entry_node_id,
             f,
             locals,
             env,

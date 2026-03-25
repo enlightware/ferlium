@@ -9,8 +9,8 @@
 use std::{borrow::Borrow, cell::RefCell, mem, rc::Rc};
 
 use crate::{
-    FxHashMap, FxHashSet, borrow_checker::check_borrows,
-    dictionary_passing::elaborate_dictionaries, function::VoidFunction,
+    FxHashMap, FxHashSet, borrow_checker::check_borrows, containers::B,
+    dictionary_passing::elaborate_dictionaries, function::VoidFunction, ir::NodeId, module::Uses,
 };
 
 use indexmap::IndexMap;
@@ -29,7 +29,7 @@ use crate::{
     format::FormatWith,
     function::{FunctionDefinition, ScriptFunction},
     internal_compilation_error,
-    ir::{self, IrBody, NodeArena, NodeId},
+    ir::{self, NodeArena},
     module::{
         ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module,
         ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, Modules, TraitImpl, id::Id,
@@ -75,27 +75,31 @@ struct ImplStubData {
     method_ids: Vec<LocalFunctionId>,
 }
 
-/// Emit IR for the given module
+/// Kinds existing data to be used when emitting a new module in [`emit_module`]
+pub enum EmitModuleFrom {
+    /// A fresh module with specific use-directives is created
+    Uses(Uses),
+    /// An existing module extended
+    Existing(B<Module>),
+}
+
+/// Emit IR for the given module.
+/// Optionally merge with an existing module (when compiling std).
 pub fn emit_module(
     source: ast::PModule,
     parsed_arena: &PExprArena,
     module_id: ModuleId,
     others: &Modules,
-    merge_with: Option<&Module>,
+    emit_from: EmitModuleFrom,
 ) -> Result<Module, InternalCompilationError> {
     // Preliminary: Make sure no name is defined multiple times.
     validate_name_uniqueness(&source)?;
 
     // First desugar the module.
-    let mut output = merge_with.map_or_else(
-        || Module::new(module_id),
-        |module| {
-            let mut module = module.clone();
-            // Make sure that the module_id is correct.
-            module.impls.module_id = module_id;
-            module
-        },
-    );
+    let mut output = match emit_from {
+        EmitModuleFrom::Uses(uses) => Module::from_uses(module_id, uses),
+        EmitModuleFrom::Existing(module) => *module,
+    };
     let (source, desugared_arena, sorted_sccs) =
         source.desugar(&mut output, others, parsed_arena)?;
 
@@ -157,6 +161,10 @@ pub fn emit_module(
         }
     }
 
+    // Take the module's IR node arena out for compilation so it can be passed separately
+    // from the module borrow, then put it back at the end.
+    let mut ir_arena = std::mem::take(&mut output.ir_arena);
+
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {
         scc.sort(); // for compatibility due to bug in effect tracking
@@ -172,7 +180,14 @@ pub fn emit_module(
         }
 
         // Emit the corresponding functions.
-        emit_functions(&mut output, functions, &desugared_arena, others, None)?;
+        emit_functions(
+            &mut output,
+            &mut ir_arena,
+            functions,
+            &desugared_arena,
+            others,
+            None,
+        )?;
     }
 
     // Process trait implementations
@@ -234,6 +249,7 @@ pub fn emit_module(
         };
         let emit_output = emit_functions(
             &mut output,
+            &mut ir_arena,
             functions,
             &desugared_arena,
             others,
@@ -265,6 +281,8 @@ pub fn emit_module(
         log::debug!("Emitted {impl_type} {header}");
     }
 
+    // Restore the IR arena.
+    output.ir_arena = ir_arena;
     Ok(output)
 }
 
@@ -285,6 +303,7 @@ pub(crate) struct EmitTraitOutput {
 
 fn emit_functions<'a, F, I>(
     output: &mut Module,
+    ir_arena: &mut NodeArena,
     ast_functions: F,
     desugared_arena: &DExprArena,
     others: &Modules,
@@ -466,7 +485,6 @@ where
         let mut lambda_functions = vec![];
         let mut locals = descr.gen_locals_no_bounds();
         let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
-        let mut ir_arena = NodeArena::with_capacity(32);
         let mut ty_env = TypingEnv::new(
             &mut locals,
             cur_locals,
@@ -477,7 +495,7 @@ where
             &mut lambda_functions,
             output.functions.len() as u32,
             desugared_arena,
-            &mut ir_arena,
+            ir_arena,
         );
         let fn_node_id = ty_inf.check_expr(
             &mut ty_env,
@@ -502,9 +520,8 @@ where
             &ir_arena[fn_node_id].effects,
             &descr.definition.ty_scheme.ty.effects,
         );
-        let fn_body = IrBody::new(ir_arena, fn_node_id);
         *descr.code.borrow_mut() = b(ScriptFunction::new(
-            fn_body,
+            fn_node_id,
             descr.definition.arg_names.clone(),
         ));
         descr.locals = locals;
@@ -516,7 +533,7 @@ where
 
     // Third pass, perform the unification.
     let mut solver = trait_solver_from_module!(output, others);
-    let mut ty_inf = ty_inf.unify(&mut solver)?;
+    let mut ty_inf = ty_inf.unify(&mut solver, ir_arena)?;
     solver.commit(&mut output.functions, &mut output.def_table);
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_substitution_tables(module_env);
@@ -526,7 +543,7 @@ where
     for id in local_fns.iter() {
         apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
             let descr = &mut output.functions[id.as_index()];
-            ty_inf.substitute_in_module_function(descr);
+            ty_inf.substitute_in_module_function(descr, ir_arena);
         });
 
         // Union duplicated effects from function arguments, and build a substitution for the
@@ -550,9 +567,8 @@ where
         apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
             let descr = &mut output.functions[id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
-            let mut body = descr.get_ir_body_mut().unwrap();
-            let root = body.root;
-            ir::instantiate_node(&mut body.arena, root, &subst);
+            let root = descr.get_code_entry().unwrap();
+            ir::instantiate_node(ir_arena, root, &subst);
             // Note: we do not have effects in locals, so no need to substitute them there.
         });
     }
@@ -600,6 +616,7 @@ where
             &input_quantifiers,
             &constraints,
             &mut solver,
+            ir_arena,
         )?;
         solver.commit(&mut output.functions, &mut output.def_table);
 
@@ -608,8 +625,8 @@ where
         let bounds: Vec<_> = quantifiers.iter().chain(subst.keys()).cloned().collect();
         for id in local_fns.iter() {
             let descr = &mut output.functions[id.as_index()];
-            let body = descr.get_ir_body().unwrap();
-            let unbound = ir::all_unbound_ty_vars(&body.arena, body.root);
+            let root = descr.get_code_entry().unwrap();
+            let unbound = ir::all_unbound_ty_vars(ir_arena, root);
             let uninstantiated_unbound = check_unbounds(unbound, &bounds)?;
             subst.extend(
                 uninstantiated_unbound
@@ -628,7 +645,7 @@ where
             .iter()
             .filter_map(|constraint| {
                 constraint
-                    .instantiate_and_drop_if_solved(&mut subst, &mut solver)
+                    .instantiate_and_drop_if_solved(&mut subst, &mut solver, ir_arena)
                     .transpose()
             })
             .collect::<Result<_, _>>()?;
@@ -647,10 +664,8 @@ where
                 let descr = &mut output.functions[id.as_index()];
                 descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
                 // type scheme quantifiers will be updated later on
-                let mut body = descr.get_ir_body_mut().unwrap();
-                let root = body.root;
-                ir::instantiate_node(&mut body.arena, root, &subst);
-                drop(body);
+                let root = descr.get_code_entry().unwrap();
+                ir::instantiate_node(ir_arena, root, &subst);
                 for local in &mut descr.locals {
                     local.ty = local.ty.instantiate(&subst);
                 }
@@ -666,7 +681,7 @@ where
                 InternalCompilationError,
             > {
                 let descr = &mut output.functions[id.as_index()];
-                descr.check_borrows_and_elaborate_dictionaries(&mut ctx)
+                descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)
             });
             solver.commit(&mut output.functions, &mut output.def_table);
         }
@@ -689,11 +704,8 @@ where
                 assert!(eff_quantifiers.is_empty());
                 descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
                 descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-                let descr = &mut output.functions[id.as_index()];
-                let mut body = descr.get_ir_body_mut().unwrap();
-                let root = body.root;
-                ir::instantiate_node(&mut body.arena, root, &subst);
-                drop(body);
+                let root = descr.get_code_entry().unwrap();
+                ir::instantiate_node(ir_arena, root, &subst);
                 for local in &mut descr.locals {
                     local.ty = local.ty.instantiate(&subst);
                 }
@@ -716,7 +728,7 @@ where
         let mut used_constraints: FxHashSet<PubTypeConstraintPtr> = FxHashSet::default();
         for (function, id) in ast_functions().zip(local_fns.iter()) {
             let descr = &output.functions[id.as_index()];
-            let body = descr.get_ir_body().unwrap();
+            let code_entry = descr.get_code_entry().unwrap();
 
             // Clean-up constraints and validate them.
             let mut solver = trait_solver_from_module!(output, others);
@@ -728,10 +740,10 @@ where
             } = validate_and_cleanup_constraints(
                 &descr.definition.ty_scheme.ty,
                 &all_constraints,
-                &body.arena,
-                body.root,
+                code_entry,
                 false,
                 &mut solver,
+                ir_arena,
             )?;
             let mut constraints: Vec<_> = all_constraints
                 .iter()
@@ -745,7 +757,6 @@ where
                 .cloned()
                 .collect();
             assert_eq!(constraints.len(), retained_constraints.len());
-            drop(body);
             solver.commit(&mut output.functions, &mut output.def_table);
 
             // Substitute the constraint-originating types in the node.
@@ -755,7 +766,7 @@ where
                 .iter()
                 .filter_map(|constraint| {
                     constraint
-                        .instantiate_and_drop_if_solved(&mut subst, &mut solver)
+                        .instantiate_and_drop_if_solved(&mut subst, &mut solver, ir_arena)
                         .transpose()
                 })
                 .collect::<Result<_, _>>()?;
@@ -764,10 +775,8 @@ where
             // Apply substitution and finalize the type scheme.
             apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                 let descr = &mut output.functions[id.as_index()];
-                let mut body = descr.get_ir_body_mut().unwrap();
-                let root = body.root;
-                ir::instantiate_node(&mut body.arena, root, &subst);
-                drop(body);
+                let root = descr.get_code_entry().unwrap();
+                ir::instantiate_node(ir_arena, root, &subst);
                 for local in &mut descr.locals {
                     local.ty = local.ty.instantiate(&subst);
                 }
@@ -823,7 +832,7 @@ where
                 InternalCompilationError,
             > {
                 let descr = &mut output.functions[id.as_index()];
-                descr.check_borrows_and_elaborate_dictionaries(&mut ctx)
+                descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)
             });
             solver.commit(&mut output.functions, &mut output.def_table);
         }
@@ -835,10 +844,8 @@ where
                 // Note: after that normalization, the functions do not share the same
                 // type variables anymore.
                 let subst = descr.definition.ty_scheme.normalize();
-                let mut body = descr.get_ir_body_mut().unwrap();
-                let root = body.root;
-                ir::instantiate_node(&mut body.arena, root, &subst);
-                drop(body);
+                let root = descr.get_code_entry().unwrap();
+                ir::instantiate_node(ir_arena, root, &subst);
                 for local in &mut descr.locals {
                     local.ty = local.ty.instantiate(&subst);
                 }
@@ -876,7 +883,7 @@ fn check_unbounds(
 /// A compiled expression
 #[derive(Debug)]
 pub struct CompiledExpr {
-    pub expr: ir::IrBody,
+    pub expr: ir::NodeId,
     pub ty: TypeScheme<Type>,
     pub locals: Vec<LocalDecl>,
 }
@@ -890,7 +897,23 @@ pub fn emit_expr_unsafe(
     parsed_arena: &PExprArena,
     module: &mut Module,
     others: &Modules,
+    locals: Vec<LocalDecl>,
+) -> Result<CompiledExpr, InternalCompilationError> {
+    // Take the module's node arena out for compilation, then restore it unconditionally.
+    let mut ir_arena = std::mem::take(&mut module.ir_arena);
+    let result =
+        emit_expr_unsafe_inner(source, parsed_arena, module, others, locals, &mut ir_arena);
+    module.ir_arena = ir_arena;
+    result
+}
+
+fn emit_expr_unsafe_inner(
+    source: PExprId,
+    parsed_arena: &PExprArena,
+    module: &mut Module,
+    others: &Modules,
     mut locals: Vec<LocalDecl>,
+    ir_arena: &mut NodeArena,
 ) -> Result<CompiledExpr, InternalCompilationError> {
     // Make sure that the locals' types have no type variables in them
     assert!(
@@ -914,7 +937,6 @@ pub fn emit_expr_unsafe(
     let mut new_type_deps = FxHashSet::default();
     let mut lambda_functions = vec![];
     let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
-    let mut ir_arena = NodeArena::with_capacity(32);
     let mut ty_env = TypingEnv::new(
         &mut locals,
         cur_locals,
@@ -925,7 +947,7 @@ pub fn emit_expr_unsafe(
         &mut lambda_functions,
         module.functions.len() as u32,
         &desugared_arena,
-        &mut ir_arena,
+        ir_arena,
     );
     let mut ty_inf = TypeInference::new_empty();
     let (node_id, _) = ty_inf.infer_expr(&mut ty_env, source)?;
@@ -945,16 +967,16 @@ pub fn emit_expr_unsafe(
 
     // Perform the unification.
     let mut solver = trait_solver_from_module!(module, others);
-    let mut ty_inf = ty_inf.unify(&mut solver)?;
+    let mut ty_inf = ty_inf.unify(&mut solver, ir_arena)?;
     solver.commit(&mut module.functions, &mut module.def_table);
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
 
     // Substitute the result of the unification.
-    ty_inf.substitute_in_node(&mut ir_arena, node_id);
+    ty_inf.substitute_in_node(ir_arena, node_id);
     for lambda_id in lambda_functions.iter() {
         let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
-        ty_inf.substitute_in_module_function(descr);
+        ty_inf.substitute_in_module_function(descr, ir_arena);
     }
     for local in locals.iter_mut().skip(initial_local_count) {
         local.ty = ty_inf.substitute_in_type(local.ty);
@@ -977,10 +999,10 @@ pub fn emit_expr_unsafe(
     } = validate_and_cleanup_constraints(
         &node_ty,
         &constraints,
-        &ir_arena,
         node_id,
         true,
         &mut solver,
+        ir_arena,
     )?;
     solver.commit(&mut module.functions, &mut module.def_table);
     let module_env = ModuleEnv::new(module, others);
@@ -1002,7 +1024,7 @@ pub fn emit_expr_unsafe(
         let mut new_constraints = Vec::new();
         for constraint in constraints.iter() {
             if let Some(new_constraint) =
-                constraint.instantiate_and_drop_if_solved(&mut subst, &mut solver)?
+                constraint.instantiate_and_drop_if_solved(&mut subst, &mut solver, ir_arena)?
             {
                 new_constraints.push(new_constraint);
             } else {
@@ -1012,14 +1034,12 @@ pub fn emit_expr_unsafe(
         constraints = new_constraints;
     }
     quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
-    ir::instantiate_node(&mut ir_arena, node_id, &subst);
+    ir::instantiate_node(ir_arena, node_id, &subst);
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
-        let mut body = descr.get_ir_body_mut().unwrap();
-        let root = body.root;
-        ir::instantiate_node(&mut body.arena, root, &subst);
-        drop(body);
+        let root = descr.get_code_entry().unwrap();
+        ir::instantiate_node(ir_arena, root, &subst);
         for local in &mut descr.locals {
             local.ty = local.ty.instantiate(&subst);
         }
@@ -1053,14 +1073,12 @@ pub fn emit_expr_unsafe(
     }
 
     // Substitute the normalized and constraint-originating types in the node, effects and locals.
-    ir::instantiate_node(&mut ir_arena, node_id, &subst);
+    ir::instantiate_node(ir_arena, node_id, &subst);
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
-        let mut body = descr.get_ir_body_mut().unwrap();
-        let root = body.root;
-        ir::instantiate_node(&mut body.arena, root, &subst);
-        drop(body);
+        let root = descr.get_code_entry().unwrap();
+        ir::instantiate_node(ir_arena, root, &subst);
         for local in &mut descr.locals {
             local.ty = local.ty.instantiate(&subst);
         }
@@ -1074,18 +1092,18 @@ pub fn emit_expr_unsafe(
     let dicts = ty_scheme.extra_parameters();
     let mut solver = trait_solver_from_module!(module, &others);
     let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
-    check_borrows(&ir_arena, node_id)?;
+    check_borrows(ir_arena, node_id)?;
     let local_count = locals.len();
-    elaborate_dictionaries(&mut ir_arena, node_id, &mut ctx, local_count)?;
+    elaborate_dictionaries(ir_arena, node_id, &mut ctx, local_count)?;
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
-        descr.check_borrows_and_elaborate_dictionaries(&mut ctx)?;
+        descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)?;
     }
     solver.commit(&mut module.functions, &mut module.def_table);
     assert_eq!(locals.len(), local_count);
 
     Ok(CompiledExpr {
-        expr: IrBody::new(ir_arena, node_id),
+        expr: node_id,
         ty: ty_scheme,
         locals,
     })
@@ -1275,13 +1293,13 @@ struct ConstraintValidationOutput {
 fn validate_and_cleanup_constraints(
     ty: &impl TypeLike,
     constraints: &[PubTypeConstraint],
-    arena: &NodeArena,
-    node_id: NodeId,
+    code_entry: NodeId,
     is_expr: bool,
     trait_solver: &mut TraitSolver,
+    arena: &mut NodeArena,
 ) -> Result<ConstraintValidationOutput, InternalCompilationError> {
     // Filter out constraints that have types not found in our code.
-    let unbound = ir::all_unbound_ty_vars(arena, node_id);
+    let unbound = ir::all_unbound_ty_vars(arena, code_entry);
     // let ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
     // let constraints = select_constraints_only_these_ty_vars(constraints, &ty_vars);
     let constraints = constraints.iter().collect::<Vec<_>>();
@@ -1312,6 +1330,7 @@ fn validate_and_cleanup_constraints(
             &mut other_orphans,
             &mut subst,
             trait_solver,
+            arena,
         )?;
         if !other_orphans.is_empty() {
             let orphans = orphan_constraints
@@ -1357,6 +1376,7 @@ fn validate_and_cleanup_constraints(
             &mut retained_constraints,
             &mut constraint_subst,
             trait_solver,
+            arena,
         )?;
     }
 
@@ -1375,6 +1395,7 @@ fn validate_and_simplify_trait_imp_constraints(
     input_quantifiers: &[TypeVar],
     constraints: &Vec<PubTypeConstraint>,
     trait_solver: &mut TraitSolver,
+    arena: &mut NodeArena,
 ) -> Result<(Vec<TypeVar>, TypeSubstitution), InternalCompilationError> {
     // Find constraints that are not transitively accessible from the trait signature.
     let (constraints, orphan_constraints) =
@@ -1389,6 +1410,7 @@ fn validate_and_simplify_trait_imp_constraints(
         &mut other_orphans,
         &mut subst,
         trait_solver,
+        arena,
     )?;
     if !other_orphans.is_empty() {
         return Err(internal_compilation_error!(Internal {
@@ -1419,6 +1441,7 @@ fn compute_num_trait_default_types(
     selected_constraints: &mut FxHashSet<PubTypeConstraintPtr>,
     subst: &mut TypeSubstitution,
     trait_solver: &mut TraitSolver,
+    arena: &mut NodeArena,
 ) -> Result<(), InternalCompilationError> {
     // In debug, check that all_constraints contains all selected_constraints.
     #[cfg(debug_assertions)]
@@ -1604,6 +1627,7 @@ fn compute_num_trait_default_types(
                             &trait_ref,
                             &input_tys,
                             span.use_site,
+                            arena,
                         )?;
                         for (output_ty, solved_ty) in
                             output_tys.iter().zip(solved_output_tys.iter())
@@ -1620,6 +1644,7 @@ fn compute_num_trait_default_types(
                             &trait_ref,
                             &input_tys,
                             span.use_site,
+                            arena,
                         )?;
                         if output_tys != solved_output_tys {
                             let fake_current = new_module_using_std(ModuleId(0));

@@ -68,8 +68,10 @@ pub use ustr::{Ustr, ustr};
 
 use crate::{
     ast::PExprArena,
+    containers::b,
+    emit_ir::EmitModuleFrom,
     format::FormatWith,
-    module::{Module, ModuleFunction, ModuleId, id::Id},
+    module::{Module, ModuleFunction, ModuleId, Uses, id::Id},
     std::STD_MODULE_ID,
     r#type::Type,
 };
@@ -359,13 +361,11 @@ impl CompilerSession {
             log::debug!("Input: {src_code}");
         }
 
-        // Prepare a module with the extra uses.
-        let module = new_module_using_std(self.modules.next_id());
-
         // Compile the code.
         // If debug logging is enabled, prepare an AST inspector that logs the ASTs.
+        let uses = Uses::new_with_std();
         let output = if log::log_enabled!(log::Level::Debug) {
-            let dbg_module = module.clone();
+            let dbg_module = new_module_using_std(self.modules.next_id());
             let ast_inspector = |module_ast: &ast::PModule,
                                  expr_ast: Option<ast::PExprId>,
                                  arena: &ast::PExprArena,
@@ -382,11 +382,11 @@ impl CompilerSession {
                 src_code,
                 source_name,
                 module_path,
-                module,
+                uses,
                 Some(&ast_inspector),
             )
         } else {
-            self.compile_to(src_code, source_name, module_path, module, None)
+            self.compile_to(src_code, source_name, module_path, uses, None)
         }?;
 
         // If debug logging is enabled, display the final IR, after linking and finalizing pending functions.
@@ -399,7 +399,7 @@ impl CompilerSession {
                 let env = ModuleEnv::new(module, &self.modules);
                 log::debug!(
                     "Expr IR\n{}",
-                    ir::IrBodyDisplay::new(&expr.expr, &expr.locals).format_with(&env)
+                    ir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&env)
                 );
             }
         }
@@ -415,7 +415,7 @@ impl CompilerSession {
         src_code: &str,
         source_name: &str,
         module_path: Path,
-        module: Module,
+        uses: Uses,
         ast_inspector: Option<AstInspectorCb<'_>>,
     ) -> Result<ModuleAndExpr, CompilationError> {
         // Parse the source code.
@@ -428,27 +428,26 @@ impl CompilerSession {
             ast_inspector(&module_ast, expr_ast, &arena, &self.modules);
         }
 
-        // FIXME: this always associates a ModuleId, even if the module was not there yet and the compilation fails.
-        // We might not want this behavior.
-
         // Get the old module of the same name, replacing it with a dummy for the duration of the compilation.
         let (module_id, old_module) = self
             .modules
             .replace(module_path.clone(), Module::new(self.modules.next_id()));
 
         // Emit IR for the module.
-        let mut module = emit_module(module_ast, &arena, module_id, &self.modules, Some(&module))
+        let emit_from = EmitModuleFrom::Uses(uses);
+        let mut module = emit_module(module_ast, &arena, module_id, &self.modules, emit_from)
             .map_err(|error| {
-            // Restore the old module in case of error, to avoid leaving the session in a broken state.
-            // Note: the clone on old_module is due to a limitation of the borrow checker not realizing this function
-            // is only called when the parent function is exited with the ? below.
-            old_module
-                .clone()
-                .map(|old_module| self.modules.replace(module_path.clone(), old_module));
-            // Resolve types in the error, to provide better error messages.
-            let env = ModuleEnv::new(&module, &self.modules);
-            CompilationError::resolve_types(error, &env, &self.source_table)
-        })?;
+                // Restore the old module in case of error, to avoid leaving the session in a broken state.
+                // Note: the clone on old_module is due to a limitation of the borrow checker not realizing this function
+                // is only called when the parent function is exited with the ? below.
+                old_module
+                    .clone()
+                    .map(|old_module| self.modules.replace(module_path.clone(), old_module));
+                // Resolve types in the error, to provide better error messages.
+                let module = new_module_using_std(module_id);
+                let env = ModuleEnv::new(&module, &self.modules);
+                CompilationError::resolve_types(error, &env, &self.source_table)
+            })?;
 
         // Emit IR for the expression, if any.
         let expr = if let Some(expr_ast) = expr_ast {
@@ -581,18 +580,18 @@ pub fn parse_module_and_expr(
 pub(crate) fn add_code_to_module(
     source_name: &str,
     code: &str,
-    to: &mut Module,
+    to: Module,
     module_id: ModuleId,
     other_modules: &Modules,
     source_table: &mut SourceTable,
-) -> Result<SourceId, CompilationError> {
+) -> Result<Module, CompilationError> {
     // Parse the source code.
     let source_id = source_table.add_source(source_name.to_string(), code.to_string());
     let (module_ast, arena) = parse_module(code, source_id, true)
         .map_err(|error| compilation_error!(ParsingFailed(error)))?;
     assert_eq!(module_ast.errors(&arena), &[]);
     {
-        let env = ModuleEnv::new(to, other_modules);
+        let env = ModuleEnv::new(&to, other_modules);
         log::debug!(
             "Added module AST\n{}",
             ast::ModuleDisplay::new(&module_ast, &arena).format_with(&env)
@@ -600,15 +599,15 @@ pub(crate) fn add_code_to_module(
     }
 
     // Emit IR for the module.
+    let prev_to = to.clone();
+    let emit_from = EmitModuleFrom::Existing(b(to));
     let module =
-        emit_module(module_ast, &arena, module_id, other_modules, Some(to)).map_err(|error| {
-            let env = ModuleEnv::new(to, other_modules);
+        emit_module(module_ast, &arena, module_id, other_modules, emit_from).map_err(|error| {
+            let env = ModuleEnv::new(&prev_to, other_modules);
             CompilationError::resolve_types(error, &env, source_table)
         })?;
 
-    // Swap the new module with the old one.
-    *to = module;
-    Ok(source_id)
+    Ok(module)
 }
 
 /// Create a new arena for src, estimating the number of nodes needed and pre-allocating the memory.

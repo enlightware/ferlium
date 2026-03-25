@@ -832,9 +832,14 @@ impl Compiler {
 
     pub fn run_expr(&self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
+            let module = self
+                .session
+                .modules()
+                .get(self.user_module.module_id)
+                .unwrap();
             match eval_node(
-                &expr.expr.arena,
-                expr.expr.root,
+                &module.ir_arena,
+                expr.expr,
                 self.user_module.module_id,
                 &expr.locals,
                 &self.session,

@@ -37,13 +37,6 @@ pub type NodeId = Idx<Node>;
 /// An arena of IR nodes
 pub type NodeArena = Arena<Node>;
 
-/// A self-contained IR body with its arena and root node
-#[derive(Debug, Clone, new)]
-pub struct IrBody {
-    pub arena: NodeArena,
-    pub root: NodeId,
-}
-
 /// Function instantiation data that are needed to fill dictionaries
 #[derive(Debug, Clone, new)]
 pub struct FnInstData {
@@ -807,13 +800,13 @@ pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitut
 }
 
 #[derive(new)]
-pub struct IrBodyDisplay<'a> {
-    pub body: &'a IrBody,
+pub struct ExprDisplay<'a> {
+    pub body: NodeId,
     pub locals: &'a [LocalDecl],
 }
 
-impl FormatWith<ModuleEnv<'_>> for IrBodyDisplay<'_> {
+impl FormatWith<ModuleEnv<'_>> for ExprDisplay<'_> {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        format_ind(&self.body.arena, self.body.root, f, self.locals, env, 0, 0)
+        format_ind(&env.current.ir_arena, self.body, f, self.locals, env, 0, 0)
     }
 }

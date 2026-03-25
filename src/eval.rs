@@ -142,6 +142,11 @@ impl<'a> EvalCtx<'a> {
         }
     }
 
+    /// Get the compiler session.
+    pub fn compiler_session(&self) -> &'a CompilerSession {
+        self.compiler_session
+    }
+
     pub fn with_environment(
         module: ModuleId,
         environment: Vec<ValOrMut>,

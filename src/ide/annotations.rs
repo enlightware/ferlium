@@ -47,8 +47,8 @@ impl ModuleAndExpr {
             let code = function.code.borrow();
             if let Some(script_fn) = code.as_script() {
                 variable_type_annotations(
-                    &script_fn.code.arena,
-                    script_fn.code.root,
+                    &module.ir_arena,
+                    script_fn.entry_node_id,
                     &mut annotations,
                     &function.locals,
                     &env,
@@ -56,11 +56,11 @@ impl ModuleAndExpr {
             }
         }
         if let Some(expr) = &self.expr {
-            let root_span = expr.expr.arena[expr.expr.root].span;
+            let root_span = module.ir_arena[expr.expr].span;
             if root_span.source_id == source_id {
                 variable_type_annotations(
-                    &expr.expr.arena,
-                    expr.expr.root,
+                    &module.ir_arena,
+                    expr.expr,
                     &mut annotations,
                     &expr.locals,
                     &env,
@@ -192,7 +192,7 @@ impl ModuleAndExpr {
 
         // Return type of the expression, if any.
         if let Some(expr) = &self.expr {
-            let root_span = expr.expr.arena[expr.expr.root].span;
+            let root_span = module.ir_arena[expr.expr].span;
             annotations.push((
                 root_span.end_usize(),
                 match style {

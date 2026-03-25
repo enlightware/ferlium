@@ -60,8 +60,7 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     iterator::add_to_module(&mut module);
     serde::add_to_module(&mut module);
     json::add_to_module(&mut module);
-    prelude::add_to_module(&mut module, source_table, STD_MODULE_ID);
-    module
+    prelude::add_to_module(module, source_table, STD_MODULE_ID)
 }
 
 pub fn new_module_using_std(module_id: ModuleId) -> Module {

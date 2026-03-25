@@ -20,7 +20,11 @@ macro_rules! prelude {
     };
 }
 
-pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable, module_id: ModuleId) {
+pub fn add_to_module(
+    mut to: Module,
+    source_table: &mut SourceTable,
+    module_id: ModuleId,
+) -> Module {
     // The prelude code is split into multiple parts
     // to allow dependencies between trait implementations.
     let codes = [
@@ -34,7 +38,7 @@ pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable, module_id:
         prelude!("json.fer"),
     ];
     for (name, code) in codes {
-        add_code_to_module(name, code, to, module_id, &Modules::default(), source_table)
+        to = add_code_to_module(name, code, to, module_id, &Modules::default(), source_table)
             .unwrap_or_else(|e| {
                 panic!(
                     "Failed to add prelude to module: {}",
@@ -42,4 +46,5 @@ pub fn add_to_module(to: &mut Module, source_table: &mut SourceTable, module_id:
                 )
             });
     }
+    to
 }

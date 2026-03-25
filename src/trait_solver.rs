@@ -22,7 +22,7 @@ use crate::{
     error::InternalCompilationError,
     function::{Function, FunctionRc, ScriptFunction},
     internal_compilation_error,
-    ir::{self, Node},
+    ir::{self, Node, NodeArena},
     ir_syn::{get_dictionary, load, static_apply},
     module::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
@@ -98,14 +98,14 @@ impl<'a> TraitSolver<'a> {
     /// Add a concrete trait implementation from the given code body, for single-function traits.
     pub fn add_concrete_impl_from_code(
         &mut self,
-        code: ir::IrBody,
+        code_entry: ir::NodeId,
         locals: Vec<LocalDecl>,
         trait_ref: &TraitRef,
         input_types: impl Into<Vec<Type>>,
         output_types: impl Into<Vec<Type>>,
     ) -> LocalImplId {
         let arg_names = trait_ref.functions[0].1.arg_names.clone();
-        let function: Function = b(ScriptFunction::new(code, arg_names));
+        let function: Function = b(ScriptFunction::new(code_entry, arg_names));
         self.impls.add_concrete_raw(
             trait_ref.clone(),
             input_types.into(),
@@ -198,6 +198,7 @@ impl<'a> TraitSolver<'a> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         fn_span: Location,
+        arena: &mut NodeArena,
     ) -> Result<TraitImplId, InternalCompilationError> {
         // Sanity checks
         assert!(
@@ -229,7 +230,7 @@ impl<'a> TraitSolver<'a> {
         self.recursion_depth += 1;
         self.solving_stack.insert(key.clone());
 
-        let result = self.solve_impl_actual(trait_ref, input_tys, fn_span);
+        let result = self.solve_impl_actual(trait_ref, input_tys, fn_span, arena);
 
         self.solving_stack.remove(&key);
         self.recursion_depth -= 1;
@@ -241,6 +242,7 @@ impl<'a> TraitSolver<'a> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         fn_span: Location,
+        arena: &mut NodeArena,
     ) -> Result<TraitImplId, InternalCompilationError> {
         // Special case for `Repr` trait.
         if trait_ref == &*REPR_TRAIT {
@@ -357,7 +359,7 @@ impl<'a> TraitSolver<'a> {
                             continue;
                         }
                         let new_output_tys =
-                            match self.solve_output_types(&trait_ref, &input_tys, fn_span) {
+                            match self.solve_output_types(&trait_ref, &input_tys, fn_span, arena) {
                                 Ok(tys) => tys,
                                 // Constraint not satisfied, try next implementation.
                                 Err(_) => continue 'impl_loop,
@@ -377,7 +379,7 @@ impl<'a> TraitSolver<'a> {
                             }
                         }
 
-                        let dict_id = self.solve_impl(&trait_ref, &input_tys, fn_span);
+                        let dict_id = self.solve_impl(&trait_ref, &input_tys, fn_span, arena);
                         let dict_id = match dict_id {
                             Ok(functions) => functions,
                             // Failed? Try next implementation.
@@ -462,14 +464,11 @@ impl<'a> TraitSolver<'a> {
                                 Location::new_synthesized(),
                             );
 
-                            // Build a per-thunk arena and allocate constraint dictionary nodes into it.
-                            let node_count =
-                                constraint_dict_infos.len() * 2 + def.ty_scheme.ty.args.len() + 1;
-                            let mut thunk_arena = ir::NodeArena::with_capacity(node_count);
+                            // Allocate constraint dictionary nodes into the module arena.
                             let constraint_dict_nodes: Vec<_> = constraint_dict_infos
                                 .iter()
                                 .map(|(kind, ty)| {
-                                    thunk_arena.alloc(Node::new(
+                                    arena.alloc(Node::new(
                                         kind.clone(),
                                         *ty,
                                         EffType::empty(),
@@ -485,7 +484,7 @@ impl<'a> TraitSolver<'a> {
                                 .chain(def.ty_scheme.ty.args.iter().enumerate().map(
                                     |(arg_i, arg_ty)| {
                                         let id = LocalDeclId::from_index(arg_i);
-                                        thunk_arena.alloc(Node::new(
+                                        arena.alloc(Node::new(
                                             load(arg_i, id),
                                             arg_ty.ty,
                                             EffType::empty(),
@@ -506,14 +505,13 @@ impl<'a> TraitSolver<'a> {
 
                             // Build the application node.
                             let apply = static_apply(function_id, ext_fn_ty, arguments, fn_span);
-                            let apply_id = thunk_arena.alloc(Node::new(
+                            let apply_id = arena.alloc(Node::new(
                                 apply,
                                 def.ty_scheme.ty.ret,
                                 EffType::empty(),
                                 fn_span,
                             ));
-                            let ir_body = ir::IrBody::new(thunk_arena, apply_id);
-                            let code = b(ScriptFunction::new(ir_body, def.arg_names.clone()));
+                            let code = b(ScriptFunction::new(apply_id, def.arg_names.clone()));
                             let code: FunctionRc = Rc::new(RefCell::new(code));
                             let function = ModuleFunction::new(def, code, None, locals);
                             let name = Ustr::from(&format!(
@@ -543,7 +541,7 @@ impl<'a> TraitSolver<'a> {
 
         // No blanket implementation found, look for a derived implementation.
         for derive in &trait_ref.derives {
-            if let Some(impl_id) = derive.derive_impl(trait_ref, input_tys, fn_span, self)? {
+            if let Some(impl_id) = derive.derive_impl(trait_ref, input_tys, fn_span, arena, self)? {
                 return Ok(impl_id);
             } else {
                 log::debug!(
@@ -578,8 +576,9 @@ impl<'a> TraitSolver<'a> {
         input_tys: &[Type],
         index: usize,
         fn_span: Location,
+        arena: &mut NodeArena,
     ) -> Result<FunctionId, InternalCompilationError> {
-        let impl_id = self.solve_impl(trait_ref, input_tys, fn_span)?;
+        let impl_id = self.solve_impl(trait_ref, input_tys, fn_span, arena)?;
         use TraitImplId::*;
         Ok(match impl_id {
             Local(id) => FunctionId::Local(self.impls.data[id.as_index()].methods[index]),
@@ -603,8 +602,9 @@ impl<'a> TraitSolver<'a> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         fn_span: Location,
+        arena: &mut NodeArena,
     ) -> Result<Vec<Type>, InternalCompilationError> {
-        let impl_id = self.solve_impl(trait_ref, input_tys, fn_span)?;
+        let impl_id = self.solve_impl(trait_ref, input_tys, fn_span, arena)?;
         Ok(self.get_impl_data_by_id(impl_id).output_tys.clone())
     }
 

@@ -203,6 +203,7 @@ impl PubTypeConstraint {
         &self,
         subst: &mut InstSubstitution,
         trait_solver: &mut TraitSolver<'_>,
+        arena: &mut crate::ir::NodeArena,
     ) -> Result<Option<Self>, InternalCompilationError> {
         let constraint = self.instantiate(subst);
         use PubTypeConstraint::*;
@@ -259,8 +260,12 @@ impl PubTypeConstraint {
                 span,
             } => {
                 if input_tys.iter().all(Type::is_constant) {
-                    let got_output_tys =
-                        trait_solver.solve_output_types(trait_ref, input_tys, span.use_site)?;
+                    let got_output_tys = trait_solver.solve_output_types(
+                        trait_ref,
+                        input_tys,
+                        span.use_site,
+                        arena,
+                    )?;
                     assert_eq!(got_output_tys.len(), output_tys.len());
                     for (got_output_ty, output_ty) in got_output_tys.iter().zip(output_tys.iter()) {
                         let inner_ty_vars = output_ty.inner_ty_vars();

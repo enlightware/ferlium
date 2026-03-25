@@ -424,15 +424,10 @@ fn try_compile_and_run(
         .map_err(RunError::Compilation)?;
 
     if let Some(expr) = expr {
-        eval_node(
-            &expr.expr.arena,
-            expr.expr.root,
-            module,
-            &expr.locals,
-            session,
-        )
-        .map(ControlFlow::into_value)
-        .map_err(RunError::Runtime)?;
+        let arena = &session.get_module_by_id(module).unwrap().ir_arena;
+        eval_node(arena, expr.expr, module, &expr.locals, session)
+            .map(ControlFlow::into_value)
+            .map_err(RunError::Runtime)?;
     }
 
     Ok(())

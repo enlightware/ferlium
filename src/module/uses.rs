@@ -27,6 +27,19 @@ pub struct Uses {
     pub explicits: FxHashMap<Ustr, UseData>,
     pub wildcards: Vec<UseData>,
 }
+
+impl Uses {
+    pub fn new_with_std() -> Self {
+        Self::new(
+            FxHashMap::default(),
+            vec![UseData::new(
+                Path::single_str("std"),
+                Location::new_synthesized(),
+            )],
+        )
+    }
+}
+
 impl Default for Uses {
     fn default() -> Self {
         Self::new(FxHashMap::default(), vec![])

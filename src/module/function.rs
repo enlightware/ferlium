@@ -9,8 +9,6 @@
 
 //! Functions within a module
 
-use std::cell::{Ref, RefMut};
-
 use crate::{
     Location,
     ast::UstrSpan,
@@ -21,7 +19,7 @@ use crate::{
     error::InternalCompilationError,
     format::FormatWith,
     function::{FunctionDefinition, FunctionRc},
-    ir::IrBody,
+    ir::{NodeArena, NodeId},
     module::{ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
     mutability::MutType,
     r#type::{FnArgType, Type},
@@ -168,14 +166,9 @@ impl ModuleFunction {
             .collect()
     }
 
-    pub fn get_ir_body(&self) -> Option<Ref<'_, IrBody>> {
+    pub fn get_code_entry(&self) -> Option<NodeId> {
         let code = self.code.borrow();
-        Ref::filter_map(code, |code| code.as_script().map(|s| &s.code)).ok()
-    }
-
-    pub fn get_ir_body_mut(&mut self) -> Option<RefMut<'_, IrBody>> {
-        let code = self.code.borrow_mut();
-        RefMut::filter_map(code, |code| code.as_script_mut().map(|s| &mut s.code)).ok()
+        code.as_script().map(|s| s.entry_node_id)
     }
 
     /// Span of the function definition, or synthesized if not available.
@@ -205,15 +198,16 @@ impl ModuleFunction {
 
     pub fn check_borrows_and_elaborate_dictionaries(
         &mut self,
+        arena: &mut NodeArena,
         ctx: &mut DictElaborationCtx<'_, '_, '_>,
     ) -> Result<(), InternalCompilationError> {
-        let mut function = self.code.borrow_mut();
-        let script_fn = function.as_script_mut().unwrap();
-        let body = &mut script_fn.code;
-        check_borrows(&body.arena, body.root)?;
+        let root = self.get_code_entry().unwrap();
+        check_borrows(arena, root)?;
         // Extend the argument list and the local variable declarations with the dictionaries
         // for the requirements, which are passed as extra arguments to the function.
         // The dictionaries are added at the beginning of the argument list, before the user-defined arguments.
+        let mut function = self.code.borrow_mut();
+        let script_fn = function.as_script_mut().unwrap();
         script_fn.arg_names.splice(
             0..0,
             ctx.dicts
@@ -234,7 +228,7 @@ impl ModuleFunction {
                     scope,
                 )
             }));
-        elaborate_dictionaries(&mut body.arena, body.root, ctx, local_count)
+        elaborate_dictionaries(arena, root, ctx, local_count)
     }
 
     pub(crate) fn fmt_code(

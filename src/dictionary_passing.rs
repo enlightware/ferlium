@@ -273,7 +273,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                     let resolved = input_tys.iter().all(Type::is_constant);
                     let node_kind = if resolved {
                         // Fully resolved, look up the trait implementation and build the trait function array.
-                        let dictionary = ctx.trait_solver.solve_impl(trait_ref, input_tys, span)?;
+                        let dictionary = ctx.trait_solver.solve_impl(trait_ref, input_tys, span, arena)?;
                         K::GetDictionary(ir::GetDictionary { dictionary })
                     } else {
                         // Not fully resolved, it must be in the input dictionaries, look for it.
@@ -503,6 +503,7 @@ impl Node {
                         &app.input_tys,
                         app.function_index,
                         app.function_span,
+                        arena,
                     )?;
                     let definition = &app.trait_ref.functions[app.function_index].1;
                     let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);

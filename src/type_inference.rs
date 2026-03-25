@@ -50,7 +50,7 @@ use crate::{
     effects::{EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution, no_effects},
     error::{ADTAccessType, InternalCompilationError, MutabilityMustBeContext},
     function::ScriptFunction,
-    ir::{self, EnvStore, FnInstData, Immediate, IrBody, NodeArena, NodeId, NodeKind},
+    ir::{self, EnvStore, FnInstData, Immediate, NodeArena, NodeId, NodeKind},
     module::ModuleEnv,
     mutability::{MutType, MutVal, MutVar, MutVarKey},
     std::{array::array_type, math::int_type},
@@ -397,8 +397,7 @@ impl TypeInference {
             .map(|local| local.name.0)
             .collect::<Vec<_>>();
 
-        // The lambda gets its own separate IR arena.
-        let mut lambda_arena = NodeArena::with_capacity(32);
+        // The lambda uses the same IR arena as the outer function (module's arena).
         let mut inner_env = TypingEnv::new(
             &mut fn_all_locals,
             fn_cur_locals,
@@ -409,7 +408,7 @@ impl TypeInference {
             env.lambda_functions,
             env.base_local_function_index,
             env.ast_arena,
-            &mut lambda_arena,
+            env.ir_arena,
         );
 
         // 5. Infer the body's type.
@@ -433,8 +432,7 @@ impl TypeInference {
         let fn_ty = FnType::new(args_ty, ret_ty, effects);
         let fn_ty_wrapper = Type::function_type(fn_ty.clone());
         let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
-        let code_body = IrBody::new(lambda_arena, code_id);
-        let code = ScriptFunction::new(code_body, all_arg_names);
+        let code = ScriptFunction::new(code_id, all_arg_names);
         let ty_scheme = TypeScheme::new_just_type(fn_ty);
         let function = ModuleFunction {
             definition: FunctionDefinition::new(ty_scheme, arg_names, None),
@@ -1762,8 +1760,9 @@ impl TypeInference {
     pub fn unify(
         self,
         trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
     ) -> Result<UnifiedTypeInference, InternalCompilationError> {
-        UnifiedTypeInference::unify_type_inference(self, trait_solver)
+        UnifiedTypeInference::unify_type_inference(self, trait_solver, arena)
     }
 }
 
@@ -1827,6 +1826,7 @@ impl UnifiedTypeInference {
     pub fn unify_type_inference(
         ty_inf: TypeInference,
         trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
     ) -> Result<Self, InternalCompilationError> {
         let TypeInference {
             ty_unification_table,
@@ -2211,6 +2211,7 @@ impl UnifiedTypeInference {
                                 span.use_site,
                                 is_ty_adt,
                                 trait_solver,
+                                arena,
                             )?
                         }
                     };
@@ -2730,6 +2731,7 @@ impl UnifiedTypeInference {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn unify_have_trait(
         &mut self,
         trait_ref: TraitRef,
@@ -2738,6 +2740,7 @@ impl UnifiedTypeInference {
         span: Location,
         is_ty_adt: impl Fn(Type) -> bool,
         trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
         let input_tys = self.normalize_types(input_tys);
         let output_tys = self.normalize_types(output_tys);
@@ -2772,7 +2775,8 @@ impl UnifiedTypeInference {
         let resolved = input_tys.iter().all(Type::is_constant);
         Ok(if resolved {
             // Fully resolved, validate the trait implementation.
-            let impl_output_tys = trait_solver.solve_output_types(&trait_ref, &input_tys, span)?;
+            let impl_output_tys =
+                trait_solver.solve_output_types(&trait_ref, &input_tys, span, arena)?;
             // Found, unify the output types.
             assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
             for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
@@ -3072,13 +3076,15 @@ impl UnifiedTypeInference {
         }
     }
 
-    pub fn substitute_in_module_function(&mut self, descr: &mut ModuleFunction) {
+    pub fn substitute_in_module_function(
+        &mut self,
+        descr: &mut ModuleFunction,
+        arena: &mut crate::ir::NodeArena,
+    ) {
         descr.definition.ty_scheme.ty = self.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
         assert!(descr.definition.ty_scheme.constraints.is_empty());
-        let mut code = descr.code.borrow_mut();
-        if let Some(script_fn) = code.as_script_mut() {
-            let root = script_fn.code.root;
-            self.substitute_in_node(&mut script_fn.code.arena, root);
+        if let Some(root) = descr.get_code_entry() {
+            self.substitute_in_node(arena, root);
         }
         for local in &mut descr.locals {
             local.ty = self.substitute_in_type(local.ty);

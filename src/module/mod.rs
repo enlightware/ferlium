@@ -29,11 +29,7 @@ pub use path::*;
 pub use trait_impl::*;
 pub use uses::*;
 
-use std::{
-    cell::{Ref, RefMut},
-    fmt,
-    hash::Hash,
-};
+use std::{fmt, hash::Hash};
 
 use ustr::{Ustr, ustr};
 
@@ -44,7 +40,7 @@ use crate::{
     format::FormatWith,
     function::Function,
     internal_compilation_error,
-    ir::{self, IrBody},
+    ir::{self, NodeArena},
     module::id::{Id, NamedIndexed},
     r#trait::TraitRef,
     r#type::{LocalTypeAliasId, Type, TypeAliases, TypeDefRef},
@@ -112,6 +108,9 @@ pub struct Module {
     type_defs: Vec<TypeDefRef>,
     traits: Traits,
     pub(crate) impls: TraitImpls,
+
+    /// Arena holding all IR nodes for all functions in this module.
+    pub ir_arena: NodeArena,
 }
 
 impl Module {
@@ -128,6 +127,24 @@ impl Module {
             type_defs: Vec::new(),
             traits: Traits::new(),
             impls: TraitImpls::new(module_id),
+            ir_arena: NodeArena::default(),
+        }
+    }
+
+    /// Create a new empty module with the given ID and specified uses, store the id in impls for later use.
+    pub fn from_uses(module_id: ModuleId, uses: Uses) -> Self {
+        Self {
+            import_fn_slots: Vec::new(),
+            import_impl_slots: Vec::new(),
+            type_deps: FxHashSet::default(),
+            uses,
+            def_table: DefTable::new(),
+            functions: Vec::new(),
+            type_aliases: TypeAliases::default(),
+            type_defs: Vec::new(),
+            traits: Traits::new(),
+            impls: TraitImpls::new(module_id),
+            ir_arena: NodeArena::default(),
         }
     }
 
@@ -259,16 +276,6 @@ impl Module {
     ) -> Option<(LocalFunctionId, &mut ModuleFunction)> {
         let id = self.get_local_function_id(name)?;
         self.functions.get_mut(id.as_index()).map(|f| (id, f))
-    }
-
-    /// Get a function by name only in this module and return its IR body, if it is a script function.
-    pub fn get_function_ir_body(&self, name: Ustr) -> Option<Ref<'_, IrBody>> {
-        self.get_function(name)?.get_ir_body()
-    }
-
-    /// Gets a function by name only in this module and return its mutable IR body, if it is a script function.
-    pub fn get_function_ir_body_mut(&mut self, name: Ustr) -> Option<RefMut<'_, IrBody>> {
-        self.get_function_mut(name)?.get_ir_body_mut()
     }
 
     /// Get a local function name by ID (slow, iterates over the def table)
@@ -570,7 +577,7 @@ impl Module {
             let code = function.code.borrow();
             let ty = code
                 .as_script()
-                .and_then(|script_fn| ir::type_at(&script_fn.code.arena, script_fn.code.root, pos));
+                .and_then(|script_fn| ir::type_at(&self.ir_arena, script_fn.entry_node_id, pos));
             if ty.is_some() {
                 return ty;
             }

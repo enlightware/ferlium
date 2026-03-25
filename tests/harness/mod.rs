@@ -300,15 +300,10 @@ impl TestSession {
 
         // Run the expression if any.
         if let Some(expr) = expr {
-            eval_node(
-                &expr.expr.arena,
-                expr.expr.root,
-                module,
-                &expr.locals,
-                &self.session,
-            )
-            .map(ControlFlow::into_value)
-            .map_err(Error::Runtime)
+            let arena = &self.session.get_module_by_id(module).unwrap().ir_arena;
+            eval_node(arena, expr.expr, module, &expr.locals, &self.session)
+                .map(ControlFlow::into_value)
+                .map_err(Error::Runtime)
         } else {
             Ok(Value::unit())
         }

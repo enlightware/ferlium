@@ -41,6 +41,7 @@ pub trait Deriver: Debug + DynClone + Sync + Send {
         trait_ref: &TraitRef,
         input_types: &[Type],
         span: Location,
+        arena: &mut crate::ir::NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError>;
 }
