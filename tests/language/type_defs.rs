@@ -72,7 +72,7 @@ fn define_enum_types() {
         enum Empty {}
     "# };
     let module_id = session.compile(mod_src).module_id;
-    let module = session.modules().get(module_id).unwrap();
+    let module = session.session().expect_fresh_module(module_id);
 
     let simple_color = module.get_type_def(ustr("SimpleColor")).unwrap();
     assert_eq!(simple_color.name, ustr("SimpleColor"));
@@ -424,7 +424,7 @@ fn define_struct_types() {
         }
     "# };
     let module_id = session.compile(mod_src).module_id;
-    let module = session.modules().get(module_id).unwrap();
+    let module = session.session().expect_fresh_module(module_id);
 
     let empty_type = module.get_type_def(ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));

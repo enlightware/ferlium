@@ -9,7 +9,7 @@
 
 use std::iter::repeat;
 
-use crate::FxHashSet;
+use crate::{FxHashSet, Modules};
 
 use derive_new::new;
 use itertools::MultiUnzip;
@@ -28,8 +28,8 @@ use crate::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
         FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, ModuleEnv, ModuleFunction, ModuleId, Modules, TraitImpl,
-        TraitImplId, TraitImpls, TraitKey, id::Id,
+        LocalFunctionId, LocalImplId, ModuleEnv, ModuleFunction, ModuleId, TraitImpl, TraitImplId,
+        TraitImpls, TraitKey, id::Id,
     },
     mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},
@@ -120,14 +120,16 @@ impl<'a> TraitSolver<'a> {
     /// Only public implementations from other modules are considered.
     pub fn has_concrete_impl(&self, key: &ConcreteTraitImplKey) -> bool {
         self.impls.concrete_key_to_id.contains_key(key)
-            || self.others.iter_named().any(|(_, m)| {
-                let id = m.impls.concrete_key_to_id.get(key);
-                if let Some(id) = id {
-                    let imp = &m.impls.data[id.as_index()];
-                    imp.public
-                } else {
-                    false
-                }
+            || self.others.iter_named().any(|(_, entry)| {
+                entry.module().is_some_and(|module| {
+                    let impls = &module.impls;
+                    let id = impls.concrete_key_to_id.get(key);
+                    if let Some(id) = id {
+                        impls.data[id.as_index()].public
+                    } else {
+                        false
+                    }
+                })
             })
     }
 
@@ -140,14 +142,17 @@ impl<'a> TraitSolver<'a> {
             return Some(TraitImplId::Local(*id));
         }
         // Search other modules; separate immutable search from mutable slot update.
-        let found = self.others.enumerates().find_map(|(module_id, m, _)| {
-            m.impls.concrete_key_to_id.get(key).and_then(|id| {
-                let imp = &m.impls.data[id.as_index()];
-                if imp.public {
-                    Some((module_id, TraitKey::Concrete(key.clone())))
-                } else {
-                    None
-                }
+        let found = self.others.enumerates().find_map(|(module_id, entry, _)| {
+            entry.module().and_then(|module| {
+                let impls = &module.impls;
+                impls.concrete_key_to_id.get(key).and_then(|id| {
+                    let imp = &impls.data[id.as_index()];
+                    if imp.public {
+                        Some((module_id, TraitKey::Concrete(key.clone())))
+                    } else {
+                        None
+                    }
+                })
             })
         });
         found.map(|(module_id, trait_key)| {
@@ -166,11 +171,14 @@ impl<'a> TraitSolver<'a> {
             .get(trait_ref)
             .map(|blankets| (None, blankets))
             .into_iter()
-            .chain(self.others.enumerates().flat_map(|(module_id, m, _)| {
-                m.impls
-                    .blanket_key_to_id
-                    .get(trait_ref)
-                    .map(|imp| (Some(module_id), imp))
+            .chain(self.others.enumerates().flat_map(|(module_id, entry, _)| {
+                entry.module().and_then(|module| {
+                    module
+                        .impls
+                        .blanket_key_to_id
+                        .get(trait_ref)
+                        .map(|imp| (Some(module_id), imp))
+                })
             }))
     }
 
@@ -180,10 +188,13 @@ impl<'a> TraitSolver<'a> {
         let fake_current = new_module_using_std(self.others.next_id());
         let env = ModuleEnv::new(&fake_current, self.others);
         self.impls.log_debug_impls_headers(trait_ref, env);
-        for (module_path, module) in self.others.iter_named() {
-            if module.impls.blanket_key_to_id.contains_key(trait_ref) {
-                log::debug!("In module {}:", module_path);
-                module.impls.log_debug_impls_headers(trait_ref, env);
+        for (module_path, entry) in self.others.iter_named() {
+            if let Some(module) = &entry.module {
+                let impls = &module.impls;
+                if impls.blanket_key_to_id.contains_key(trait_ref) {
+                    log::debug!("In module {}:", module_path);
+                    impls.log_debug_impls_headers(trait_ref, env);
+                }
             }
         }
     }
@@ -408,7 +419,14 @@ impl<'a> TraitSolver<'a> {
 
                 // Succeeded? First get the blanket implementation data and compute the output types.
                 let impls = if let Some(module_id) = imp_module_id {
-                    &self.others.get(module_id).unwrap().impls
+                    &self
+                        .others
+                        .get(module_id)
+                        .unwrap()
+                        .module
+                        .as_ref()
+                        .unwrap()
+                        .impls
                 } else {
                     #[allow(clippy::needless_borrow)] // clippy has a bug here as of Rust 1.90
                     &self.impls
@@ -621,6 +639,9 @@ impl<'a> TraitSolver<'a> {
                     .others
                     .get(module_id)
                     .unwrap_or_else(|| panic!("imported module #{module_id} not found"))
+                    .module
+                    .as_ref()
+                    .unwrap()
                     .impls;
                 let id = other_impls.concrete_key_to_id.get(key).unwrap_or_else(|| {
                     panic!("imported trait impl {key:?} not found in module #{module_id}")
@@ -638,14 +659,19 @@ impl<'a> TraitSolver<'a> {
         module_path: &module::Path,
         function_name: Ustr,
     ) -> Result<FunctionId, InternalCompilationError> {
-        let (module_id, module) = self.others.get_by_name(module_path).ok_or_else(|| {
+        let module_not_found_error = || {
             internal_compilation_error!(Internal {
                 error: format!(
                     "Module {module_path} not found when looking for function {function_name}"
                 ),
                 span: use_site
             })
-        })?;
+        };
+        let (module_id, entry) = self
+            .others
+            .get_by_name(module_path)
+            .ok_or_else(module_not_found_error)?;
+        let module = entry.module().ok_or_else(module_not_found_error)?;
         module.get_function(function_name).ok_or_else(|| {
             internal_compilation_error!(Internal {
                 error: format!("Function {function_name} not found in module {module_path}"),

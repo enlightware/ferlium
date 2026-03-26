@@ -268,8 +268,7 @@ impl Callable for ScriptFunction {
         ctx.recursion += 1;
         let arena = &ctx
             .compiler_session()
-            .get_module_by_id(ctx.module_id)
-            .expect("module not found during script function call")
+            .expect_fresh_module(ctx.module_id)
             .ir_arena;
         if ctx.recursion >= ctx.recursion_limit {
             return Err(RuntimeError::new(

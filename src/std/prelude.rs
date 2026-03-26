@@ -8,10 +8,10 @@
 //
 
 use crate::{
-    add_code_to_module,
+    Modules, add_code_to_module,
     format::FormatWithData,
     location::SourceTable,
-    module::{Module, ModuleId, Modules},
+    module::{Module, ModuleId},
 };
 
 macro_rules! prelude {
@@ -37,8 +37,9 @@ pub fn add_to_module(
         // Json depends on expect_variant_object_entry being available.
         prelude!("json.fer"),
     ];
+    let other_modules = Modules::default();
     for (name, code) in codes {
-        to = add_code_to_module(name, code, to, module_id, &Modules::default(), source_table)
+        to = add_code_to_module(name, code, to, module_id, &other_modules, source_table)
             .unwrap_or_else(|e| {
                 panic!(
                     "Failed to add prelude to module: {}",

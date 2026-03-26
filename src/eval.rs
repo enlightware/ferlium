@@ -13,7 +13,6 @@ use enum_as_inner::EnumAsInner;
 #[cfg(debug_assertions)]
 use ustr::{Ustr, ustr};
 
-use crate::ir::{NodeArena, NodeId, NodeKind};
 #[cfg(debug_assertions)]
 use crate::module::id::Id;
 use crate::{
@@ -21,12 +20,14 @@ use crate::{
     containers::b,
     error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
-    module::{
-        FunctionId, LocalDecl, LocalFunctionId, ModuleFunction, ModuleId, Modules, TraitImplId,
-    },
+    module::{FunctionId, LocalDecl, LocalFunctionId, ModuleFunction, ModuleId, TraitImplId},
     std::array,
     r#type::FnArgType,
     value::{FunctionValue, NativeValue, Value},
+};
+use crate::{
+    Modules,
+    ir::{NodeArena, NodeId, NodeKind},
 };
 
 use crate::module::ImportFunctionTarget;
@@ -183,10 +184,7 @@ impl<'a> EvalCtx<'a> {
                 i -= 1;
                 eprintln!("  {}", self.environment_names[i]);
             }
-            let module = self
-                .compiler_session
-                .get_module_by_id(entry.module_id)
-                .unwrap();
+            let module = self.compiler_session.expect_fresh_module(entry.module_id);
             let fn_name = module.get_function_name_by_id(entry.local_id).unwrap();
             eprintln!("- {}::{}", entry.module_id, fn_name);
         }
@@ -202,18 +200,12 @@ impl<'a> EvalCtx<'a> {
         match function {
             Local(id) => (id, self.module_id),
             Import(id) => {
-                let module = self
-                    .compiler_session
-                    .get_module_by_id(self.module_id)
-                    .unwrap();
+                let module = self.compiler_session.expect_fresh_module(self.module_id);
                 let slot = module
                     .get_import_fn_slot(id)
                     .unwrap_or_else(|| panic!("imported function slot not found: {}", id));
                 let module_id = slot.module;
-                let module = self
-                    .compiler_session
-                    .get_module_by_id(module_id)
-                    .unwrap_or_else(|| panic!("imported module not found: #{}", module_id));
+                let module = self.compiler_session.expect_fresh_module(module_id);
                 let target_module_id = module_id;
                 use ImportFunctionTarget::*;
                 let local_id = match &slot.target {
@@ -246,28 +238,19 @@ impl<'a> EvalCtx<'a> {
         local_id: LocalFunctionId,
         module_id: ModuleId,
     ) -> &ModuleFunction {
-        let module = self.compiler_session.get_module_by_id(module_id).unwrap();
+        let module = self.compiler_session.expect_fresh_module(module_id);
         module.get_function_by_id(local_id).unwrap()
     }
 
     /// Get the dictionary value for a ImplId at runtime using module.
     pub fn get_dictionary(&self, dictionary: TraitImplId) -> Value {
+        let module = self.compiler_session.expect_fresh_module(self.module_id);
         use TraitImplId::*;
         match dictionary {
-            Local(id) => {
-                let module = self
-                    .compiler_session
-                    .get_module_by_id(self.module_id)
-                    .unwrap();
-                module.get_impl_data(id).unwrap().dictionary_value.clone()
-            }
+            Local(id) => module.get_impl_data(id).unwrap().dictionary_value.clone(),
             Import(id) => {
-                let module = self
-                    .compiler_session
-                    .get_module_by_id(self.module_id)
-                    .unwrap();
                 let slot = module.get_import_impl_slot(id).unwrap();
-                let module = self.compiler_session.get_module_by_id(slot.module).unwrap();
+                let module = self.compiler_session.expect_fresh_module(slot.module);
                 module
                     .get_impl_data_by_trait_key(&slot.key)
                     .unwrap()
@@ -361,10 +344,7 @@ impl<'a> EvalCtx<'a> {
         mem::swap(&mut self.module_id, &mut module_id);
 
         // Call the function.
-        let module = self
-            .compiler_session
-            .get_module_by_id(self.module_id)
-            .unwrap();
+        let module = self.compiler_session.expect_fresh_module(self.module_id);
         let function_data = module.get_function_by_id(local_id).unwrap();
         let locals = &function_data.locals;
         let result = function_data.code.call(arguments, self, locals);
@@ -514,7 +494,12 @@ impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
             .get_name(self.module_id)
             .map(|name| format!("{name}"))
             .unwrap_or("<unknown>".to_string());
-        let module = modules.get(self.module_id).unwrap();
+        let module = &modules
+            .get(self.module_id)
+            .unwrap()
+            .module
+            .as_ref()
+            .unwrap();
         match self.function_id {
             FunctionId::Local(id) => {
                 let local_name = module.get_function_name_by_id(id).unwrap();

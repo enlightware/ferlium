@@ -6,8 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use ferlium::ir;
 use ferlium::{FxHashMap, FxHashSet};
+use ferlium::{Modules, ir};
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
@@ -18,8 +18,7 @@ use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, Mutab
 use ferlium::format::FormatWith;
 use ferlium::module::id::Id;
 use ferlium::module::{
-    LocalDecl, LocalFunctionId, ModuleEnv, ModuleId, Modules, Path, ShowModuleDetails, UseData,
-    Uses,
+    LocalDecl, LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleDetails, UseData, Uses,
 };
 use ferlium::std::new_module_using_std;
 use ferlium::{
@@ -480,9 +479,10 @@ fn process_input(
     for i in 0..fill_use_until {
         let index = fill_use_until - i - 1;
         let mod_name = format!("repl{index}");
-        if let Some(module) = session
+        if let Some(entry) = session
             .modules()
             .get_value_by_name(&Path::single_str(&mod_name))
+            && let Some(module) = entry.module()
         {
             for sym in module.own_symbols() {
                 if !local_symbols.contains(&sym)
@@ -545,13 +545,13 @@ fn process_input(
 
     // Show IR
     if is_repl {
-        let module = session.modules().get(module_id).unwrap();
+        let module = session.expect_fresh_module(module_id);
         println!(
             "Module IR:\n{}",
             module.format_with(&ShowModuleDetails(session.modules()))
         );
         if let Some(expr) = expr.as_ref() {
-            let module_env = ModuleEnv::new(&module, session.modules());
+            let module_env = ModuleEnv::new(module, session.modules());
             println!(
                 "Expr IR:\n{}",
                 ir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&module_env)
@@ -567,15 +567,14 @@ fn process_input(
         let old_size = eval_ctx.environment.len();
         let arena = &eval_ctx
             .compiler_session()
-            .get_module_by_id(module_id)
-            .unwrap()
+            .expect_fresh_module(module_id)
             .ir_arena;
         let result = eval_node_with_ctx(arena, expr.expr, &mut eval_ctx, &expr.locals);
         *locals = expr.locals;
         match result {
             Ok(value) => {
                 let value = value.into_value();
-                let module = session.modules().get(module_id).unwrap();
+                let module = session.expect_fresh_module(module_id);
                 let module_env = ModuleEnv::new(module, session.modules());
                 println!(
                     "{}: {}",
@@ -641,7 +640,7 @@ fn process_pipe_input(print_module: bool) -> i32 {
         |code| code,
         |module_id| {
             if print_module {
-                let module = session.modules().get(module_id).unwrap();
+                let module = session.expect_fresh_module(module_id);
                 println!("{}", module.format_with(session.modules()));
             }
             0
@@ -704,7 +703,8 @@ fn run_interactive_repl() {
 
     // ferlium emission and evaluation contexts
     let mut session = CompilerSession::new();
-    let mut last_module = ModuleId::from_index(0); // start with the std module
+    // Last module that compiled successfully, start with the std module.
+    let mut last_module = ModuleId::from_index(0);
     let mut locals: Vec<LocalDecl> = vec![];
     let mut environment: Vec<ValOrMut> = vec![];
     let mut counter: usize = 0;
@@ -724,7 +724,7 @@ fn run_interactive_repl() {
             println!("No locals.");
         } else {
             println!("Locals:");
-            let module = session.modules().get(last_module).unwrap();
+            let module = session.expect_fresh_module(last_module);
             let env = ModuleEnv::new(module, session.modules());
             for (i, local) in locals.iter().enumerate() {
                 println!(
@@ -772,8 +772,14 @@ fn run_interactive_repl() {
                             } else {
                                 last_module
                             };
-                            let module = session.modules().get(module_id).unwrap();
-                            println!("\n{}", module.format_with(session.modules()));
+                            let module = session.modules().get(module_id).unwrap().module();
+                            if let Some(module) = module {
+                                println!("\n{}", module.format_with(session.modules()));
+                            } else {
+                                println!(
+                                    "Module never compiled succesfully and is thus not available for inspection."
+                                );
+                            }
                             true
                         }
                         "function" => {
@@ -791,7 +797,16 @@ fn run_interactive_repl() {
                                 } else {
                                     (last_module, "current")
                                 };
-                            let module = session.modules().get(module_id).unwrap();
+                            let module = session.modules().get(module_id).unwrap().module();
+                            let module = match module {
+                                None => {
+                                    println!(
+                                        "Module never compiled succesfully and is thus not available for inspection."
+                                    );
+                                    continue;
+                                }
+                                Some(module) => module,
+                            };
                             let fn_id = if let Some(arg) = args.get(1) {
                                 match arg.parse::<usize>() {
                                     Ok(index) => LocalFunctionId::from_index(index),
@@ -829,9 +844,10 @@ fn run_interactive_repl() {
                         "history" => {
                             for i in 0..counter {
                                 let name = format!("repl{i}");
-                                if let Some(module) = session
+                                if let Some(entry) = session
                                     .modules()
                                     .get_value_by_name(&Path::single_str(&name))
+                                    && let Some(module) = entry.module()
                                 {
                                     println!("{}: {}", name, module.list_stats());
                                 }

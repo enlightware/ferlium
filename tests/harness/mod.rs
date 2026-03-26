@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    CompilerSession, ModuleAndExpr, Modules, SourceTable,
+    CompilerSession, ModuleAndExpr, SourceTable,
     containers::IntoSVec2,
     effects::{PrimitiveEffect, effect, effects, no_effects},
     error::{CompilationError, RuntimeErrorKind},
@@ -226,11 +226,6 @@ impl TestSession {
         &self.session
     }
 
-    /// Get the modules of this compilation session.
-    pub fn modules(&self) -> &Modules {
-        self.session.modules()
-    }
-
     /// Get a module environment, with an empty module including the standard library
     /// for debugging purposes.
     pub fn std_module_env(&self) -> ModuleEnv<'_> {
@@ -277,7 +272,7 @@ impl TestSession {
     /// Compile and get the module of the src
     pub fn compile_and_get_module(&mut self, src: &str) -> &Module {
         let module_id = self.compile(src).module_id;
-        self.session.modules().get(module_id).unwrap()
+        self.session.expect_fresh_module(module_id)
     }
 
     /// Compile and get a specific function definition
@@ -293,15 +288,13 @@ impl TestSession {
     /// Compile and run the src and return its execution result (either a value or an error)
     pub fn try_compile_and_run(&mut self, src: &str) -> CompileRunResult {
         // Compile the source.
-        let ModuleAndExpr {
-            module_id: module,
-            expr,
-        } = self.try_compile(src).map_err(Error::Compilation)?;
+        let ModuleAndExpr { module_id, expr } =
+            self.try_compile(src).map_err(Error::Compilation)?;
 
         // Run the expression if any.
         if let Some(expr) = expr {
-            let arena = &self.session.get_module_by_id(module).unwrap().ir_arena;
-            eval_node(arena, expr.expr, module, &expr.locals, &self.session)
+            let arena = &self.session.expect_fresh_module(module_id).ir_arena;
+            eval_node(arena, expr.expr, module_id, &expr.locals, &self.session)
                 .map(ControlFlow::into_value)
                 .map_err(Error::Runtime)
         } else {

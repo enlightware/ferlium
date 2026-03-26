@@ -51,13 +51,15 @@ impl<'m> ModuleEnv<'m> {
     pub fn type_alias_name(&self, ty: Type) -> Option<String> {
         self.current.type_aliases.get_name(ty).map_or_else(
             || {
-                self.modules.iter_named().find_map(|(mod_path, module)| {
-                    module.type_aliases.get_name(ty).map(|ty_name| {
-                        if self.current.uses(mod_path, ty_name) {
-                            ty_name.to_string()
-                        } else {
-                            format!("{mod_path}::{ty_name}")
-                        }
+                self.modules.iter_named().find_map(|(mod_path, entry)| {
+                    entry.module().and_then(|module| {
+                        module.type_aliases.get_name(ty).map(|ty_name| {
+                            if self.current.uses(mod_path, ty_name) {
+                                ty_name.to_string()
+                            } else {
+                                format!("{mod_path}::{ty_name}")
+                            }
+                        })
                     })
                 })
             },
@@ -71,17 +73,19 @@ impl<'m> ModuleEnv<'m> {
             .get_bare_native_name(native)
             .map_or_else(
                 || {
-                    self.modules.iter_named().find_map(|(mod_name, module)| {
-                        module
-                            .type_aliases
-                            .get_bare_native_name(native)
-                            .map(|ty_name| {
-                                if self.current.uses(mod_name, ty_name) {
-                                    ty_name.to_string()
-                                } else {
-                                    format!("{mod_name}::{ty_name}")
-                                }
-                            })
+                    self.modules.iter_named().find_map(|(mod_name, entry)| {
+                        entry.module().and_then(|module| {
+                            module
+                                .type_aliases
+                                .get_bare_native_name(native)
+                                .map(|ty_name| {
+                                    if self.current.uses(mod_name, ty_name) {
+                                        ty_name.to_string()
+                                    } else {
+                                        format!("{mod_name}::{ty_name}")
+                                    }
+                                })
+                        })
                     })
                 },
                 |name| Some(name.to_string()),
@@ -255,8 +259,10 @@ impl<'m> ModuleEnv<'m> {
             // Look into the foreign module, if it exists.
             let path = Path::from_ast_segments(module);
             Ok(
-                if let Some((foreign_id, foreign_module)) = self.modules.get_by_name(&path) {
-                    getter(sym_name, foreign_module)
+                if let Some((foreign_id, foreign_entry)) = self.modules.get_by_name(&path)
+                    && let Some(module) = foreign_entry.module()
+                {
+                    getter(sym_name, module)
                         .map(|t| Some((Some(foreign_id), t)))
                         .unwrap_or(None)
                 } else {

@@ -7,8 +7,10 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use derive_new::new;
 pub use rustc_hash::{FxHashMap, FxHashSet};
 
+use ::std::mem;
 use std::new_module_using_std;
 
 use ast::{UnstableCollector, VisitExpr};
@@ -60,7 +62,7 @@ pub mod value;
 
 pub use ide::Compiler;
 pub use location::{Location, SourceId, SourceTable};
-pub use module::{Modules, Path};
+pub use module::Path;
 pub use type_inference::SubOrSameType;
 
 use type_scheme::DisplayStyle;
@@ -71,7 +73,10 @@ use crate::{
     containers::b,
     emit_ir::EmitModuleFrom,
     format::FormatWith,
-    module::{Module, ModuleFunction, ModuleId, Uses, id::Id},
+    module::{
+        Module, ModuleFunction, ModuleId, Uses,
+        id::{Id, NamedIndexed},
+    },
     std::STD_MODULE_ID,
     r#type::Type,
 };
@@ -193,6 +198,118 @@ pub type AstInspectorCb<'a> =
 
 static FIRST_USER_MODULE_ID: ModuleId = ModuleId(2);
 
+/// All data needed to rebuild the module.
+#[derive(Clone, Debug, new)]
+pub struct ModuleSrcInfo {
+    /// The source code used
+    source_id: SourceId,
+    /// The use directive used
+    uses: Uses,
+}
+
+/// A module that has been attempted to be compiled at least once.
+#[derive(Debug)]
+pub struct ModuleEntry {
+    /// Informations needed to rebuild the module, if it supports rebuilding (std doesn't).
+    src_info: Option<ModuleSrcInfo>,
+    /// Last good compiled module (without stale deps at that time).
+    /// Must be not-None if [`stale`] is false.
+    module: Option<Module>,
+    /// Compilation error, if last compilation failed.
+    last_error: Option<CompilationError>,
+    /// Deps from latest successful self build, stale or not.
+    latest_deps: Vec<ModuleId>,
+    /// Whether this module or some of its dependencies failed to compile.
+    stale: bool,
+}
+
+impl ModuleEntry {
+    /// New fresh module that cannot be rebuilt (e.g. std).
+    pub fn new_fresh_raw(module: Module) -> Self {
+        let deps = module.deps().collect();
+        ModuleEntry {
+            src_info: None,
+            module: Some(module),
+            last_error: None,
+            latest_deps: deps,
+            stale: false,
+        }
+    }
+
+    /// New fresh module that can be rebuilt later.
+    pub fn new_fresh(src_info: ModuleSrcInfo, module: Module) -> Self {
+        let deps = module.deps().collect();
+        ModuleEntry {
+            src_info: Some(src_info),
+            module: Some(module),
+            last_error: None,
+            latest_deps: deps,
+            stale: false,
+        }
+    }
+
+    /// New module that compiled but whose dependencies are stale, and can be rebuilt later.
+    pub fn new_stale(src_info: ModuleSrcInfo, deps: Vec<ModuleId>) -> Self {
+        ModuleEntry {
+            src_info: Some(src_info),
+            module: None,
+            last_error: None,
+            latest_deps: deps,
+            stale: true,
+        }
+    }
+
+    /// New module that failed to compile but can be rebuilt later.
+    pub fn new_with_error(src_info: ModuleSrcInfo, error: CompilationError) -> Self {
+        ModuleEntry {
+            src_info: Some(src_info),
+            module: None,
+            last_error: Some(error),
+            latest_deps: vec![],
+            stale: true,
+        }
+    }
+
+    /// Our module compiled successfully, but some of its dependencies are stale.
+    pub fn update_with_stale(
+        &mut self,
+        src_info: ModuleSrcInfo,
+        old_module: Option<Module>,
+        latest_deps: Vec<ModuleId>,
+    ) {
+        self.src_info = Some(src_info);
+        self.module = old_module;
+        self.last_error = None;
+        self.latest_deps = latest_deps;
+        self.stale = true;
+    }
+
+    /// Our module failed to compile, but can be rebuilt later.
+    pub fn update_with_compilation_error(
+        &mut self,
+        src_info: ModuleSrcInfo,
+        old_module: Option<Module>,
+        error: CompilationError,
+    ) {
+        self.src_info = Some(src_info);
+        self.module = old_module;
+        self.last_error = Some(error);
+        self.stale = true;
+    }
+
+    pub fn module(&self) -> Option<&Module> {
+        self.module.as_ref()
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.stale
+    }
+}
+
+/// A set of modules indexed both by name (Path) and by numeric ID (ModuleId).
+/// This is the canonical way to hold a collection of modules in a compilation session.
+pub type Modules = NamedIndexed<Path, ModuleId, ModuleEntry>;
+
 /// A compilation session, that contains a source table and the standard library.
 #[derive(Debug)]
 pub struct CompilerSession {
@@ -214,10 +331,12 @@ impl CompilerSession {
         assert_eq!(modules.next_id(), STD_MODULE_ID);
         let std_module = std::std_module(&mut source_table);
         let std_name = module::Path::single_str("std");
-        modules.insert(std_name, std_module);
+        modules.insert(std_name, ModuleEntry::new_fresh_raw(std_module));
         let empty_std_user = new_module_using_std(modules.next_id());
-        let empty_std_user =
-            modules.insert(module::Path::single_str("$empty_std_user"), empty_std_user);
+        let empty_std_user = modules.insert(
+            module::Path::single_str("$empty_std_user"),
+            ModuleEntry::new_fresh_raw(empty_std_user),
+        );
         assert_eq!(modules.next_id(), FIRST_USER_MODULE_ID);
         let initial_source_table_size = source_table.len();
         Self {
@@ -239,13 +358,8 @@ impl CompilerSession {
     }
 
     /// Get a module by its ID, if it exists.
-    pub fn get_module_by_id(&self, id: ModuleId) -> Option<&Module> {
+    pub fn get_module_entry_by_id(&self, id: ModuleId) -> Option<&ModuleEntry> {
         self.modules.get(id)
-    }
-
-    /// Get a module by its path, if it exists.
-    pub fn get_module_by_path(&self, path: &module::Path) -> Option<&Module> {
-        self.modules.get_by_name(path).map(|(_, module)| module)
     }
 
     /// Get a module environment, with an empty module including the standard library
@@ -253,13 +367,13 @@ impl CompilerSession {
     pub fn module_env(&self) -> ModuleEnv<'_> {
         ModuleEnv {
             modules: &self.modules,
-            current: self.modules.get(self.empty_std_user).unwrap(),
+            current: self.expect_fresh_module(self.empty_std_user),
         }
     }
 
     /// Get the standard library module.
     pub fn std_module(&self) -> &Module {
-        self.modules.get(STD_MODULE_ID).unwrap()
+        self.expect_fresh_module(STD_MODULE_ID)
     }
 
     /// Reset the compiler session to its initial state, without rebuilding std.
@@ -269,9 +383,11 @@ impl CompilerSession {
         self.source_table.truncate(self.initial_source_table_size);
     }
 
-    /// Register a module in this compilation session and return its id.
+    /// Register a module without Ferlium source in this compilation session and return its id.
     pub fn register_module(&mut self, path: module::Path, module: Module) -> ModuleId {
-        let module_id = self.modules.insert(path, module);
+        let module_id = self
+            .modules
+            .insert(path, ModuleEntry::new_fresh_raw(module));
         log::debug!("Registered module with id {module_id}");
         module_id
     }
@@ -390,16 +506,18 @@ impl CompilerSession {
 
         // If debug logging is enabled, display the final IR, after linking and finalizing pending functions.
         if log::log_enabled!(log::Level::Debug) {
-            let module = self.modules.get(output.module_id).unwrap();
-            if !module.is_empty() {
-                log::debug!("Module IR\n{}", module.format_with(&self.modules));
-            }
-            if let Some(expr) = output.expr.as_ref() {
-                let env = ModuleEnv::new(module, &self.modules);
-                log::debug!(
-                    "Expr IR\n{}",
-                    ir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&env)
-                );
+            let entry = self.modules.get(output.module_id).unwrap();
+            if let Some(module) = &entry.module {
+                if !module.is_empty() {
+                    log::debug!("Module IR\n{}", module.format_with(&self.modules));
+                }
+                if let Some(expr) = output.expr.as_ref() {
+                    let env = ModuleEnv::new(module, &self.modules);
+                    log::debug!(
+                        "Expr IR\n{}",
+                        ir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&env)
+                    );
+                }
             }
         }
 
@@ -417,98 +535,44 @@ impl CompilerSession {
         uses: Uses,
         ast_inspector: Option<AstInspectorCb<'_>>,
     ) -> Result<ModuleAndExpr, CompilationError> {
-        // Parse the source code.
+        // Add the source to the table first so every failure path can reference it.
         let source_id = self
             .source_table
             .add_source(source_name.to_string(), src_code.to_string());
-        let (module_ast, expr_ast, arena) = parse_module_and_expr(src_code, source_id, false)
-            .map_err(|error| compilation_error!(ParsingFailed(error)))?;
-        if let Some(ast_inspector) = ast_inspector {
-            ast_inspector(&module_ast, expr_ast, &arena, &self.modules);
+
+        compile_with_source_id(
+            source_id,
+            &self.source_table,
+            &mut self.modules,
+            ModuleRef::ByPath(module_path),
+            uses,
+            ast_inspector,
+        )
+    }
+
+    /// Returns the entry for module_id, or panic if not found.
+    pub fn expect_module_entry(&self, module_id: ModuleId) -> &ModuleEntry {
+        self.modules()
+            .get(module_id)
+            .unwrap_or_else(|| panic!("Module {module_id} not found"))
+    }
+
+    /// Returns a fresh module for module_id, or panic if none is available.
+    pub fn expect_fresh_module(&self, module_id: ModuleId) -> &Module {
+        let entry = self.expect_module_entry(module_id);
+        if entry.stale {
+            panic!("Module {module_id} is stale due to failed compilation, cannot access it");
         }
+        entry.module().unwrap()
+    }
 
-        // Get the old module of the same name, replacing it with a dummy for the duration of the compilation.
-        let (module_id, old_module) = self
-            .modules
-            .replace(module_path.clone(), Module::new(self.modules.next_id()));
-
-        // Emit IR for the module.
-        let emit_from = EmitModuleFrom::Uses(uses);
-        let mut module = emit_module(module_ast, &arena, module_id, &self.modules, emit_from)
-            .map_err(|error| {
-                // Restore the old module in case of error, to avoid leaving the session in a broken state.
-                // Note: the clone on old_module is due to a limitation of the borrow checker not realizing this function
-                // is only called when the parent function is exited with the ? below.
-                old_module
-                    .clone()
-                    .map(|old_module| self.modules.replace(module_path.clone(), old_module));
-                // Resolve types in the error, to provide better error messages.
-                let module = new_module_using_std(module_id);
-                let env = ModuleEnv::new(&module, &self.modules);
-                CompilationError::resolve_types(error, &env, &self.source_table)
-            })?;
-
-        // Emit IR for the expression, if any.
-        let expr = if let Some(expr_ast) = expr_ast {
-            let compiled_expr = emit_expr(expr_ast, &arena, &mut module, &self.modules, vec![])
-                .map_err(|error| {
-                    // Restore the old module in case of error, to avoid leaving the session in a broken state.
-                    old_module
-                        .clone()
-                        .map(|old_module| self.modules.replace(module_path.clone(), old_module));
-                    // Resolve types in the error, to provide better error messages.
-                    let env = ModuleEnv::new(&module, &self.modules);
-                    CompilationError::resolve_types(error, &env, &self.source_table)
-                })?;
-            Some(compiled_expr)
-        } else {
-            None
-        };
-
-        // Detect circular imports and emit error in that case.
-        struct ModuleNode(Vec<ModuleId>);
-        impl graph::Node for ModuleNode {
-            type Index = ModuleId;
-            fn neighbors(&self) -> impl Iterator<Item = ModuleId> {
-                self.0.iter().copied()
-            }
-        }
-        // Note: `module_id`'s slot in `self.modules` still holds the temporary dummy module
-        // inserted at the start of `compile_to`. We must use the freshly-compiled `module`
-        // for that slot so its real dependencies are visible to the cycle detector.
-        let module_graph: Vec<_> = self
-            .modules
-            .iter_ids()
-            .map(|id| {
-                let deps = if id == module_id {
-                    module.deps().collect()
-                } else {
-                    self.modules.get(id).unwrap().deps().collect()
-                };
-                ModuleNode(deps)
-            })
-            .collect();
-        if let Some(cycle) = graph::find_cycle_from(&module_graph, module_id.as_index()) {
-            // Restore the old module in case of error, to avoid leaving the session in a broken state.
-            old_module.map(|old_module| self.modules.replace(module_path.clone(), old_module));
-            return Err(compilation_error!(CircularImportDependency {
-                origin: self.modules.get_name(module_id).unwrap().to_string(),
-                import_chain: cycle
-                    .into_iter()
-                    .map(|index| self
-                        .modules
-                        .get_name(ModuleId::from_index(index))
-                        .unwrap()
-                        .to_string())
-                    .collect(),
-                span: Location::new_synthesized(),
-            }));
-        }
-
-        // Store the module.
-        self.modules.replace(module_path, module);
-
-        Ok(ModuleAndExpr { module_id, expr })
+    /// Returned the last good compiled module for module_id, or panic if none exists.
+    pub fn expect_compiled_module(&self, module_id: ModuleId) -> &Module {
+        let entry = self.expect_module_entry(module_id);
+        entry
+            .module
+            .as_ref()
+            .unwrap_or_else(|| panic!("Module {module_id} does not have a compiled version"))
     }
 
     /// Run a function from a module, given its path and name, through a user-provided runner.
@@ -518,10 +582,16 @@ impl CompilerSession {
         name: &str,
         runner: impl FnOnce(&ModuleFunction, &Module, &Modules) -> Result<R, String>,
     ) -> Result<R, String> {
-        let module = self
+        let entry = self
             .modules()
             .get(module_id)
             .ok_or_else(|| format!("Module {module_id} not found"))?;
+        if entry.stale {
+            return Err(format!(
+                "Module {module_id} is stale due to failed compilation, cannot run function {name}"
+            ));
+        }
+        let module = entry.module().unwrap();
         match module.lookup_function(name, &self.modules) {
             Ok(Some(func)) => runner(func, module, &self.modules),
             Ok(None) => Err(format!("Function {name} not found in module {module_id}")),
@@ -534,6 +604,290 @@ impl Default for CompilerSession {
     fn default() -> Self {
         CompilerSession::new()
     }
+}
+
+/// Identifies the module being compiled, allowing the caller to either supply
+/// a [`Path`] (for a module that may or may not already exist) or a known
+/// [`ModuleId`] (for cascade recompilations where the module is guaranteed to
+/// exist). Using [`ModuleRef::Existing`] skips the name-lookup and avoids any
+/// [`Path`] clone.
+enum ModuleRef {
+    /// Look the module up by path; insert a new entry if it does not yet exist.
+    ByPath(Path),
+    /// The module is known to already exist at this ID; skip the name lookup.
+    Existing(ModuleId),
+}
+
+impl ModuleRef {
+    pub fn into_path(self) -> Option<Path> {
+        match self {
+            ModuleRef::ByPath(path) => Some(path),
+            ModuleRef::Existing(_) => None,
+        }
+    }
+}
+
+/// Core compilation function, called once the source text has already been
+/// registered in the [`SourceTable`]. Accepts a [`SourceId`] instead of raw
+/// source strings so that cascade recompilations can skip the duplicate
+/// [`SourceTable::add_source`] call and the associated string clones.
+fn compile_with_source_id(
+    source_id: SourceId,
+    source_table: &SourceTable,
+    modules: &mut Modules,
+    module_ref: ModuleRef,
+    uses: Uses,
+    ast_inspector: Option<AstInspectorCb<'_>>,
+) -> Result<ModuleAndExpr, CompilationError> {
+    // Retrieve the source text registered under this id.
+    let src_code = source_table
+        .get_source_text(source_id)
+        .expect("source_id must point to a valid entry in the source table");
+
+    // Locate (or prepare to create) the module entry and temporarily replace
+    // its compiled module with a dummy so the new compilation cannot see the
+    // old version of itself.
+    let next_module_id = modules.next_id();
+    let (module_id, old_module) = match &module_ref {
+        ModuleRef::ByPath(path) => {
+            if let Some((id, entry)) = modules.get_mut_by_name(path) {
+                let old = entry
+                    .module
+                    .as_mut()
+                    .map(|m| mem::replace(m, Module::new(next_module_id)));
+                (id, old)
+            } else {
+                (next_module_id, None)
+            }
+        }
+        ModuleRef::Existing(id) => {
+            let id = *id;
+            let old = modules.get_mut(id).and_then(|e| {
+                e.module
+                    .as_mut()
+                    .map(|m| mem::replace(m, Module::new(next_module_id)))
+            });
+            (id, old)
+        }
+    };
+    let src_info = ModuleSrcInfo::new(source_id, uses.clone());
+
+    // Closure called on every compilation failure, to restore the old module and mark dependencies.
+    let process_compilation_failed =
+        |modules: &mut Modules,
+         path_for_new: Option<Path>,
+         src_info: ModuleSrcInfo,
+         old_module: Option<Module>,
+         error: &CompilationError| {
+            let error = error.clone();
+            if let Some(entry) = modules.get_mut(module_id) {
+                entry.update_with_compilation_error(src_info, old_module, error);
+                mark_stale_transitively(modules, module_id)
+            } else if let Some(path) = path_for_new {
+                modules.insert(path, ModuleEntry::new_with_error(src_info, error));
+            } else {
+                panic!("Existing module not found — should never happen.");
+            }
+        };
+
+    // Parse the source code.
+    let (module_ast, expr_ast, arena) = match parse_module_and_expr(src_code, source_id, false) {
+        Ok(result) => result,
+        Err(error) => {
+            let error = compilation_error!(ParsingFailed(error));
+            let path_for_new = module_ref.into_path();
+            process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
+            return Err(error);
+        }
+    };
+    if let Some(ast_inspector) = ast_inspector {
+        ast_inspector(&module_ast, expr_ast, &arena, modules);
+    }
+
+    // Emit IR for the module.
+    let emit_from = EmitModuleFrom::Uses(uses);
+    let mut module = match emit_module(module_ast, &arena, module_id, modules, emit_from) {
+        Ok(result) => result,
+        Err(error) => {
+            // Resolve types in the error, to provide better error messages.
+            let module = new_module_using_std(module_id);
+            let env = ModuleEnv::new(&module, modules);
+            let error = CompilationError::resolve_types(error, &env, source_table);
+            let path_for_new = module_ref.into_path();
+            process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
+            return Err(error);
+        }
+    };
+
+    // Emit IR for the expression, if any.
+    let expr = if let Some(expr_ast) = expr_ast {
+        let compiled_expr = match emit_expr(expr_ast, &arena, &mut module, modules, vec![]) {
+            Ok(result) => result,
+            Err(error) => {
+                // Resolve types in the error, to provide better error messages.
+                let env = ModuleEnv::new(&module, modules);
+                let error = CompilationError::resolve_types(error, &env, source_table);
+                let path_for_new = module_ref.into_path();
+                process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
+                return Err(error);
+            }
+        };
+        Some(compiled_expr)
+    } else {
+        None
+    };
+
+    // Detect cycles in the module dependency graph.
+    if let Some(cycle) = find_module_deps_cycle(modules, module_id, &module, old_module.is_some()) {
+        let error = compilation_error!(CircularImportDependency {
+            origin: modules.get_name(module_id).unwrap().to_string(),
+            import_chain: cycle
+                .into_iter()
+                .map(|index| modules
+                    .get_name(ModuleId::from_index(index))
+                    .unwrap()
+                    .to_string())
+                .collect(),
+            span: Location::new_synthesized(),
+        });
+        let path_for_new = module_ref.into_path();
+        process_compilation_failed(modules, path_for_new, src_info, old_module, &error);
+        return Err(error);
+    }
+
+    // Compilation was successful, are any dependencies stale?
+    let deps: Vec<_> = module.deps().collect();
+    let deps_stale = deps.iter().any(|&dep| modules.get(dep).unwrap().stale);
+    if deps_stale {
+        if let Some(entry) = modules.get_mut(module_id) {
+            entry.update_with_stale(src_info, old_module, deps);
+            mark_stale_transitively(modules, module_id);
+        } else {
+            // Only reachable for ByPath when the module does not yet exist.
+            if let Some(path) = module_ref.into_path() {
+                modules.insert(path, ModuleEntry::new_stale(src_info, deps));
+            }
+        }
+    } else {
+        // No stale deps — store the fresh module.
+        // For ByPath: consume the path out of module_ref (no extra clone).
+        // For Existing: write directly through the known ID.
+        match module_ref {
+            ModuleRef::ByPath(path) => {
+                modules.replace(path, ModuleEntry::new_fresh(src_info, module));
+            }
+            ModuleRef::Existing(id) => {
+                *modules.get_mut(id).unwrap() = ModuleEntry::new_fresh(src_info, module);
+            }
+        }
+        // Cascade-recompile every stale direct dependent that can be rebuilt from source.
+        // Each successful recompilation recurses into its own dependents via the same
+        // mechanism, so the entire reverse-dependency graph is eventually brought up to date.
+        let to_recompile = stale_dependents_to_recompile(modules, module_id);
+        for (dep_id, dep_source_id, dep_uses) in to_recompile {
+            let _ = compile_with_source_id(
+                dep_source_id,
+                source_table,
+                modules,
+                ModuleRef::Existing(dep_id),
+                dep_uses,
+                None,
+            );
+        }
+    }
+
+    Ok(ModuleAndExpr { module_id, expr })
+}
+
+fn direct_deps(modules: &Modules, target: ModuleId) -> Vec<ModuleId> {
+    modules
+        .enumerate()
+        .filter_map(|(id, entry, _)| entry.latest_deps.contains(&target).then_some(id))
+        .collect()
+}
+
+fn mark_stale_transitively(modules: &mut Modules, root: ModuleId) {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        for dep_id in direct_deps(modules, id) {
+            let entry = match modules.get_mut(dep_id) {
+                Some(entry) => entry,
+                None => continue,
+            };
+
+            if !entry.stale {
+                entry.stale = true;
+                stack.push(dep_id);
+            }
+        }
+    }
+}
+
+/// Collect the data needed to recompile every stale direct dependent of `target`
+/// that was originally compiled from source (i.e. has a [`ModuleSrcInfo`]).
+fn stale_dependents_to_recompile(
+    modules: &mut Modules,
+    target: ModuleId,
+) -> Vec<(ModuleId, SourceId, Uses)> {
+    direct_deps(modules, target)
+        .into_iter()
+        .filter_map(|dep_id| {
+            let entry = modules.get_mut(dep_id)?;
+            if !entry.stale {
+                return None;
+            }
+            let src_info = entry.src_info.as_mut()?;
+            Some((dep_id, src_info.source_id, mem::take(&mut src_info.uses)))
+        })
+        .collect()
+}
+
+/// Return whether there is a cycle in the module graph.
+fn find_module_deps_cycle(
+    modules: &Modules,
+    module_id: ModuleId,
+    module: &Module,
+    has_old_module: bool,
+) -> Option<Vec<usize>> {
+    struct ModuleNode(Vec<ModuleId>);
+    impl graph::Node for ModuleNode {
+        type Index = ModuleId;
+        fn neighbors(&self) -> impl Iterator<Item = ModuleId> {
+            self.0.iter().copied()
+        }
+    }
+
+    // Build a graph node for every module that must participate in cycle detection.
+    //
+    // Two cases:
+    //   • Re-compiling an existing module: its slot in `self.modules` currently holds
+    //     a temporary dummy (placed at the start of `compile_to`).  We substitute the
+    //     freshly-compiled `module`'s real deps so the cycle detector sees the truth.
+    //   • Compiling a brand-new module: the slot does NOT exist in `self.modules` yet
+    //     (the new `compile_to` no longer pre-inserts a placeholder).  We append the
+    //     new module's node via `.chain(...)` so that `module_id.as_index()` is always
+    //     a valid index into `module_graph`.
+    let module_graph: Vec<_> = modules
+        .enumerate()
+        .map(|(id, entry, _name)| {
+            let deps = if id == module_id {
+                // Existing module being recompiled: use real deps, not the dummy's.
+                module.deps().collect()
+            } else {
+                entry.latest_deps.clone()
+            };
+            ModuleNode(deps)
+        })
+        // New module case: `module_id` is not in `iter_ids()` yet, so append its node
+        // at the end.  Its index will be exactly `module_id.as_index()`.
+        .chain(if has_old_module {
+            None
+        } else {
+            Some(ModuleNode(module.deps().collect()))
+        })
+        .collect();
+
+    graph::find_cycle_from(&module_graph, module_id.as_index())
 }
 
 /// Parse a module from a source code and return the corresponding ASTs.

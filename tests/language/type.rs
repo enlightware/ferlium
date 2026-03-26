@@ -484,7 +484,7 @@ fn variant_type_alias_in_function_signature() {
         .module_id;
 
     // Check first function
-    let module = session.modules().get(module_id).unwrap();
+    let module = session.session().expect_fresh_module(module_id);
     let fn_def1 = &module
         .get_function(ustr("process_variant"))
         .unwrap()

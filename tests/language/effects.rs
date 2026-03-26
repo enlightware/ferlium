@@ -36,11 +36,7 @@ fn test_expr(session: &mut TestSession, src: &str, exp_eff: EffType) {
     let module_and_expr = session.compile(src);
     let module_id = module_and_expr.module_id;
     let expr = module_and_expr.expr.unwrap();
-    let arena = &session
-        .session()
-        .get_module_by_id(module_id)
-        .unwrap()
-        .ir_arena;
+    let arena = &session.session().expect_fresh_module(module_id).ir_arena;
     let effects = arena[expr.expr].effects.clone();
     assert_eq!(effects, exp_eff);
 }

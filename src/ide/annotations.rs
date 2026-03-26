@@ -31,7 +31,11 @@ impl ModuleAndExpr {
         style: DisplayStyle,
     ) -> Vec<(usize, String)> {
         use DisplayStyle::*;
-        let module = session.modules().get(self.module_id).unwrap();
+        let entry = session.expect_module_entry(self.module_id);
+        let module = match entry.module() {
+            None => return vec![],
+            Some(module) => module,
+        };
         let env = ModuleEnv::new(module, session.modules());
         let mut annotations = vec![];
 

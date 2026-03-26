@@ -150,6 +150,7 @@ impl<'m> TypingEnv<'m> {
         if path.is_empty() {
             return Ok(None);
         }
+
         // Resolve the symbol in the module environment, to (Option<module path>, function name)
         let segments = &path.segments;
         let fn_name = segments.last().unwrap().0;
@@ -174,8 +175,10 @@ impl<'m> TypingEnv<'m> {
             self.module_env
                 .modules
                 .get_by_name(&module_path)
-                .and_then(|(module_id, m)| {
-                    if m.get_local_function_id(fn_name).is_some() {
+                .and_then(|(module_id, entry)| {
+                    if let Some(module) = entry.module()
+                        && module.get_local_function_id(fn_name).is_some()
+                    {
                         Some((Some(module_id), fn_name))
                     } else {
                         None
@@ -183,7 +186,7 @@ impl<'m> TypingEnv<'m> {
                 })
         };
 
-        // Create the ProgramFunction from the resolved key
+        // Create the GetFunctionData from the resolved key
         let (module_id_opt, function_name) = match key {
             Some(k) => k,
             None => return Ok(None),
@@ -194,6 +197,9 @@ impl<'m> TypingEnv<'m> {
                 .module_env
                 .modules
                 .get(module_id)
+                .unwrap()
+                .module
+                .as_ref()
                 .unwrap()
                 .get_function(function_name)
                 .unwrap()

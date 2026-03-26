@@ -11,12 +11,11 @@ use derive_new::new;
 use ustr::Ustr;
 
 use crate::{
-    FxHashMap, Location,
+    FxHashMap, Location, Modules,
     ast::{Path as AstPath, UseTree},
     error::{ImportKind, ImportSite, InternalCompilationError},
     internal_compilation_error,
     module::{
-        Modules,
         path::Path as ModPath,
         uses::{UseData, Uses},
     },
@@ -28,8 +27,10 @@ pub struct ModulesResolver<'a> {
 }
 impl ModulesResolver<'_> {
     fn import_exists(&self, module: &ModPath, symbol: Ustr) -> bool {
-        if let Some(m) = self.modules.get_value_by_name(module) {
-            m.own_symbols().any(|n| n == symbol)
+        if let Some(entry) = self.modules.get_value_by_name(module)
+            && let Some(module) = &entry.module
+        {
+            module.own_symbols().any(|n| n == symbol)
         } else {
             false
         }

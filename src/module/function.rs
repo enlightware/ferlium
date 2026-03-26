@@ -69,6 +69,9 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                             .modules
                             .get(module_id)
                             .expect("imported module not found")
+                            .module
+                            .as_ref()
+                            .expect("compiled module not found")
                             .get_impl_data_by_trait_key(key)
                             .expect("imported trait impl not found");
                         write!(f, "<")?;

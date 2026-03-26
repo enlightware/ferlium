@@ -26,6 +26,7 @@ use crate::{
     r#type::{Type, tuple_type},
     value::{NativeValue, Value},
 };
+use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use regex::Regex;
@@ -698,7 +699,7 @@ impl AnnotationData {
 
 /// The content of an execution error in the IDE
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
 pub struct ExecutionErrorData {
     pub summary: String,
     pub complete: String,
@@ -805,9 +806,7 @@ impl Compiler {
     pub fn fn_signature(&self, name: &str) -> Option<String> {
         let module = self
             .session
-            .modules()
-            .get(self.user_module.module_id)
-            .unwrap();
+            .expect_compiled_module(self.user_module.module_id);
         if let Some(func) = module
             .lookup_function(name, self.session.modules())
             .ok()
@@ -832,11 +831,24 @@ impl Compiler {
 
     pub fn run_expr(&self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
-            let module = self
+            let entry = self
                 .session
                 .modules()
                 .get(self.user_module.module_id)
                 .unwrap();
+            if entry.is_stale() {
+                let module_name = self
+                    .session
+                    .modules()
+                    .get_name(self.user_module.module_id)
+                    .map_or("".into(), |path| path.to_string());
+                return ExecutionResult::error(ExecutionErrorData::new(
+                    "Stale module".into(),
+                    format!("Module {module_name} is stale and cannot be executed"),
+                    None,
+                ));
+            }
+            let module = entry.module().unwrap();
             match eval_node(
                 &module.ir_arena,
                 expr.expr,
@@ -846,11 +858,6 @@ impl Compiler {
             ) {
                 Ok(value) => {
                     let value = value.into_value();
-                    let module = self
-                        .session
-                        .modules()
-                        .get(self.user_module.module_id)
-                        .unwrap();
                     let module_env = ModuleEnv::new(module, self.session.modules());
                     let output = format!(
                         "{}: {}",
@@ -921,12 +928,15 @@ impl Compiler {
 
     pub fn list_module_fns(&self) -> Vec<FunctionSignature> {
         let mut sigs = Vec::new();
-        let user_module = self
+        let user_module = &self
             .session
-            .modules()
-            .get(self.user_module.module_id)
-            .unwrap();
-        for (mod_name, module) in self.session.modules().iter_named() {
+            .expect_module_entry(self.user_module.module_id)
+            .module;
+        for (mod_name, entry) in self.session.modules().iter_named() {
+            let module = match entry.module() {
+                None => continue,
+                Some(module) => module,
+            };
             for (sym_name, func) in module.iter_named_functions() {
                 // skip trait methods
                 if !module.is_non_trait_local_function(sym_name) {
@@ -935,7 +945,9 @@ impl Compiler {
                 if sym_name.starts_with('@') {
                     continue; // skip hidden functions
                 }
-                let name = if user_module.uses(mod_name, sym_name) {
+                let name = if let Some(module) = user_module
+                    && module.uses(mod_name, sym_name)
+                {
                     sym_name.to_string()
                 } else {
                     format!("{mod_name}::{sym_name}")
@@ -959,13 +971,20 @@ impl Compiler {
         static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@(get|set) (.*)$").unwrap());
         let mut getters = FxHashSet::default();
         let mut setters = FxHashSet::default();
-        let user_module = self
+        let user_module = &self
             .session
-            .modules()
-            .get(self.user_module.module_id)
-            .unwrap();
-        for (mod_name, module) in self.session.modules().iter_named() {
+            .expect_module_entry(self.user_module.module_id)
+            .module;
+        for (mod_name, entry) in self.session.modules().iter_named() {
+            let module = match entry.module() {
+                None => continue,
+                Some(module) => module,
+            };
             for (sym_name, _) in module.iter_named_functions() {
+                let module = match entry.module() {
+                    None => continue,
+                    Some(module) => module,
+                };
                 // skip trait methods
                 if !module.is_non_trait_local_function(sym_name) {
                     continue;
@@ -982,7 +1001,9 @@ impl Compiler {
                     "set" => &mut setters,
                     _ => continue,
                 };
-                if user_module.uses(mod_name, sym_name) {
+                if let Some(module) = user_module
+                    && module.uses(mod_name, sym_name)
+                {
                     bin.insert(format!("@{name}"));
                 } else {
                     bin.insert(format!("@{mod_name}::{name}"));

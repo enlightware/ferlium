@@ -106,10 +106,22 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
         self.data.get(id.as_index()).map(|(data, _)| data)
     }
 
+    pub fn get_mut(&mut self, id: I) -> Option<&mut T> {
+        self.data.get_mut(id.as_index()).map(|(data, _)| data)
+    }
+
     pub fn get_by_name(&self, name: &N) -> Option<(I, &T)> {
         self.name_to_id
             .get(name)
             .and_then(|&id| self.get(id).map(|data| (id, data)))
+    }
+
+    pub fn get_mut_by_name(&mut self, name: &N) -> Option<(I, &mut T)> {
+        let id = match self.name_to_id.get(name) {
+            Some(id) => *id,
+            None => return None,
+        };
+        self.get_mut(id).map(|data| (id, data))
     }
 
     pub fn get_name(&self, id: I) -> Option<&N> {
@@ -120,6 +132,13 @@ impl<N: Clone + Eq + Hash, I: Id, T> NamedIndexed<N, I, T> {
 
     pub fn iter(&self) -> impl Iterator<Item = &(T, Option<N>)> {
         self.data.iter()
+    }
+
+    pub fn enumerate(&self) -> impl Iterator<Item = (I, &T, Option<&N>)> {
+        self.data
+            .iter()
+            .enumerate()
+            .map(|(index, (data, name))| (I::from_index(index), data, name.as_ref()))
     }
 
     pub fn iter_ids(&self) -> impl Iterator<Item = I> {

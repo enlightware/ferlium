@@ -9,7 +9,7 @@
 use std::{borrow::Borrow, mem};
 
 use crate::{
-    FxHashMap, FxHashSet, borrow_checker::check_borrows, containers::B,
+    FxHashMap, FxHashSet, Modules, borrow_checker::check_borrows, containers::B,
     dictionary_passing::elaborate_dictionaries, function::VoidFunction, ir::NodeId, module::Uses,
 };
 
@@ -32,7 +32,7 @@ use crate::{
     ir::{self, NodeArena},
     module::{
         ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module,
-        ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, Modules, TraitImpl, id::Id,
+        ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl, id::Id,
     },
     mutability::MutType,
     std::{

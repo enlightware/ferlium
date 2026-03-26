@@ -15,6 +15,7 @@ mod bits;
 mod complex;
 mod effects;
 mod math;
+mod multi_module;
 mod regression;
 mod simple;
 mod std;

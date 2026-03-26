@@ -1914,8 +1914,7 @@ fn type_ascription() {
     let body = module_and_expr.expr.unwrap().expr;
     let arena = &session
         .session()
-        .get_module_by_id(module_and_expr.module_id)
-        .unwrap()
+        .expect_fresh_module(module_and_expr.module_id)
         .ir_arena;
     let root = &arena[body];
     assert!(
@@ -1927,8 +1926,7 @@ fn type_ascription() {
     let body = module_and_expr.expr.unwrap().expr;
     let arena = &session
         .session()
-        .get_module_by_id(module_and_expr.module_id)
-        .unwrap()
+        .expect_fresh_module(module_and_expr.module_id)
         .ir_arena;
     let root = &arena[body];
     assert!(arena[root.kind.as_block().unwrap()[0]].kind.is_immediate());

@@ -34,7 +34,7 @@ use std::{fmt, hash::Hash};
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashSet, Location, define_id_type,
+    FxHashSet, Location, Modules, define_id_type,
     emit_ir::EmitTraitOutput,
     error::{ImportKind, ImportSite, InternalCompilationError},
     format::FormatWith,
@@ -606,20 +606,21 @@ impl Module {
         }
 
         let u_name = ustr(name);
-        if let Some(use_data) = self.uses.explicits.get(&u_name) {
-            if let Some((module_id, module_ref)) = others.get_by_name(&use_data.module) {
-                if let Some(t) = getter(name, module_ref) {
-                    return Ok(Some((Some(module_id), t)));
-                }
-            }
+        if let Some(use_data) = self.uses.explicits.get(&u_name)
+            && let Some((module_id, entry)) = others.get_by_name(&use_data.module)
+            && let Some(module) = entry.module()
+            && let Some(t) = getter(name, module)
+        {
+            return Ok(Some((Some(module_id), t)));
         }
 
         let mut matches = Vec::new();
         for wildcard_use in &self.uses.wildcards {
-            if let Some((module_id, module_ref)) = others.get_by_name(&wildcard_use.module) {
-                if let Some(t) = getter(name, module_ref) {
-                    matches.push((wildcard_use, module_id, t));
-                }
+            if let Some((module_id, entry)) = others.get_by_name(&wildcard_use.module)
+                && let Some(module) = entry.module()
+                && let Some(t) = getter(name, module)
+            {
+                matches.push((wildcard_use, module_id, t));
             }
         }
 
@@ -891,10 +892,6 @@ impl FormatWith<Modules> for Module {
         self.format_with_modules(f, data, false)
     }
 }
-
-/// A set of modules indexed both by name (Path) and by numeric ID (ModuleId).
-/// This is the canonical way to hold a collection of modules in a compilation session.
-pub type Modules = NamedIndexed<Path, ModuleId, Module>;
 
 pub struct ShowModuleDetails<'a>(pub &'a Modules);
 

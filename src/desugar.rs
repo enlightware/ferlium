@@ -9,7 +9,7 @@
 use itertools::process_results;
 use std::mem;
 
-use crate::{FxHashMap, FxHashSet};
+use crate::{FxHashMap, FxHashSet, Modules};
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -28,7 +28,7 @@ use crate::{
     graph::{find_strongly_connected_components, topological_sort_sccs},
     import_resolver::{ModulesResolver, resolve_imports},
     internal_compilation_error,
-    module::{Module, ModuleEnv, ModuleId, Modules},
+    module::{Module, ModuleEnv, ModuleId},
     mutability::{MutType, MutVal},
     parser_helpers::syn_static_apply,
     std::{array::array_type, math::int_type},

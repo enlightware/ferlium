@@ -722,6 +722,9 @@ pub fn format_impl_header_by_import_slot(
         .modules
         .get(slot.module)
         .expect("imported module not found")
+        .module
+        .as_ref()
+        .expect("compiled module not found")
         .get_impl_data_by_trait_key(key)
         .expect("imported trait impl not found");
     format_impl_header_by_key(f, key, imp, env)?;
