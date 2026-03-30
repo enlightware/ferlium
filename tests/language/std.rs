@@ -446,9 +446,7 @@ fn concat() {
     assert_eq!(session.run(r#"concat("", "b")"#), string("b"));
     // arrays
     assert_eq!(session.run("concat([1, 2], [3, 4])"), int_a![1, 2, 3, 4]);
-    // FIXME: Broken due to limitations in type defaulting, tang related
-    // to https://github.com/enlightware/ferlium/issues/59
-    //assert_eq!(session.run("concat([], [])"), int_a![]);
+    assert_eq!(session.run("concat([], [])"), int_a![]);
     assert_eq!(session.run("(concat([], []): [int])"), int_a![]);
     assert_eq!(session.run("concat([1, 2], [])"), int_a![1, 2]);
     assert_eq!(session.run("concat([], [3, 4])"), int_a![3, 4]);
@@ -908,7 +906,10 @@ fn serde_deserialize() {
         session.run("(deserialize(serialize(None)): None | Some(int))"),
         none()
     );
-    // TODO: once https://github.com/enlightware/ferlium/issues/59 is fixed, remove (int) ascription
+    assert_eq!(
+        session.run("(deserialize(serialize(Some(1))): None | Some(int))"),
+        some(int(1))
+    );
     assert_eq!(
         session.run("(deserialize(serialize(Some((1: int)))): None | Some(int))"),
         some(int(1))

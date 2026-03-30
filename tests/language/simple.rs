@@ -1189,9 +1189,10 @@ fn variants() {
         session.run("MyVariant2 { b: 2.0, a: 1.0 }"),
         variant_tn("MyVariant2", [float(1.0), float(2.0)])
     );
-    // Note: the following doesn't work due to a bug in recursive application of type defaulting substitution
-    // (see https://github.com/enlightware/ferlium/issues/59)
-    //assert_eq!(session.run("MyVariant2(\"hi\", 1)"), variant_tn("MyVariant2", [string("hi"), int(1)]));
+    assert_eq!(
+        session.run("MyVariant2(\"hi\", 1)"),
+        variant_tn("MyVariant2", [string("hi"), int(1)])
+    );
     assert_eq!(
         session.run("MyVariant2 { name: \"hi\", value: 1.0 }"),
         variant_tn("MyVariant2", [string("hi"), float(1.0)])
@@ -1951,19 +1952,18 @@ fn cast_as_syntax() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn cast_as_precedence() {
     let mut session = TestSession::new();
-    // FIXME: once bug https://github.com/enlightware/ferlium/issues/59
-    // remove the int type ascription in the following tests.
+    assert_eq!(session.run("2 * 3 as float"), float(6.0));
 
     // as binds tighter than multiplication (a * b as T) = (a * (b as T))
-    assert_eq!(session.run("2 * (3: int) as float"), float(6.0));
-    assert_eq!(session.run("10 / (2: int) as float"), float(5.0));
+    assert_eq!(session.run("2 * 3 as float"), float(6.0));
+    assert_eq!(session.run("10 / 2 as float"), float(5.0));
 
     // as binds looser than unary operators (-a as T) = ((-a) as T)
-    assert_eq!(session.run("-((5: int) as float)"), float(-5.0));
-    assert_eq!(session.run("let x: int = -3; x as float"), float(-3.0));
+    assert_eq!(session.run("-(5 as float)"), float(-5.0));
+    assert_eq!(session.run("let x = -3; x as float"), float(-3.0));
 
     // as is left-associative (a as B as C) = ((a as B) as C)
-    assert_eq!(session.run("(5: int) as float as int"), int(5));
+    assert_eq!(session.run("5 as float as int"), int(5));
 
     // as binds looser than field access and indexing
     assert_eq!(
@@ -1972,14 +1972,11 @@ fn cast_as_precedence() {
     );
 
     // as binds tighter than comparison
-    assert_eq!(
-        session.run("let x = (3: int) as float; x == 3.0"),
-        bool(true)
-    );
-    assert_eq!(session.run("(5: int) as float < 6.0"), bool(true));
+    assert_eq!(session.run("let x = 3 as float; x == 3.0"), bool(true));
+    assert_eq!(session.run("5 as float < 6.0"), bool(true));
 
     // as binds tighter than addition
-    assert_eq!(session.run("2 + (3: int) as float"), float(5.0)); // (2.0 + 3.0)
+    assert_eq!(session.run("2 + 3 as float"), float(5.0)); // (2.0 + 3.0)
 }
 
 #[test]

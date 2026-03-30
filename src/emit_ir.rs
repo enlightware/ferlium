@@ -1216,6 +1216,131 @@ where
     (ins, outs)
 }
 
+/// Normalize a type substitution by applying it to its own values until fixpoint.
+/// This ensures that chained substitutions like {B → Some(C), C → int} are resolved
+/// to {B → Some(int), C → int}, which is necessary because Type::instantiate is a
+/// single-pass bottom-up map that doesn't re-visit substituted results.
+fn normalize_type_substitution(subst: &mut TypeSubstitution) {
+    loop {
+        let mut changed = false;
+        let inst_subst: crate::type_inference::InstSubstitution =
+            (subst.clone(), FxHashMap::default());
+        for (_, ty) in subst.iter_mut() {
+            let new_ty = ty.instantiate(&inst_subst);
+            if new_ty != *ty {
+                *ty = new_ty;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// For expressions, try to default remaining unconstrained type variables to int.
+/// This handles cases like `concat([], [])` where the element type has no Num constraint
+/// but can be safely defaulted to int if all trait constraints are satisfiable.
+fn default_unconstrained_expr_ty_vars(
+    ty: &impl TypeLike,
+    constraints: &FxHashSet<&PubTypeConstraint>,
+    retained_constraints: &mut FxHashSet<PubTypeConstraintPtr>,
+    constraint_subst: &mut TypeSubstitution,
+    trait_solver: &mut TraitSolver,
+    arena: &mut NodeArena,
+) {
+    let mut progress = true;
+    while progress {
+        progress = false;
+        normalize_type_substitution(constraint_subst);
+
+        // Find type variables in the expression type that are not yet resolved.
+        let inst_subst: crate::type_inference::InstSubstitution =
+            (constraint_subst.clone(), FxHashMap::default());
+        let substituted_ty = ty.instantiate(&inst_subst);
+        let remaining_vars: Vec<TypeVar> = substituted_ty
+            .inner_ty_vars()
+            .into_iter()
+            .filter(|v| !constraint_subst.contains_key(v))
+            .collect();
+
+        for ty_var in remaining_vars {
+            // Only default if this variable appears in at least one retained constraint.
+            // Variables with no constraints at all (e.g. `[]`) should remain unresolved
+            // and produce an UnboundTypeVar error.
+            let has_retained_constraint = constraints.iter().any(|c| {
+                retained_constraints.contains(&constraint_ptr(c)) && c.contains_any_type_var(ty_var)
+            });
+            if !has_retained_constraint {
+                continue;
+            }
+
+            // Build a trial substitution with this variable defaulted to int.
+            let mut trial_subst = constraint_subst.clone();
+            trial_subst.insert(ty_var, int_type());
+            normalize_type_substitution(&mut trial_subst);
+            let trial_inst: crate::type_inference::InstSubstitution =
+                (trial_subst, FxHashMap::default());
+
+            // Check if all retained constraints mentioning this variable are satisfied.
+            let mut all_satisfied = true;
+            for c in constraints.iter() {
+                if !retained_constraints.contains(&constraint_ptr(c)) {
+                    continue;
+                }
+                if !c.contains_any_type_var(ty_var) {
+                    continue;
+                }
+                let inst_c = c.instantiate(&trial_inst);
+                if let PubTypeConstraint::HaveTrait {
+                    trait_ref,
+                    input_tys,
+                    span,
+                    ..
+                } = &inst_c
+                {
+                    if input_tys.iter().all(Type::is_constant)
+                        && trait_solver
+                            .solve_impl(trait_ref, input_tys, span.use_site, arena)
+                            .is_err()
+                    {
+                        all_satisfied = false;
+                        break;
+                    }
+                    // If inputs aren't all concrete yet, we can't verify — assume OK for now.
+                }
+                // Non-trait constraints (tuple, record, variant): assume OK, handled elsewhere.
+            }
+
+            if all_satisfied {
+                constraint_subst.insert(ty_var, int_type());
+                // Mark now-resolvable constraints for removal from retained set.
+                let to_remove: Vec<_> = constraints
+                    .iter()
+                    .filter(|c| {
+                        retained_constraints.contains(&constraint_ptr(c))
+                            && c.contains_any_type_var(ty_var)
+                    })
+                    .filter_map(|c| {
+                        let inst_c =
+                            c.instantiate(&(constraint_subst.clone(), FxHashMap::default()));
+                        if let PubTypeConstraint::HaveTrait { input_tys, .. } = &inst_c {
+                            if input_tys.iter().all(Type::is_constant) {
+                                return Some(constraint_ptr(c));
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+                for ptr in to_remove {
+                    retained_constraints.remove(&ptr);
+                }
+                progress = true;
+            }
+        }
+    }
+}
+
 /// Partition the orphan variant constraints and the others, and for the variant constraints,
 /// create a substitution into a minimalist variant type.
 fn partition_variant_constraints(
@@ -1329,6 +1454,8 @@ fn validate_and_cleanup_constraints(
             trait_solver,
             arena,
         )?;
+        // Normalize the substitution so variant types contain resolved Num defaults.
+        normalize_type_substitution(&mut subst);
         if !other_orphans.is_empty() {
             let orphans = orphan_constraints
                 .into_iter()
@@ -1375,7 +1502,21 @@ fn validate_and_cleanup_constraints(
             trait_solver,
             arena,
         )?;
+        // Normalize the substitution so variant types contain resolved Num defaults,
+        // and then try to default remaining unconstrained type variables to int.
+        normalize_type_substitution(&mut constraint_subst);
+        default_unconstrained_expr_ty_vars(
+            ty,
+            &constraints,
+            &mut retained_constraints,
+            &mut constraint_subst,
+            trait_solver,
+            arena,
+        );
     }
+
+    // Normalize one final time to ensure all chained substitutions are resolved.
+    normalize_type_substitution(&mut constraint_subst);
 
     // Simplify quantifiers with substitution
     quantifiers.retain(|ty_var| !constraint_subst.contains_key(ty_var));
@@ -1409,6 +1550,8 @@ fn validate_and_simplify_trait_imp_constraints(
         trait_solver,
         arena,
     )?;
+    // Normalize the substitution so variant types contain resolved Num defaults.
+    normalize_type_substitution(&mut subst);
     if !other_orphans.is_empty() {
         return Err(internal_compilation_error!(Internal {
             error: format!("Orphan constraints found in trait impl: {other_orphans:?}"),
@@ -1479,7 +1622,15 @@ fn compute_num_trait_default_types(
             {
                 assert!(!input_tys.is_empty());
                 if input_tys.len() > 1 {
-                    invalid_ty_vars.extend(input_tys.iter().flat_map(|ty| ty.inner_ty_vars()));
+                    // Only mark type variables as invalid for defaulting if multiple
+                    // type variables co-occur in the multi-input trait's inputs.
+                    // If a variable is the sole variable (e.g. Cast<A, float>),
+                    // it can still be safely defaulted.
+                    let all_ty_vars: Vec<_> =
+                        input_tys.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
+                    if all_ty_vars.len() > 1 {
+                        invalid_ty_vars.extend(all_ty_vars);
+                    }
                 } else if trait_ref == &*NUM_TRAIT {
                     let maybe_ty_var = input_tys[0].data().as_variable().cloned();
                     if let Some(ty_var) = maybe_ty_var {
