@@ -10,7 +10,7 @@ use std::{borrow::Borrow, mem};
 
 use crate::{
     FxHashMap, FxHashSet, Modules, borrow_checker::check_borrows, containers::B,
-    dictionary_passing::elaborate_dictionaries, function::VoidFunction, ir::NodeId, module::Uses,
+    dictionary_passing::elaborate_dictionaries, function::VoidFunction, module::Uses,
 };
 
 use indexmap::IndexMap;
@@ -35,19 +35,15 @@ use crate::{
         ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl, id::Id,
     },
     mutability::MutType,
-    std::{
-        math::{NUM_TRAIT, float_type, int_type},
-        new_module_using_std,
-    },
+    std::new_module_using_std,
     r#trait::TraitRef,
     trait_solver::{TraitSolver, trait_solver_from_module},
     r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
-    type_inference::{FreshVariableTypeMapper, TypeInference},
+    type_inference::{FreshVariableTypeMapper, TypeInference, UnifiedTypeInference},
     type_like::{TypeLike, instantiate_types},
     type_mapper::TypeMapper,
     type_scheme::{
-        PubTypeConstraint, TypeScheme, VariantConstraint, extra_parameters_from_constraints,
-        normalize_types,
+        PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
     },
     type_visitor::{TyVarsCollector, collect_ty_vars},
     typing_env::TypingEnv,
@@ -536,42 +532,122 @@ where
     ty_inf.log_debug_substitution_tables(module_env);
     ty_inf.log_debug_constraints(module_env);
 
-    // Fourth pass, substitute the mono type variables with the inferred types.
-    for id in local_fns.iter() {
-        apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-            let descr = &mut output.functions[id.as_index()];
-            ty_inf.substitute_in_module_function(descr, ir_arena);
-        });
+    // Helpers to de-duplicate later phases between trait and normal function emission.
+    let substitute_and_canonicalize_functions =
+        |output: &mut Module, ir_arena: &mut _, ty_inf: &mut UnifiedTypeInference| {
+            for id in local_fns.iter() {
+                apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+                    let descr = &mut output.functions[id.as_index()];
+                    ty_inf.substitute_in_module_function(descr, ir_arena);
+                });
 
-        // Union duplicated effects from function arguments, and build a substitution for the
-        // fully unioned effects, to removed duplications.
-        let descr = &mut output.functions[id.as_index()];
-        ty_inf.unify_fn_arg_effects(&descr.definition.ty_scheme.ty);
-        let effect_subst = descr
-            .definition
-            .ty_scheme
-            .ty
-            .inner_effect_vars()
-            .iter()
-            .filter_map(|var| {
-                ty_inf
-                    .effect_unioned(*var)
-                    .map(|target| (*var, EffType::single_variable(target)))
-            })
-            .collect();
+                // Union duplicated effects from function arguments, and build a substitution
+                // for the fully unioned effects, to remove duplications.
+                let descr = &mut output.functions[id.as_index()];
+                ty_inf.unify_fn_arg_effects(&descr.definition.ty_scheme.ty);
+                let effect_subst: FxHashMap<_, _> = descr
+                    .definition
+                    .ty_scheme
+                    .ty
+                    .inner_effect_vars()
+                    .iter()
+                    .filter_map(|var| {
+                        ty_inf
+                            .effect_unioned(*var)
+                            .map(|target| (*var, EffType::single_variable(target)))
+                    })
+                    .collect();
+                if !effect_subst.is_empty() {
+                    let subst = (FxHashMap::default(), effect_subst);
+                    apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+                        let descr = &mut output.functions[id.as_index()];
+                        descr.definition.ty_scheme.ty =
+                            descr.definition.ty_scheme.ty.instantiate(&subst);
+                        let root = descr.get_code_entry().unwrap();
+                        ir::instantiate_node(ir_arena, root, &subst);
+                    });
+                }
+            }
+        };
+    let borrow_check_and_elaborate_dict =
+        |output: &mut Module, ir_arena: &mut _, dicts, module_inst_data, id| -> Result<_, _> {
+            let mut solver = trait_solver_from_module!(output, &others);
+            let mut ctx = DictElaborationCtx::new(dicts, Some(module_inst_data), &mut solver);
+            try_apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| -> Result<
+                (),
+                InternalCompilationError,
+            > {
+                let descr = &mut output.functions[id.as_index()];
+                descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)
+            });
+            solver.commit(&mut output.functions, &mut output.def_table);
+            Ok(())
+        };
+    let substitute_in_function_descr = |ir_arena: &mut _, descr: &mut ModuleFunction, subst: &_| {
+        let root = descr.get_code_entry().unwrap();
+        ir::instantiate_node(ir_arena, root, subst);
+        for local in &mut descr.locals {
+            local.ty = local.ty.instantiate(subst);
+        }
+    };
 
-        let subst = (FxHashMap::default(), effect_subst);
-        apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-            let descr = &mut output.functions[id.as_index()];
-            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
-            let root = descr.get_code_entry().unwrap();
-            ir::instantiate_node(ir_arena, root, &subst);
-            // Note: we do not have effects in locals, so no need to substitute them there.
-        });
-    }
-
-    // Fifth pass, get the remaining constraints and collect the free type variables.
+    // Fourth pass: default orphan constraints and substitute types.
     if let Some(mut trait_output) = trait_output {
+        // Default orphan constraints for the trait implementation into the unification tables.
+        {
+            let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+            let input_quantifiers = collect_ty_vars(&input_tys);
+            ty_inf.normalize_remaining_constraints();
+            let (_, orphan_constraints) = select_constraints_accessible_from(
+                ty_inf.remaining_constraints(),
+                &input_quantifiers,
+            );
+            let orphan_constraints = orphan_constraints.into_iter().cloned().collect();
+            let mut solver = trait_solver_from_module!(output, others);
+            ty_inf.resolve_specific_defaults_to_fixed_point(
+                orphan_constraints,
+                None,
+                &mut solver,
+                ir_arena,
+            )?;
+            solver.commit(&mut output.functions, &mut output.def_table);
+
+            // Check for remaining orphans.
+            ty_inf.normalize_remaining_constraints();
+            let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+            let input_quantifiers = collect_ty_vars(&input_tys);
+            let (_, remaining_orphans) = select_constraints_accessible_from(
+                ty_inf.remaining_constraints(),
+                &input_quantifiers,
+            );
+            let remaining_orphans: Vec<_> = remaining_orphans
+                .into_iter()
+                .filter(|c| !c.is_type_has_variant())
+                .collect();
+            if !remaining_orphans.is_empty() {
+                let fake_current = new_module_using_std(ModuleId(0));
+                let env = ModuleEnv::new(&fake_current, others);
+                return Err(internal_compilation_error!(Internal {
+                    error: format!(
+                        "Orphan constraints found in trait impl: {}",
+                        remaining_orphans.format_with(&env)
+                    ),
+                    span: remaining_orphans[0].use_site(),
+                }));
+            }
+        }
+
+        // Substitute everything using ty_inf (single pass, includes all defaults).
+        substitute_and_canonicalize_functions(output, ir_arena, &mut ty_inf);
+
+        // Resolve input and output types.
+        trait_output.input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
+        trait_output.output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
+
+        // Take final substituted constraints.
+        ty_inf.normalize_remaining_constraints();
+        let all_constraints = ty_inf.take_constraints();
+
         // Validate that each method's effects are a subset of the trait definition's effects,
         // and override them with the trait's effects.
         // This ensures ABI consistency: the calling convention is determined by the trait definition.
@@ -598,47 +674,42 @@ where
             descr.definition.ty_scheme.ty.effects = trait_effects.clone();
         }
 
-        // We are emitting a trait.
+        // Store the functions in the trait output.
         trait_output.functions = local_fns.clone();
 
-        // Resolve input and output types.
-        trait_output.input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-        trait_output.output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
-
-        // Validate and simplify constraints.
-        let constraints = ty_inf.constraints();
+        // Compute quantifiers from input types and constraints.
         let input_quantifiers = collect_ty_vars(&trait_output.input_tys);
-        let mut solver = trait_solver_from_module!(output, others);
-        let (mut quantifiers, mut subst) = validate_and_simplify_trait_imp_constraints(
-            &input_quantifiers,
-            &constraints,
-            &mut solver,
-            ir_arena,
-        )?;
-        solver.commit(&mut output.functions, &mut output.def_table);
+        let constraints_refs: Vec<_> = all_constraints.iter().collect();
+        let (related_constraints, _) =
+            select_constraints_accessible_from(&constraints_refs, &input_quantifiers);
+        let mut quantifiers = input_quantifiers.to_vec();
+        let mut collector = TyVarsCollector(&mut quantifiers);
+        for constraint in related_constraints.iter() {
+            constraint.visit(&mut collector);
+        }
+        quantifiers = quantifiers.into_iter().unique().collect();
 
         // Detect unbound type variables in the code and return error if not in unused variants only.
-        // These are neither part of the function signature nor of the constraints.
-        let bounds: Vec<_> = quantifiers.iter().chain(subst.keys()).cloned().collect();
+        let mut unbound_subst = FxHashMap::default();
         for id in local_fns.iter() {
             let descr = &mut output.functions[id.as_index()];
             let root = descr.get_code_entry().unwrap();
             let unbound = ir::all_unbound_ty_vars(ir_arena, root);
-            let uninstantiated_unbound = check_unbounds(unbound, &bounds)?;
-            subst.extend(
+            let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
+            unbound_subst.extend(
                 uninstantiated_unbound
                     .into_iter()
                     .map(|ty_var| (ty_var, Type::never())),
             );
         }
 
-        // Update quantifiers and constraints with substitution.
-        quantifiers.retain(|ty_var| !subst.contains_key(ty_var));
+        // Update quantifiers and constraints with unbound substitution.
+        quantifiers.retain(|ty_var| !unbound_subst.contains_key(ty_var));
         trait_output.ty_var_count = quantifiers.len() as u32;
-        let mut subst = (subst, FxHashMap::default());
+        let mut subst = (unbound_subst, FxHashMap::default());
         let subst_size = subst.0.len();
         let mut solver = trait_solver_from_module!(output, others);
-        trait_output.constraints = constraints
+        trait_output.constraints = all_constraints
             .iter()
             .filter_map(|constraint| {
                 constraint
@@ -651,39 +722,32 @@ where
         assert_eq!(subst_size, subst.0.len());
         let dicts = extra_parameters_from_constraints(&trait_output.constraints);
 
-        // Update node code with substitution and build the module instantiation data
-        trait_output.input_tys = instantiate_types(&trait_output.input_tys, &subst);
-        trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
+        // Apply unbound substitution to code and types.
+        if !subst.0.is_empty() {
+            trait_output.input_tys = instantiate_types(&trait_output.input_tys, &subst);
+            trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
+            let mut module_inst_data = FxHashMap::default();
+            for id in local_fns.iter() {
+                module_inst_data.insert(*id, dicts.clone());
+                apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+                    let descr = &mut output.functions[id.as_index()];
+                    descr.definition.ty_scheme.ty =
+                        descr.definition.ty_scheme.ty.instantiate(&subst);
+                    substitute_in_function_descr(ir_arena, descr, &subst);
+                });
+            }
+        }
+
+        // Fifth pass, run the borrow checker and elaborate dictionaries.
         let mut module_inst_data = FxHashMap::default();
         for id in local_fns.iter() {
             module_inst_data.insert(*id, dicts.clone());
-            apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
-                let descr = &mut output.functions[id.as_index()];
-                descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
-                // type scheme quantifiers will be updated later on
-                let root = descr.get_code_entry().unwrap();
-                ir::instantiate_node(ir_arena, root, &subst);
-                for local in &mut descr.locals {
-                    local.ty = local.ty.instantiate(&subst);
-                }
-            });
         }
-
-        // Sixth pass, run the borrow checker and elaborate dictionaries.
         for id in local_fns.iter() {
-            let mut solver = trait_solver_from_module!(output, &others);
-            let mut ctx = DictElaborationCtx::new(&dicts, Some(&module_inst_data), &mut solver);
-            try_apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| -> Result<
-                (),
-                InternalCompilationError,
-            > {
-                let descr = &mut output.functions[id.as_index()];
-                descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)
-            });
-            solver.commit(&mut output.functions, &mut output.def_table);
+            borrow_check_and_elaborate_dict(output, ir_arena, &dicts, &module_inst_data, id)?;
         }
 
-        // Seventh pass, normalize the input types, substitute the types in the functions and input/output types.
+        // Sixth pass, normalize the input types, substitute the types in the functions and input/output types.
         let subst = (normalize_types(&mut quantifiers), FxHashMap::default());
         trait_output.input_tys = instantiate_types(&trait_output.input_tys, &subst);
         trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
@@ -701,18 +765,13 @@ where
                 assert!(eff_quantifiers.is_empty());
                 descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
                 descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-                let root = descr.get_code_entry().unwrap();
-                ir::instantiate_node(ir_arena, root, &subst);
-                for local in &mut descr.locals {
-                    local.ty = local.ty.instantiate(&subst);
-                }
+                substitute_in_function_descr(ir_arena, descr, &subst);
             });
 
             // Name the function
-            let name = // TODO: retrieve proper name for generic arguments
-                trait_ref
-                    .qualified_method_name(function_index, &trait_output.input_tys)
-                    .into();
+            let name = trait_ref
+                .qualified_method_name(function_index, &trait_output.input_tys)
+                .into();
             output.name_function(*id, name);
         }
 
@@ -720,80 +779,135 @@ where
     } else {
         // We are emitting normal module functions.
 
-        // Limit each function to its own constants and type variables
-        let all_constraints = ty_inf.substitute_and_take_constraints();
+        // Default orphan constraints for each function into the unification tables.
+        for id in local_fns.iter() {
+            let descr = &output.functions[id.as_index()];
+            let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
+            let sig_ty_vars = fn_ty.inner_ty_vars();
+            ty_inf.normalize_remaining_constraints();
+            let (_, orphan_constraints) =
+                select_constraints_accessible_from(ty_inf.remaining_constraints(), &sig_ty_vars);
+            let orphan_constraints: Vec<_> = orphan_constraints.into_iter().cloned().collect();
+            let mut solver = trait_solver_from_module!(output, others);
+            ty_inf.resolve_specific_defaults_to_fixed_point(
+                orphan_constraints,
+                None,
+                &mut solver,
+                ir_arena,
+            )?;
+            solver.commit(&mut output.functions, &mut output.def_table);
+        }
+        for id in local_fns.iter() {
+            let descr = &output.functions[id.as_index()];
+            let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
+            let sig_ty_vars = fn_ty.inner_ty_vars();
+            ty_inf.normalize_remaining_constraints();
+            let (_, remaining_orphans) =
+                select_constraints_accessible_from(ty_inf.remaining_constraints(), &sig_ty_vars);
+            let remaining_orphans: Vec<_> = remaining_orphans
+                .into_iter()
+                .filter(|c| !c.is_type_has_variant())
+                .collect();
+            if !remaining_orphans.is_empty() {
+                let fake_current = new_module_using_std(ModuleId(0));
+                let env = ModuleEnv::new(&fake_current, others);
+                return Err(internal_compilation_error!(Internal {
+                    error: format!(
+                        "Orphan constraints found in module fn: {}",
+                        remaining_orphans.format_with(&env)
+                    ),
+                    span: remaining_orphans[0].use_site(),
+                }));
+            }
+        }
+
+        // Substitute everything using ty_inf (single pass, includes all defaults).
+        substitute_and_canonicalize_functions(output, ir_arena, &mut ty_inf);
+
+        // Take final substituted constraints.
+        ty_inf.normalize_remaining_constraints();
+        let all_constraints = ty_inf.take_constraints();
+
+        // For each function: filter constraints, check unbounds, finalize type scheme.
         let mut used_constraints: FxHashSet<PubTypeConstraintPtr> = FxHashSet::default();
         for (function, id) in ast_functions().zip(local_fns.iter()) {
             let descr = &output.functions[id.as_index()];
             let code_entry = descr.get_code_entry().unwrap();
 
-            // Clean-up constraints and validate them.
-            let mut solver = trait_solver_from_module!(output, others);
-            let ConstraintValidationOutput {
-                mut quantifiers,
-                related_constraints,
-                retained_constraints,
-                constraint_subst,
-            } = validate_and_cleanup_constraints(
-                &descr.definition.ty_scheme.ty,
-                &all_constraints,
-                code_entry,
-                false,
-                &mut solver,
-                ir_arena,
-            )?;
-            let mut constraints: Vec<_> = all_constraints
+            // Find constraints related to this function's signature.
+            let sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
+            let (related_constraints, _) =
+                select_constraints_accessible_from(&all_constraints, &sig_ty_vars);
+            let related_ptrs: FxHashSet<PubTypeConstraintPtr> = related_constraints
                 .iter()
-                .filter(|c| {
-                    let ptr = constraint_ptr(c);
-                    if related_constraints.contains(&ptr) {
-                        used_constraints.insert(ptr);
-                    }
-                    retained_constraints.contains(&ptr)
-                })
-                .cloned()
+                .map(|c| constraint_ptr(c))
                 .collect();
-            assert_eq!(constraints.len(), retained_constraints.len());
-            solver.commit(&mut output.functions, &mut output.def_table);
+            for ptr in &related_ptrs {
+                used_constraints.insert(*ptr);
+            }
 
-            // Substitute the constraint-originating types in the node.
+            // Compute quantifiers.
+            let mut quantifiers = TypeScheme::list_ty_vars(
+                &descr.definition.ty_scheme.ty,
+                related_constraints.iter().map(|c| *c as &PubTypeConstraint),
+            );
+
+            // Check for unbound type variables.
+            let unbound = ir::all_unbound_ty_vars(ir_arena, code_entry);
+            let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
+
+            // Apply unbound→Never fixup if needed.
+            if !uninstantiated_unbound.is_empty() {
+                let fixup_subst: (TypeSubstitution, FxHashMap<_, _>) = (
+                    uninstantiated_unbound
+                        .iter()
+                        .map(|v| (*v, Type::never()))
+                        .collect(),
+                    FxHashMap::default(),
+                );
+                apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
+                    let descr = &mut output.functions[id.as_index()];
+                    substitute_in_function_descr(ir_arena, descr, &fixup_subst);
+                });
+                quantifiers.retain(|v| !uninstantiated_unbound.contains(v));
+            }
+
+            // Filter and finalize constraints.
             let mut solver = trait_solver_from_module!(output, others);
-            let mut subst = (constraint_subst, FxHashMap::default());
-            constraints = constraints
+            let mut drop_subst = (FxHashMap::default(), FxHashMap::default());
+            let constraints: Vec<_> = all_constraints
                 .iter()
+                .filter(|c| related_ptrs.contains(&constraint_ptr(c)))
                 .filter_map(|constraint| {
                     constraint
-                        .instantiate_and_drop_if_solved(&mut subst, &mut solver, ir_arena)
+                        .instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, ir_arena)
                         .transpose()
                 })
                 .collect::<Result<_, _>>()?;
-            quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
             solver.commit(&mut output.functions, &mut output.def_table);
-            // Apply substitution and finalize the type scheme.
+
+            // Write the final type scheme.
             apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                 let descr = &mut output.functions[id.as_index()];
-                let root = descr.get_code_entry().unwrap();
-                ir::instantiate_node(ir_arena, root, &subst);
-                for local in &mut descr.locals {
-                    local.ty = local.ty.instantiate(&subst);
-                }
-
-                // Write the final type scheme.
                 descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
                 descr.definition.ty_scheme.eff_quantifiers =
                     descr.definition.ty_scheme.ty.input_effect_vars();
                 descr.definition.ty_scheme.constraints = constraints.clone();
             });
 
-            // Log the dropped constraints.
-            let module_env = ModuleEnv::new(output, others);
-            log_dropped_constraints_module(
-                function.name.0,
-                &all_constraints,
-                &related_constraints,
-                &retained_constraints,
-                module_env,
-            );
+            // Log dropped constraints.
+            if log_enabled!(log::Level::Debug) {
+                let module_env = ModuleEnv::new(output, others);
+                let retained_ptrs: FxHashSet<PubTypeConstraintPtr> =
+                    constraints.iter().map(constraint_ptr).collect();
+                log_dropped_constraints_module(
+                    function.name.0,
+                    &all_constraints,
+                    &related_ptrs,
+                    &retained_ptrs,
+                    module_env,
+                );
+            }
         }
 
         // Safety check: make sure that there are no unused constraints.
@@ -813,7 +927,7 @@ where
             }));
         }
 
-        // Sixth pass, run the borrow checker and elaborate dictionaries.
+        // Fifth pass, run the borrow checker and elaborate dictionaries.
         let mut module_inst_data = FxHashMap::default();
         for id in local_fns.iter() {
             let descr = &output.functions[id.as_index()];
@@ -822,30 +936,17 @@ where
         }
         for id in local_fns.iter() {
             let dicts = module_inst_data.get(id).unwrap();
-            let mut solver = trait_solver_from_module!(output, &others);
-            let mut ctx = DictElaborationCtx::new(dicts, Some(&module_inst_data), &mut solver);
-            try_apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| -> Result<
-                (),
-                InternalCompilationError,
-            > {
-                let descr = &mut output.functions[id.as_index()];
-                descr.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)
-            });
-            solver.commit(&mut output.functions, &mut output.def_table);
+            borrow_check_and_elaborate_dict(output, ir_arena, dicts, &module_inst_data, id)?;
         }
 
-        // Seventh pass, normalize the type schemes, substitute the types in the functions.
+        // Sixth pass, normalize the type schemes, substitute the types in the functions.
         for id in local_fns.iter() {
             apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                 let descr = &mut output.functions[id.as_index()];
                 // Note: after that normalization, the functions do not share the same
                 // type variables anymore.
                 let subst = descr.definition.ty_scheme.normalize();
-                let root = descr.get_code_entry().unwrap();
-                ir::instantiate_node(ir_arena, root, &subst);
-                for local in &mut descr.locals {
-                    local.ty = local.ty.instantiate(&subst);
-                }
+                substitute_in_function_descr(ir_arena, descr, &subst);
             });
         }
 
@@ -968,8 +1069,18 @@ fn emit_expr_unsafe_inner(
     solver.commit(&mut module.functions, &mut module.def_table);
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_substitution_tables(module_env);
+    ty_inf.log_debug_constraints(module_env);
 
-    // Substitute the result of the unification.
+    // Default constraints into the unification tables (pre-substitution).
+    // For expressions, iterate defaulting and re-solving to a fixed point.
+    {
+        let node_ty = ty_inf.substitute_in_type(ir_arena[node_id].ty);
+        let mut solver = trait_solver_from_module!(module, others);
+        ty_inf.resolve_expr_defaults_to_fixed_point(node_ty, &mut solver, ir_arena)?;
+        solver.commit(&mut module.functions, &mut module.def_table);
+    }
+
+    // Substitute everything using ty_inf (single pass, includes all defaults).
     ty_inf.substitute_in_node(ir_arena, node_id);
     for lambda_id in lambda_functions.iter() {
         let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
@@ -980,48 +1091,64 @@ fn emit_expr_unsafe_inner(
         local.mut_ty = ty_inf.substitute_in_mut_type(local.mut_ty);
     }
 
-    // Get the remaining substituted constraints and collect the free variables.
+    // Take final substituted constraints.
     let module_env = ModuleEnv::new(module, others);
     ty_inf.log_debug_constraints(module_env);
-    let mut constraints = ty_inf.substitute_and_take_constraints();
+    ty_inf.normalize_remaining_constraints();
+    let all_constraints = ty_inf.take_constraints();
 
-    // Clean-up constraints and validate them.
-    let mut solver = trait_solver_from_module!(module, others);
+    // Compute quantifiers from the node type and remaining constraints.
     let node_ty = ir_arena[node_id].ty;
-    let ConstraintValidationOutput {
-        mut quantifiers,
-        retained_constraints,
-        constraint_subst,
-        ..
-    } = validate_and_cleanup_constraints(
-        &node_ty,
-        &constraints,
-        node_id,
-        true,
-        &mut solver,
-        ir_arena,
-    )?;
-    solver.commit(&mut module.functions, &mut module.def_table);
-    let module_env = ModuleEnv::new(module, others);
-    log_dropped_constraints_expr(
-        &constraints,
-        &retained_constraints,
-        &constraint_subst,
-        module_env,
-    );
-    constraints.retain(|c| retained_constraints.contains(&constraint_ptr(c)));
-    assert_eq!(constraints.len(), retained_constraints.len());
+    let mut quantifiers = TypeScheme::list_ty_vars(&node_ty, all_constraints.iter());
 
-    // Apply the constraint-originating substitution.
-    let mut subst = (constraint_subst, FxHashMap::default());
-    let mut progress = true;
+    // Check for unbound type variables.
+    let unbound = ir::all_unbound_ty_vars(ir_arena, node_id);
+    let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
+
+    // Apply unbound→Never fixup if needed.
+    let fixup_subst: (TypeSubstitution, FxHashMap<_, _>) = (
+        uninstantiated_unbound
+            .iter()
+            .map(|v| (*v, Type::never()))
+            .collect(),
+        FxHashMap::default(),
+    );
+    if !fixup_subst.0.is_empty() {
+        ir::instantiate_node(ir_arena, node_id, &fixup_subst);
+        for lambda_id in lambda_functions.iter() {
+            let descr = &mut module.functions[lambda_id.as_index()];
+            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&fixup_subst);
+            let root = descr.get_code_entry().unwrap();
+            ir::instantiate_node(ir_arena, root, &fixup_subst);
+            for local in &mut descr.locals {
+                local.ty = local.ty.instantiate(&fixup_subst);
+            }
+        }
+        for local in locals.iter_mut().skip(initial_local_count) {
+            local.ty = local.ty.instantiate(&fixup_subst);
+        }
+        quantifiers.retain(|v| !uninstantiated_unbound.contains(v));
+    }
+
+    // Filter solved constraints.
     let mut solver = trait_solver_from_module!(module, others);
+    let mut drop_subst = (FxHashMap::default(), FxHashMap::default());
+    let mut constraints: Vec<_> = all_constraints
+        .iter()
+        .filter_map(|constraint| {
+            constraint
+                .instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, ir_arena)
+                .transpose()
+        })
+        .collect::<Result<_, _>>()?;
+    // Loop to drop constraints that become solved due to output type resolution.
+    let mut progress = true;
     while progress {
         progress = false;
         let mut new_constraints = Vec::new();
         for constraint in constraints.iter() {
             if let Some(new_constraint) =
-                constraint.instantiate_and_drop_if_solved(&mut subst, &mut solver, ir_arena)?
+                constraint.instantiate_and_drop_if_solved(&mut drop_subst, &mut solver, ir_arena)?
             {
                 new_constraints.push(new_constraint);
             } else {
@@ -1030,27 +1157,40 @@ fn emit_expr_unsafe_inner(
         }
         constraints = new_constraints;
     }
-    quantifiers.retain(|ty_var| !subst.0.contains_key(ty_var));
-    ir::instantiate_node(ir_arena, node_id, &subst);
+    quantifiers.retain(|ty_var| !drop_subst.0.contains_key(ty_var));
+    if !drop_subst.0.is_empty() {
+        ir::instantiate_node(ir_arena, node_id, &drop_subst);
+        for lambda_id in lambda_functions.iter() {
+            let descr = &mut module.functions[lambda_id.as_index()];
+            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&drop_subst);
+            let root = descr.get_code_entry().unwrap();
+            ir::instantiate_node(ir_arena, root, &drop_subst);
+            for local in &mut descr.locals {
+                local.ty = local.ty.instantiate(&drop_subst);
+            }
+        }
+        for local in locals.iter_mut().skip(initial_local_count) {
+            local.ty = local.ty.instantiate(&drop_subst);
+        }
+    }
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
-        descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
-        let root = descr.get_code_entry().unwrap();
-        ir::instantiate_node(ir_arena, root, &subst);
-        for local in &mut descr.locals {
-            local.ty = local.ty.instantiate(&subst);
-        }
         descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
         descr.definition.ty_scheme.eff_quantifiers =
             descr.definition.ty_scheme.ty.input_effect_vars();
         descr.definition.ty_scheme.constraints = constraints.clone();
     }
-    for local in locals.iter_mut().skip(initial_local_count) {
-        local.ty = local.ty.instantiate(&subst);
-    }
     solver.commit(&mut module.functions, &mut module.def_table);
 
-    // Normalize the type scheme
+    // Log dropped constraints.
+    if log_enabled!(log::Level::Debug) {
+        let module_env = ModuleEnv::new(module, others);
+        let retained_ptrs: FxHashSet<PubTypeConstraintPtr> =
+            constraints.iter().map(constraint_ptr).collect();
+        log_dropped_constraints_expr(&all_constraints, &retained_ptrs, module_env);
+    }
+
+    // Normalize the type scheme.
     let node_ty = ir_arena[node_id].ty;
     let mut ty_scheme = TypeScheme {
         ty: node_ty,
@@ -1069,7 +1209,7 @@ fn emit_expr_unsafe_inner(
         }
     }
 
-    // Substitute the normalized and constraint-originating types in the node, effects and locals.
+    // Substitute the normalized types in the node, effects and locals.
     ir::instantiate_node(ir_arena, node_id, &subst);
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
@@ -1135,34 +1275,8 @@ pub fn emit_expr(
     Ok(CompiledExpr { ty, expr, locals })
 }
 
-/// Filter constraints that contain at least of the type variables listed in ty_vars
-#[allow(dead_code)]
-fn select_constraints_any_of_these_ty_vars(
-    constraints: &[PubTypeConstraint],
-    ty_vars: &[TypeVar],
-) -> Vec<PubTypeConstraint> {
-    constraints
-        .iter()
-        .filter(|constraint| constraint.contains_any_ty_vars(ty_vars))
-        .cloned()
-        .collect()
-}
-
-// /// Filter constraints that contain only type variables listed in the ty_vars
-// fn select_constraints_only_these_ty_vars<'c>(
-//     constraints: &'c [PubTypeConstraint],
-//     ty_vars: &[TypeVar],
-// ) -> Vec<&'c PubTypeConstraint> {
-//     constraints
-//         .iter()
-//         .filter(|constraint| {
-//             constraint.is_have_trait() || constraint.contains_only_ty_vars(ty_vars)
-//         })
-//         .collect()
-// }
-
 /// Return the constraints that are transitively accessible from the ty_vars
-fn select_constraints_accessible_from<'c: 'r, 'r, C, T>(
+fn select_constraints_accessible_from<'c: 'r, 'r, C: ?Sized, T>(
     constraints: &'r C,
     ty_vars: &[TypeVar],
 ) -> (
@@ -1174,7 +1288,7 @@ where
     T: Borrow<PubTypeConstraint> + 'c,
 {
     // Split the constraints into those that contain at least one of the ty_vars and those that don't.
-    fn partition<'c: 'r, 'r, C, T>(
+    fn partition<'c: 'r, 'r, C: ?Sized, T>(
         constraints: &'r C,
         ty_vars: &[TypeVar],
     ) -> (
@@ -1216,638 +1330,29 @@ where
     (ins, outs)
 }
 
-/// Normalize a type substitution by applying it to its own values until fixpoint.
-/// This ensures that chained substitutions like {B → Some(C), C → int} are resolved
-/// to {B → Some(int), C → int}, which is necessary because Type::instantiate is a
-/// single-pass bottom-up map that doesn't re-visit substituted results.
-fn normalize_type_substitution(subst: &mut TypeSubstitution) {
-    loop {
-        let mut changed = false;
-        let inst_subst: crate::type_inference::InstSubstitution =
-            (subst.clone(), FxHashMap::default());
-        for (_, ty) in subst.iter_mut() {
-            let new_ty = ty.instantiate(&inst_subst);
-            if new_ty != *ty {
-                *ty = new_ty;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-}
-
-/// For expressions, try to default remaining unconstrained type variables to int.
-/// This handles cases like `concat([], [])` where the element type has no Num constraint
-/// but can be safely defaulted to int if all trait constraints are satisfiable.
-fn default_unconstrained_expr_ty_vars(
-    ty: &impl TypeLike,
-    constraints: &FxHashSet<&PubTypeConstraint>,
-    retained_constraints: &mut FxHashSet<PubTypeConstraintPtr>,
-    constraint_subst: &mut TypeSubstitution,
-    trait_solver: &mut TraitSolver,
-    arena: &mut NodeArena,
-) {
-    let mut progress = true;
-    while progress {
-        progress = false;
-        normalize_type_substitution(constraint_subst);
-
-        // Find type variables in the expression type that are not yet resolved.
-        let inst_subst: crate::type_inference::InstSubstitution =
-            (constraint_subst.clone(), FxHashMap::default());
-        let substituted_ty = ty.instantiate(&inst_subst);
-        let remaining_vars: Vec<TypeVar> = substituted_ty
-            .inner_ty_vars()
-            .into_iter()
-            .filter(|v| !constraint_subst.contains_key(v))
-            .collect();
-
-        for ty_var in remaining_vars {
-            // Only default if this variable appears in at least one retained constraint.
-            // Variables with no constraints at all (e.g. `[]`) should remain unresolved
-            // and produce an UnboundTypeVar error.
-            let has_retained_constraint = constraints.iter().any(|c| {
-                retained_constraints.contains(&constraint_ptr(c)) && c.contains_any_type_var(ty_var)
-            });
-            if !has_retained_constraint {
-                continue;
-            }
-
-            // Build a trial substitution with this variable defaulted to int.
-            let mut trial_subst = constraint_subst.clone();
-            trial_subst.insert(ty_var, int_type());
-            normalize_type_substitution(&mut trial_subst);
-            let trial_inst: crate::type_inference::InstSubstitution =
-                (trial_subst, FxHashMap::default());
-
-            // Check if all retained constraints mentioning this variable are satisfied.
-            let mut all_satisfied = true;
-            for c in constraints.iter() {
-                if !retained_constraints.contains(&constraint_ptr(c)) {
-                    continue;
-                }
-                if !c.contains_any_type_var(ty_var) {
-                    continue;
-                }
-                let inst_c = c.instantiate(&trial_inst);
-                if let PubTypeConstraint::HaveTrait {
-                    trait_ref,
-                    input_tys,
-                    span,
-                    ..
-                } = &inst_c
-                {
-                    if input_tys.iter().all(Type::is_constant)
-                        && trait_solver
-                            .solve_impl(trait_ref, input_tys, span.use_site, arena)
-                            .is_err()
-                    {
-                        all_satisfied = false;
-                        break;
-                    }
-                    // If inputs aren't all concrete yet, we can't verify — assume OK for now.
-                }
-                // Non-trait constraints (tuple, record, variant): assume OK, handled elsewhere.
-            }
-
-            if all_satisfied {
-                constraint_subst.insert(ty_var, int_type());
-                // Mark now-resolvable constraints for removal from retained set.
-                let to_remove: Vec<_> = constraints
-                    .iter()
-                    .filter(|c| {
-                        retained_constraints.contains(&constraint_ptr(c))
-                            && c.contains_any_type_var(ty_var)
-                    })
-                    .filter_map(|c| {
-                        let inst_c =
-                            c.instantiate(&(constraint_subst.clone(), FxHashMap::default()));
-                        if let PubTypeConstraint::HaveTrait { input_tys, .. } = &inst_c {
-                            if input_tys.iter().all(Type::is_constant) {
-                                return Some(constraint_ptr(c));
-                            }
-                        }
-                        None
-                    })
-                    .collect();
-                for ptr in to_remove {
-                    retained_constraints.remove(&ptr);
-                }
-                progress = true;
-            }
-        }
-    }
-}
-
-/// Partition the orphan variant constraints and the others, and for the variant constraints,
-/// create a substitution into a minimalist variant type.
-fn partition_variant_constraints(
-    constraints: &FxHashSet<&PubTypeConstraint>,
-) -> (TypeSubstitution, FxHashSet<PubTypeConstraintPtr>) {
-    // First, collect the type variables that are invalid for variant simplification.
-    let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
-    for constraint in constraints {
-        if let Some(has_variant) = constraint.as_type_has_variant() {
-            invalid_ty_vars.extend(has_variant.3.inner_ty_vars())
-        } else if !constraint.is_have_trait() {
-            invalid_ty_vars.extend(constraint.inner_ty_vars());
-        }
-    }
-
-    // Then, extract the variant constraints and partition them by type variable,
-    // if the type variable is not in invalid_ty_vars.
-    let mut variants: FxHashMap<TypeVar, VariantConstraint> = FxHashMap::default();
-    let mut others = FxHashSet::default();
-    for constraint in constraints {
-        match constraint {
-            PubTypeConstraint::TypeHasVariant {
-                variant_ty,
-                tag,
-                payload_ty,
-                ..
-            } => {
-                if let Some(ty_var) = variant_ty.data().as_variable() {
-                    if !invalid_ty_vars.contains(ty_var) {
-                        let existing = variants
-                            .entry(*ty_var)
-                            .or_default()
-                            .insert(*tag, *payload_ty);
-                        assert!(existing.is_none(), "Duplicate variant constraint for {tag}");
-                    } else {
-                        others.insert(constraint_ptr(constraint));
-                    }
-                } else {
-                    others.insert(constraint_ptr(constraint));
-                }
-            }
-            _ => {
-                others.insert(constraint_ptr(constraint));
-            }
-        }
-    }
-
-    // And create minimalist variant type for them.
-    let subst = variants
-        .into_iter()
-        .map(|(ty_var, variant)| {
-            let variant_ty = Type::variant(variant.into_iter().collect::<Vec<_>>());
-            (ty_var, variant_ty)
-        })
-        .collect();
-    (subst, others)
-}
-
 type PubTypeConstraintPtr = *const PubTypeConstraint;
 
 fn constraint_ptr(c: &PubTypeConstraint) -> PubTypeConstraintPtr {
     c as *const PubTypeConstraint
 }
 
-struct ConstraintValidationOutput {
-    quantifiers: Vec<TypeVar>,
-    related_constraints: FxHashSet<PubTypeConstraintPtr>,
-    retained_constraints: FxHashSet<PubTypeConstraintPtr>,
-    constraint_subst: TypeSubstitution,
-}
-
-fn validate_and_cleanup_constraints(
-    ty: &impl TypeLike,
-    constraints: &[PubTypeConstraint],
-    code_entry: NodeId,
-    is_expr: bool,
-    trait_solver: &mut TraitSolver,
-    arena: &mut NodeArena,
-) -> Result<ConstraintValidationOutput, InternalCompilationError> {
-    // Filter out constraints that have types not found in our code.
-    let unbound = ir::all_unbound_ty_vars(arena, code_entry);
-    // let ty_vars = unbound.keys().cloned().collect::<Vec<_>>();
-    // let constraints = select_constraints_only_these_ty_vars(constraints, &ty_vars);
-    let constraints = constraints.iter().collect::<Vec<_>>();
-    let related_constraints = constraints.iter().map(|c| constraint_ptr(c)).collect();
-
-    let (constraints, subst) = if is_expr {
-        // An expression, keep all constraints
-        let (subst, other_constraints) =
-            partition_variant_constraints(&constraints.iter().copied().collect());
-        let constraints = constraints
-            .iter()
-            .copied()
-            .filter(|c| other_constraints.contains(&constraint_ptr(c)))
-            .collect();
-        (constraints, subst)
-    } else {
-        // A module function, find constraints that are not transitively accessible from the fn signature.
-        let sig_ty_vars = ty.inner_ty_vars();
-        let (constraints, orphan_constraints) =
-            select_constraints_accessible_from(&constraints, &sig_ty_vars);
-
-        // Partition the orphan constraints into variant constraint substitutions and the others.
-        let (mut subst, mut other_orphans) = partition_variant_constraints(&orphan_constraints);
-
-        // Default Num types to Int or Float in other orphan constraints.
-        compute_num_trait_default_types(
-            &orphan_constraints,
-            &mut other_orphans,
-            &mut subst,
-            trait_solver,
-            arena,
-        )?;
-        // Normalize the substitution so variant types contain resolved Num defaults.
-        normalize_type_substitution(&mut subst);
-        if !other_orphans.is_empty() {
-            let orphans = orphan_constraints
-                .into_iter()
-                .filter(|c| other_orphans.contains(&constraint_ptr(c)))
-                .collect::<Vec<_>>();
-            let fake_current = new_module_using_std(ModuleId(0));
-            let env = ModuleEnv::new(&fake_current, trait_solver.others);
-            return Err(internal_compilation_error!(Internal {
-                error: format!(
-                    "Orphan constraints found in module fn: {}\nsubst: {}",
-                    orphans.format_with(&env),
-                    subst.format_with(&env)
-                ),
-                span: orphans[0].use_site(),
-            }));
-        }
-        (constraints, subst)
-    };
-
-    // Compute the quantifiers based on the function type and its constraints.
-    let mut quantifiers = TypeScheme::list_ty_vars(ty, constraints.iter().map(Borrow::borrow));
-
-    // Detect unbound type variables in the code and return error if not in unused variants only.
-    // These are neither part of the function signature nor of the constraints.
-    let bounds: Vec<_> = quantifiers.iter().chain(subst.keys()).cloned().collect();
-    let uninstantiated_unbound = check_unbounds(unbound, &bounds)?;
-    let mut constraint_subst: FxHashMap<_, _> = subst
-        .into_iter()
-        .chain(
-            uninstantiated_unbound
-                .into_iter()
-                .map(|ty_var| (ty_var, Type::never())),
-        )
-        .collect();
-    let mut retained_constraints: FxHashSet<_> =
-        constraints.iter().map(|c| constraint_ptr(c)).collect();
-
-    // In expressions, default Num types to Int or Float if not specified.
-    if is_expr {
-        compute_num_trait_default_types(
-            &constraints,
-            &mut retained_constraints,
-            &mut constraint_subst,
-            trait_solver,
-            arena,
-        )?;
-        // Normalize the substitution so variant types contain resolved Num defaults,
-        // and then try to default remaining unconstrained type variables to int.
-        normalize_type_substitution(&mut constraint_subst);
-        default_unconstrained_expr_ty_vars(
-            ty,
-            &constraints,
-            &mut retained_constraints,
-            &mut constraint_subst,
-            trait_solver,
-            arena,
-        );
-    }
-
-    // Normalize one final time to ensure all chained substitutions are resolved.
-    normalize_type_substitution(&mut constraint_subst);
-
-    // Simplify quantifiers with substitution
-    quantifiers.retain(|ty_var| !constraint_subst.contains_key(ty_var));
-
-    Ok(ConstraintValidationOutput {
-        quantifiers,
-        related_constraints,
-        retained_constraints,
-        constraint_subst,
-    })
-}
-
-fn validate_and_simplify_trait_imp_constraints(
-    input_quantifiers: &[TypeVar],
-    constraints: &Vec<PubTypeConstraint>,
-    trait_solver: &mut TraitSolver,
-    arena: &mut NodeArena,
-) -> Result<(Vec<TypeVar>, TypeSubstitution), InternalCompilationError> {
-    // Find constraints that are not transitively accessible from the trait signature.
-    let (constraints, orphan_constraints) =
-        select_constraints_accessible_from(constraints, input_quantifiers);
-
-    // Partition the orphan constraints into variant constraint substitutions and the others.
-    let (mut subst, mut other_orphans) = partition_variant_constraints(&orphan_constraints);
-
-    // Default Num types to Int or Float in other orphan constraints.
-    compute_num_trait_default_types(
-        &orphan_constraints,
-        &mut other_orphans,
-        &mut subst,
-        trait_solver,
-        arena,
-    )?;
-    // Normalize the substitution so variant types contain resolved Num defaults.
-    normalize_type_substitution(&mut subst);
-    if !other_orphans.is_empty() {
-        return Err(internal_compilation_error!(Internal {
-            error: format!("Orphan constraints found in trait impl: {other_orphans:?}"),
-            span: orphan_constraints
-                .into_iter()
-                .find(|c| other_orphans.contains(&constraint_ptr(c)))
-                .unwrap()
-                .use_site(),
-        }));
-    }
-
-    // Compute quantifiers based on the trait signature and its constraints.
-    let mut quantifiers = input_quantifiers.to_vec();
-    let mut collector = TyVarsCollector(&mut quantifiers);
-    for constraint in constraints.iter() {
-        constraint.visit(&mut collector);
-    }
-    quantifiers = quantifiers.into_iter().unique().collect();
-
-    Ok((quantifiers, subst))
-}
-
-/// Compute which constraints in selected_constraints can be defaulted to int or float.
-/// Update both selected_constraints and subst.
-fn compute_num_trait_default_types(
-    all_constraints: &FxHashSet<&PubTypeConstraint>,
-    selected_constraints: &mut FxHashSet<PubTypeConstraintPtr>,
-    subst: &mut TypeSubstitution,
-    trait_solver: &mut TraitSolver,
-    arena: &mut NodeArena,
-) -> Result<(), InternalCompilationError> {
-    // In debug, check that all_constraints contains all selected_constraints.
-    #[cfg(debug_assertions)]
-    {
-        let all_constraints: FxHashSet<PubTypeConstraintPtr> = all_constraints
-            .iter()
-            .copied()
-            .map(constraint_ptr)
-            .collect();
-        for constraint in selected_constraints.iter() {
-            assert!(all_constraints.contains(constraint));
-        }
-    }
-
-    // Then, decide which type variables can be default and whether to int or float.
-    // The value of the default_tys map holds the index of the type to default to.
-    // If the index is default_tys.len(), there is no default.
-    let default_tys = [int_type(), float_type()];
-    let mut progress = true;
-    while progress {
-        progress = false;
-
-        // First, collect the type variables that are invalid for defaulting.
-        // These include the ones that appear in non-trait constraints or in traits with
-        // more than one input types or having output types.
-        let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
-        let mut num_ty_vars = FxHashSet::<TypeVar>::default();
-        for constraint in all_constraints {
-            if !selected_constraints.contains(&constraint_ptr(constraint)) {
-                continue;
-            }
-            if let PubTypeConstraint::HaveTrait {
-                trait_ref,
-                input_tys,
-                output_tys,
-                ..
-            } = constraint
-            {
-                assert!(!input_tys.is_empty());
-                if input_tys.len() > 1 {
-                    // Only mark type variables as invalid for defaulting if multiple
-                    // type variables co-occur in the multi-input trait's inputs.
-                    // If a variable is the sole variable (e.g. Cast<A, float>),
-                    // it can still be safely defaulted.
-                    let all_ty_vars: Vec<_> =
-                        input_tys.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
-                    if all_ty_vars.len() > 1 {
-                        invalid_ty_vars.extend(all_ty_vars);
-                    }
-                } else if trait_ref == &*NUM_TRAIT {
-                    let maybe_ty_var = input_tys[0].data().as_variable().cloned();
-                    if let Some(ty_var) = maybe_ty_var {
-                        num_ty_vars.insert(ty_var);
-                    }
-                }
-                invalid_ty_vars.extend(output_tys.iter().flat_map(|ty| ty.inner_ty_vars()));
-            } else {
-                invalid_ty_vars.extend(constraint.inner_ty_vars());
-            }
-        }
-
-        let mut defaulted_ty_vars = FxHashMap::<TypeVar, usize>::default();
-        // Process trait constraint type variables.
-        for constraint in all_constraints.iter() {
-            if !selected_constraints.contains(&constraint_ptr(constraint))
-                || !constraint.is_have_trait()
-            {
-                continue;
-            }
-            if let PubTypeConstraint::HaveTrait {
-                trait_ref,
-                input_tys,
-                output_tys,
-                ..
-            } = constraint
-            {
-                if input_tys.len() > 1 || !output_tys.is_empty() {
-                    continue;
-                }
-                let maybe_ty_var = input_tys[0].data().as_variable().cloned();
-                if let Some(ty_var) = maybe_ty_var {
-                    if invalid_ty_vars.contains(&ty_var) {
-                        continue;
-                    }
-                    if !num_ty_vars.contains(&ty_var) {
-                        continue;
-                    }
-                    let mut default_index = defaulted_ty_vars.get(&ty_var).copied().unwrap_or(0);
-                    while default_index < default_tys.len() && {
-                        let key = ConcreteTraitImplKey::new(
-                            trait_ref.clone(),
-                            vec![default_tys[default_index]],
-                        );
-                        !trait_solver.has_concrete_impl(&key)
-                    } {
-                        default_index += 1;
-                        if default_index >= default_tys.len() {
-                            break;
-                        }
-                    }
-                    defaulted_ty_vars.insert(ty_var, default_index);
-                    progress = true;
-                }
-            }
-        }
-
-        // Finally, remove the defaulted constraints and update the substitution with the valid default types.
-        for constraint in all_constraints.iter() {
-            if !selected_constraints.contains(&constraint_ptr(constraint))
-                || !constraint.is_have_trait()
-            {
-                continue;
-            }
-            // FIXME: this is really inefficient.
-            let subst = (subst.clone(), FxHashMap::default());
-            let subst_constraint = constraint.instantiate(&subst);
-            if let PubTypeConstraint::HaveTrait {
-                input_tys,
-                output_tys,
-                ..
-            } = subst_constraint
-            {
-                if input_tys.len() > 1 || !output_tys.is_empty() {
-                    continue;
-                }
-                let maybe_ty_var = input_tys[0].data().as_variable().cloned();
-                if let Some(ty_var) = maybe_ty_var {
-                    if let Some(default_index) = defaulted_ty_vars.get(&ty_var) {
-                        if *default_index < default_tys.len() {
-                            selected_constraints.remove(&constraint_ptr(constraint));
-                        }
-                    }
-                }
-            }
-        }
-        for (ty_var, default_ty_index) in defaulted_ty_vars {
-            let default_ty = default_tys.get(default_ty_index);
-            if let Some(default_ty) = default_ty {
-                let entry = subst.entry(ty_var);
-                use std::collections::hash_map::Entry;
-                match entry {
-                    Entry::Occupied(entry) => {
-                        let entry_ty = entry.get();
-                        if entry_ty != default_ty {
-                            // FIXME: This is due lack of unification when doing this part, in a way that is a similar bug to
-                            // https://github.com/enlightware/ferlium/issues/59, a proper fix would likely solve both.
-                            let fake_current = new_module_using_std(ModuleId(0));
-                            let env = ModuleEnv::new(&fake_current, trait_solver.others);
-                            return Err(internal_compilation_error!(Internal {
-                                error: format!(
-                                    "Type variable {ty_var} already exists in type substitution with type `{}`, but trying to use type `{}` instead",
-                                    entry_ty.format_with(&env),
-                                    default_ty.format_with(&env)
-                                ),
-                                span: all_constraints.iter().next().unwrap().use_site(),
-                            }));
-                        }
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(*default_ty);
-                    }
-                }
-            }
-        }
-
-        // Finally, look if some constraints have become solved due to substitution.
-        for constraint in all_constraints.iter() {
-            if !selected_constraints.contains(&constraint_ptr(constraint))
-                || !constraint.is_have_trait()
-            {
-                continue;
-            }
-            // FIXME: this is inefficient.
-            // FIXME: Use real unification rather than this limited substitution-based approach.
-            let inst_subst = (subst.clone(), FxHashMap::default());
-            let subst_constraint = constraint.instantiate(&inst_subst);
-            if let PubTypeConstraint::HaveTrait {
-                trait_ref,
-                input_tys,
-                output_tys,
-                span,
-            } = subst_constraint
-            {
-                let resolved = input_tys.iter().all(Type::is_constant);
-                if resolved {
-                    let output_tys_all_vars = output_tys
-                        .iter()
-                        .all(|ty| ty.data().as_variable().is_some());
-                    if output_tys_all_vars {
-                        let solved_output_tys = trait_solver.solve_output_types(
-                            &trait_ref,
-                            &input_tys,
-                            span.use_site,
-                            arena,
-                        )?;
-                        for (output_ty, solved_ty) in
-                            output_tys.iter().zip(solved_output_tys.iter())
-                        {
-                            let ty_var = *output_ty.data().as_variable().unwrap();
-                            subst.insert(ty_var, *solved_ty);
-                        }
-                        selected_constraints.remove(&constraint_ptr(constraint));
-                        progress = true;
-                    }
-                    let output_tys_all_const = output_tys.iter().all(Type::is_constant);
-                    if output_tys_all_const {
-                        let solved_output_tys = trait_solver.solve_output_types(
-                            &trait_ref,
-                            &input_tys,
-                            span.use_site,
-                            arena,
-                        )?;
-                        if output_tys != solved_output_tys {
-                            let fake_current = new_module_using_std(ModuleId(0));
-                            let env = ModuleEnv::new(&fake_current, trait_solver.others);
-                            return Err(internal_compilation_error!(Internal {
-                                error: format!(
-                                    "While defaulting Num types, a constraint ended up having invalid output types [{}] while the correct ones are [{}].",
-                                    output_tys.format_with(&env),
-                                    solved_output_tys.format_with(&env)
-                                ),
-                                span: span.use_site,
-                            }));
-                        }
-                        selected_constraints.remove(&constraint_ptr(constraint));
-                        progress = true;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn log_dropped_constraints_expr(
     all: &[PubTypeConstraint],
     retained: &FxHashSet<PubTypeConstraintPtr>,
-    subst: &TypeSubstitution,
     module_env: ModuleEnv,
 ) {
     if retained.len() == all.len() {
         return;
     }
-    let mut ty_vars_in_dropped = FxHashSet::default();
     let dropped = all
         .iter()
         .filter(|c| {
             let ptr = constraint_ptr(c);
-            let dropped = !retained.contains(&ptr);
-            if dropped {
-                ty_vars_in_dropped.extend(c.inner_ty_vars());
-            }
-            dropped
+            !retained.contains(&ptr)
         })
         .map(|c| c.format_with(&module_env));
     let dropped = iterable_to_string(dropped, " ∧ ");
     log::debug!("Dropped/resolved constraints in expr: {dropped}");
-    for (ty_var, ty) in subst {
-        if ty_vars_in_dropped.contains(ty_var) {
-            log::debug!(
-                "  Type variable {ty_var} resolved to {}",
-                ty.format_with(&module_env)
-            );
-        }
-    }
 }
 
 fn log_dropped_constraints_module(

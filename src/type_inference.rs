@@ -2243,19 +2243,438 @@ impl UnifiedTypeInference {
         Ok(unified_ty_inf)
     }
 
-    pub fn constraints(self) -> Vec<PubTypeConstraint> {
-        self.remaining_ty_constraints
+    /// Substitute the remaining constraints using the current unification tables,
+    /// storing the normalized constraints back into self.
+    pub fn normalize_remaining_constraints(&mut self) {
+        let constraints = mem::take(&mut self.remaining_ty_constraints);
+        self.remaining_ty_constraints = self.substitute_in_constraints(&constraints);
     }
 
-    /// Extract the remaining constraints, applying the full unification substitution
-    /// to each one before returning them.
-    pub fn substitute_and_take_constraints(mut self) -> Vec<PubTypeConstraint> {
-        // FIXME: refactor type_inference to avoid the clone here.
-        self.remaining_ty_constraints
-            .clone()
-            .iter()
-            .map(|c| self.substitute_in_constraint(c))
-            .collect()
+    /// Borrow the remaining constraints. Call `normalize_remaining_constraints`
+    /// first if you need them fully substituted.
+    pub fn remaining_constraints(&self) -> &[PubTypeConstraint] {
+        &self.remaining_ty_constraints
+    }
+
+    /// Extract the remaining constraints from self.
+    pub fn take_constraints(&mut self) -> Vec<PubTypeConstraint> {
+        mem::take(&mut self.remaining_ty_constraints)
+    }
+
+    /// Re-solve remaining constraints after defaulting has added new information
+    /// to the unification tables. Constraints that are now solvable are removed.
+    pub fn resolve_remaining_constraints(
+        &mut self,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<(), InternalCompilationError> {
+        loop {
+            self.normalize_remaining_constraints();
+            let constraints = mem::take(&mut self.remaining_ty_constraints);
+            let old_count = constraints.len();
+            let mut new_remaining = Vec::new();
+            for constraint in constraints {
+                use PubTypeConstraint::*;
+                let unified_constraint = match constraint {
+                    TupleAtIndexIs {
+                        tuple_ty,
+                        tuple_span,
+                        index,
+                        index_span,
+                        element_ty,
+                    } => self.unify_tuple_project(
+                        tuple_ty,
+                        tuple_span.use_site,
+                        index,
+                        index_span.use_site,
+                        element_ty,
+                    )?,
+                    RecordFieldIs {
+                        record_ty,
+                        record_span,
+                        field,
+                        field_span,
+                        element_ty,
+                    } => self.unify_record_field_access(
+                        record_ty,
+                        record_span.use_site,
+                        field,
+                        field_span.use_site,
+                        element_ty,
+                    )?,
+                    TypeHasVariant {
+                        variant_ty,
+                        variant_span,
+                        tag,
+                        payload_ty,
+                        payload_span,
+                    } => self.unify_type_has_variant(
+                        variant_ty,
+                        variant_span.use_site,
+                        tag,
+                        payload_ty,
+                        payload_span.use_site,
+                    )?,
+                    HaveTrait {
+                        trait_ref,
+                        input_tys,
+                        output_tys,
+                        span,
+                    } => self.unify_have_trait(
+                        trait_ref,
+                        &input_tys,
+                        &output_tys,
+                        span.use_site,
+                        |_| false,
+                        trait_solver,
+                        arena,
+                    )?,
+                };
+                if let Some(new_constraint) = unified_constraint {
+                    new_remaining.push(new_constraint);
+                }
+            }
+            self.remaining_ty_constraints = new_remaining;
+            if self.remaining_ty_constraints.len() == old_count {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Default variant constraints in the provided boundary by unifying
+    /// eligible type variables with minimalist variant types.
+    pub fn default_orphan_variants_in_constraints(
+        &mut self,
+        constraints: &[PubTypeConstraint],
+    ) -> Result<(), InternalCompilationError> {
+        use crate::type_scheme::VariantConstraint;
+
+        // First, collect the type variables that are invalid for variant simplification.
+        let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
+        for constraint in constraints {
+            match constraint {
+                PubTypeConstraint::TypeHasVariant { payload_ty, .. } => {
+                    invalid_ty_vars.extend(payload_ty.inner_ty_vars());
+                }
+                PubTypeConstraint::HaveTrait { .. } => {}
+                _ => {
+                    invalid_ty_vars.extend(constraint.inner_ty_vars());
+                }
+            }
+        }
+
+        // Collect variant constraints grouped by type variable.
+        let mut variants: FxHashMap<TypeVar, VariantConstraint> = FxHashMap::default();
+        let mut variant_spans: FxHashMap<TypeVar, Location> = FxHashMap::default();
+        for constraint in constraints {
+            if let PubTypeConstraint::TypeHasVariant {
+                variant_ty,
+                variant_span,
+                tag,
+                payload_ty,
+                ..
+            } = constraint
+            {
+                if let Some(ty_var) = variant_ty.data().as_variable() {
+                    if !invalid_ty_vars.contains(ty_var) {
+                        let existing = variants
+                            .entry(*ty_var)
+                            .or_default()
+                            .insert(*tag, *payload_ty);
+                        assert!(existing.is_none(), "Duplicate variant constraint for {tag}");
+                        variant_spans
+                            .entry(*ty_var)
+                            .or_insert(variant_span.use_site);
+                    }
+                }
+            }
+        }
+
+        // Unify each variable with its minimalist variant type.
+        for (ty_var, variant) in variants {
+            let variant_ty = Type::variant(variant.into_iter().collect::<Vec<_>>());
+            let span = variant_spans[&ty_var];
+            self.unify_same_type(Type::variable(ty_var), span, variant_ty, span)?;
+        }
+        Ok(())
+    }
+
+    /// Default Num-constrained type variables to int or float by unifying
+    /// directly in the unification table.
+    pub fn default_num_types(
+        &mut self,
+        constraints: &[PubTypeConstraint],
+        trait_solver: &mut TraitSolver<'_>,
+        _arena: &mut NodeArena,
+    ) -> Result<(), InternalCompilationError> {
+        if constraints.is_empty() {
+            return Ok(());
+        }
+
+        use crate::module::ConcreteTraitImplKey;
+        use crate::std::math::{NUM_TRAIT, float_type, int_type};
+
+        let default_tys = [int_type(), float_type()];
+        let mut progress = true;
+        while progress {
+            progress = false;
+
+            // Re-substitute orphan constraints to see current state of type variables.
+            let subst_constraints = self.substitute_in_constraints(constraints);
+
+            // First, collect invalid type variables and Num type variables.
+            let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
+            let mut num_ty_vars = FxHashSet::<TypeVar>::default();
+            for constraint in &subst_constraints {
+                if let PubTypeConstraint::HaveTrait {
+                    trait_ref,
+                    input_tys,
+                    output_tys,
+                    ..
+                } = constraint
+                {
+                    assert!(!input_tys.is_empty());
+                    if input_tys.len() > 1 {
+                        // Only mark type variables as invalid for defaulting if multiple
+                        // type variables co-occur in the multi-input trait's inputs.
+                        let all_ty_vars: Vec<_> =
+                            input_tys.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
+                        if all_ty_vars.len() > 1 {
+                            invalid_ty_vars.extend(all_ty_vars);
+                        }
+                    } else if *trait_ref == *NUM_TRAIT {
+                        let maybe_ty_var = input_tys[0].data().as_variable().cloned();
+                        if let Some(ty_var) = maybe_ty_var {
+                            num_ty_vars.insert(ty_var);
+                        }
+                    }
+                    invalid_ty_vars.extend(output_tys.iter().flat_map(|ty| ty.inner_ty_vars()));
+                } else if !constraint.is_type_has_variant() {
+                    invalid_ty_vars.extend(constraint.inner_ty_vars());
+                }
+            }
+
+            // Determine defaults for Num-constrained type variables.
+            let mut defaulted_ty_vars = FxHashMap::<TypeVar, usize>::default();
+            for constraint in &subst_constraints {
+                if let PubTypeConstraint::HaveTrait {
+                    trait_ref,
+                    input_tys,
+                    output_tys,
+                    ..
+                } = constraint
+                {
+                    if input_tys.len() > 1 || !output_tys.is_empty() {
+                        continue;
+                    }
+                    let maybe_ty_var = input_tys[0].data().as_variable().cloned();
+                    if let Some(ty_var) = maybe_ty_var {
+                        if invalid_ty_vars.contains(&ty_var) {
+                            continue;
+                        }
+                        if !num_ty_vars.contains(&ty_var) {
+                            continue;
+                        }
+                        let mut default_index =
+                            defaulted_ty_vars.get(&ty_var).copied().unwrap_or(0);
+                        while default_index < default_tys.len() {
+                            let key = ConcreteTraitImplKey::new(
+                                trait_ref.clone(),
+                                vec![default_tys[default_index]],
+                            );
+                            if trait_solver.has_concrete_impl(&key) {
+                                break;
+                            }
+                            default_index += 1;
+                        }
+                        defaulted_ty_vars.insert(ty_var, default_index);
+                    }
+                }
+            }
+
+            if defaulted_ty_vars.is_empty() {
+                break;
+            }
+
+            // Unify each defaulted variable with its default type.
+            let span = constraints[0].use_site();
+            for (ty_var, default_index) in &defaulted_ty_vars {
+                if let Some(default_ty) = default_tys.get(*default_index) {
+                    // Check if the variable is already resolved to something else.
+                    let current = self.lookup_type_var(*ty_var);
+                    if current.data().as_variable().is_some() {
+                        self.unify_same_type(Type::variable(*ty_var), span, *default_ty, span)?;
+                        progress = true;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// For expressions, try to default remaining unconstrained type variables to int.
+    /// This handles cases like `concat([], [])` where the element type has no Num constraint
+    /// but can be safely defaulted to int if all trait constraints are satisfiable.
+    pub fn default_unconstrained_expr_ty_vars(
+        &mut self,
+        expr_ty: Type,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> bool {
+        use crate::std::math::int_type;
+
+        let mut progress = false;
+
+        // Re-substitute the expression type through current tables.
+        let substituted_ty = self.substitute_in_type(expr_ty);
+        let remaining_vars: Vec<TypeVar> = substituted_ty
+            .inner_ty_vars()
+            .into_iter()
+            .filter(|v| {
+                // Only consider variables that are still unresolved.
+                self.lookup_type_var(*v).data().as_variable().is_some()
+            })
+            .collect();
+
+        // Get current normalized constraints.
+        self.normalize_remaining_constraints();
+        let subst_constraints = self.remaining_constraints().to_vec();
+
+        for ty_var in remaining_vars {
+            // Only default if this variable appears in at least one remaining constraint.
+            let has_constraint = subst_constraints
+                .iter()
+                .any(|c| c.contains_any_type_var(ty_var));
+            if !has_constraint {
+                continue;
+            }
+
+            // Check if all constraints mentioning this variable are satisfied with int.
+            let mut all_satisfied = true;
+            let trial_subst: InstSubstitution = (
+                FxHashMap::from_iter([(ty_var, int_type())]),
+                FxHashMap::default(),
+            );
+            for c in &subst_constraints {
+                if !c.contains_any_type_var(ty_var) {
+                    continue;
+                }
+                let inst_c = c.instantiate(&trial_subst);
+                if let PubTypeConstraint::HaveTrait {
+                    trait_ref,
+                    input_tys,
+                    span,
+                    ..
+                } = &inst_c
+                {
+                    if input_tys.iter().all(Type::is_constant)
+                        && trait_solver
+                            .solve_impl(trait_ref, input_tys, span.use_site, arena)
+                            .is_err()
+                    {
+                        all_satisfied = false;
+                        break;
+                    }
+                }
+            }
+
+            if all_satisfied {
+                let span = subst_constraints
+                    .iter()
+                    .find(|c| c.contains_any_type_var(ty_var))
+                    .expect("there must be a relevant constraint for expr defaulting")
+                    .use_site();
+                if self
+                    .unify_same_type(Type::variable(ty_var), span, int_type(), span)
+                    .is_ok()
+                {
+                    progress = true;
+                }
+            }
+        }
+
+        progress
+    }
+
+    /// Repeatedly default the provided constraints and re-solve remaining
+    /// constraints until reaching a fixed point.
+    ///
+    /// This is boundary-aware: only the supplied constraints participate in
+    /// variant and numeric defaulting.
+    /// If `root_ty` is provided, expression-only unconstrained defaulting is
+    /// also attempted for variables visible from that root type.
+    pub fn resolve_specific_defaults_to_fixed_point(
+        &mut self,
+        mut constraints: Vec<PubTypeConstraint>,
+        root_ty: Option<Type>,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<(), InternalCompilationError> {
+        let expr_var_count = |this: &mut Self| {
+            root_ty
+                .map(|root_ty| {
+                    this.substitute_in_type(root_ty)
+                        .inner_ty_vars()
+                        .into_iter()
+                        .filter(|v| this.lookup_type_var(*v).data().as_variable().is_some())
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let constraints_var_count = |constraints: &[PubTypeConstraint]| {
+            constraints
+                .iter()
+                .map(|constraint| constraint.inner_ty_vars().len())
+                .sum::<usize>()
+        };
+
+        loop {
+            let old_expr_var_count = expr_var_count(self);
+            let old_constraints_var_count = constraints_var_count(&constraints);
+
+            self.default_orphan_variants_in_constraints(&constraints)?;
+            self.default_num_types(&constraints, trait_solver, arena)?;
+            self.resolve_remaining_constraints(trait_solver, arena)?;
+            let unconstrained_progress = root_ty
+                .map(|root_ty| {
+                    self.default_unconstrained_expr_ty_vars(root_ty, trait_solver, arena)
+                })
+                .unwrap_or(false);
+
+            constraints = self.substitute_in_constraints(&constraints);
+
+            let new_expr_var_count = expr_var_count(self);
+            let new_constraints_var_count = constraints_var_count(&constraints);
+
+            if !unconstrained_progress
+                && new_expr_var_count == old_expr_var_count
+                && new_constraints_var_count == old_constraints_var_count
+            {
+                break;
+            }
+        }
+
+        self.normalize_remaining_constraints();
+
+        Ok(())
+    }
+
+    /// Repeatedly default expression constraints and re-solve remaining constraints
+    /// until reaching a fixed point.
+    pub fn resolve_expr_defaults_to_fixed_point(
+        &mut self,
+        expr_ty: Type,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<(), InternalCompilationError> {
+        let orphan_constraints = self.remaining_constraints().to_vec();
+        self.resolve_specific_defaults_to_fixed_point(
+            orphan_constraints,
+            Some(expr_ty),
+            trait_solver,
+            arena,
+        )
     }
 
     fn normalize_type(&mut self, ty: Type) -> Type {
@@ -3272,6 +3691,16 @@ impl UnifiedTypeInference {
                 }
             }
         }
+    }
+
+    fn substitute_in_constraints(
+        &mut self,
+        constraints: &[PubTypeConstraint],
+    ) -> Vec<PubTypeConstraint> {
+        constraints
+            .iter()
+            .map(|c| self.substitute_in_constraint(c))
+            .collect()
     }
 
     pub fn log_debug_constraints(&self, module_env: ModuleEnv) {
