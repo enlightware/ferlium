@@ -18,7 +18,7 @@ use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, Mutab
 use ferlium::format::FormatWith;
 use ferlium::module::id::Id;
 use ferlium::module::{
-    LocalDecl, LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleDetails, UseData, Uses,
+    LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleDetails, UseData, Uses,
 };
 use ferlium::std::new_module_using_std;
 use ferlium::{
@@ -29,7 +29,7 @@ use rustyline::DefaultEditor;
 use rustyline::{config::Configurer, error::ReadlineError};
 use ustr::ustr;
 
-use ferlium::eval::{EvalCtx, ValOrMut, eval_node_with_ctx};
+use ferlium::eval::{EvalCtx, eval_node_with_ctx};
 
 /// A wrapper around location to implement ariadne::Span
 #[derive(Debug, Clone, Copy)]
@@ -454,6 +454,7 @@ fn print_help() {
     );
     println!("\\history: Shows the modules in this session's history.");
     println!("CTRL-D: Exits the REPL.");
+    println!("\nNote: expression locals do not persist across REPL inputs.");
 }
 
 /// Process a single input: parse, compile module, and evaluate expression if present.
@@ -462,8 +463,6 @@ fn process_input(
     name: &str,
     input: &str,
     fill_use_until: usize,
-    locals: &mut Vec<LocalDecl>,
-    environment: &mut Vec<ValOrMut>,
     session: &mut CompilerSession,
     is_repl: bool,
 ) -> Result<ModuleId, i32> {
@@ -562,15 +561,12 @@ fn process_input(
     // If there's an expression, evaluate it
     if let Some(expr) = expr {
         // Evaluate expression
-        let mut eval_ctx =
-            EvalCtx::with_environment(module_id.clone(), environment.clone(), session);
-        let old_size = eval_ctx.environment.len();
+        let mut eval_ctx = EvalCtx::new(module_id, session);
         let arena = &eval_ctx
             .compiler_session()
             .expect_fresh_module(module_id)
             .ir_arena;
         let result = eval_node_with_ctx(arena, expr.expr, &mut eval_ctx, &expr.locals);
-        *locals = expr.locals;
         match result {
             Ok(value) => {
                 let value = value.into_value();
@@ -589,11 +585,6 @@ fn process_input(
                 );
                 if cfg!(debug_assertions) {
                     eval_ctx.print_environment();
-                }
-                if is_repl {
-                    // Restore the context as before starting the evaluation
-                    eval_ctx.environment.truncate(old_size);
-                    *environment = eval_ctx.environment;
                 }
                 return Err(2);
             }
@@ -623,20 +614,9 @@ fn process_pipe_input(print_module: bool) -> i32 {
 
     // Initialize ferlium contexts
     let mut session = CompilerSession::new();
-    let mut locals: Vec<LocalDecl> = vec![];
-    let mut environment: Vec<ValOrMut> = vec![];
 
     // Process the input
-    process_input(
-        "<stdin>",
-        &input,
-        0,
-        &mut locals,
-        &mut environment,
-        &mut session,
-        false,
-    )
-    .map_or_else(
+    process_input("<stdin>", &input, 0, &mut session, false).map_or_else(
         |code| code,
         |module_id| {
             if print_module {
@@ -705,8 +685,6 @@ fn run_interactive_repl() {
     let mut session = CompilerSession::new();
     // Last module that compiled successfully, start with the std module.
     let mut last_module = ModuleId::from_index(0);
-    let mut locals: Vec<LocalDecl> = vec![];
-    let mut environment: Vec<ValOrMut> = vec![];
     let mut counter: usize = 0;
 
     // REPL loop
@@ -718,31 +696,7 @@ fn run_interactive_repl() {
         println!("No previous history.");
     }
     loop {
-        // Show locals
         println!();
-        if locals.is_empty() {
-            println!("No locals.");
-        } else {
-            println!("Locals:");
-            let module = session.expect_fresh_module(last_module);
-            let env = ModuleEnv::new(module, session.modules());
-            for (i, local) in locals.iter().enumerate() {
-                println!(
-                    "{} {}: {} = {}",
-                    local
-                        .mut_ty
-                        .as_resolved()
-                        .expect("unresolved mutability in local")
-                        .var_def_string(),
-                    local.name.0,
-                    local.ty.format_with(&env),
-                    environment[i]
-                        .as_val()
-                        .expect("reference found in REPL locals")
-                        .to_string_repr(),
-                );
-            }
-        }
 
         // Read input
         let readline = rl.readline(&format!("repl{counter} >> "));
@@ -883,15 +837,7 @@ fn run_interactive_repl() {
 
         // Process the input using the shared function
         let name = &format!("repl{counter}");
-        let result = process_input(
-            &name,
-            &src,
-            counter,
-            &mut locals,
-            &mut environment,
-            &mut session,
-            true,
-        );
+        let result = process_input(&name, &src, counter, &mut session, true);
         if let Ok(module) = result {
             last_module = module;
         }
