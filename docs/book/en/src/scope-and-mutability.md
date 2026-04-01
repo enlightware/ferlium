@@ -121,6 +121,110 @@ xs[0] = 3;
 
 If the binding is not mutable, these updates are rejected at compile time.
 
+## Destructuring bindings
+
+`let` can destructure product values instead of binding the whole value to a single name.
+
+### Tuples
+
+Tuple destructuring binds each element by position:
+
+```ferlium
+let point = (10, 20);
+let (x, y) = point;
+
+(x, y)
+```
+
+Use `_` to ignore elements you do not need:
+
+```ferlium
+let triple = (1, 2, 3);
+let (first, _, third) = triple;
+
+(first, third)
+```
+
+Patterns can be nested:
+
+```ferlium
+let ((feet, inches), (x, y)) = ((3, 10), (4, 5));
+
+feet + inches + x + y
+```
+
+### Records
+
+Anonymous records can be destructured by field name:
+
+```ferlium
+let person = { name: "Ada", age: 36 };
+let { age, name } = person;
+
+f"{name} is {age}"
+```
+
+Field order does not matter.
+
+### Named structs
+
+Tuple structs use tuple-style destructuring:
+
+```ferlium
+struct Color(int, int, int)
+
+let c = Color(10, 20, 30);
+let Color(r, g, b) = c;
+
+r + g + b
+```
+
+Record structs use record-style destructuring:
+
+```ferlium
+struct Point { x: int, y: int }
+
+let p = Point { x: 3, y: 4 };
+let Point { x, y } = p;
+
+x + y
+```
+
+You can rename fields while destructuring:
+
+```ferlium
+struct Point { x: int, y: int }
+
+let p = Point { x: 3, y: 4 };
+let Point { x: horizontal, y: vertical } = p;
+
+horizontal + vertical
+```
+
+For named tuple and record structs, `..` ignores the remaining elements or fields:
+
+```ferlium
+struct Point3 { x: int, y: int, z: int }
+
+let p = Point3 { x: 1, y: 2, z: 3 };
+let Point3 { x, .. } = p;
+
+x
+```
+
+### Mutability in destructuring
+
+Mutability applies to each binding individually:
+
+```ferlium
+let (mut a, b) = (1, 2);
+a = 10;
+
+a + b
+```
+
+This is different from `let mut value = ...`, which makes the whole binding mutable.
+
 ## What comes next
 
 The next chapter introduces functions and type inference, showing how Ferlium automatically determines types for your code.

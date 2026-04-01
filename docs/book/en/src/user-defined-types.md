@@ -179,6 +179,13 @@ let m2 = Message::Write("hello");
 let m3 = Message::Move { x: 10, y: 20 };
 ```
 
+## Destructuring structured values
+
+Tuples, records, and nominal product types can also be destructured in `let` bindings.
+This includes tuple structs, record structs, nested destructuring, per-binding `mut`, `_` to ignore tuple elements, and `..` to ignore the remaining fields of named structs.
+
+See [Bindings, Scope, and Mutability](./scope-and-mutability.md#destructuring-bindings) for the full syntax and examples.
+
 ## Structural vs Nominal Types
 
 As seen in this chapter, Ferlium supports both structural and nominal reasoning.
