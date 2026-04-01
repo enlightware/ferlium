@@ -166,6 +166,15 @@ f"{name} is {age}"
 
 Field order does not matter.
 
+You can rename fields while destructuring:
+
+```ferlium
+let p = { x: 3, y: 4 };
+let { x: horizontal, y: vertical } = p;
+
+horizontal + vertical
+```
+
 ### Named structs
 
 Tuple structs use tuple-style destructuring:
@@ -188,17 +197,6 @@ let p = Point { x: 3, y: 4 };
 let Point { x, y } = p;
 
 x + y
-```
-
-You can rename fields while destructuring:
-
-```ferlium
-struct Point { x: int, y: int }
-
-let p = Point { x: 3, y: 4 };
-let Point { x: horizontal, y: vertical } = p;
-
-horizontal + vertical
 ```
 
 For named tuple and record structs, `..` ignores the remaining elements or fields:
