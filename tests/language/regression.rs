@@ -71,3 +71,41 @@ fn enum_constructors() {
         Value::raw_variant(ustr("Quit"), Value::unit())
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn never_in_if_branches() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn unwrap(v) {
+                match v {
+                    None => abort(),
+                    Some(x) => x
+                }
+            }
+
+            unwrap(Some(1))
+		"# }),
+        int(1)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn never_in_if_branches_after_value_branch() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn unwrap(v) {
+                match v {
+                    Some(x) => x,
+                    None => abort()
+                }
+            }
+
+            unwrap(Some(1))
+        "# }),
+        int(1)
+    );
+}

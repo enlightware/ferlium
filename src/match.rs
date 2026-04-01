@@ -239,9 +239,10 @@ impl TypeInference {
                 sp(cond_expr),
             ));
 
-            // Generate code for each alternative
-            let mut return_ty = None;
-            let mut return_ty_span = match_span;
+            // Variant branches should share a fresh result type, like literal matches do.
+            // Otherwise a leading `never` branch can lock the whole match to `never`
+            // before later branches get a chance to constrain the result.
+            let return_ty = self.fresh_type_var_ty();
             let mut alternatives = types
                 .iter()
                 .zip(exprs)
@@ -270,20 +271,13 @@ impl TypeInference {
                             .collect();
 
                         // Type check the alternative and generate its code
-                        let mut node_id = if let Some(return_ty) = return_ty {
-                            self.check_expr(
-                                env,
-                                *expr,
-                                return_ty,
-                                MutType::constant(),
-                                return_ty_span,
-                            )?
-                        } else {
-                            let (node_id, _) = self.infer_expr(env, *expr)?;
-                            return_ty = Some(env.ir_arena[node_id].ty);
-                            return_ty_span = sp(*expr);
-                            node_id
-                        };
+                        let mut node_id = self.check_expr(
+                            env,
+                            *expr,
+                            return_ty,
+                            MutType::constant(),
+                            match_span,
+                        )?;
 
                         // Generate the variable binding code
                         if !bind_var_names.is_empty() {
@@ -342,7 +336,7 @@ impl TypeInference {
                             );
                             node_id = env.ir_arena.alloc(N::new(
                                 K::Block(b(SVec2::from_vec(project_node_ids))),
-                                return_ty.unwrap(),
+                                return_ty,
                                 proj_effects,
                                 sp(*expr),
                             ));
@@ -353,7 +347,6 @@ impl TypeInference {
                     },
                 )
                 .collect::<Result<Vec<_>, _>>()?;
-            let return_ty = return_ty.unwrap();
             let alt_eff = self.make_dependent_effect(
                 alternatives
                     .iter()
@@ -375,13 +368,7 @@ impl TypeInference {
                 }
 
                 // Generate the default code node
-                self.check_expr(
-                    env,
-                    *default,
-                    return_ty,
-                    MutType::constant(),
-                    return_ty_span,
-                )?
+                self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?
             } else {
                 // No default, compute a full variant type.
                 let variant_inner_tys: Vec<_> =
