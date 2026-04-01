@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import CodeEditor from './components/CodeEditor.vue';
 import DropdownSelect from './components/DropdownSelect.vue';
 import SimpleButton from './components/SimpleButton.vue';
+import FlatLinkButton from './components/FlatLinkButton.vue';
 import ConsoleOutput from './components/ConsoleOutput.vue';
 import { demoCodes } from './demo-codes';
 import { defined } from './types';
@@ -55,10 +56,18 @@ onMounted(() => {
 			Run
 		</SimpleButton>
 		<div class="revision" />
-		<DropdownSelect
-			:items="demoTitles"
-			@selection-changed="updateEditor"
-		/>
+		<div class="demo-controls">
+			<DropdownSelect
+				:items="demoTitles"
+				@selection-changed="updateEditor"
+			/>
+			<FlatLinkButton
+				href="https://enlightware.github.io/ferlium/book/"
+				title="Open documentation"
+			>
+				🕮
+			</FlatLinkButton>
+		</div>
 	</div>
 	<CodeEditor
 		ref="editor"
@@ -82,5 +91,11 @@ onMounted(() => {
 }
 .revision {
 	color: gray;
+}
+
+.demo-controls {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 </style>
