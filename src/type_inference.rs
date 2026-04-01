@@ -17,8 +17,8 @@ use std::{
 use crate::{
     FxHashMap, FxHashSet,
     ast::{
-        self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternKind, PatternVar,
-        RecordField, RecordFields, UnnamedArg,
+        self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternConstraintKind,
+        PatternKind, PatternVar, RecordField, RecordFields, UnnamedArg,
     },
     containers::continuous_hashmap_to_vec,
     effects::{PrimitiveEffect, effect},
@@ -577,12 +577,14 @@ impl TypeInference {
                 }
             }
             Let(data) => {
+                let name = data.pattern.kind.name;
+                let mut_val = data.pattern.kind.mut_val;
                 let node_id = self.infer_expr_drop_mut(env, data.expr)?;
                 let node_ty = env.ir_arena[node_id].ty;
                 let node_effects = env.ir_arena[node_id].effects.clone();
                 let local = LocalDecl::new(
-                    data.name,
-                    MutType::resolved(data.mut_val),
+                    name,
+                    MutType::resolved(mut_val),
                     node_ty,
                     data.ty_ascription,
                     expr_span,
@@ -597,6 +599,25 @@ impl TypeInference {
                     id,
                 });
                 (node, Type::unit(), MutType::constant(), node_effects)
+            }
+            PatternConstraint(data) => {
+                let (node_id, mut_type) = self.infer_expr(env, data.expr)?;
+                match data.constraint {
+                    PatternConstraintKind::ExactTuple(element_count) => {
+                        let expected_ty = if element_count == 0 {
+                            Type::unit()
+                        } else {
+                            Type::tuple(self.fresh_type_var_tys(element_count))
+                        };
+                        self.add_same_type_constraint(
+                            env.ir_arena[node_id].ty,
+                            sp(data.expr),
+                            expected_ty,
+                            data.span,
+                        );
+                    }
+                }
+                return Ok((node_id, mut_type));
             }
             Return(expr) => {
                 let (outer_ty, outer_span) = match env.expected_return_ty {
@@ -3855,9 +3876,10 @@ fn collect_free_variables(
         Let(data) => {
             collect_free_variables(data.expr, arena, bound, free);
             if let Some(scope) = bound.last_mut() {
-                scope.insert(data.name.0);
+                scope.insert(data.pattern.kind.name.0);
             }
         }
+        PatternConstraint(data) => collect_free_variables(data.expr, arena, bound, free),
         Abstract(data) => {
             let mut scope = FxHashSet::default();
             for (arg, _) in &data.args {

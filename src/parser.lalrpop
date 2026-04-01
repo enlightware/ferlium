@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -720,12 +720,7 @@ Stmt = {
 }
 
 LetStmt: ExprKind = {
-    "let" <mut_flag:"mut"?> <id:Sp<UIdentifier>> <ty:TypeAscription?> "=" <e:Expr> ";" => {
-        let mut_val = if mut_flag.is_some() {
-            MutVal::mutable()
-        } else {
-            MutVal::constant()
-        };
+    "let" <pattern:LetBindingPattern> <ty:TypeAscription?> "=" <e:Expr> ";" => {
         let (e, ty_span_and_complete) = if let Some((ty, ty_span)) = ty {
             let e_span = arena[e].span;
             (
@@ -735,8 +730,89 @@ LetStmt: ExprKind = {
         } else {
             (e, None)
         };
-        ExprKind::let_(id, mut_val, e, ty_span_and_complete)
+        ExprKind::let_(pattern, e, ty_span_and_complete)
     }
+}
+
+BindingLetPattern<Id>: LetPattern = {
+    <mut_flag:"mut"?> <id:Sp<Id>> => {
+        let mut_val = if mut_flag.is_some() {
+            MutVal::mutable()
+        } else {
+            MutVal::constant()
+        };
+        LetPattern::binding(id, mut_val)
+    },
+}
+
+LetBindingPattern: LetPattern = {
+    BindingLetPattern<UIdentifier>,
+    Lps<TupleLetPatternKind>,
+    Lps<RecordLetPatternKind>,
+}
+
+LetSubPattern: LetPattern = {
+    BindingLetPattern<PatternBindingIdentifier>,
+    <l:@L> "_" <r:@R> => LetPattern::new(LetPatK::Ignore, span(l, r, source_id)),
+    Lps<TupleLetPatternKind>,
+    Lps<RecordLetPatternKind>,
+}
+
+TupleLetPatternKind: LetPatK = {
+    "(" ")" => LetPatK::tuple(None, vec![], false),
+    "(" <items:AnonTupleLetPatternItems<LetSubPattern>> ")" =>
+        LetPatK::tuple(None, items, false),
+    <path:Path> "(" <items:PatternItemsWithOptionalRest<LetSubPattern>> ")" =>
+        LetPatK::tuple(Some(path), items.0, items.1),
+}
+
+RecordLetPatternKind: LetPatK = {
+    "{" <fields:Sep<LetRecordPatternField, ",">> "}" => LetPatK::record(None, fields, false),
+    <path:Path> "{" <fields:PatternItemsWithOptionalRest<LetRecordPatternField>> "}" =>
+        LetPatK::record(Some(path), fields.0, fields.1),
+}
+
+AnonTupleLetPatternItems<T>: Vec<T> = {
+    <first:T> "," <rest:Sep<T, ",">> => ext_f(first, rest),
+}
+
+PatternItemsWithOptionalRest<T>: (Vec<T>, bool) = {
+    => (vec![], false),
+    ".." => (vec![], true),
+    <item:T> <tail:PatternItemsWithOptionalRestTail<T>> => {
+        let (tail_items, has_rest) = tail;
+        (ext_f(item, tail_items), has_rest)
+    },
+}
+
+PatternItemsWithOptionalRestTail<T>: (Vec<T>, bool) = {
+    => (vec![], false),
+    "," => (vec![], false),
+    "," ".." => (vec![], true),
+    "," <item:T> <tail:PatternItemsWithOptionalRestTail<T>> => {
+        let (tail_items, has_rest) = tail;
+        (ext_f(item, tail_items), has_rest)
+    },
+}
+
+LetRecordPatternField: LetRecordPatternField = {
+    LetRecordPatternExplicitField,
+    LetRecordPatternAbbrevField,
+}
+
+LetRecordPatternExplicitField: LetRecordPatternField = {
+    <name:Sp<FieldIdentifier>> ":" <pattern:LetSubPattern> => LetRecordPatternField::new(name, pattern),
+}
+
+LetRecordPatternAbbrevField: LetRecordPatternField = {
+    <mut_flag:"mut"?> <name:Sp<FieldIdentifier>> => {
+        let mut_val = if mut_flag.is_some() {
+            MutVal::mutable()
+        } else {
+            MutVal::constant()
+        };
+        LetRecordPatternField::new(name, LetPattern::binding(name, mut_val))
+    },
 }
 
 ExprStmt: PExprId = {
@@ -771,6 +847,14 @@ StrOrMoreArgs = {
 StrOrMore: PatternVar = {
     <id:Sp<UIdentifier>> => PatternVar::Named(id),
     <l:@L> ".." <r:@R> => PatternVar::Wildcard(span(l, r, source_id)),
+}
+
+PatternBindingIdentifier: Ustr = {
+    <l:@L> <id:Identifier> <r:@R> =>? if id != "_" {
+        Ok(ustr(id))
+    } else {
+        error("`_` cannot be used as a binding name inside a destructuring pattern".into(), span(l, r, source_id))
+    }
 }
 
 // Terminals
@@ -877,6 +961,12 @@ Es<K>: PExprId = {
 #[inline]
 Ps<T>: Pattern = {
     Sp<T> => Pattern::new(<>.0, <>.1),
+};
+
+// Build a LetPattern out of an LetPatternKind by adding its span
+#[inline]
+Lps<T>: LetPattern = {
+    Sp<T> => LetPattern::new(<>.0, <>.1),
 };
 
 // Return T along with its location

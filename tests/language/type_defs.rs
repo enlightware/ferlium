@@ -634,6 +634,78 @@ fn struct_projections() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn struct_destructuring() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct Pair(int, int)
+            let Pair(x, y) = Pair(1, 2);
+            (x, y)
+        "# }),
+        Value::tuple([int(1), int(2)])
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct Vec3(int, int, int)
+            let Vec3(x, ..) = Vec3(1, 2, 3);
+            x
+        "# }),
+        int(1)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct Point { x: int, y: int, z: int }
+            let Point { x: mut horizontal, mut y, .. } = Point { x: 1, y: 2, z: 3 };
+            horizontal = horizontal + y;
+            y = y + 10;
+            horizontal + y
+        "# }),
+        int(15)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct Point { x: int, y: int }
+            let ((feet, inches), Point { x, y }) = ((3, 10), Point { x: 3, y: -10 });
+            (feet, inches, x, y)
+        "# }),
+        Value::tuple([int(3), int(10), int(3), int(-10)])
+    );
+
+    assert_eq!(
+        *session
+            .fail_compilation(indoc! { r#"
+                struct Point { x: int, y: int, z: int }
+                let Point { x, y } = Point { x: 1, y: 2, z: 3 };
+                x
+            "# })
+            .as_missing_struct_field()
+            .unwrap()
+            .1,
+        "z"
+    );
+    assert_eq!(
+        *session
+            .fail_compilation(indoc! { r#"
+                struct Point { x: int, y: int, z: int }
+                let Point { x, w, .. } = Point { x: 1, y: 2, z: 3 };
+                x
+            "# })
+            .as_invalid_struct_field()
+            .unwrap()
+            .1,
+        "w"
+    );
+    session
+        .fail_compilation(indoc! { r#"
+            struct Vec3(int, int, int)
+            let Vec3(x, y) = Vec3(1, 2, 3);
+            x
+        "# })
+        .expect_wrong_number_of_arguments(3, 2);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn projections_through_repr_in_match() {
     let mut session = TestSession::new();
     assert_eq!(

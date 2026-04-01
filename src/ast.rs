@@ -124,6 +124,8 @@ pub type PMutTypeTypeSpan = MutTypeTypeSpan<Parsed>;
 pub trait Phase: Sized {
     type FormattedString: Debug + Clone + Display;
     type ForLoop: Debug + Clone + FormatWithIndent<Self> + VisitExpr<Self>;
+    type LetPatternContent: Debug + Clone + Display;
+    type PatternConstraint: Debug + Clone + Display + FormatWithIndent<Self> + VisitExpr<Self>;
     type Type: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
@@ -143,6 +145,8 @@ pub struct Desugared;
 impl Phase for Parsed {
     type FormattedString = String;
     type ForLoop = B<ForLoopData>;
+    type LetPatternContent = LetPatternKind;
+    type PatternConstraint = Never;
     type Type = PType;
     type MutType = PMutType;
     type LetTyAscriptionComplete = ();
@@ -154,6 +158,8 @@ impl Phase for Parsed {
 impl Phase for Desugared {
     type FormattedString = Never;
     type ForLoop = Never;
+    type LetPatternContent = LetBindingPattern;
+    type PatternConstraint = B<PatternConstraintData>;
     type Type = IrType;
     type MutType = IrMutType;
     type LetTyAscriptionComplete = bool;
@@ -388,6 +394,18 @@ impl<P: Phase> FormatWithIndent<P> for Never {
     }
 }
 
+impl<P: Phase, T: FormatWithIndent<P> + ?Sized> FormatWithIndent<P> for Box<T> {
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &ModuleEnv,
+        arena: &ExprArena<P>,
+        indent: usize,
+    ) -> std::fmt::Result {
+        (**self).format_ind(f, env, arena, indent)
+    }
+}
+
 /// A visitor pattern for expressions
 pub trait ExprVisitor<P: Phase> {
     fn visit_start(&mut self, _expr: &Expr<P>) {}
@@ -416,6 +434,12 @@ pub trait VisitExpr<P: Phase> {
 
 impl<P: Phase> VisitExpr<P> for Never {
     fn visit<V: ExprVisitor<P>>(&self, _visitor: &mut V, _arena: &ExprArena<P>) {}
+}
+
+impl<P: Phase, T: VisitExpr<P> + ?Sized> VisitExpr<P> for Box<T> {
+    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V, arena: &ExprArena<P>) {
+        (**self).visit(visitor, arena)
+    }
 }
 
 /// The data of a for loop
@@ -779,6 +803,190 @@ pub type RecordField<P> = (UstrSpan, ExprId<P>);
 /// A collection of record fields in an expression
 pub type RecordFields<P> = Vec<RecordField<P>>;
 
+/// A single binding pattern in a desugared `let`.
+#[derive(Debug, Clone, Copy, new)]
+pub struct LetBindingPattern {
+    pub name: UstrSpan,
+    pub mut_val: MutVal,
+}
+
+impl Display for LetBindingPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.mut_val == MutVal::mutable() {
+            write!(f, "mut {}", self.name.0)
+        } else {
+            write!(f, "{}", self.name.0)
+        }
+    }
+}
+
+/// An internal constraint induced by a destructuring pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternConstraintKind {
+    ExactTuple(usize),
+}
+
+impl Display for PatternConstraintKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PatternConstraintKind::ExactTuple(element_count) => {
+                write!(f, "exact {element_count}-tuple")
+            }
+        }
+    }
+}
+
+/// A record field in a let-pattern
+#[derive(Debug, Clone, new)]
+pub struct LetRecordPatternField {
+    pub name: UstrSpan,
+    pub pattern: PLetPattern,
+}
+
+impl Display for LetRecordPatternField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let LetPatternKind::Binding { name, mut_val } = &self.pattern.kind
+            && name.0 == self.name.0
+            && *mut_val == MutVal::constant()
+        {
+            write!(f, "{}", self.name.0)
+        } else {
+            write!(f, "{}: {}", self.name.0, self.pattern)
+        }
+    }
+}
+
+/// The kind-specific part of a let-pattern.
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum LetPatternKind {
+    Binding {
+        name: UstrSpan,
+        mut_val: MutVal,
+    },
+    Ignore,
+    Tuple {
+        path: Option<Path>,
+        elements: Vec<PLetPattern>,
+        has_rest: bool,
+    },
+    Record {
+        path: Option<Path>,
+        fields: Vec<LetRecordPatternField>,
+        has_rest: bool,
+    },
+}
+
+impl LetPatternKind {
+    pub fn binding(name: UstrSpan, mut_val: MutVal) -> Self {
+        Self::Binding { name, mut_val }
+    }
+
+    pub fn tuple(path: Option<Path>, elements: Vec<PLetPattern>, has_rest: bool) -> Self {
+        Self::Tuple {
+            path,
+            elements,
+            has_rest,
+        }
+    }
+
+    pub fn record(path: Option<Path>, fields: Vec<LetRecordPatternField>, has_rest: bool) -> Self {
+        Self::Record {
+            path,
+            fields,
+            has_rest,
+        }
+    }
+}
+
+impl Display for LetPatternKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LetPatternKind::Binding { name, mut_val } => {
+                if *mut_val == MutVal::mutable() {
+                    write!(f, "mut {}", name.0)
+                } else {
+                    write!(f, "{}", name.0)
+                }
+            }
+            LetPatternKind::Ignore => write!(f, "_"),
+            LetPatternKind::Tuple {
+                path,
+                elements,
+                has_rest,
+            } => {
+                if let Some(path) = path {
+                    write!(f, "{path}(")?;
+                } else {
+                    write!(f, "(")?;
+                }
+                write_with_separator(elements.iter(), ", ", f)?;
+                if *has_rest {
+                    if !elements.is_empty() {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "..")?;
+                }
+                if path.is_none() && elements.len() == 1 && !*has_rest {
+                    write!(f, ",")?;
+                }
+                write!(f, ")")
+            }
+            LetPatternKind::Record {
+                path,
+                fields,
+                has_rest,
+            } => {
+                if let Some(path) = path {
+                    write!(f, "{path} {{")?;
+                } else {
+                    write!(f, "{{")?;
+                }
+                write_with_separator(fields.iter(), ", ", f)?;
+                if *has_rest {
+                    if !fields.is_empty() {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "..")?;
+                }
+                write!(f, "}}")
+            }
+        }
+    }
+}
+
+/// A let-pattern.
+#[derive(Debug, Clone, new)]
+pub struct LetPattern<P: Phase> {
+    pub kind: P::LetPatternContent,
+    pub span: Location,
+}
+
+impl LetPattern<Parsed> {
+    pub fn binding(name: UstrSpan, mut_val: MutVal) -> Self {
+        let span = name.1;
+        Self::new(LetPatternKind::binding(name, mut_val), span)
+    }
+}
+
+impl LetPattern<Desugared> {
+    pub fn binding(name: UstrSpan, mut_val: MutVal) -> Self {
+        let span = name.1;
+        Self::new(LetBindingPattern::new(name, mut_val), span)
+    }
+}
+
+/// An AST let-pattern just after parsing
+pub type PLetPattern = LetPattern<Parsed>;
+
+/// An AST let-pattern after desugaring
+pub type DLetPattern = LetPattern<Desugared>;
+
+impl<P: Phase> Display for LetPattern<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.kind, f)
+    }
+}
+
 /// Whether some arguments of an apply node should be hidden in the IDE
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnnamedArg {
@@ -804,8 +1012,7 @@ impl UnnamedArg {
 /// Data for the [`ExprKind::Let`] variant: variable binding
 #[derive(Debug, Clone)]
 pub struct LetData<P: Phase> {
-    pub name: UstrSpan,
-    pub mut_val: MutVal,
+    pub pattern: LetPattern<P>,
     pub expr: ExprId<P>,
     pub ty_ascription: Option<(Location, P::LetTyAscriptionComplete)>,
 }
@@ -877,6 +1084,40 @@ pub struct TypeAscriptionData<P: Phase> {
     pub span: Location,
 }
 
+/// Data for the [`ExprKind::PatternConstraint`] variant: internal pattern-induced constraint.
+#[derive(Debug, Clone, new)]
+pub struct PatternConstraintData {
+    pub expr: ExprId<Desugared>,
+    pub constraint: PatternConstraintKind,
+    pub span: Location,
+}
+
+impl Display for PatternConstraintData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.constraint, f)
+    }
+}
+
+impl FormatWithIndent<Desugared> for PatternConstraintData {
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &ModuleEnv,
+        arena: &ExprArena<Desugared>,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = "  ".repeat(indent);
+        writeln!(f, "{indent_str}pattern constraint {}", self.constraint)?;
+        arena[self.expr].format_ind(f, env, arena, indent + 1)
+    }
+}
+
+impl VisitExpr<Desugared> for PatternConstraintData {
+    fn visit<V: ExprVisitor<Desugared>>(&self, visitor: &mut V, arena: &ExprArena<Desugared>) {
+        arena[self.expr].visit(visitor, arena);
+    }
+}
+
 /// Data for the [`ExprKind::PropertyPath`] variant: scoped property path
 #[derive(Debug, Clone)]
 pub struct PropertyPathData {
@@ -909,6 +1150,7 @@ pub enum ExprKind<P: Phase> {
     ForLoop(P::ForLoop),
     Loop(ExprId<P>),
     SoftBreak,
+    PatternConstraint(P::PatternConstraint),
     TypeAscription(B<TypeAscriptionData<P>>),
     Error,
 }
@@ -931,14 +1173,12 @@ impl<P: Phase> ExprKind<P> {
 
     /// Construct a [`Let`](ExprKind::Let) expression.
     pub fn let_(
-        name: UstrSpan,
-        mut_val: MutVal,
+        pattern: LetPattern<P>,
         expr: ExprId<P>,
         ty_ascription: Option<(Location, P::LetTyAscriptionComplete)>,
     ) -> Self {
         ExprKind::Let(b(LetData {
-            name,
-            mut_val,
+            pattern,
             expr,
             ty_ascription,
         }))
@@ -1086,8 +1326,7 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
             FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
             Identifier(path) => writeln!(f, "{indent_str}{path}"),
             Let(data) => {
-                let kw = data.mut_val.var_def_string();
-                writeln!(f, "{indent_str}{kw} {} =", data.name.0)?;
+                writeln!(f, "{indent_str}let {} =", data.pattern)?;
                 arena[data.expr].format_ind(f, env, arena, indent + 1)
             }
             Return(expr) => {
@@ -1198,6 +1437,7 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
             }
             SoftBreak => writeln!(f, "{indent_str}SoftBreak"),
             PropertyPath(data) => writeln!(f, "{indent_str}@{}.{}", data.path, data.name),
+            PatternConstraint(data) => data.format_ind(f, env, arena, indent),
             TypeAscription(data) => {
                 arena[data.expr].format_ind(f, env, arena, indent)?;
                 writeln!(f, "{indent_str}: {}", data.ty.format_with(env))
@@ -1246,6 +1486,7 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
             ForLoop(for_loop) => for_loop.visit(visitor, arena),
             Return(expr) => arena[*expr].visit(visitor, arena),
             Loop(body) => arena[*body].visit(visitor, arena),
+            PatternConstraint(data) => data.visit(visitor, arena),
             TypeAscription(data) => arena[data.expr].visit(visitor, arena),
             _ => {}
         }

@@ -8,7 +8,7 @@
 //
 use std::{str::FromStr, sync::LazyLock};
 
-use crate::ast::{DExprArena, DExprId};
+use crate::ast::{DExprArena, DExprId, DLetPattern as LetPattern};
 use crate::parser_helpers::syn_static_apply_path;
 use crate::{Location, internal_compilation_error};
 use regex::Regex;
@@ -69,7 +69,11 @@ pub fn emit_format_string_ast(
         span,
     ));
     let let_stmt = arena.alloc(Expr::new(
-        ExprKind::let_((ustr("@s"), span), MutVal::mutable(), empty_string, None),
+        ExprKind::let_(
+            LetPattern::binding((ustr("@s"), span), MutVal::mutable()),
+            empty_string,
+            None,
+        ),
         span,
     ));
     let mut exprs = vec![let_stmt];

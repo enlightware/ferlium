@@ -503,7 +503,62 @@ stmt {
 }
 
 Let {
-    kw<'let'> kw<'mut'>? Identifier TypeAscription? '=' expr ';'
+    kw<'let'> letPattern TypeAscription? '=' expr ';'
+}
+
+letPattern {
+    letBindingPattern
+    | letTuplePattern
+    | letRecordPattern
+}
+
+letSubPattern {
+    letBindingPattern
+    | IgnorePattern { kw<'_'> }
+    | letTuplePattern
+    | letRecordPattern
+}
+
+letBindingPattern {
+    kw<'mut'>? Identifier
+}
+
+letTuplePattern {
+    '(' ')'
+    | '(' letAnonTupleItems ')'
+    | Path '(' letPatternItemsWithOptionalRest<letSubPattern> ')'
+}
+
+letRecordPattern {
+    '{' letRecordFieldsOptComma '}'
+    | Path '{' letPatternItemsWithOptionalRest<letRecordField> '}'
+}
+
+letAnonTupleItems {
+    letSubPattern ',' (letSubPattern ',')* letSubPattern?
+}
+
+letPatternItemsWithOptionalRest<item> {
+    '..'
+    | (item ',')* item?
+    | (item ',')+ '..'
+}
+
+letRecordFieldsOptComma {
+    (letRecordField ',')* letRecordField?
+}
+
+letRecordField {
+    letRecordPatternExplicitField
+    | letRecordPatternAbbrevField
+}
+
+letRecordPatternExplicitField {
+    FieldName { fieldIdentifier } ':' letSubPattern
+}
+
+letRecordPatternAbbrevField {
+    kw<'mut'>? FieldName { fieldIdentifier }
 }
 
 exprStmt {

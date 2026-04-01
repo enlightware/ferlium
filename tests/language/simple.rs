@@ -15,7 +15,9 @@ use crate::harness::{
     set_array_property_value, set_property_value, string, unit, variant_0, variant_t1, variant_tn,
 };
 use ferlium::{
-    error::{DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeErrorKind},
+    error::{
+        CompilationErrorImpl, DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeErrorKind,
+    },
     mutability::MutType,
     std::{
         array::{Array, array_type_generic},
@@ -169,6 +171,52 @@ fn local_variables() {
         bool(true)
     );
     assert_eq!(session.run("let f = || 1; let a = f(); a"), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn let_destructuring() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("let tuple = (1, 2); let (x, y) = tuple; (x, y)"),
+        int_tuple!(1, 2)
+    );
+    assert_eq!(session.run("let (mut a, _) = (1, 2); a = 10; a"), int(10));
+    assert_eq!(
+        session.run("let { x, y: (a, _) } = { x: 1, y: (2, 3) }; (x, a)"),
+        int_tuple!(1, 2)
+    );
+    assert_eq!(
+        session.run("let (_, x, _, _, y, _) = (1, 2, 3, 4, 5, 6); (x, y)"),
+        int_tuple!(2, 5)
+    );
+    assert_eq!(
+        session.run("let (n, ok) = (1, true); if ok { n } else { 0 }"),
+        int(1)
+    );
+
+    set_property_value(0);
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn next_pair() {
+                @props::my_scope.my_var = @props::my_scope.my_var + 1;
+                (@props::my_scope.my_var, @props::my_scope.my_var)
+            }
+
+            let (a, b) = next_pair();
+            a + b
+        "# }),
+        int(2)
+    );
+    assert_eq!(get_property_value(), 1);
+
+    match session
+        .fail_compilation("let { x, y: (x, _) } = { x: 1, y: (2, 3) }; x")
+        .into_inner()
+    {
+        CompilationErrorImpl::IdentifierBoundMoreThanOnceInAPattern { .. } => {}
+        error => panic!("unexpected error: {error:?}"),
+    }
 }
 
 #[test]
