@@ -1,0 +1,227 @@
+use super::expr::desugar;
+use super::*;
+
+/// A reference to name of a type, either an alias or a definition, in parsed AST.
+enum NamedTypeData {
+    Alias(UstrSpan, PTypeSpan),
+    Def(PTypeDef),
+}
+impl NamedTypeData {
+    fn collect_refs(
+        &self,
+        ty_names: &FxHashMap<Ustr, usize>,
+        collected: &mut FxHashSet<usize>,
+    ) -> Result<(), InternalCompilationError> {
+        use NamedTypeData::*;
+        match self {
+            Alias(name, alias) => alias.0.collect_refs(name.0, ty_names, collected),
+            Def(def) => {
+                def.shape.collect_refs(def.name.0, ty_names, collected)?;
+                def.where_clause.iter().try_for_each(|constraint| {
+                    constraint.collect_refs(def.name.0, ty_names, collected)
+                })
+            }
+        }
+    }
+    fn name(&self) -> Ustr {
+        use NamedTypeData::*;
+        match self {
+            Alias(name, _) => name.0,
+            Def(def) => def.name.0,
+        }
+    }
+    fn name_span(&self) -> Location {
+        use NamedTypeData::*;
+        match self {
+            Alias(name, _) => name.1,
+            Def(def) => def.name.1,
+        }
+    }
+}
+
+impl PModule {
+    /// Desugars a parsed module and resolve its types and write them into output.
+    /// Returns a desugared AST, the desugared expression arena, and a list of
+    /// strongly connected components of its function dependency graph, sorted topologically.
+    pub fn desugar(
+        self,
+        output: &mut Module,
+        others: &Modules,
+        parsed_arena: &PExprArena,
+    ) -> Result<(DModule, DExprArena, FnSccs), InternalCompilationError> {
+        // Flatten uses from self and check for conflicts with local definitions.
+        let local_names = self.own_symbols().collect();
+        let resolver = ModulesResolver::new(others);
+        resolve_imports(&self.uses, &local_names, &resolver, &mut output.uses)?;
+
+        // Build a map of type names to their location and definitions or aliases.
+        // The ty_names map holds indices to the ty_refs vector, which contains the data.
+        let (ty_names, ty_refs): (FxHashMap<_, _>, Vec<_>) = self
+            .type_aliases
+            .into_iter()
+            .map(|alias| (alias.name.0, NamedTypeData::Alias(alias.name, alias.ty)))
+            .chain(
+                self.type_defs
+                    .into_iter()
+                    .map(|def| (def.name.0, NamedTypeData::Def(def))),
+            )
+            .enumerate()
+            .map(|(index, (name, ty_data))| ((name, index), ty_data))
+            .unzip();
+
+        // Create the dependency graph of the named types in this module.
+        let ty_dep_graph = ty_refs
+            .iter()
+            .map(|ty_ref| {
+                let mut collected = FxHashSet::default();
+                ty_ref.collect_refs(&ty_names, &mut collected)?;
+                Ok(DepGraphNode(collected.into_iter().collect()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let sccs = find_strongly_connected_components(&ty_dep_graph);
+        for scc in &sccs {
+            if scc.len() > 1 {
+                // If there are multiple types in the same SCC, we have a cycle.
+                // This is currently not allowed in type definitions.
+                let ty_ref = &ty_refs[scc[0]];
+                return Err(internal_compilation_error!(Unsupported {
+                    reason: format!(
+                        "Cyclic types are not supported, but `{}` indirectly refers to itself",
+                        ty_ref.name()
+                    ),
+                    span: ty_ref.name_span(),
+                }));
+            }
+        }
+
+        // Build a module environment with the current module and the others.
+        let mut env = ModuleEnv::new(output, others);
+
+        // Process types in order of their dependencies and resolve type aliases and type definitions.
+        // Directly insert them into the output module once they are resolved.
+        let sorted_sccs = topological_sort_sccs(&ty_dep_graph, &sccs);
+        let mut modules_used = FxHashSet::<ModuleId>::default();
+        for scc in sorted_sccs.into_iter().rev() {
+            assert_eq!(scc.len(), 1);
+            let ty_ref = &ty_refs[scc[0]];
+            match ty_ref {
+                NamedTypeData::Alias(name, alias) => {
+                    let ty = alias.0.desugar(alias.1, false, &env, &mut modules_used)?;
+                    output.add_type_alias(name.0, ty);
+                }
+                NamedTypeData::Def(def) => {
+                    output.add_type_def(def.name.0, def.desugar(&env, &mut modules_used)?);
+                }
+            }
+            env = ModuleEnv::new(output, others);
+        }
+
+        // Desugar functions
+        let fn_map = self
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(index, func)| (func.name.0, index))
+            .collect::<FxHashMap<_, _>>();
+        let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
+        let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
+            self.functions.into_iter().map(|f| {
+                f.desugar(
+                    &fn_map,
+                    &env,
+                    parsed_arena,
+                    &mut desugared_arena,
+                    &mut modules_used,
+                )
+            }),
+            |iter| iter.unzip(),
+        )?;
+        let sccs = find_strongly_connected_components(&fn_dep_graph);
+        let sorted_sccs = topological_sort_sccs(&fn_dep_graph, &sccs);
+
+        // Desugar trait implementations
+        let impls = self
+            .impls
+            .into_iter()
+            .map(|i| i.desugar(&env, parsed_arena, &mut desugared_arena, &mut modules_used))
+            .collect::<Result<_, _>>()?;
+
+        // Build result
+        output.type_deps.extend(modules_used);
+        let module = DModule {
+            functions,
+            impls,
+            type_aliases: vec![],
+            type_defs: vec![],
+            uses: self.uses,
+        };
+        Ok((module, desugared_arena, sorted_sccs))
+    }
+}
+
+impl PModuleFunction {
+    pub fn desugar(
+        self,
+        fn_map: &FnMap,
+        env: &ModuleEnv<'_>,
+        parsed_arena: &PExprArena,
+        desugared_arena: &mut DExprArena,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
+        let generic_ty_params = GenericTyParams::default();
+        self.desugar_with_ty_params(
+            fn_map,
+            env,
+            &generic_ty_params,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )
+    }
+
+    pub(super) fn desugar_with_ty_params(
+        self,
+        fn_map: &FnMap,
+        env: &ModuleEnv<'_>,
+        generic_ty_params: &GenericTyParams,
+        parsed_arena: &PExprArena,
+        desugared_arena: &mut DExprArena,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
+        let locals = self.args.iter().map(|arg| arg.name.0).collect();
+        let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env, generic_ty_params);
+        let body = desugar(
+            self.body,
+            &mut ctx,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )?;
+        let args = self
+            .args
+            .into_iter()
+            .map(|arg| arg.desugar_with_ty_params(env, generic_ty_params, modules_used))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Collect function dependencies
+        let ret_ty = self
+            .ret_ty
+            .map(|(ty, span)| {
+                Ok((
+                    ty.desugar_with_ty_params(span, false, env, generic_ty_params, modules_used)?,
+                    span,
+                ))
+            })
+            .transpose()?;
+        let function = ModuleFunction {
+            name: self.name,
+            args,
+            args_span: self.args_span,
+            ret_ty,
+            body,
+            span: self.span,
+            doc: self.doc,
+        };
+        let deps = DepGraphNode(ctx.fn_deps.into_iter().collect());
+        Ok((function, deps))
+    }
+}

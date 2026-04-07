@@ -245,8 +245,8 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
             use DictionaryReq::*;
             let (node_kind, node_ty) = match dict {
                 FieldIndex { ty, field: name } => {
-                    let ty_data = ty.data().clone();
-                    let node_kind = match ty_data {
+                    let ty_data = ty.data();
+                    let node_kind = match &*ty_data {
                         Record(record) => {
                             // Known type, get the index from the type and create an immediate with it.
                             let index = record.iter().position(|field| field.0 == *name).expect(
@@ -256,9 +256,11 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                         }
                         Variable(var) => {
                             // Variable, it must be in the input dictionaries, look for it.
+                            let var = *var;
+                            drop(ty_data);
                             let index = find_field_dict_index(ctx.dicts, var, name).unwrap_or_else(
-                            || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
-                        );
+                                || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
+                            );
                             let id = LocalDeclId::from_index(local_count + index);
                             K::EnvLoad(ir::EnvLoad { index: index as u32, id })
                         }
@@ -661,17 +663,15 @@ impl Node {
                 let field_name = *field;
                 elaborate_dictionaries(arena, child_id, ctx, local_count)?;
                 let child_ty = arena[child_id].ty;
-                let ty_data = child_ty.data().clone();
+                let ty_data = child_ty.data();
                 let ty_data = if let Some(named) = ty_data.as_named() {
-                    assert!(
-                        named.params.is_empty(),
-                        "Field access on named types with parameters is not supported yet"
-                    );
-                    named.def.shape.data().clone()
+                    let named = named.clone();
+                    drop(ty_data);
+                    named.instantiated_shape().data()
                 } else {
                     ty_data
                 };
-                match ty_data {
+                match &*ty_data {
                     Record(record) => {
                         // Known type, get the index from the type and replace the IR instruction.
                         let index = record
@@ -682,6 +682,8 @@ impl Node {
                     }
                     Variable(var) => {
                         // Variable type, it must be in the type scheme, use the dictionary to lookup local variable.
+                        let var = *var;
+                        drop(ty_data);
                         let index = find_field_dict_index(ctx.dicts, var, &field_name).unwrap_or_else(
                             || panic!("Dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
                         );

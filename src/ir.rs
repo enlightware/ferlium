@@ -12,7 +12,6 @@ use crate::{
     format::FormatWith,
     module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
     r#trait::TraitRef,
-    r#type::TypeKind,
     type_like::{CastableToType, TypeLike},
 };
 use derive_new::new;
@@ -438,9 +437,13 @@ impl Node {
                 writeln!(f, "{indent_str}at {}", *index)?;
             }
             Record(nodes) => {
-                let inner_ty = if let TypeKind::Named(named) = &*self.ty.data() {
-                    named.def.shape
+                let ty_data = self.ty.data();
+                let inner_ty = if ty_data.is_named() {
+                    let named = ty_data.as_named().unwrap().clone();
+                    drop(ty_data);
+                    named.instantiated_shape()
                 } else {
+                    drop(ty_data);
                     self.ty
                 };
                 writeln!(f, "{indent_str}build record {{")?;

@@ -263,11 +263,11 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 solver.add_concrete_impl_from_code(root, locals, trait_ref, input_types, []);
             Ok(Some(TraitImplId::Local(local_impl_id)))
         } else if let TypeKind::Named(named) = ty_data {
-            let ty_def = named.def;
+            let inner_ty = named.instantiated_shape();
             // serialize the inner type
             Ok(Some(solver.solve_impl(
                 trait_ref,
-                &[ty_def.shape],
+                &[inner_ty],
                 span,
                 arena,
             )?))
@@ -509,11 +509,11 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             // assemble the final node
             Some(n(arena, block([store_object, match_type]), ty))
         } else if let TypeKind::Named(named) = ty_data {
-            let ty_def = named.def;
+            let inner_ty = named.instantiated_shape();
             // deserialize the inner type
             return Ok(Some(solver.solve_impl(
                 trait_ref,
-                &[ty_def.shape],
+                &[inner_ty],
                 span,
                 arena,
             )?));

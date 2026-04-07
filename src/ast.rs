@@ -13,7 +13,7 @@ use itertools::Itertools;
 use la_arena::{Arena, Idx};
 use std::fmt::{self, Debug, Display};
 
-use crate::{FxHashMap, FxHashSet};
+use crate::{FxHashMap, FxHashSet, format::write_with_separator_and_format_fn};
 
 use ustr::Ustr;
 
@@ -27,7 +27,7 @@ use crate::{
     mutability::{FormatInFnArg, MutType as IrMutType, MutVal},
     never::Never,
     parser_helpers::EMPTY_USTR,
-    r#type::Type as IrType,
+    r#type::{Type as IrType, TypeDefRef},
     type_like::TypeLike,
     value::{LiteralValue, Value},
 };
@@ -254,6 +254,11 @@ pub enum PType {
     Infer,
     /// A path to a type
     Path(Path),
+    /// A path applied to explicit type arguments
+    AppliedPath {
+        path: Path,
+        args: Vec<TypeSpan<Parsed>>,
+    },
     /// Tagged union sum type
     Variant(Vec<(UstrSpan, TypeSpan<Parsed>)>),
     /// Position-based product type
@@ -269,6 +274,10 @@ pub enum PType {
 impl PType {
     pub fn function_type(fn_type: PFnType) -> Self {
         PType::Function(b(fn_type))
+    }
+
+    pub fn path_with_args(path: Path, args: Vec<TypeSpan<Parsed>>) -> Self {
+        PType::AppliedPath { path, args }
     }
 
     /// Collect indices of types in ty_names that are referenced in this type.
@@ -296,6 +305,24 @@ impl PType {
                     }
                 }
             }
+            AppliedPath { path, args } => {
+                if path.segments.len() == 1 {
+                    let ty_name = path.segments[0].0;
+                    if ty_name == name {
+                        return Err(internal_compilation_error!(Unsupported {
+                            reason: format!(
+                                "Self-referential type paths are not supported, but `{ty_name}` refers to itself"
+                            ),
+                            span: path.segments[0].1,
+                        }));
+                    }
+                    if let Some(index) = ty_names.get(&ty_name) {
+                        collected.insert(*index);
+                    }
+                }
+                args.iter()
+                    .try_for_each(|(ty, _)| ty.collect_refs(name, ty_names, collected))?;
+            }
             Variant(types) => types
                 .iter()
                 .try_for_each(|(_, (ty, _))| ty.collect_refs(name, ty_names, collected))?,
@@ -322,6 +349,16 @@ impl FormatWith<ModuleEnv<'_>> for PType {
             Resolved(ty) => ty.fmt_with(f, env),
             Infer => write!(f, "_"),
             Path(path) => write!(f, "{}", path.segments.iter().map(|(s, _)| s).join("::")),
+            AppliedPath { path, args } => {
+                write!(f, "{path}<")?;
+                for (i, (ty, _)) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    ty.fmt_with(f, env)?;
+                }
+                write!(f, ">")
+            }
             Variant(types) => {
                 for (i, ((name, _), (ty, _))) in types.iter().enumerate() {
                     if i > 0 {
@@ -546,11 +583,76 @@ pub type DModuleFunction = ModuleFunction<Desugared>;
 
 /// A trait implementation
 #[derive(Debug, Clone)]
+pub struct TraitImplFor<P: Phase> {
+    pub input_types: Vec<TypeConstraintInput<P>>,
+    pub output_types: Vec<TypeConstraintOutput<P>>,
+    pub span: Location,
+}
+
+impl<P: Phase> FormatWith<ModuleEnv<'_>> for TraitImplFor<P> {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
+        if self.output_types.is_empty()
+            && self.input_types.len() == 1
+            && self.input_types[0].name.is_none()
+        {
+            return self.input_types[0].ty.0.fmt_with(f, env);
+        }
+
+        if self.output_types.is_empty() && self.input_types.iter().all(|input| input.name.is_none())
+        {
+            write!(f, "<")?;
+            write_with_separator_and_format_fn(
+                &self.input_types,
+                ", ",
+                |input_ty, f| input_ty.ty.0.fmt_with(f, env),
+                f,
+            )?;
+            return write!(f, ">");
+        }
+
+        write!(f, "<")?;
+        for (index, input) in self.input_types.iter().enumerate() {
+            if index > 0 {
+                write!(f, ", ")?;
+            }
+            input.fmt_with(f, env)?;
+        }
+        if !self.output_types.is_empty() {
+            write!(f, " |-> ")?;
+            write_with_separator_and_format_fn(
+                &self.output_types,
+                ", ",
+                |output_ty, f| output_ty.ty.0.fmt_with(f, env),
+                f,
+            )?;
+        }
+        write!(f, ">")
+    }
+}
+
+impl TraitImplFor<Desugared> {
+    pub fn input_tys(&self) -> Vec<<Desugared as Phase>::Type> {
+        self.input_types.iter().map(|input| input.ty.0).collect()
+    }
+    pub fn output_tys(&self) -> Vec<<Desugared as Phase>::Type> {
+        self.output_types.iter().map(|output| output.ty.0).collect()
+    }
+}
+
+/// An AST trait implementation header just after parsing
+pub type PTraitImplFor = TraitImplFor<Parsed>;
+
+/// An AST trait implementation header after desugaring
+pub type DTraitImplFor = TraitImplFor<Desugared>;
+
+/// A trait implementation
+#[derive(Debug, Clone)]
 pub struct TraitImpl<P: Phase> {
+    pub generic_params: Vec<UstrSpan>,
     pub trait_name: UstrSpan,
-    /// Explicit concrete types for the implementation, e.g. `impl Ord for S`.
-    /// When `None`, the types are fully inferred from the functions signatures.
-    pub for_tys: Option<Vec<TypeSpan<P>>>,
+    /// Explicit trait inputs and outputs for the implementation header, if any.
+    /// When `None`, they are fully inferred from the function signatures.
+    pub for_trait: Option<TraitImplFor<P>>,
     pub functions: Vec<ModuleFunction<P>>,
     pub span: Location,
 }
@@ -684,31 +786,28 @@ impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, P> {
         if !module.impls.is_empty() {
             writeln!(f, "Trait implementations:")?;
             for TraitImpl {
+                generic_params,
                 trait_name,
-                for_tys: for_ty,
+                for_trait,
                 functions,
                 ..
             } in module.impls.iter()
             {
-                if let Some(tys) = for_ty {
-                    if let [ty] = &tys[..] {
-                        writeln!(
-                            f,
-                            "  impl {} for {} {{",
-                            trait_name.0,
-                            ty.0.format_with(env)
-                        )?;
-                    } else {
-                        writeln!(
-                            f,
-                            "  impl {} for <{}> {{",
-                            trait_name.0,
-                            tys.iter().map(|ty| ty.0.format_with(env)).join(", ")
-                        )?;
-                    }
-                } else {
-                    writeln!(f, "  impl {} {{", trait_name.0)?;
+                write!(f, "  impl")?;
+                if !generic_params.is_empty() {
+                    write!(
+                        f,
+                        "<{}>",
+                        generic_params.iter().map(|(name, _)| name).join(", ")
+                    )?;
                 }
+                write!(f, " {}", trait_name.0)?;
+                if let Some(for_trait) = for_trait {
+                    write!(f, " for {}", for_trait.format_with(env))?;
+                } else {
+                    write!(f, " ")?;
+                }
+                writeln!(f, "{{")?;
                 for ModuleFunction {
                     name,
                     args,
@@ -821,9 +920,10 @@ impl Display for LetBindingPattern {
 }
 
 /// An internal constraint induced by a destructuring pattern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatternConstraintKind {
     ExactTuple(usize),
+    NamedType(TypeDefRef),
 }
 
 impl Display for PatternConstraintKind {
@@ -831,6 +931,9 @@ impl Display for PatternConstraintKind {
         match self {
             PatternConstraintKind::ExactTuple(element_count) => {
                 write!(f, "exact {element_count}-tuple")
+            }
+            PatternConstraintKind::NamedType(type_def) => {
+                write!(f, "named type {}", type_def.name)
             }
         }
     }
@@ -1701,6 +1804,127 @@ pub enum MetaItem {
     },
 }
 
+/// A parsed input trait constraint as written in a type definition `where` clause.
+#[derive(Debug, Clone)]
+pub struct TypeConstraintInput<P: Phase> {
+    pub name: Option<UstrSpan>,
+    pub ty: TypeSpan<P>,
+}
+
+impl<P: Phase> FormatWith<ModuleEnv<'_>> for TypeConstraintInput<P> {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
+        if let Some((name, _)) = self.name {
+            write!(f, "{name} = {}", self.ty.0.format_with(env))
+        } else {
+            self.ty.0.fmt_with(f, env)
+        }
+    }
+}
+
+impl TypeConstraintInput<Parsed> {
+    pub fn collect_refs(
+        &self,
+        name: Ustr,
+        ty_names: &FxHashMap<Ustr, usize>,
+        collected: &mut FxHashSet<usize>,
+    ) -> Result<(), InternalCompilationError> {
+        self.ty.0.collect_refs(name, ty_names, collected)
+    }
+}
+
+/// A parsed output trait constraint as written in a type definition `where` clause.
+#[derive(Debug, Clone)]
+pub struct TypeConstraintOutput<P: Phase> {
+    pub name: UstrSpan,
+    pub ty: TypeSpan<P>,
+}
+
+impl<P: Phase> FormatWith<ModuleEnv<'_>> for TypeConstraintOutput<P> {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
+        write!(f, "{} = {}", self.name.0, self.ty.0.format_with(env))
+    }
+}
+
+impl TypeConstraintOutput<Parsed> {
+    pub fn collect_refs(
+        &self,
+        name: Ustr,
+        ty_names: &FxHashMap<Ustr, usize>,
+        collected: &mut FxHashSet<usize>,
+    ) -> Result<(), InternalCompilationError> {
+        self.ty.0.collect_refs(name, ty_names, collected)
+    }
+}
+
+/// A parsed trait constraint as written in a type definition `where` clause.
+#[derive(Debug, Clone)]
+pub struct TypeConstraint<P: Phase> {
+    pub trait_name: Path,
+    pub input_types: Vec<TypeConstraintInput<P>>,
+    pub output_types: Vec<TypeConstraintOutput<P>>,
+    pub span: Location,
+}
+
+impl<P: Phase> FormatWith<ModuleEnv<'_>> for TypeConstraint<P> {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
+        if self.input_types.len() == 1 && self.input_types[0].name.is_none() {
+            write!(
+                f,
+                "{}: {}",
+                self.input_types[0].ty.0.format_with(env),
+                self.trait_name
+            )?;
+            if self.output_types.is_empty() {
+                return Ok(());
+            }
+            write!(f, "<")?;
+            write_with_separator_and_format_fn(
+                &self.output_types,
+                ", ",
+                |output_ty, f| output_ty.fmt_with(f, env),
+                f,
+            )?;
+            write!(f, ">")?;
+            return Ok(());
+        }
+
+        write!(f, "{}<", self.trait_name)?;
+        write_with_separator_and_format_fn(
+            &self.input_types,
+            ", ",
+            |input_ty, f| input_ty.fmt_with(f, env),
+            f,
+        )?;
+        if !self.output_types.is_empty() {
+            write!(f, " |-> ")?;
+            write_with_separator_and_format_fn(
+                &self.output_types,
+                ", ",
+                |output_ty, f| output_ty.fmt_with(f, env),
+                f,
+            )?;
+        }
+        write!(f, ">")
+    }
+}
+
+impl TypeConstraint<Parsed> {
+    pub fn collect_refs(
+        &self,
+        name: Ustr,
+        ty_names: &FxHashMap<Ustr, usize>,
+        collected: &mut FxHashSet<usize>,
+    ) -> Result<(), InternalCompilationError> {
+        self.input_types
+            .iter()
+            .try_for_each(|input| input.collect_refs(name, ty_names, collected))?;
+        self.output_types
+            .iter()
+            .try_for_each(|output| output.collect_refs(name, ty_names, collected))?;
+        Ok(())
+    }
+}
+
 /// A type definition with common metadata
 #[derive(Debug, Clone)]
 pub struct TypeDef<P: Phase> {
@@ -1708,11 +1932,20 @@ pub struct TypeDef<P: Phase> {
     pub generic_params: Vec<UstrSpan>,
     // The structural shape of the type (record, tuple, or unit)
     pub shape: P::Type,
+    pub where_clause: Vec<TypeConstraint<P>>,
     pub attributes: Vec<Attribute>,
     pub span: Location,
     pub doc_comments: Vec<String>,
-    // TODO: add constraints for the type arguments
 }
 
 /// A type definition just after parsing
 pub type PTypeDef = TypeDef<Parsed>;
+
+/// A parsed output type constraint as written in a type definition `where` clause, after parsing.
+pub type PTypeConstraintInput = TypeConstraintInput<Parsed>;
+
+/// A parsed input type constraint as written in a type definition `where` clause, after parsing.
+pub type PTypeConstraintOutput = TypeConstraintOutput<Parsed>;
+
+/// A parsed type constraint as written in a type definition `where` clause, after parsing.
+pub type PTypeConstraint = TypeConstraint<Parsed>;

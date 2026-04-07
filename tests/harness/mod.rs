@@ -7,22 +7,26 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{
-    CompilerSession, ModuleAndExpr, SourceTable,
+    CompilerSession, FxHashSet, Location, ModuleAndExpr, SourceTable,
     containers::IntoSVec2,
     effects::{PrimitiveEffect, effect, effects, no_effects},
     error::{CompilationError, RuntimeErrorKind},
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     function::{
-        BinaryNativeFnNNV, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnNV,
-        UnaryNativeFnVN,
+        BinaryNativeFnNNV, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMV,
+        UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN,
     },
-    module::{Module, ModuleEnv, ModuleId, Path},
+    module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
     std::{
-        array::{Array, array_type},
+        array::{Array, ArrayIterator, array_iter_type_generic, array_type},
+        logic::bool_type,
         math::int_type,
         option::option_type,
+        string::string_type,
     },
-    r#type::{FnType, Type, variant_type},
+    r#trait::TraitRef,
+    r#type::{FnType, Type, TypeDef, TypeDefRef, TypeVar, variant_type},
+    type_scheme::{PubTypeConstraint, TypeScheme},
     value::Value,
 };
 use std::{cell::RefCell, sync::atomic::AtomicIsize};
@@ -36,8 +40,146 @@ pub enum Error {
 
 pub type CompileRunResult = Result<Value, Error>;
 
+fn test_assoc_trait() -> TraitRef {
+    TraitRef::new_with_self_input_type(
+        "TestAssoc",
+        "Test-only trait with one associated output type.",
+        ["Output"],
+        [(
+            "project",
+            FunctionDefinition::new_infer_quantifiers(
+                FnType::new_by_val([Type::variable_id(0)], Type::variable_id(1), no_effects()),
+                ["value"],
+                "Projects a test-only associated output type.",
+            ),
+        )],
+    )
+}
+
+fn test_iterator_trait() -> TraitRef {
+    TraitRef::new_with_self_input_type(
+        "TestIterator",
+        "Test-only iterator trait with one associated item type.",
+        ["Item"],
+        [(
+            "test_next",
+            FunctionDefinition::new_infer_quantifiers(
+                FnType::new_mut_resolved(
+                    [(Type::variable_id(0), true)],
+                    option_type(Type::variable_id(1)),
+                    no_effects(),
+                ),
+                ["iterator"],
+                "Gets the next item from a test-only iterator.",
+            ),
+        )],
+    )
+}
+
+fn option_type_def() -> TypeDefRef {
+    TypeDefRef::new(TypeDef {
+        name: ustr("Option"),
+        param_names: vec![ustr("T")],
+        shape: TypeScheme {
+            ty_quantifiers: vec![TypeVar::new(0)],
+            eff_quantifiers: FxHashSet::default(),
+            ty: variant_type([
+                ("None", Type::unit()),
+                ("Some", Type::tuple([Type::variable_id(0)])),
+            ]),
+            constraints: vec![],
+        },
+        span: Location::new_synthesized(),
+        attributes: vec![],
+    })
+}
+
+fn map_iterator_type_def(test_iterator_trait: TraitRef) -> TypeDefRef {
+    TypeDefRef::new(TypeDef {
+        name: ustr("MapIterator"),
+        param_names: vec![ustr("I"), ustr("T"), ustr("O")],
+        shape: TypeScheme {
+            ty_quantifiers: vec![TypeVar::new(0), TypeVar::new(1), TypeVar::new(2)],
+            eff_quantifiers: FxHashSet::default(),
+            ty: Type::record([
+                (ustr("iterator"), Type::variable_id(0)),
+                (
+                    ustr("mapper"),
+                    Type::function_by_val([Type::variable_id(1)], Type::variable_id(2)),
+                ),
+            ]),
+            constraints: vec![PubTypeConstraint::new_have_trait(
+                test_iterator_trait,
+                vec![Type::variable_id(0)],
+                vec![Type::variable_id(1)],
+                Location::new_synthesized(),
+            )],
+        },
+        span: Location::new_synthesized(),
+        attributes: vec![],
+    })
+}
+
+fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDefRef {
+    TypeDefRef::new(TypeDef {
+        name: ustr("Witnessed"),
+        param_names: vec![ustr("Input"), ustr("Output")],
+        shape: TypeScheme {
+            ty_quantifiers: vec![TypeVar::new(0), TypeVar::new(1)],
+            eff_quantifiers: FxHashSet::default(),
+            ty: Type::tuple([Type::variable_id(0)]),
+            constraints: vec![PubTypeConstraint::new_have_trait(
+                test_assoc_trait,
+                vec![Type::variable_id(0)],
+                vec![Type::variable_id(1)],
+                Location::new_synthesized(),
+            )],
+        },
+        span: Location::new_synthesized(),
+        attributes: vec![],
+    })
+}
+
 fn testing_module(module_id: ModuleId) -> Module {
     let mut module = Module::new(module_id);
+    let test_assoc_trait = test_assoc_trait();
+    let test_iterator_trait = test_iterator_trait();
+    let option_type_def = option_type_def();
+    let map_iterator_type_def = map_iterator_type_def(test_iterator_trait.clone());
+    let witnessed_type_def = witnessed_type_def(test_assoc_trait.clone());
+    module.add_trait(test_assoc_trait.clone());
+    module.add_trait(test_iterator_trait.clone());
+    module.add_concrete_impl_no_locals(
+        test_assoc_trait.clone(),
+        [string_type()],
+        [int_type()],
+        [
+            Box::new(UnaryNativeFnNN::new(|_: ferlium::std::string::String| {
+                0isize
+            })) as Function,
+        ],
+    );
+    module.add_concrete_impl_no_locals(
+        test_assoc_trait,
+        [bool_type()],
+        [string_type()],
+        [Box::new(UnaryNativeFnNN::new(|value: bool| {
+            ferlium::std::string::String::new(if value { "true" } else { "false" })
+        })) as Function],
+    );
+    module.add_type_def(option_type_def.name, option_type_def.clone());
+    module.add_type_def(map_iterator_type_def.name, map_iterator_type_def.clone());
+    module.add_type_def(witnessed_type_def.name, witnessed_type_def.clone());
+    module.add_blanket_impl_no_locals(
+        test_iterator_trait,
+        BlanketTraitImplSubKey {
+            input_tys: vec![array_iter_type_generic()],
+            ty_var_count: 1,
+            constraints: vec![],
+        },
+        vec![Type::variable_id(0)],
+        [Box::new(UnaryNativeFnMV::new(ArrayIterator::next_value)) as Function],
+    );
     module.add_function(
         "some_int".into(),
         UnaryNativeFnNV::description_with_ty(
@@ -45,7 +187,7 @@ fn testing_module(module_id: ModuleId) -> Module {
             ["option"],
             "Wraps an integer into an Option variant.",
             int_type(),
-            option_type(int_type()),
+            Type::named(option_type_def, [int_type()]),
             no_effects(),
         ),
     );

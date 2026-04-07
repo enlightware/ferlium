@@ -378,7 +378,7 @@ impl Module {
     // Type definitions
 
     /// Add a type definition to this module, returning its ID.
-    pub(crate) fn add_type_def(&mut self, name: Ustr, type_def: TypeDefRef) -> LocalTypeDefId {
+    pub fn add_type_def(&mut self, name: Ustr, type_def: TypeDefRef) -> LocalTypeDefId {
         let id = LocalTypeDefId::from_index(self.type_defs.len());
         self.type_defs.push(type_def);
         self.def_table.insert(name, DefKind::TypeDef(id));

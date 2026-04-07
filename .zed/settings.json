@@ -1,0 +1,9 @@
+{
+  "languages": {
+    "Vue.js": {
+      "tab_size": 4,
+      "hard_tabs": true,
+      "format_on_save": "off",
+    },
+  },
+}

@@ -7,12 +7,19 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ferlium::error::{DuplicatedFieldContext, DuplicatedVariantContext};
+use ferlium::error::{
+    CompilationErrorImpl, DuplicatedFieldContext, DuplicatedVariantContext,
+    InvalidTraitConstraintKind,
+};
+use ferlium::eval::eval_node;
+use ferlium::format::FormatWith;
+use ferlium::module::id::Id;
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
 use ferlium::std::string::string_type;
-use ferlium::r#type::Type;
+use ferlium::r#type::{Type, TypeVar};
 use ferlium::value::Value;
+use ferlium::{CompilerSession, SourceId, ast, parse_module_and_expr};
 use test_log::test;
 
 use indoc::indoc;
@@ -22,6 +29,397 @@ use crate::harness::{TestSession, bool, float, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+fn parse_module_ast(src: &str) -> ast::PModule {
+    parse_module_and_expr(src, SourceId::from_index(1), true)
+        .unwrap_or_else(|errors| panic!("module should parse cleanly, got {errors:?}"))
+        .0
+}
+
+fn parse_type_ast(src: &str) -> ast::PType {
+    CompilerSession::default()
+        .parse_defined_type("test", src)
+        .unwrap_or_else(|error| panic!("type should parse cleanly, got {error:?}"))
+        .0
+}
+
+fn run_and_pretty_format(session: &mut TestSession, src: &str) -> String {
+    let module_and_expr = session.compile(src);
+    let expr = module_and_expr
+        .expr
+        .expect("expected an expression to evaluate in pretty-print regression");
+    let module = session
+        .session()
+        .expect_fresh_module(module_and_expr.module_id);
+    let value = eval_node(
+        &module.ir_arena,
+        expr.expr,
+        module_and_expr.module_id,
+        &expr.locals,
+        session.session(),
+    )
+    .unwrap()
+    .into_value();
+    value.display_pretty(&expr.ty.ty).to_string()
+}
+
+fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
+    let module_id = session.compile(src).module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    module.format_with(session.session().modules()).to_string()
+}
+
+fn join_src(parts: &[&str]) -> String {
+    parts.join("\n\n")
+}
+
+fn assert_compiled_fn_type(session: &mut TestSession, src: &str, fn_name: &str, expected_ty: &str) {
+    let function = session.compile_and_get_fn_def(src, fn_name);
+    assert!(
+        function.ty_scheme.ty_quantifiers.is_empty(),
+        "expected a concrete function type, got {}",
+        function
+            .ty_scheme
+            .display_rust_style(&session.std_module_env()),
+    );
+    assert_eq!(
+        function
+            .ty_scheme
+            .ty()
+            .format_with(&session.std_module_env())
+            .to_string(),
+        expected_ty,
+    );
+}
+
+fn option_type_def_src() -> &'static str {
+    indoc! { r#"
+        enum Option<A> {
+            None,
+            Some(A),
+        }
+    "# }
+}
+
+fn witnessed_type_def_src() -> &'static str {
+    indoc! { r#"
+        struct Witnessed<Input, Output>
+        where
+            Input: testing::TestAssoc<Output = Output>
+        (Input)
+    "# }
+}
+
+fn map_iterator_type_def_src() -> &'static str {
+    indoc! { r#"
+        struct MapIterator<I, T, O>
+        where
+            I: Iterator<Item = T>
+        {
+            iterator: I,
+            mapper: (T) -> O,
+        }
+    "# }
+}
+
+fn zip_iterator_type_def_src() -> &'static str {
+    indoc! { r#"
+        struct ZipIterator<L, R, A, B>
+        where
+            L: Iterator<Item = A>,
+            R: Iterator<Item = B>
+        {
+            left: L,
+            right: R,
+        }
+    "# }
+}
+
+fn map_iterator_impl_src() -> &'static str {
+    indoc! { r#"
+        impl Iterator for MapIterator<I, T, O> {
+            fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
+                match next(it.iterator) {
+                    Some(data) => Some(it.mapper(data)),
+                    None => None,
+                }
+            }
+        }
+    "# }
+}
+
+fn map_iterator_impl_with_explicit_binders_src() -> &'static str {
+    indoc! { r#"
+        impl<I, T, O> Iterator for MapIterator<I, T, O> {
+            fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
+                match next(it.iterator) {
+                    Some(data) => Some(it.mapper(data)),
+                    None => None,
+                }
+            }
+        }
+    "# }
+}
+
+fn map_iterator_impl_with_explicit_outputs_src() -> &'static str {
+    indoc! { r#"
+        impl<I, T, O> Iterator for <Self = MapIterator<I, T, O> |-> Item = O> {
+            fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
+                match next(it.iterator) {
+                    Some(data) => Some(it.mapper(data)),
+                    None => None,
+                }
+            }
+        }
+    "# }
+}
+
+fn zip_iterator_impl_src() -> &'static str {
+    indoc! { r#"
+        impl Iterator for ZipIterator<L, R, A, B> {
+            fn next(it: &mut ZipIterator<L, R, A, B>) -> None | Some((A, B)) {
+                match next(it.left) {
+                    Some(left) => match next(it.right) {
+                        Some(right) => Some((left, right)),
+                        None => None,
+                    },
+                    None => None,
+                }
+            }
+        }
+    "# }
+}
+
+fn collect_expected_path_segments<S, I>(expected: I) -> Vec<ustr::Ustr>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    expected
+        .into_iter()
+        .map(|segment| ustr(segment.as_ref()))
+        .collect()
+}
+
+trait PathAssert: std::fmt::Debug {
+    fn kind_name(&self) -> &'static str;
+    fn path_segments(&self) -> Option<Vec<ustr::Ustr>>;
+}
+
+impl<T> PathAssert for &T
+where
+    T: PathAssert + ?Sized,
+{
+    fn kind_name(&self) -> &'static str {
+        (*self).kind_name()
+    }
+
+    fn path_segments(&self) -> Option<Vec<ustr::Ustr>> {
+        (*self).path_segments()
+    }
+}
+
+impl PathAssert for ast::Path {
+    fn kind_name(&self) -> &'static str {
+        "path"
+    }
+
+    fn path_segments(&self) -> Option<Vec<ustr::Ustr>> {
+        Some(self.segments.iter().map(|(name, _)| *name).collect())
+    }
+}
+
+impl PathAssert for ast::PType {
+    fn kind_name(&self) -> &'static str {
+        "path type"
+    }
+
+    fn path_segments(&self) -> Option<Vec<ustr::Ustr>> {
+        match self {
+            ast::PType::Path(path) => Some(path.segments.iter().map(|(name, _)| *name).collect()),
+            _ => None,
+        }
+    }
+}
+
+fn assert_path_matches<T>(value: &T, expected: &[ustr::Ustr])
+where
+    T: PathAssert + ?Sized,
+{
+    match value.path_segments() {
+        Some(actual) => assert_eq!(actual, expected),
+        None => panic!(
+            "expected a {} for {expected:?}, got {value:?}",
+            value.kind_name()
+        ),
+    }
+}
+
+fn assert_path_is_impl<T, S, I>(value: &T, expected: I)
+where
+    T: PathAssert + ?Sized,
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let expected = collect_expected_path_segments(expected);
+    assert_path_matches(value, &expected);
+}
+
+macro_rules! assert_path_is {
+    ($value:expr, $expected:expr) => {{
+        assert_path_is_impl(&$value, $expected);
+    }};
+}
+
+fn expect_applied_path<'a, S, I>(ty: &'a ast::PType, expected: I) -> &'a [ast::PTypeSpan]
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let expected = collect_expected_path_segments(expected);
+    match ty {
+        ast::PType::AppliedPath { path, args } => {
+            assert_path_matches(path, &expected);
+            args
+        }
+        other => panic!("expected an applied path type for {expected:?}, got {other:?}"),
+    }
+}
+
+fn assert_applied_path_matches<S1, I1, S2, I2, J>(
+    ty: &ast::PType,
+    expected_path: I1,
+    expected_args: J,
+) where
+    I1: IntoIterator<Item = S1>,
+    S1: AsRef<str>,
+    J: IntoIterator<Item = I2>,
+    I2: IntoIterator<Item = S2>,
+    S2: AsRef<str>,
+{
+    let args = expect_applied_path(ty, expected_path);
+    let expected_args = expected_args
+        .into_iter()
+        .map(collect_expected_path_segments)
+        .collect::<Vec<_>>();
+    assert_eq!(args.len(), expected_args.len());
+    for (arg, expected_arg) in args.iter().zip(&expected_args) {
+        assert_path_matches(&arg.0, expected_arg);
+    }
+}
+
+macro_rules! assert_applied_path_is {
+    ($ty:expr, $expected_path:expr, $expected_args:expr) => {{
+        assert_applied_path_matches(&$ty, $expected_path, $expected_args);
+    }};
+}
+
+#[derive(Debug)]
+enum ExpectedConstraintInput {
+    Unnamed(Vec<ustr::Ustr>),
+    Named {
+        name: ustr::Ustr,
+        ty: Vec<ustr::Ustr>,
+    },
+}
+
+#[derive(Debug)]
+struct ExpectedConstraint {
+    trait_name: Vec<ustr::Ustr>,
+    input_types: Vec<ExpectedConstraintInput>,
+    output_types: Vec<(ustr::Ustr, Vec<ustr::Ustr>)>,
+}
+
+fn unnamed_constraint_input<S, I>(ty: I) -> ExpectedConstraintInput
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    ExpectedConstraintInput::Unnamed(collect_expected_path_segments(ty))
+}
+
+fn named_constraint_input<S, I>(name: &str, ty: I) -> ExpectedConstraintInput
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    ExpectedConstraintInput::Named {
+        name: ustr(name),
+        ty: collect_expected_path_segments(ty),
+    }
+}
+
+fn output_binding<S, I>(name: &str, ty: I) -> (ustr::Ustr, Vec<ustr::Ustr>)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    (ustr(name), collect_expected_path_segments(ty))
+}
+
+fn constraint<S1, I1, I2, I3>(
+    trait_name: I1,
+    input_types: I2,
+    output_types: I3,
+) -> ExpectedConstraint
+where
+    I1: IntoIterator<Item = S1>,
+    S1: AsRef<str>,
+    I2: IntoIterator<Item = ExpectedConstraintInput>,
+    I3: IntoIterator<Item = (ustr::Ustr, Vec<ustr::Ustr>)>,
+{
+    ExpectedConstraint {
+        trait_name: collect_expected_path_segments(trait_name),
+        input_types: input_types.into_iter().collect(),
+        output_types: output_types.into_iter().collect(),
+    }
+}
+
+fn assert_type_def_constraints<S, I, C>(
+    type_def: &ast::PTypeDef,
+    expected_params: I,
+    constraints: C,
+) where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+    C: IntoIterator<Item = ExpectedConstraint>,
+{
+    assert_eq!(
+        type_def
+            .generic_params
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        collect_expected_path_segments(expected_params)
+    );
+
+    let constraints = constraints.into_iter().collect::<Vec<_>>();
+    assert_eq!(type_def.where_clause.len(), constraints.len());
+    for (actual, expected) in type_def.where_clause.iter().zip(constraints) {
+        assert_path_matches(&actual.trait_name, &expected.trait_name);
+        assert_eq!(actual.input_types.len(), expected.input_types.len());
+        for (actual_input, expected_input) in actual.input_types.iter().zip(expected.input_types) {
+            match expected_input {
+                ExpectedConstraintInput::Unnamed(tys) => {
+                    assert!(actual_input.name.is_none());
+                    assert_path_matches(&actual_input.ty.0, &tys);
+                }
+                ExpectedConstraintInput::Named { name, ty: tys } => {
+                    assert_eq!(actual_input.name.unwrap().0, name);
+                    assert_path_matches(&actual_input.ty.0, &tys);
+                }
+            }
+        }
+
+        assert_eq!(actual.output_types.len(), expected.output_types.len());
+        for (actual_output, (expected_name, expected_tys)) in
+            actual.output_types.iter().zip(expected.output_types)
+        {
+            assert_eq!(actual_output.name.0, expected_name);
+            assert_path_matches(&actual_output.ty.0, &expected_tys);
+        }
+    }
+}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -76,7 +474,7 @@ fn define_enum_types() {
 
     let simple_color = module.get_type_def(ustr("SimpleColor")).unwrap();
     assert_eq!(simple_color.name, ustr("SimpleColor"));
-    let simple_color = simple_color.shape.data().as_variant().unwrap().clone();
+    let simple_color = simple_color.shape_ty().data().as_variant().unwrap().clone();
     assert_eq!(
         simple_color,
         [
@@ -88,7 +486,7 @@ fn define_enum_types() {
 
     let option_type = module.get_type_def(ustr("Option")).unwrap();
     assert_eq!(option_type.name, ustr("Option"));
-    let option_type = option_type.shape.data().as_variant().unwrap().clone();
+    let option_type = option_type.shape_ty().data().as_variant().unwrap().clone();
     assert_eq!(
         option_type,
         [
@@ -99,12 +497,12 @@ fn define_enum_types() {
 
     let option2_type = module.get_type_def(ustr("Option2")).unwrap();
     assert_eq!(option2_type.name, ustr("Option2"));
-    let option2_type = option2_type.shape.data().as_variant().unwrap().clone();
+    let option2_type = option2_type.shape_ty().data().as_variant().unwrap().clone();
     assert_eq!(option2_type, option_type);
 
     let player_type = module.get_type_def(ustr("Player")).unwrap();
     assert_eq!(player_type.name, ustr("Player"));
-    let player_type = player_type.shape.data().as_variant().unwrap().clone();
+    let player_type = player_type.shape_ty().data().as_variant().unwrap().clone();
     assert_eq!(
         player_type,
         [
@@ -122,7 +520,7 @@ fn define_enum_types() {
 
     let event_type = module.get_type_def(ustr("Event")).unwrap();
     assert_eq!(event_type.name, ustr("Event"));
-    let event_type = event_type.shape.data().as_variant().unwrap().clone();
+    let event_type = event_type.shape_ty().data().as_variant().unwrap().clone();
     assert_eq!(
         event_type,
         [
@@ -143,7 +541,7 @@ fn define_enum_types() {
 
     let message_type = module.get_type_def(ustr("Message")).unwrap();
     assert_eq!(message_type.name, ustr("Message"));
-    let message_type = message_type.shape.data().as_variant().unwrap().clone();
+    let message_type = message_type.shape_ty().data().as_variant().unwrap().clone();
     assert_eq!(
         message_type,
         [
@@ -166,7 +564,7 @@ fn define_enum_types() {
 
     let empty_type = module.get_type_def(ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));
-    assert!(empty_type.shape.data().is_never());
+    assert!(empty_type.shape_ty().data().is_never());
 
     assert_eq!(
         session
@@ -203,6 +601,998 @@ fn define_enum_types() {
             .unwrap()
             .3,
         DuplicatedVariantContext::Variant
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_generic_type_definitions() {
+    let module = parse_module_ast(indoc! { r#"
+        struct Box<T>(T)
+        struct Pair<A, B>(A, B)
+        struct Entry<K, V> { key: K, value: V }
+
+        enum Option<T> {
+            Some(T),
+            None,
+        }
+
+        enum Result<T, E> {
+            Ok(T),
+            Err(E),
+        }
+    "# });
+
+    assert_eq!(module.type_defs.len(), 5);
+
+    let box_def = &module.type_defs[0];
+    assert_eq!(
+        box_def
+            .generic_params
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        vec![ustr("T")]
+    );
+    assert!(box_def.where_clause.is_empty());
+    match &box_def.shape {
+        ast::PType::Tuple(fields) => {
+            assert_eq!(fields.len(), 1);
+            assert_path_is!(&fields[0].0, ["T"]);
+        }
+        other => panic!("expected tuple struct shape, got {other:?}"),
+    }
+
+    let entry_def = &module.type_defs[2];
+    assert_eq!(
+        entry_def
+            .generic_params
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        vec![ustr("K"), ustr("V")]
+    );
+    match &entry_def.shape {
+        ast::PType::Record(fields) => {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].0.0, ustr("key"));
+            assert_path_is!(&fields[0].1.0, ["K"]);
+            assert_eq!(fields[1].0.0, ustr("value"));
+            assert_path_is!(&fields[1].1.0, ["V"]);
+        }
+        other => panic!("expected record struct shape, got {other:?}"),
+    }
+
+    let option_def = &module.type_defs[3];
+    assert_eq!(
+        option_def
+            .generic_params
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        vec![ustr("T")]
+    );
+    match &option_def.shape {
+        ast::PType::Variant(variants) => {
+            assert_eq!(variants.len(), 2);
+            assert_eq!(variants[0].0.0, ustr("Some"));
+            match &variants[0].1.0 {
+                ast::PType::Tuple(fields) => {
+                    assert_eq!(fields.len(), 1);
+                    assert_path_is!(&fields[0].0, ["T"]);
+                }
+                other => panic!("expected tuple payload, got {other:?}"),
+            }
+            assert_eq!(variants[1].0.0, ustr("None"));
+            assert_eq!(variants[1].1.0, ast::PType::Unit);
+        }
+        other => panic!("expected enum shape, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_generic_type_use_sites() {
+    let box_ty = parse_type_ast("Box<int>");
+    assert_applied_path_is!(&box_ty, ["Box"], [["int"]]);
+
+    let pair_ty = parse_type_ast("Pair<int, string>");
+    assert_applied_path_is!(&pair_ty, ["Pair"], [["int"], ["string"]]);
+
+    let nested_ty = parse_type_ast("testing::Option<Pair<int, string>>");
+    let nested_args = expect_applied_path(&nested_ty, ["testing", "Option"]);
+    assert_eq!(nested_args.len(), 1);
+    assert_applied_path_is!(&nested_args[0].0, ["Pair"], [["int"], ["string"]]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_generic_types_in_function_signatures() {
+    let module = parse_module_ast(indoc! { r#"
+        fn demo(value: Option<string>) -> Pair<int, string> {
+            value
+        }
+    "# });
+
+    let function = &module.functions[0];
+    let (_, arg_ty, _) = function.args[0].ty.as_ref().unwrap();
+    assert_applied_path_is!(arg_ty, ["Option"], [["string"]]);
+
+    let (ret_ty, _) = function.ret_ty.as_ref().unwrap();
+    assert_applied_path_is!(ret_ty, ["Pair"], [["int"], ["string"]]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_generic_trait_impl_headers() {
+    let module = parse_module_ast(indoc! { r#"
+        struct InferredIterator<I, T, O> {
+            iterator: I,
+            mapper: (T) -> O,
+        }
+
+        struct ExplicitIterator<I, T, O> {
+            iterator: I,
+            mapper: (T) -> O,
+        }
+
+        struct S(string)
+
+        impl<I, T, O> Iterator for InferredIterator<I, T, O> {
+            fn next(it: &mut InferredIterator<I, T, O>) -> None | Some(O) {
+                None
+            }
+        }
+
+        impl<I, T, O> Iterator for <Self = ExplicitIterator<I, T, O> |-> Item = O> {
+            fn next(it: &mut ExplicitIterator<I, T, O>) -> None | Some(O) {
+                None
+            }
+        }
+
+        impl Cast for <int, S> {
+            fn cast(self) -> S {
+                self
+            }
+        }
+    "# });
+
+    let inferred_header = &module.impls[0];
+    assert_eq!(
+        inferred_header
+            .generic_params
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        vec![ustr("I"), ustr("T"), ustr("O")]
+    );
+    let inferred_for_trait = inferred_header.for_trait.as_ref().unwrap();
+    assert_eq!(inferred_for_trait.input_types.len(), 1);
+    assert!(inferred_for_trait.output_types.is_empty());
+    assert!(inferred_for_trait.input_types[0].name.is_none());
+    assert_applied_path_is!(
+        &inferred_for_trait.input_types[0].ty.0,
+        ["InferredIterator"],
+        [["I"], ["T"], ["O"]]
+    );
+
+    let explicit_header = &module.impls[1];
+    assert_eq!(
+        explicit_header
+            .generic_params
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        vec![ustr("I"), ustr("T"), ustr("O")]
+    );
+    let explicit_for_trait = explicit_header.for_trait.as_ref().unwrap();
+    assert_eq!(explicit_for_trait.input_types.len(), 1);
+    assert_eq!(
+        explicit_for_trait.input_types[0].name.unwrap().0,
+        ustr("Self")
+    );
+    assert_applied_path_is!(
+        &explicit_for_trait.input_types[0].ty.0,
+        ["ExplicitIterator"],
+        [["I"], ["T"], ["O"]]
+    );
+    assert_eq!(explicit_for_trait.output_types.len(), 1);
+    assert_eq!(explicit_for_trait.output_types[0].name.0, ustr("Item"));
+    assert_path_is!(&explicit_for_trait.output_types[0].ty.0, ["O"]);
+
+    let specified_multi_input = &module.impls[2];
+    assert!(specified_multi_input.generic_params.is_empty());
+    let specified_for_trait = specified_multi_input.for_trait.as_ref().unwrap();
+    assert_eq!(specified_for_trait.input_types.len(), 2);
+    assert!(
+        specified_for_trait
+            .input_types
+            .iter()
+            .all(|input| input.name.is_none())
+    );
+    assert_path_is!(&specified_for_trait.input_types[0].ty.0, ["int"]);
+    assert_path_is!(&specified_for_trait.input_types[1].ty.0, ["S"]);
+    assert!(specified_for_trait.output_types.is_empty());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_type_def_where_clauses() {
+    let src = indoc! { r#"
+        struct ZipIterator<L, R, A, B>
+        where
+            L: Iterator<Item = A>,
+            R: Iterator<Item = B>
+        {
+            left: L,
+            right: R,
+        }
+
+        enum StreamState<I, T>
+        where
+            I: Iterator<Item = T>
+        {
+            Ready(I),
+            Done,
+        }
+    "# };
+    let src = join_src(&[map_iterator_type_def_src(), witnessed_type_def_src(), src]);
+    let module = parse_module_ast(&src);
+
+    assert_type_def_constraints(
+        &module.type_defs[0],
+        ["I", "T", "O"],
+        [constraint(
+            ["Iterator"],
+            [unnamed_constraint_input(["I"])],
+            [output_binding("Item", ["T"])],
+        )],
+    );
+
+    assert_type_def_constraints(
+        &module.type_defs[1],
+        ["Input", "Output"],
+        [constraint(
+            ["testing", "TestAssoc"],
+            [unnamed_constraint_input(["Input"])],
+            [output_binding("Output", ["Output"])],
+        )],
+    );
+
+    assert_type_def_constraints(
+        &module.type_defs[2],
+        ["L", "R", "A", "B"],
+        [
+            constraint(
+                ["Iterator"],
+                [unnamed_constraint_input(["L"])],
+                [output_binding("Item", ["A"])],
+            ),
+            constraint(
+                ["Iterator"],
+                [unnamed_constraint_input(["R"])],
+                [output_binding("Item", ["B"])],
+            ),
+        ],
+    );
+
+    assert_type_def_constraints(
+        &module.type_defs[3],
+        ["I", "T"],
+        [constraint(
+            ["Iterator"],
+            [unnamed_constraint_input(["I"])],
+            [output_binding("Item", ["T"])],
+        )],
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_multi_parameter_type_def_where_clauses() {
+    let module = parse_module_ast(indoc! { r#"
+        struct NamedCast<From, To>
+        where
+            Cast<From = From, To = To>
+        {
+            value: From,
+        }
+
+        struct Convertible<From, To, Via>
+        where
+            Convert<From = From, To = To |-> Via = Via>
+        {
+            value: From,
+        }
+
+        struct MultiOutput<Left, Right, Combined, Error>
+        where
+            Combine<Left = Left, Right = Right |-> Output = Combined, Error = Error>
+        {
+            left: Left,
+            right: Right,
+        }
+    "# });
+
+    assert_type_def_constraints(
+        &module.type_defs[0],
+        ["From", "To"],
+        [constraint(
+            ["Cast"],
+            [
+                named_constraint_input("From", ["From"]),
+                named_constraint_input("To", ["To"]),
+            ],
+            [],
+        )],
+    );
+
+    assert_type_def_constraints(
+        &module.type_defs[1],
+        ["From", "To", "Via"],
+        [constraint(
+            ["Convert"],
+            [
+                named_constraint_input("From", ["From"]),
+                named_constraint_input("To", ["To"]),
+            ],
+            [output_binding("Via", ["Via"])],
+        )],
+    );
+
+    assert_type_def_constraints(
+        &module.type_defs[2],
+        ["Left", "Right", "Combined", "Error"],
+        [constraint(
+            ["Combine"],
+            [
+                named_constraint_input("Left", ["Left"]),
+                named_constraint_input("Right", ["Right"]),
+            ],
+            [
+                output_binding("Output", ["Combined"]),
+                output_binding("Error", ["Error"]),
+            ],
+        )],
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn invalid_trait_constraint_bindings_report_structured_errors() {
+    let mut session = TestSession::new();
+
+    match session
+        .fail_compilation("struct Bad<From, To> where Cast<Src = From, To = To> (From)")
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidTraitConstraint {
+            trait_name, kind, ..
+        } => {
+            assert_eq!(trait_name, "Cast");
+            assert_eq!(
+                kind,
+                InvalidTraitConstraintKind::UnknownInputBinding { name: ustr("Src") }
+            );
+        }
+        other => panic!("expected InvalidTraitConstraint, got {other:?}"),
+    }
+
+    match session
+        .fail_compilation("struct Bad<From, To> where Cast<From = From, From = To> (From)")
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidTraitConstraint {
+            trait_name, kind, ..
+        } => {
+            assert_eq!(trait_name, "Cast");
+            assert_eq!(
+                kind,
+                InvalidTraitConstraintKind::DuplicateInputBinding { name: ustr("From") }
+            );
+        }
+        other => panic!("expected InvalidTraitConstraint, got {other:?}"),
+    }
+
+    match session
+        .fail_compilation("struct Bad<From, To> where Cast<From = From> (From)")
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidTraitConstraint {
+            trait_name, kind, ..
+        } => {
+            assert_eq!(trait_name, "Cast");
+            assert_eq!(
+                kind,
+                InvalidTraitConstraintKind::MissingInputBindings {
+                    names: vec![ustr("To")]
+                }
+            );
+        }
+        other => panic!("expected InvalidTraitConstraint, got {other:?}"),
+    }
+
+    match session
+        .fail_compilation("struct Bad<From, To> where From: Cast<To = To> (From)")
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidTraitConstraint {
+            trait_name, kind, ..
+        } => {
+            assert_eq!(trait_name, "Cast");
+            assert_eq!(
+                kind,
+                InvalidTraitConstraintKind::ExpectedNamedInputs { expected_count: 2 }
+            );
+        }
+        other => panic!("expected InvalidTraitConstraint, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn user_defined_generic_type_defs_lower_to_type_schemes() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(indoc! { r#"
+        enum Option<A> {
+            None,
+            Some(A),
+        }
+    "# });
+
+    let option_def = module.get_type_def(ustr("Option")).unwrap();
+    assert_eq!(option_def.param_names, vec![ustr("A")]);
+    assert_eq!(option_def.shape.ty_quantifiers, vec![TypeVar::new(0)]);
+    assert!(option_def.shape.constraints.is_empty());
+    let option_shape = option_def.shape_ty().data().clone().into_variant().unwrap();
+    assert_eq!(
+        option_shape,
+        [
+            (ustr("None"), Type::unit()),
+            (ustr("Some"), Type::tuple([Type::variable_id(0)])),
+        ]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_named_type_from_user_definition() {
+    let mut session = TestSession::new();
+
+    let make_some_src = join_src(&[
+        option_type_def_src(),
+        indoc! { r#"
+            fn make_some() {
+                Option::Some("hello")
+            }
+        "# },
+    ]);
+    assert_compiled_fn_type(
+        &mut session,
+        &make_some_src,
+        "make_some",
+        "() -> Option<string>",
+    );
+
+    let unwrap_or_zero_src = join_src(&[
+        option_type_def_src(),
+        indoc! { r#"
+            fn unwrap_or_zero(value) {
+                match value {
+                    Some(inner) => inner,
+                    None => 0,
+                }
+            }
+
+            unwrap_or_zero(Option::Some(41))
+        "# },
+    ]);
+    assert_eq!(session.run(&unwrap_or_zero_src), int(41));
+
+    let annotated_value_src = join_src(&[
+        option_type_def_src(),
+        indoc! { r#"
+            let value: Option<int> = Option::Some(41);
+            match value {
+                Some(inner) => inner,
+                None => 0,
+            }
+        "# },
+    ]);
+    assert_eq!(session.run(&annotated_value_src), int(41));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn constrained_named_type_from_user_definition() {
+    let mut session = TestSession::new();
+
+    let make_bool_src = join_src(&[
+        witnessed_type_def_src(),
+        indoc! { r#"
+            fn make_bool() {
+                Witnessed(true)
+            }
+        "# },
+    ]);
+    assert_compiled_fn_type(
+        &mut session,
+        &make_bool_src,
+        "make_bool",
+        "() -> Witnessed<bool, string>",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn multi_parameter_trait_constraints_from_user_definition() {
+    let mut session = TestSession::new();
+
+    let make_cast_box = session.compile_and_get_fn_def(
+        indoc! { r#"
+            struct CastBox<From, To>
+            where
+                Cast<From = From, To = To>
+            (From)
+
+            fn make_cast_box() {
+                let value: CastBox<int, float> = CastBox(1);
+                value
+            }
+        "# },
+        "make_cast_box",
+    );
+    assert!(make_cast_box.ty_scheme.ty_quantifiers.is_empty());
+    assert_eq!(
+        make_cast_box
+            .ty_scheme
+            .ty()
+            .format_with(&session.std_module_env())
+            .to_string(),
+        "() -> CastBox<int, float>"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_struct_patterns_from_user_definition() {
+    let mut session = TestSession::new();
+
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct Box<T>(T)
+
+            let Box(value) = Box(41);
+            value
+        "# }),
+        int(41)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn map_iterator_named_type_from_user_definition() {
+    let mut session = TestSession::new();
+
+    let build_map_iterator_src = join_src(&[
+        map_iterator_type_def_src(),
+        map_iterator_impl_src(),
+        indoc! { r#"
+            fn build_map_iterator() {
+                MapIterator {
+                    iterator: iter(["a", "bc"]),
+                    mapper: |x| len(x),
+                }
+            }
+        "# },
+    ]);
+    assert_compiled_fn_type(
+        &mut session,
+        &build_map_iterator_src,
+        "build_map_iterator",
+        "() -> MapIterator<array_iterator<string>, string, int>",
+    );
+
+    let run_map_iterator_src = join_src(&[
+        &build_map_iterator_src,
+        indoc! { r#"
+            let mut total = 0;
+            for score in build_map_iterator() {
+                total += score;
+            };
+            total
+        "# },
+    ]);
+    assert_eq!(session.run(&run_map_iterator_src), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_trait_impl_with_explicit_binders_for_user_defined_map_iterator() {
+    let mut session = TestSession::new();
+
+    let build_map_iterator_src = join_src(&[
+        map_iterator_type_def_src(),
+        map_iterator_impl_with_explicit_binders_src(),
+        indoc! { r#"
+            fn build_map_iterator() {
+                MapIterator {
+                    iterator: iter(["a", "bc"]),
+                    mapper: |x| len(x),
+                }
+            }
+        "# },
+    ]);
+    assert_compiled_fn_type(
+        &mut session,
+        &build_map_iterator_src,
+        "build_map_iterator",
+        "() -> MapIterator<array_iterator<string>, string, int>",
+    );
+
+    let run_map_iterator_src = join_src(&[
+        &build_map_iterator_src,
+        indoc! { r#"
+            let mut total = 0;
+            for score in build_map_iterator() {
+                total += score;
+            };
+            total
+        "# },
+    ]);
+    assert_eq!(session.run(&run_map_iterator_src), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_trait_impl_with_explicit_outputs_for_user_defined_map_iterator() {
+    let mut session = TestSession::new();
+
+    let build_map_iterator_src = join_src(&[
+        map_iterator_type_def_src(),
+        map_iterator_impl_with_explicit_outputs_src(),
+        indoc! { r#"
+            fn build_map_iterator() {
+                MapIterator {
+                    iterator: iter(["a", "bc"]),
+                    mapper: |x| len(x),
+                }
+            }
+        "# },
+    ]);
+    assert_compiled_fn_type(
+        &mut session,
+        &build_map_iterator_src,
+        "build_map_iterator",
+        "() -> MapIterator<array_iterator<string>, string, int>",
+    );
+
+    let run_map_iterator_src = join_src(&[
+        &build_map_iterator_src,
+        indoc! { r#"
+            let mut total = 0;
+            for score in build_map_iterator() {
+                total += score;
+            };
+            total
+        "# },
+    ]);
+    assert_eq!(session.run(&run_map_iterator_src), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn grammar_extractor_covers_advanced_generic_type_syntax() {
+    let mut session = TestSession::new();
+
+    assert_eq!(
+        session.run(indoc! { r#"
+            enum Option<T> {
+                None,
+                Some(T),
+            }
+
+            struct Wrapper<T>(T)
+
+            struct MapIterator<I, T, O>
+            where
+                I: Iterator<Item = T>
+            {
+                iterator: I,
+                mapper: (T) -> O,
+            }
+
+            enum StreamState<I, T>
+            where
+                I: Iterator<Item = T>
+            {
+                Ready(I),
+                Done,
+            }
+
+            impl<T> Cast for <From = T, To = Wrapper<T>> {
+                fn cast(self) -> Wrapper<T> {
+                    Wrapper(self)
+                }
+            }
+
+            impl<I, T, O> Iterator for <Self = MapIterator<I, T, O> |-> Item = O> {
+                fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
+                    match next(it.iterator) {
+                        Some(data) => Some(it.mapper(data)),
+                        None => None,
+                    }
+                }
+            }
+
+            let wrapped: Wrapper<int> = cast(2);
+            let state = StreamState::Ready(iter([wrapped.0, 40]));
+            let result: Option<int> = match state {
+                Ready(iterator) => {
+                    let mut total = 0;
+                    let values = MapIterator {
+                        iterator,
+                        mapper: |x| x + 1,
+                    };
+                    for value in values {
+                        total += value;
+                    };
+                    Option::Some(total)
+                },
+                Done => Option::None,
+            };
+
+            match result {
+                Some(value) => value,
+                None => 0,
+            }
+        "# }),
+        int(44)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_trait_impl_for_user_defined_zip_iterator() {
+    let mut session = TestSession::new();
+
+    let build_zip_iterator_src = join_src(&[
+        zip_iterator_type_def_src(),
+        zip_iterator_impl_src(),
+        indoc! { r#"
+            fn build_zip_iterator() {
+                ZipIterator {
+                    left: iter([1 as int, 20 as int]),
+                    right: iter(["a", "bbb"]),
+                }
+            }
+        "# },
+    ]);
+    assert_compiled_fn_type(
+        &mut session,
+        &build_zip_iterator_src,
+        "build_zip_iterator",
+        "() -> ZipIterator<array_iterator<int>, array_iterator<string>, int, string>",
+    );
+
+    let run_zip_iterator_src = join_src(&[
+        &build_zip_iterator_src,
+        indoc! { r#"
+            fn pair_score(pair) {
+                pair.0 + len(pair.1)
+            }
+
+            let mut total = 0;
+            for score in build_zip_iterator() {
+                total += pair_score(score)
+            };
+            total
+        "# },
+    ]);
+    assert_eq!(session.run(&run_zip_iterator_src), int(25));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compiled_impl_headers_use_source_syntax() {
+    let mut session = TestSession::new();
+
+    let rendered = format_compiled_module(
+        &mut session,
+        &join_src(&[
+            indoc! { r#"
+                struct S(string)
+
+                impl Ord for S {
+                    fn cmp(self, other: S) {
+                        cmp(len(self.0), len(other.0))
+                    }
+                }
+            "# },
+            map_iterator_type_def_src(),
+            map_iterator_impl_with_explicit_outputs_src(),
+        ]),
+    );
+
+    assert!(
+        rendered.contains("impl Ord for S ("),
+        "expected unary-input impl sugar, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("impl<A, B, C> Iterator for <Self = MapIterator<A, B, C> |-> Item = C>"),
+        "expected explicit output impl header, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn pretty_print_user_defined_generic_enum_values() {
+    let mut session = TestSession::new();
+    let src = join_src(&[
+        option_type_def_src(),
+        indoc! { r#"
+            Option::Some(32)
+        "# },
+    ]);
+
+    assert_eq!(
+        run_and_pretty_format(&mut session, &src),
+        "Option::Some (32)"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_named_type_from_rust_definition() {
+    let mut session = TestSession::new();
+
+    let make_some = session.compile_and_get_fn_def(
+        indoc! { r#"
+            fn make_some() {
+                testing::Option::Some("hello")
+            }
+        "# },
+        "make_some",
+    );
+    assert!(
+        make_some.ty_scheme.ty_quantifiers.is_empty(),
+        "constructor should infer a concrete named type, got {}",
+        make_some
+            .ty_scheme
+            .display_rust_style(&session.std_module_env()),
+    );
+    assert_eq!(
+        make_some
+            .ty_scheme
+            .ty()
+            .format_with(&session.std_module_env())
+            .to_string(),
+        "() -> Option<string>"
+    );
+
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn unwrap_or_zero(value) {
+                match value {
+                    Some(inner) => inner,
+                    None => 0,
+                }
+            }
+
+            unwrap_or_zero(testing::Option::Some(41))
+        "# }),
+        int(41)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn unwrap_or_zero(value) {
+                match value {
+                    Some(inner) => inner,
+                    None => 0,
+                }
+            }
+
+            unwrap_or_zero(testing::Option::None)
+        "# }),
+        int(0)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn constrained_named_type_from_rust_definition() {
+    let mut session = TestSession::new();
+
+    let make_string = session.compile_and_get_fn_def(
+        indoc! { r#"
+            fn make_string() {
+                testing::Witnessed("hello")
+            }
+        "# },
+        "make_string",
+    );
+    assert!(
+        make_string.ty_scheme.ty_quantifiers.is_empty(),
+        "constraint-instantiated constructor should not stay polymorphic, got {}",
+        make_string
+            .ty_scheme
+            .display_rust_style(&session.std_module_env()),
+    );
+    assert_eq!(
+        make_string
+            .ty_scheme
+            .ty()
+            .format_with(&session.std_module_env())
+            .to_string(),
+        "() -> Witnessed<string, int>"
+    );
+
+    let make_bool = session.compile_and_get_fn_def(
+        indoc! { r#"
+            fn make_bool() {
+                testing::Witnessed(true)
+            }
+        "# },
+        "make_bool",
+    );
+    assert!(
+        make_bool.ty_scheme.ty_quantifiers.is_empty(),
+        "constraint-instantiated constructor should not stay polymorphic, got {}",
+        make_bool
+            .ty_scheme
+            .display_rust_style(&session.std_module_env()),
+    );
+    assert_eq!(
+        make_bool
+            .ty_scheme
+            .ty()
+            .format_with(&session.std_module_env())
+            .to_string(),
+        "() -> Witnessed<bool, string>"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn map_iterator_named_type_from_rust_definition() {
+    let mut session = TestSession::new();
+
+    let build_map_iterator = session.compile_and_get_fn_def(
+        indoc! { r#"
+            fn build_map_iterator() {
+                testing::MapIterator {
+                    iterator: array_iter(["a", "bc"]),
+                    mapper: |x| len(x),
+                }
+            }
+        "# },
+        "build_map_iterator",
+    );
+    assert!(
+        build_map_iterator.ty_scheme.ty_quantifiers.is_empty(),
+        "constructor should infer a concrete named type, got {}",
+        build_map_iterator
+            .ty_scheme
+            .display_rust_style(&session.std_module_env()),
+    );
+    assert_eq!(
+        build_map_iterator
+            .ty_scheme
+            .ty()
+            .format_with(&session.std_module_env())
+            .to_string(),
+        "() -> MapIterator<array_iterator<string>, string, int>"
+    );
+
+    assert_eq!(
+        session.run(indoc! { r#"
+            let it = testing::MapIterator {
+                iterator: array_iter(["a", "bc"]),
+                mapper: |x| len(x),
+            };
+            it.mapper("abc")
+        "# }),
+        int(3)
     );
 }
 
@@ -428,12 +1818,12 @@ fn define_struct_types() {
 
     let empty_type = module.get_type_def(ustr("Empty")).unwrap();
     assert_eq!(empty_type.name, ustr("Empty"));
-    let empty_type_shape = empty_type.shape.data().as_record().unwrap().clone();
+    let empty_type_shape = empty_type.shape_ty().data().as_record().unwrap().clone();
     assert_eq!(empty_type_shape, vec![]);
 
     let person_type = module.get_type_def(ustr("Person")).unwrap();
     assert_eq!(person_type.name, ustr("Person"));
-    let person_type_shape = person_type.shape.data().as_record().unwrap().clone();
+    let person_type_shape = person_type.shape_ty().data().as_record().unwrap().clone();
     assert_eq!(
         person_type_shape,
         vec![
@@ -445,27 +1835,27 @@ fn define_struct_types() {
 
     let person2_type = module.get_type_def(ustr("Person2")).unwrap();
     assert_eq!(person2_type.name, ustr("Person2"));
-    let person2_type_shape = person2_type.shape.data().as_record().unwrap().clone();
+    let person2_type_shape = person2_type.shape_ty().data().as_record().unwrap().clone();
     assert_eq!(person2_type_shape, person_type_shape);
 
     let email_type = module.get_type_def(ustr("Email")).unwrap();
     assert_eq!(email_type.name, ustr("Email"));
-    let email_type_shape = email_type.shape.data().as_tuple().unwrap().clone();
+    let email_type_shape = email_type.shape_ty().data().as_tuple().unwrap().clone();
     assert_eq!(email_type_shape, vec![string_type()]);
 
     let point_type = module.get_type_def(ustr("Point")).unwrap();
     assert_eq!(point_type.name, ustr("Point"));
-    let point_type_shape = point_type.shape.data().as_tuple().unwrap().clone();
+    let point_type_shape = point_type.shape_ty().data().as_tuple().unwrap().clone();
     assert_eq!(point_type_shape, vec![int_type(), int_type()]);
 
     let point2_type = module.get_type_def(ustr("Point2")).unwrap();
     assert_eq!(point2_type.name, ustr("Point2"));
-    let point2_type_shape = point2_type.shape.data().as_tuple().unwrap().clone();
+    let point2_type_shape = point2_type.shape_ty().data().as_tuple().unwrap().clone();
     assert_eq!(point2_type_shape, vec![int_type(), int_type()]);
 
     let callable_type = module.get_type_def(ustr("Callable")).unwrap();
     assert_eq!(callable_type.name, ustr("Callable"));
-    let callable_type_shape = callable_type.shape.data().as_record().unwrap().clone();
+    let callable_type_shape = callable_type.shape_ty().data().as_record().unwrap().clone();
     assert_eq!(
         callable_type_shape,
         vec![(

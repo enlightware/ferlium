@@ -48,14 +48,14 @@ use ustr::{Ustr, ustr};
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::{B, b};
-use crate::effects::EffType;
-use crate::effects::EffectVar;
+use crate::effects::{EffType, EffectVar, EffectsSubstitution};
 use crate::format::type_variable_index_to_string_greek;
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::module::ModuleEnv;
 use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
+use crate::type_scheme::{DisplayStyle, TypeScheme};
 
 // use crate::typing_env::Local;
 
@@ -706,7 +706,7 @@ pub struct TypeDef {
     /// The names of the generic parameters of this type, if any
     pub param_names: Vec<Ustr>,
     /// The inner type data, possibly with generic arguments
-    pub shape: Type,
+    pub shape: TypeScheme<Type>,
     /// The location of the type declaration in the source code
     pub span: Location,
     /// The attributes of the type
@@ -714,20 +714,86 @@ pub struct TypeDef {
 }
 
 impl TypeDef {
+    fn validate(&self) {
+        assert_eq!(
+            self.param_names.len(),
+            self.shape.ty_quantifiers.len(),
+            "Type definition `{}` has {} parameter names but {} type quantifiers",
+            self.name,
+            self.param_names.len(),
+            self.shape.ty_quantifiers.len(),
+        );
+        for (index, quantifier) in self.shape.ty_quantifiers.iter().enumerate() {
+            assert_eq!(
+                quantifier.name(),
+                index as u32,
+                "Type definition `{}` has non-canonical type quantifier ordering",
+                self.name,
+            );
+        }
+    }
+
+    pub fn shape_ty(&self) -> Type {
+        self.shape.ty
+    }
+
+    pub fn instantiated_shape(&self, params: &[Type]) -> Type {
+        assert_eq!(
+            params.len(),
+            self.param_names.len(),
+            "Type definition `{}` expects {} parameters, got {}",
+            self.name,
+            self.param_names.len(),
+            params.len(),
+        );
+        let ty_subst = self
+            .shape
+            .ty_quantifiers
+            .iter()
+            .copied()
+            .zip(params.iter().copied())
+            .collect();
+        self.shape
+            .ty
+            .instantiate(&(ty_subst, EffectsSubstitution::default()))
+    }
+
+    pub fn payload_scheme(&self, tag: Option<Ustr>) -> TypeScheme<Type> {
+        let ty = if let Some(tag) = tag {
+            *self
+                .shape
+                .ty
+                .data()
+                .as_variant()
+                .unwrap()
+                .iter()
+                .find_map(|(name, ty)| if *name == tag { Some(ty) } else { None })
+                .unwrap_or_else(|| panic!("Variant `{tag}` not found in `{}`", self.name))
+        } else {
+            self.shape.ty
+        };
+        TypeScheme {
+            ty_quantifiers: self.shape.ty_quantifiers.clone(),
+            eff_quantifiers: self.shape.eff_quantifiers.clone(),
+            ty,
+            constraints: self.shape.constraints.clone(),
+        }
+    }
+
     pub fn is_enum(&self) -> bool {
-        self.shape.data().is_variant()
+        self.shape.ty.data().is_variant()
     }
 
     pub fn is_record_struct(&self) -> bool {
-        self.shape.data().is_record()
+        self.shape.ty.data().is_record()
     }
 
     pub fn is_tuple_struct(&self) -> bool {
-        self.shape.data().is_tuple()
+        self.shape.ty.data().is_tuple()
     }
 
     pub fn is_unit_struct(&self) -> bool {
-        self.shape == Type::unit()
+        self.shape.ty == Type::unit()
     }
 
     pub fn is_struct_like(&self) -> bool {
@@ -741,28 +807,33 @@ impl TypeDef {
             write!(f, "enum")?;
         }
         write!(f, " {}", self.name)?;
-        // Rebuild the list of type arguments for the type declaration
-        let args = self
-            .shape
-            .inner_ty_vars_iter()
-            .sorted()
-            .map(Type::variable)
-            .collect::<Vec<_>>();
-        if !args.is_empty() {
+        if !self.param_names.is_empty() {
             write!(f, "<")?;
-            for (i, ty) in args.iter().enumerate() {
+            for (i, name) in self.param_names.iter().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                ty.fmt_with(f, env)?;
+                write!(f, "{name}")?;
             }
             write!(f, ">")?;
+        }
+        if !self.shape.constraints.is_empty() {
+            write!(f, " where ")?;
+            self.shape.format_constraints(DisplayStyle::Rust, f, env)?;
         }
         write!(f, " ")?;
         if self.is_enum() {
             write!(f, "{{ ")?;
-            if self.shape != Type::never() {
-                for (i, (name, ty)) in self.shape.data().as_variant().unwrap().iter().enumerate() {
+            if self.shape.ty != Type::never() {
+                for (i, (name, ty)) in self
+                    .shape
+                    .ty
+                    .data()
+                    .as_variant()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -776,7 +847,7 @@ impl TypeDef {
             }
             write!(f, " }}")?;
         } else {
-            self.shape.fmt_with(f, env)?;
+            self.shape.ty.fmt_with(f, env)?;
         }
         Ok(())
     }
@@ -787,6 +858,7 @@ impl TypeDef {
 pub struct TypeDefRef(Arc<TypeDef>);
 impl TypeDefRef {
     pub fn new(def: TypeDef) -> Self {
+        def.validate();
         Self(Arc::new(def))
     }
 
@@ -829,6 +901,12 @@ pub struct NamedType {
     /// The type arguments for this named type to replace its generic variables
     pub params: Vec<Type>,
     // TODO: add constraints for the type arguments
+}
+
+impl NamedType {
+    pub fn instantiated_shape(&self) -> Type {
+        self.def.instantiated_shape(&self.params)
+    }
 }
 
 /// The representation of a type in the system
@@ -995,11 +1073,7 @@ impl TypeKind {
             Tuple(types) => types.iter().for_each(|ty| process_ty(*ty, visitor)),
             Record(fields) => fields.iter().for_each(|(_, ty)| process_ty(*ty, visitor)),
             Function(fn_type) => fn_type.visit(visitor),
-            Named(NamedType {
-                def: decl,
-                params: args,
-            }) => {
-                process_ty(decl.shape, visitor);
+            Named(NamedType { params: args, .. }) => {
                 args.iter().for_each(|ty| process_ty(*ty, visitor));
             }
         };
@@ -1021,10 +1095,7 @@ impl TypeKind {
                 .iter()
                 .map(|arg| arg.ty)
                 .chain(iter::once(function.ret))),
-            Named(NamedType {
-                def: decl,
-                params: args,
-            }) => b(iter::once(decl.shape).chain(args.iter().copied())),
+            Named(NamedType { params: args, .. }) => b(args.iter().copied()),
             Never => b(iter::empty()),
         }
     }

@@ -29,7 +29,7 @@ use crate::{
     function::{Function, FunctionDefinition},
     internal_compilation_error,
     location::Location,
-    module::{LocalDecl, LocalDeclId, ModuleFunction, id::Id},
+    module::{LocalDecl, LocalDeclId, ModuleFunction, TypeDefLookupResult, id::Id},
     std::core::REPR_TRAIT,
     r#trait::TraitRef,
     trait_solver::TraitSolver,
@@ -303,6 +303,25 @@ impl TypeInference {
         self.ty_coverage_constraints.push((span, ty, values));
     }
 
+    fn instantiate_type_def(
+        &mut self,
+        type_def_lookup: TypeDefLookupResult,
+        use_site: Location,
+    ) -> (crate::r#type::TypeDefRef, Type, Type, Option<Ustr>) {
+        let (type_def, tag) = type_def_lookup.lookup_payload();
+        let (payload_ty, _inst_data, subst) = type_def
+            .payload_scheme(tag)
+            .instantiate_with_fresh_vars(self, use_site, None);
+        let params: Vec<_> = type_def
+            .shape
+            .ty_quantifiers
+            .iter()
+            .map(|quantifier| quantifier.instantiate(&subst.0))
+            .collect();
+        let named_ty = Type::named(type_def.clone(), params);
+        (type_def, payload_ty, named_ty, tag)
+    }
+
     fn infer_abstract(
         &mut self,
         env: &mut TypingEnv,
@@ -534,7 +553,8 @@ impl TypeInference {
                 // Retrieve the struct constructor, if it exists
                 else if let Some(type_def) = env.get_type_def(path)? {
                     // Retrieve the payload type and the tag, if it is an enum.
-                    let (type_def, payload_ty, tag) = type_def.lookup_payload();
+                    let (type_def, payload_ty, ty, tag) =
+                        self.instantiate_type_def(type_def, expr_span);
                     if payload_ty != Type::unit() {
                         return Err(internal_compilation_error!(IsNotCorrectProductType {
                             which: WhichProductTypeIsNot::Unit,
@@ -543,8 +563,6 @@ impl TypeInference {
                             instantiation_span: expr_span,
                         }));
                     }
-                    // The type of the node is the named type.
-                    let ty = Type::named(type_def.clone(), []);
                     // But the value of the node is the underlying data.
                     let value = if let Some(tag) = tag {
                         Value::unit_variant(tag)
@@ -602,17 +620,29 @@ impl TypeInference {
             }
             PatternConstraint(data) => {
                 let (node_id, mut_type) = self.infer_expr(env, data.expr)?;
-                match data.constraint {
+                match &data.constraint {
                     PatternConstraintKind::ExactTuple(element_count) => {
-                        let expected_ty = if element_count == 0 {
+                        let expected_ty = if *element_count == 0 {
                             Type::unit()
                         } else {
-                            Type::tuple(self.fresh_type_var_tys(element_count))
+                            Type::tuple(self.fresh_type_var_tys(*element_count))
                         };
                         self.add_same_type_constraint(
                             env.ir_arena[node_id].ty,
                             sp(data.expr),
                             expected_ty,
+                            data.span,
+                        );
+                    }
+                    PatternConstraintKind::NamedType(type_def) => {
+                        let (_type_def, _payload_ty, named_ty, _tag) = self.instantiate_type_def(
+                            TypeDefLookupResult::Struct(type_def.clone()),
+                            data.span,
+                        );
+                        self.add_same_type_constraint(
+                            env.ir_arena[node_id].ty,
+                            sp(data.expr),
+                            named_ty,
                             data.span,
                         );
                     }
@@ -804,7 +834,8 @@ impl TypeInference {
                 // First check if the path is a known type definition.
                 if let Some(type_def) = env.get_type_def(&data.path)? {
                     // Then resolve the layout of the struct.
-                    let (type_def, payload_ty, tag) = type_def.lookup_payload();
+                    let (type_def, payload_ty, ty, tag) =
+                        self.instantiate_type_def(type_def, expr_span);
                     // Check that it is a record.
                     if !payload_ty.data().is_record() {
                         return Err(internal_compilation_error!(IsNotCorrectProductType {
@@ -879,8 +910,6 @@ impl TypeInference {
                             Ok(node_id)
                         })
                         .collect::<Result<_, _>>()?;
-                    // The type of the node is the named type.
-                    let ty = Type::named(type_def.clone(), []);
                     // But the value of the node is the underlying record.
                     // If all nodes can be resolved to bare immediates, we can create an immediate value.
                     let resolved_nodes_value =
@@ -1224,7 +1253,8 @@ impl TypeInference {
                 (node, ret_ty, MutType::constant(), combined_effects)
             } else if let Some(type_def) = env.get_type_def(path)? {
                 // Retrieve the payload type and the tag, if it is an enum.
-                let (type_def, payload_ty, tag) = type_def.lookup_payload();
+                let (type_def, payload_ty, ty, tag) =
+                    self.instantiate_type_def(type_def, expr_span);
                 // Compute the arity from the payload type.
                 let payload_tys = if payload_ty == Type::unit() {
                     vec![]
@@ -1270,8 +1300,6 @@ impl TypeInference {
                         Ok(node_id)
                     })
                     .collect::<Result<_, _>>()?;
-                // The type of the node is the named type.
-                let ty = Type::named(type_def.clone(), []);
                 // But the value of the node is the underlying tuple.
                 // If all nodes can be resolved to bare immediates, we can create an immediate value.
                 let resolved_nodes_value =
@@ -1510,8 +1538,10 @@ impl TypeInference {
 
         // Functions abstraction
         if let Abstract(data) = &expr.kind {
-            let ty_data = { expected_ty.data().clone() };
-            if let TypeKind::Function(fn_ty) = ty_data {
+            let ty_data = expected_ty.data();
+            if let TypeKind::Function(fn_ty) = &*ty_data {
+                let fn_ty = fn_ty.clone();
+                drop(ty_data);
                 let (node_id, _, _, _) =
                     self.infer_abstract(env, &data.args, data.body, Some(*fn_ty), expr_span)?;
                 return Ok(node_id);
@@ -3009,9 +3039,11 @@ impl UnifiedTypeInference {
     /// to preserve effect polymorphism.
     fn generalize_function_effects(&mut self, ty: Type) -> Type {
         use TypeKind::*;
-        let ty_data = ty.data().clone();
-        match ty_data {
+        let ty_data = ty.data();
+        match &*ty_data {
             Function(fn_ty) => {
+                let fn_ty = fn_ty.clone();
+                drop(ty_data);
                 // Check if the function has any non-variable effects
                 let has_primitive_effects = fn_ty.effects.iter().any(|e| e.is_primitive());
                 if has_primitive_effects {
@@ -3039,7 +3071,10 @@ impl UnifiedTypeInference {
                     ty
                 }
             }
-            _ => ty,
+            _ => {
+                drop(ty_data);
+                ty
+            }
         }
     }
 
@@ -3193,17 +3228,17 @@ impl UnifiedTypeInference {
             let input_ty = input_tys[0];
             let ty_data = input_ty.data();
             let is_known_non_named_ty = !ty_data.is_named() && !ty_data.is_variable();
-            let unify_to_ty = if let Some(named) = ty_data.as_named() {
-                if !named.params.is_empty() {
-                    todo!("Repr trait for named types with arguments is not supported yet");
-                }
-                Some(named.def.shape)
+            let unify_to_ty = if ty_data.is_named() {
+                let named = ty_data.as_named().unwrap().clone();
+                drop(ty_data);
+                Some(named.instantiated_shape())
             } else if is_known_non_named_ty || is_ty_adt(input_ty) {
+                drop(ty_data);
                 Some(input_ty)
             } else {
+                drop(ty_data);
                 None
             };
-            drop(ty_data);
             if let Some(unify_to_ty) = unify_to_ty {
                 self.unify_same_type(unify_to_ty, span, output_tys[0], span)?;
                 return Ok(None);
@@ -3556,11 +3591,12 @@ impl UnifiedTypeInference {
     }
 
     fn substitute_type_lookup(&mut self, ty: Type) -> Type {
-        let type_data: TypeKind = { ty.data().clone() };
-        let var = match type_data {
-            TypeKind::Variable(var) => var,
+        let ty_data = ty.data();
+        let var = match &*ty_data {
+            TypeKind::Variable(var) => *var,
             _ => return ty,
         };
+        drop(ty_data);
         self.lookup_type_var(var)
     }
 

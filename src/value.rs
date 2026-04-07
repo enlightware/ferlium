@@ -329,7 +329,8 @@ impl Value {
 
     fn fmt_pretty(&self, f: &mut std::fmt::Formatter<'_>, ty: Type) -> std::fmt::Result {
         use TypeKind::*;
-        match &*ty.data() {
+        let ty_data = ty.data();
+        match &*ty_data {
             Variable(type_var) => panic!(
                 "Cannot pretty-print value with uninstantiated type variable: {:?}",
                 type_var
@@ -388,17 +389,16 @@ impl Value {
                 }
             }
             Named(named_type) => {
-                let separator = if named_type.def.shape.data().is_variant() {
-                    "::"
-                } else {
-                    " "
-                };
+                let named_type = named_type.clone();
+                drop(ty_data);
+                let shape = named_type.instantiated_shape();
+                let separator = if shape.data().is_variant() { "::" } else { " " };
                 write!(
                     f,
                     "{}{}{}",
                     &named_type.def.name,
                     separator,
-                    self.display_pretty(&named_type.def.shape)
+                    self.display_pretty(&shape)
                 )
             }
             Never => panic!("A value of type Never cannot exist"),

@@ -51,6 +51,7 @@ mod sync;
 pub mod r#trait;
 pub mod trait_solver;
 pub mod r#type;
+mod type_constraints;
 mod type_inference;
 mod type_like;
 mod type_mapper;

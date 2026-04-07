@@ -39,7 +39,10 @@ use crate::{
     r#trait::TraitRef,
     trait_solver::{TraitSolver, trait_solver_from_module},
     r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
-    type_inference::{FreshVariableTypeMapper, TypeInference, UnifiedTypeInference},
+    type_constraints::named_type_constraints_in_types,
+    type_inference::{
+        FreshVariableTypeMapper, InstSubstitution, TypeInference, UnifiedTypeInference,
+    },
     type_like::{TypeLike, instantiate_types},
     type_mapper::TypeMapper,
     type_scheme::{
@@ -69,6 +72,53 @@ struct ImplStubData {
     id: LocalImplId,
     input_tys: Vec<Type>,
     method_ids: Vec<LocalFunctionId>,
+}
+
+fn substitute_in_function_descr(
+    ir_arena: &mut NodeArena,
+    descr: &mut ModuleFunction,
+    subst: &InstSubstitution,
+) {
+    let root = descr.get_code_entry().unwrap();
+    ir::instantiate_node(ir_arena, root, subst);
+    for local in &mut descr.locals {
+        local.ty = local.ty.instantiate(subst);
+    }
+}
+
+fn default_output_effects_in_functions(
+    output: &mut Module,
+    ir_arena: &mut NodeArena,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    function_ids: &[LocalFunctionId],
+) {
+    for &id in function_ids {
+        let effect_subst: FxHashMap<_, _> = {
+            let descr = &output.functions[id.as_index()];
+            let input_effect_vars = descr.definition.ty_scheme.ty.input_effect_vars();
+            descr
+                .definition
+                .ty_scheme
+                .ty
+                .output_effect_vars()
+                .into_iter()
+                .filter(|var| !input_effect_vars.contains(var))
+                .map(|var| (var, EffType::empty()))
+                .collect()
+        };
+        if effect_subst.is_empty() {
+            continue;
+        }
+
+        let subst = (FxHashMap::default(), effect_subst);
+        let function_and_lambdas =
+            std::iter::once(id).chain(associated_lambdas.get(&id).into_iter().flatten().copied());
+        for function_id in function_and_lambdas {
+            let descr = &mut output.functions[function_id.as_index()];
+            descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
+            substitute_in_function_descr(ir_arena, descr, &subst);
+        }
+    }
 }
 
 /// Kinds existing data to be used when emitting a new module in [`emit_module`]
@@ -104,24 +154,38 @@ pub fn emit_module(
     // functions to use trait methods from these impls regardless of source order.
     let mut concrete_impl_stubs: FxHashMap<usize, ImplStubData> = FxHashMap::default();
     for (imp_idx, imp) in source.impls.iter().enumerate() {
-        if let Some(tys) = &imp.for_tys {
-            let input_tys: Vec<_> = tys.iter().map(|(ty, _)| *ty).collect();
-            if input_tys.iter().any(Type::is_variable) {
-                panic!("Generic type found in impl for concrete type.");
-            }
+        if let Some(for_trait) = &imp.for_trait {
+            let input_tys = for_trait.input_tys();
+            let output_tys = for_trait.output_tys();
             let module_env = ModuleEnv::new(&output, others);
             let Some(trait_ref) = module_env.get_trait_ref(imp.trait_name)? else {
                 continue; // Trait not found; the error will be reported in the main impl loop
             };
-            if trait_ref.output_type_count() != 0 {
-                return Err(internal_compilation_error!(Unsupported {
-                    span: imp.span,
-                    reason:
-                        "Trait with output types are not yet supported for manual specification"
-                            .to_string()
+            if input_tys.len() != trait_ref.input_type_count() as usize {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: trait_ref.input_type_count() as usize,
+                    expected_span: imp.trait_name.1,
+                    got: input_tys.len(),
+                    got_span: imp.span,
                 }));
             }
-            let output_tys = vec![];
+            let mut stub_tys = input_tys.clone();
+            stub_tys.extend(output_tys.iter().copied());
+            if !collect_ty_vars(&stub_tys).is_empty() {
+                continue;
+            }
+            if !output_tys.is_empty() && output_tys.len() != trait_ref.output_type_count() as usize
+            {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: trait_ref.output_type_count() as usize,
+                    expected_span: imp.trait_name.1,
+                    got: output_tys.len(),
+                    got_span: for_trait.span,
+                }));
+            }
+            if output_tys.is_empty() && trait_ref.output_type_count() != 0 {
+                continue;
+            }
             // Pre-allocate placeholder functions for each trait method.
             let fn_defs = trait_ref.instantiate_for_tys(&input_tys, &output_tys);
             let mut method_ids = Vec::with_capacity(fn_defs.len());
@@ -239,6 +303,8 @@ pub fn emit_module(
             trait_ref: trait_ref.clone(),
             span: imp.span,
             stub_data: concrete_impl_stubs.get(&imp_idx),
+            generic_param_count: imp.generic_params.len(),
+            for_trait: imp.for_trait.as_ref(),
         };
         let emit_output = emit_functions(
             &mut output,
@@ -257,7 +323,6 @@ pub fn emit_module(
                 &emit_output.functions,
                 &output.impls.data[stub_data.id.as_index()].methods
             );
-            assert!(emit_output.output_tys.is_empty());
             let new_dictionary_ty = output.computer_dictionary_ty(&emit_output.functions);
             let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
             assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
@@ -284,6 +349,8 @@ struct EmitTraitCtx<'a> {
     trait_ref: TraitRef,
     span: Location,
     stub_data: Option<&'a ImplStubData>,
+    generic_param_count: usize,
+    for_trait: Option<&'a ast::DTraitImplFor>,
 }
 
 pub(crate) struct EmitTraitOutput {
@@ -308,13 +375,89 @@ where
 {
     // First pass, populate the function table and allocate fresh mono type variables.
     let mut ty_inf = TypeInference::default();
+    let mut impl_annotation_subst = None;
+    let mut explicit_trait_impl = None;
 
     // If we are emitting a trait implementation, create generics for the trait input and output types
     // and add the constraints from the trait definition to the type inference.
     let trait_output = if let Some(trait_ctx) = &trait_ctx {
         let trait_ref = &trait_ctx.trait_ref;
         let input_tys = ty_inf.fresh_type_var_tys(trait_ref.input_type_count() as usize);
-        if let Some(stub_data) = trait_ctx.stub_data {
+        let output_tys = ty_inf.fresh_type_var_tys(trait_ref.output_type_count() as usize);
+        let explicit_quantifiers = if trait_ctx.generic_param_count > 0 {
+            (0..trait_ctx.generic_param_count)
+                .map(|index| TypeVar::new(index as u32))
+                .collect::<Vec<_>>()
+        } else if let Some(for_trait) = trait_ctx.for_trait {
+            let mut tys = for_trait.input_tys();
+            tys.extend(for_trait.output_tys());
+            collect_ty_vars(&tys)
+        } else {
+            vec![]
+        };
+        if !explicit_quantifiers.is_empty() {
+            impl_annotation_subst = Some((
+                ty_inf.fresh_type_var_subst(&explicit_quantifiers),
+                FxHashMap::default(),
+            ));
+        }
+        explicit_trait_impl = trait_ctx.for_trait.map(|for_trait| {
+            let instantiate = |ty: Type| {
+                impl_annotation_subst
+                    .as_ref()
+                    .map_or(ty, |subst| ty.instantiate(subst))
+            };
+            let input_tys: Vec<_> = for_trait.input_tys().into_iter().map(instantiate).collect();
+            let output_tys = for_trait
+                .output_tys()
+                .into_iter()
+                .map(instantiate)
+                .collect::<Vec<_>>();
+            let mut explicit_tys = input_tys.clone();
+            explicit_tys.extend(output_tys.iter().copied());
+            let explicit_constraints =
+                named_type_constraints_in_types(explicit_tys, trait_ctx.span);
+            (input_tys, output_tys, explicit_constraints)
+        });
+        if let Some((explicit_input_tys, explicit_output_tys, explicit_constraints)) =
+            &explicit_trait_impl
+        {
+            if explicit_input_tys.len() != input_tys.len() {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: input_tys.len(),
+                    expected_span: trait_ctx.span,
+                    got: explicit_input_tys.len(),
+                    got_span: trait_ctx.span,
+                }));
+            }
+            if !explicit_output_tys.is_empty() && explicit_output_tys.len() != output_tys.len() {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: output_tys.len(),
+                    expected_span: trait_ctx.span,
+                    got: explicit_output_tys.len(),
+                    got_span: trait_ctx.span,
+                }));
+            }
+            for constraint in explicit_constraints {
+                ty_inf.add_pub_constraint(constraint.clone());
+            }
+            for (input_ty, explicit_ty) in input_tys.iter().zip(explicit_input_tys.iter()) {
+                ty_inf.add_same_type_constraint(
+                    *input_ty,
+                    trait_ctx.span,
+                    *explicit_ty,
+                    trait_ctx.span,
+                );
+            }
+            for (output_ty, explicit_ty) in output_tys.iter().zip(explicit_output_tys.iter()) {
+                ty_inf.add_same_type_constraint(
+                    *output_ty,
+                    trait_ctx.span,
+                    *explicit_ty,
+                    trait_ctx.span,
+                );
+            }
+        } else if let Some(stub_data) = trait_ctx.stub_data {
             // For a stub implementation, equate the fresh input types with the concrete types from the impl annotation.
             assert_eq!(input_tys.len(), stub_data.input_tys.len());
             for (ty_var, concrete_ty) in input_tys.iter().zip(stub_data.input_tys.iter()) {
@@ -326,7 +469,6 @@ where
                 );
             }
         }
-        let output_tys = ty_inf.fresh_type_var_tys(trait_ref.output_type_count() as usize);
         for constraint in &trait_ctx.trait_ref.constraints {
             ty_inf.add_pub_constraint(constraint.instantiate_location_cloned(trait_ctx.span));
         }
@@ -357,24 +499,33 @@ where
         // Note: the type quantifiers and constraints are left empty.
         // They will be filled in the second pass.
         // The effect quantifiers are filled with the output effect variable.
+        let annotation_subst = impl_annotation_subst.as_ref();
         let args_ty = args
             .iter()
             .map(|arg| {
                 if let Some((mut_ty, ty, _)) = &arg.ty {
-                    let mut mapper = FreshVariableTypeMapper::new(&mut ty_inf);
-                    let mut_ty = match mut_ty {
-                        Some(mut_ty) => mapper.map_mut_type(*mut_ty),
-                        None => MutType::constant(),
-                    };
-                    let ty = ty.map(&mut mapper);
-                    FnArgType::new(ty, mut_ty)
+                    if let Some(subst) = annotation_subst {
+                        FnArgType::new(ty.instantiate(subst), mut_ty.unwrap_or(MutType::constant()))
+                    } else {
+                        let mut mapper = FreshVariableTypeMapper::new(&mut ty_inf);
+                        let mut_ty = match mut_ty {
+                            Some(mut_ty) => mapper.map_mut_type(*mut_ty),
+                            None => MutType::constant(),
+                        };
+                        let ty = ty.map(&mut mapper);
+                        FnArgType::new(ty, mut_ty)
+                    }
                 } else {
                     ty_inf.fresh_fn_arg()
                 }
             })
             .collect();
         let ret_ty_ty = if let Some((ret_ty, _)) = ret_ty {
-            ret_ty.map(&mut FreshVariableTypeMapper::new(&mut ty_inf))
+            if let Some(subst) = annotation_subst {
+                ret_ty.instantiate(subst)
+            } else {
+                ret_ty.map(&mut FreshVariableTypeMapper::new(&mut ty_inf))
+            }
         } else {
             ty_inf.fresh_type_var_ty()
         };
@@ -504,7 +655,7 @@ where
                 format!("$lambda${}", lambda_id.as_index()).into(),
             );
             associated_lambdas
-                .entry(id)
+                .entry(*id)
                 .or_insert_with(Vec::new)
                 .push(lambda_id);
         });
@@ -583,14 +734,6 @@ where
             solver.commit(&mut output.functions, &mut output.def_table);
             Ok(())
         };
-    let substitute_in_function_descr = |ir_arena: &mut _, descr: &mut ModuleFunction, subst: &_| {
-        let root = descr.get_code_entry().unwrap();
-        ir::instantiate_node(ir_arena, root, subst);
-        for local in &mut descr.locals {
-            local.ty = local.ty.instantiate(subst);
-        }
-    };
-
     // Fourth pass: default orphan constraints and substitute types.
     if let Some(mut trait_output) = trait_output {
         // Default orphan constraints for the trait implementation into the unification tables.
@@ -639,6 +782,7 @@ where
 
         // Substitute everything using ty_inf (single pass, includes all defaults).
         substitute_and_canonicalize_functions(output, ir_arena, &mut ty_inf);
+        default_output_effects_in_functions(output, ir_arena, &associated_lambdas, &local_fns);
 
         // Resolve input and output types.
         trait_output.input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);

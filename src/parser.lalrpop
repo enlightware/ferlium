@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -61,27 +61,48 @@ ModuleTraitImpl: Module = {
 }
 
 TraitImpl: TraitImpl = {
-    <l:@L> "impl" <trait_name:Sp<UIdentifier>> "{" <functions:Function*> "}" <r:@R> => {
+    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "{" <functions:Function*> "}" <r:@R> => {
         TraitImpl {
+            generic_params: generic_params.unwrap_or_default(),
             trait_name,
-            for_tys: None,
+            for_trait: None,
             functions,
             span: span(l, r, source_id),
         }
     },
-    <l:@L> "impl" <trait_name:Sp<UIdentifier>> "for" <for_tys:TraitImplForType> "{" <functions:Function*> "}" <r:@R> => {
+    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "for" <for_trait:TraitImplForHeader> "{" <functions:Function*> "}" <r:@R> => {
         TraitImpl {
+            generic_params: generic_params.unwrap_or_default(),
             trait_name,
-            for_tys: Some(for_tys),
+            for_trait: Some(for_trait),
             functions,
             span: span(l, r, source_id),
         }
     },
 }
 
-TraitImplForType: Vec<TypeSpan> = {
-    "<" <tys:Sep<Sp<Type<"", "">>, ",">> ">" => tys,
-    <ty:Sp<Type<"", "">>> => vec![ty],
+TraitImplForHeader: TraitImplForHeader = {
+    <ty:Sp<Type<"", "">>> => {
+        let span = ty.1;
+        TraitImplForHeader {
+            input_types: vec![TypeConstraintInput { name: None, ty }],
+            output_types: vec![],
+            span,
+        }
+    },
+    <l:@L> "<" <tys:Sep1<Sp<Type<"", "">>, ",">> ">" <r:@R> => TraitImplForHeader {
+        input_types: tys
+            .into_iter()
+            .map(|ty| TypeConstraintInput { name: None, ty })
+            .collect(),
+        output_types: vec![],
+        span: span(l, r, source_id),
+    },
+    <l:@L> "<" <input_types:TypeConstraintNamedInputList> <output_types:TypeConstraintOutputSection?> ">" <r:@R> => TraitImplForHeader {
+        input_types,
+        output_types: output_types.unwrap_or_default(),
+        span: span(l, r, source_id),
+    },
 }
 
 ModuleFunction: Module = {
@@ -141,7 +162,11 @@ pub HoledType: Type = {
 // P: placeholder allowed, R: return type context
 Type<P, R>: Type = {
     PlaceholderType if P != "",
-    PathType,
+    NonPathType<P, R>,
+    PathType<P>,
+}
+
+NonPathType<P, R>: Type = {
     ArrayType<P>,
     SetType<P>,
     MapType<P>,
@@ -195,7 +220,8 @@ PlaceholderType: Type = {
     "_" => Type::Infer,
 }
 
-PathType: Type = {
+PathType<P>: Type = {
+    <p:Path> "<" <args:TypeArgList<P>> ">" => Type::path_with_args(p, args),
     <p:Path> => Type::Path(p),
 }
 
@@ -217,8 +243,7 @@ RecordType<P>: Type = {
 }
 
 RecordTypeFields<P>: Type = {
-    <f:RecordTypeField<P>> => Type::Record(vec![f]),
-    <f:RecordTypeField<P>> "," <r:Sep<RecordTypeField<P>, ",">> => Type::Record(ext_f(f, r)),
+    <fields:Sep1<RecordTypeField<P>, ",">> => Type::Record(fields),
 }
 
 RecordTypeField<P>: (UstrSpan, TypeSpan) = {
@@ -263,11 +288,12 @@ TypeAliasDefinition: TypeAlias = {
 }
 
 StructDefinition: TypeDef = {
-    <l:@L> <attributes:(Attribute)*> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <shape:StructBody> <r:@R> => {
+    <l:@L> <attributes:(Attribute)*> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> <shape:StructBody> <r:@R> => {
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
             shape,
+            where_clause: where_clause.unwrap_or_default(),
             attributes,
             span: span(l, r, source_id),
             doc_comments: vec![],
@@ -282,9 +308,7 @@ StructBody: Type = {
 }
 
 StructNamedFields: Vec<(UstrSpan, TypeSpan)> = {
-    <f:StructNamedField> => vec![f],
-    <f:StructNamedField> "," <r:StructNamedFields> => ext_f(f, r),
-    <f:StructNamedField> "," => vec![f], // trailing comma
+    Sep1<StructNamedField, ",">,
 }
 
 StructNamedField: (UstrSpan, TypeSpan) = {
@@ -292,28 +316,28 @@ StructNamedField: (UstrSpan, TypeSpan) = {
 }
 
 StructTupleFields: Vec<TypeSpan> = {
-    <t:Sp<DefinedType>> => vec![t],
-    <t:Sp<DefinedType>> "," <r:StructTupleFields> => ext_f(t, r),
-    <t:Sp<DefinedType>> "," => vec![t], // trailing comma
+    Sep1<Sp<DefinedType>, ",">,
 }
 
 EnumDefinition: TypeDef = {
-    <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" "}" <r:@R> => {
+    <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" "}" <r:@R> => {
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
             shape: Type::Never,
+            where_clause: where_clause.unwrap_or_default(),
             attributes,
             span: span(l, r, source_id),
             doc_comments: vec![],
         }
     },
-    <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> "{" <variants:EnumVariants> "}" <r:@R> => {
+    <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" <variants:EnumVariants> "}" <r:@R> => {
         let variant_ty = Type::Variant(variants);
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
             shape: variant_ty,
+            where_clause: where_clause.unwrap_or_default(),
             attributes,
             span: span(l, r, source_id),
             doc_comments: vec![],
@@ -337,9 +361,7 @@ AttrMetaList: Vec<MetaItem> = {
 }
 
 AttrMetaItems: Vec<MetaItem> = {
-    <item:AttrMetaItem> => vec![item],
-    <item:AttrMetaItem> "," <r:AttrMetaItems> => ext_f(item, r),
-    <item:AttrMetaItem> "," => vec![item], // trailing comma
+    Sep1<AttrMetaItem, ",">,
 }
 
 AttrMetaItem: MetaItem = {
@@ -352,9 +374,7 @@ AttrMetaItem: MetaItem = {
 }
 
 EnumVariants: Vec<(UstrSpan, TypeSpan)> = {
-    <v:EnumVariant> => vec![v],
-    <v:EnumVariant> "," <r:EnumVariants> => ext_f(v, r),
-    <v:EnumVariant> "," => vec![v], // trailing comma
+    Sep1<EnumVariant, ",">,
 }
 
 EnumVariant: (UstrSpan, TypeSpan) = {
@@ -382,9 +402,68 @@ GenericParams: Vec<UstrSpan> = {
 }
 
 GenericParamList: Vec<UstrSpan> = {
-    <p:Sp<UIdentifier>> => vec![p],
-    <p:Sp<UIdentifier>> "," <r:GenericParamList> => ext_f(p, r),
-    <p:Sp<UIdentifier>> "," => vec![p], // trailing comma
+    Sep1<Sp<UIdentifier>, ",">,
+}
+
+WhereClause: Vec<TypeConstraint> = {
+    "where" <first:TypeConstraint> <rest:("," <TypeConstraint>)*> => ext_f(first, rest),
+}
+
+TypeConstraint: TypeConstraint = {
+    <l:@L> <ty:TypeConstraintUnaryInput> ":" <trait_name:Path> <output_types:TypeConstraintOutputBindings?> <r:@R> => {
+        TypeConstraint {
+            trait_name,
+            input_types: vec![TypeConstraintInput { name: None, ty }],
+            output_types: output_types.unwrap_or_default(),
+            span: span(l, r, source_id),
+        }
+    },
+    <l:@L> <trait_name:Path> "<" <input_types:TypeConstraintNamedInputList> <output_types:TypeConstraintOutputSection?> ">" <r:@R> => {
+        TypeConstraint {
+            trait_name,
+            input_types,
+            output_types: output_types.unwrap_or_default(),
+            span: span(l, r, source_id),
+        }
+    },
+}
+
+TypeConstraintUnaryInput: TypeSpan = {
+    <ty:Sp<NonPathType<"", "">>> => ty,
+    <path:Sp<Path>> => (Type::Path(path.0), path.1),
+    <l:@L> <path:Path> "<" <args:TypeArgList<"">> ">" <r:@R> =>
+        (Type::path_with_args(path, args), span(l, r, source_id)),
+}
+
+TypeArgList<P>: Vec<TypeSpan> = {
+    Sep1<Sp<Type<P, "">>, ",">,
+}
+
+TypeConstraintOutputBindings: Vec<TypeConstraintOutput> = {
+    "<" <bindings:AssociatedTypeBindingList> ">" => bindings,
+}
+
+AssociatedTypeBinding: TypeConstraintOutput = {
+    <name:Sp<UIdentifier>> "=" <ty:Sp<Type<"", "">>> => TypeConstraintOutput { name, ty },
+}
+
+AssociatedTypeBindingList: Vec<TypeConstraintOutput> = {
+    Sep1<AssociatedTypeBinding, ",">,
+}
+
+TypeConstraintOutputSection: Vec<TypeConstraintOutput> = {
+    "|->" <bindings:AssociatedTypeBindingList> => bindings,
+}
+
+TypeConstraintNamedInputList: Vec<TypeConstraintInput> = {
+    Sep1<TypeConstraintNamedInput, ",">,
+}
+
+TypeConstraintNamedInput: TypeConstraintInput = {
+    <name:Sp<PathIdentifier<"">>> "=" <ty:Sp<Type<"", "">>> => TypeConstraintInput {
+        name: Some(name),
+        ty,
+    },
 }
 
 
@@ -471,7 +550,7 @@ CastExpr<NoStruct>: ExprKind = {
 // Cast target types: only allow simple, unambiguous types
 // For complex types like tuples or functions, use parentheses: (value as (A, B))
 CastTargetType: Type = {
-    PathType,
+    PlainPathType,
     CastTargetTypeParens,
     ArrayType<"">,
     RecordType<"">,
@@ -479,6 +558,10 @@ CastTargetType: Type = {
 
 CastTargetTypeParens: Type = {
     "(" <ty:DefinedType> ")" => ty
+}
+
+PlainPathType: Type = {
+    <p:Path> => Type::Path(p),
 }
 
 UnaryExpr<NoStruct> = {
@@ -684,8 +767,7 @@ RecordAbbrevField: (UstrSpan, PExprId) = {
 
 // Struct literals support both explicit and shorthand field syntax
 StructExprImpl: Vec<(UstrSpan, PExprId)> = {
-    "{" <f:StructField> "}" => vec![f],
-    "{" <f:StructField> "," <r:Sep<StructField, ",">> "}" => ext_f(f, r),
+    "{" <fields:Sep1<StructField, ",">> "}" => fields,
 }
 
 StructField: (UstrSpan, PExprId) = {
@@ -988,6 +1070,11 @@ Sep<T, S>: Vec<T> = {
             v
         }
     }
+};
+
+// Non-empty S-separated list of T, with optional trailing S
+Sep1<T, S>: Vec<T> = {
+    <first:T> <rest:(S <T>)*> <_trailing:S?> => ext_f(first, rest)
 };
 
 // A tier of expression, for a binary operation, left-associative

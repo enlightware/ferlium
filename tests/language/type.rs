@@ -569,6 +569,7 @@ fn trait_impl_for_specified() {
     assert_eq!(
         session.run(indoc! { r#"
             struct S(string)
+            struct Wrapper<T>(T)
             impl Ord for S {
                 fn cmp(self, other: S) {
                     cmp(len(self.0), len(other.0))
@@ -579,9 +580,17 @@ fn trait_impl_for_specified() {
                     S(f"hello {self}")
                 }
             }
-            ((1: int) as S).0
+            impl<T> Cast for <From = T, To = Wrapper<T>> {
+                fn cast(self) -> Wrapper<T> {
+                    Wrapper(self)
+                }
+            }
+            let left = ((1: int) as S).0;
+            let wrapped: Wrapper<int> = cast(2);
+            let right = wrapped.0;
+            f"{left} / {right}"
         "# }),
-        string("hello 1")
+        string("hello 1 / 2")
     );
 }
 

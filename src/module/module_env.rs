@@ -25,18 +25,15 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum TypeDefLookupResult {
-    Enum(TypeDefRef, Ustr, Type),
+    Enum(TypeDefRef, Ustr),
     Struct(TypeDefRef),
 }
 impl TypeDefLookupResult {
-    pub fn lookup_payload(&self) -> (TypeDefRef, Type, Option<Ustr>) {
+    pub fn lookup_payload(&self) -> (TypeDefRef, Option<Ustr>) {
         use TypeDefLookupResult::*;
         match self {
-            Enum(type_def, tag, variant_ty) => (type_def.clone(), *variant_ty, Some(*tag)),
-            Struct(type_def) => {
-                let payload_ty = type_def.shape;
-                (type_def.clone(), payload_ty, None)
-            }
+            Enum(type_def, tag) => (type_def.clone(), Some(*tag)),
+            Struct(type_def) => (type_def.clone(), None),
         }
     }
 }
@@ -114,6 +111,15 @@ impl<'m> ModuleEnv<'m> {
         })
     }
 
+    pub fn type_def_with_module(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<(Option<ModuleId>, TypeDefRef)>, InternalCompilationError> {
+        self.get_module_member(&path.segments, &|name, module| {
+            module.get_type_def(ustr(name)).cloned()
+        })
+    }
+
     pub fn type_def_for_construction(
         &self,
         path: &ast::Path,
@@ -130,11 +136,11 @@ impl<'m> ModuleEnv<'m> {
                 })?
             {
                 if ty_def.is_enum() {
-                    let ty_data = ty_def.shape.data();
+                    let ty_data = ty_def.shape_ty().data();
                     let variants = ty_data.as_variant().unwrap();
                     let variant = variants.iter().find(|(name, _)| *name == variant_name);
-                    if let Some((tag, ty)) = variant {
-                        let td = TypeDefLookupResult::Enum(ty_def.clone(), *tag, *ty);
+                    if let Some((tag, _)) = variant {
+                        let td = TypeDefLookupResult::Enum(ty_def.clone(), *tag);
                         return Ok(Some((module_id, td)));
                     }
                 }
@@ -160,10 +166,8 @@ impl<'m> ModuleEnv<'m> {
         path: &ast::Path,
     ) -> Result<Option<Type>, InternalCompilationError> {
         Ok(self
-            .get_module_member(&path.segments, &|name, module| {
-                module.get_type_def(ustr(name))
-            })?
-            .map(|(_, ty_def)| ty_def.as_type()))
+            .type_def_with_module(path)?
+            .and_then(|(_, type_def)| type_def.param_names.is_empty().then(|| type_def.as_type())))
     }
 
     /// Like [`type_def_type`], but also returns the source [`ModuleId`] when the type
@@ -173,10 +177,13 @@ impl<'m> ModuleEnv<'m> {
         path: &ast::Path,
     ) -> Result<Option<(Option<ModuleId>, Type)>, InternalCompilationError> {
         Ok(self
-            .get_module_member(&path.segments, &|name, module| {
-                module.get_type_def(ustr(name))
-            })?
-            .map(|(module_id, ty_def)| (module_id, ty_def.as_type())))
+            .type_def_with_module(path)?
+            .and_then(|(module_id, type_def)| {
+                type_def
+                    .param_names
+                    .is_empty()
+                    .then(|| (module_id, type_def.as_type()))
+            }))
     }
 
     /// Get a function from the current module, or other ones, return the ID of the module if other.
@@ -201,16 +208,23 @@ impl<'m> ModuleEnv<'m> {
         name: UstrSpan,
     ) -> Result<Option<TraitRef>, InternalCompilationError> {
         Ok(self
-            .get_module_member(&[name], &|name, module| {
-                module.trait_iter().find_map(|trait_ref| {
-                    if trait_ref.name == name {
-                        Some(trait_ref.clone())
-                    } else {
-                        None
-                    }
-                })
-            })?
-            .map(|(_, t)| t))
+            .trait_ref_with_module(&ast::Path::single_tuple(name))?
+            .map(|(_, trait_ref)| trait_ref))
+    }
+
+    pub fn trait_ref_with_module(
+        &'m self,
+        path: &'m ast::Path,
+    ) -> Result<Option<(Option<ModuleId>, TraitRef)>, InternalCompilationError> {
+        self.get_module_member(&path.segments, &|name, module| {
+            module.trait_iter().find_map(|trait_ref| {
+                if trait_ref.name == name {
+                    Some(trait_ref.clone())
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     /// Get a trait function from the current module, or other ones, return the ID of the module if other.
@@ -237,10 +251,10 @@ impl<'m> ModuleEnv<'m> {
     }
 
     /// Get a member of a module, by first looking in the current module, and then in others, considering the path.
-    fn get_module_member<T>(
-        &'m self,
-        segments: &'m [UstrSpan],
-        getter: &impl Fn(/*name*/ &'m str, /*current*/ &'m Module) -> Option<T>,
+    fn get_module_member<'a, T>(
+        &'a self,
+        segments: &'a [UstrSpan],
+        getter: &impl Fn(/*name*/ &'a str, /*current*/ &'a Module) -> Option<T>,
     ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
         // If the name is not qualified, look in the current module.
         if let [(name, _)] = segments {

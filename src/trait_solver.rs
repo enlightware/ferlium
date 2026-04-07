@@ -259,15 +259,12 @@ impl<'a> TraitSolver<'a> {
         if trait_ref == &*REPR_TRAIT {
             let input_ty = input_tys[0];
             let ty_data = input_ty.data();
-            let output_ty = if let Some(named) = ty_data.as_named() {
-                if !named.params.is_empty() {
-                    todo!("Repr trait for named types with arguments is not supported yet");
-                }
-                named.def.shape
+            let output_ty = if ty_data.is_named() {
+                let named = ty_data.as_named().unwrap().clone();
+                named.instantiated_shape()
             } else {
                 input_ty
             };
-            drop(ty_data); // avoid borrow issues
 
             // Only search in current module, create a new implementation if not found.
             let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());

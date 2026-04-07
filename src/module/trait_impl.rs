@@ -630,23 +630,32 @@ fn format_impl_header_expanded(
         }
         write!(f, ">")?;
     }
-    write!(f, " {} for <", trait_ref.name)?;
-    write_with_separator_and_format_fn(
-        input_tys.iter().zip(trait_ref.input_type_names.iter()),
-        ", ",
-        |(ty, name), f| write!(f, "{} = {}", name, ty.format_with(env)),
-        f,
-    )?;
-    if !output_tys.is_empty() {
-        write!(f, " ↦ ")?;
+    if input_tys.len() == 1 && output_tys.is_empty() {
+        write!(
+            f,
+            " {} for {}",
+            trait_ref.name,
+            input_tys[0].format_with(env)
+        )?;
+    } else {
+        write!(f, " {} for <", trait_ref.name)?;
         write_with_separator_and_format_fn(
-            output_tys.iter().zip(trait_ref.output_type_names.iter()),
+            input_tys.iter().zip(trait_ref.input_type_names.iter()),
             ", ",
             |(ty, name), f| write!(f, "{} = {}", name, ty.format_with(env)),
             f,
         )?;
+        if !output_tys.is_empty() {
+            write!(f, " |-> ")?;
+            write_with_separator_and_format_fn(
+                output_tys.iter().zip(trait_ref.output_type_names.iter()),
+                ", ",
+                |(ty, name), f| write!(f, "{} = {}", name, ty.format_with(env)),
+                f,
+            )?;
+        }
+        write!(f, ">")?;
     }
-    write!(f, ">")?;
     let mut subst = TypeSubstitution::default();
     for (i, ty) in input_tys.iter().enumerate() {
         subst.insert(TypeVar::new(i as u32), *ty);

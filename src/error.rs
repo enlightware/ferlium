@@ -14,6 +14,7 @@ use std::{
 
 use crate::{
     ast,
+    containers::iterable_to_string,
     format::FormatWith,
     location::{Location, SourceTable},
     r#trait::TraitRef,
@@ -114,6 +115,48 @@ impl WhatIsNotAProductType {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidTraitConstraintKind {
+    UnknownInputBinding { name: Ustr },
+    DuplicateInputBinding { name: Ustr },
+    MissingInputBindings { names: Vec<Ustr> },
+    UnknownOutputBinding { name: Ustr },
+    DuplicateOutputBinding { name: Ustr },
+    MissingOutputBindings { names: Vec<Ustr> },
+    ExpectedNamedInputs { expected_count: usize },
+}
+
+impl InvalidTraitConstraintKind {
+    pub fn message(&self, trait_name: &str) -> String {
+        use InvalidTraitConstraintKind::*;
+        match self {
+            UnknownInputBinding { name } => {
+                format!("Unknown input type parameter `{name}` for trait `{trait_name}`")
+            }
+            DuplicateInputBinding { name } => {
+                format!("Duplicate input type parameter `{name}` for trait `{trait_name}`")
+            }
+            MissingInputBindings { names } => format!(
+                "Missing input type parameters {} for trait `{trait_name}`",
+                iterable_to_string(names, ", ")
+            ),
+            UnknownOutputBinding { name } => {
+                format!("Unknown output type parameter `{name}` for trait `{trait_name}`")
+            }
+            DuplicateOutputBinding { name } => {
+                format!("Duplicate output type parameter `{name}` for trait `{trait_name}`")
+            }
+            MissingOutputBindings { names } => format!(
+                "Missing output type parameters {} for trait `{trait_name}`",
+                iterable_to_string(names, ", ")
+            ),
+            ExpectedNamedInputs { expected_count } => format!(
+                "Trait `{trait_name}` expects {expected_count} named input type parameters in this constraint"
+            ),
+        }
+    }
+}
+
 /// A scope of error messages, either internal within the compiler, or external for users.
 pub trait Scope: Sized {
     type Type: Debug + Clone;
@@ -188,6 +231,11 @@ pub enum CompilationErrorImpl<S: Scope> {
     ImportNotFound(ImportSite),
     TypeNotFound(Location),
     TraitNotFound(Location),
+    InvalidTraitConstraint {
+        trait_name: String,
+        kind: InvalidTraitConstraintKind,
+        span: Location,
+    },
     WrongNumberOfArguments {
         expected: usize,
         expected_span: Location,
@@ -539,6 +587,13 @@ impl FormatWith<SourceTable> for CompilationError {
             }
             TraitNotFound(span) => {
                 write!(f, "Cannot find trait {} in this scope", fmt_span(span))
+            }
+            InvalidTraitConstraint {
+                trait_name,
+                kind,
+                span,
+            } => {
+                write!(f, "{} in {}", kind.message(trait_name), fmt_span(span))
             }
             WrongNumberOfArguments {
                 expected,
@@ -1113,6 +1168,15 @@ impl CompilationError {
             }
             TypeNotFound(span) => compilation_error!(TypeNotFound(span)),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
+            InvalidTraitConstraint {
+                trait_name,
+                kind,
+                span,
+            } => compilation_error!(InvalidTraitConstraint {
+                trait_name,
+                kind,
+                span,
+            }),
             WrongNumberOfArguments {
                 expected,
                 expected_span,

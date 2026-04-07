@@ -8,13 +8,12 @@
     blockCommentRest { ![*] blockCommentRest | "*" blockCommentAfterStar }
     blockCommentAfterStar { "/" | "*" blockCommentAfterStar | ![/*] blockCommentRest }
     whitespace { @whitespace+ }
-    CompareOp { "==" | "!="| ">"| ">="| "<" | "<=" }
     AssignOp { "="  }
     UpdateOp { "+=" | "-=" | "*=" | "/="  }
 
     "[" "]" "{" "}" "(" ")"
     ";" ":" "::" ","
-    "=>" ".." "|>" "*"
+    "=>" ".." "|>" "|->" "*"
 
     @precedence { LineComment, BlockComment, "/" }
     @precedence { Boolean, String, Identifier }
@@ -22,7 +21,9 @@
 
 @precedence {
     noStruct,
-    structLiteral
+    structLiteral,
+    plainPathType,
+    appliedPathType
 }
 
 kw<term> { @specialize[@name={term}]<Identifier, term> }
@@ -49,12 +50,13 @@ Function {
 }
 
 TraitImpl {
-    kw<'impl'> Identifier (kw<'for'> traitImplForType)? '{' Function* '}'
+    kw<'impl'> GenericParams? Identifier (kw<'for'> traitImplForType)? '{' Function* '}'
 }
 
 traitImplForType {
     TypeNoRecordVariant
     | '<' (TypeNoRecordVariant ',')* TypeNoRecordVariant? '>'
+    | '<' namedConstraintInputList constraintOutputSection? '>'
 }
 
 TypeDef {
@@ -76,7 +78,7 @@ UseTree {
 }
 
 StructDef {
-    kw<'struct'> TypeName { Identifier } TypeArgs? structBody
+    kw<'struct'> TypeName { Identifier } GenericParams? whereClause? structBody
 }
 
 structBody {
@@ -85,12 +87,12 @@ structBody {
     | ';' // empty struct
 }
 
-TypeArgs {
+GenericParams {
     '<' Identifier (',' Identifier)* '>'
 }
 
 EnumDef {
-    kw<'enum'> TypeName { Identifier } TypeArgs? '{' (enumVariant ',')* enumVariant? '}'
+    kw<'enum'> TypeName { Identifier } GenericParams? whereClause? '{' (enumVariant ',')* enumVariant? '}'
 }
 
 enumVariant {
@@ -101,7 +103,7 @@ enumVariant {
 
 TypeAllowRecordVariant {
     placeholderType
-    | Path
+    | PathType
     | arrayType
     | recordType
     | variantTypeAllowRecord
@@ -110,7 +112,7 @@ TypeAllowRecordVariant {
 
 TypeNoRecordVariant {
     placeholderType
-    | Path
+    | PathType
     | arrayType
     | recordType
     | variantTypeNoRecord
@@ -118,11 +120,20 @@ TypeNoRecordVariant {
 }
 
 AliasType {
-    Path
+    PathType
     | arrayType
     | recordType
     | variantTypeAllowRecord
     | tupleOrFnTypeAllowRecord
+}
+
+PathType {
+    Path !plainPathType
+    | Path typeArgList !appliedPathType
+}
+
+typeArgList {
+    '<' TypeNoRecordVariant (',' TypeNoRecordVariant)* '>'
 }
 
 tupleOrFnTypeAllowRecord {
@@ -211,6 +222,35 @@ variantTypeRecord {
     Identifier recordType
 }
 
+whereClause {
+    kw<'where'> traitConstraint (',' traitConstraint)*
+}
+
+traitConstraint {
+    TypeNoRecordVariant ':' Path associatedTypeBindings?
+    | Path '<' namedConstraintInputList constraintOutputSection? '>'
+}
+
+associatedTypeBindings {
+    '<' associatedTypeBinding (',' associatedTypeBinding)* '>'
+}
+
+associatedTypeBinding {
+    Identifier '=' TypeNoRecordVariant
+}
+
+constraintOutputSection {
+    '|->' associatedTypeBinding (',' associatedTypeBinding)*
+}
+
+namedConstraintInputList {
+    namedConstraintInput (',' namedConstraintInput)*
+}
+
+namedConstraintInput {
+    Identifier '=' TypeNoRecordVariant
+}
+
 TypeAscription {
     TypeOp { ':' } TypeAllowRecordVariant
 }
@@ -274,7 +314,7 @@ logicAndExpr {
 
 compExpr {
     addExpr
-    | compExpr CompareOp addExpr
+    | compExpr CompareOp { "==" | "!=" | ">" | ">=" | "<" | "<=" } addExpr
 }
 
 addExpr {
@@ -293,7 +333,7 @@ castExpr {
 }
 
 CastTargetType {
-    Path
+    PathType
     | '(' TypeAllowRecordVariant ')'
     | arrayType
     | recordType
