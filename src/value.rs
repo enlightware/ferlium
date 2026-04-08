@@ -339,6 +339,7 @@ impl Value {
             Variant(types) => {
                 let variant = self.as_variant().unwrap();
                 let inner_ty = types.iter().find(|(tag, _)| *tag == variant.tag).unwrap().1;
+                drop(ty_data);
                 if variant.value.is_tuple() {
                     write!(
                         f,
@@ -358,6 +359,8 @@ impl Value {
                 }
             }
             Tuple(tuple) => {
+                let tuple = tuple.clone();
+                drop(ty_data);
                 let data = self.as_tuple().unwrap();
                 write!(f, "(")?;
                 write_with_separator(
@@ -370,6 +373,8 @@ impl Value {
                 write!(f, ")")
             }
             Record(fields) => {
+                let fields = fields.clone();
+                drop(ty_data);
                 let data = self.as_tuple().unwrap();
                 write!(f, "{{ ")?;
                 write_with_separator(

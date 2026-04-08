@@ -9,6 +9,7 @@
 
 use ustr::ustr;
 
+use ferlium::eval::eval_node;
 use ferlium::value::Value;
 use test_log::test;
 
@@ -108,4 +109,29 @@ fn never_in_if_branches_after_value_branch() {
         "# }),
         int(1)
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn pretty_print_unknown_variant_with_named_payload_does_not_crash() {
+    let mut session = TestSession::new();
+    let module_and_expr =
+        session.compile("[1, 2, 3] |> iter() |> map(|x| x as float) |> collect()");
+    let expr = module_and_expr
+        .expr
+        .expect("expected an expression for the pretty-print regression");
+    let module = session
+        .session()
+        .expect_fresh_module(module_and_expr.module_id);
+    let value = eval_node(
+        &module.ir_arena,
+        expr.expr,
+        module_and_expr.module_id,
+        &expr.locals,
+        session.session(),
+    )
+    .unwrap()
+    .into_value();
+    let formatted = value.display_pretty(&expr.ty.ty).to_string();
+    assert!(formatted.starts_with("collect (MapIterator { "));
 }
