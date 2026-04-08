@@ -385,7 +385,6 @@ impl PTypeDef {
             }
             ty_quantifiers.push(ty_var);
         }
-        assert!(self.doc_comments.is_empty());
         let shape = self.shape.desugar_with_ty_params(
             self.span,
             true,

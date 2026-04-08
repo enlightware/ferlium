@@ -288,7 +288,7 @@ TypeAliasDefinition: TypeAlias = {
 }
 
 StructDefinition: TypeDef = {
-    <l:@L> <attributes:(Attribute)*> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> <shape:StructBody> <r:@R> => {
+    <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> <shape:StructBody> <r:@R> => {
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
@@ -296,7 +296,7 @@ StructDefinition: TypeDef = {
             where_clause: where_clause.unwrap_or_default(),
             attributes,
             span: span(l, r, source_id),
-            doc_comments: vec![],
+            doc_comments: parse_doc_comments(doc).into_iter().collect(),
         }
     }
 }
@@ -320,7 +320,7 @@ StructTupleFields: Vec<TypeSpan> = {
 }
 
 EnumDefinition: TypeDef = {
-    <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" "}" <r:@R> => {
         TypeDef {
             name,
             generic_params: generics.unwrap_or_default(),
@@ -328,10 +328,10 @@ EnumDefinition: TypeDef = {
             where_clause: where_clause.unwrap_or_default(),
             attributes,
             span: span(l, r, source_id),
-            doc_comments: vec![],
+            doc_comments: parse_doc_comments(doc).into_iter().collect(),
         }
     },
-    <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" <variants:EnumVariants> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" <variants:EnumVariants> "}" <r:@R> => {
         let variant_ty = Type::Variant(variants);
         TypeDef {
             name,
@@ -340,7 +340,7 @@ EnumDefinition: TypeDef = {
             where_clause: where_clause.unwrap_or_default(),
             attributes,
             span: span(l, r, source_id),
-            doc_comments: vec![],
+            doc_comments: parse_doc_comments(doc).into_iter().collect(),
         }
     }
 }

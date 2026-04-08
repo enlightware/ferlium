@@ -707,6 +707,31 @@ fn parse_generic_type_use_sites() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_doc_commented_type_definitions() {
+    let module = parse_module_ast(indoc! { r#"
+        /// An optional value.
+        enum Option<T> {
+            Some(T),
+            None,
+        }
+
+        /// Stores one value.
+        struct Box<T>(T)
+    "# });
+
+    assert_eq!(module.type_defs.len(), 2);
+    assert_eq!(
+        module.type_defs[0].doc_comments,
+        vec!["An optional value.".to_string()]
+    );
+    assert_eq!(
+        module.type_defs[1].doc_comments,
+        vec!["Stores one value.".to_string()]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn parse_generic_types_in_function_signatures() {
     let module = parse_module_ast(indoc! { r#"
         fn demo(value: Option<string>) -> Pair<int, string> {
