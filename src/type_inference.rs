@@ -56,7 +56,7 @@ use crate::{
     std::{array::array_type, math::int_type},
     r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
     type_scheme::PubTypeConstraint,
-    typing_env::TypingEnv,
+    typing_env::{LoopFrame, TypingEnv},
     value::Value,
 };
 
@@ -424,6 +424,7 @@ impl TypeInference {
             env.new_type_deps,
             env.module_env,
             Some((ret_ty, env.ast_arena[body].span)),
+            vec![],
             env.lambda_functions,
             env.base_local_function_index,
             env.ast_arena,
@@ -1090,19 +1091,34 @@ impl TypeInference {
                 unreachable!("this cannot happen as payload is never")
             }
             Loop(body) => {
+                let result_ty = self.fresh_type_var();
+                env.loop_frames.push(LoopFrame::new(result_ty, false));
                 let body_id =
                     self.check_expr(env, *body, Type::unit(), MutType::constant(), sp(*body))?;
+                let loop_frame = env.loop_frames.pop().unwrap();
                 let effects = env.ir_arena[body_id].effects.clone();
-                // FIXME: The type of the loop actually depends on whether there is a soft break inside
-                // If so, the type should be unit, otherwise it should be never.
-                (K::Loop(body_id), Type::unit(), MutType::constant(), effects)
+                let ty = if loop_frame.saw_break {
+                    Type::variable(loop_frame.result_ty)
+                } else {
+                    Type::never()
+                };
+                (K::Loop(body_id), ty, MutType::constant(), effects)
             }
-            SoftBreak => (
-                K::SoftBreak,
-                Type::unit(),
-                MutType::constant(),
-                no_effects(),
-            ),
+            SoftBreak => {
+                let ty = if let Some(loop_frame) = env.loop_frames.last_mut() {
+                    loop_frame.saw_break = true;
+                    self.add_same_type_constraint(
+                        Type::variable(loop_frame.result_ty),
+                        expr_span,
+                        Type::unit(),
+                        expr_span,
+                    );
+                    Type::never()
+                } else {
+                    Type::unit()
+                };
+                (K::SoftBreak, ty, MutType::constant(), no_effects())
+            }
             PropertyPath(data) => {
                 let fn_path = property_to_fn_path(
                     &data.path,

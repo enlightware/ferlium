@@ -21,7 +21,7 @@ use crate::{
     },
     std::STD_MODULE_ID,
     r#trait::TraitRef,
-    r#type::Type,
+    r#type::{Type, TypeVar},
 };
 
 use derive_new::new;
@@ -65,6 +65,13 @@ pub type TraitFunctionDescription<'a> = (TraitRef, usize, &'a FunctionDefinition
 
 pub type GetFunctionData<'a> = (&'a FunctionDefinition, FunctionId, Option<ModuleId>);
 
+#[derive(Debug, new)]
+pub struct LoopFrame {
+    pub(crate) result_ty: TypeVar,
+    pub(crate) saw_break: bool,
+    // pub(crate) label: Option<Ustr>,
+}
+
 /// A typing environment, mapping local variable names to types.
 #[derive(new)]
 #[allow(clippy::too_many_arguments)]
@@ -82,6 +89,8 @@ pub struct TypingEnv<'m> {
     pub(crate) module_env: ModuleEnv<'m>,
     /// The expected return type of the enclosing function (for type-checking `return` statements).
     pub(crate) expected_return_ty: Option<(Type, Location)>,
+    /// The active loop frames, used for type-checking `soft_break`.
+    pub(crate) loop_frames: Vec<LoopFrame>,
     /// Newly-created module functions from lambdas
     pub(crate) lambda_functions: &'m mut Vec<ModuleFunction>,
     /// The next index for a new module function created from a lambda

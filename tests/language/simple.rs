@@ -1611,6 +1611,18 @@ fn never_type() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn loop_types() {
+    let mut session = TestSession::new();
+
+    let expr = session.compile_unstable_expr("loop {}");
+    assert_eq!(expr.ty.ty, Type::never());
+
+    let expr = session.compile_unstable_expr("loop { soft_break }");
+    assert_eq!(expr.ty.ty, Type::unit());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_creation() {
     let mut session = TestSession::new();
     session.fail_compilation("[]").expect_unbound_ty_var();
