@@ -1451,6 +1451,35 @@ fn compiled_impl_headers_use_source_syntax() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compiled_type_defs_include_doc_comments() {
+    let mut session = TestSession::new();
+
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            /// An optional value.
+            enum Option<T> {
+                Some(T),
+                None,
+            }
+
+            /// Stores one value.
+            struct Box<T>(T)
+        "# },
+    );
+
+    assert!(
+        rendered.contains("/// An optional value.\nenum Option<T>"),
+        "expected enum doc comments in module formatting, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("/// Stores one value.\nstruct Box<T>"),
+        "expected struct doc comments in module formatting, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn pretty_print_user_defined_generic_enum_values() {
     let mut session = TestSession::new();
     let src = join_src(&[

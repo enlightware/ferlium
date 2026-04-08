@@ -703,6 +703,8 @@ impl TypeAliases {
 pub struct TypeDef {
     /// The name of the type
     pub name: Ustr,
+    /// Optional documentation for the type.
+    pub doc: Option<String>,
     /// The names of the generic parameters of this type, if any
     pub param_names: Vec<Ustr>,
     /// The inner type data, possibly with generic arguments
@@ -801,6 +803,11 @@ impl TypeDef {
     }
 
     pub fn format_details(&self, env: &ModuleEnv<'_>, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(doc) = &self.doc {
+            for line in doc.split('\n') {
+                writeln!(f, "/// {line}")?;
+            }
+        }
         if self.is_struct_like() {
             write!(f, "struct")?;
         } else {

@@ -401,6 +401,7 @@ impl PTypeDef {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(TypeDefRef::new(crate::r#type::TypeDef {
             name: self.name.0,
+            doc: (!self.doc_comments.is_empty()).then(|| self.doc_comments.join("\n")),
             param_names: self.generic_params.iter().map(|(name, _)| *name).collect(),
             shape: TypeScheme {
                 ty_quantifiers,

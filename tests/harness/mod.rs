@@ -82,6 +82,7 @@ fn test_iterator_trait() -> TraitRef {
 fn option_type_def() -> TypeDefRef {
     TypeDefRef::new(TypeDef {
         name: ustr("Option"),
+        doc: None,
         param_names: vec![ustr("T")],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0)],
@@ -100,6 +101,7 @@ fn option_type_def() -> TypeDefRef {
 fn map_iterator_type_def(test_iterator_trait: TraitRef) -> TypeDefRef {
     TypeDefRef::new(TypeDef {
         name: ustr("MapIterator"),
+        doc: None,
         param_names: vec![ustr("I"), ustr("T"), ustr("O")],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0), TypeVar::new(1), TypeVar::new(2)],
@@ -126,6 +128,7 @@ fn map_iterator_type_def(test_iterator_trait: TraitRef) -> TypeDefRef {
 fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDefRef {
     TypeDefRef::new(TypeDef {
         name: ustr("Witnessed"),
+        doc: None,
         param_names: vec![ustr("Input"), ustr("Output")],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0), TypeVar::new(1)],
