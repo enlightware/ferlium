@@ -391,6 +391,12 @@ fn reducing_fns() {
         session.run("[0, 1, 3] |> iter() |> position(|x| x < 0)"),
         none()
     );
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> iter() |> filter(|x| x > 0); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(2)), none())
+    );
     assert_eq!(session.run("[3, 1, 2] |> iter() |> minimum()"), int(1));
     assert_eq!(
         session.run("[3.0, 1.0, 2.0] |> iter() |> minimum()"),

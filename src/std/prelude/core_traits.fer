@@ -264,7 +264,7 @@ fn position(seq, predicate) -> None | Some(int) {
 	None
 }
 
-// Iterators
+// Iterator adaptors
 
 /// An iterator that maps a function over another iterator.
 struct MapIterator<I, T, O>
@@ -283,8 +283,37 @@ impl Iterator for MapIterator<I, T, O> {
     }
 }
 
+/// Creates an iterator which calls a function on each element yielded by the provided iterator.
 fn map(iterator, mapper) {
 	MapIterator { iterator, mapper }
+}
+
+/// An iterator that filters another iterator with a predicate.
+struct FilterIterator<I, T>
+    where I: Iterator<Item = T>
+{
+    iterator: I,
+    filter: (T) -> bool,
+}
+
+impl Iterator for FilterIterator<I, T> {
+    fn next(it: &mut FilterIterator<I, T>) -> None | Some(T) {
+        loop {
+            match next(it.iterator) {
+                Some(data) => if it.filter(data) {
+                    return Some(data)
+                } else {
+                    // filter data out
+                },
+                None => return None
+            }
+        }
+    }
+}
+
+/// Creates an iterator which calls a function to decide which element yielded by the provided iterator should be kept.
+fn filter(iterator, filter) {
+    FilterIterator { iterator, filter }
 }
 
 // Compatibility, mark as deprecated when supported
