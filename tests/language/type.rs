@@ -609,6 +609,26 @@ fn trait_impl_orphan_rule() {
         CompilationErrorImpl::TraitImplOrphanRuleViolation { .. } => {}
         other => panic!("expected TraitImplOrphanRuleViolation, got {other:?}"),
     }
+
+    session
+        .try_compile_module("a", "struct ForeignCounter(int)")
+        .unwrap();
+    let err = session
+        .try_compile_module(
+            "b",
+            indoc! { r#"
+                impl SizedSeq for a::ForeignCounter {
+                    fn len(counter: a::ForeignCounter) {
+                        counter.0
+                    }
+                }
+            "# },
+        )
+        .expect_err("expected orphan rule violation for foreign named type");
+    match err.into_inner() {
+        CompilationErrorImpl::TraitImplOrphanRuleViolation { .. } => {}
+        other => panic!("expected TraitImplOrphanRuleViolation, got {other:?}"),
+    }
 }
 
 #[test]
