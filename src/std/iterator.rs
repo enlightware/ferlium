@@ -7,16 +7,14 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    containers::b,
     effects::EffType,
-    function::{BinaryNativeFnVVV, FunctionDefinition},
+    function::FunctionDefinition,
     location::InstantiableLocation,
-    module::{BlanketTraitImplSubKey, Module},
+    module::Module,
     std::{math::int_type, option::option_type},
     r#trait::TraitRef,
     r#type::{FnType, Type},
     type_scheme::PubTypeConstraint,
-    value::Value,
 };
 
 pub const ITERATOR_TRAIT_NAME: &str = "Iterator";
@@ -108,29 +106,6 @@ pub fn add_to_module(to: &mut Module) {
         )],
     );
     to.add_trait(sized_seq_trait);
-
-    // Implementation of Seq trait for Iterator
-    // TODO: implement in Ferlium itself once we have constraint parsing in blanket implementations.
-    to.add_blanket_impl_no_locals(
-        seq_trait,
-        BlanketTraitImplSubKey {
-            input_tys: vec![Type::variable_id(0)],
-            ty_var_count: 2,
-            constraints: vec![PubTypeConstraint::HaveTrait {
-                trait_ref: iterator_trait,
-                input_tys: vec![Type::variable_id(0)],
-                output_tys: vec![Type::variable_id(1)],
-                span: InstantiableLocation::new_synthesized(),
-            }],
-        },
-        vec![Type::variable_id(1), Type::variable_id(0)],
-        vec![
-            // As we have one HaveTrait constraint, we need to add one extra argument
-            // for the constraint dictionary, even if it is not used.
-            b(BinaryNativeFnVVV::new(|_dict: Value, v: Value| v))
-                as Box<dyn crate::function::Callable>,
-        ],
-    );
 
     // Trait implementations are in the prelude.
 }

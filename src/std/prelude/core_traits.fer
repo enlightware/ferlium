@@ -269,6 +269,12 @@ fn position(seq, predicate) -> None | Some(int) {
 
 // Iterator adaptors
 
+impl<I, T> Seq for <Self = I |-> Item = T, Iter = I> {
+    fn iter(seq: I) -> I {
+        seq
+    }
+}
+
 /// An iterator that maps a function over another iterator.
 struct MapIterator<I, T, O>
 	where I: Iterator<Item = T>
