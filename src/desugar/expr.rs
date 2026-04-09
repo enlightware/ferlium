@@ -1,3 +1,4 @@
+use super::format_string::emit_format_string_ast;
 use super::patterns::{desugar_block_exprs, desugar_let_exprs};
 use super::*;
 

@@ -33,7 +33,6 @@ pub mod error;
 mod escapes;
 pub mod eval;
 pub mod format;
-mod format_string;
 pub mod function;
 mod graph;
 pub mod ide;

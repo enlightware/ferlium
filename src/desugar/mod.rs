@@ -29,7 +29,6 @@ use crate::{
         DuplicatedFieldContext, DuplicatedVariantContext, InternalCompilationError,
         InvalidTraitConstraintKind, WhatIsNotAProductType, WhichProductTypeIsNot,
     },
-    format_string::emit_format_string_ast,
     graph::{find_strongly_connected_components, topological_sort_sccs},
     import_resolver::{ModulesResolver, resolve_imports},
     internal_compilation_error,
@@ -121,6 +120,7 @@ fn new_desugared_arena_sized_from_parsed_arena(parsed_arena: &PExprArena) -> DEx
 }
 
 mod expr;
+mod format_string;
 mod module;
 mod patterns;
 mod types;
