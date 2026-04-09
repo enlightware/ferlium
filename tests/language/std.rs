@@ -388,18 +388,12 @@ fn reducing_fns() {
     assert_eq!(session.run("[2, 5] |> iter() |> sum()"), int(7));
     assert_eq!(session.run("[2.5, 5] |> sum()"), float(7.5));
     assert_eq!(session.run("[2.5, 5] |> iter() |> sum()"), float(7.5));
-    assert_eq!(
-        session.run("[0, 1, 3] |> find(|x| x > 1)"),
-        some(int(3))
-    );
+    assert_eq!(session.run("[0, 1, 3] |> find(|x| x > 1)"), some(int(3)));
     assert_eq!(
         session.run("[0, 1, 3] |> iter() |> find(|x| x > 1)"),
         some(int(3))
     );
-    assert_eq!(
-        session.run("[0, 1, 3] |> find(|x| x < 0)"),
-        none()
-    );
+    assert_eq!(session.run("[0, 1, 3] |> find(|x| x < 0)"), none());
     assert_eq!(
         session.run("[0, 1, 3] |> iter() |> find(|x| x < 0)"),
         none()
@@ -412,10 +406,7 @@ fn reducing_fns() {
         session.run("[0, 1, 3] |> iter() |> position(|x| x > 1)"),
         some(int(2))
     );
-    assert_eq!(
-        session.run("[0, 1, 3] |> position(|x| x < 0)"),
-        none()
-    );
+    assert_eq!(session.run("[0, 1, 3] |> position(|x| x < 0)"), none());
     assert_eq!(
         session.run("[0, 1, 3] |> iter() |> position(|x| x < 0)"),
         none()
@@ -463,7 +454,10 @@ fn reducing_fns() {
 fn collect_fns() {
     let mut session = TestSession::new();
     assert_eq!(session.run("[1, 2, 3] |> collect()"), int_a![1, 2, 3]);
-    assert_eq!(session.run("[1, 2, 3] |> iter() |> collect()"), int_a![1, 2, 3]);
+    assert_eq!(
+        session.run("[1, 2, 3] |> iter() |> collect()"),
+        int_a![1, 2, 3]
+    );
     assert_eq!(
         session.run("[1, 2, 3] |> map(|x| x as float) |> collect()"),
         float_a![1.0, 2.0, 3.0]
