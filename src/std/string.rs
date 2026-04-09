@@ -26,10 +26,7 @@ use crate::{
         UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnVN,
     },
     module::{Module, ModuleFunction},
-    std::{
-        contains::CONTAINS_TRAIT,
-        ordering::{ORD_TRAIT, compare},
-    },
+    std::ordering::{ORD_TRAIT, compare},
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
     value::{NativeDisplay, Value},
@@ -130,8 +127,8 @@ impl String {
         Self::new(&self.0.to_lowercase())
     }
 
-    fn contains(s: Self, substring: Self) -> bool {
-        s.as_ref().contains(substring.as_ref())
+    fn contains_substring(haystack: Self, needle: Self) -> bool {
+        haystack.as_ref().contains(needle.as_ref())
     }
 
     /// Creates an iterator over the grapheme clusters of the string.
@@ -284,13 +281,6 @@ pub fn add_to_module(to: &mut Module) {
     to.add_type_alias_str("string", string_type());
 
     to.add_concrete_impl_no_locals(
-        CONTAINS_TRAIT.clone(),
-        [string_type()],
-        [string_type()],
-        [b(BinaryNativeFnNNN::new(String::contains)) as Function],
-    );
-
-    to.add_concrete_impl_no_locals(
         ORD_TRAIT.clone(),
         [string_type()],
         [],
@@ -321,6 +311,15 @@ pub fn add_to_module(to: &mut Module) {
             |a: String, b: String| String::concat(&a, &b),
             ["left", "right"],
             "Concatenates `left` and `right` strings.",
+            no_effects(),
+        ),
+    );
+    to.add_function(
+        ustr("contains_substring"),
+        BinaryNativeFnNNN::description_with_default_ty(
+            String::contains_substring,
+            ["haystack", "needle"],
+            "Returns `true` if `haystack` contains `needle` as a substring.",
             no_effects(),
         ),
     );

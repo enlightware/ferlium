@@ -596,6 +596,73 @@ fn trait_impl_for_specified() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impl_orphan_rule() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        impl Ord for int {
+            fn cmp(self, other: int) {
+                cmp(self, other)
+            }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::TraitImplOrphanRuleViolation { .. } => {}
+        other => panic!("expected TraitImplOrphanRuleViolation, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn overlapping_concrete_trait_impls_are_rejected() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        struct S(int)
+
+        impl Ord for S {
+            fn cmp(self, other: S) {
+                cmp(self.0, other.0)
+            }
+        }
+
+        impl Ord for S {
+            fn cmp(self, other: S) {
+                cmp(other.0, self.0)
+            }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::OverlappingTraitImpls { .. } => {}
+        other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn overlapping_blanket_trait_impls_are_rejected() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        struct Wrapper<T>(T)
+
+        impl<T> Cast for <From = T, To = Wrapper<T>> {
+            fn cast(self) -> Wrapper<T> {
+                Wrapper(self)
+            }
+        }
+
+        impl Cast for <From = int, To = Wrapper<int>> {
+            fn cast(self) -> Wrapper<int> {
+                Wrapper(self + 1)
+            }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::OverlappingTraitImpls { .. } => {}
+        other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_solver_recursion_limit() {
     let mut session = TestSession::new();
     let code = indoc! { r#"

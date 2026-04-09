@@ -21,6 +21,7 @@ use ustr::Ustr;
 use crate::{
     Location,
     ast::{self, *},
+    coherence::check_trait_impl,
     containers::{b, iterable_to_string},
     desugar::desugar_expr_with_empty_ctx,
     dictionary_passing::DictElaborationCtx,
@@ -158,7 +159,9 @@ pub fn emit_module(
             let input_tys = for_trait.input_tys();
             let output_tys = for_trait.output_tys();
             let module_env = ModuleEnv::new(&output, others);
-            let Some(trait_ref) = module_env.get_trait_ref(imp.trait_name)? else {
+            let Some((trait_module_id, trait_ref)) =
+                module_env.trait_ref_with_module(&Path::single_tuple(imp.trait_name))?
+            else {
                 continue; // Trait not found; the error will be reported in the main impl loop
             };
             if input_tys.len() != trait_ref.input_type_count() as usize {
@@ -186,6 +189,16 @@ pub fn emit_module(
             if output_tys.is_empty() && trait_ref.output_type_count() != 0 {
                 continue;
             }
+            check_trait_impl(
+                &output,
+                others,
+                &trait_ref,
+                trait_module_id.is_none(),
+                &input_tys,
+                0,
+                &[],
+                imp.span,
+            )?;
             // Pre-allocate placeholder functions for each trait method.
             let fn_defs = trait_ref.instantiate_for_tys(&input_tys, &output_tys);
             let mut method_ids = Vec::with_capacity(fn_defs.len());
@@ -204,6 +217,7 @@ pub fn emit_module(
                 dictionary_value,
                 dictionary_ty,
                 true,
+                Some(imp.span),
             );
             let key = ConcreteTraitImplKey::new(trait_ref, input_tys.clone());
             let id = output.impls.add_concrete_struct(key, stub);
@@ -251,8 +265,8 @@ pub fn emit_module(
     for (imp_idx, imp) in source.impls.iter().enumerate() {
         // Validate the function mapping.
         let module_env = ModuleEnv::new(&output, others);
-        let trait_ref = module_env
-            .get_trait_ref(imp.trait_name)?
+        let (trait_module_id, trait_ref) = module_env
+            .trait_ref_with_module(&Path::single_tuple(imp.trait_name))?
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
 
         // Check that all functions in the impl are part of the trait.
@@ -328,7 +342,17 @@ pub fn emit_module(
             assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
             stub_data.id
         } else {
-            output.add_emitted_impl(trait_ref, emit_output)
+            check_trait_impl(
+                &output,
+                others,
+                &trait_ref,
+                trait_module_id.is_none(),
+                &emit_output.input_tys,
+                emit_output.ty_var_count,
+                &emit_output.constraints,
+                imp.span,
+            )?;
+            output.add_emitted_impl(trait_ref, emit_output, Some(imp.span))
         };
         let module_env = ModuleEnv::new(&output, others);
         let header = output

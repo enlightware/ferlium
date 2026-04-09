@@ -15,8 +15,9 @@ use std::{
 use crate::{
     ast,
     containers::iterable_to_string,
-    format::FormatWith,
+    format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
     location::{Location, SourceTable},
+    module::ModuleId,
     r#trait::TraitRef,
     r#type::TypeDefRef,
     type_inference::SubOrSameType,
@@ -164,7 +165,81 @@ pub trait Scope: Sized {
     type TypeDefRef: Debug + Clone;
     type PubTypeConstraint: Debug + Clone;
     type TraitRef: Debug + Clone;
+    type TraitImplHeader: Debug + Clone;
     type ValidVariant: Debug + Clone;
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalTraitImplHeader {
+    pub input_tys: Vec<Type>,
+    pub output_tys: Vec<Type>,
+    pub ty_var_count: u32,
+    pub constraints: Vec<PubTypeConstraint>,
+    pub module_id: Option<ModuleId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalTraitImplHeader {
+    pub input_bindings: Vec<(String, String)>,
+    pub output_bindings: Vec<(String, String)>,
+    pub ty_var_count: u32,
+    pub constraints: Vec<String>,
+    pub module_name: Option<String>,
+}
+
+pub struct DisplayTraitImplHeader<'a> {
+    trait_name: &'a str,
+    header: &'a ExternalTraitImplHeader,
+}
+
+impl ExternalTraitImplHeader {
+    pub fn display<'a>(&'a self, trait_name: &'a str) -> DisplayTraitImplHeader<'a> {
+        DisplayTraitImplHeader {
+            trait_name,
+            header: self,
+        }
+    }
+}
+
+impl Display for DisplayTraitImplHeader<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header = self.header;
+        write!(f, "impl")?;
+        if header.ty_var_count > 0 {
+            write!(f, "<")?;
+            write_with_separator((0..header.ty_var_count).map(TypeVar::new), ", ", f)?;
+            write!(f, ">")?;
+        }
+        if header.input_bindings.len() == 1 && header.output_bindings.is_empty() {
+            write!(f, " {} for {}", self.trait_name, header.input_bindings[0].1)?;
+        } else {
+            write!(f, " {} for <", self.trait_name)?;
+            write_with_separator_and_format_fn(
+                header.input_bindings.iter(),
+                ", ",
+                |(name, ty), f| write!(f, "{name} = {ty}"),
+                f,
+            )?;
+            if !header.output_bindings.is_empty() {
+                write!(f, " |-> ")?;
+                write_with_separator_and_format_fn(
+                    header.output_bindings.iter(),
+                    ", ",
+                    |(name, ty), f| write!(f, "{name} = {ty}"),
+                    f,
+                )?;
+            }
+            write!(f, ">")?;
+        }
+        if !header.constraints.is_empty() {
+            write!(f, " where ")?;
+            write_with_separator(header.constraints.iter(), ", ", f)?;
+        }
+        if let Some(module_name) = &header.module_name {
+            write!(f, " in module {module_name}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Internal scope, using internal compiler representations.
@@ -177,6 +252,7 @@ impl Scope for Internal {
     type TypeDefRef = TypeDefRef;
     type PubTypeConstraint = PubTypeConstraint;
     type TraitRef = TraitRef;
+    type TraitImplHeader = InternalTraitImplHeader;
     type ValidVariant = ();
 }
 
@@ -190,6 +266,7 @@ impl Scope for External {
     type TypeDefRef = (String, Location);
     type PubTypeConstraint = String;
     type TraitRef = String;
+    type TraitImplHeader = ExternalTraitImplHeader;
     type ValidVariant = Vec<String>;
 }
 
@@ -377,6 +454,18 @@ pub enum CompilationErrorImpl<S: Scope> {
         impl_span: Location,
         missings: Vec<Ustr>,
     },
+    TraitImplOrphanRuleViolation {
+        trait_ref: S::TraitRef,
+        input_tys: Vec<S::Type>,
+        impl_span: Location,
+    },
+    OverlappingTraitImpls {
+        trait_ref: S::TraitRef,
+        input_tys: Vec<S::Type>,
+        impl_span: Location,
+        existing_impl: S::TraitImplHeader,
+        existing_span: Option<Location>,
+    },
     TraitMethodArgCountMismatch {
         trait_ref: S::TraitRef,
         method_index: usize,
@@ -539,6 +628,36 @@ fn span_to_string(loc: &Location, source_table: &SourceTable) -> String {
         None => {
             format!("#{}:{}..{}", source_id, start, end)
         }
+    }
+}
+
+fn external_trait_impl_header_from_internal(
+    header: InternalTraitImplHeader,
+    trait_ref: &TraitRef,
+    env: &ModuleEnv<'_>,
+) -> ExternalTraitImplHeader {
+    ExternalTraitImplHeader {
+        input_bindings: header
+            .input_tys
+            .iter()
+            .zip(trait_ref.input_type_names.iter())
+            .map(|(ty, name)| (name.to_string(), ty.format_with(env).to_string()))
+            .collect(),
+        output_bindings: header
+            .output_tys
+            .iter()
+            .zip(trait_ref.output_type_names.iter())
+            .map(|(ty, name)| (name.to_string(), ty.format_with(env).to_string()))
+            .collect(),
+        ty_var_count: header.ty_var_count,
+        constraints: header
+            .constraints
+            .iter()
+            .map(|constraint| constraint.format_with(env).to_string())
+            .collect(),
+        module_name: header
+            .module_id
+            .and_then(|module_id| env.modules.get_name(module_id).map(ToString::to_string)),
     }
 }
 
@@ -941,6 +1060,35 @@ impl FormatWith<SourceTable> for CompilationError {
                     "Implementation of trait `{}` is missing methods `{}` in {}",
                     trait_ref,
                     missings.iter().join(", "),
+                    fmt_span(impl_span)
+                )
+            }
+            TraitImplOrphanRuleViolation {
+                trait_ref,
+                input_tys,
+                impl_span,
+            } => {
+                write!(
+                    f,
+                    "Implementation of foreign trait `{}` over types `{}` violates the orphan rule in {}",
+                    trait_ref,
+                    input_tys.join(", "),
+                    fmt_span(impl_span)
+                )
+            }
+            OverlappingTraitImpls {
+                trait_ref,
+                input_tys,
+                impl_span,
+                existing_impl,
+                ..
+            } => {
+                write!(
+                    f,
+                    "Implementation of trait `{}` over types `{}` overlaps with existing impl `{}` in {}",
+                    trait_ref,
+                    input_tys.join(", "),
+                    existing_impl.display(trait_ref),
                     fmt_span(impl_span)
                 )
             }
@@ -1444,6 +1592,40 @@ impl CompilationError {
                 trait_ref: trait_ref.name.to_string(),
                 missings,
                 impl_span,
+            }),
+            TraitImplOrphanRuleViolation {
+                trait_ref,
+                input_tys,
+                impl_span,
+            } => compilation_error!(TraitImplOrphanRuleViolation {
+                trait_ref: trait_ref.name.to_string(),
+                input_tys: input_tys
+                    .iter()
+                    .zip(trait_ref.input_type_names.iter())
+                    .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
+                    .collect(),
+                impl_span,
+            }),
+            OverlappingTraitImpls {
+                trait_ref,
+                input_tys,
+                impl_span,
+                existing_impl,
+                existing_span,
+            } => compilation_error!(OverlappingTraitImpls {
+                trait_ref: trait_ref.name.to_string(),
+                input_tys: input_tys
+                    .iter()
+                    .zip(trait_ref.input_type_names.iter())
+                    .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
+                    .collect(),
+                impl_span,
+                existing_impl: external_trait_impl_header_from_internal(
+                    existing_impl,
+                    &trait_ref,
+                    env
+                ),
+                existing_span,
             }),
             TraitMethodArgCountMismatch {
                 trait_ref,

@@ -20,6 +20,7 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     function::Function,
+    location::Location,
     module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id},
     r#trait::TraitRef,
     r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
@@ -161,6 +162,8 @@ pub struct TraitImpl {
     pub dictionary_ty: Type,
     /// Visibility, hand-written implementations are public, derived ones are private.
     pub public: bool,
+    /// Location of the source implementation when it comes from Ferlium code.
+    pub source_span: Option<Location>,
 }
 
 /// Collects new local functions to be added to a module when adding trait implementations.
@@ -266,7 +269,14 @@ impl TraitImpls {
 
         // Build and insert the implementation.
         let dictionary_value = build_dictionary_value(&methods, self.module_id);
-        let imp = TraitImpl::new(output_tys, methods, dictionary_value, dictionary_type, true);
+        let imp = TraitImpl::new(
+            output_tys,
+            methods,
+            dictionary_value,
+            dictionary_type,
+            true,
+            None,
+        );
         let key = ConcreteTraitImplKey::new(trait_ref, input_tys);
         self.add_concrete_struct(key, imp)
     }
@@ -329,7 +339,14 @@ impl TraitImpls {
 
         // Build and insert the implementation.
         let dictionary_value = build_dictionary_value(&methods, self.module_id);
-        let imp = TraitImpl::new(output_tys, methods, dictionary_value, dictionary_type, true);
+        let imp = TraitImpl::new(
+            output_tys,
+            methods,
+            dictionary_value,
+            dictionary_type,
+            true,
+            None,
+        );
         let key = BlanketTraitImplKey::new(trait_ref, sub_key);
         self.add_blanket_struct(key, imp)
     }

@@ -277,6 +277,7 @@ impl<'a> TraitSolver<'a> {
                     dictionary_value: Value::empty_tuple(),
                     dictionary_ty: Type::tuple([]),
                     public: false,
+                    source_span: None,
                 };
                 self.impls.add_concrete_struct(key, imp)
             };
@@ -545,8 +546,14 @@ impl<'a> TraitSolver<'a> {
                 // Build and insert the implementation.
                 let dictionary_ty = Type::tuple(tys);
                 let dictionary_value = build_dictionary_value(&methods, self.impls.module_id);
-                let imp =
-                    TraitImpl::new(output_tys, methods, dictionary_value, dictionary_ty, true);
+                let imp = TraitImpl::new(
+                    output_tys,
+                    methods,
+                    dictionary_value,
+                    dictionary_ty,
+                    true,
+                    None,
+                );
                 let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
                 let local_impl_id = self.impls.add_concrete_struct(key, imp);
 

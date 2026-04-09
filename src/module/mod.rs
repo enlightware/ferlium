@@ -394,6 +394,10 @@ impl Module {
         })
     }
 
+    pub(crate) fn owns_type_def(&self, type_def: &TypeDefRef) -> bool {
+        self.type_defs.iter().any(|local| local == type_def)
+    }
+
     // Trait definitions and implementations
 
     /// Add a trait definition to this module, returning its ID.
@@ -498,9 +502,8 @@ impl Module {
         &mut self,
         trait_ref: TraitRef,
         emit_output: EmitTraitOutput,
+        source_span: Option<Location>,
     ) -> LocalImplId {
-        // TODO: ensure coherence
-
         let dictionary_ty = self.computer_dictionary_ty(&emit_output.functions);
         let dictionary_value = build_dictionary_value(&emit_output.functions, self.impls.module_id);
         let imp = TraitImpl::new(
@@ -509,6 +512,7 @@ impl Module {
             dictionary_value,
             dictionary_ty,
             true,
+            source_span,
         );
         if emit_output.ty_var_count == 0 {
             let key = ConcreteTraitImplKey::new(trait_ref, emit_output.input_tys);

@@ -1871,7 +1871,7 @@ impl TypeMapper for FreshVariableTypeMapper<'_> {
 }
 
 /// The type inference after unification, with only public constraints remaining
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct UnifiedTypeInference {
     ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
@@ -1884,10 +1884,14 @@ pub struct UnifiedTypeInference {
 impl UnifiedTypeInference {
     pub fn new_with_ty_vars(count: u32) -> Self {
         let mut unified_ty_inf = Self::default();
-        for _ in 0..count {
-            unified_ty_inf.ty_unification_table.new_key(None);
-        }
+        unified_ty_inf.add_ty_vars(count);
         unified_ty_inf
+    }
+
+    pub fn add_ty_vars(&mut self, count: u32) {
+        for _ in 0..count {
+            self.ty_unification_table.new_key(None);
+        }
     }
 
     pub fn unify_type_inference(

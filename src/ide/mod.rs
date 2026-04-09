@@ -517,6 +517,45 @@ fn compilation_error_to_data(
                 ),
             )]
         }
+        TraitImplOrphanRuleViolation {
+            trait_ref,
+            input_tys,
+            impl_span,
+        } => {
+            vec![error_data_from_location(
+                impl_span,
+                format!(
+                    "Implementation of foreign trait `{trait_ref}` over types `{}` violates the orphan rule",
+                    input_tys.join(", ")
+                ),
+            )]
+        }
+        OverlappingTraitImpls {
+            trait_ref,
+            input_tys,
+            impl_span,
+            existing_impl,
+            existing_span,
+        } => {
+            let mut diagnostics = vec![error_data_from_location(
+                impl_span,
+                format!(
+                    "Implementation of trait `{trait_ref}` over types `{}` overlaps with existing impl `{existing_impl}`",
+                    input_tys.join(", "),
+                    existing_impl = existing_impl.display(trait_ref)
+                ),
+            )];
+            if let Some(existing_span) = existing_span {
+                diagnostics.push(error_data_from_location(
+                    existing_span,
+                    format!(
+                        "Conflicting implementation: {}",
+                        existing_impl.display(trait_ref)
+                    ),
+                ));
+            }
+            diagnostics
+        }
         TraitMethodArgCountMismatch {
             trait_ref,
             method_name,

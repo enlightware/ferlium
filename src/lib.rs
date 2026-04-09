@@ -24,6 +24,7 @@ use parser_helpers::describe_parse_error;
 mod assert;
 pub mod ast;
 mod borrow_checker;
+mod coherence;
 pub mod containers;
 mod desugar;
 mod dictionary_passing;
