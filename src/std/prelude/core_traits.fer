@@ -9,12 +9,13 @@ fn clamp(value, min_bound, max_bound) {
 
 // Ranges
 
-// /// A range bounded inclusively at start and exclusively at end: [start..end)
+/// A range bounded inclusively at start and exclusively at end: [start..end)
 struct Range {
 	start: int,
 	end: int,
 }
 
+/// An iterator over a range.
 struct RangeIterator {
 	range: Range,
 	next: int,
@@ -53,11 +54,13 @@ impl SizedSeq {
 	}
 }
 
+/// A range bounded inclusively at start and at end: [start..end]
 struct RangeInclusive {
 	start: int,
 	end: int,
 }
 
+/// An iterator over an inclusive range.
 struct RangeInclusiveIterator {
 	range: RangeInclusive,
 	next: int,
