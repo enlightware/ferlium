@@ -275,6 +275,11 @@ impl<I, T> Seq for <Self = I |-> Item = T, Iter = I> {
     }
 }
 
+/// Collects a sequence into an output collection.
+fn collect(seq) {
+	from_iter(iter(seq))
+}
+
 /// An iterator that maps a function over another iterator.
 struct MapIterator<I, T, O>
 	where I: Iterator<Item = T>
@@ -395,22 +400,20 @@ impl Seq {
 		array_iter(a)
 	}
 }
-// Requires per trait method generics
-// impl FromIterator {
-//     fn from_iter(it) {
-//         let mut it = it;
-//         let mut a = [];
-//         loop {
-//             match next(it) {
-//                 Some(x) => {
-//                     array_append(a, x);
-//                 },
-//                 None => soft_break,
-//             }
-//         };
-//         a
-//     }
-// }
+impl<I, T> FromIterator for <Iter = I |-> Item = T, Output = [T]> {
+	fn from_iter(iterator: I) -> [T] {
+		let mut iterator = iterator;
+		let mut result = [];
+		loop {
+			match next(iterator) {
+				Some(item) => {
+					array_append(result, item);
+				},
+				None => return result,
+			}
+		}
+	}
+}
 impl SizedSeq {
 	fn len(a) {
 		array_len(a)

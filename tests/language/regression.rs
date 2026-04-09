@@ -116,7 +116,7 @@ fn never_in_if_branches_after_value_branch() {
 fn pretty_print_unknown_variant_with_named_payload_does_not_crash() {
     let mut session = TestSession::new();
     let module_and_expr =
-        session.compile("[1, 2, 3] |> iter() |> map(|x| x as float) |> collect()");
+        session.compile("[1, 2, 3] |> iter() |> map(|x| x as float) |> missing_collect()");
     let expr = module_and_expr
         .expr
         .expect("expected an expression for the pretty-print regression");
@@ -133,5 +133,5 @@ fn pretty_print_unknown_variant_with_named_payload_does_not_crash() {
     .unwrap()
     .into_value();
     let formatted = value.display_pretty(&expr.ty.ty).to_string();
-    assert!(formatted.starts_with("collect (MapIterator { "));
+    assert!(formatted.starts_with("missing_collect (MapIterator { "));
 }

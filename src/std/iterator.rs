@@ -71,26 +71,31 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_trait(seq_trait.clone());
 
-    // Requires per trait method generics
-    // let from_iter_trait = TraitRef::new_with_constraints(
-    //     FROM_ITERATOR_TRAIT_NAME,
-    //     1,
-    //     0,
-    //     [iter_item_constraint],
-    //     [(
-    //         "from_iter",
-    //         Def::new_infer_quantifiers(
-    //             FnType::new_by_val(
-    //                 &[Type::variable_id(2)],
-    //                 Type::variable_id(0),
-    //                 EffType::empty(),
-    //             ),
-    //             &["iterator"],
-    //             "Create a sequence from an iterator.",
-    //         ),
-    //     )],
-    // );
-    // to.traits.push(from_iter_trait);
+    let from_iter_trait = TraitRef::new_with_constraints(
+        FROM_ITERATOR_TRAIT_NAME,
+        "A collection that can be built from an iterator.",
+        ["Iter"],
+        ["Item", "Output"],
+        [PubTypeConstraint::HaveTrait {
+            trait_ref: iterator_trait,
+            input_tys: vec![Type::variable_id(0)],
+            output_tys: vec![Type::variable_id(1)],
+            span: InstantiableLocation::new_synthesized(),
+        }],
+        [(
+            "from_iter",
+            Def::new_infer_quantifiers(
+                FnType::new_by_val(
+                    [Type::variable_id(0)],
+                    Type::variable_id(2),
+                    EffType::empty(),
+                ),
+                ["iterator"],
+                "Create a collection from an iterator.",
+            ),
+        )],
+    );
+    to.add_trait(from_iter_trait);
 
     let sized_seq_trait = TraitRef::new_with_self_input_type(
         SIZED_SEQ_TRAIT_NAME,

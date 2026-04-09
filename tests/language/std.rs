@@ -460,6 +460,23 @@ fn reducing_fns() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn collect_fns() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run("[1, 2, 3] |> collect()"), int_a![1, 2, 3]);
+    assert_eq!(session.run("[1, 2, 3] |> iter() |> collect()"), int_a![1, 2, 3]);
+    assert_eq!(
+        session.run("[1, 2, 3] |> map(|x| x as float) |> collect()"),
+        float_a![1.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        session.run("[1, 2, 3] |> iter() |> map(|x| x as float) |> collect()"),
+        float_a![1.0, 2.0, 3.0]
+    );
+    assert_eq!(session.run("(0..3 |> collect(): [int])"), int_a![0, 1, 2]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn contains() {
     let mut session = TestSession::new();
     // strings
