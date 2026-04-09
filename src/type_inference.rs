@@ -39,7 +39,7 @@ use crate::{
     type_substitution::{TypeSubstituer, substitute_fn_type, substitute_type, substitute_types},
 };
 use derive_new::new;
-use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey, UnifyValue};
+use ena::unify::{EqUnifyValue, InPlace, InPlaceUnificationTable, Snapshot, UnifyKey, UnifyValue};
 use itertools::{Itertools, multiunzip};
 use ustr::{Ustr, ustr};
 
@@ -1870,8 +1870,16 @@ impl TypeMapper for FreshVariableTypeMapper<'_> {
     }
 }
 
+pub(crate) struct UnifiedTypeInferenceSnapshot {
+    ty_unification_table: Snapshot<InPlace<TyVarKey>>,
+    mut_unification_table: Snapshot<InPlace<MutVarKey>>,
+    effect_unification_table: Snapshot<InPlace<EffectVarKey>>,
+    remaining_ty_constraints_len: usize,
+    effect_constraints_inv: FxHashMap<EffType, EffectVarKey>,
+}
+
 /// The type inference after unification, with only public constraints remaining
-#[derive(Clone, Default, Debug)]
+#[derive(Default, Debug)]
 pub struct UnifiedTypeInference {
     ty_unification_table: InPlaceUnificationTable<TyVarKey>,
     /// Remaining constraints that cannot be solved, will be part of the resulting type scheme
@@ -1892,6 +1900,28 @@ impl UnifiedTypeInference {
         for _ in 0..count {
             self.ty_unification_table.new_key(None);
         }
+    }
+
+    pub(crate) fn snapshot(&mut self) -> UnifiedTypeInferenceSnapshot {
+        UnifiedTypeInferenceSnapshot {
+            ty_unification_table: self.ty_unification_table.snapshot(),
+            mut_unification_table: self.mut_unification_table.snapshot(),
+            effect_unification_table: self.effect_unification_table.snapshot(),
+            remaining_ty_constraints_len: self.remaining_ty_constraints.len(),
+            effect_constraints_inv: self.effect_constraints_inv.clone(),
+        }
+    }
+
+    pub(crate) fn rollback_to(&mut self, snapshot: UnifiedTypeInferenceSnapshot) {
+        self.ty_unification_table
+            .rollback_to(snapshot.ty_unification_table);
+        self.mut_unification_table
+            .rollback_to(snapshot.mut_unification_table);
+        self.effect_unification_table
+            .rollback_to(snapshot.effect_unification_table);
+        self.remaining_ty_constraints
+            .truncate(snapshot.remaining_ty_constraints_len);
+        self.effect_constraints_inv = snapshot.effect_constraints_inv;
     }
 
     pub fn unify_type_inference(

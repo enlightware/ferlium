@@ -19,11 +19,56 @@ use crate::{
     r#trait::TraitRef,
     trait_solver::TraitSolverProbe,
     r#type::{Type, TypeVar},
-    type_inference::UnifiedTypeInference,
+    type_inference::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
     type_like::TypeLike,
     type_like::instantiate_types,
     type_scheme::PubTypeConstraint,
 };
+
+struct CoherenceTypeUnifier {
+    inner: UnifiedTypeInference,
+}
+
+struct CoherenceTypeUnifierSnapshot {
+    inner: UnifiedTypeInferenceSnapshot,
+}
+
+impl CoherenceTypeUnifier {
+    fn new_with_ty_vars(count: u32) -> Self {
+        Self {
+            inner: UnifiedTypeInference::new_with_ty_vars(count),
+        }
+    }
+
+    fn add_ty_vars(&mut self, count: u32) {
+        self.inner.add_ty_vars(count);
+    }
+
+    fn snapshot(&mut self) -> CoherenceTypeUnifierSnapshot {
+        CoherenceTypeUnifierSnapshot {
+            inner: self.inner.snapshot(),
+        }
+    }
+
+    fn rollback_to(&mut self, snapshot: CoherenceTypeUnifierSnapshot) {
+        self.inner.rollback_to(snapshot.inner);
+    }
+
+    fn unify_same_type(
+        &mut self,
+        current: Type,
+        current_span: Location,
+        expected: Type,
+        expected_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        self.inner
+            .unify_same_type(current, current_span, expected, expected_span)
+    }
+
+    fn substitute_in_constraint(&mut self, constraint: &PubTypeConstraint) -> PubTypeConstraint {
+        self.inner.substitute_in_constraint(constraint)
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_trait_impl(
@@ -174,7 +219,7 @@ fn blanket_matches_concrete(
     }
 
     let span = Location::new_synthesized();
-    let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(blanket.ty_var_count);
+    let mut ty_inf = CoherenceTypeUnifier::new_with_ty_vars(blanket.ty_var_count);
     for (&blanket_input, &concrete_input) in blanket.input_tys.iter().zip(concrete_inputs) {
         if ty_inf
             .unify_same_type(blanket_input, span, concrete_input, span)
@@ -249,7 +294,7 @@ fn blanket_impls_overlap(
     let rhs_constraints =
         instantiate_types(&rhs.constraints, &(rhs_ty_subst, FxHashMap::default()));
     let span = Location::new_synthesized();
-    let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(lhs.ty_var_count + rhs.ty_var_count);
+    let mut ty_inf = CoherenceTypeUnifier::new_with_ty_vars(lhs.ty_var_count + rhs.ty_var_count);
     for (&lhs_ty, &rhs_ty) in lhs.input_tys.iter().zip(rhs_inputs.iter()) {
         if ty_inf.unify_same_type(lhs_ty, span, rhs_ty, span).is_err() {
             return Ok(false);
@@ -260,7 +305,7 @@ fn blanket_impls_overlap(
     constraints_may_be_satisfiable(
         current,
         others,
-        ty_inf,
+        &mut ty_inf,
         pending,
         lhs.ty_var_count + rhs.ty_var_count,
         &mut FxHashSet::default(),
@@ -270,7 +315,7 @@ fn blanket_impls_overlap(
 fn constraints_may_be_satisfiable(
     current: &Module,
     others: &Modules,
-    mut ty_inf: UnifiedTypeInference,
+    ty_inf: &mut CoherenceTypeUnifier,
     mut pending: Vec<PubTypeConstraint>,
     next_ty_var_index: u32,
     stack: &mut FxHashSet<(TraitRef, Vec<Type>, Vec<Type>)>,
@@ -336,7 +381,7 @@ fn constraints_may_be_satisfiable(
 fn trait_constraint_may_be_satisfiable(
     current: &Module,
     others: &Modules,
-    ty_inf: UnifiedTypeInference,
+    ty_inf: &mut CoherenceTypeUnifier,
     pending: Vec<PubTypeConstraint>,
     next_ty_var_index: u32,
     stack: &mut FxHashSet<(TraitRef, Vec<Type>, Vec<Type>)>,
@@ -354,11 +399,12 @@ fn trait_constraint_may_be_satisfiable(
             continue;
         }
 
+        let snapshot = ty_inf.snapshot();
         let result = match &key {
             TraitKey::Concrete(key) => concrete_impl_may_match_constraint(
                 current,
                 others,
-                ty_inf.clone(),
+                ty_inf,
                 pending.clone(),
                 next_ty_var_index,
                 stack,
@@ -370,7 +416,7 @@ fn trait_constraint_may_be_satisfiable(
             TraitKey::Blanket(key) => blanket_impl_may_match_constraint(
                 current,
                 others,
-                ty_inf.clone(),
+                ty_inf,
                 pending.clone(),
                 next_ty_var_index,
                 stack,
@@ -380,6 +426,7 @@ fn trait_constraint_may_be_satisfiable(
                 output_tys,
             )?,
         };
+        ty_inf.rollback_to(snapshot);
         if result {
             stack.remove(&query);
             return Ok(true);
@@ -394,7 +441,7 @@ fn trait_constraint_may_be_satisfiable(
 fn concrete_impl_may_match_constraint(
     current: &Module,
     others: &Modules,
-    mut ty_inf: UnifiedTypeInference,
+    ty_inf: &mut CoherenceTypeUnifier,
     pending: Vec<PubTypeConstraint>,
     next_ty_var_index: u32,
     stack: &mut FxHashSet<(TraitRef, Vec<Type>, Vec<Type>)>,
@@ -427,7 +474,7 @@ fn concrete_impl_may_match_constraint(
 fn blanket_impl_may_match_constraint(
     current: &Module,
     others: &Modules,
-    mut ty_inf: UnifiedTypeInference,
+    ty_inf: &mut CoherenceTypeUnifier,
     mut pending: Vec<PubTypeConstraint>,
     next_ty_var_index: u32,
     stack: &mut FxHashSet<(TraitRef, Vec<Type>, Vec<Type>)>,
