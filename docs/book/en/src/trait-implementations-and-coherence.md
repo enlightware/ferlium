@@ -172,4 +172,4 @@ User code still cannot:
 
 ## What comes next
 
-The previous chapter, [Type Abstraction](./type-abstraction.md), explains how these impls relate to inference and trait constraints.
+The next chapter introduces effects, describing how functions can interact with their environment beyond pure computation.

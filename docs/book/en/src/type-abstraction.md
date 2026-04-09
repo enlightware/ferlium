@@ -209,5 +209,4 @@ For now, the intended workflow is: write ordinary code, let inference produce th
 
 ## What comes next
 
-The next chapter introduces effects, describing how functions can interact with their environment beyond pure computation.
-
+The next chapter introduces trait implementations and coherence, describing how you can implement existing traits for your types, and how Ferlium ensures that trait resolution remains predictable across module boundaries.
