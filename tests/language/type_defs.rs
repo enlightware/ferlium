@@ -174,6 +174,22 @@ fn map_iterator_impl_with_explicit_outputs_src() -> &'static str {
     "# }
 }
 
+fn map_iterator_impl_with_where_clause_src() -> &'static str {
+    indoc! { r#"
+        impl<I, T, O> Iterator for MapIterator<I, T, O>
+        where
+            I: Iterator<Item = T>
+        {
+            fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
+                match next(it.iterator) {
+                    Some(data) => Some(it.mapper(data)),
+                    None => None,
+                }
+            }
+        }
+    "# }
+}
+
 fn zip_iterator_impl_src() -> &'static str {
     indoc! { r#"
         impl Iterator for ZipIterator<L, R, A, B> {
@@ -842,6 +858,57 @@ fn parse_generic_trait_impl_headers() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_trait_impl_where_clauses() {
+    let module = parse_module_ast(indoc! { r#"
+        struct TransformIter<I, T, O> {
+            iterator: I,
+            mapper: (T) -> O,
+        }
+
+        impl<I, T, O> Iterator for <Self = TransformIter<I, T, O> |-> Item = O>
+        where
+            I: Iterator<Item = T>
+        {
+            fn next(it: &mut TransformIter<I, T, O>) -> None | Some(O) {
+                None
+            }
+        }
+    "# });
+
+    let imp = &module.impls[0];
+    assert_eq!(
+        imp.generic_params
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        vec![ustr("I"), ustr("T"), ustr("O")]
+    );
+
+    let for_trait = imp.for_trait.as_ref().unwrap();
+    assert_eq!(for_trait.input_types.len(), 1);
+    assert_eq!(for_trait.input_types[0].name.unwrap().0, ustr("Self"));
+    assert_applied_path_is!(
+        &for_trait.input_types[0].ty.0,
+        ["TransformIter"],
+        [["I"], ["T"], ["O"]]
+    );
+    assert_eq!(for_trait.output_types.len(), 1);
+    assert_eq!(for_trait.output_types[0].name.0, ustr("Item"));
+    assert_path_is!(&for_trait.output_types[0].ty.0, ["O"]);
+
+    assert_eq!(imp.where_clause.len(), 1);
+    let constraint = &imp.where_clause[0];
+    assert_path_is!(&constraint.trait_name, ["Iterator"]);
+    assert_eq!(constraint.input_types.len(), 1);
+    assert!(constraint.input_types[0].name.is_none());
+    assert_path_is!(&constraint.input_types[0].ty.0, ["I"]);
+    assert_eq!(constraint.output_types.len(), 1);
+    assert_eq!(constraint.output_types[0].name.0, ustr("Item"));
+    assert_path_is!(&constraint.output_types[0].ty.0, ["T"]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn parse_type_def_where_clauses() {
     let src = indoc! { r#"
         struct ZipIterator<L, R, A, B>
@@ -1307,6 +1374,43 @@ fn generic_trait_impl_with_explicit_outputs_for_user_defined_map_iterator() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_trait_impl_with_where_clause_for_user_defined_map_iterator() {
+    let mut session = TestSession::new();
+
+    let build_map_iterator_src = join_src(&[
+        map_iterator_type_def_src(),
+        map_iterator_impl_with_where_clause_src(),
+        indoc! { r#"
+            fn build_map_iterator() {
+                MapIterator {
+                    iterator: iter(["a", "bc"]),
+                    mapper: |x| len(x),
+                }
+            }
+        "# },
+    ]);
+    assert_compiled_fn_type(
+        &mut session,
+        &build_map_iterator_src,
+        "build_map_iterator",
+        "() -> MapIterator<array_iterator<string>, string, int>",
+    );
+
+    let run_map_iterator_src = join_src(&[
+        &build_map_iterator_src,
+        indoc! { r#"
+            let mut total = 0;
+            for score in build_map_iterator() {
+                total += score;
+            };
+            total
+        "# },
+    ]);
+    assert_eq!(session.run(&run_map_iterator_src), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn grammar_extractor_covers_advanced_generic_type_syntax() {
     let mut session = TestSession::new();
 
@@ -1436,6 +1540,24 @@ fn compiled_impl_headers_use_source_syntax() {
             "# },
             map_iterator_type_def_src(),
             map_iterator_impl_with_explicit_outputs_src(),
+            indoc! { r#"
+                struct TransformIter<I, T, O> {
+                    iterator: I,
+                    mapper: (T) -> O,
+                }
+
+                impl<I, T, O> Iterator for TransformIter<I, T, O>
+                where
+                    I: Iterator<Item = T>
+                {
+                    fn next(it: &mut TransformIter<I, T, O>) -> None | Some(O) {
+                        match next(it.iterator) {
+                            Some(data) => Some(it.mapper(data)),
+                            None => None,
+                        }
+                    }
+                }
+            "# },
         ]),
     );
 
@@ -1446,6 +1568,12 @@ fn compiled_impl_headers_use_source_syntax() {
     assert!(
         rendered.contains("impl<A, B, C> Iterator for <Self = MapIterator<A, B, C> |-> Item = C>"),
         "expected explicit output impl header, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "impl<A, B, C> Iterator for <Self = TransformIter<A, B, C> |-> Item = C> where A: Iterator <Item = B>"
+        ),
+        "expected impl where clause in module formatting, got:\n{rendered}"
     );
 }
 

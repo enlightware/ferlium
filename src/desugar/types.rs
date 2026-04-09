@@ -94,6 +94,18 @@ fn desugar_type_constraint(
     ))
 }
 
+fn desugar_type_constraints(
+    constraints: &[ast::PTypeConstraint],
+    generic_ty_params: &GenericTyParams,
+    env: &ModuleEnv<'_>,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
+    constraints
+        .iter()
+        .map(|constraint| desugar_type_constraint(constraint, generic_ty_params, env, modules_used))
+        .collect()
+}
+
 impl ast::PFnArgType {
     pub fn desugar(
         &self,
@@ -765,11 +777,14 @@ impl PTraitImpl {
                 )
             })
             .transpose()?;
+        let where_clause =
+            desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
         Ok(DTraitImpl {
             span: self.span,
             generic_params: self.generic_params,
             trait_name: self.trait_name,
             for_trait,
+            where_clause,
             functions,
         })
     }

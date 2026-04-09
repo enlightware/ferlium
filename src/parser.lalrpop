@@ -61,20 +61,22 @@ ModuleTraitImpl: Module = {
 }
 
 TraitImpl: TraitImpl = {
-    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "{" <functions:Function*> "}" <r:@R> => {
+    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> <where_clause:WhereClause?> "{" <functions:Function*> "}" <r:@R> => {
         TraitImpl {
             generic_params: generic_params.unwrap_or_default(),
             trait_name,
             for_trait: None,
+            where_clause: where_clause.unwrap_or_default(),
             functions,
             span: span(l, r, source_id),
         }
     },
-    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "for" <for_trait:TraitImplForHeader> "{" <functions:Function*> "}" <r:@R> => {
+    <l:@L> "impl" <generic_params:GenericParams?> <trait_name:Sp<UIdentifier>> "for" <for_trait:TraitImplForHeader> <where_clause:WhereClause?> "{" <functions:Function*> "}" <r:@R> => {
         TraitImpl {
             generic_params: generic_params.unwrap_or_default(),
             trait_name,
             for_trait: Some(for_trait),
+            where_clause: where_clause.unwrap_or_default(),
             functions,
             span: span(l, r, source_id),
         }

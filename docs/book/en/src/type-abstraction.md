@@ -198,6 +198,7 @@ At the same time, several pieces of type abstraction can be explicit:
 - you can define generic `struct` and `enum` types
 - you can add `where` clauses to generic type definitions
 - you can write generic `impl` blocks for existing traits
+- you can add `where` clauses to those `impl` blocks
 - you can write explicit trait input and output bindings in impl headers
 
 You still get polymorphism and trait-based behavior through inference and standard-library traits.

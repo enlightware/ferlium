@@ -29,6 +29,7 @@ use crate::{
     parser_helpers::EMPTY_USTR,
     r#type::{Type as IrType, TypeDefRef},
     type_like::TypeLike,
+    type_scheme::PubTypeConstraint,
     value::{LiteralValue, Value},
 };
 
@@ -129,6 +130,7 @@ pub trait Phase: Sized {
     type Type: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
+    type TraitImplConstraint: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TypeAliasInModule: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TypeDefInModule: Debug + Clone;
 }
@@ -150,6 +152,7 @@ impl Phase for Parsed {
     type Type = PType;
     type MutType = PMutType;
     type LetTyAscriptionComplete = ();
+    type TraitImplConstraint = TypeConstraint<Self>;
     type TypeAliasInModule = TypeAlias;
     type TypeDefInModule = TypeDef<Self>;
 }
@@ -163,6 +166,7 @@ impl Phase for Desugared {
     type Type = IrType;
     type MutType = IrMutType;
     type LetTyAscriptionComplete = bool;
+    type TraitImplConstraint = PubTypeConstraint;
     type TypeAliasInModule = Never;
     type TypeDefInModule = Never;
 }
@@ -653,6 +657,7 @@ pub struct TraitImpl<P: Phase> {
     /// Explicit trait inputs and outputs for the implementation header, if any.
     /// When `None`, they are fully inferred from the function signatures.
     pub for_trait: Option<TraitImplFor<P>>,
+    pub where_clause: Vec<P::TraitImplConstraint>,
     pub functions: Vec<ModuleFunction<P>>,
     pub span: Location,
 }
@@ -789,6 +794,7 @@ impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, P> {
                 generic_params,
                 trait_name,
                 for_trait,
+                where_clause,
                 functions,
                 ..
             } in module.impls.iter()
@@ -805,6 +811,16 @@ impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, P> {
                 if let Some(for_trait) = for_trait {
                     write!(f, " for {}", for_trait.format_with(env))?;
                 } else {
+                    write!(f, " ")?;
+                }
+                if !where_clause.is_empty() {
+                    write!(f, " where ")?;
+                    write_with_separator_and_format_fn(
+                        where_clause,
+                        ", ",
+                        |constraint, f| constraint.fmt_with(f, env),
+                        f,
+                    )?;
                     write!(f, " ")?;
                 }
                 writeln!(f, "{{")?;

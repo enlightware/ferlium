@@ -596,6 +596,35 @@ fn trait_impl_for_specified() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impl_where_clause_is_used_for_selection() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            struct Wrapper<T>(T)
+
+            impl<T> SizedSeq for Wrapper<T>
+            where
+                T: Iterator<Item = int>
+            {
+                fn len(self) {
+                    count(self.0)
+                }
+            }
+
+            impl SizedSeq for Wrapper<int> {
+                fn len(self) {
+                    self.0
+                }
+            }
+
+            len(Wrapper(0..3 |> iter())) + len(Wrapper(5))
+        "# }),
+        int(8)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_impl_orphan_rule() {
     let mut session = TestSession::new();
     let err = session.fail_compilation(indoc! { r#"
@@ -647,6 +676,51 @@ fn overlapping_concrete_trait_impls_are_rejected() {
         impl Ord for S {
             fn cmp(self, other: S) {
                 cmp(other.0, self.0)
+            }
+        }
+    "# });
+    match err.into_inner() {
+        CompilationErrorImpl::OverlappingTraitImpls { .. } => {}
+        other => panic!("expected OverlappingTraitImpls, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn overlapping_trait_impls_with_where_clauses_are_rejected() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! { r#"
+        struct CounterIter {
+            next: int,
+            end: int,
+        }
+
+        impl Iterator for CounterIter {
+            fn next(it: &mut CounterIter) -> None | Some(int) {
+                if it.next < it.end {
+                    let current = it.next;
+                    it.next += 1;
+                    Some(current)
+                } else {
+                    None
+                }
+            }
+        }
+
+        struct Wrapper<T>(T)
+
+        impl<T> SizedSeq for Wrapper<T>
+        where
+            T: Iterator<Item = int>
+        {
+            fn len(self) {
+                count(self.0)
+            }
+        }
+
+        impl SizedSeq for Wrapper<CounterIter> {
+            fn len(self) {
+                0
             }
         }
     "# });

@@ -39,6 +39,27 @@ Here the impl says: for every `T`, `Bag<T>` is a sized sequence.
 The same binder syntax also works for more involved generic impls, including iterator-like types.
 The next sections show those richer impl headers.
 
+## Impl-level `where` clauses
+
+Impls may also carry their own `where` clause.
+This is useful when an implementation only applies under extra trait assumptions:
+
+```ferlium
+struct Wrapper<T>(T)
+
+impl<T> SizedSeq for Wrapper<T>
+where
+    T: Iterator<Item = int>
+{
+    fn len(wrapper: Wrapper<T>) {
+        count(wrapper.0)
+    }
+}
+```
+
+The extra constraints become part of the impl itself.
+They participate in trait selection and in coherence checking, just like the types named in the impl header.
+
 ## Explicit trait input and output bindings
 
 Some traits relate more than one input type, or also expose output slots.
@@ -162,12 +183,12 @@ Today, user code can:
 
 - implement existing standard-library traits
 - write generic impls
+- write impl-level `where` clauses
 - use explicit trait input and output bindings in impl headers
 
 User code still cannot:
 
 - define new traits
-- write impl-level `where` clauses yet
 - write per-method generic parameter lists inside traits or impls
 
 ## What comes next

@@ -50,7 +50,7 @@ Function {
 }
 
 TraitImpl {
-    kw<'impl'> GenericParams? Identifier (kw<'for'> traitImplForType)? '{' Function* '}'
+    kw<'impl'> GenericParams? Identifier (kw<'for'> traitImplForType)? whereClause? '{' Function* '}'
 }
 
 traitImplForType {

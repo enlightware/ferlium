@@ -319,6 +319,7 @@ pub fn emit_module(
             stub_data: concrete_impl_stubs.get(&imp_idx),
             generic_param_count: imp.generic_params.len(),
             for_trait: imp.for_trait.as_ref(),
+            impl_constraints: &imp.where_clause,
         };
         let emit_output = emit_functions(
             &mut output,
@@ -375,6 +376,7 @@ struct EmitTraitCtx<'a> {
     stub_data: Option<&'a ImplStubData>,
     generic_param_count: usize,
     for_trait: Option<&'a ast::DTraitImplFor>,
+    impl_constraints: &'a [PubTypeConstraint],
 }
 
 pub(crate) struct EmitTraitOutput {
@@ -495,6 +497,12 @@ where
         }
         for constraint in &trait_ctx.trait_ref.constraints {
             ty_inf.add_pub_constraint(constraint.instantiate_location_cloned(trait_ctx.span));
+        }
+        for constraint in trait_ctx.impl_constraints {
+            let constraint = impl_annotation_subst
+                .as_ref()
+                .map_or_else(|| constraint.clone(), |subst| constraint.instantiate(subst));
+            ty_inf.add_pub_constraint(constraint);
         }
         Some(EmitTraitOutput {
             input_tys,
