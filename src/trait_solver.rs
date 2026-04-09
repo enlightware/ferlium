@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::iter::repeat;
+use std::{iter::repeat, mem};
 
 use crate::{FxHashSet, Modules};
 
@@ -28,8 +28,8 @@ use crate::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
         FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, ModuleEnv, ModuleFunction, ModuleId, TraitImpl, TraitImplId,
-        TraitImpls, TraitKey, id::Id,
+        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitImpl,
+        TraitImplId, TraitImpls, TraitKey, id::Id,
     },
     mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},
@@ -82,6 +82,58 @@ macro_rules! trait_solver_from_module {
     };
 }
 pub(crate) use trait_solver_from_module;
+
+/// Scratch overlay for running trait-solver queries without mutating a real module.
+pub(crate) struct TraitSolverProbe<'a> {
+    impls: TraitImpls,
+    import_fn_slots: Vec<ImportFunctionSlot>,
+    import_impl_slots: Vec<ImportImplSlot>,
+    fn_collector: FunctionCollector,
+    others: &'a Modules,
+}
+
+impl<'a> TraitSolverProbe<'a> {
+    pub(crate) fn from_module(module: &Module, others: &'a Modules) -> Self {
+        Self {
+            impls: module.impls.clone(),
+            import_fn_slots: module.import_fn_slots.clone(),
+            import_impl_slots: module.import_impl_slots.clone(),
+            fn_collector: FunctionCollector::new(module.functions.len()),
+            others,
+        }
+    }
+
+    fn with_solver<R>(&mut self, f: impl FnOnce(&mut TraitSolver<'_>) -> R) -> R {
+        let initial_count = self.fn_collector.initial_count;
+        let fn_collector = mem::replace(
+            &mut self.fn_collector,
+            FunctionCollector::new(initial_count),
+        );
+        let mut solver = TraitSolver::new(
+            &mut self.impls,
+            &mut self.import_fn_slots,
+            &mut self.import_impl_slots,
+            fn_collector,
+            self.others,
+        );
+        let result = f(&mut solver);
+        self.fn_collector = mem::replace(
+            &mut solver.fn_collector,
+            FunctionCollector::new(initial_count),
+        );
+        result
+    }
+
+    pub(crate) fn solve_output_types(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<Vec<Type>, InternalCompilationError> {
+        self.with_solver(|solver| solver.solve_output_types(trait_ref, input_tys, fn_span, arena))
+    }
+}
 
 impl<'a> TraitSolver<'a> {
     /// Commit the newly created functions to the module.

@@ -17,7 +17,7 @@ use crate::{
         TraitImpl, TraitKey,
     },
     r#trait::TraitRef,
-    trait_solver::{TraitSolver, trait_solver_from_module},
+    trait_solver::TraitSolverProbe,
     r#type::{Type, TypeVar},
     type_inference::UnifiedTypeInference,
     type_like::TypeLike,
@@ -25,6 +25,7 @@ use crate::{
     type_scheme::PubTypeConstraint,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_trait_impl(
     current: &Module,
     others: &Modules,
@@ -183,9 +184,8 @@ fn blanket_matches_concrete(
         }
     }
 
-    let mut scratch_module = current.clone();
+    let mut trait_solver = TraitSolverProbe::from_module(current, others);
     let mut arena = NodeArena::default();
-    let mut trait_solver = trait_solver_from_module!(scratch_module, others);
     let mut remaining_indices: Vec<_> = (0..blanket.constraints.len()).collect();
     loop {
         let initial_count = remaining_indices.len();
@@ -285,9 +285,8 @@ fn constraints_may_be_satisfiable(
         .into_have_trait()
         .expect("Non trait constraint in blanket impl overlap check");
     if input_tys.iter().all(Type::is_constant) {
-        let mut scratch_module = current.clone();
+        let mut trait_solver = TraitSolverProbe::from_module(current, others);
         let mut arena = NodeArena::default();
-        let mut trait_solver = trait_solver_from_module!(scratch_module, others);
         let solved_output_tys = match trait_solver.solve_output_types(
             &trait_ref,
             &input_tys,
@@ -333,6 +332,7 @@ fn constraints_may_be_satisfiable(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn trait_constraint_may_be_satisfiable(
     current: &Module,
     others: &Modules,
