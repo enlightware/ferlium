@@ -411,28 +411,6 @@ fn reducing_fns() {
         session.run("[0, 1, 3] |> iter() |> position(|x| x < 0)"),
         none()
     );
-    assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2] |> iter() |> filter(|x| x > 0); (next(it), next(it), next(it))"
-        ),
-        tuple!(some(int(1)), some(int(2)), none())
-    );
-    assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2] |> map(|x| x + 1); (next(it), next(it), next(it), next(it))"
-        ),
-        tuple!(some(int(1)), some(int(2)), some(int(3)), none())
-    );
-    assert_eq!(
-        session.run("let mut it = [0, 1, 2] |> filter(|x| x > 0); (next(it), next(it), next(it))"),
-        tuple!(some(int(1)), some(int(2)), none())
-    );
-    assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2] |> filter_map(|x| if x > 0 { Some(x * x) } else { None }); (next(it), next(it), next(it))"
-        ),
-        tuple!(some(int(1)), some(int(4)), none())
-    );
     assert_eq!(session.run("[3, 1, 2] |> minimum()"), int(1));
     assert_eq!(session.run("[3, 1, 2] |> iter() |> minimum()"), int(1));
     assert_eq!(session.run("[3.0, 1.0, 2.0] |> minimum()"), float(1.0));
@@ -446,6 +424,46 @@ fn reducing_fns() {
     assert_eq!(
         session.run("[3.0, 1.0, 2.0] |> iter() |> maximum()"),
         float(3.0)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mapping_fns() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> map(|x| x + 1); (next(it), next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(2)), some(int(3)), none())
+    );
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> iter() |> map(|x| x + 1); (next(it), next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(2)), some(int(3)), none())
+    );
+    assert_eq!(
+        session.run("let mut it = [0, 1, 2] |> filter(|x| x > 0); (next(it), next(it), next(it))"),
+        tuple!(some(int(1)), some(int(2)), none())
+    );
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> iter() |> filter(|x| x > 0); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(2)), none())
+    );
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> filter_map(|x| if x > 0 { Some(x * x) } else { None }); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(4)), none())
+    );
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> iter() |> filter_map(|x| if x > 0 { Some(x * x) } else { None }); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(4)), none())
     );
 }
 
@@ -471,20 +489,23 @@ fn collect_fns() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn contains() {
+fn contains_and_contains_substring() {
     let mut session = TestSession::new();
     // strings
     assert_eq!(
-        session.run("contains(\"hello world\", \"world\")"),
+        session.run("contains_substring(\"hello world\", \"world\")"),
         bool(true)
     );
     assert_eq!(
-        session.run("contains(\"hello world\", \"world!\")"),
+        session.run("contains_substring(\"hello world\", \"world!\")"),
         bool(false)
     );
-    assert_eq!(session.run("contains(\"hello world\", \"\")"), bool(true));
-    assert_eq!(session.run("contains(\"\", \"\")"), bool(true));
-    assert_eq!(session.run("contains(\"\", \"a\")"), bool(false));
+    assert_eq!(
+        session.run("contains_substring(\"hello world\", \"\")"),
+        bool(true)
+    );
+    assert_eq!(session.run("contains_substring(\"\", \"\")"), bool(true));
+    assert_eq!(session.run("contains_substring(\"\", \"a\")"), bool(false));
     // arrays
     assert_eq!(session.run("contains([1, 2, 3], 2)"), bool(true));
     assert_eq!(session.run("contains([1, 2, 3], 4)"), bool(false));
