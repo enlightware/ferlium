@@ -120,6 +120,9 @@ impl Deserialize {
 ```
 
 When writing an `impl`, the method signatures and behavior must match the requirements of the trait.
+Impls can also be generic, and Ferlium supports explicit trait input and output bindings in impl headers.
+
+The next chapter, [Trait Implementations and Coherence](./trait-implementations-and-coherence.md), covers this in detail.
 
 ## Partial type annotations with `_`
 
@@ -190,6 +193,13 @@ In particular:
 - you cannot define new traits in user code yet
 - you cannot write explicit user-level trait constraint clauses for functions
 
+At the same time, several pieces of type abstraction can be explicit:
+
+- you can define generic `struct` and `enum` types
+- you can add `where` clauses to generic type definitions
+- you can write generic `impl` blocks for existing traits
+- you can write explicit trait input and output bindings in impl headers
+
 You still get polymorphism and trait-based behavior through inference and standard-library traits.
 
 ## Looking ahead
@@ -200,5 +210,4 @@ For now, the intended workflow is: write ordinary code, let inference produce th
 ## What comes next
 
 The next chapter introduces effects, describing how functions can interact with their environment beyond pure computation.
-
 

@@ -267,6 +267,14 @@ enum BlockResult {
     Failed,
 }
 
+fn print_failed_block(label: &str, reason: &str, code: &str) {
+    println!("[FAIL] {label}: {reason}");
+    println!("Snippet:");
+    for (line_no, line) in code.lines().enumerate() {
+        println!("{:>4} | {}", line_no + 1, line);
+    }
+}
+
 fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> BlockResult {
     let allowed_attrs: BTreeSet<&str> = [
         "ignore",
@@ -287,7 +295,11 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
     }
 
     if !unknown.is_empty() {
-        println!("[FAIL] {label}: unknown attributes: {}", unknown.join(", "));
+        print_failed_block(
+            label,
+            &format!("unknown attributes: {}", unknown.join(", ")),
+            code_body,
+        );
         return BlockResult::Failed;
     }
 
@@ -306,7 +318,7 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
     if compile_fail {
         match compile_only(label, &code) {
             Ok(()) => {
-                println!("[FAIL] {label}: expected compile failure but succeeded");
+                print_failed_block(label, "expected compile failure but succeeded", &code);
                 BlockResult::Failed
             }
             Err(error) => {
@@ -321,7 +333,7 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
                 BlockResult::Passed
             }
             Err(error) => {
-                println!("[FAIL] {label}: compilation failed ({error:?})");
+                print_failed_block(label, &format!("compilation failed ({error:?})"), &code);
                 BlockResult::Failed
             }
         }
@@ -332,7 +344,7 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
                 BlockResult::Passed
             }
             BlockResult::Failed => {
-                println!("[FAIL] {label}: expected panic but ran successfully");
+                print_failed_block(label, "expected panic but ran successfully", &code);
                 BlockResult::Failed
             }
             BlockResult::Ignored => BlockResult::Ignored,
@@ -343,10 +355,7 @@ fn process_ferlium_block(label: &str, attrs: &[String], code_body: &str) -> Bloc
                 println!("[OK] {label}");
                 BlockResult::Passed
             }
-            BlockResult::Failed => {
-                println!("[FAIL] {label}: runtime or compilation error");
-                BlockResult::Failed
-            }
+            BlockResult::Failed => BlockResult::Failed,
             BlockResult::Ignored => BlockResult::Ignored,
         }
     }
@@ -390,10 +399,10 @@ fn run_block(label: &str, code: &str, expect_panic: bool) -> BlockResult {
             }
         }
         Ok(Err(RunError::Runtime(error))) => {
-            println!("[FAIL] {label}: runtime error ({error:?})");
             if expect_panic {
                 BlockResult::Passed
             } else {
+                print_failed_block(label, &format!("runtime error ({error:?})"), code);
                 BlockResult::Failed
             }
         }
@@ -401,11 +410,12 @@ fn run_block(label: &str, code: &str, expect_panic: bool) -> BlockResult {
             if expect_panic {
                 BlockResult::Passed
             } else {
+                print_failed_block(label, "panicked unexpectedly", code);
                 BlockResult::Failed
             }
         }
         Ok(Err(RunError::Compilation(error))) => {
-            println!("[FAIL] {label}: compilation failed ({error:?})");
+            print_failed_block(label, &format!("compilation failed ({error:?})"), code);
             BlockResult::Failed
         }
     }

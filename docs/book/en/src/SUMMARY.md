@@ -20,6 +20,7 @@
 
 - [Functions as Values](./functions-as-values.md)
 - [Type Abstraction](./type-abstraction.md)
+- [Trait Implementations and Coherence](./trait-implementations-and-coherence.md)
 
 # Effects and Execution
 
