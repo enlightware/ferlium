@@ -269,6 +269,7 @@ fn position(seq, predicate) -> None | Some(int) {
 
 // Iterator adaptors
 
+// Blanket implementation of Seq for iterators
 impl<I, T> Seq for <Self = I |-> Item = T, Iter = I> {
     fn iter(seq: I) -> I {
         seq
