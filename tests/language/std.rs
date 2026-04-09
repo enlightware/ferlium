@@ -349,43 +349,72 @@ fn array_casts() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn reducing_fns() {
     let mut session = TestSession::new();
+    assert_eq!(session.run("0..2 |> any(|x| x > 1)"), bool(false));
     assert_eq!(session.run("0..2 |> iter() |> any(|x| x > 1)"), bool(false));
+    assert_eq!(session.run("0..2 |> any(|x| x >= 1)"), bool(true));
     assert_eq!(session.run("0..2 |> iter() |> any(|x| x >= 1)"), bool(true));
+    assert_eq!(session.run("[0, 1] |> any(|x| x > 1)"), bool(false));
     assert_eq!(
         session.run("[0, 1] |> iter() |> any(|x| x > 1)"),
         bool(false)
     );
+    assert_eq!(session.run("[0, 1] |> any(|x| x >= 1)"), bool(true));
     assert_eq!(
         session.run("[0, 1] |> iter() |> any(|x| x >= 1)"),
         bool(true)
     );
+    assert_eq!(session.run("0..2 |> all(|x| x > 0)"), bool(false));
     assert_eq!(session.run("0..2 |> iter() |> all(|x| x > 0)"), bool(false));
+    assert_eq!(session.run("0..2 |> all(|x| x >= 0)"), bool(true));
     assert_eq!(session.run("0..2 |> iter() |> all(|x| x >= 0)"), bool(true));
+    assert_eq!(session.run("[0, 1] |> all(|x| x > 0)"), bool(false));
     assert_eq!(
         session.run("[0, 1] |> iter() |> all(|x| x > 0)"),
         bool(false)
     );
+    assert_eq!(session.run("[0, 1] |> all(|x| x >= 0)"), bool(true));
     assert_eq!(
         session.run("[0, 1] |> iter() |> all(|x| x >= 0)"),
         bool(true)
     );
+    assert_eq!(session.run("2..5 |> count()"), int(3));
     assert_eq!(session.run("2..5 |> iter() |> count()"), int(3));
+    assert_eq!(session.run("[2, 5] |> count()"), int(2));
     assert_eq!(session.run("[2, 5] |> iter() |> count()"), int(2));
     assert_eq!(session.run("[2, 5] |> iter() |> iter() |> count()"), int(2));
+    assert_eq!(session.run("2..5 |> sum()"), int(9));
     assert_eq!(session.run("2..5 |> iter() |> sum()"), int(9));
+    assert_eq!(session.run("[2, 5] |> sum()"), int(7));
     assert_eq!(session.run("[2, 5] |> iter() |> sum()"), int(7));
+    assert_eq!(session.run("[2.5, 5] |> sum()"), float(7.5));
     assert_eq!(session.run("[2.5, 5] |> iter() |> sum()"), float(7.5));
+    assert_eq!(
+        session.run("[0, 1, 3] |> find(|x| x > 1)"),
+        some(int(3))
+    );
     assert_eq!(
         session.run("[0, 1, 3] |> iter() |> find(|x| x > 1)"),
         some(int(3))
+    );
+    assert_eq!(
+        session.run("[0, 1, 3] |> find(|x| x < 0)"),
+        none()
     );
     assert_eq!(
         session.run("[0, 1, 3] |> iter() |> find(|x| x < 0)"),
         none()
     );
     assert_eq!(
+        session.run("[0, 1, 3] |> position(|x| x > 1)"),
+        some(int(2))
+    );
+    assert_eq!(
         session.run("[0, 1, 3] |> iter() |> position(|x| x > 1)"),
         some(int(2))
+    );
+    assert_eq!(
+        session.run("[0, 1, 3] |> position(|x| x < 0)"),
+        none()
     );
     assert_eq!(
         session.run("[0, 1, 3] |> iter() |> position(|x| x < 0)"),
@@ -397,12 +426,32 @@ fn reducing_fns() {
         ),
         tuple!(some(int(1)), some(int(2)), none())
     );
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> map(|x| x + 1); (next(it), next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(2)), some(int(3)), none())
+    );
+    assert_eq!(
+        session.run("let mut it = [0, 1, 2] |> filter(|x| x > 0); (next(it), next(it), next(it))"),
+        tuple!(some(int(1)), some(int(2)), none())
+    );
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> filter_map(|x| if x > 0 { Some(x * x) } else { None }); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(4)), none())
+    );
+    assert_eq!(session.run("[3, 1, 2] |> minimum()"), int(1));
     assert_eq!(session.run("[3, 1, 2] |> iter() |> minimum()"), int(1));
+    assert_eq!(session.run("[3.0, 1.0, 2.0] |> minimum()"), float(1.0));
     assert_eq!(
         session.run("[3.0, 1.0, 2.0] |> iter() |> minimum()"),
         float(1.0)
     );
+    assert_eq!(session.run("[3, 1, 2] |> maximum()"), int(3));
     assert_eq!(session.run("[3, 1, 2] |> iter() |> maximum()"), int(3));
+    assert_eq!(session.run("[3.0, 1.0, 2.0] |> maximum()"), float(3.0));
     assert_eq!(
         session.run("[3.0, 1.0, 2.0] |> iter() |> maximum()"),
         float(3.0)

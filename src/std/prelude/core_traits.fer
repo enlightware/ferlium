@@ -286,9 +286,9 @@ impl Iterator for MapIterator<I, T, O> {
     }
 }
 
-/// Creates an iterator which calls a function on each element yielded by the provided iterator.
-fn map(iterator, mapper) {
-	MapIterator { iterator, mapper }
+/// Creates an iterator which calls a function on each element yielded by the provided sequence.
+fn map(seq, mapper) {
+	MapIterator { iterator: iter(seq), mapper }
 }
 
 /// An iterator that filters another iterator with a predicate.
@@ -314,9 +314,38 @@ impl Iterator for FilterIterator<I, T> {
     }
 }
 
-/// Creates an iterator which calls a function to decide which element yielded by the provided iterator should be kept.
-fn filter(iterator, filter) {
-    FilterIterator { iterator, filter }
+/// Creates an iterator which calls a function to decide which element yielded by the provided sequence should be kept.
+fn filter(seq, filter) {
+    FilterIterator { iterator: iter(seq), filter }
+}
+
+/// An itertar that uses a function to both filter and map another iterator.
+struct FilterMapIterator<I, T, O>
+    where I: Iterator<Item = T>
+{
+    iterator: I,
+    filter_map: (T) -> None | Some(O),
+}
+
+impl Iterator for FilterMapIterator<I, T, O> {
+    fn next(it: &mut FilterMapIterator<I, T, O>) -> None | Some(O) {
+        loop {
+            match next(it.iterator) {
+                Some(data) => match it.filter_map(data) {
+                    Some(mapped) => return Some(mapped),
+                    None => {
+                        // filter data out
+                    }
+                },
+                None => return None
+            }
+        }
+    }
+}
+
+/// Creates an iterator which calls a function to both filter and map elements yielded by the provided sequence.
+fn filter_map(seq, filter_map) {
+    FilterMapIterator { iterator: iter(seq), filter_map }
 }
 
 // Compatibility, mark as deprecated when supported
