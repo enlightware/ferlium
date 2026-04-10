@@ -276,9 +276,8 @@ impl<I, T> Seq for <Self = I |-> Item = T, Iter = I> {
     }
 }
 
-/// Collects a sequence into an output collection.
-fn collect(seq) {
-	from_iter(iter(seq))
+fn collect(value) {
+    from_iter(iter(value))
 }
 
 /// An iterator that maps a function over another iterator.
@@ -298,9 +297,24 @@ impl Iterator for MapIterator<I, T, O> {
     }
 }
 
-/// Creates an iterator which calls a function on each element yielded by the provided sequence.
-fn map(seq, mapper) {
-	MapIterator { iterator: iter(seq), mapper }
+impl<I, T, O> Map for <Self = I, Mapped = O |-> Item = T, Output = MapIterator<I, T, O>>
+where
+    I: Iterator<Item = T>
+{
+    fn map(value: I, mapper: (T) -> O) -> MapIterator<I, T, O> {
+        MapIterator { iterator: value, mapper }
+    }
+}
+
+impl<A, B, C, I> Map for <Self = [A], Mapped = B |-> Item = A, Output = C>
+where
+    [A]: Seq<Item = A, Iter = I>,
+    RebindItem<Self = [A], Item = B |-> Output = C>,
+    FromIterator<Self = C, Iter = MapIterator<I, A, B>>
+{
+    fn map(value: [A], mapper: (A) -> B) -> C {
+        from_iter(MapIterator { iterator: iter(value), mapper })
+    }
 }
 
 /// An iterator that filters another iterator with a predicate.
@@ -326,9 +340,24 @@ impl Iterator for FilterIterator<I, T> {
     }
 }
 
-/// Creates an iterator which calls a function to decide which element yielded by the provided sequence should be kept.
-fn filter(seq, filter) {
-    FilterIterator { iterator: iter(seq), filter }
+impl<I, T> Filter for <Self = I |-> Item = T, Output = FilterIterator<I, T>>
+where
+    I: Iterator<Item = T>
+{
+    fn filter(value: I, predicate: (T) -> bool) -> FilterIterator<I, T> {
+        FilterIterator { iterator: value, filter: predicate }
+    }
+}
+
+impl<A, C, I> Filter for <Self = [A] |-> Item = A, Output = C>
+where
+    [A]: Seq<Item = A, Iter = I>,
+    RebindItem<Self = [A], Item = A |-> Output = C>,
+    FromIterator<Self = C, Iter = FilterIterator<I, A>>
+{
+    fn filter(value: [A], predicate: (A) -> bool) -> C {
+        from_iter(FilterIterator { iterator: iter(value), filter: predicate })
+    }
 }
 
 /// An itertar that uses a function to both filter and map another iterator.
@@ -355,9 +384,24 @@ impl Iterator for FilterMapIterator<I, T, O> {
     }
 }
 
-/// Creates an iterator which calls a function to both filter and map elements yielded by the provided sequence.
-fn filter_map(seq, filter_map) {
-    FilterMapIterator { iterator: iter(seq), filter_map }
+impl<I, T, O> FilterMap for <Self = I, Mapped = O |-> Item = T, Output = FilterMapIterator<I, T, O>>
+where
+    I: Iterator<Item = T>
+{
+    fn filter_map(value: I, mapper: (T) -> None | Some(O)) -> FilterMapIterator<I, T, O> {
+        FilterMapIterator { iterator: value, filter_map: mapper }
+    }
+}
+
+impl<A, B, C, I> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = C>
+where
+    [A]: Seq<Item = A, Iter = I>,
+    RebindItem<Self = [A], Item = B |-> Output = C>,
+    FromIterator<Self = C, Iter = FilterMapIterator<I, A, B>>
+{
+    fn filter_map(value: [A], mapper: (A) -> None | Some(B)) -> C {
+        from_iter(FilterMapIterator { iterator: iter(value), filter_map: mapper })
+    }
 }
 
 // Compatibility, mark as deprecated when supported
@@ -401,7 +445,12 @@ impl Seq {
 		array_iter(a)
 	}
 }
-impl<I, T> FromIterator for <Iter = I |-> Item = T, Output = [T]> {
+impl<A, B> RebindItem for <Self = [A], Item = B |-> Output = [B]> {}
+
+impl<I, T> FromIterator for <Self = [T], Iter = I>
+where
+    I: Iterator<Item = T>
+{
 	fn from_iter(iterator: I) -> [T] {
 		let mut iterator = iterator;
 		let mut result = [];

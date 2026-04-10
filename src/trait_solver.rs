@@ -9,7 +9,7 @@
 
 use std::{iter::repeat, mem};
 
-use crate::{FxHashSet, Modules};
+use crate::{FxHashMap, FxHashSet, Modules, type_scheme::PubTypeConstraint};
 
 use derive_new::new;
 use itertools::MultiUnzip;
@@ -36,7 +36,7 @@ use crate::{
     r#trait::TraitRef,
     r#type::{FnArgType, Type},
     type_inference::UnifiedTypeInference,
-    type_like::TypeLike,
+    type_like::{TypeLike, instantiate_types},
     value::{Value, build_dictionary_value},
 };
 
@@ -92,6 +92,21 @@ pub(crate) struct TraitSolverProbe<'a> {
     others: &'a Modules,
 }
 
+/// Minimal query interface needed by blanket matching.
+///
+/// This is a trait so the same matching code can run either against the real
+/// solver, which may materialize concrete impls, or against `TraitSolverProbe`,
+/// which answers the same questions through a scratch overlay.
+trait TraitOutputQuery {
+    fn solve_output_types_query(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<Vec<Type>, InternalCompilationError>;
+}
+
 impl<'a> TraitSolverProbe<'a> {
     pub(crate) fn from_module(module: &Module, others: &'a Modules) -> Self {
         Self {
@@ -100,6 +115,16 @@ impl<'a> TraitSolverProbe<'a> {
             import_impl_slots: module.import_impl_slots.clone(),
             fn_collector: FunctionCollector::new(module.functions.len()),
             others,
+        }
+    }
+
+    fn from_solver(solver: &TraitSolver<'a>) -> Self {
+        Self {
+            impls: solver.impls.clone(),
+            import_fn_slots: solver.import_fn_slots.clone(),
+            import_impl_slots: solver.import_impl_slots.clone(),
+            fn_collector: solver.fn_collector.clone(),
+            others: solver.others,
         }
     }
 
@@ -135,7 +160,425 @@ impl<'a> TraitSolverProbe<'a> {
     }
 }
 
+impl TraitOutputQuery for TraitSolverProbe<'_> {
+    fn solve_output_types_query(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<Vec<Type>, InternalCompilationError> {
+        self.solve_output_types(trait_ref, input_tys, fn_span, arena)
+    }
+}
+
+/// Lightweight visible impl head used while probing whether a partially known
+/// trait application already has a unique candidate.
+#[derive(Clone)]
+enum TraitImprovementCandidate {
+    /// A fully concrete impl head.
+    Concrete {
+        input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
+    },
+    /// A blanket impl head plus the generic information needed to instantiate
+    /// and check its impl constraints.
+    Blanket {
+        input_tys: Vec<Type>,
+        output_tys: Vec<Type>,
+        ty_var_count: u32,
+        constraints: Vec<PubTypeConstraint>,
+    },
+}
+
+/// A nested trait constraint from a matched blanket impl after its inputs have
+/// been fully resolved.
+struct ResolvedTraitConstraint {
+    /// Original source order of the constraint in the blanket impl.
+    index: usize,
+    trait_ref: TraitRef,
+    input_tys: Vec<Type>,
+}
+
+/// Whether a visible impl candidate is compatible with the current partially known trait application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraitImprovementMatch {
+    /// The candidate is definitely incompatible.
+    No,
+    /// The candidate might still match later, but some blanket constraints are not resolved enough yet.
+    Unknown,
+    /// The candidate can already be matched uniquely with the current information.
+    Yes,
+}
+
+/// Controls how `match_blanket_impl` treats nested trait constraints that are
+/// still not fully resolved after reaching a fixed point.
+enum BlanketConstraintMode {
+    /// Matching is only considered successful if every nested trait constraint
+    /// can be resolved immediately.
+    RequireAllResolved,
+    /// A partially resolved fixed point is reported back as `Unknown` instead
+    /// of being treated as a definite mismatch.
+    AllowUnknown,
+}
+
+/// Result of matching a blanket impl against a requested trait application.
+enum BlanketImplMatch {
+    /// The blanket impl is definitely incompatible.
+    No,
+    /// The blanket impl may still match later, but some nested trait
+    /// constraints remain unresolved.
+    Unknown,
+    /// The blanket impl matches, yielding instantiated output types and the
+    /// resolved nested trait constraints in source order.
+    Yes {
+        output_tys: Vec<Type>,
+        resolved_constraints: Vec<ResolvedTraitConstraint>,
+    },
+}
+
 impl<'a> TraitSolver<'a> {
+    /// Collect all visible concrete and blanket impl heads for a trait.
+    ///
+    /// This is used by trait improvement to probe whether a partially known
+    /// trait application already has a unique matching impl.
+    fn improvement_candidates(&self, trait_ref: &TraitRef) -> Vec<TraitImprovementCandidate> {
+        let mut candidates = Vec::new();
+
+        for (key, id) in &self.impls.concrete_key_to_id {
+            if &key.trait_ref == trait_ref {
+                let imp = &self.impls.data[id.as_index()];
+                candidates.push(TraitImprovementCandidate::Concrete {
+                    input_tys: key.input_tys.clone(),
+                    output_tys: imp.output_tys.clone(),
+                });
+            }
+        }
+
+        if let Some(blankets) = self.impls.blanket_key_to_id.get(trait_ref) {
+            for (sub_key, id) in blankets {
+                let imp = &self.impls.data[id.as_index()];
+                candidates.push(TraitImprovementCandidate::Blanket {
+                    input_tys: sub_key.input_tys.clone(),
+                    output_tys: imp.output_tys.clone(),
+                    ty_var_count: sub_key.ty_var_count,
+                    constraints: sub_key.constraints.clone(),
+                });
+            }
+        }
+
+        for (_, entry) in self.others.iter_named() {
+            let Some(module) = entry.module() else {
+                continue;
+            };
+
+            for (key, id) in &module.impls.concrete_key_to_id {
+                if &key.trait_ref == trait_ref {
+                    let imp = &module.impls.data[id.as_index()];
+                    if imp.public {
+                        candidates.push(TraitImprovementCandidate::Concrete {
+                            input_tys: key.input_tys.clone(),
+                            output_tys: imp.output_tys.clone(),
+                        });
+                    }
+                }
+            }
+
+            if let Some(blankets) = module.impls.blanket_key_to_id.get(trait_ref) {
+                for (sub_key, id) in blankets {
+                    let imp = &module.impls.data[id.as_index()];
+                    if imp.public {
+                        candidates.push(TraitImprovementCandidate::Blanket {
+                            input_tys: sub_key.input_tys.clone(),
+                            output_tys: imp.output_tys.clone(),
+                            ty_var_count: sub_key.ty_var_count,
+                            constraints: sub_key.constraints.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        candidates
+    }
+
+    /// Check whether a visible impl candidate is compatible with the current
+    /// partially known trait application.
+    fn improvement_candidate_matches<Q: TraitOutputQuery>(
+        query: &mut Q,
+        ty_inf: &mut UnifiedTypeInference,
+        candidate: &TraitImprovementCandidate,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<TraitImprovementMatch, InternalCompilationError> {
+        match candidate {
+            TraitImprovementCandidate::Concrete {
+                input_tys: candidate_inputs,
+                output_tys: candidate_outputs,
+            } => {
+                for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
+                    if ty_inf
+                        .unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)
+                        .is_err()
+                    {
+                        return Ok(TraitImprovementMatch::No);
+                    }
+                }
+                for (candidate_output, output_ty) in candidate_outputs.iter().zip(output_tys.iter())
+                {
+                    if ty_inf
+                        .unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)
+                        .is_err()
+                    {
+                        return Ok(TraitImprovementMatch::No);
+                    }
+                }
+                Ok(TraitImprovementMatch::Yes)
+            }
+            TraitImprovementCandidate::Blanket {
+                input_tys: candidate_inputs,
+                output_tys: candidate_outputs,
+                ty_var_count,
+                constraints,
+            } => Ok(
+                match Self::match_blanket_impl(
+                    query,
+                    ty_inf,
+                    candidate_inputs,
+                    candidate_outputs,
+                    *ty_var_count,
+                    constraints,
+                    input_tys,
+                    output_tys,
+                    fn_span,
+                    arena,
+                    BlanketConstraintMode::AllowUnknown,
+                )? {
+                    BlanketImplMatch::No => TraitImprovementMatch::No,
+                    BlanketImplMatch::Unknown => TraitImprovementMatch::Unknown,
+                    BlanketImplMatch::Yes { .. } => TraitImprovementMatch::Yes,
+                },
+            ),
+        }
+    }
+
+    /// Try to improve a deferred trait application from its partially known
+    /// inputs and outputs.
+    ///
+    /// The algorithm probes every visible impl under snapshots of the current
+    /// unifier. It only commits the improvement when there is exactly one
+    /// matching candidate and no other candidate remains merely `Unknown`.
+    pub(crate) fn try_improve_trait_application(
+        &mut self,
+        ty_inf: &mut UnifiedTypeInference,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<bool, InternalCompilationError> {
+        let candidates = self.improvement_candidates(trait_ref);
+        let mut probe = TraitSolverProbe::from_solver(self);
+        let mut unique_candidate: Option<TraitImprovementCandidate> = None;
+        let mut found_unknown_candidate = false;
+
+        for candidate in candidates {
+            let snapshot = ty_inf.snapshot();
+            let matched = Self::improvement_candidate_matches(
+                &mut probe, ty_inf, &candidate, input_tys, output_tys, fn_span, arena,
+            )?;
+            ty_inf.rollback_to(snapshot);
+            use TraitImprovementMatch::*;
+            match matched {
+                No => {}
+                Unknown => {
+                    found_unknown_candidate = true;
+                }
+                Yes => {
+                    if unique_candidate.is_some() {
+                        return Ok(false);
+                    }
+                    unique_candidate = Some(candidate);
+                }
+            }
+        }
+
+        if found_unknown_candidate {
+            return Ok(false);
+        }
+        let Some(candidate) = unique_candidate else {
+            return Ok(false);
+        };
+
+        Ok(matches!(
+            Self::improvement_candidate_matches(
+                self, ty_inf, &candidate, input_tys, output_tys, fn_span, arena,
+            )?,
+            TraitImprovementMatch::Yes
+        ))
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_blanket_impl_is_well_formed(
+        imp_input_tys: &[Type],
+        imp_constraints: &[PubTypeConstraint],
+        imp_ty_var_count: u32,
+        input_tys: &[Type],
+    ) {
+        assert_eq!(imp_input_tys.len(), input_tys.len());
+        let mut ty_vars = FxHashSet::default();
+        let mut mut_vars = FxHashSet::default();
+        let mut eff_vars = FxHashSet::default();
+        let mut collector = AllVarsCollector {
+            ty_vars: &mut ty_vars,
+            mut_vars: &mut mut_vars,
+            effect_vars: &mut eff_vars,
+        };
+        for ty in imp_input_tys {
+            ty.visit(&mut collector);
+        }
+        for constraint in imp_constraints {
+            constraint.visit(&mut collector);
+        }
+        assert!(mut_vars.is_empty());
+        assert!(eff_vars.is_empty());
+        assert_eq!(ty_vars.len(), imp_ty_var_count as usize);
+    }
+
+    /// Match a blanket impl head plus its impl constraints against a requested
+    /// trait application.
+    ///
+    /// This is the shared fixed-point engine used by both normal blanket impl
+    /// solving and trait improvement. It instantiates the blanket-local type
+    /// variables, unifies the impl head with the requested types, then iterates
+    /// the impl constraints until no more progress is possible.
+    #[allow(clippy::too_many_arguments)]
+    fn match_blanket_impl<Q: TraitOutputQuery>(
+        query: &mut Q,
+        ty_inf: &mut UnifiedTypeInference,
+        imp_input_tys: &[Type],
+        imp_output_tys: &[Type],
+        imp_ty_var_count: u32,
+        imp_constraints: &[PubTypeConstraint],
+        input_tys: &[Type],
+        output_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+        mode: BlanketConstraintMode,
+    ) -> Result<BlanketImplMatch, InternalCompilationError> {
+        // First instantiate the blanket-local type variables with fresh
+        // inference variables in the caller-provided unifier.
+        let inst_subst = (
+            ty_inf.fresh_type_var_subst(imp_ty_var_count),
+            FxHashMap::default(),
+        );
+        let imp_input_tys = instantiate_types(imp_input_tys, &inst_subst);
+        let imp_output_tys = instantiate_types(imp_output_tys, &inst_subst);
+        let mut remaining = instantiate_types(imp_constraints, &inst_subst)
+            .into_iter()
+            .enumerate()
+            .collect::<Vec<_>>();
+        let mut resolved_constraints = Vec::new();
+
+        // Then unify the instantiated blanket input types against the
+        // requested trait inputs.
+        for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys.iter()) {
+            if ty_inf
+                .unify_same_type(*imp_input_ty, fn_span, *input_ty, fn_span)
+                .is_err()
+            {
+                return Ok(BlanketImplMatch::No);
+            }
+        }
+
+        loop {
+            let initial_count = remaining.len();
+            let mut still_remaining = Vec::new();
+
+            for (constraint_index, constraint) in remaining {
+                // Re-substitute the constraint on every pass because earlier
+                // solved constraints may have refined the type variables it uses.
+                let (trait_ref, constraint_inputs, constraint_outputs, _span) = ty_inf
+                    .substitute_in_constraint(&constraint)
+                    .into_have_trait()
+                    .expect("Non trait constraint in blanket impl");
+                if !constraint_inputs.iter().all(Type::is_constant) {
+                    still_remaining.push((constraint_index, constraint));
+                    continue;
+                }
+                let solved_outputs = match query.solve_output_types_query(
+                    &trait_ref,
+                    &constraint_inputs,
+                    fn_span,
+                    arena,
+                ) {
+                    Ok(outputs) => outputs,
+                    Err(_) => return Ok(BlanketImplMatch::No),
+                };
+                for (solved_output, constraint_output) in
+                    solved_outputs.iter().zip(constraint_outputs.iter())
+                {
+                    if ty_inf
+                        .unify_same_type(*solved_output, fn_span, *constraint_output, fn_span)
+                        .is_err()
+                    {
+                        return Ok(BlanketImplMatch::No);
+                    }
+                }
+                resolved_constraints.push(ResolvedTraitConstraint {
+                    index: constraint_index,
+                    trait_ref,
+                    input_tys: constraint_inputs,
+                });
+            }
+
+            // Fixed point reached: either all nested constraints are solved or
+            // we have to stop according to the caller's mode.
+            if still_remaining.is_empty() {
+                break;
+            }
+
+            if still_remaining.len() == initial_count {
+                // Even in the `Unknown` case, we still try to unify the impl's
+                // outputs with the requested outputs, so obvious mismatches are
+                // rejected early.
+                for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
+                    if ty_inf
+                        .unify_same_type(*imp_output_ty, fn_span, *output_ty, fn_span)
+                        .is_err()
+                    {
+                        return Ok(BlanketImplMatch::No);
+                    }
+                }
+                return Ok(match mode {
+                    BlanketConstraintMode::RequireAllResolved => BlanketImplMatch::No,
+                    BlanketConstraintMode::AllowUnknown => BlanketImplMatch::Unknown,
+                });
+            }
+
+            remaining = still_remaining;
+        }
+
+        // Finally, unify the instantiated blanket outputs with the requested
+        // outputs and return the resolved nested trait constraints in source order.
+        for (imp_output_ty, output_ty) in imp_output_tys.iter().zip(output_tys.iter()) {
+            if ty_inf
+                .unify_same_type(*imp_output_ty, fn_span, *output_ty, fn_span)
+                .is_err()
+            {
+                return Ok(BlanketImplMatch::No);
+            }
+        }
+
+        resolved_constraints.sort_by_key(|constraint| constraint.index);
+        Ok(BlanketImplMatch::Yes {
+            output_tys: ty_inf.substitute_in_types(&imp_output_tys),
+            resolved_constraints,
+        })
+    }
+
     /// Commit the newly created functions to the module.
     /// This must be called after trait solving is done,
     /// otherwise the created functions will be lost.
@@ -354,118 +797,66 @@ impl<'a> TraitSolver<'a> {
                 let imp_input_tys = &sub_key.input_tys;
                 let imp_ty_var_count = sub_key.ty_var_count;
                 let imp_constraints = &sub_key.constraints;
+                let imp_output_tys = if let Some(module_id) = imp_module_id {
+                    self.others
+                        .get(module_id)
+                        .unwrap()
+                        .module
+                        .as_ref()
+                        .unwrap()
+                        .impls
+                        .data[impl_id.as_index()]
+                    .output_tys
+                    .clone()
+                } else {
+                    self.impls.data[impl_id.as_index()].output_tys.clone()
+                };
 
                 // Sanity checks
                 #[cfg(debug_assertions)]
-                {
-                    assert_eq!(imp_input_tys.len(), input_tys.len());
-                    let mut ty_vars = FxHashSet::default();
-                    let mut mut_vars = FxHashSet::default();
-                    let mut eff_vars = FxHashSet::default();
-                    let mut collector = AllVarsCollector {
-                        ty_vars: &mut ty_vars,
-                        mut_vars: &mut mut_vars,
-                        effect_vars: &mut eff_vars,
-                    };
-                    for ty in imp_input_tys {
-                        ty.visit(&mut collector);
-                    }
-                    for constraint in imp_constraints.iter() {
-                        constraint.visit(&mut collector);
-                    }
-                    assert!(mut_vars.is_empty());
-                    assert!(eff_vars.is_empty());
-                    assert_eq!(ty_vars.len(), imp_ty_var_count as usize);
-                }
+                Self::assert_blanket_impl_is_well_formed(
+                    imp_input_tys,
+                    imp_constraints,
+                    imp_ty_var_count,
+                    input_tys,
+                );
 
-                // Does this implementation matches the input types? We try to unify the types to find out.
+                // Match the blanket implementation and resolve the blanket constraints to a
+                // fixed point before materializing the concrete implementation.
                 let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(imp_ty_var_count);
-                for (imp_input_ty, input_ty) in imp_input_tys.iter().zip(input_tys.iter()) {
-                    assert!(input_ty.is_constant());
-                    // Note: expected_span is wrong in unify_same_type, but it doesn't matter because
-                    // this error is not reported to the user.
-                    if ty_inf
-                        .unify_same_type(*imp_input_ty, fn_span, *input_ty, fn_span)
-                        .is_err()
-                    {
-                        // No, try next implementation.
-                        continue 'impl_loop;
-                    }
+                let BlanketImplMatch::Yes {
+                    output_tys,
+                    resolved_constraints,
+                } = Self::match_blanket_impl(
+                    self,
+                    &mut ty_inf,
+                    imp_input_tys,
+                    &imp_output_tys,
+                    imp_ty_var_count,
+                    imp_constraints,
+                    input_tys,
+                    &[],
+                    fn_span,
+                    arena,
+                    BlanketConstraintMode::RequireAllResolved,
+                )?
+                else {
+                    continue 'impl_loop;
+                };
+
+                let mut constraint_dict_ids = Vec::with_capacity(resolved_constraints.len());
+                for resolved_constraint in resolved_constraints {
+                    let dict_id = match self.solve_impl(
+                        &resolved_constraint.trait_ref,
+                        &resolved_constraint.input_tys,
+                        fn_span,
+                        arena,
+                    ) {
+                        Ok(functions) => functions,
+                        Err(_) => continue 'impl_loop,
+                    };
+                    constraint_dict_ids.push(dict_id);
                 }
-
-                // Yes, instantiate the constraints and get the corresponding function dictionaries
-                // (as Value containing a tuple of first-class functions).
-                // We process constraints iteratively because constraints may not be ordered by
-                // dependency. After solving a constraint and unifying its output types, those
-                // types become available for subsequent constraints that depend on them.
-                // We maintain a map from constraint index to dict_id to preserve the original order.
-                let mut constraint_dict_ids: Vec<Option<TraitImplId>> =
-                    vec![None; imp_constraints.len()];
-                let mut remaining_indices: Vec<_> = (0..imp_constraints.len()).collect();
-                loop {
-                    let initial_count = remaining_indices.len();
-                    let mut still_remaining = Vec::new();
-
-                    for constraint_idx in remaining_indices {
-                        let constraint = &imp_constraints[constraint_idx];
-                        let (trait_ref, input_tys, output_tys, _span) = ty_inf
-                            .substitute_in_constraint(constraint)
-                            .into_have_trait()
-                            .expect("Non trait constraint in blanket impl");
-                        // If some input types are not constant, we cannot solve this constraint yet.
-                        // Defer it and try again after solving other constraints that may provide
-                        // the missing type information.
-                        if !input_tys.iter().all(Type::is_constant) {
-                            still_remaining.push(constraint_idx);
-                            continue;
-                        }
-                        let new_output_tys =
-                            match self.solve_output_types(&trait_ref, &input_tys, fn_span, arena) {
-                                Ok(tys) => tys,
-                                // Constraint not satisfied, try next implementation.
-                                Err(_) => continue 'impl_loop,
-                            };
-                        for (new_output_ty, output_ty) in
-                            new_output_tys.iter().zip(output_tys.iter())
-                        {
-                            assert!(new_output_ty.is_constant());
-                            // Note: expected_span is wrong in unify_same_type, but it doesn't matter because
-                            // this error is not reported to the user.
-                            if ty_inf
-                                .unify_same_type(*new_output_ty, fn_span, *output_ty, fn_span)
-                                .is_err()
-                            {
-                                // No, try next implementation.
-                                continue 'impl_loop;
-                            }
-                        }
-
-                        let dict_id = self.solve_impl(&trait_ref, &input_tys, fn_span, arena);
-                        let dict_id = match dict_id {
-                            Ok(functions) => functions,
-                            // Failed? Try next implementation.
-                            Err(_) => continue 'impl_loop,
-                        };
-                        constraint_dict_ids[constraint_idx] = Some(dict_id);
-                    }
-
-                    // If all constraints are solved, we're done.
-                    if still_remaining.is_empty() {
-                        break;
-                    }
-
-                    // If no progress was made, this implementation doesn't work.
-                    if still_remaining.len() == initial_count {
-                        continue 'impl_loop;
-                    }
-
-                    remaining_indices = still_remaining;
-                }
-                // Unwrap all the dict_ids - they should all be Some by now.
-                let constraint_dict_ids: Vec<_> = constraint_dict_ids
-                    .into_iter()
-                    .map(|opt| opt.expect("All constraints should be solved"))
-                    .collect();
 
                 // Succeeded? First get the blanket implementation data and compute the output types.
                 let impls = if let Some(module_id) = imp_module_id {
@@ -482,7 +873,6 @@ impl<'a> TraitSolver<'a> {
                     &self.impls
                 };
                 let imp = &impls.data[impl_id.as_index()];
-                let output_tys = ty_inf.substitute_in_types(&imp.output_tys);
 
                 // Then collect constraint dictionary info for building thunk nodes later.
                 // Each thunk gets its own arena, so we store (NodeKind, Type) pairs to re-create them.
@@ -804,6 +1194,18 @@ impl<'a> TraitSolver<'a> {
                 });
                 ImportImplSlotId::from_index(index)
             })
+    }
+}
+
+impl TraitOutputQuery for TraitSolver<'_> {
+    fn solve_output_types_query(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<Vec<Type>, InternalCompilationError> {
+        self.solve_output_types(trait_ref, input_tys, fn_span, arena)
     }
 }
 

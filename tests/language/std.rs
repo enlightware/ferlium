@@ -431,22 +431,14 @@ fn reducing_fns() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mapping_fns() {
     let mut session = TestSession::new();
-    assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2] |> map(|x| x + 1); (next(it), next(it), next(it), next(it))"
-        ),
-        tuple!(some(int(1)), some(int(2)), some(int(3)), none())
-    );
+    assert_eq!(session.run("[0, 1, 2] |> map(|x| x + 1)"), int_a![1, 2, 3]);
     assert_eq!(
         session.run(
             "let mut it = [0, 1, 2] |> iter() |> map(|x| x + 1); (next(it), next(it), next(it), next(it))"
         ),
         tuple!(some(int(1)), some(int(2)), some(int(3)), none())
     );
-    assert_eq!(
-        session.run("let mut it = [0, 1, 2] |> filter(|x| x > 0); (next(it), next(it), next(it))"),
-        tuple!(some(int(1)), some(int(2)), none())
-    );
+    assert_eq!(session.run("[0, 1, 2] |> filter(|x| x > 0)"), int_a![1, 2]);
     assert_eq!(
         session.run(
             "let mut it = [0, 1, 2] |> iter() |> filter(|x| x > 0); (next(it), next(it), next(it))"
@@ -454,10 +446,8 @@ fn mapping_fns() {
         tuple!(some(int(1)), some(int(2)), none())
     );
     assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2] |> filter_map(|x| if x > 0 { Some(x * x) } else { None }); (next(it), next(it), next(it))"
-        ),
-        tuple!(some(int(1)), some(int(4)), none())
+        session.run("[0, 1, 2] |> filter_map(|x| if x > 0 { Some(x * x) } else { None })"),
+        int_a![1, 4]
     );
     assert_eq!(
         session.run(
@@ -465,26 +455,63 @@ fn mapping_fns() {
         ),
         tuple!(some(int(1)), some(int(4)), none())
     );
+    use PrimitiveEffect::*;
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { [0, 1, 2] |> map(|x| x + 1) }",
+        "f",
+        no_effects(),
+    );
+    session
+        .fail_compilation("fn f() { [0, 1, 2] |> map(|x| { effects::read(); x + 1 }) }")
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
+    session
+        .fail_compilation("fn f() { [0, 1, 2] |> filter(|x| { effects::read(); x > 0 }) }")
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
+    session
+        .fail_compilation("fn f() { [0, 1, 2] |> filter_map(|x| { effects::read(); Some(x) }) }")
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
+    session
+        .fail_compilation(
+            "fn f() { let ignored = [0, 1, 2] |> iter() |> map(|x| { effects::read(); x + 1 }); () }",
+        )
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
+    session
+        .fail_compilation(
+            "fn f() { let ignored = [0, 1, 2] |> iter() |> filter(|x| { effects::read(); x > 0 }); () }",
+        )
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
+    session
+        .fail_compilation(
+            "fn f() { let ignored = [0, 1, 2] |> iter() |> filter_map(|x| { effects::read(); Some(x) }); () }",
+        )
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
 }
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn collect_fns() {
     let mut session = TestSession::new();
-    assert_eq!(session.run("[1, 2, 3] |> collect()"), int_a![1, 2, 3]);
     assert_eq!(
-        session.run("[1, 2, 3] |> iter() |> collect()"),
+        session.run("([1, 2, 3] |> collect(): [_])"),
         int_a![1, 2, 3]
     );
     assert_eq!(
-        session.run("[1, 2, 3] |> map(|x| x as float) |> collect()"),
+        session.run("([1, 2, 3] |> iter() |> collect(): [_])"),
+        int_a![1, 2, 3]
+    );
+    assert_eq!(
+        session.run("([1, 2, 3] |> iter() |> map(|x| x as float) |> collect(): [_])"),
         float_a![1.0, 2.0, 3.0]
     );
     assert_eq!(
-        session.run("[1, 2, 3] |> iter() |> map(|x| x as float) |> collect()"),
+        session.run("let ys: [_] = [1, 2, 3] |> iter() |> map(|x| x as float) |> collect(); ys"),
         float_a![1.0, 2.0, 3.0]
     );
     assert_eq!(session.run("(0..3 |> collect(): [int])"), int_a![0, 1, 2]);
+    session
+        .fail_compilation("[1, 2, 3] |> iter() |> collect()")
+        .expect_unbound_ty_var();
 }
 
 #[test]

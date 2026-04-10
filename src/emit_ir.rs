@@ -772,11 +772,14 @@ where
         // Default orphan constraints for the trait implementation into the unification tables.
         {
             let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-            let input_quantifiers = collect_ty_vars(&input_tys);
+            let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
+            let mut head_tys = input_tys.clone();
+            head_tys.extend(output_tys.iter().copied());
+            let head_quantifiers = collect_ty_vars(&head_tys);
             ty_inf.normalize_remaining_constraints();
             let (_, orphan_constraints) = select_constraints_accessible_from(
                 ty_inf.remaining_constraints(),
-                &input_quantifiers,
+                &head_quantifiers,
             );
             let orphan_constraints = orphan_constraints.into_iter().cloned().collect();
             let mut solver = trait_solver_from_module!(output, others);
@@ -791,10 +794,13 @@ where
             // Check for remaining orphans.
             ty_inf.normalize_remaining_constraints();
             let input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-            let input_quantifiers = collect_ty_vars(&input_tys);
+            let output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
+            let mut head_tys = input_tys.clone();
+            head_tys.extend(output_tys.iter().copied());
+            let head_quantifiers = collect_ty_vars(&head_tys);
             let (_, remaining_orphans) = select_constraints_accessible_from(
                 ty_inf.remaining_constraints(),
-                &input_quantifiers,
+                &head_quantifiers,
             );
             let remaining_orphans: Vec<_> = remaining_orphans
                 .into_iter()
@@ -855,7 +861,9 @@ where
         trait_output.functions = local_fns.clone();
 
         // Compute quantifiers from input types and constraints.
-        let input_quantifiers = collect_ty_vars(&trait_output.input_tys);
+        let mut head_tys = trait_output.input_tys.clone();
+        head_tys.extend(trait_output.output_tys.iter().copied());
+        let input_quantifiers = collect_ty_vars(&head_tys);
         let constraints_refs: Vec<_> = all_constraints.iter().collect();
         let (related_constraints, _) =
             select_constraints_accessible_from(&constraints_refs, &input_quantifiers);

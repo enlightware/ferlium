@@ -152,6 +152,54 @@ for n in [1, 2, 3] {
 count
 ```
 
+## Sequence transforms
+
+Ferlium provides `map`, `filter`, and `filter_map` for both collections and iterators.
+
+### Arrays transform eagerly
+
+When you call these functions on an array, you get back an array immediately:
+
+```ferlium
+[1, 2, 3] |> map(|x| x + 1)
+```
+
+```ferlium
+[1, 2, 3] |> filter(|x| x > 1)
+```
+
+### Iterators transform lazily
+
+When you call the same functions on an iterator, you get back another iterator:
+
+```ferlium
+let mut it = [1, 2, 3] |> iter() |> map(|x| x + 1);
+(next(it), next(it), next(it), next(it))
+```
+
+This evaluates to:
+
+```ferlium
+(Some(2), Some(3), Some(4), None)
+```
+
+The same eager/lazy distinction applies to `filter` and `filter_map`.
+
+### Collecting results
+
+Use `collect()` to turn a sequence or iterator into a target collection.
+At the moment, the target collection type must be known from context:
+
+```ferlium
+let xs: [_] = 0..3 |> collect();
+xs
+```
+
+```ferlium
+let ys: [_] = [1, 2, 3] |> iter() |> map(|x| x as float) |> collect();
+ys
+```
+
 ## What comes next
 
 The next chapters expand structured data beyond arrays and introduce richer pattern matching for structured values.

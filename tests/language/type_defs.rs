@@ -1736,6 +1736,28 @@ fn constrained_named_type_from_rust_definition() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn structured_trait_improvement_uses_trait_policy_not_trait_name() {
+    let mut session = TestSession::new();
+
+    assert_compiled_fn_type(
+        &mut session,
+        indoc! { r#"
+            struct DemandsWitness<A>
+            where
+                A: testing::TestWitnessedProject<Output = int>
+            (A)
+
+            fn project_witness(value: testing::Witnessed<string, _>) {
+                DemandsWitness(value)
+            }
+        "# },
+        "project_witness",
+        "(Witnessed<string, int>) -> DemandsWitness<Witnessed<string, int>>",
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn map_iterator_named_type_from_rust_definition() {
     let mut session = TestSession::new();
 

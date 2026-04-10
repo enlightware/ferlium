@@ -375,7 +375,7 @@ impl TypeInference {
 
         // 3. Determine explicit arguments types and return type.
         // Local ids are inner to the lambda.
-        let (explicit_locals, ret_ty, expected_effects) = if let Some(fn_ty) = &expected_fn_ty {
+        let (explicit_locals, ret_ty) = if let Some(fn_ty) = &expected_fn_ty {
             let explicit_locals = args
                 .iter()
                 .zip(&fn_ty.args)
@@ -385,7 +385,7 @@ impl TypeInference {
                     id
                 })
                 .collect::<Vec<_>>();
-            (explicit_locals, fn_ty.ret, Some(fn_ty.effects.clone()))
+            (explicit_locals, fn_ty.ret)
         } else {
             let explicit_locals = args
                 .iter()
@@ -401,7 +401,7 @@ impl TypeInference {
                     id
                 })
                 .collect::<Vec<_>>();
-            (explicit_locals, self.fresh_type_var_ty(), None)
+            (explicit_locals, self.fresh_type_var_ty())
         };
 
         let args_ty = explicit_locals
@@ -440,13 +440,8 @@ impl TypeInference {
             env.ast_arena[body].span,
         )?;
 
-        // Unify effects if expected
         let code = &inner_env.ir_arena[code_id];
-        let effects = if let Some(expected_effects) = expected_effects {
-            self.unify_effects(&code.effects, &expected_effects)
-        } else {
-            code.effects.clone()
-        };
+        let effects = code.effects.clone();
 
         // 6. Store and return the function's type.
         let fn_ty = FnType::new(args_ty, ret_ty, effects);
@@ -1558,8 +1553,15 @@ impl TypeInference {
             if let TypeKind::Function(fn_ty) = &*ty_data {
                 let fn_ty = fn_ty.clone();
                 drop(ty_data);
-                let (node_id, _, _, _) =
+                let (node_id, node_ty, actual_mut, _) =
                     self.infer_abstract(env, &data.args, data.body, Some(*fn_ty), expr_span)?;
+                self.add_sub_type_constraint(node_ty, expr_span, expected_ty, expected_span);
+                self.add_mut_be_at_least_constraint(
+                    actual_mut,
+                    expr_span,
+                    expected_mut,
+                    expected_span,
+                );
                 return Ok(node_id);
             }
         }
@@ -1870,12 +1872,20 @@ impl TypeMapper for FreshVariableTypeMapper<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PendingEffectDependency {
+    source: EffType,
+    source_span: Location,
+    target: EffectVarKey,
+    target_span: Location,
+}
+
 pub(crate) struct UnifiedTypeInferenceSnapshot {
     ty_unification_table: Snapshot<InPlace<TyVarKey>>,
     mut_unification_table: Snapshot<InPlace<MutVarKey>>,
     effect_unification_table: Snapshot<InPlace<EffectVarKey>>,
     remaining_ty_constraints_len: usize,
-    effect_constraints_inv: FxHashMap<EffType, EffectVarKey>,
+    effect_constraints_inv: Vec<PendingEffectDependency>,
 }
 
 /// The type inference after unification, with only public constraints remaining
@@ -1886,7 +1896,7 @@ pub struct UnifiedTypeInference {
     remaining_ty_constraints: Vec<PubTypeConstraint>,
     mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     effect_unification_table: InPlaceUnificationTable<EffectVarKey>,
-    effect_constraints_inv: FxHashMap<EffType, EffectVarKey>,
+    effect_constraints_inv: Vec<PendingEffectDependency>,
 }
 
 impl UnifiedTypeInference {
@@ -1896,10 +1906,20 @@ impl UnifiedTypeInference {
         unified_ty_inf
     }
 
+    pub(crate) fn fresh_type_var(&mut self) -> TypeVar {
+        self.ty_unification_table.new_key(None)
+    }
+
     pub fn add_ty_vars(&mut self, count: u32) {
         for _ in 0..count {
             self.ty_unification_table.new_key(None);
         }
+    }
+
+    pub(crate) fn fresh_type_var_subst(&mut self, count: u32) -> TypeSubstitution {
+        (0..count)
+            .map(|old_var| (TypeVar::new(old_var), Type::variable(self.fresh_type_var())))
+            .collect()
     }
 
     pub(crate) fn snapshot(&mut self) -> UnifiedTypeInferenceSnapshot {
@@ -1943,7 +1963,7 @@ impl UnifiedTypeInference {
             remaining_ty_constraints: vec![],
             mut_unification_table,
             effect_unification_table,
-            effect_constraints_inv: FxHashMap::default(),
+            effect_constraints_inv: Vec::default(),
         };
         let mut remaining_constraints = FxHashSet::default();
 
@@ -2335,8 +2355,8 @@ impl UnifiedTypeInference {
 
         // Flatten inverted effect constraints into normal constraints
         let effect_constraints_inv = mem::take(&mut unified_ty_inf.effect_constraints_inv);
-        for (eff, var) in effect_constraints_inv {
-            unified_ty_inf.expand_inv_effect_dep(eff, var);
+        for dep in effect_constraints_inv {
+            unified_ty_inf.expand_inv_effect_dep(dep)?;
         }
 
         // FIXME: think whether we should have an intermediate struct without the remaining_constraints in it.
@@ -2536,21 +2556,20 @@ impl UnifiedTypeInference {
                 } = constraint
                 {
                     assert!(!input_tys.is_empty());
-                    if input_tys.len() > 1 {
-                        // Only mark type variables as invalid for defaulting if multiple
-                        // type variables co-occur in the multi-input trait's inputs.
-                        let all_ty_vars: Vec<_> =
-                            input_tys.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
-                        if all_ty_vars.len() > 1 {
-                            invalid_ty_vars.extend(all_ty_vars);
-                        }
-                    } else if *trait_ref == *NUM_TRAIT {
+                    if *trait_ref == *NUM_TRAIT {
                         let maybe_ty_var = input_tys[0].data().as_variable().cloned();
                         if let Some(ty_var) = maybe_ty_var {
                             num_ty_vars.insert(ty_var);
                         }
                     }
-                    invalid_ty_vars.extend(output_tys.iter().flat_map(|ty| ty.inner_ty_vars()));
+                    let input_ty_vars: FxHashSet<_> =
+                        input_tys.iter().flat_map(|ty| ty.inner_ty_vars()).collect();
+                    invalid_ty_vars.extend(
+                        output_tys
+                            .iter()
+                            .flat_map(|ty| ty.inner_ty_vars())
+                            .filter(|ty_var| !input_ty_vars.contains(ty_var)),
+                    );
                 } else if !constraint.is_type_has_variant() {
                     invalid_ty_vars.extend(constraint.inner_ty_vars());
                 }
@@ -3103,8 +3122,12 @@ impl UnifiedTypeInference {
                     // This is done through the inverted constraints mechanism
                     for eff in fn_ty.effects.iter() {
                         if eff.is_primitive() {
-                            self.effect_constraints_inv
-                                .insert(EffType::single(*eff), fresh_eff_var);
+                            self.effect_constraints_inv.push(PendingEffectDependency {
+                                source: EffType::single(*eff),
+                                source_span: Location::new_synthesized(),
+                                target: fresh_eff_var,
+                                target_span: Location::new_synthesized(),
+                            });
                         } else if let Some(var) = eff.as_variable() {
                             // Also union any existing effect variables
                             self.effect_unification_table.union(fresh_eff_var, *var);
@@ -3309,10 +3332,36 @@ impl UnifiedTypeInference {
             }
             None
         } else {
-            // Not fully resolved, defer the unification.
-            Some(PubTypeConstraint::new_have_trait(
-                trait_ref, input_tys, output_tys, span,
-            ))
+            // Partially resolved, we can progress a bit.
+            let has_structured_non_constant_input = input_tys
+                .iter()
+                .any(|ty| !ty.is_constant() && !ty.data().is_variable());
+            if has_structured_non_constant_input {
+                let _ = trait_solver.try_improve_trait_application(
+                    self,
+                    &trait_ref,
+                    &input_tys,
+                    &output_tys,
+                    span,
+                    arena,
+                )?;
+            }
+            let input_tys = self.normalize_types(&input_tys);
+            let output_tys = self.normalize_types(&output_tys);
+            if input_tys.iter().all(Type::is_constant) {
+                let impl_output_tys =
+                    trait_solver.solve_output_types(&trait_ref, &input_tys, span, arena)?;
+                assert!(output_tys.is_empty() || output_tys.len() == impl_output_tys.len());
+                for (cur_ty, exp_ty) in output_tys.iter().zip(impl_output_tys.iter()) {
+                    self.unify_same_type(*cur_ty, span, *exp_ty, span)?;
+                }
+                None
+            } else {
+                // Not fully resolved, defer the unification.
+                Some(PubTypeConstraint::new_have_trait(
+                    trait_ref, input_tys, output_tys, span,
+                ))
+            }
         })
     }
 
@@ -3574,7 +3623,12 @@ impl UnifiedTypeInference {
         } else if let Some(var) = tgt_var {
             // Right is a variable, put the effect dependency to the inverted constraints,
             // to be resolved later.
-            self.effect_constraints_inv.insert(current.clone(), var);
+            self.effect_constraints_inv.push(PendingEffectDependency {
+                source: current.clone(),
+                source_span: current_span,
+                target: var,
+                target_span,
+            });
         } else {
             return Err(internal_compilation_error!(InvalidEffectDependency {
                 source: current.clone(),
@@ -3586,19 +3640,40 @@ impl UnifiedTypeInference {
         Ok(())
     }
 
-    pub fn expand_inv_effect_dep(&mut self, current: EffType, target: EffectVarKey) {
-        if let Some(existing_effects) = self.effect_unification_table.probe_value(target) {
-            for eff in existing_effects.iter() {
-                if let Some(var) = eff.as_variable() {
-                    self.expand_inv_effect_dep(current.clone(), *var);
-                }
+    fn expand_inv_effect_dep(
+        &mut self,
+        dep: PendingEffectDependency,
+    ) -> Result<(), InternalCompilationError> {
+        if let Some(existing_effects) = self.effect_unification_table.probe_value(dep.target) {
+            if current_satisfied_by_target(&dep.source, &existing_effects) {
+                return Ok(());
+            }
+
+            let target_vars = existing_effects.inner_vars();
+            if target_vars.is_empty() {
+                return Err(internal_compilation_error!(InvalidEffectDependency {
+                    source: dep.source,
+                    source_span: dep.source_span,
+                    target: existing_effects,
+                    target_span: dep.target_span,
+                }));
+            }
+
+            for var in target_vars {
+                self.expand_inv_effect_dep(PendingEffectDependency {
+                    source: dep.source.clone(),
+                    source_span: dep.source_span,
+                    target: var,
+                    target_span: dep.target_span,
+                })?;
             }
         } else {
             self.effect_unification_table.union_value(
-                target,
-                Some(current.union(&EffType::single_variable(target))),
+                dep.target,
+                Some(dep.source.union(&EffType::single_variable(dep.target))),
             );
         }
+        Ok(())
     }
 
     pub fn substitute_in_module_function(
@@ -3863,11 +3938,18 @@ impl UnifiedTypeInference {
         }
         if !self.effect_constraints_inv.is_empty() {
             log::debug!("Inverted effect constraints:");
-            for (eff, var) in &self.effect_constraints_inv {
-                log::debug!("  {eff} → {var}");
+            for dep in &self.effect_constraints_inv {
+                log::debug!("  {} → {}", dep.source, dep.target);
             }
         }
     }
+}
+
+fn current_satisfied_by_target(current: &EffType, target: &EffType) -> bool {
+    // A pending dependency is already satisfied if the target contains all currently required
+    // primitive effects. Any target-side variables can still absorb the remaining uncertainty.
+    let target_primitives = EffType::multiple_primitive(&target.inner_non_vars());
+    current.is_subset_of(&target_primitives)
 }
 
 /// Substitution phase

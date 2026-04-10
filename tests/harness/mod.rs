@@ -15,7 +15,7 @@ use ferlium::{
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     function::{
         BinaryNativeFnNNV, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMV,
-        UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN,
+        UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
     parse_module_and_expr,
@@ -74,6 +74,22 @@ fn test_iterator_trait() -> TraitRef {
                 ),
                 ["iterator"],
                 "Gets the next item from a test-only iterator.",
+            ),
+        )],
+    )
+}
+
+fn test_witnessed_project_trait() -> TraitRef {
+    TraitRef::new_with_self_input_type(
+        "TestWitnessedProject",
+        "Test-only trait used to exercise structured trait improvement on a non-std trait name.",
+        ["Output"],
+        [(
+            "witness_project",
+            FunctionDefinition::new_infer_quantifiers(
+                FnType::new_by_val([Type::variable_id(0)], Type::variable_id(1), no_effects()),
+                ["value"],
+                "Projects the output witnessed by a constrained named type.",
             ),
         )],
     )
@@ -150,11 +166,13 @@ fn testing_module(module_id: ModuleId) -> Module {
     let mut module = Module::new(module_id);
     let test_assoc_trait = test_assoc_trait();
     let test_iterator_trait = test_iterator_trait();
+    let test_witnessed_project_trait = test_witnessed_project_trait();
     let option_type_def = option_type_def();
     let map_iterator_type_def = map_iterator_type_def(test_iterator_trait.clone());
     let witnessed_type_def = witnessed_type_def(test_assoc_trait.clone());
     module.add_trait(test_assoc_trait.clone());
     module.add_trait(test_iterator_trait.clone());
+    module.add_trait(test_witnessed_project_trait.clone());
     module.add_concrete_impl_no_locals(
         test_assoc_trait.clone(),
         [string_type()],
@@ -166,7 +184,7 @@ fn testing_module(module_id: ModuleId) -> Module {
         ],
     );
     module.add_concrete_impl_no_locals(
-        test_assoc_trait,
+        test_assoc_trait.clone(),
         [bool_type()],
         [string_type()],
         [Box::new(UnaryNativeFnNN::new(|value: bool| {
@@ -185,6 +203,24 @@ fn testing_module(module_id: ModuleId) -> Module {
         },
         vec![Type::variable_id(0)],
         [Box::new(UnaryNativeFnMV::new(ArrayIterator::next_value)) as Function],
+    );
+    module.add_blanket_impl_no_locals(
+        test_witnessed_project_trait,
+        BlanketTraitImplSubKey {
+            input_tys: vec![Type::named(
+                witnessed_type_def.clone(),
+                [Type::variable_id(0), Type::variable_id(1)],
+            )],
+            ty_var_count: 2,
+            constraints: vec![PubTypeConstraint::new_have_trait(
+                test_assoc_trait.clone(),
+                vec![Type::variable_id(0)],
+                vec![Type::variable_id(1)],
+                Location::new_synthesized(),
+            )],
+        },
+        vec![Type::variable_id(1)],
+        [Box::new(UnaryNativeFnVV::new(|_value: Value| Value::unit())) as Function],
     );
     module.add_function(
         "some_int".into(),
