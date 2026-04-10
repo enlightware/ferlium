@@ -66,7 +66,7 @@ apply_twice(|n| n + 1, 5)
 This pattern is common when working with collections and iterators:
 
 ```ferlium
-array_map([1, 2, 3], |x| x + 10)
+map([1, 2, 3], |x| x + 10)
 ```
 
 The receiving function constrains what the passed function must accept and return.

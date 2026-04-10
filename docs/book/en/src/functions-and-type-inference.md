@@ -101,6 +101,33 @@ Ferlium cannot enforce at compile time that recursive functions terminate.
 If a function calls itself indefinitely, execution will fail at runtime.
 It is the programmer's responsibility to ensure that recursion progresses toward a base case.
 
+## Pipeline calls with `|>`
+
+Ferlium provides a pipeline operator, `|>`, as a lightweight way to write function application left to right.
+
+```ferlium
+fn inc(x) { x + 1 }
+fn add(x, y) { x + y }
+
+41 |> inc() |> add(5)
+```
+
+This is equivalent to:
+
+```ferlium
+fn inc(x) { x + 1 }
+fn add(x, y) { x + y }
+
+add(inc(41), 5)
+```
+
+In general:
+
+- `value |> f()` means `f(value)`
+- `value |> f(a, b)` means `f(value, a, b)`
+
+This is especially useful later when chaining sequence operations.
+
 ## What comes next
 
 In some cases, inference leaves certain types ambiguous.

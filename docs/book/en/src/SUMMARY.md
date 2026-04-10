@@ -22,6 +22,10 @@
 - [Type Abstraction](./type-abstraction.md)
 - [Trait Implementations and Coherence](./trait-implementations-and-coherence.md)
 
+# Standard Library
+
+- [Sequence Processing](./sequence-processing.md)
+
 # Effects and Execution
 
 - [Effects](./effects.md)

@@ -193,4 +193,4 @@ User code still cannot:
 
 ## What comes next
 
-The next chapter introduces effects, describing how functions can interact with their environment beyond pure computation.
+The next chapter moves into the standard library and shows how sequence-processing functions such as `map`, `filter`, `collect`, and common reductions work over collections and iterators.
