@@ -18,7 +18,7 @@ use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, Mutab
 use ferlium::format::FormatWith;
 use ferlium::module::id::Id;
 use ferlium::module::{
-    LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleDetails, UseData, Uses,
+    LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
 };
 use ferlium::std::new_module_using_std;
 use ferlium::{
@@ -547,7 +547,7 @@ fn process_input(
         let module = session.expect_fresh_module(module_id);
         println!(
             "Module IR:\n{}",
-            module.format_with(&ShowModuleDetails(session.modules()))
+            module.format_with(&ShowModuleWithOptions::new(session.modules(), false, false))
         );
         if let Some(expr) = expr.as_ref() {
             let module_env = ModuleEnv::new(module, session.modules());
@@ -642,13 +642,21 @@ fn main() {
         println!("Ferlium REPL - A functional programming language interpreter");
         println!();
         println!("Usage:");
-        println!("  {} [--help|-h]      Show the help.", args[0]);
+        println!("  {} [--help|-h]        Show the help.", args[0]);
         println!(
-            "  {} [--print-std]    Print the standard library module (interactive mode only).",
+            "  {} [--print-std]      Print the standard library module (interactive mode only).",
             args[0]
         );
         println!(
-            "  {} [--print-module] Print the provided-code module (pipe mode only).",
+            "  {} [--print-std-all]  Print the standard library module with all functions (interactive mode only).",
+            args[0]
+        );
+        println!(
+            "  {} [--print-std-full] Print the standard library module with all functions and their IR (interactive mode only).",
+            args[0]
+        );
+        println!(
+            "  {} [--print-module]   Print the provided-code module (pipe mode only).",
             args[0]
         );
         println!("  echo 'code' | {}", args[0]);
@@ -666,11 +674,33 @@ fn main() {
         return;
     }
 
-    // Check for print-std flag
-    if args.len() > 1 && args[1] == "--print-std" {
-        let session = CompilerSession::new();
-        println!("{}", session.std_module().format_with(session.modules()));
-        return;
+    // Check for print-std flags
+    if args.len() > 1 {
+        if args[1] == "--print-std" {
+            let session = CompilerSession::new();
+            println!("{}", session.std_module().format_with(session.modules()));
+            return;
+        }
+        if args[1] == "--print-std-all" {
+            let session = CompilerSession::new();
+            println!(
+                "{}",
+                session
+                    .std_module()
+                    .format_with(&ShowModuleWithOptions::new(session.modules(), false, true))
+            );
+            return;
+        }
+        if args[1] == "--print-std-full" {
+            let session = CompilerSession::new();
+            println!(
+                "{}",
+                session
+                    .std_module()
+                    .format_with(&ShowModuleWithOptions::new(session.modules(), true, true))
+            );
+            return;
+        }
     }
 
     // Interactive REPL mode

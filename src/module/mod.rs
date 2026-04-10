@@ -21,6 +21,7 @@ pub mod path;
 pub mod trait_impl;
 pub mod uses;
 
+use derive_new::new;
 use enum_as_inner::EnumAsInner;
 pub use function::*;
 use itertools::Itertools;
@@ -795,6 +796,7 @@ impl Module {
         f: &mut fmt::Formatter,
         modules: &Modules,
         show_details: bool,
+        show_all_functions: bool,
     ) -> fmt::Result {
         let env = ModuleEnv::new(self, modules);
         if !self.uses.explicits.is_empty() {
@@ -870,7 +872,7 @@ impl Module {
                 .count();
             writeln!(f, "Non-trait impl functions ({}):\n", named_count)?;
             for (i, (name, function)) in self.iter_named_functions().enumerate() {
-                if !self.is_non_trait_local_function(name) {
+                if !show_all_functions && !self.is_non_trait_local_function(name) {
                     continue;
                 }
                 function
@@ -883,7 +885,7 @@ impl Module {
                 }
             }
             let unnamed_count = self.functions.len() - named_count;
-            if unnamed_count > 0 {
+            if !show_all_functions && unnamed_count > 0 {
                 writeln!(f, "\nNot showing {} trait impl functions.", unnamed_count)?;
             }
         }
@@ -893,15 +895,25 @@ impl Module {
 
 impl FormatWith<Modules> for Module {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &Modules) -> fmt::Result {
-        self.format_with_modules(f, data, false)
+        self.format_with_modules(f, data, false, false)
     }
 }
 
-pub struct ShowModuleDetails<'a>(pub &'a Modules);
+#[derive(new)]
+pub struct ShowModuleWithOptions<'a> {
+    pub modules: &'a Modules,
+    pub show_details: bool,
+    pub show_all_functions: bool,
+}
 
-impl FormatWith<ShowModuleDetails<'_>> for Module {
-    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &ShowModuleDetails) -> fmt::Result {
-        self.format_with_modules(f, data.0, true)
+impl FormatWith<ShowModuleWithOptions<'_>> for Module {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, options: &ShowModuleWithOptions) -> fmt::Result {
+        self.format_with_modules(
+            f,
+            options.modules,
+            options.show_details,
+            options.show_all_functions,
+        )
     }
 }
 
