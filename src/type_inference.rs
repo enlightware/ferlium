@@ -2270,80 +2270,25 @@ impl UnifiedTypeInference {
                 }
 
                 // Perform unification.
-                let mut new_remaining_constraints = FxHashSet::default();
-                let old_constraint_count = remaining_constraints.len();
-                for constraint in remaining_constraints {
-                    use PubTypeConstraint::*;
-                    let unified_constraint = match constraint {
-                        TupleAtIndexIs {
-                            tuple_ty,
-                            tuple_span,
-                            index,
-                            index_span,
-                            element_ty,
-                        } => unified_ty_inf.unify_tuple_project(
-                            tuple_ty,
-                            tuple_span.use_site,
-                            index,
-                            index_span.use_site,
-                            element_ty,
-                        )?,
-                        RecordFieldIs {
-                            record_ty,
-                            record_span,
-                            field,
-                            field_span,
-                            element_ty,
-                        } => unified_ty_inf.unify_record_field_access(
-                            record_ty,
-                            record_span.use_site,
-                            field,
-                            field_span.use_site,
-                            element_ty,
-                        )?,
-                        TypeHasVariant {
-                            variant_ty,
-                            variant_span,
-                            tag,
-                            payload_ty,
-                            payload_span,
-                        } => unified_ty_inf.unify_type_has_variant(
-                            variant_ty,
-                            variant_span.use_site,
-                            tag,
-                            payload_ty,
-                            payload_span.use_site,
-                        )?,
-                        HaveTrait {
-                            trait_ref,
-                            input_tys,
-                            output_tys,
-                            span,
-                        } => {
-                            let is_ty_adt = |ty| {
-                                tuples_at_index_is.contains_key(&ty)
-                                    || records_field_is.contains_key(&ty)
-                                    || variants_are.contains_key(&ty)
-                            };
-                            unified_ty_inf.unify_have_trait(
-                                trait_ref,
-                                &input_tys,
-                                &output_tys,
-                                span.use_site,
-                                is_ty_adt,
-                                trait_solver,
-                                arena,
-                            )?
-                        }
-                    };
-                    if let Some(new_constraint) = unified_constraint {
-                        new_remaining_constraints.insert(new_constraint);
-                    }
-                }
-                remaining_constraints = new_remaining_constraints;
+                let constraints = remaining_constraints.into_iter().collect::<Vec<_>>();
+                let old_constraint_count = constraints.len();
+                let old_constraint_var_count = total_constraints_var_count(constraints.iter());
+                let is_ty_adt = |ty| {
+                    tuples_at_index_is.contains_key(&ty)
+                        || records_field_is.contains_key(&ty)
+                        || variants_are.contains_key(&ty)
+                };
+                remaining_constraints = unified_ty_inf
+                    .unify_constraint_pass(&constraints, is_ty_adt, trait_solver, arena)?
+                    .into_iter()
+                    .collect();
+                let new_constraint_var_count =
+                    total_constraints_var_count(remaining_constraints.iter());
 
                 // Break if no progress was made
-                if remaining_constraints.len() == old_constraint_count {
+                if remaining_constraints.len() == old_constraint_count
+                    && new_constraint_var_count == old_constraint_var_count
+                {
                     break;
                 }
             }
@@ -2393,70 +2338,11 @@ impl UnifiedTypeInference {
             self.normalize_remaining_constraints();
             let constraints = mem::take(&mut self.remaining_ty_constraints);
             let old_count = constraints.len();
-            let mut new_remaining = Vec::new();
-            for constraint in constraints {
-                use PubTypeConstraint::*;
-                let unified_constraint = match constraint {
-                    TupleAtIndexIs {
-                        tuple_ty,
-                        tuple_span,
-                        index,
-                        index_span,
-                        element_ty,
-                    } => self.unify_tuple_project(
-                        tuple_ty,
-                        tuple_span.use_site,
-                        index,
-                        index_span.use_site,
-                        element_ty,
-                    )?,
-                    RecordFieldIs {
-                        record_ty,
-                        record_span,
-                        field,
-                        field_span,
-                        element_ty,
-                    } => self.unify_record_field_access(
-                        record_ty,
-                        record_span.use_site,
-                        field,
-                        field_span.use_site,
-                        element_ty,
-                    )?,
-                    TypeHasVariant {
-                        variant_ty,
-                        variant_span,
-                        tag,
-                        payload_ty,
-                        payload_span,
-                    } => self.unify_type_has_variant(
-                        variant_ty,
-                        variant_span.use_site,
-                        tag,
-                        payload_ty,
-                        payload_span.use_site,
-                    )?,
-                    HaveTrait {
-                        trait_ref,
-                        input_tys,
-                        output_tys,
-                        span,
-                    } => self.unify_have_trait(
-                        trait_ref,
-                        &input_tys,
-                        &output_tys,
-                        span.use_site,
-                        |_| false,
-                        trait_solver,
-                        arena,
-                    )?,
-                };
-                if let Some(new_constraint) = unified_constraint {
-                    new_remaining.push(new_constraint);
-                }
-            }
-            self.remaining_ty_constraints = new_remaining;
-            if self.remaining_ty_constraints.len() == old_count {
+            let old_var_count = total_constraints_var_count(constraints.iter());
+            self.remaining_ty_constraints =
+                self.unify_constraint_pass(&constraints, |_| false, trait_solver, arena)?;
+            let new_var_count = total_constraints_var_count(self.remaining_ty_constraints.iter());
+            if self.remaining_ty_constraints.len() == old_count && new_var_count == old_var_count {
                 break;
             }
         }
@@ -3286,6 +3172,7 @@ impl UnifiedTypeInference {
         input_tys: &[Type],
         output_tys: &[Type],
         span: Location,
+        assumptions: &[&PubTypeConstraint],
         is_ty_adt: impl Fn(Type) -> bool,
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
@@ -3342,6 +3229,7 @@ impl UnifiedTypeInference {
                     &trait_ref,
                     &input_tys,
                     &output_tys,
+                    assumptions,
                     span,
                     arena,
                 )?;
@@ -3363,6 +3251,88 @@ impl UnifiedTypeInference {
                 ))
             }
         })
+    }
+
+    fn unify_constraint_pass(
+        &mut self,
+        constraints: &[PubTypeConstraint],
+        is_ty_adt: impl Fn(Type) -> bool,
+        trait_solver: &mut TraitSolver<'_>,
+        arena: &mut NodeArena,
+    ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
+        let mut new_constraints = Vec::with_capacity(constraints.len());
+        for (constraint_index, constraint) in constraints.iter().enumerate() {
+            use PubTypeConstraint::*;
+            let unified_constraint = match constraint {
+                TupleAtIndexIs {
+                    tuple_ty,
+                    tuple_span,
+                    index,
+                    index_span,
+                    element_ty,
+                } => self.unify_tuple_project(
+                    *tuple_ty,
+                    tuple_span.use_site,
+                    *index,
+                    index_span.use_site,
+                    *element_ty,
+                )?,
+                RecordFieldIs {
+                    record_ty,
+                    record_span,
+                    field,
+                    field_span,
+                    element_ty,
+                } => self.unify_record_field_access(
+                    *record_ty,
+                    record_span.use_site,
+                    *field,
+                    field_span.use_site,
+                    *element_ty,
+                )?,
+                TypeHasVariant {
+                    variant_ty,
+                    variant_span,
+                    tag,
+                    payload_ty,
+                    payload_span,
+                } => self.unify_type_has_variant(
+                    *variant_ty,
+                    variant_span.use_site,
+                    *tag,
+                    *payload_ty,
+                    payload_span.use_site,
+                )?,
+                HaveTrait {
+                    trait_ref,
+                    input_tys,
+                    output_tys,
+                    span,
+                } => {
+                    let assumptions = constraints
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, constraint)| {
+                            (index != constraint_index).then_some(constraint)
+                        })
+                        .collect::<Vec<_>>();
+                    self.unify_have_trait(
+                        trait_ref.clone(),
+                        input_tys,
+                        output_tys,
+                        span.use_site,
+                        &assumptions,
+                        &is_ty_adt,
+                        trait_solver,
+                        arena,
+                    )?
+                }
+            };
+            if let Some(new_constraint) = unified_constraint {
+                new_constraints.push(new_constraint);
+            }
+        }
+        Ok(new_constraints)
     }
 
     fn unify_mut_must_be_at_least_or_equal(
@@ -3682,7 +3652,8 @@ impl UnifiedTypeInference {
         arena: &mut crate::ir::NodeArena,
     ) {
         descr.definition.ty_scheme.ty = self.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
-        assert!(descr.definition.ty_scheme.constraints.is_empty());
+        descr.definition.ty_scheme.constraints =
+            self.substitute_in_constraints(&descr.definition.ty_scheme.constraints);
         if let Some(root) = descr.get_code_entry() {
             self.substitute_in_node(arena, root);
         }
@@ -3943,6 +3914,15 @@ impl UnifiedTypeInference {
             }
         }
     }
+}
+
+fn total_constraints_var_count<'a>(
+    constraints: impl IntoIterator<Item = &'a PubTypeConstraint>,
+) -> usize {
+    constraints
+        .into_iter()
+        .map(|constraint| constraint.inner_ty_vars().len())
+        .sum()
 }
 
 fn current_satisfied_by_target(current: &EffType, target: &EffType) -> bool {

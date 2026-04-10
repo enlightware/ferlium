@@ -22,11 +22,14 @@ use crate::{
     containers::b,
     effects::no_effects,
     function::{
-        BinaryNativeFnMNN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, TernaryNativeFnNNNN,
-        UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnVN,
+        BinaryNativeFnMNN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, NullaryNativeFnN,
+        TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnVN,
     },
     module::{Module, ModuleFunction},
-    std::ordering::{ORD_TRAIT, compare},
+    std::{
+        default::DEFAULT_TRAIT,
+        ordering::{ORD_TRAIT, compare},
+    },
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
     value::{NativeDisplay, Value},
@@ -285,6 +288,12 @@ pub fn add_to_module(to: &mut Module) {
         [string_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<String>)) as Function],
+    );
+    to.add_concrete_impl_no_locals(
+        DEFAULT_TRAIT.clone(),
+        [string_type()],
+        [],
+        [b(NullaryNativeFnN::new(String::default)) as Function],
     );
 
     to.add_function(

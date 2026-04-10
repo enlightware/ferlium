@@ -111,6 +111,14 @@ Use `count` to count elements and `sum` to add them:
 [2.0, 4.0, 6.0] |> average()
 ```
 
+Use `join` to concatenate a sequence of concatenable values with a separator between elements:
+
+```ferlium
+join(["a", "b", "c"], ",")
+```
+
+When the sequence is empty, `join` returns `default()` for the element type.
+
 ### Minimum and maximum
 
 Use `minimum` and `maximum` when the element type is ordered:

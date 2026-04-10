@@ -86,11 +86,49 @@ impl NamedTypeConstraintCollector {
             let mut constraint = constraint.instantiate(&subst);
             constraint.instantiate_location(self.use_site);
             if self.seen_constraints.insert(constraint.clone()) {
+                self.collect_constraint(&constraint);
                 self.constraints.push(constraint);
             }
         }
         for &param in &named.params {
             self.collect_type(param);
+        }
+    }
+
+    fn collect_constraint(&mut self, constraint: &PubTypeConstraint) {
+        use PubTypeConstraint::*;
+
+        match constraint {
+            TupleAtIndexIs {
+                tuple_ty,
+                element_ty,
+                ..
+            }
+            | RecordFieldIs {
+                record_ty: tuple_ty,
+                element_ty,
+                ..
+            }
+            | TypeHasVariant {
+                variant_ty: tuple_ty,
+                payload_ty: element_ty,
+                ..
+            } => {
+                self.collect_type(*tuple_ty);
+                self.collect_type(*element_ty);
+            }
+            HaveTrait {
+                input_tys,
+                output_tys,
+                ..
+            } => {
+                for &ty in input_tys {
+                    self.collect_type(ty);
+                }
+                for &ty in output_tys {
+                    self.collect_type(ty);
+                }
+            }
         }
     }
 

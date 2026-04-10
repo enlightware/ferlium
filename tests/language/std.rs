@@ -10,7 +10,7 @@ use test_log::test;
 
 use crate::effects::test_mod as test_mod_for_effects;
 
-use crate::harness::{TestSession, bool, float, int, string, variant_0, variant_t1};
+use crate::harness::{TestSession, bool, float, int, string, unit, variant_0, variant_t1};
 use ferlium::{
     effects::{PrimitiveEffect, effect, no_effects},
     std::option::{none, some},
@@ -512,6 +512,57 @@ fn collect_fns() {
     session
         .fail_compilation("[1, 2, 3] |> iter() |> collect()")
         .expect_unbound_ty_var();
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn plain_join_is_inferred_as_generic_function() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("join([\"a\", \"b\", \"c\"], \",\")"),
+        string("a,b,c")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn join_accepts_iterator_input() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("join([\"a\", \"b\", \"c\"] |> iter(), \",\")"),
+        string("a,b,c")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn join_uses_default_for_empty_sequences() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run("(join([], \",\"): string)"), string(""));
+    assert_eq!(session.run("(join([], [0]): [int])"), int_a![]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn join_works_on_arrays_of_arrays() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("join([[1], [2], [3]], [0])"),
+        int_a![1, 0, 2, 0, 3]
+    );
+    assert_eq!(session.run("(join([], [0]): [int])"), int_a![]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn default() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run("(default(): ())"), unit());
+    assert_eq!(session.run("(default(): bool)"), bool(false));
+    assert_eq!(session.run("(default(): int)"), int(0));
+    assert_eq!(session.run("(default(): float)"), float(0.0));
+    assert_eq!(session.run("(default(): string)"), string(""));
+    assert_eq!(session.run("(default(): [int])"), int_a![]);
 }
 
 #[test]

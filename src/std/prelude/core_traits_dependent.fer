@@ -30,3 +30,23 @@ impl Contains {
 		false
 	}
 }
+
+/// Concatenates the elements of a sequence, inserting `separator` between them.
+/// Returns `default()` when the sequence is empty.
+fn join(seq, separator) {
+	let mut it = iter(seq);
+	match next(it) {
+		Some(first) => {
+			let mut acc = first;
+			loop {
+				match next(it) {
+					Some(element) => {
+						acc = concat(concat(acc, separator), element);
+					},
+					None => return acc,
+				}
+			}
+		},
+		None => default(),
+	}
+}

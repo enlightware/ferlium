@@ -14,9 +14,9 @@ use crate::{
     cached_primitive_ty,
     containers::b,
     effects::no_effects,
-    function::{BinaryNativeFnNNN, BinaryNativeFnVVN, Function, UnaryNativeFnNN},
+    function::{BinaryNativeFnNNN, BinaryNativeFnVVN, Function, NullaryNativeFnN, UnaryNativeFnNN},
     module::Module,
-    std::{bits::BITS_TRAIT, math::Int},
+    std::{bits::BITS_TRAIT, default::DEFAULT_TRAIT, math::Int},
     r#type::Type,
     value::{NativeDisplay, Value},
 };
@@ -86,6 +86,12 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(clear_bit)) as Function,
             b(BinaryFn::new(test_bit)) as Function,
         ],
+    );
+    to.add_concrete_impl_no_locals(
+        DEFAULT_TRAIT.clone(),
+        [bool_type()],
+        [],
+        [b(NullaryNativeFnN::new(|| false)) as Function],
     );
     to.add_function(
         ustr("not"),

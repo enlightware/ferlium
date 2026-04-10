@@ -14,14 +14,18 @@ use crate::{
     cached_ty,
     effects::no_effects,
     format::{write_with_separator, write_with_separator_and_format_fn},
-    function::{BinaryNativeFnMVN, BinaryNativeFnNNN, UnaryNativeFnMV, UnaryNativeFnNN},
-    module::{Module, ModuleFunction},
+    function::{
+        BinaryNativeFnMVN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnMV,
+        UnaryNativeFnNN,
+    },
+    module::{BlanketTraitImplSubKey, Module, ModuleFunction},
     r#type::{FnType, NativeType, Type, bare_native_type},
     type_scheme::TypeScheme,
     value::{NativeDisplay, NativeValue, Value},
 };
 
 use super::{
+    default::DEFAULT_TRAIT,
     math::int_type,
     option::{none, option_type_generic, some},
 };
@@ -386,6 +390,16 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(ustr("array_concat"), Array::concat_descr());
     // to.add_local_function(ustr("array_map"), Array::map_descr());
     to.add_function(ustr("array_iter"), Array::iter_descr());
+    to.add_blanket_impl_no_locals(
+        DEFAULT_TRAIT.clone(),
+        BlanketTraitImplSubKey {
+            input_tys: vec![array_type_generic()],
+            ty_var_count: 1,
+            constraints: vec![],
+        },
+        [],
+        [Box::new(NullaryNativeFnN::new(Array::new)) as Function],
+    );
 
     to.add_function(
         ustr("array_iterator_next"),

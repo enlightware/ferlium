@@ -514,6 +514,14 @@ where
     } else {
         None
     };
+    let instantiated_trait_fn_defs = match (&trait_ctx, &trait_output) {
+        (Some(trait_ctx), Some(trait_output)) => Some(
+            trait_ctx
+                .trait_ref
+                .instantiate_for_tys(&trait_output.input_tys, &trait_output.output_tys),
+        ),
+        _ => None,
+    };
 
     // Populate the function table
     let mut local_fns = Vec::new();
@@ -567,13 +575,14 @@ where
         // If we are emitting a trait implementation, make sure this function conforms to it.
         if let Some(trait_ctx) = &trait_ctx {
             let index = trait_ctx.trait_ref.method_index(name.0).unwrap();
-            let (fn_name, fn_def) = &trait_ctx.trait_ref.functions[index];
-            if args.len() != fn_def.ty_scheme.ty.args.len() {
+            let (fn_name, raw_fn_def) = &trait_ctx.trait_ref.functions[index];
+            let instantiated_fn_def = &instantiated_trait_fn_defs.as_ref().unwrap()[index];
+            if args.len() != raw_fn_def.ty_scheme.ty.args.len() {
                 return Err(internal_compilation_error!(TraitMethodArgCountMismatch {
                     trait_ref: trait_ctx.trait_ref.clone(),
                     method_index: index,
                     method_name: *fn_name,
-                    expected: fn_def.ty_scheme.ty.args.len(),
+                    expected: raw_fn_def.ty_scheme.ty.args.len(),
                     got: args.len(),
                     args_span: *args_span,
                 }));
@@ -584,7 +593,7 @@ where
             ty_inf.add_same_fn_type_constraint_without_effects(
                 &fn_type,
                 *span,
-                &fn_def.ty_scheme.ty,
+                &instantiated_fn_def.ty_scheme.ty,
                 *span,
             );
         }

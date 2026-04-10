@@ -19,12 +19,13 @@ use crate::{
     error::RuntimeErrorKind,
     function::{
         BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, FunctionDefinition,
-        UnaryNativeFnNN,
+        NullaryNativeFnN, UnaryNativeFnNN,
     },
     module::Module,
     std::{
         bits::BITS_TRAIT,
         cast::CAST_TRAIT,
+        default::DEFAULT_TRAIT,
         ordering::{ORD_TRAIT, compare},
     },
     r#trait::TraitRef,
@@ -346,6 +347,12 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
     );
+    to.add_concrete_impl_no_locals(
+        DEFAULT_TRAIT.clone(),
+        [int_type()],
+        [],
+        [b(NullaryNativeFnN::new(|| 0isize)) as Function],
+    );
     to.add_function(
         ustr("idiv"),
         BinaryNativeFnNNFN::description_with_default_ty(
@@ -439,6 +446,12 @@ pub fn add_to_module(to: &mut Module) {
                 Ok(lhs / rhs)
             }
         })) as Function],
+    );
+    to.add_concrete_impl_no_locals(
+        DEFAULT_TRAIT.clone(),
+        [float_type()],
+        [],
+        [b(NullaryNativeFnN::new(|| Float::new(0.0).unwrap())) as Function],
     );
     to.add_function(
         ustr("round"),

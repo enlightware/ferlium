@@ -9,7 +9,14 @@
 
 use std::sync::LazyLock;
 
-use crate::{module::Module, r#trait::TraitRef, r#type::Type};
+use crate::{
+    containers::b,
+    function::{Function, NullaryNativeFnN},
+    module::Module,
+    std::default::DEFAULT_TRAIT,
+    r#trait::TraitRef,
+    r#type::Type,
+};
 
 pub static REPR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     TraitRef::new_with_self_input_type(
@@ -26,6 +33,13 @@ pub fn add_to_module(to: &mut Module) {
 
     // Add the `Repr` trait
     to.add_trait(REPR_TRAIT.clone());
+
+    to.add_concrete_impl_no_locals(
+        DEFAULT_TRAIT.clone(),
+        [Type::unit()],
+        [],
+        [b(NullaryNativeFnN::new(|| ())) as Function],
+    );
 
     // All types implement `Repr` to themselves, but to avoid overlapping
     // blanket implementations, this is implemented manually in the code.
