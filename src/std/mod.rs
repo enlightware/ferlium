@@ -26,6 +26,7 @@ pub mod concat;
 pub mod contains;
 pub mod core;
 pub mod default;
+pub mod empty;
 pub mod flow;
 pub mod io;
 pub mod iterator;
@@ -46,6 +47,7 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     let mut module = Module::new(STD_MODULE_ID);
     core::add_to_module(&mut module);
     default::add_to_module(&mut module);
+    empty::add_to_module(&mut module);
     flow::add_to_module(&mut module);
     cast::add_to_module(&mut module);
     // mem::add_to_module(&mut module);

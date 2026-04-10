@@ -117,7 +117,8 @@ Use `join` to concatenate a sequence of concatenable values with a separator bet
 join(["a", "b", "c"], ",")
 ```
 
-When the sequence is empty, `join` returns `default()` for the element type.
+When the sequence is empty, `join` returns `empty()` for the element type.
+In practice, this is currently useful for strings and arrays.
 
 ### Minimum and maximum
 

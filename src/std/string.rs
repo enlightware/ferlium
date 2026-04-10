@@ -28,6 +28,7 @@ use crate::{
     module::{Module, ModuleFunction},
     std::{
         default::DEFAULT_TRAIT,
+        empty::EMPTY_TRAIT,
         ordering::{ORD_TRAIT, compare},
     },
     r#type::{FnType, Type},
@@ -291,6 +292,12 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_concrete_impl_no_locals(
         DEFAULT_TRAIT.clone(),
+        [string_type()],
+        [],
+        [b(NullaryNativeFnN::new(String::default)) as Function],
+    );
+    to.add_concrete_impl_no_locals(
+        EMPTY_TRAIT.clone(),
         [string_type()],
         [],
         [b(NullaryNativeFnN::new(String::default)) as Function],

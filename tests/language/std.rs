@@ -536,7 +536,7 @@ fn join_accepts_iterator_input() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn join_uses_default_for_empty_sequences() {
+fn join_uses_empty_for_empty_sequences() {
     let mut session = TestSession::new();
     assert_eq!(session.run("(join([], \",\"): string)"), string(""));
     assert_eq!(session.run("(join([], [0]): [int])"), int_a![]);
@@ -563,6 +563,14 @@ fn default() {
     assert_eq!(session.run("(default(): float)"), float(0.0));
     assert_eq!(session.run("(default(): string)"), string(""));
     assert_eq!(session.run("(default(): [int])"), int_a![]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn empty() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run("(empty(): string)"), string(""));
+    assert_eq!(session.run("(empty(): [int])"), int_a![]);
 }
 
 #[test]

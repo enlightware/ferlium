@@ -117,6 +117,7 @@ trait TraitOutputQuery {
         arena: &mut NodeArena,
     ) -> Result<Vec<Type>, InternalCompilationError>;
 
+    #[allow(clippy::too_many_arguments)]
     fn improve_trait_application_query(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -353,6 +354,7 @@ impl<'a> TraitSolver<'a> {
 
     /// Check whether a visible impl candidate is compatible with the current
     /// partially known trait application.
+    #[allow(clippy::too_many_arguments)]
     fn improvement_candidate_matches<Q: TraitOutputQuery>(
         query: &mut Q,
         ty_inf: &mut UnifiedTypeInference,
@@ -421,6 +423,7 @@ impl<'a> TraitSolver<'a> {
     /// The algorithm probes every visible impl under snapshots of the current
     /// unifier. It only commits the improvement when there is exactly one
     /// matching candidate and no other candidate remains merely `Unknown`.
+    #[allow(clippy::too_many_arguments)]
     fn improve_trait_application_match(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -452,6 +455,7 @@ impl<'a> TraitSolver<'a> {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn improve_trait_application_match_actual(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -523,6 +527,7 @@ impl<'a> TraitSolver<'a> {
     /// The algorithm probes every visible impl under snapshots of the current
     /// unifier. It only commits the improvement when there is exactly one
     /// matching candidate and no other candidate remains merely `Unknown`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_improve_trait_application(
         &mut self,
         ty_inf: &mut UnifiedTypeInference,
@@ -1170,7 +1175,6 @@ impl<'a> TraitSolver<'a> {
 
                         (id, fn_ty)
                     })
-                    .into_iter()
                     .multiunzip();
 
                 // Build and insert the implementation.
