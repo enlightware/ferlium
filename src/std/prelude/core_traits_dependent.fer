@@ -31,6 +31,8 @@ impl Contains {
 	}
 }
 
+// Join implementation
+
 /// Concatenates the elements of a sequence, inserting `separator` between them.
 /// Returns `empty()` when the sequence is empty.
 fn join(seq, separator) {
@@ -49,5 +51,192 @@ fn join(seq, separator) {
 			}
 		},
 		None => empty(),
+	}
+}
+
+// Split implementations
+
+/// Splits `value` around a non-empty `separator` and collects the parts into an array.
+// TODO: once free functions support where clauses, give this wrapper an explicit
+// `Split`/`Iterator`-based signature so callers do not need result ascription in
+// otherwise ambiguous eager uses.
+fn split(value, separator) {
+	from_iter(split_iterator(value, separator))
+}
+
+struct StringSplitIterator {
+	value: string,
+	separator: string,
+	next_start: int,
+	finished: bool,
+}
+
+fn string_find_substring_from(value: string, separator: string, start: int) -> None | Some(int) {
+	let value_len = len(value);
+	let separator_len = len(separator);
+	if separator_len == 0 or separator_len > value_len or start > value_len - separator_len {
+		return None;
+	};
+	for candidate_start in start..(value_len - separator_len + 1) {
+		if string_slice(value, candidate_start, candidate_start + separator_len) == separator {
+			return Some(candidate_start);
+		}
+	};
+	None
+}
+
+impl Iterator for StringSplitIterator {
+	fn next(it: &mut StringSplitIterator) -> None | Some(string) {
+		if it.finished {
+			return None;
+		};
+		match string_find_substring_from(it.value, it.separator, it.next_start) {
+			Some(separator_start) => {
+				let part = string_slice(it.value, it.next_start, separator_start);
+				it.next_start = separator_start + len(it.separator);
+				Some(part)
+			},
+			None => {
+				let part = string_slice(it.value, it.next_start, len(it.value));
+				it.finished = true;
+				Some(part)
+			}
+		}
+	}
+}
+
+impl Split for <Self = string, Separator = string |-> Part = string, Iter = StringSplitIterator> {
+	fn split_iterator(value: string, separator: string) -> StringSplitIterator {
+		if len(separator) == 0 {
+			panic("separator must not be empty")
+		} else {
+			StringSplitIterator {
+				value,
+				separator,
+				next_start: 0,
+				finished: false,
+			}
+		}
+	}
+}
+
+fn array_slice(array: [_], start: int, end: int) -> [_] {
+	let mut result = [];
+	let mut index = 0;
+	for item in array {
+		if index >= start and index < end {
+			array_append(result, item);
+		};
+		index += 1;
+	};
+	result
+}
+
+fn array_find_subarray_from(value: [_], separator: [_], start: int) -> None | Some(int) {
+	let value_len = len(value);
+	let separator_len = len(separator);
+	if separator_len == 0 or separator_len > value_len or start > value_len - separator_len {
+		return None;
+	};
+	for candidate_start in start..(value_len - separator_len + 1) {
+		if array_slice(value, candidate_start, candidate_start + separator_len) == separator {
+			return Some(candidate_start);
+		}
+	};
+	None
+}
+
+fn array_find_element_from(value: [_], separator, start: int) -> None | Some(int) {
+	let value_len = len(value);
+	if start >= value_len {
+		return None;
+	};
+	let mut index = 0;
+	for item in value {
+		if index >= start and item == separator {
+			return Some(index);
+		};
+		index += 1;
+	};
+	None
+}
+
+struct ArraySplitIterator<A> {
+	value: [A],
+	separator: [A],
+	next_start: int,
+	finished: bool,
+}
+
+impl<A> Iterator for ArraySplitIterator<A> {
+	fn next(it: &mut ArraySplitIterator<A>) -> None | Some([A]) {
+		if it.finished {
+			return None;
+		};
+		match array_find_subarray_from(it.value, it.separator, it.next_start) {
+			Some(separator_start) => {
+				let part = array_slice(it.value, it.next_start, separator_start);
+				it.next_start = separator_start + len(it.separator);
+				Some(part)
+			},
+			None => {
+				let part = array_slice(it.value, it.next_start, len(it.value));
+				it.finished = true;
+				Some(part)
+			}
+		}
+	}
+}
+
+impl<A> Split for <Self = [A], Separator = [A] |-> Part = [A], Iter = ArraySplitIterator<A>> {
+	fn split_iterator(value: [A], separator: [A]) -> ArraySplitIterator<A> {
+		if len(separator) == 0 {
+			panic("separator must not be empty")
+		} else {
+			ArraySplitIterator {
+				value,
+				separator,
+				next_start: 0,
+				finished: false,
+			}
+		}
+	}
+}
+
+struct ArraySplitElementIterator<A> {
+	value: [A],
+	separator: A,
+	next_start: int,
+	finished: bool,
+}
+
+impl<A> Iterator for ArraySplitElementIterator<A> {
+	fn next(it: &mut ArraySplitElementIterator<A>) -> None | Some([A]) {
+		if it.finished {
+			return None;
+		};
+		match array_find_element_from(it.value, it.separator, it.next_start) {
+			Some(separator_start) => {
+				let part = array_slice(it.value, it.next_start, separator_start);
+				it.next_start = separator_start + 1;
+				Some(part)
+			},
+			None => {
+				let part = array_slice(it.value, it.next_start, len(it.value));
+				it.finished = true;
+				Some(part)
+			}
+		}
+	}
+}
+
+impl<A> Split for <Self = [A], Separator = A |-> Part = [A], Iter = ArraySplitElementIterator<A>> {
+	fn split_iterator(value: [A], separator: A) -> ArraySplitElementIterator<A> {
+		ArraySplitElementIterator {
+			value,
+			separator,
+			next_start: 0,
+			finished: false,
+		}
 	}
 }

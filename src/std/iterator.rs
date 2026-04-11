@@ -6,6 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+use std::sync::LazyLock;
+
 use crate::{
     effects::EffType,
     function::FunctionDefinition,
@@ -26,10 +28,9 @@ pub const FILTER_TRAIT_NAME: &str = "Filter";
 pub const FILTER_MAP_TRAIT_NAME: &str = "FilterMap";
 pub const SIZED_SEQ_TRAIT_NAME: &str = "SizedSeq";
 
-pub fn add_to_module(to: &mut Module) {
-    // Traits
+pub static ITERATOR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     use FunctionDefinition as Def;
-    let iterator_trait = TraitRef::new_with_self_input_type(
+    TraitRef::new_with_self_input_type(
         ITERATOR_TRAIT_NAME,
         "An iterator that can produce a sequence of values.",
         ["Item"],
@@ -45,7 +46,13 @@ pub fn add_to_module(to: &mut Module) {
                 "Get the next element of the iterator, or None if the iterator is exhausted.",
             ),
         )],
-    );
+    )
+});
+
+pub fn add_to_module(to: &mut Module) {
+    // Traits
+    use FunctionDefinition as Def;
+    let iterator_trait = ITERATOR_TRAIT.clone();
     to.add_trait(iterator_trait.clone());
 
     let iter_item_constraint = PubTypeConstraint::HaveTrait {

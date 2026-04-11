@@ -13,6 +13,7 @@ use crate::effects::test_mod as test_mod_for_effects;
 use crate::harness::{TestSession, bool, float, int, string, unit, variant_0, variant_t1};
 use ferlium::{
     effects::{PrimitiveEffect, effect, no_effects},
+    error::RuntimeErrorKind,
     std::option::{none, some},
     value::Value,
 };
@@ -551,6 +552,70 @@ fn join_works_on_arrays_of_arrays() {
         int_a![1, 0, 2, 0, 3]
     );
     assert_eq!(session.run("(join([], [0]): [int])"), int_a![]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_split() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(r#"(split(",a,,", ","): [string])"#),
+        array![string(""), string("a"), string(""), string("")]
+    );
+    assert_eq!(
+        session.run(r#"join(split_iterator(",a,,", ","), ",")"#),
+        string(",a,,")
+    );
+    assert_eq!(
+        session.run(
+            r#"let mut it = split_iterator(",a,,", ","); (next(it), next(it), next(it), next(it), next(it))"#
+        ),
+        tuple!(
+            variant_t1("Some", string("")),
+            variant_t1("Some", string("a")),
+            variant_t1("Some", string("")),
+            variant_t1("Some", string("")),
+            variant_0("None")
+        )
+    );
+    assert_eq!(
+        session.fail_run(r#"(split("abc", ""): [string])"#),
+        RuntimeErrorKind::Aborted(Some("separator must not be empty".to_string()))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_split() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("(split([1, 0, 0, 2, 0, 0, 3], [0, 0]): [[int]])"),
+        array![int_a![1], int_a![2], int_a![3]]
+    );
+    assert_eq!(
+        session.run("(split([0, 1, 0, 2, 0], 0): [[int]])"),
+        array![int_a![], int_a![1], int_a![2], int_a![]]
+    );
+    assert_eq!(
+        session.run(
+            "let mut it = split_iterator([0, 1, 0, 2, 0], 0); (next(it), next(it), next(it), next(it), next(it))"
+        ),
+        tuple!(
+            variant_t1("Some", int_a![]),
+            variant_t1("Some", int_a![1]),
+            variant_t1("Some", int_a![2]),
+            variant_t1("Some", int_a![]),
+            variant_0("None")
+        )
+    );
+    assert_eq!(
+        session.run("join(split_iterator([1, 0, 2, 0, 3], 0), [0])"),
+        int_a![1, 0, 2, 0, 3]
+    );
+    assert_eq!(
+        session.fail_run("(split([1, 2], []): [[int]])"),
+        RuntimeErrorKind::Aborted(Some("separator must not be empty".to_string()))
+    );
 }
 
 #[test]
