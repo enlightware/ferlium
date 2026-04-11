@@ -34,6 +34,7 @@ impl Contains {
 /// Concatenates the elements of a sequence, inserting `separator` between them.
 /// Returns `empty()` when the sequence is empty.
 fn join(seq, separator) {
+	// Note: we do not use fold to save one concatenation operation.
 	let mut it = iter(seq);
 	match next(it) {
 		Some(first) => {
