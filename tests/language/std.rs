@@ -157,6 +157,20 @@ fn array_len() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_slice() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run("array_slice([1, 2, 3], 0, 0)"), int_a![]);
+    assert_eq!(session.run("array_slice([1, 2, 3], 1, 1)"), int_a![]);
+    assert_eq!(session.run("array_slice([1, 2, 3], 0, 2)"), int_a![1, 2]);
+    assert_eq!(session.run("array_slice([1, 2, 3], 1, 10)"), int_a![2, 3]);
+    assert_eq!(session.run("array_slice([1, 2, 3], -2, 3)"), int_a![2, 3]);
+    assert_eq!(session.run("array_slice([1, 2, 3], 0, -1)"), int_a![1, 2]);
+    assert_eq!(session.run("array_slice([1, 2, 3], -2, -1)"), int_a![2]);
+    assert_eq!(session.run("array_slice([1, 2, 3], 3, 5)"), int_a![]);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_concat() {
     let mut session = TestSession::new();
     session

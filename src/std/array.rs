@@ -12,11 +12,12 @@ use ustr::ustr;
 
 use crate::{
     cached_ty,
-    effects::no_effects,
+    effects::{PrimitiveEffect, effect, no_effects},
+    error::RuntimeErrorKind,
     format::{write_with_separator, write_with_separator_and_format_fn},
     function::{
-        BinaryNativeFnMVN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnMV,
-        UnaryNativeFnNN,
+        BinaryNativeFnMVN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNVN, Function,
+        NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN,
     },
     module::{BlanketTraitImplSubKey, Module, ModuleFunction},
     r#type::{FnType, NativeType, Type, bare_native_type},
@@ -27,8 +28,10 @@ use crate::{
 use super::{
     default::DEFAULT_TRAIT,
     empty::EMPTY_TRAIT,
+    iterator::ITERATOR_TRAIT,
     math::int_type,
-    option::{none, option_type_generic, some},
+    option::{none, option_type, option_type_generic, some},
+    split::SPLIT_TRAIT,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +261,91 @@ impl Array {
             ty_scheme,
         )
     }
+
+    pub fn slice(&self, start: isize, end: isize) -> Self {
+        let len = self.len();
+        let start = self.to_unsigned_index(start).min(len);
+        let end = self.to_unsigned_index(end).min(len);
+
+        self.slice_range(start, end)
+    }
+
+    fn slice_range(&self, start: usize, end: usize) -> Self {
+        if end <= start {
+            Self::default()
+        } else {
+            Self::from_deque(self.0.range(start..end).cloned().collect())
+        }
+    }
+
+    fn slice_descr() -> ModuleFunction {
+        let array = array_type_generic();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            [array, int_type(), int_type()],
+            array,
+            no_effects(),
+        ));
+        TernaryNativeFnNNNN::description_with_ty_scheme(
+            |array: Self, start: isize, end: isize| array.slice(start, end),
+            ["array", "start", "end"],
+            "Returns the slice of `array` from index `start` to index `end`. Negative indices count from the end.",
+            ty_scheme,
+        )
+    }
+
+    fn split_element_iter(&self, separator: Value) -> ArraySplitElementIterator {
+        ArraySplitElementIterator {
+            array: self.0.clone(),
+            separator,
+            next_start: 0,
+            finished: false,
+        }
+    }
+
+    fn split_iter(&self, separator: Self) -> Result<ArraySplitIterator, RuntimeErrorKind> {
+        if separator.is_empty() {
+            Err(RuntimeErrorKind::InvalidArgument(ustr(
+                "separator must not be empty",
+            )))
+        } else {
+            Ok(ArraySplitIterator {
+                array: self.0.clone(),
+                separator: separator.0,
+                next_start: 0,
+                finished: false,
+            })
+        }
+    }
+
+    fn split_element_iter_descr() -> ModuleFunction {
+        let element = Type::variable_id(0);
+        let array = array_type_generic();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            [array, element],
+            array_split_element_iter_type_generic(),
+            no_effects(),
+        ));
+        BinaryNativeFnNVN::description_with_ty_scheme(
+            |array: Self, separator: Value| array.split_element_iter(separator),
+            ["array", "separator"],
+            "Creates an iterator over the slices of `array` separated by `separator`.",
+            ty_scheme,
+        )
+    }
+
+    fn split_iter_descr() -> ModuleFunction {
+        let array = array_type_generic();
+        BinaryNativeFnNNFN::description_with_ty_scheme(
+            |array: Self, separator: Self| array.split_iter(separator),
+            ["array", "separator"],
+            "Creates an iterator over the slices of `array` separated by `separator`.",
+            TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+                [array, array],
+                array_split_iter_type_generic(),
+                effect(PrimitiveEffect::Fallible),
+            )),
+        )
+    }
 }
 
 impl Default for Array {
@@ -356,6 +444,181 @@ impl NativeDisplay for ArrayIterator {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArraySplitElementIterator {
+    array: Rc<VecDeque<Value>>,
+    separator: Value,
+    next_start: usize,
+    finished: bool,
+}
+
+impl ArraySplitElementIterator {
+    fn next_separator_start(&self) -> Option<usize> {
+        self.array
+            .iter()
+            .enumerate()
+            .skip(self.next_start)
+            .find(|(_, item)| **item == self.separator)
+            .map(|(index, _)| index)
+    }
+
+    pub fn next_value(&mut self) -> Value {
+        match self.next() {
+            Some(value) => some(Value::native(value)),
+            None => none(),
+        }
+    }
+
+    fn next_value_descr() -> ModuleFunction {
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            [(array_split_element_iter_type_generic(), true)],
+            option_type(array_type_generic()),
+            no_effects(),
+        ));
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::next_value,
+            ["iterator"],
+            "Gets the next part of the array split iterator.",
+            ty_scheme,
+        )
+    }
+}
+
+impl Iterator for ArraySplitElementIterator {
+    type Item = Array;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        let array = Array(self.array.clone());
+        match self.next_separator_start() {
+            Some(separator_start) => {
+                let part = array.slice_range(self.next_start, separator_start);
+                self.next_start = separator_start + 1;
+                Some(part)
+            }
+            None => {
+                let part = array.slice_range(self.next_start, self.array.len());
+                self.finished = true;
+                Some(part)
+            }
+        }
+    }
+}
+
+impl NativeDisplay for ArraySplitElementIterator {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ArraySplitElementIterator on [")?;
+        write_with_separator_and_format_fn(
+            self.array.iter(),
+            ", ",
+            Value::format_as_string_repr,
+            f,
+        )?;
+        write!(
+            f,
+            "] by {} @ {}",
+            self.separator.to_string_repr(),
+            self.next_start
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArraySplitIterator {
+    array: Rc<VecDeque<Value>>,
+    separator: Rc<VecDeque<Value>>,
+    next_start: usize,
+    finished: bool,
+}
+
+impl ArraySplitIterator {
+    fn next_separator_start(&self) -> Option<usize> {
+        if self.separator.len() > self.array.len().saturating_sub(self.next_start) {
+            return None;
+        }
+
+        let last_candidate = self.array.len() - self.separator.len();
+        for candidate_start in self.next_start..=last_candidate {
+            if self
+                .array
+                .range(candidate_start..candidate_start + self.separator.len())
+                .eq(self.separator.iter())
+            {
+                return Some(candidate_start);
+            }
+        }
+        None
+    }
+
+    pub fn next_value(&mut self) -> Value {
+        match self.next() {
+            Some(value) => some(Value::native(value)),
+            None => none(),
+        }
+    }
+
+    fn next_value_descr() -> ModuleFunction {
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            [(array_split_iter_type_generic(), true)],
+            option_type(array_type_generic()),
+            no_effects(),
+        ));
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::next_value,
+            ["iterator"],
+            "Gets the next part of the array split iterator.",
+            ty_scheme,
+        )
+    }
+}
+
+impl Iterator for ArraySplitIterator {
+    type Item = Array;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        let array = Array(self.array.clone());
+        match self.next_separator_start() {
+            Some(separator_start) => {
+                let part = array.slice_range(self.next_start, separator_start);
+                self.next_start = separator_start + self.separator.len();
+                Some(part)
+            }
+            None => {
+                let part = array.slice_range(self.next_start, self.array.len());
+                self.finished = true;
+                Some(part)
+            }
+        }
+    }
+}
+
+impl NativeDisplay for ArraySplitIterator {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ArraySplitIterator on [")?;
+        write_with_separator_and_format_fn(
+            self.array.iter(),
+            ", ",
+            Value::format_as_string_repr,
+            f,
+        )?;
+        write!(f, "] by [")?;
+        write_with_separator_and_format_fn(
+            self.separator.iter(),
+            ", ",
+            Value::format_as_string_repr,
+            f,
+        )?;
+        write!(f, "] @ {}", self.next_start)
+    }
+}
+
 pub fn array_type(element_ty: Type) -> Type {
     Type::native::<Array>([element_ty])
 }
@@ -376,10 +639,34 @@ pub fn array_iter_type_generic() -> Type {
     cached_ty!(|| array_iter_type(Type::variable_id(0)))
 }
 
+pub fn array_split_element_iter_type(element_ty: Type) -> Type {
+    Type::native::<ArraySplitElementIterator>([element_ty])
+}
+
+pub fn array_split_element_iter_type_generic() -> Type {
+    cached_ty!(|| array_split_element_iter_type(Type::variable_id(0)))
+}
+
+pub fn array_split_iter_type(element_ty: Type) -> Type {
+    Type::native::<ArraySplitIterator>([element_ty])
+}
+
+pub fn array_split_iter_type_generic() -> Type {
+    cached_ty!(|| array_split_iter_type(Type::variable_id(0)))
+}
+
 pub fn add_to_module(to: &mut Module) {
     // Types
     to.add_bare_native_type_alias_str("array", bare_native_type::<Array>());
     to.add_bare_native_type_alias_str("array_iterator", bare_native_type::<ArrayIterator>());
+    to.add_bare_native_type_alias_str(
+        "array_split_iterator",
+        bare_native_type::<ArraySplitIterator>(),
+    );
+    to.add_bare_native_type_alias_str(
+        "array_split_element_iterator",
+        bare_native_type::<ArraySplitElementIterator>(),
+    );
 
     // TODO: use type classes to get rid of the array prefix
     // to.add_local_function(ustr("array_from_iterator"), Array::from_iterator_descr());
@@ -388,7 +675,13 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(ustr("array_pop_back"), Array::pop_back_desc());
     to.add_function(ustr("array_pop_front"), Array::pop_front_desc());
     to.add_function(ustr("array_len"), Array::len_descr());
+    to.add_function(ustr("array_slice"), Array::slice_descr());
     to.add_function(ustr("array_concat"), Array::concat_descr());
+    to.add_function(ustr("array_split_iterator"), Array::split_iter_descr());
+    to.add_function(
+        ustr("array_split_element_iterator"),
+        Array::split_element_iter_descr(),
+    );
     // to.add_local_function(ustr("array_map"), Array::map_descr());
     to.add_function(ustr("array_iter"), Array::iter_descr());
     to.add_blanket_impl_no_locals(
@@ -411,9 +704,68 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [Box::new(NullaryNativeFnN::new(Array::new)) as Function],
     );
+    to.add_blanket_impl_no_locals(
+        ITERATOR_TRAIT.clone(),
+        BlanketTraitImplSubKey {
+            input_tys: vec![array_split_iter_type_generic()],
+            ty_var_count: 1,
+            constraints: vec![],
+        },
+        [array_type_generic()],
+        [Box::new(UnaryNativeFnMV::new(ArraySplitIterator::next_value)) as Function],
+    );
+    to.add_blanket_impl_no_locals(
+        ITERATOR_TRAIT.clone(),
+        BlanketTraitImplSubKey {
+            input_tys: vec![array_split_element_iter_type_generic()],
+            ty_var_count: 1,
+            constraints: vec![],
+        },
+        [array_type_generic()],
+        [Box::new(UnaryNativeFnMV::new(ArraySplitElementIterator::next_value)) as Function],
+    );
+    to.add_blanket_impl_no_locals(
+        SPLIT_TRAIT.clone(),
+        BlanketTraitImplSubKey {
+            input_tys: vec![array_type_generic(), Type::variable_id(0)],
+            ty_var_count: 1,
+            constraints: vec![],
+        },
+        [
+            array_type_generic(),
+            array_split_element_iter_type_generic(),
+        ],
+        [
+            Box::new(BinaryNativeFnNVN::new(|array: Array, separator: Value| {
+                array.split_element_iter(separator)
+            })) as Function,
+        ],
+    );
+    to.add_blanket_impl_no_locals(
+        SPLIT_TRAIT.clone(),
+        BlanketTraitImplSubKey {
+            input_tys: vec![array_type_generic(), array_type_generic()],
+            ty_var_count: 1,
+            constraints: vec![],
+        },
+        [array_type_generic(), array_split_iter_type_generic()],
+        [
+            Box::new(BinaryNativeFnNNFN::new(|array: Array, separator: Array| {
+                array.split_iter(separator)
+            })) as Function,
+        ],
+    );
 
     to.add_function(
         ustr("array_iterator_next"),
         ArrayIterator::next_value_descr(),
+    );
+    to.add_function(
+        ustr("array_split_iterator_next"),
+        ArraySplitIterator::next_value_descr(),
+    );
+    to.add_function(
+        ustr("array_split_element_iterator_next"),
+        ArraySplitElementIterator::next_value_descr(),
     );
 }
