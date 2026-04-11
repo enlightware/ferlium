@@ -28,6 +28,10 @@ fn panic(msg: Str) -> Result<(), RuntimeErrorKind> {
     Err(RuntimeErrorKind::Aborted(Some(msg.into())))
 }
 
+fn invalid_argument(msg: Str) -> Result<(), RuntimeErrorKind> {
+    Err(RuntimeErrorKind::InvalidArgument(ustr(msg.as_ref())))
+}
+
 pub fn add_to_module(to: &mut Module) {
     // Control flow operation
     // Note: we use no_effects() for now as non-termination is modelled purely in the return type
@@ -50,6 +54,19 @@ pub fn add_to_module(to: &mut Module) {
             panic,
             ["msg"],
             "Aborts the program with a message.",
+            TypeScheme::new_just_type(FnType::new_by_val(
+                [string_type()],
+                Type::never(),
+                effect(PrimitiveEffect::Fallible),
+            )),
+        ),
+    );
+    to.add_function(
+        ustr("invalid_argument"),
+        UnaryNativeFnNFN::description_with_ty_scheme(
+            invalid_argument,
+            ["msg"],
+            "Aborts the program with an invalid argument error.",
             TypeScheme::new_just_type(FnType::new_by_val(
                 [string_type()],
                 Type::never(),
