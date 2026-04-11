@@ -132,6 +132,18 @@ impl String {
         Self::new(&self.0.to_lowercase())
     }
 
+    pub fn trim(&self) -> Self {
+        Self(Rc::new(self.0.trim().to_owned()))
+    }
+
+    fn starts_with(value: Self, prefix: Self) -> bool {
+        value.as_ref().starts_with(prefix.as_ref())
+    }
+
+    fn ends_with(value: Self, suffix: Self) -> bool {
+        value.as_ref().ends_with(suffix.as_ref())
+    }
+
     fn contains_substring(haystack: Self, needle: Self) -> bool {
         haystack.as_ref().contains(needle.as_ref())
     }
@@ -475,6 +487,33 @@ pub fn add_to_module(to: &mut Module) {
             String::contains_substring,
             ["haystack", "needle"],
             "Returns `true` if `haystack` contains `needle` as a substring.",
+            no_effects(),
+        ),
+    );
+    to.add_function(
+        ustr("string_trim"),
+        UnaryNativeFnNN::description_with_default_ty(
+            |s: String| s.trim(),
+            ["string"],
+            "Returns `string` with leading and trailing whitespace removed.",
+            no_effects(),
+        ),
+    );
+    to.add_function(
+        ustr("string_starts_with"),
+        BinaryNativeFnNNN::description_with_default_ty(
+            String::starts_with,
+            ["string", "prefix"],
+            "Returns `true` if `string` starts with `prefix`.",
+            no_effects(),
+        ),
+    );
+    to.add_function(
+        ustr("string_ends_with"),
+        BinaryNativeFnNNN::description_with_default_ty(
+            String::ends_with,
+            ["string", "suffix"],
+            "Returns `true` if `string` ends with `suffix`.",
             no_effects(),
         ),
     );

@@ -702,6 +702,55 @@ fn contains_and_contains_substring() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn string_trim_and_prefix_suffix() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run(r#"string_trim("")"#), string(""));
+    assert_eq!(session.run(r#"string_trim("  hello  ")"#), string("hello"));
+    assert_eq!(
+        session.run("string_trim(\"\\n\\t hello \\u{00A0}\")"),
+        string("hello")
+    );
+    assert_eq!(
+        session.run(r#"string_trim("  café 🇫🇷  ")"#),
+        string("café 🇫🇷")
+    );
+    assert_eq!(
+        session.run(r#"string_starts_with("hello", "he")"#),
+        bool(true)
+    );
+    assert_eq!(
+        session.run(r#"string_starts_with("hello", "")"#),
+        bool(true)
+    );
+    assert_eq!(session.run(r#"string_starts_with("", "")"#), bool(true));
+    assert_eq!(session.run(r#"string_starts_with("", "a")"#), bool(false));
+    assert_eq!(
+        session.run(r#"string_starts_with("hello", "lo")"#),
+        bool(false)
+    );
+    assert_eq!(
+        session.run("string_starts_with(\"caf\\u{00E9}\", \"cafe\\u{0301}\")"),
+        bool(true)
+    );
+    assert_eq!(
+        session.run(r#"string_ends_with("hello", "lo")"#),
+        bool(true)
+    );
+    assert_eq!(session.run(r#"string_ends_with("hello", "")"#), bool(true));
+    assert_eq!(session.run(r#"string_ends_with("", "")"#), bool(true));
+    assert_eq!(session.run(r#"string_ends_with("", "a")"#), bool(false));
+    assert_eq!(
+        session.run(r#"string_ends_with("hello", "he")"#),
+        bool(false)
+    );
+    assert_eq!(
+        session.run("string_ends_with(\"caf\\u{00E9}\", \"fe\\u{0301}\")"),
+        bool(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concat() {
     let mut session = TestSession::new();
     // strings
