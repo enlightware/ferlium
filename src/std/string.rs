@@ -20,10 +20,11 @@ use ustr::ustr;
 use crate::{
     cached_primitive_ty, cached_ty,
     containers::b,
-    effects::no_effects,
+    effects::{PrimitiveEffect, effect, no_effects},
+    error::RuntimeErrorKind,
     function::{
-        BinaryNativeFnMNN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, NullaryNativeFnN,
-        TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnVN,
+        BinaryNativeFnMNN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
+        NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnVN,
     },
     module::{Module, ModuleFunction},
     std::{
@@ -137,13 +138,40 @@ impl String {
 
     /// Creates an iterator over the grapheme clusters of the string.
     pub fn iter(&self) -> StringIterator {
-        // Collect byte offsets of each grapheme cluster
-        let indices: Vec<usize> = self.0.grapheme_indices(true).map(|(idx, _)| idx).collect();
         StringIterator {
             string: self.0.clone(),
-            indices,
+            indices: self.grapheme_indices(),
             position: 0,
         }
+    }
+
+    /// Collect byte offsets of each grapheme cluster
+    fn grapheme_indices(&self) -> Vec<usize> {
+        self.0.grapheme_indices(true).map(|(idx, _)| idx).collect()
+    }
+
+    fn grapheme_boundaries(&self) -> Vec<usize> {
+        let mut indices = self.grapheme_indices();
+        indices.push(self.0.len());
+        indices
+    }
+
+    fn split_iterator(&self, separator: Self) -> Result<StringSplitIterator, RuntimeErrorKind> {
+        if separator.is_empty() {
+            return Err(RuntimeErrorKind::InvalidArgument(ustr(
+                "separator must not be empty",
+            )));
+        }
+        let separator_grapheme_len = separator.grapheme_count();
+
+        Ok(StringSplitIterator {
+            string: self.0.clone(),
+            boundaries: self.grapheme_boundaries(),
+            separator: separator.0,
+            separator_grapheme_len,
+            next_start: 0,
+            finished: false,
+        })
     }
 
     fn iter_descr() -> ModuleFunction {
@@ -157,6 +185,19 @@ impl String {
             ["string"],
             "Creates an iterator over the characters of the string.",
             ty_scheme,
+        )
+    }
+
+    fn split_iter_descr() -> ModuleFunction {
+        BinaryNativeFnNNFN::description_with_ty_scheme(
+            |value: Self, separator: Self| value.split_iterator(separator),
+            ["value", "separator"],
+            "Creates an iterator over the parts of `value` separated by `separator`.",
+            TypeScheme::new_just_type(FnType::new_by_val(
+                [string_type(), string_type()],
+                string_split_iter_type(),
+                effect(PrimitiveEffect::Fallible),
+            )),
         )
     }
 }
@@ -269,12 +310,110 @@ impl NativeDisplay for StringIterator {
     }
 }
 
+/// An iterator over the grapheme-aligned parts of a string separated by a substring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringSplitIterator {
+    string: Rc<std::string::String>,
+    boundaries: Vec<usize>,
+    separator: Rc<std::string::String>,
+    separator_grapheme_len: usize,
+    next_start: usize,
+    finished: bool,
+}
+
+impl StringSplitIterator {
+    fn slice_grapheme_range(&self, start: usize, end: usize) -> String {
+        if end <= start {
+            String::default()
+        } else {
+            String(Rc::new(
+                self.string[self.boundaries[start]..self.boundaries[end]].to_string(),
+            ))
+        }
+    }
+
+    fn next_separator_start(&self) -> Option<usize> {
+        let grapheme_count = self.boundaries.len().saturating_sub(1);
+        if self.separator_grapheme_len > grapheme_count.saturating_sub(self.next_start) {
+            return None;
+        }
+
+        let last_candidate = grapheme_count - self.separator_grapheme_len;
+        for candidate_start in self.next_start..=last_candidate {
+            let start = self.boundaries[candidate_start];
+            let end = self.boundaries[candidate_start + self.separator_grapheme_len];
+            if &self.string[start..end] == self.separator.as_ref() {
+                return Some(candidate_start);
+            }
+        }
+        None
+    }
+
+    pub fn next_value(&mut self) -> Value {
+        match self.next() {
+            Some(value) => some(Value::native(value)),
+            None => none(),
+        }
+    }
+
+    fn next_value_descr() -> ModuleFunction {
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            [(string_split_iter_type(), true)],
+            option_type(string_type()),
+            no_effects(),
+        ));
+        UnaryNativeFnMV::description_with_ty_scheme(
+            Self::next_value,
+            ["iterator"],
+            "Gets the next part of the string split iterator.",
+            ty_scheme,
+        )
+    }
+}
+
+impl Iterator for StringSplitIterator {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        match self.next_separator_start() {
+            Some(separator_start) => {
+                let part = self.slice_grapheme_range(self.next_start, separator_start);
+                self.next_start = separator_start + self.separator_grapheme_len;
+                Some(part)
+            }
+            None => {
+                let part = self.slice_grapheme_range(self.next_start, self.boundaries.len() - 1);
+                self.finished = true;
+                Some(part)
+            }
+        }
+    }
+}
+
+impl NativeDisplay for StringSplitIterator {
+    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "StringSplitIterator on \"{}\" by \"{}\" @ {}",
+            self.string, self.separator, self.next_start
+        )
+    }
+}
+
 pub fn string_type() -> Type {
     cached_primitive_ty!(String)
 }
 
 pub fn string_iter_type() -> Type {
     cached_ty!(|| Type::native::<StringIterator>([]))
+}
+
+pub fn string_split_iter_type() -> Type {
+    cached_ty!(|| Type::native::<StringSplitIterator>([]))
 }
 
 pub fn string_value(s: &str) -> Value {
@@ -405,9 +544,15 @@ pub fn add_to_module(to: &mut Module) {
 
     // Iterator
     to.add_type_alias_str("string_iterator", string_iter_type());
+    to.add_type_alias_str("string_split_iterator", string_split_iter_type());
     to.add_function(ustr("string_iter"), String::iter_descr());
+    to.add_function(ustr("string_split_iterator"), String::split_iter_descr());
     to.add_function(
         ustr("string_iterator_next"),
         StringIterator::next_value_descr(),
+    );
+    to.add_function(
+        ustr("string_split_iterator_next"),
+        StringSplitIterator::next_value_descr(),
     );
 }

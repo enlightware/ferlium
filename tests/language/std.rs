@@ -7,6 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use test_log::test;
+use ustr::ustr;
 
 use crate::effects::test_mod as test_mod_for_effects;
 
@@ -579,8 +580,24 @@ fn string_split() {
         )
     );
     assert_eq!(
+        session.run(r#"(split("a🇫🇷b🇫🇷c", "🇫🇷"): [string])"#),
+        array![string("a"), string("b"), string("c")]
+    );
+    assert_eq!(
+        session.run(r#"(split("a👩‍💻b👩‍💻c", "👩‍💻"): [string])"#),
+        array![string("a"), string("b"), string("c")]
+    );
+    assert_eq!(
+        session.run(r#"(split("a🇫🇷b", "🇫"): [string])"#),
+        array![string("a🇫🇷b")]
+    );
+    assert_eq!(
+        session.run(r#"(split("cafe\u{0301}-caf\u{00E9}", "e\u{0301}"): [string])"#),
+        array![string("caf"), string("-caf"), string("")]
+    );
+    assert_eq!(
         session.fail_run(r#"(split("abc", ""): [string])"#),
-        RuntimeErrorKind::Aborted(Some("separator must not be empty".to_string()))
+        RuntimeErrorKind::InvalidArgument(ustr("separator must not be empty"))
     );
 }
 
@@ -614,7 +631,7 @@ fn array_split() {
     );
     assert_eq!(
         session.fail_run("(split([1, 2], []): [[int]])"),
-        RuntimeErrorKind::Aborted(Some("separator must not be empty".to_string()))
+        RuntimeErrorKind::InvalidArgument(ustr("separator must not be empty"))
     );
 }
 
