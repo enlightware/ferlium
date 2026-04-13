@@ -134,6 +134,64 @@ Use `minimum` and `maximum` when the element type is ordered:
 
 These functions require a non-empty sequence and panic on an empty one.
 
+## Splitting sequences
+
+Use `split` to divide a value around a non-empty separator and collect the parts into an array.
+
+### Splitting strings
+
+`split` on a `string` with a `string` separator returns `[string]`:
+
+```ferlium
+split("a,b,c", ",")
+```
+
+This evaluates to `["a", "b", "c"]`. Like in most languages, if the separator appears at the start, end, or consecutively, empty strings are produced as parts:
+
+```ferlium
+split(",a,,", ",")
+```
+
+This evaluates to `["", "a", "", ""]`.
+
+### Splitting arrays
+
+`split` on `[A]` with an element separator `A` returns `[[A]]`:
+
+```ferlium
+split([0, 1, 0, 2, 0], 0)
+```
+
+This evaluates to `[[], [1], [2], []]`.
+
+You can also split with a subarray separator:
+
+```ferlium
+split([1, 0, 0, 2, 0, 0, 3], [0, 0])
+```
+
+This evaluates to `[[1], [2], [3]]`.
+
+### The separator must be non-empty
+
+Passing an empty separator is a runtime error:
+
+```ferlium,should_panic 
+split("abc", "")   // error: separator must not be empty
+# ;
+split([1, 2], [])  // error: separator must not be empty
+```
+
+### Relationship to `join`
+
+`split` and `join` are inverses: splitting a value and then joining the parts with the same separator reconstructs the original:
+
+```ferlium
+join(split_iterator("a,b,c", ","), ",")
+```
+
+This evaluates to `"a,b,c"`. Note the use of `split_iterator` here, which returns a lazy iterator over the parts rather than collecting them into an array.
+
 ## Choosing between collections and iterators
 
 A good rule of thumb is:
