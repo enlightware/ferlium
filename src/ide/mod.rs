@@ -1063,15 +1063,6 @@ impl Compiler {
 
 /// The compiler to be used in the web IDE, non-wasm-available part
 impl Compiler {
-    /* TODO: figure out how to clean that
-    pub fn with_module(mut self, name: &str, module: ModuleRc, extra_uses: Uses) -> Self {
-        self.modules.modules.insert(name.into(), module);
-        self.extra_uses.extend(extra_uses.iter().cloned());
-        self.user_module.module.uses.extend(extra_uses);
-        self
-    }
-    */
-
     fn char_index_lookup(&mut self, source_id: SourceId) -> &mut CharIndexLookup {
         self.char_index_lookup.entry(source_id).or_insert_with(|| {
             CharIndexLookup::new(

@@ -273,7 +273,6 @@ pub enum PType {
     Array(Box<TypeSpan<Parsed>>),
     /// Function type (args -> return)
     Function(B<PFnType>),
-    // TODO: currently we do not support explicit generic types in the AST
 }
 impl PType {
     pub fn function_type(fn_type: PFnType) -> Self {
@@ -1591,8 +1590,6 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
         }
         visitor.visit_end(self);
     }
-
-    // TODO: use the visitor to collect the dependency graph
 }
 
 /// A wrapper for displaying an expression with its expression arena

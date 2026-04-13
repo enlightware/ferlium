@@ -457,7 +457,6 @@ impl Module {
             functions,
             &mut fn_collector,
         );
-        // TODO: find the name and use it to store the impl
         self.add_collected_functions(fn_collector);
     }
 

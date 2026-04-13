@@ -868,5 +868,3 @@ fn circular_imports_type_defs() {
         .as_circular_import_dependency()
         .unwrap();
 }
-
-// TODO: once one can define type alias in user code, add the relevant test here.
