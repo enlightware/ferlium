@@ -60,7 +60,7 @@ where
 The extra constraints become part of the impl itself.
 They participate in trait selection and in coherence checking, just like the types named in the impl header.
 
-## Explicit trait input and output bindings
+## Explicit bindings
 
 Some traits relate more than one input type, or also expose output slots.
 In those cases, an impl header can spell the bindings explicitly.
@@ -190,6 +190,7 @@ User code still cannot:
 
 - define new traits
 - write per-method generic parameter lists inside traits or impls
+- write method-local `where` clauses inside trait impls
 
 ## What comes next
 

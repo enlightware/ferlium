@@ -20,6 +20,7 @@
 
 - [Functions as Values](./functions-as-values.md)
 - [Type Abstraction](./type-abstraction.md)
+- [Explicit Types](./explicit-types.md)
 - [Trait Implementations and Coherence](./trait-implementations-and-coherence.md)
 
 # Standard Library

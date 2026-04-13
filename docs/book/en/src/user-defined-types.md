@@ -179,79 +179,22 @@ let m2 = Message::Write("hello");
 let m3 = Message::Move { x: 10, y: 20 };
 ```
 
-## Generic nominal types
+## Generic named types
 
-Named types can themselves be generic.
-This lets you define one `struct` or `enum` shape that works for many concrete types, while still keeping nominal identity.
-
-### Generic `struct`
-
-Generic parameters are written in angle brackets after the type name:
+Named types can also be generic.
 
 ```ferlium
 struct Box<T>(T)
 
-struct Pair<A, B> {
-    first: A,
-    second: B,
-}
-```
-
-You use a generic named type by applying concrete type arguments:
-
-```ferlium
-let a = Box(1); // produces a Box<int>
-let b = Pair { first: 1, second: "hi" }; // produces a Pair<int, string>
-```
-
-### Generic `enum`
-
-Enums can be generic as well:
-
-```ferlium
 enum MaybeValue<T> {
     Absent,
     Present(T),
 }
 ```
 
-Construction and matching work the same way as for non-generic enums:
+This lets one named type definition work for many concrete types while keeping nominal identity.
 
-```ferlium
-# enum MaybeValue<T> {
-#     Absent,
-#     Present(T),
-# }
-let value: MaybeValue<int> = MaybeValue::Present(41);
-
-match value {
-    Present(x) => x,
-    Absent => 0,
-}
-```
-
-### Constraints on generic named types
-
-Generic named types can have `where` clauses.
-These constrain which type arguments are allowed.
-
-```ferlium
-struct TransformIter<I, T, O>
-where
-    I: Iterator<Item = T>
-{
-    iterator: I,
-    mapper: (T) -> O,
-}
-```
-
-This says that `TransformIter<I, T, O>` only makes sense when `I` is an iterator producing `T`.
-
-The `where` clause can mention:
-
-- trait constraints on the generic parameters
-- associated type bindings such as `Item = T`
-- multi-parameter trait constraints, as described later in the type abstraction chapters
+Ferlium also supports explicit `where` clauses on generic named types, but the full syntax and meaning of explicit generic parameters and constraints are introduced later in [Explicit Types](./explicit-types.md).
 
 ## Destructuring structured values
 

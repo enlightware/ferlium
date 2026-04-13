@@ -124,26 +124,7 @@ Impls can also be generic, and Ferlium supports explicit trait input and output 
 
 The next chapter, [Trait Implementations and Coherence](./trait-implementations-and-coherence.md), covers this in detail.
 
-## Partial type annotations with `_`
 
-You can annotate only the parts you care about and leave the rest to inference using `_`, which acts as a type hole.
-
-```ferlium
-fn id_array(x: [_]) { x }
-fn pair(v) -> (_, _) { v }
-fn keep_shape(x) -> [_] { x }
-```
-
-This is useful when you want to constrain structure (for example, “array of something” or “pair of something”) without naming every type explicitly.
-
-You can also use `_` in local annotations:
-
-```ferlium
-fn f(x) {
-    let a: [_] = x;
-    a
-}
-```
 
 ## Defaulting of ambiguous types
 
@@ -184,30 +165,11 @@ Currently, numeric and open sum defaulting do not combine well.
 When both need to apply to the same expression, compilation can fail.
 This is a known limitation.
 
-## What you cannot write explicitly yet
-
-Today, type abstraction is largely inference-driven.
-In particular:
-
-- you cannot write explicit generic parameter lists on functions
-- you cannot define new traits in user code yet
-- you cannot write explicit user-level trait constraint clauses for functions
-
-At the same time, several pieces of type abstraction can be explicit:
-
-- you can define generic `struct` and `enum` types
-- you can add `where` clauses to generic type definitions
-- you can write generic `impl` blocks for existing traits
-- you can add `where` clauses to those `impl` blocks
-- you can write explicit trait input and output bindings in impl headers
-
-You still get polymorphism and trait-based behavior through inference and standard-library traits.
-
 ## Looking ahead
 
-As Ferlium evolves, explicit generic syntax will be added on top of the current inference-first model.
-For now, the intended workflow is: write ordinary code, let inference produce the general type, and use lightweight annotations (including `_`) only when they improve clarity.
+Ferlium continues to evolve by layering explicit syntax on top of the current inference-first model.
+The intended workflow remains: write ordinary code, let inference produce the general type, and use explicit binders, `where` clauses, and lightweight annotations (including `_`) when they improve clarity.
 
 ## What comes next
 
-The next chapter introduces trait implementations and coherence, describing how you can implement existing traits for your types, and how Ferlium ensures that trait resolution remains predictable across module boundaries.
+The next chapter introduces Ferlium's explicit type syntax, including explicit annotations, generic parameter lists, and `where` clauses.
