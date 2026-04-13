@@ -445,7 +445,7 @@ fn reducing_fns() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn mapping_fns() {
+fn map() {
     let mut session = TestSession::new();
     assert_eq!(session.run("[0, 1, 2] |> map(|x| x + 1)"), int_a![1, 2, 3]);
     assert_eq!(
@@ -453,23 +453,6 @@ fn mapping_fns() {
             "let mut it = [0, 1, 2] |> iter() |> map(|x| x + 1); (next(it), next(it), next(it), next(it))"
         ),
         tuple!(some(int(1)), some(int(2)), some(int(3)), none())
-    );
-    assert_eq!(session.run("[0, 1, 2] |> filter(|x| x > 0)"), int_a![1, 2]);
-    assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2] |> iter() |> filter(|x| x > 0); (next(it), next(it), next(it))"
-        ),
-        tuple!(some(int(1)), some(int(2)), none())
-    );
-    assert_eq!(
-        session.run("[0, 1, 2] |> filter_map(|x| if x > 0 { Some(x * x) } else { None })"),
-        int_a![1, 4]
-    );
-    assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2] |> iter() |> filter_map(|x| if x > 0 { Some(x * x) } else { None }); (next(it), next(it), next(it))"
-        ),
-        tuple!(some(int(1)), some(int(4)), none())
     );
     use PrimitiveEffect::*;
     test_mod_for_effects(
@@ -482,20 +465,51 @@ fn mapping_fns() {
         .fail_compilation("fn f() { [0, 1, 2] |> map(|x| { effects::read(); x + 1 }) }")
         .expect_invalid_effect_dependency(effect(Read), no_effects());
     session
-        .fail_compilation("fn f() { [0, 1, 2] |> filter(|x| { effects::read(); x > 0 }) }")
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
-    session
-        .fail_compilation("fn f() { [0, 1, 2] |> filter_map(|x| { effects::read(); Some(x) }) }")
-        .expect_invalid_effect_dependency(effect(Read), no_effects());
-    session
         .fail_compilation(
             "fn f() { let ignored = [0, 1, 2] |> iter() |> map(|x| { effects::read(); x + 1 }); () }",
         )
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn filter() {
+    let mut session = TestSession::new();
+    assert_eq!(session.run("[0, 1, 2] |> filter(|x| x > 0)"), int_a![1, 2]);
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> iter() |> filter(|x| x > 0); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(2)), none())
+    );
+    use PrimitiveEffect::*;
+    session
+        .fail_compilation("fn f() { [0, 1, 2] |> filter(|x| { effects::read(); x > 0 }) }")
         .expect_invalid_effect_dependency(effect(Read), no_effects());
     session
         .fail_compilation(
             "fn f() { let ignored = [0, 1, 2] |> iter() |> filter(|x| { effects::read(); x > 0 }); () }",
         )
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn filter_map() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("[0, 1, 2] |> filter_map(|x| if x > 0 { Some(x * x) } else { None })"),
+        int_a![1, 4]
+    );
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> iter() |> filter_map(|x| if x > 0 { Some(x * x) } else { None }); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(1)), some(int(4)), none())
+    );
+    use PrimitiveEffect::*;
+    session
+        .fail_compilation("fn f() { [0, 1, 2] |> filter_map(|x| { effects::read(); Some(x) }) }")
         .expect_invalid_effect_dependency(effect(Read), no_effects());
     session
         .fail_compilation(
@@ -506,7 +520,142 @@ fn mapping_fns() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn collect_fns() {
+fn zip() {
+    let mut session = TestSession::new();
+    // zip of two arrays
+    assert_eq!(
+        session.run("([0, 1, 2] |> zip([10, 11, 12]) |> collect(): [_])"),
+        array![tuple!(int(0), int(10)), tuple!(int(1), int(11)), tuple!(int(2), int(12))]
+    );
+    // stops at shorter sequence
+    assert_eq!(
+        session.run("([0, 1] |> zip([10, 11, 12]) |> collect(): [_])"),
+        array![tuple!(int(0), int(10)), tuple!(int(1), int(11))]
+    );
+    assert_eq!(
+        session.run("([0, 1, 2] |> zip([10, 11]) |> collect(): [_])"),
+        array![tuple!(int(0), int(10)), tuple!(int(1), int(11))]
+    );
+    // zip of two ranges via lazy iterator
+    assert_eq!(
+        session.run(
+            "let mut it = zip(0..3, 10..13); (next(it), next(it), next(it), next(it))"
+        ),
+        tuple!(some(tuple!(int(0), int(10))), some(tuple!(int(1), int(11))), some(tuple!(int(2), int(12))), none())
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn enumerate() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("([10, 20, 30] |> enumerate() |> collect(): [_])"),
+        array![tuple!(int(0), int(10)), tuple!(int(1), int(20)), tuple!(int(2), int(30))]
+    );
+    // via iterator
+    assert_eq!(
+        session.run(
+            "let mut it = [10, 20] |> iter() |> enumerate(); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(tuple!(int(0), int(10))), some(tuple!(int(1), int(20))), none())
+    );
+    // on a range
+    assert_eq!(
+        session.run("(5..8 |> enumerate() |> collect(): [_])"),
+        array![tuple!(int(0), int(5)), tuple!(int(1), int(6)), tuple!(int(2), int(7))]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn take() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("(0..10 |> take(3) |> collect(): [int])"),
+        int_a![0, 1, 2]
+    );
+    // take more than available
+    assert_eq!(
+        session.run("([1, 2] |> take(5) |> collect(): [int])"),
+        int_a![1, 2]
+    );
+    // take zero
+    assert_eq!(
+        session.run("([1, 2, 3] |> take(0) |> collect(): [int])"),
+        int_a![]
+    );
+    // via iterator
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2] |> iter() |> take(2); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(0)), some(int(1)), none())
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn skip() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("(0..5 |> skip(2) |> collect(): [int])"),
+        int_a![2, 3, 4]
+    );
+    // skip zero
+    assert_eq!(
+        session.run("([1, 2, 3] |> skip(0) |> collect(): [int])"),
+        int_a![1, 2, 3]
+    );
+    // skip more than available
+    assert_eq!(
+        session.run("([1, 2] |> skip(5) |> collect(): [int])"),
+        int_a![]
+    );
+    // via iterator
+    assert_eq!(
+        session.run(
+            "let mut it = [0, 1, 2, 3] |> iter() |> skip(2); (next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(2)), some(int(3)), none())
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn chain() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run("(chain([1, 2], [3, 4, 5]) |> collect(): [int])"),
+        int_a![1, 2, 3, 4, 5]
+    );
+    // chain with empty first
+    assert_eq!(
+        session.run("(chain(([]: [int]), [1, 2]) |> collect(): [int])"),
+        int_a![1, 2]
+    );
+    // chain with empty second
+    assert_eq!(
+        session.run("(chain([1, 2], ([]: [int])) |> collect(): [int])"),
+        int_a![1, 2]
+    );
+    // chain of two ranges
+    assert_eq!(
+        session.run("(chain(0..3, 3..6) |> collect(): [int])"),
+        int_a![0, 1, 2, 3, 4, 5]
+    );
+    // via iterator
+    assert_eq!(
+        session.run(
+            "let mut it = chain([0, 1], [2, 3]); (next(it), next(it), next(it), next(it), next(it))"
+        ),
+        tuple!(some(int(0)), some(int(1)), some(int(2)), some(int(3)), none())
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn collect() {
     let mut session = TestSession::new();
     assert_eq!(
         session.run("([1, 2, 3] |> collect(): [_])"),

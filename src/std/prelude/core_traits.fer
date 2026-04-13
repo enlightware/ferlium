@@ -103,12 +103,12 @@ impl SizedSeq {
 
 /// Return the last element of an array, or None if the array is empty.
 fn array_peek_back(array) -> None | Some(_) {
-    let l = array_len(array);
-    if l <= 0 {
-        None
-    } else {
-        Some(array[l - 1])
-    }
+	let l = array_len(array);
+	if l <= 0 {
+		None
+	} else {
+		Some(array[l - 1])
+	}
 }
 
 /// Maps a function over an array, returning a new array with the results.
@@ -271,13 +271,13 @@ fn position(seq, predicate) -> None | Some(int) {
 
 // Blanket implementation of Seq for iterators
 impl<I, T> Seq for <Self = I |-> Item = T, Iter = I> {
-    fn iter(seq: I) -> I {
-        seq
-    }
+	fn iter(seq: I) -> I {
+		seq
+	}
 }
 
 fn collect(value) {
-    from_iter(iter(value))
+	from_iter(iter(value))
 }
 
 /// An iterator that maps a function over another iterator.
@@ -289,119 +289,260 @@ struct MapIterator<I, T, O>
 }
 
 impl Iterator for MapIterator<I, T, O> {
-    fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
-        match next(it.iterator) {
-            Some(data) => Some(it.mapper(data)),
-            None => None,
-        }
-    }
+	fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
+		match next(it.iterator) {
+			Some(data) => Some(it.mapper(data)),
+			None => None,
+		}
+	}
 }
 
 impl<I, T, O> Map for <Self = I, Mapped = O |-> Item = T, Output = MapIterator<I, T, O>>
 where
-    I: Iterator<Item = T>
+	I: Iterator<Item = T>
 {
-    fn map(value: I, mapper: (T) -> O) -> MapIterator<I, T, O> {
-        MapIterator { iterator: value, mapper }
-    }
+	fn map(value: I, mapper: (T) -> O) -> MapIterator<I, T, O> {
+		MapIterator { iterator: value, mapper }
+	}
 }
 
 impl<A, B, C, I> Map for <Self = [A], Mapped = B |-> Item = A, Output = C>
 where
-    [A]: Seq<Item = A, Iter = I>,
-    RebindItem<Self = [A], Item = B |-> Output = C>,
-    FromIterator<Self = C, Iter = MapIterator<I, A, B>>
+	[A]: Seq<Item = A, Iter = I>,
+	RebindItem<Self = [A], Item = B |-> Output = C>,
+	FromIterator<Self = C, Iter = MapIterator<I, A, B>>
 {
-    fn map(value: [A], mapper: (A) -> B) -> C {
-        from_iter(MapIterator { iterator: iter(value), mapper })
-    }
+	fn map(value: [A], mapper: (A) -> B) -> C {
+		from_iter(MapIterator { iterator: iter(value), mapper })
+	}
 }
 
 /// An iterator that filters another iterator with a predicate.
 struct FilterIterator<I, T>
-    where I: Iterator<Item = T>
+	where I: Iterator<Item = T>
 {
-    iterator: I,
-    filter: (T) -> bool,
+	iterator: I,
+	filter: (T) -> bool,
 }
 
 impl Iterator for FilterIterator<I, T> {
-    fn next(it: &mut FilterIterator<I, T>) -> None | Some(T) {
-        loop {
-            match next(it.iterator) {
-                Some(data) => if it.filter(data) {
-                    return Some(data)
-                } else {
-                    // filter data out
-                },
-                None => return None
-            }
-        }
-    }
+	fn next(it: &mut FilterIterator<I, T>) -> None | Some(T) {
+		loop {
+			match next(it.iterator) {
+				Some(data) => if it.filter(data) {
+					return Some(data)
+				} else {
+					// filter data out
+				},
+				None => return None
+			}
+		}
+	}
 }
 
 impl<I, T> Filter for <Self = I |-> Item = T, Output = FilterIterator<I, T>>
 where
-    I: Iterator<Item = T>
+	I: Iterator<Item = T>
 {
-    fn filter(value: I, predicate: (T) -> bool) -> FilterIterator<I, T> {
-        FilterIterator { iterator: value, filter: predicate }
-    }
+	fn filter(value: I, predicate: (T) -> bool) -> FilterIterator<I, T> {
+		FilterIterator { iterator: value, filter: predicate }
+	}
 }
 
 impl<A, C, I> Filter for <Self = [A] |-> Item = A, Output = C>
 where
-    [A]: Seq<Item = A, Iter = I>,
-    RebindItem<Self = [A], Item = A |-> Output = C>,
-    FromIterator<Self = C, Iter = FilterIterator<I, A>>
+	[A]: Seq<Item = A, Iter = I>,
+	RebindItem<Self = [A], Item = A |-> Output = C>,
+	FromIterator<Self = C, Iter = FilterIterator<I, A>>
 {
-    fn filter(value: [A], predicate: (A) -> bool) -> C {
-        from_iter(FilterIterator { iterator: iter(value), filter: predicate })
-    }
+	fn filter(value: [A], predicate: (A) -> bool) -> C {
+		from_iter(FilterIterator { iterator: iter(value), filter: predicate })
+	}
 }
 
-/// An itertar that uses a function to both filter and map another iterator.
+/// An iterator that uses a function to both filter and map another iterator.
 struct FilterMapIterator<I, T, O>
-    where I: Iterator<Item = T>
+	where I: Iterator<Item = T>
 {
-    iterator: I,
-    filter_map: (T) -> None | Some(O),
+	iterator: I,
+	filter_map: (T) -> None | Some(O),
 }
 
 impl Iterator for FilterMapIterator<I, T, O> {
-    fn next(it: &mut FilterMapIterator<I, T, O>) -> None | Some(O) {
-        loop {
-            match next(it.iterator) {
-                Some(data) => match it.filter_map(data) {
-                    Some(mapped) => return Some(mapped),
-                    None => {
-                        // filter data out
-                    }
-                },
-                None => return None
-            }
-        }
-    }
+	fn next(it: &mut FilterMapIterator<I, T, O>) -> None | Some(O) {
+		loop {
+			match next(it.iterator) {
+				Some(data) => match it.filter_map(data) {
+					Some(mapped) => return Some(mapped),
+					None => {
+						// filter data out
+					}
+				},
+				None => return None
+			}
+		}
+	}
 }
 
 impl<I, T, O> FilterMap for <Self = I, Mapped = O |-> Item = T, Output = FilterMapIterator<I, T, O>>
 where
-    I: Iterator<Item = T>
+	I: Iterator<Item = T>
 {
-    fn filter_map(value: I, mapper: (T) -> None | Some(O)) -> FilterMapIterator<I, T, O> {
-        FilterMapIterator { iterator: value, filter_map: mapper }
-    }
+	fn filter_map(value: I, mapper: (T) -> None | Some(O)) -> FilterMapIterator<I, T, O> {
+		FilterMapIterator { iterator: value, filter_map: mapper }
+	}
 }
 
 impl<A, B, C, I> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = C>
 where
-    [A]: Seq<Item = A, Iter = I>,
-    RebindItem<Self = [A], Item = B |-> Output = C>,
-    FromIterator<Self = C, Iter = FilterMapIterator<I, A, B>>
+	[A]: Seq<Item = A, Iter = I>,
+	RebindItem<Self = [A], Item = B |-> Output = C>,
+	FromIterator<Self = C, Iter = FilterMapIterator<I, A, B>>
 {
-    fn filter_map(value: [A], mapper: (A) -> None | Some(B)) -> C {
-        from_iter(FilterMapIterator { iterator: iter(value), filter_map: mapper })
-    }
+	fn filter_map(value: [A], mapper: (A) -> None | Some(B)) -> C {
+		from_iter(FilterMapIterator { iterator: iter(value), filter_map: mapper })
+	}
+}
+
+/// An iterator that zips two iterators together, yielding pairs of their items.
+struct ZipIterator<I, J, A, B>
+	where I: Iterator<Item = A>,
+		  J: Iterator<Item = B>
+{
+	left: I,
+	right: J,
+}
+
+impl Iterator for ZipIterator<I, J, A, B> {
+	fn next(it: &mut ZipIterator<I, J, A, B>) -> None | Some((A, B)) {
+		match next(it.left) {
+			Some(a) => match next(it.right) {
+				Some(b) => Some((a, b)),
+				None => None,
+			},
+			None => None,
+		}
+	}
+}
+
+/// Zips two sequences together, yielding pairs of their items. Stops at the shorter sequence.
+fn zip(seq1, seq2) {
+	ZipIterator { left: iter(seq1), right: iter(seq2) }
+}
+
+/// An iterator that yields (index, item) pairs.
+struct EnumerateIterator<I, T>
+	where I: Iterator<Item = T>
+{
+	iterator: I,
+	index: int,
+}
+
+impl Iterator for EnumerateIterator<I, T> {
+	fn next(it: &mut EnumerateIterator<I, T>) -> None | Some((int, T)) {
+		match next(it.iterator) {
+			Some(item) => {
+				let idx = it.index;
+				it.index += 1;
+				Some((idx, item))
+			},
+			None => None,
+		}
+	}
+}
+
+/// Enumerates a sequence, yielding (index, item) pairs starting from 0.
+fn enumerate(seq) {
+	EnumerateIterator { iterator: iter(seq), index: 0 }
+}
+
+/// An iterator that yields at most n items from another iterator.
+struct TakeIterator<I, T>
+	where I: Iterator<Item = T>
+{
+	iterator: I,
+	remaining: int,
+}
+
+impl Iterator for TakeIterator<I, T> {
+	fn next(it: &mut TakeIterator<I, T>) -> None | Some(T) {
+		if it.remaining <= 0 {
+			None
+		} else {
+			match next(it.iterator) {
+				Some(item) => {
+					it.remaining -= 1;
+					Some(item)
+				},
+				None => None,
+			}
+		}
+	}
+}
+
+/// Returns an iterator that yields at most n items from the sequence.
+fn take(seq, n) {
+	TakeIterator { iterator: iter(seq), remaining: n }
+}
+
+/// An iterator that skips the first n items of another iterator.
+struct SkipIterator<I, T>
+	where I: Iterator<Item = T>
+{
+	iterator: I,
+	to_skip: int,
+}
+
+impl Iterator for SkipIterator<I, T> {
+	fn next(it: &mut SkipIterator<I, T>) -> None | Some(T) {
+		loop {
+			match next(it.iterator) {
+				None => return None,
+				Some(item) => if it.to_skip > 0 {
+					it.to_skip -= 1
+				} else {
+					return Some(item)
+				}
+			}
+		}
+	}
+}
+
+/// Returns an iterator that skips the first n items of the sequence.
+fn skip(seq, n) {
+	SkipIterator { iterator: iter(seq), to_skip: n }
+}
+
+/// An iterator that chains two iterators of the same item type together.
+struct ChainIterator<I, J, T>
+	where I: Iterator<Item = T>,
+		  J: Iterator<Item = T>
+{
+	first: I,
+	second: J,
+	first_done: bool,
+}
+
+impl Iterator for ChainIterator<I, J, T> {
+	fn next(it: &mut ChainIterator<I, J, T>) -> None | Some(T) {
+		if it.first_done {
+			next(it.second)
+		} else {
+			match next(it.first) {
+				Some(item) => Some(item),
+				None => {
+					it.first_done = true;
+					next(it.second)
+				},
+			}
+		}
+	}
+}
+
+/// Chains two sequences together, yielding all items from the first then all from the second.
+/// Both sequences must have the same item type.
+fn chain(seq1, seq2) {
+	ChainIterator { first: iter(seq1), second: iter(seq2), first_done: false }
 }
 
 // Compatibility, mark as deprecated when supported
@@ -449,7 +590,7 @@ impl<A, B> RebindItem for <Self = [A], Item = B |-> Output = [B]> {}
 
 impl<I, T> FromIterator for <Self = [T], Iter = I>
 where
-    I: Iterator<Item = T>
+	I: Iterator<Item = T>
 {
 	fn from_iter(iterator: I) -> [T] {
 		let mut iterator = iterator;
