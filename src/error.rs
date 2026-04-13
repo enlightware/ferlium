@@ -116,6 +116,41 @@ impl WhatIsNotAProductType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenericParamsOwner {
+    TypeDef { name: Ustr },
+    Function { name: Ustr },
+    TraitImpl { trait_name: Ustr },
+}
+
+impl GenericParamsOwner {
+    pub fn description(&self) -> String {
+        match self {
+            Self::TypeDef { name } => format!("type definition `{name}`"),
+            Self::Function { name } => format!("function `{name}`"),
+            Self::TraitImpl { trait_name } => format!("impl of trait `{trait_name}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidGenericParamsKind {
+    DuplicateParam { name: Ustr },
+}
+
+impl InvalidGenericParamsKind {
+    pub fn message(&self, owner: GenericParamsOwner) -> String {
+        match self {
+            Self::DuplicateParam { name } => {
+                format!(
+                    "Duplicate generic type parameter `{name}` in {}",
+                    owner.description()
+                )
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidTraitConstraintKind {
     UnknownInputBinding { name: Ustr },
@@ -308,6 +343,11 @@ pub enum CompilationErrorImpl<S: Scope> {
     ImportNotFound(ImportSite),
     TypeNotFound(Location),
     TraitNotFound(Location),
+    InvalidGenericParams {
+        owner: GenericParamsOwner,
+        kind: InvalidGenericParamsKind,
+        span: Location,
+    },
     InvalidTraitConstraint {
         trait_name: String,
         kind: InvalidTraitConstraintKind,
@@ -706,6 +746,9 @@ impl FormatWith<SourceTable> for CompilationError {
             }
             TraitNotFound(span) => {
                 write!(f, "Cannot find trait {} in this scope", fmt_span(span))
+            }
+            InvalidGenericParams { owner, kind, span } => {
+                write!(f, "{} in {}", kind.message(*owner), fmt_span(span))
             }
             InvalidTraitConstraint {
                 trait_name,
@@ -1316,6 +1359,9 @@ impl CompilationError {
             }
             TypeNotFound(span) => compilation_error!(TypeNotFound(span)),
             TraitNotFound(span) => compilation_error!(TraitNotFound(span)),
+            InvalidGenericParams { owner, kind, span } => {
+                compilation_error!(InvalidGenericParams { owner, kind, span })
+            }
             InvalidTraitConstraint {
                 trait_name,
                 kind,

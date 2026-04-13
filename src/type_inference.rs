@@ -424,6 +424,7 @@ impl TypeInference {
             env.new_type_deps,
             env.module_env,
             Some((ret_ty, env.ast_arena[body].span)),
+            env.annotation_ty_subst,
             vec![],
             env.lambda_functions,
             env.base_local_function_index,
@@ -1133,7 +1134,10 @@ impl TypeInference {
             }
             TypeAscription(data) => {
                 let (node_id, mut_type) = self.infer_expr(env, data.expr)?;
-                let ty = data.ty.map(&mut FreshVariableTypeMapper::new(self));
+                let ty = data.ty.map(&mut AnnotationTypeMapper::new(
+                    self,
+                    env.annotation_ty_subst,
+                ));
                 self.add_same_type_constraint(
                     env.ir_arena[node_id].ty,
                     sp(data.expr),
@@ -1836,13 +1840,22 @@ impl TypeInference {
 }
 
 #[derive(new)]
-pub struct FreshVariableTypeMapper<'a> {
+pub struct AnnotationTypeMapper<'a, 'b> {
     ty_inf: &'a mut TypeInference,
+    explicit_ty_subst: Option<&'b TypeSubstitution>,
 }
-impl TypeMapper for FreshVariableTypeMapper<'_> {
+impl TypeMapper for AnnotationTypeMapper<'_, '_> {
     fn map_type(&mut self, ty: Type) -> Type {
-        if ty.data().is_variable() {
-            self.ty_inf.fresh_type_var_ty()
+        let var = { ty.data().as_variable().copied() };
+        if let Some(var) = var {
+            if let Some(ty) = self
+                .explicit_ty_subst
+                .and_then(|explicit_ty_subst| explicit_ty_subst.get(&var))
+            {
+                *ty
+            } else {
+                self.ty_inf.fresh_type_var_ty()
+            }
         } else {
             ty
         }

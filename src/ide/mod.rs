@@ -184,6 +184,9 @@ fn compilation_error_to_data(
             span,
             format!("Cannot find trait `{}` in this scope", fmt_span(span)),
         )],
+        InvalidGenericParams { owner, kind, span } => {
+            vec![error_data_from_location(span, kind.message(*owner))]
+        }
         InvalidTraitConstraint {
             trait_name,
             kind,

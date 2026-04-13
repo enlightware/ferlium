@@ -130,7 +130,7 @@ pub trait Phase: Sized {
     type Type: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
-    type TraitImplConstraint: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
+    type WhereClause: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TypeAliasInModule: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TypeDefInModule: Debug + Clone;
 }
@@ -152,7 +152,7 @@ impl Phase for Parsed {
     type Type = PType;
     type MutType = PMutType;
     type LetTyAscriptionComplete = ();
-    type TraitImplConstraint = TypeConstraint<Self>;
+    type WhereClause = TypeConstraint<Self>;
     type TypeAliasInModule = TypeAlias;
     type TypeDefInModule = TypeDef<Self>;
 }
@@ -166,7 +166,7 @@ impl Phase for Desugared {
     type Type = IrType;
     type MutType = IrMutType;
     type LetTyAscriptionComplete = bool;
-    type TraitImplConstraint = PubTypeConstraint;
+    type WhereClause = PubTypeConstraint;
     type TypeAliasInModule = Never;
     type TypeDefInModule = Never;
 }
@@ -547,36 +547,18 @@ impl DModuleFunctionArg {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, new)]
+#[allow(clippy::too_many_arguments)]
 pub struct ModuleFunction<P: Phase> {
     pub name: UstrSpan,
+    pub generic_params: Vec<UstrSpan>,
     pub args: Vec<ModuleFunctionArg<P>>,
     pub args_span: Location,
     pub ret_ty: Option<TypeSpan<P>>,
+    pub where_clause: Vec<P::WhereClause>,
     pub body: ExprId<P>,
     pub span: Location,
     pub doc: Option<String>,
-}
-impl<P: Phase> ModuleFunction<P> {
-    pub fn new(
-        name: UstrSpan,
-        args: Vec<ModuleFunctionArg<P>>,
-        args_span: Location,
-        ret_ty: Option<TypeSpan<P>>,
-        body: ExprId<P>,
-        span: Location,
-        doc: Option<String>,
-    ) -> Self {
-        Self {
-            name,
-            args,
-            args_span,
-            ret_ty,
-            body,
-            span,
-            doc,
-        }
-    }
 }
 
 /// An AST module function just after parsing
@@ -657,7 +639,7 @@ pub struct TraitImpl<P: Phase> {
     /// Explicit trait inputs and outputs for the implementation header, if any.
     /// When `None`, they are fully inferred from the function signatures.
     pub for_trait: Option<TraitImplFor<P>>,
-    pub where_clause: Vec<P::TraitImplConstraint>,
+    pub where_clause: Vec<P::WhereClause>,
     pub functions: Vec<ModuleFunction<P>>,
     pub span: Location,
 }
@@ -778,6 +760,70 @@ pub struct ModuleDisplay<'a, P: Phase> {
     pub arena: &'a ExprArena<P>,
 }
 
+fn fmt_module_function<P: Phase>(
+    f: &mut fmt::Formatter<'_>,
+    env: &ModuleEnv<'_>,
+    arena: &ExprArena<P>,
+    function: &ModuleFunction<P>,
+    doc_prefix: &str,
+    body_indent: usize,
+) -> fmt::Result {
+    let ModuleFunction {
+        name,
+        generic_params,
+        args,
+        ret_ty,
+        where_clause,
+        body,
+        doc,
+        ..
+    } = function;
+
+    if let Some(doc) = doc {
+        for line in doc.split("\n") {
+            writeln!(f, "{doc_prefix}/// {line}")?;
+        }
+    }
+    write!(f, "    fn {}", name.0)?;
+    if !generic_params.is_empty() {
+        write!(
+            f,
+            "<{}>",
+            generic_params.iter().map(|(name, _)| name).join(", ")
+        )?;
+    }
+    write!(f, "(")?;
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        if let Some((mut_ty, ty, _)) = &arg.ty {
+            write!(f, "{}: ", arg.name.0)?;
+            if let Some(mut_ty) = mut_ty {
+                mut_ty.format_in_fn_arg(f)?;
+            }
+            write!(f, "{}", ty.format_with(env))?;
+        } else {
+            write!(f, "{}", arg.name.0)?;
+        }
+    }
+    write!(f, ")")?;
+    if let Some((ret_ty, _)) = ret_ty {
+        write!(f, " → {}", ret_ty.format_with(env))?;
+    }
+    if !where_clause.is_empty() {
+        write!(f, " where ")?;
+        write_with_separator_and_format_fn(
+            where_clause,
+            ", ",
+            |constraint, f| constraint.fmt_with(f, env),
+            f,
+        )?;
+    }
+    writeln!(f)?;
+    arena[*body].format_ind(f, env, arena, body_indent)
+}
+
 impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, P> {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
         let module = self.module;
@@ -824,82 +870,16 @@ impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, P> {
                     write!(f, " ")?;
                 }
                 writeln!(f, "{{")?;
-                for ModuleFunction {
-                    name,
-                    args,
-                    ret_ty,
-                    body,
-                    doc,
-                    ..
-                } in functions.iter()
-                {
-                    if let Some(doc) = doc {
-                        for line in doc.split("\n") {
-                            writeln!(f, "    /// {line}")?;
-                        }
-                    }
-                    write!(f, "    fn {}(", name.0,)?;
-                    for (i, arg) in args.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        if let Some((mut_ty, ty, _)) = &arg.ty {
-                            write!(f, "{}: ", arg.name.0)?;
-                            if let Some(mut_ty) = mut_ty {
-                                mut_ty.format_in_fn_arg(f)?;
-                            }
-                            write!(f, "{}", ty.format_with(env))?;
-                        } else {
-                            write!(f, "{}", arg.name.0)?;
-                        }
-                    }
-                    write!(f, ")")?;
-                    if let Some((ret_ty, _)) = ret_ty {
-                        write!(f, " → {}", ret_ty.format_with(env))?;
-                    }
-                    writeln!(f)?;
-                    arena[*body].format_ind(f, env, arena, 3)?;
+                for function in functions.iter() {
+                    fmt_module_function(f, env, arena, function, "    ", 3)?;
                 }
                 writeln!(f, "  }}")?;
             }
         }
         if !module.functions.is_empty() {
             writeln!(f, "Functions:")?;
-            for ModuleFunction {
-                name,
-                args,
-                ret_ty,
-                body,
-                doc,
-                ..
-            } in module.functions.iter()
-            {
-                if let Some(doc) = doc {
-                    for line in doc.split("\n") {
-                        writeln!(f, "  /// {line}")?;
-                    }
-                }
-                write!(f, "    fn {}(", name.0,)?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    if let Some((mut_ty, ty, _)) = &arg.ty {
-                        write!(f, "{}: ", arg.name.0)?;
-                        if let Some(mut_ty) = mut_ty {
-                            mut_ty.format_in_fn_arg(f)?;
-                        }
-                        write!(f, "{}", ty.format_with(env))?;
-                    } else {
-                        write!(f, "{}", arg.name.0)?;
-                    }
-                }
-                write!(f, ")")?;
-                if let Some((ret_ty, _)) = ret_ty {
-                    write!(f, " → {}", ret_ty.format_with(env))?;
-                }
-                writeln!(f)?;
-                arena[*body].format_ind(f, env, arena, 2)?;
+            for function in module.functions.iter() {
+                fmt_module_function(f, env, arena, function, "  ", 2)?;
             }
         }
         Ok(())

@@ -141,8 +141,18 @@ UseTree: UseTree = {
 }
 
 Function: ModuleFunction = {
-    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <ar:@R> <body:Es<Block>> <r:@R> =>
-        ModuleFunction::new(name, args, span(al, ar, source_id), ret, body, span(l, r, source_id), parse_doc_comments(doc)),
+    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:WhereClause?> <ar:@R> <body:Es<Block>> <r:@R> =>
+        ModuleFunction::new(
+            name,
+            generic_params.unwrap_or_default(),
+            args,
+            span(al, ar, source_id),
+            ret,
+            where_clause.unwrap_or_default(),
+            body,
+            span(l, r, source_id),
+            parse_doc_comments(doc),
+        ),
 }
 
 ModuleFunctionArgs: Vec<ModuleFunctionArg> = {

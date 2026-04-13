@@ -203,6 +203,132 @@ fn array_access_in_module_functions() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn explicit_generic_module_functions() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn keep<T>(value: T) -> T {
+                let identity = |candidate| {
+                    let typed: T = candidate;
+                    typed
+                };
+                identity(value)
+            }
+
+            let left = keep(1);
+            let right = keep(true);
+            if right { left } else { 0 }
+        "# }),
+        int(1)
+    );
+
+    let keep = session.compile_and_get_fn_def(
+        indoc! { r#"
+            fn keep<T>(value: T) -> T {
+                let identity = |candidate| {
+                    let typed: T = candidate;
+                    typed
+                };
+                identity(value)
+            }
+        "# },
+        "keep",
+    );
+    assert_eq!(keep.ty_scheme.ty_quantifiers.len(), 1);
+    assert!(keep.ty_scheme.constraints.is_empty());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn function_where_clauses_are_enforced() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn keep_ord<T>(value: T) -> T
+            where
+                T: Ord
+            {
+                value
+            }
+
+            keep_ord(1) + keep_ord(2)
+        "# }),
+        int(3)
+    );
+
+    let keep_ord = session.compile_and_get_fn_def(
+        indoc! { r#"
+            fn keep_ord<T>(value: T) -> T
+            where
+                T: Ord
+            {
+                value
+            }
+        "# },
+        "keep_ord",
+    );
+    assert_eq!(keep_ord.ty_scheme.ty_quantifiers.len(), 1);
+    assert_eq!(keep_ord.ty_scheme.constraints.len(), 1);
+
+    session.fail_compilation(indoc! { r#"
+        fn keep_ord<T>(value: T) -> T
+        where
+            T: Ord
+        {
+            value
+        }
+
+        keep_ord(|x| x)
+    "# });
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trait_impl_methods_with_local_generics_or_where_clauses_are_unsupported() {
+    let mut session = TestSession::new();
+
+    assert_eq!(
+        session
+            .fail_compilation(indoc! { r#"
+                struct Wrapper(int)
+
+                impl Cast for <From = int, To = Wrapper> {
+                    fn cast<T>(self) -> Wrapper {
+                        Wrapper(self)
+                    }
+                }
+            "# })
+            .into_inner()
+            .into_unsupported()
+            .unwrap()
+            .1,
+        "Explicit generic parameters on trait impl methods are not supported yet: method `cast` in impl of trait `Cast`"
+    );
+
+    assert_eq!(
+        session
+            .fail_compilation(indoc! { r#"
+                struct Wrapper<T>(T)
+
+                impl<T> Cast for <From = T, To = Wrapper<T>> {
+                    fn cast(self) -> Wrapper<T>
+                    where
+                        T: Ord
+                    {
+                        Wrapper(self)
+                    }
+                }
+            "# })
+            .into_inner()
+            .into_unsupported()
+            .unwrap()
+            .1,
+        "Method-local where clauses on trait impl methods are not supported yet: method `cast` in impl of trait `Cast`"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_mutable_references() {
     let mut session = TestSession::new();
     assert_eq!(

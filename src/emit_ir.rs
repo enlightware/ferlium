@@ -41,9 +41,7 @@ use crate::{
     trait_solver::{TraitSolver, trait_solver_from_module},
     r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
     type_constraints::named_type_constraints_in_types,
-    type_inference::{
-        FreshVariableTypeMapper, InstSubstitution, TypeInference, UnifiedTypeInference,
-    },
+    type_inference::{AnnotationTypeMapper, InstSubstitution, TypeInference, UnifiedTypeInference},
     type_like::{TypeLike, instantiate_types},
     type_mapper::TypeMapper,
     type_scheme::{
@@ -402,6 +400,7 @@ where
     // First pass, populate the function table and allocate fresh mono type variables.
     let mut ty_inf = TypeInference::default();
     let mut impl_annotation_subst = None;
+    let mut outer_annotation_var_count = 0;
     let mut explicit_trait_impl = None;
 
     // If we are emitting a trait implementation, create generics for the trait input and output types
@@ -421,6 +420,9 @@ where
         } else {
             vec![]
         };
+        // Reserve the leading annotation placeholder indices for explicit impl-level generics,
+        // so any function-level generics in this shared path start after them.
+        outer_annotation_var_count = explicit_quantifiers.len();
         if !explicit_quantifiers.is_empty() {
             impl_annotation_subst = Some((
                 ty_inf.fresh_type_var_subst(&explicit_quantifiers),
@@ -525,11 +527,15 @@ where
 
     // Populate the function table
     let mut local_fns = Vec::new();
+    let mut function_annotation_ty_substs = Vec::new();
+    let mut function_explicit_root_tys = Vec::new();
     for ast::ModuleFunction {
         name,
+        generic_params,
         args,
         args_span,
         ret_ty,
+        where_clause,
         span,
         doc,
         ..
@@ -539,36 +545,69 @@ where
         // Note: the type quantifiers and constraints are left empty.
         // They will be filled in the second pass.
         // The effect quantifiers are filled with the output effect variable.
-        let annotation_subst = impl_annotation_subst.as_ref();
+        if let Some(trait_ctx) = &trait_ctx {
+            if let Some((_, generic_span)) = generic_params.first() {
+                return Err(internal_compilation_error!(Unsupported {
+                    span: *generic_span,
+                    reason: format!(
+                        "Explicit generic parameters on trait impl methods are not supported yet: method `{}` in impl of trait `{}`",
+                        name.0, trait_ctx.trait_ref.name
+                    ),
+                }));
+            }
+            if let Some(constraint) = where_clause.first() {
+                return Err(internal_compilation_error!(Unsupported {
+                    span: constraint.use_site(),
+                    reason: format!(
+                        "Method-local where clauses on trait impl methods are not supported yet: method `{}` in impl of trait `{}`",
+                        name.0, trait_ctx.trait_ref.name
+                    ),
+                }));
+            }
+        }
+        let mut annotation_ty_subst = impl_annotation_subst
+            .as_ref()
+            .map(|subst| subst.0.clone())
+            .unwrap_or_default();
+        let explicit_root_tys = generic_params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let source_var = TypeVar::new((outer_annotation_var_count + index) as u32);
+                let fresh_ty = ty_inf.fresh_type_var_ty();
+                annotation_ty_subst.insert(source_var, fresh_ty);
+                fresh_ty
+            })
+            .collect::<Vec<_>>();
         let args_ty = args
             .iter()
             .map(|arg| {
                 if let Some((mut_ty, ty, _)) = &arg.ty {
-                    if let Some(subst) = annotation_subst {
-                        FnArgType::new(ty.instantiate(subst), mut_ty.unwrap_or(MutType::constant()))
-                    } else {
-                        let mut mapper = FreshVariableTypeMapper::new(&mut ty_inf);
-                        let mut_ty = match mut_ty {
-                            Some(mut_ty) => mapper.map_mut_type(*mut_ty),
-                            None => MutType::constant(),
-                        };
-                        let ty = ty.map(&mut mapper);
-                        FnArgType::new(ty, mut_ty)
-                    }
+                    let mut mapper =
+                        AnnotationTypeMapper::new(&mut ty_inf, Some(&annotation_ty_subst));
+                    let mut_ty = match mut_ty {
+                        Some(mut_ty) => mapper.map_mut_type(*mut_ty),
+                        None => MutType::constant(),
+                    };
+                    let ty = ty.map(&mut mapper);
+                    FnArgType::new(ty, mut_ty)
                 } else {
                     ty_inf.fresh_fn_arg()
                 }
             })
             .collect();
         let ret_ty_ty = if let Some((ret_ty, _)) = ret_ty {
-            if let Some(subst) = annotation_subst {
-                ret_ty.instantiate(subst)
-            } else {
-                ret_ty.map(&mut FreshVariableTypeMapper::new(&mut ty_inf))
-            }
+            ret_ty.map(&mut AnnotationTypeMapper::new(
+                &mut ty_inf,
+                Some(&annotation_ty_subst),
+            ))
         } else {
             ty_inf.fresh_type_var_ty()
         };
+        let annotation_subst = (annotation_ty_subst.clone(), FxHashMap::default());
+        for constraint in where_clause {
+            ty_inf.add_pub_constraint(constraint.instantiate(&annotation_subst));
+        }
         let effects = ty_inf.fresh_effect_var_ty();
         let fn_type = FnType::new(args_ty, ret_ty_ty, effects.clone());
 
@@ -634,6 +673,8 @@ where
             output.add_function(name.0, descr)
         };
         local_fns.push(id);
+        function_annotation_ty_substs.push(annotation_ty_subst);
+        function_explicit_root_tys.push(explicit_root_tys);
     }
 
     // Associated lambdas and macro to call and id and its associated lambdas
@@ -660,7 +701,10 @@ where
     }
 
     // Second pass, infer types and emit function bodies.
-    for (function, id) in ast_functions().zip(local_fns.iter()) {
+    for ((function, id), annotation_ty_subst) in ast_functions()
+        .zip(local_fns.iter())
+        .zip(function_annotation_ty_substs.iter())
+    {
         let descr = output.get_function_by_id(*id).unwrap();
         let module_env = ModuleEnv::new(output, others);
         let mut new_import_slots = vec![];
@@ -677,6 +721,7 @@ where
             &mut new_type_deps,
             module_env,
             Some((expected_ret_ty, expected_span)),
+            (!annotation_ty_subst.is_empty()).then_some(annotation_ty_subst),
             vec![],
             &mut lambda_functions,
             output.functions.len() as u32,
@@ -974,10 +1019,17 @@ where
         // We are emitting normal module functions.
 
         // Default orphan constraints for each function into the unification tables.
-        for id in local_fns.iter() {
+        for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
             let descr = &output.functions[id.as_index()];
             let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
-            let sig_ty_vars = fn_ty.inner_ty_vars();
+            let mut sig_ty_vars = fn_ty.inner_ty_vars();
+            sig_ty_vars.extend(
+                explicit_root_tys
+                    .iter()
+                    .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+                    .collect::<Vec<_>>(),
+            );
+            sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
             ty_inf.normalize_remaining_constraints();
             let (_, orphan_constraints) =
                 select_constraints_accessible_from(ty_inf.remaining_constraints(), &sig_ty_vars);
@@ -991,10 +1043,17 @@ where
             )?;
             solver.commit(&mut output.functions, &mut output.def_table);
         }
-        for id in local_fns.iter() {
+        for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
             let descr = &output.functions[id.as_index()];
             let fn_ty = ty_inf.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
-            let sig_ty_vars = fn_ty.inner_ty_vars();
+            let mut sig_ty_vars = fn_ty.inner_ty_vars();
+            sig_ty_vars.extend(
+                explicit_root_tys
+                    .iter()
+                    .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+                    .collect::<Vec<_>>(),
+            );
+            sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
             ty_inf.normalize_remaining_constraints();
             let (_, remaining_orphans) =
                 select_constraints_accessible_from(ty_inf.remaining_constraints(), &sig_ty_vars);
@@ -1024,12 +1083,21 @@ where
 
         // For each function: filter constraints, check unbounds, finalize type scheme.
         let mut used_constraints: FxHashSet<PubTypeConstraintPtr> = FxHashSet::default();
-        for (function, id) in ast_functions().zip(local_fns.iter()) {
+        for ((function, id), explicit_root_tys) in ast_functions()
+            .zip(local_fns.iter())
+            .zip(function_explicit_root_tys.iter())
+        {
             let descr = &output.functions[id.as_index()];
             let code_entry = descr.get_code_entry().unwrap();
 
             // Find constraints related to this function's signature.
-            let sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
+            let mut sig_ty_vars = descr.definition.ty_scheme.ty.inner_ty_vars();
+            let explicit_ty_vars = explicit_root_tys
+                .iter()
+                .flat_map(|ty| ty_inf.substitute_in_type(*ty).inner_ty_vars().into_iter())
+                .collect::<Vec<_>>();
+            sig_ty_vars.extend(explicit_ty_vars.iter().copied());
+            sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
             let (related_constraints, _) =
                 select_constraints_accessible_from(&all_constraints, &sig_ty_vars);
             let related_ptrs: FxHashSet<PubTypeConstraintPtr> = related_constraints
@@ -1045,6 +1113,8 @@ where
                 &descr.definition.ty_scheme.ty,
                 related_constraints.iter().map(|c| *c as &PubTypeConstraint),
             );
+            quantifiers.extend(explicit_ty_vars.iter().copied());
+            quantifiers = quantifiers.into_iter().unique().collect();
 
             // Check for unbound type variables.
             let unbound = ir::all_unbound_ty_vars(ir_arena, code_entry);
@@ -1235,6 +1305,7 @@ fn emit_expr_unsafe_inner(
         &mut new_import_slots,
         &mut new_type_deps,
         module_env,
+        None,
         None,
         vec![],
         &mut lambda_functions,

@@ -8,8 +8,8 @@
 //
 
 use ferlium::error::{
-    CompilationErrorImpl, DuplicatedFieldContext, DuplicatedVariantContext,
-    InvalidTraitConstraintKind,
+    CompilationErrorImpl, DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
+    InvalidGenericParamsKind, InvalidTraitConstraintKind,
 };
 use ferlium::eval::eval_node;
 use ferlium::format::FormatWith;
@@ -1118,6 +1118,68 @@ fn invalid_trait_constraint_bindings_report_structured_errors() {
             );
         }
         other => panic!("expected InvalidTraitConstraint, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn duplicate_generic_params_report_structured_errors() {
+    let mut session = TestSession::new();
+
+    match session.fail_compilation("struct Bad<T, T>(T)").into_inner() {
+        CompilationErrorImpl::InvalidGenericParams { owner, kind, .. } => {
+            assert_eq!(owner, GenericParamsOwner::TypeDef { name: ustr("Bad") });
+            assert_eq!(
+                kind,
+                InvalidGenericParamsKind::DuplicateParam { name: ustr("T") }
+            );
+        }
+        other => panic!("expected InvalidGenericParams, got {other:?}"),
+    }
+
+    match session
+        .fail_compilation(indoc! { r#"
+            struct Wrapper<T>(T)
+
+            impl<T, T> Cast for <From = T, To = Wrapper<T>> {
+                fn cast(self) -> Wrapper<T> {
+                    Wrapper(self)
+                }
+            }
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidGenericParams { owner, kind, .. } => {
+            assert_eq!(
+                owner,
+                GenericParamsOwner::TraitImpl {
+                    trait_name: ustr("Cast")
+                }
+            );
+            assert_eq!(
+                kind,
+                InvalidGenericParamsKind::DuplicateParam { name: ustr("T") }
+            );
+        }
+        other => panic!("expected InvalidGenericParams, got {other:?}"),
+    }
+
+    match session
+        .fail_compilation(indoc! { r#"
+            fn keep<T, T>(value: T) -> T {
+                value
+            }
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidGenericParams { owner, kind, .. } => {
+            assert_eq!(owner, GenericParamsOwner::Function { name: ustr("keep") });
+            assert_eq!(
+                kind,
+                InvalidGenericParamsKind::DuplicateParam { name: ustr("T") }
+            );
+        }
+        other => panic!("expected InvalidGenericParams, got {other:?}"),
     }
 }
 

@@ -26,8 +26,9 @@ use crate::{
     containers::b,
     effects::EffType,
     error::{
-        DuplicatedFieldContext, DuplicatedVariantContext, InternalCompilationError,
-        InvalidTraitConstraintKind, WhatIsNotAProductType, WhichProductTypeIsNot,
+        DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
+        InternalCompilationError, InvalidGenericParamsKind, InvalidTraitConstraintKind,
+        WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     graph::{find_strongly_connected_components, topological_sort_sccs},
     import_resolver::{ModulesResolver, resolve_imports},

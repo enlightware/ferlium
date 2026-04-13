@@ -94,7 +94,7 @@ fn desugar_type_constraint(
     ))
 }
 
-fn desugar_type_constraints(
+pub(super) fn desugar_type_constraints(
     constraints: &[ast::PTypeConstraint],
     generic_ty_params: &GenericTyParams,
     env: &ModuleEnv<'_>,
@@ -382,21 +382,16 @@ impl PTypeDef {
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<TypeDefRef, InternalCompilationError> {
-        let mut ty_quantifiers = Vec::with_capacity(self.generic_params.len());
-        let mut generic_ty_params = GenericTyParams::default();
-        for (index, param) in self.generic_params.iter().enumerate() {
-            let ty_var = TypeVar::new(index as u32);
-            if generic_ty_params.insert(param.0, ty_var).is_some() {
-                return Err(internal_compilation_error!(Unsupported {
-                    reason: format!(
-                        "Duplicate generic type parameter `{}` in type definition `{}`",
-                        param.0, self.name.0
-                    ),
-                    span: param.1,
-                }));
-            }
-            ty_quantifiers.push(ty_var);
-        }
+        let generic_ty_params = extend_generic_ty_params(
+            &GenericTyParams::default(),
+            &self.generic_params,
+            GenericParamsOwner::TypeDef { name: self.name.0 },
+        )?;
+        let ty_quantifiers = self
+            .generic_params
+            .iter()
+            .map(|param| generic_ty_params.get(&param.0).copied().unwrap())
+            .collect();
         let shape = self.shape.desugar_with_ty_params(
             self.span,
             true,
@@ -554,17 +549,34 @@ fn collect_trait_impl_generic_ty_params_from_ty(
     Ok(())
 }
 
-fn build_generic_ty_params(
+fn invalid_generic_params_error(
+    owner: GenericParamsOwner,
+    name: Ustr,
+    span: Location,
+) -> InternalCompilationError {
+    internal_compilation_error!(InvalidGenericParams {
+        owner,
+        kind: InvalidGenericParamsKind::DuplicateParam { name },
+        span,
+    })
+}
+
+pub(super) fn extend_generic_ty_params(
+    existing: &GenericTyParams,
     generic_params: &[UstrSpan],
+    owner: GenericParamsOwner,
 ) -> Result<GenericTyParams, InternalCompilationError> {
-    let mut generic_ty_params = GenericTyParams::default();
-    for (index, param) in generic_params.iter().enumerate() {
-        let ty_var = TypeVar::new(index as u32);
+    let mut generic_ty_params = existing.clone();
+    let mut next_index = generic_ty_params
+        .values()
+        .map(TypeVar::name)
+        .max()
+        .map_or(0, |index| index + 1);
+    for param in generic_params.iter() {
+        let ty_var = TypeVar::new(next_index);
+        next_index += 1;
         if generic_ty_params.insert(param.0, ty_var).is_some() {
-            return Err(internal_compilation_error!(Unsupported {
-                reason: format!("Duplicate generic type parameter `{}` in impl", param.0),
-                span: param.1,
-            }));
+            return Err(invalid_generic_params_error(owner, param.0, param.1));
         }
     }
     Ok(generic_ty_params)
@@ -742,7 +754,13 @@ impl PTraitImpl {
                 .transpose()?
                 .unwrap_or_default()
         } else {
-            build_generic_ty_params(&self.generic_params)?
+            extend_generic_ty_params(
+                &GenericTyParams::default(),
+                &self.generic_params,
+                GenericParamsOwner::TraitImpl {
+                    trait_name: self.trait_name.0,
+                },
+            )?
         };
         let fn_map = self
             .functions

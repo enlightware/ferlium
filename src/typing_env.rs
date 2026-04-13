@@ -21,7 +21,7 @@ use crate::{
     },
     std::STD_MODULE_ID,
     r#trait::TraitRef,
-    r#type::{Type, TypeVar},
+    r#type::{Type, TypeSubstitution, TypeVar},
 };
 
 use derive_new::new;
@@ -89,6 +89,8 @@ pub struct TypingEnv<'m> {
     pub(crate) module_env: ModuleEnv<'m>,
     /// The expected return type of the enclosing function (for type-checking `return` statements).
     pub(crate) expected_return_ty: Option<(Type, Location)>,
+    /// The substitution to use for explicit generic type parameters in current annotations.
+    pub(crate) annotation_ty_subst: Option<&'m TypeSubstitution>,
     /// The active loop frames, used for type-checking `soft_break`.
     pub(crate) loop_frames: Vec<LoopFrame>,
     /// Newly-created module functions from lambdas

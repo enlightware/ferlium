@@ -188,8 +188,13 @@ impl PModuleFunction {
         desugared_arena: &mut DExprArena,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
+        let generic_ty_params = super::types::extend_generic_ty_params(
+            generic_ty_params,
+            &self.generic_params,
+            GenericParamsOwner::Function { name: self.name.0 },
+        )?;
         let locals = self.args.iter().map(|arg| arg.name.0).collect();
-        let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env, generic_ty_params);
+        let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env, &generic_ty_params);
         let body = desugar(
             self.body,
             &mut ctx,
@@ -200,23 +205,31 @@ impl PModuleFunction {
         let args = self
             .args
             .into_iter()
-            .map(|arg| arg.desugar_with_ty_params(env, generic_ty_params, modules_used))
+            .map(|arg| arg.desugar_with_ty_params(env, &generic_ty_params, modules_used))
             .collect::<Result<Vec<_>, _>>()?;
         // Collect function dependencies
         let ret_ty = self
             .ret_ty
             .map(|(ty, span)| {
                 Ok((
-                    ty.desugar_with_ty_params(span, false, env, generic_ty_params, modules_used)?,
+                    ty.desugar_with_ty_params(span, false, env, &generic_ty_params, modules_used)?,
                     span,
                 ))
             })
             .transpose()?;
+        let where_clause = super::types::desugar_type_constraints(
+            &self.where_clause,
+            &generic_ty_params,
+            env,
+            modules_used,
+        )?;
         let function = ModuleFunction {
             name: self.name,
+            generic_params: self.generic_params,
             args,
             args_span: self.args_span,
             ret_ty,
+            where_clause,
             body,
             span: self.span,
             doc: self.doc,

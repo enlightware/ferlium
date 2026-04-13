@@ -46,7 +46,7 @@ modelItem {
 }
 
 Function {
-    kw<'fn'> Identifier '(' identifierWithOptTypeArgs ')' fnRet? Block
+    kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
 }
 
 TraitImpl {
