@@ -525,7 +525,11 @@ fn zip() {
     // zip of two arrays
     assert_eq!(
         session.run("([0, 1, 2] |> zip([10, 11, 12]) |> collect(): [_])"),
-        array![tuple!(int(0), int(10)), tuple!(int(1), int(11)), tuple!(int(2), int(12))]
+        array![
+            tuple!(int(0), int(10)),
+            tuple!(int(1), int(11)),
+            tuple!(int(2), int(12))
+        ]
     );
     // stops at shorter sequence
     assert_eq!(
@@ -538,10 +542,13 @@ fn zip() {
     );
     // zip of two ranges via lazy iterator
     assert_eq!(
-        session.run(
-            "let mut it = zip(0..3, 10..13); (next(it), next(it), next(it), next(it))"
-        ),
-        tuple!(some(tuple!(int(0), int(10))), some(tuple!(int(1), int(11))), some(tuple!(int(2), int(12))), none())
+        session.run("let mut it = zip(0..3, 10..13); (next(it), next(it), next(it), next(it))"),
+        tuple!(
+            some(tuple!(int(0), int(10))),
+            some(tuple!(int(1), int(11))),
+            some(tuple!(int(2), int(12))),
+            none()
+        )
     );
 }
 
@@ -551,19 +558,30 @@ fn enumerate() {
     let mut session = TestSession::new();
     assert_eq!(
         session.run("([10, 20, 30] |> enumerate() |> collect(): [_])"),
-        array![tuple!(int(0), int(10)), tuple!(int(1), int(20)), tuple!(int(2), int(30))]
+        array![
+            tuple!(int(0), int(10)),
+            tuple!(int(1), int(20)),
+            tuple!(int(2), int(30))
+        ]
     );
     // via iterator
     assert_eq!(
-        session.run(
-            "let mut it = [10, 20] |> iter() |> enumerate(); (next(it), next(it), next(it))"
-        ),
-        tuple!(some(tuple!(int(0), int(10))), some(tuple!(int(1), int(20))), none())
+        session
+            .run("let mut it = [10, 20] |> iter() |> enumerate(); (next(it), next(it), next(it))"),
+        tuple!(
+            some(tuple!(int(0), int(10))),
+            some(tuple!(int(1), int(20))),
+            none()
+        )
     );
     // on a range
     assert_eq!(
         session.run("(5..8 |> enumerate() |> collect(): [_])"),
-        array![tuple!(int(0), int(5)), tuple!(int(1), int(6)), tuple!(int(2), int(7))]
+        array![
+            tuple!(int(0), int(5)),
+            tuple!(int(1), int(6)),
+            tuple!(int(2), int(7))
+        ]
     );
 }
 
@@ -587,9 +605,7 @@ fn take() {
     );
     // via iterator
     assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2] |> iter() |> take(2); (next(it), next(it), next(it))"
-        ),
+        session.run("let mut it = [0, 1, 2] |> iter() |> take(2); (next(it), next(it), next(it))"),
         tuple!(some(int(0)), some(int(1)), none())
     );
 }
@@ -614,9 +630,8 @@ fn skip() {
     );
     // via iterator
     assert_eq!(
-        session.run(
-            "let mut it = [0, 1, 2, 3] |> iter() |> skip(2); (next(it), next(it), next(it))"
-        ),
+        session
+            .run("let mut it = [0, 1, 2, 3] |> iter() |> skip(2); (next(it), next(it), next(it))"),
         tuple!(some(int(2)), some(int(3)), none())
     );
 }
@@ -649,7 +664,13 @@ fn chain() {
         session.run(
             "let mut it = chain([0, 1], [2, 3]); (next(it), next(it), next(it), next(it), next(it))"
         ),
-        tuple!(some(int(0)), some(int(1)), some(int(2)), some(int(3)), none())
+        tuple!(
+            some(int(0)),
+            some(int(1)),
+            some(int(2)),
+            some(int(3)),
+            none()
+        )
     );
 }
 

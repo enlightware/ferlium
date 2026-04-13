@@ -644,14 +644,14 @@ PathIdentifier<E>: Ustr = {
 }
 
 ForExpr: ExprKind = {
-    "for" <id:Sp<UIdentifier>> "in" <seq:Es<TopExpr<"NoStruct">>> <body:Es<Block>> =>
+    "for" <id:Sp<UIdentifier>> "in" <seq:Es<TopExpr<"NoStruct">>> <body:Es<BranchBlock>> =>
         for_loop(id, seq, body, arena),
 }
 
 IfExpr: ExprKind = {
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f, arena),
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> "else" <f:Es<Block>> => cond_if_else(c, t, f, arena),
-    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<Block>> => cond_if(c, t, arena),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<BranchBlock>> "else" <f:Es<IfExpr>> => cond_if_else(c, t, f, arena),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<BranchBlock>> "else" <f:Es<BranchBlock>> => cond_if_else(c, t, f, arena),
+    "if" <c:Es<TopExpr<"NoStruct">>> <t:Es<BranchBlock>> => cond_if(c, t, arena),
 }
 
 MatchExpr: ExprKind = {
@@ -793,11 +793,21 @@ PropertyPath: (Path, Ustr) = {
 }
 
 LoopExpr: ExprKind = {
-    "loop" <b:Es<Block>> => ExprKind::loop_(b),
+    "loop" <b:Es<BranchBlock>> => ExprKind::loop_(b),
 }
 
 SoftBreakExpr: ExprKind = {
     "soft_break" => ExprKind::SoftBreak,
+}
+
+// BranchBlock is used as the body/branch of control-flow expressions (if, for, loop).
+// It wraps Block with a separate non-terminal to prevent LALR state merging with the
+// general expression reduction chain. Without this, the ModuleParser would incorrectly
+// reduce through the expression chain (e.g. Sp<CastExpr<"">>) instead of producing
+// Sp<Block> (NT=379), making the parser fail to recognize `else` after an if true-branch
+// that ends with a block-like expression (e.g. match).
+BranchBlock: ExprKind = {
+    Block
 }
 
 Block: ExprKind = {

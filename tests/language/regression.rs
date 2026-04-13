@@ -20,6 +20,82 @@ use crate::harness::{TestSession, int};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
+// Previously, the ModuleParser (used for prelude/module-level code) had an LALR state-merge bug:
+// when an `if` true-branch ended with a block-like expression (e.g. `match`), the parser would
+// enter the expression-reduction chain (Sp<CastExpr<"">>) instead of producing Sp<Block>, causing
+// it to miss the `else` and report: "expected one of "fn", "}", DOC_COMMENT, found "else"".
+//
+// Fixed by introducing `BranchBlock` as a separate non-terminal for if/for/loop bodies,
+// preventing the spurious LALR state merge with the expression hierarchy.
+//
+// Note: the bug only affected ModuleParser (not ModuleAndBlockContentParser used for user code),
+// so these user-code tests serve as documentation and regression guards for the pattern.
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn if_else_after_match_expression() {
+    let mut session = TestSession::new();
+    // `if cond { match ... } else { ... }` — true-branch ends with a match expression
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn first_or_zero(a: [int]) {
+                if a[0] > 0 {
+                    match array_peek_back(a) { Some(x) => x, None => 0 }
+                } else {
+                    0
+                }
+            }
+            first_or_zero([42])
+        "# }),
+        int(42)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn first_or_zero(a: [int]) {
+                if a[0] > 0 {
+                    match array_peek_back(a) { Some(x) => x, None => 0 }
+                } else {
+                    0
+                }
+            }
+            first_or_zero([-1])
+        "# }),
+        int(0)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn if_else_after_nested_block_expression() {
+    let mut session = TestSession::new();
+    // `if cond { { ... } } else { ... }` — true-branch ends with a nested block
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn choose(flag) {
+                if flag {
+                    { 1 }
+                } else {
+                    2
+                }
+            }
+            choose(true)
+        "# }),
+        int(1)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn choose(flag) {
+                if flag {
+                    { 1 }
+                } else {
+                    2
+                }
+            }
+            choose(false)
+        "# }),
+        int(2)
+    );
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_iterator() {
