@@ -512,7 +512,7 @@ fn early_returns_in_unexpected_places() {
     );
 
     // Test return in closure capture
-    // TODO: use once closures are implemented
+    // FIXME: issue https://github.com/enlightware/ferlium/issues/121
     // assert_eq!(
     //     session.run(indoc! { r#"
     //         fn f() {
