@@ -734,6 +734,7 @@ pub fn add_to_module(to: &mut Module) {
         [
             array_type_generic(),
             array_split_element_iter_type_generic(),
+            array_type(array_type_generic()),
         ],
         [
             Box::new(BinaryNativeFnNVN::new(|array: Array, separator: Value| {
@@ -748,7 +749,11 @@ pub fn add_to_module(to: &mut Module) {
             ty_var_count: 1,
             constraints: vec![],
         },
-        [array_type_generic(), array_split_iter_type_generic()],
+        [
+            array_type_generic(),
+            array_split_iter_type_generic(),
+            array_type(array_type_generic()),
+        ],
         [
             Box::new(BinaryNativeFnNNFN::new(|array: Array, separator: Array| {
                 array.split_iter(separator)

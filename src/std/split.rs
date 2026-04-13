@@ -23,6 +23,7 @@ use crate::{
 use FunctionDefinition as Def;
 
 pub static SPLIT_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
+    // Variable IDs: Self=0, Separator=1, Part=2, Iter=3, Output=4
     let iter_part_constraint = PubTypeConstraint::HaveTrait {
         trait_ref: ITERATOR_TRAIT.clone(),
         input_tys: vec![Type::variable_id(3)],
@@ -34,7 +35,7 @@ pub static SPLIT_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
         "Split",
         "A type that can be split around a non-empty separator, yielding parts lazily.",
         ["Self", "Separator"],
-        ["Part", "Iter"],
+        ["Part", "Iter", "Output"],
         [iter_part_constraint],
         [(
             "split_iterator",

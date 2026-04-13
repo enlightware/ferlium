@@ -574,7 +574,7 @@ fn join_works_on_arrays_of_arrays() {
 fn string_split() {
     let mut session = TestSession::new();
     assert_eq!(
-        session.run(r#"(split(",a,,", ","): [string])"#),
+        session.run(r#"split(",a,,", ",")"#),
         array![string(""), string("a"), string(""), string("")]
     );
     assert_eq!(
@@ -594,23 +594,20 @@ fn string_split() {
         )
     );
     assert_eq!(
-        session.run(r#"(split("a🇫🇷b🇫🇷c", "🇫🇷"): [string])"#),
+        session.run(r#"split("a🇫🇷b🇫🇷c", "🇫🇷")"#),
         array![string("a"), string("b"), string("c")]
     );
     assert_eq!(
-        session.run(r#"(split("a👩‍💻b👩‍💻c", "👩‍💻"): [string])"#),
+        session.run(r#"split("a👩‍💻b👩‍💻c", "👩‍💻")"#),
         array![string("a"), string("b"), string("c")]
     );
+    assert_eq!(session.run(r#"split("a🇫🇷b", "🇫")"#), array![string("a🇫🇷b")]);
     assert_eq!(
-        session.run(r#"(split("a🇫🇷b", "🇫"): [string])"#),
-        array![string("a🇫🇷b")]
-    );
-    assert_eq!(
-        session.run(r#"(split("cafe\u{0301}-caf\u{00E9}", "e\u{0301}"): [string])"#),
+        session.run(r#"split("cafe\u{0301}-caf\u{00E9}", "e\u{0301}")"#),
         array![string("caf"), string("-caf"), string("")]
     );
     assert_eq!(
-        session.fail_run(r#"(split("abc", ""): [string])"#),
+        session.fail_run(r#"split("abc", "")"#),
         RuntimeErrorKind::InvalidArgument(ustr("separator must not be empty"))
     );
 }
@@ -620,11 +617,11 @@ fn string_split() {
 fn array_split() {
     let mut session = TestSession::new();
     assert_eq!(
-        session.run("(split([1, 0, 0, 2, 0, 0, 3], [0, 0]): [[int]])"),
+        session.run("split([1, 0, 0, 2, 0, 0, 3], [0, 0])"),
         array![int_a![1], int_a![2], int_a![3]]
     );
     assert_eq!(
-        session.run("(split([0, 1, 0, 2, 0], 0): [[int]])"),
+        session.run("split([0, 1, 0, 2, 0], 0)"),
         array![int_a![], int_a![1], int_a![2], int_a![]]
     );
     assert_eq!(
@@ -644,7 +641,7 @@ fn array_split() {
         int_a![1, 0, 2, 0, 3]
     );
     assert_eq!(
-        session.fail_run("(split([1, 2], []): [[int]])"),
+        session.fail_run("split([1, 2], [])"),
         RuntimeErrorKind::InvalidArgument(ustr("separator must not be empty"))
     );
 }

@@ -57,10 +57,11 @@ fn join(seq, separator) {
 // Split implementations
 
 /// Splits `value` around a non-empty `separator` and collects the parts into an array.
-// TODO: once free functions support where clauses, give this wrapper an explicit
-// `Split`/`Iterator`-based signature so callers do not need result ascription in
-// otherwise ambiguous eager uses.
-fn split(value, separator) {
+fn split<S, Sep, Part, I, Out>(value: S, separator: Sep) -> Out
+where
+	Split<Self = S, Separator = Sep |-> Part = Part, Iter = I, Output = Out>,
+	FromIterator<Self = Out, Iter = I>
+{
 	from_iter(split_iterator(value, separator))
 }
 
@@ -70,8 +71,8 @@ impl Iterator {
 	}
 }
 
-impl Split {
-	fn split_iterator(value, separator) {
+impl Split for <Self = string, Separator = string |-> Part = string, Iter = string_split_iterator, Output = [string]> {
+	fn split_iterator(value: string, separator: string) {
 		string_split_iterator(value, separator)
 	}
 }
