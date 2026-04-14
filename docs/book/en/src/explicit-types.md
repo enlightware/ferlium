@@ -23,6 +23,12 @@ fn f(x) {
 }
 ```
 
+You can annotate arbitrary expressions using the `(expr: T)` syntax:
+
+```ferlium
+(1 + 1: float)
+```
+
 ## Functions
 
 ### Generic parameters on functions

@@ -67,6 +67,78 @@ ys
 
 This is especially useful when you want to switch back from lazy iterator code to an eager collection value.
 
+You can also give explicit types using the expression annotation syntax.
+For example, to collect into an array:
+
+```ferlium
+([1, 2, 3] |> iter() |> map(|x| x as float) |> collect(): [_])
+```
+
+## Combining and slicing sequences
+
+Ferlium includes functions to process sequences, producing iterators.
+
+### Pairing with `zip`
+
+`zip` pairs elements from two sequences into tuples, stopping at the shorter one:
+
+```ferlium
+([0, 1, 2] |> zip(["first", "second", "third"]) |> collect(): [_])
+```
+
+### Indexing with `enumerate`
+
+`enumerate` pairs each element with its zero-based index:
+
+```ferlium
+(["zero", "one", "two"] |> enumerate() |> collect(): [_])
+```
+
+This is useful for iterating over a collection with the index of the elements:
+
+```ferlium
+for tuple in ["zero", "one", "two"] |> enumerate() {
+    let (i, value) = tuple;
+    log(f"{i} = {value}")
+}
+```
+
+### Limiting with `take` and `skip`
+
+`take(n)` keeps only the first `n` elements; `skip(n)` drops them:
+
+```ferlium
+(0..10 |> take(3) |> collect(): [_])
+```
+
+```ferlium
+(0..5 |> skip(2) |> collect(): [_])
+```
+
+If `n` exceeds the sequence length, `take` returns all elements and `skip` returns none.
+
+### Concatenating with `chain`
+
+`chain` appends a second sequence after the first:
+
+```ferlium
+(chain([1, 2], [3, 4, 5]) |> collect(): [_])
+```
+
+```ferlium
+(chain(0..3, 3..6) |> collect(): [_])
+```
+
+```ferlium
+(chain(["Hello", "world"], ["how", "are", "you", "?"]) |> collect(): [_])
+```
+
+Both sequences must have the same element type, but the sequences themselves can be of different types:
+
+```ferlium
+(chain(0..2, [2, 3]) |> collect(): [_])
+```
+
 ## Reducing sequences
 
 Ferlium also includes reduction-style functions that consume a sequence and produce a summary value.
@@ -118,7 +190,12 @@ join(["a", "b", "c"], ",")
 ```
 
 When the sequence is empty, `join` returns `empty()` for the element type.
-In practice, this is currently useful for strings and arrays.
+
+You can combine `join` with other functions:
+
+```ferlium
+join(chain(["Hello", "world"], ["how", "are", "you", "?"]), " ")
+```
 
 ### Minimum and maximum
 
