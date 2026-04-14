@@ -9,8 +9,8 @@
 
 use ustr::ustr;
 
-use ferlium::eval::eval_node;
 use ferlium::value::Value;
+use ferlium::{Path, eval::eval_node};
 use test_log::test;
 
 use indoc::indoc;
@@ -210,4 +210,15 @@ fn pretty_print_unknown_variant_with_named_payload_does_not_crash() {
     .into_value();
     let formatted = value.display_pretty(&expr.ty.ty).to_string();
     assert!(formatted.starts_with("missing_collect (MapIterator { "));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn join_empty_sequence_compiles_repeatedly_in_shared_session() {
+    let mut session = ferlium::CompilerSession::new();
+    for name in ["repl0", "repl1", "repl2"] {
+        session
+            .compile("join([], \",\")", name, Path::single_str(name))
+            .unwrap_or_else(|error| panic!("Compilation error in {name}: {error:?}"));
+    }
 }
