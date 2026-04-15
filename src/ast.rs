@@ -1927,6 +1927,7 @@ pub struct TypeDef<P: Phase> {
     pub shape: P::Type,
     pub where_clause: Vec<TypeConstraint<P>>,
     pub attributes: Vec<Attribute>,
+    pub variant_attributes: Vec<Vec<Attribute>>,
     pub span: Location,
     pub doc_comments: Vec<String>,
 }

@@ -111,6 +111,7 @@ fn option_type_def() -> TypeDefRef {
         },
         span: Location::new_synthesized(),
         attributes: vec![],
+        default_variant: None,
     })
 }
 
@@ -138,6 +139,7 @@ fn map_iterator_type_def(test_iterator_trait: TraitRef) -> TypeDefRef {
         },
         span: Location::new_synthesized(),
         attributes: vec![],
+        default_variant: None,
     })
 }
 
@@ -159,6 +161,7 @@ fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDefRef {
         },
         span: Location::new_synthesized(),
         attributes: vec![],
+        default_variant: None,
     })
 }
 

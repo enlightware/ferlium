@@ -11,6 +11,7 @@
     AssignOp { "="  }
     UpdateOp { "+=" | "-=" | "*=" | "/="  }
 
+    "#"
     "[" "]" "{" "}" "(" ")"
     ";" ":" "::" ","
     "=>" ".." "|>" "|->" "*"
@@ -78,7 +79,7 @@ UseTree {
 }
 
 StructDef {
-    kw<'struct'> TypeName { Identifier } GenericParams? whereClause? structBody
+    Attribute* kw<'struct'> TypeName { Identifier } GenericParams? whereClause? structBody
 }
 
 structBody {
@@ -92,13 +93,26 @@ GenericParams {
 }
 
 EnumDef {
-    kw<'enum'> TypeName { Identifier } GenericParams? whereClause? '{' (enumVariant ',')* enumVariant? '}'
+    Attribute* kw<'enum'> TypeName { Identifier } GenericParams? whereClause? '{' (enumVariant ',')* enumVariant? '}'
 }
 
 enumVariant {
-    TagName { Identifier }
-    | TagName { Identifier } '(' (TypeAllowRecordVariant ',')* TypeAllowRecordVariant? ')'
-    | TagName { Identifier } recordType
+    Attribute* TagName { Identifier }
+    | Attribute* TagName { Identifier } '(' (TypeAllowRecordVariant ',')* TypeAllowRecordVariant? ')'
+    | Attribute* TagName { Identifier } recordType
+}
+
+Attribute {
+    "#" "[" Identifier attrMetaList? "]"
+}
+
+attrMetaList {
+    "(" attrMetaItem ("," attrMetaItem)* ")"
+}
+
+attrMetaItem {
+    Identifier
+    | Identifier AssignOp String
 }
 
 TypeAllowRecordVariant {

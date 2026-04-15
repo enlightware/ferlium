@@ -842,6 +842,15 @@ fn default() {
         session.run("struct Struct { name: string, toys: [int]} (default(): Struct)"),
         tuple!(string(""), int_a![])
     );
+    assert_eq!(
+        session
+            .run("enum TrafficLight { #[default] Red, Yellow, Green } (default(): TrafficLight)"),
+        variant_0("Red")
+    );
+    assert_eq!(
+        session.run("enum MaybeInt { None, #[default] Some(int) } (default(): MaybeInt)"),
+        variant_t1("Some", int(0))
+    );
 }
 
 #[test]

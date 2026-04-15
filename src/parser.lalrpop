@@ -307,6 +307,7 @@ StructDefinition: TypeDef = {
             shape,
             where_clause: where_clause.unwrap_or_default(),
             attributes,
+            variant_attributes: vec![],
             span: span(l, r, source_id),
             doc_comments: parse_doc_comments(doc).into_iter().collect(),
         }
@@ -339,11 +340,14 @@ EnumDefinition: TypeDef = {
             shape: Type::Never,
             where_clause: where_clause.unwrap_or_default(),
             attributes,
+            variant_attributes: vec![],
             span: span(l, r, source_id),
             doc_comments: parse_doc_comments(doc).into_iter().collect(),
         }
     },
     <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" <variants:EnumVariants> "}" <r:@R> => {
+        let (variants, variant_attributes): (Vec<_>, Vec<_>) =
+            variants.into_iter().map(|(name, ty, attrs)| ((name, ty), attrs)).unzip();
         let variant_ty = Type::Variant(variants);
         TypeDef {
             name,
@@ -351,6 +355,7 @@ EnumDefinition: TypeDef = {
             shape: variant_ty,
             where_clause: where_clause.unwrap_or_default(),
             attributes,
+            variant_attributes,
             span: span(l, r, source_id),
             doc_comments: parse_doc_comments(doc).into_iter().collect(),
         }
@@ -385,27 +390,28 @@ AttrMetaItem: MetaItem = {
     }
 }
 
-EnumVariants: Vec<(UstrSpan, TypeSpan)> = {
+EnumVariants: Vec<(UstrSpan, TypeSpan, Vec<Attribute>)> = {
     Sep1<EnumVariant, ",">,
 }
 
-EnumVariant: (UstrSpan, TypeSpan) = {
+EnumVariant: (UstrSpan, TypeSpan, Vec<Attribute>) = {
     // Unit variant: Name
-    <name:Sp<UIdentifier>> => (name, (Type::Unit, name.1)),
+    <attributes:(Attribute)*> <name:Sp<UIdentifier>> => (name, (Type::Unit, name.1), attributes),
 
     // Tuple variant with single type: Name(Type)
-    <name:Sp<UIdentifier>> <l:@L> "(" <ty:Sp<DefinedType>> ")" <r:@R> => (name, (Type::Tuple(vec![ty]), span(l, r, source_id))),
+    <attributes:(Attribute)*> <name:Sp<UIdentifier>> <l:@L> "(" <ty:Sp<DefinedType>> ")" <r:@R> =>
+        (name, (Type::Tuple(vec![ty]), span(l, r, source_id)), attributes),
 
     // Tuple variant with multiple types: Name(Type1, Type2, ...)
-    <name:Sp<UIdentifier>> <l:@L> "(" <f:Sp<DefinedType>> "," <rest:Sep<Sp<DefinedType>, ",">> ")" <r:@R> => {
+    <attributes:(Attribute)*> <name:Sp<UIdentifier>> <l:@L> "(" <f:Sp<DefinedType>> "," <rest:Sep<Sp<DefinedType>, ",">> ")" <r:@R> => {
         let tys = ext_f(f, rest);
         let tuple_ty = Type::Tuple(tys);
-        (name, (tuple_ty, span(l, r, source_id)))
+        (name, (tuple_ty, span(l, r, source_id)), attributes)
     },
 
     // Record variant: Name { field1: Type1, field2: Type2, ... }
-    <name:Sp<UIdentifier>> <ty:Sp<RecordType<"">>> => {
-        (name, ty)
+    <attributes:(Attribute)*> <name:Sp<UIdentifier>> <ty:Sp<RecordType<"">>> => {
+        (name, ty, attributes)
     },
 }
 

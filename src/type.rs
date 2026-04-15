@@ -713,6 +713,8 @@ pub struct TypeDef {
     pub span: Location,
     /// The attributes of the type
     pub attributes: Vec<Attribute>,
+    /// The default enum variant for `Default`, if any.
+    pub default_variant: Option<Ustr>,
 }
 
 impl TypeDef {
@@ -730,6 +732,24 @@ impl TypeDef {
                 quantifier.name(),
                 index as u32,
                 "Type definition `{}` has non-canonical type quantifier ordering",
+                self.name,
+            );
+        }
+        if let Some(default_variant) = self.default_variant {
+            assert!(
+                self.is_enum(),
+                "Type definition `{}` stores a default variant but is not an enum",
+                self.name,
+            );
+            assert!(
+                self.shape
+                    .ty
+                    .data()
+                    .as_variant()
+                    .is_some_and(|variants| variants
+                        .iter()
+                        .any(|(name, _)| *name == default_variant)),
+                "Type definition `{}` stores unknown default variant `{default_variant}`",
                 self.name,
             );
         }

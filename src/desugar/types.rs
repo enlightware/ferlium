@@ -106,6 +106,61 @@ pub(super) fn desugar_type_constraints(
         .collect()
 }
 
+fn desugar_default_variant(
+    type_def: &ast::PTypeDef,
+) -> Result<Option<Ustr>, InternalCompilationError> {
+    use ast::PType;
+
+    let PType::Variant(variants) = &type_def.shape else {
+        return Ok(None);
+    };
+    assert_eq!(type_def.variant_attributes.len(), variants.len());
+
+    let mut default_variant = None;
+    for (((variant_name, _), _), attributes) in variants.iter().zip(&type_def.variant_attributes) {
+        let mut variant_has_default = false;
+        for attribute in attributes {
+            if attribute.path.0 != ustr("default") {
+                continue;
+            }
+            if !attribute.items.is_empty() {
+                return Err(internal_compilation_error!(InvalidEnumDefaultAttribute {
+                    type_name: type_def.name.0,
+                    kind: InvalidEnumDefaultAttributeKind::HasArguments {
+                        variant_name: *variant_name,
+                    },
+                    span: attribute.span,
+                }));
+            }
+            if variant_has_default {
+                return Err(internal_compilation_error!(InvalidEnumDefaultAttribute {
+                    type_name: type_def.name.0,
+                    kind: InvalidEnumDefaultAttributeKind::DuplicateOnVariant {
+                        variant_name: *variant_name,
+                    },
+                    span: attribute.span,
+                }));
+            }
+            variant_has_default = true;
+        }
+
+        if variant_has_default {
+            if let Some(previous) = default_variant {
+                return Err(internal_compilation_error!(InvalidEnumDefaultAttribute {
+                    type_name: type_def.name.0,
+                    kind: InvalidEnumDefaultAttributeKind::MultipleDefaultVariants {
+                        first_variant: previous,
+                        second_variant: *variant_name,
+                    },
+                    span: type_def.span,
+                }));
+            }
+            default_variant = Some(*variant_name);
+        }
+    }
+    Ok(default_variant)
+}
+
 impl ast::PFnArgType {
     pub fn desugar(
         &self,
@@ -406,6 +461,7 @@ impl PTypeDef {
                 desugar_type_constraint(constraint, &generic_ty_params, env, modules_used)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let default_variant = desugar_default_variant(self)?;
         Ok(TypeDefRef::new(crate::r#type::TypeDef {
             name: self.name.0,
             doc: (!self.doc_comments.is_empty()).then(|| self.doc_comments.join("\n")),
@@ -418,6 +474,7 @@ impl PTypeDef {
             },
             span: self.span,
             attributes: self.attributes.clone(),
+            default_variant,
         }))
     }
 }

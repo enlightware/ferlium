@@ -192,6 +192,11 @@ fn compilation_error_to_data(
             kind,
             span,
         } => vec![error_data_from_location(span, kind.message(trait_name))],
+        InvalidEnumDefaultAttribute {
+            type_name,
+            kind,
+            span,
+        } => vec![error_data_from_location(span, kind.message(*type_name))],
         WrongNumberOfArguments {
             expected,
             expected_span,

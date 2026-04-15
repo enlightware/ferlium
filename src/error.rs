@@ -193,6 +193,39 @@ impl InvalidTraitConstraintKind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidEnumDefaultAttributeKind {
+    HasArguments {
+        variant_name: Ustr,
+    },
+    DuplicateOnVariant {
+        variant_name: Ustr,
+    },
+    MultipleDefaultVariants {
+        first_variant: Ustr,
+        second_variant: Ustr,
+    },
+}
+
+impl InvalidEnumDefaultAttributeKind {
+    pub fn message(&self, type_name: Ustr) -> String {
+        match self {
+            Self::HasArguments { variant_name } => format!(
+                "Enum variant attribute `#[default]` does not accept arguments on `{type_name}::{variant_name}`"
+            ),
+            Self::DuplicateOnVariant { variant_name } => format!(
+                "Enum variant `{type_name}::{variant_name}` declares `#[default]` more than once"
+            ),
+            Self::MultipleDefaultVariants {
+                first_variant,
+                second_variant,
+            } => format!(
+                "Enum `{type_name}` has multiple variants marked with `#[default]`: `{first_variant}` and `{second_variant}`"
+            ),
+        }
+    }
+}
+
 /// A scope of error messages, either internal within the compiler, or external for users.
 pub trait Scope: Sized {
     type Type: Debug + Clone;
@@ -351,6 +384,11 @@ pub enum CompilationErrorImpl<S: Scope> {
     InvalidTraitConstraint {
         trait_name: String,
         kind: InvalidTraitConstraintKind,
+        span: Location,
+    },
+    InvalidEnumDefaultAttribute {
+        type_name: Ustr,
+        kind: InvalidEnumDefaultAttributeKind,
         span: Location,
     },
     WrongNumberOfArguments {
@@ -756,6 +794,13 @@ impl FormatWith<SourceTable> for CompilationError {
                 span,
             } => {
                 write!(f, "{} in {}", kind.message(trait_name), fmt_span(span))
+            }
+            InvalidEnumDefaultAttribute {
+                type_name,
+                kind,
+                span,
+            } => {
+                write!(f, "{} in {}", kind.message(*type_name), fmt_span(span))
             }
             WrongNumberOfArguments {
                 expected,
@@ -1368,6 +1413,15 @@ impl CompilationError {
                 span,
             } => compilation_error!(InvalidTraitConstraint {
                 trait_name,
+                kind,
+                span,
+            }),
+            InvalidEnumDefaultAttribute {
+                type_name,
+                kind,
+                span,
+            } => compilation_error!(InvalidEnumDefaultAttribute {
+                type_name,
                 kind,
                 span,
             }),

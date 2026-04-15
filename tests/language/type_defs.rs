@@ -9,7 +9,7 @@
 
 use ferlium::error::{
     CompilationErrorImpl, DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
-    InvalidGenericParamsKind, InvalidTraitConstraintKind,
+    InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind, InvalidTraitConstraintKind,
 };
 use ferlium::eval::eval_node;
 use ferlium::format::FormatWith;
@@ -744,6 +744,29 @@ fn parse_doc_commented_type_definitions() {
         module.type_defs[1].doc_comments,
         vec!["Stores one value.".to_string()]
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_enum_variant_attributes() {
+    let module = parse_module_ast(indoc! { r#"
+        enum TrafficLight {
+            #[default]
+            Red,
+            #[doc(name = "ignored")]
+            Yellow,
+            Green,
+        }
+    "# });
+
+    let type_def = &module.type_defs[0];
+    assert_eq!(type_def.variant_attributes.len(), 3);
+    assert_eq!(type_def.variant_attributes[0].len(), 1);
+    assert_eq!(type_def.variant_attributes[0][0].path.0, ustr("default"));
+    assert!(type_def.variant_attributes[0][0].items.is_empty());
+    assert_eq!(type_def.variant_attributes[1].len(), 1);
+    assert_eq!(type_def.variant_attributes[1][0].path.0, ustr("doc"));
+    assert_eq!(type_def.variant_attributes[2].len(), 0);
 }
 
 #[test]
@@ -2588,4 +2611,77 @@ fn attributes() {
     let item2 = attributes[2].items[1].as_name_value().unwrap();
     assert_eq!(item2.0.0, ustr("name2"));
     assert_eq!(item2.1.0, ustr("value2"));
+
+    let type_def = session
+        .compile_and_get_module(indoc! { r#"
+            enum SimpleColor {
+                Red,
+                #[default]
+                Green,
+                Blue,
+            }
+        "# })
+        .get_type_def(ustr("SimpleColor"))
+        .unwrap();
+    assert_eq!(type_def.default_variant, Some(ustr("Green")));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn enum_default_attribute_rejects_multiple_default_variants() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            enum SimpleColor {
+                #[default]
+                Red,
+                #[default]
+                Green,
+            }
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidEnumDefaultAttribute {
+            type_name, kind, ..
+        } => {
+            assert_eq!(type_name, ustr("SimpleColor"));
+            assert_eq!(
+                kind,
+                InvalidEnumDefaultAttributeKind::MultipleDefaultVariants {
+                    first_variant: ustr("Red"),
+                    second_variant: ustr("Green"),
+                }
+            );
+        }
+        other => panic!("expected invalid enum default attribute error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn enum_default_attribute_rejects_arguments() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            enum SimpleColor {
+                #[default(note = "nope")]
+                Red,
+                Green,
+            }
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidEnumDefaultAttribute {
+            type_name, kind, ..
+        } => {
+            assert_eq!(type_name, ustr("SimpleColor"));
+            assert_eq!(
+                kind,
+                InvalidEnumDefaultAttributeKind::HasArguments {
+                    variant_name: ustr("Red"),
+                }
+            );
+        }
+        other => panic!("expected invalid enum default attribute error, got {other:?}"),
+    }
 }
