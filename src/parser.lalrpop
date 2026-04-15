@@ -156,8 +156,8 @@ Function: ModuleFunction = {
 }
 
 ModuleFunctionArgs: Vec<ModuleFunctionArg> = {
-    <args:StrWithOptTypeArgs> => args.into_iter().map(|(name, ty)| {
-        ModuleFunctionArg { name, ty }
+    <args:StrWithOptTypeArgs> => args.into_iter().map(|(is_mut, name, ty)| {
+        ModuleFunctionArg { name, ty, mut_binding: is_mut }
     }).collect(),
 }
 
@@ -946,8 +946,8 @@ StrWithOptTypeArgs = {
     Sep<StrWithOptType, ",">
 }
 
-StrWithOptType: (UstrSpan, Option<MutTypeTypeSpan>) = {
-    <id:Sp<UIdentifier>> <ty:RefMutTypeAscription?> => (id, ty),
+StrWithOptType: (bool, UstrSpan, Option<MutTypeTypeSpan>) = {
+    <is_mut:"mut"?> <id:Sp<UIdentifier>> <ty:RefMutTypeAscription?> => (is_mut.is_some(), id, ty),
 }
 
 StrOrMoreArgs = {

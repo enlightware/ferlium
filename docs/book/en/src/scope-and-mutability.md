@@ -101,6 +101,43 @@ add_one(10)
 
 This uses a new local `n` that shadows the parameter inside the function body.
 
+## Mutable function parameters
+
+You can write `mut` before a function parameter name to get a mutable local binding for it inside the function body:
+
+```ferlium
+fn add_one(mut n) {
+    n += 1;
+    n
+}
+
+add_one(10)
+```
+
+This is equivalent to writing:
+
+```ferlium
+fn add_one(n) {
+    let mut n = n;
+    n += 1;
+    n
+}
+
+add_one(10)
+```
+
+The `mut` notation is purely a convenience: the function signature is unchanged, and the caller's value is never affected.
+You can mix `mut` and non-`mut` parameters freely:
+
+```ferlium
+fn add_n(mut x, n) {
+    x += n;
+    x
+}
+
+add_n(5, 3)
+```
+
 ## Mutable value semantics
 
 Think of a binding as a named cell that holds a value. With `let`, the cell is read-only. With `let mut`, the cell is writable. Reassigning a mutable binding replaces the value stored in that cell.

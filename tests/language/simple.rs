@@ -371,6 +371,71 @@ fn mutability() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mut_function_parameters() {
+    let mut session = TestSession::new();
+    // basic: `mut` parameter is rebound as a mutable local, incremented, and returned
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn add_one(mut x) {
+                x += 1;
+                x
+            }
+            add_one(10)
+        "# }),
+        int(11)
+    );
+    // multiple mut parameters
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn swap_add(mut a, mut b) {
+                let tmp = a;
+                a = b;
+                b = tmp;
+                a + b
+            }
+            swap_add(3, 7)
+        "# }),
+        int(10)
+    );
+    // mut and non-mut parameters mixed
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn add_n(mut x, n) {
+                x += n;
+                x
+            }
+            add_n(5, 3)
+        "# }),
+        int(8)
+    );
+    // caller's value is not affected (value semantics)
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn increment(mut x) {
+                x += 1;
+                x
+            }
+            let a = 10;
+            let b = increment(a);
+            (a, b)
+        "# }),
+        int_tuple!(10, 11)
+    );
+    // with type annotation
+    assert_eq!(
+        session.run(indoc! { r#"
+            fn add_one_typed(mut x: int) -> int {
+                x += 1;
+                x
+            }
+            add_one_typed(41)
+        "# }),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn logic_operators() {
     let mut session = TestSession::new();
     // basic usage

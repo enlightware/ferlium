@@ -534,6 +534,7 @@ impl PModuleFunctionArg {
         Ok(ModuleFunctionArg {
             name: self.name,
             ty,
+            mut_binding: self.mut_binding,
         })
     }
 }

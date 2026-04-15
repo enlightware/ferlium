@@ -527,6 +527,7 @@ impl VisitExpr<Parsed> for B<ForLoopData> {
 pub struct ModuleFunctionArg<P: Phase> {
     pub name: UstrSpan,
     pub ty: Option<MutTypeTypeSpan<P>>,
+    pub mut_binding: bool,
 }
 
 pub type PModuleFunctionArg = ModuleFunctionArg<Parsed>;

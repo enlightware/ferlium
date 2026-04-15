@@ -463,7 +463,7 @@ identifierWithOptTypeArgs {
 }
 
 identifierWithOptTypeArg {
-    Identifier RefMutTypeAscription?
+    kw<'mut'>? Identifier RefMutTypeAscription?
 }
 
 identifiersOrMoreOptComma {

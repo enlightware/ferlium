@@ -193,6 +193,13 @@ impl PModuleFunction {
             &self.generic_params,
             GenericParamsOwner::Function { name: self.name.0 },
         )?;
+        // Collect mut-binding arg info before args are consumed.
+        let mut_binding_args: Vec<UstrSpan> = self
+            .args
+            .iter()
+            .filter(|arg| arg.mut_binding)
+            .map(|arg| arg.name)
+            .collect();
         let locals = self.args.iter().map(|arg| arg.name.0).collect();
         let mut ctx = DesugarCtx::new_with_locals(fn_map, locals, env, &generic_ty_params);
         let body = desugar(
@@ -202,6 +209,33 @@ impl PModuleFunction {
             desugared_arena,
             modules_used,
         )?;
+        // Desugar `mut x` parameters by prepending `let mut x = x;` to the body.
+        // This rebinds each such parameter as a mutable local, shadowing the immutable arg,
+        // without changing the function's external signature.
+        let body = if mut_binding_args.is_empty() {
+            body
+        } else {
+            let body_span = desugared_arena[body].span;
+            let mut stmts: Vec<DExprId> = Vec::with_capacity(mut_binding_args.len() + 1);
+            for name in &mut_binding_args {
+                let span = name.1;
+                let arg_ref = desugared_arena.alloc(DExpr::new(
+                    ExprKind::identifier(Path::single(name.0, span)),
+                    span,
+                ));
+                let let_mut = desugared_arena.alloc(DExpr::new(
+                    ExprKind::let_(
+                        DLetPattern::binding(*name, MutVal::mutable()),
+                        arg_ref,
+                        None,
+                    ),
+                    span,
+                ));
+                stmts.push(let_mut);
+            }
+            stmts.push(body);
+            desugared_arena.alloc(DExpr::new(ExprKind::block(stmts), body_span))
+        };
         let args = self
             .args
             .into_iter()
