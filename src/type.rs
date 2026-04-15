@@ -121,7 +121,7 @@ pub trait BareNativeType: DynClone + DynEq + Send + Sync {
     }
 }
 
-impl FormatWith<ModuleEnv<'_>> for B<dyn BareNativeType> {
+impl FormatWith<ModuleEnv<'_>> for BareNativeTypeB {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
         match env.bare_native_name(self) {
             Some(name) => write!(f, "{name}"),
@@ -130,7 +130,7 @@ impl FormatWith<ModuleEnv<'_>> for B<dyn BareNativeType> {
     }
 }
 
-pub fn bare_native_type<T: 'static>() -> B<dyn BareNativeType> {
+pub fn bare_native_type<T: 'static>() -> BareNativeTypeB {
     b(BareNativeTypeImpl::<T>::new())
 }
 
@@ -154,6 +154,9 @@ impl Hash for dyn BareNativeType {
         BareNativeType::type_id(self).hash(state)
     }
 }
+
+/// A boxed bare native type.
+pub type BareNativeTypeB = B<dyn BareNativeType>;
 
 #[derive(Default)]
 pub struct BareNativeTypeImpl<T> {
@@ -199,7 +202,7 @@ impl Debug for dyn BareNativeType {
 /// If arguments is empty, we call it a primitive type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, new)]
 pub struct NativeType {
-    pub bare_ty: B<dyn BareNativeType>,
+    pub bare_ty: BareNativeTypeB,
     pub arguments: Vec<Type>,
 }
 
@@ -651,9 +654,9 @@ pub(crate) struct TypeAliases {
     types: Vec<Type>,
     type_to_name: FxHashMap<Type, Ustr>,
     /// Names for the native part of generic native types, used for formatting
-    bare_native_to_name: FxHashMap<B<dyn BareNativeType>, Ustr>,
+    bare_native_to_name: FxHashMap<BareNativeTypeB, Ustr>,
     /// Reverse mapping: name → bare native type, used for type resolution in Ferlium code
-    name_to_bare_native: FxHashMap<Ustr, B<dyn BareNativeType>>,
+    name_to_bare_native: FxHashMap<Ustr, BareNativeTypeB>,
 }
 impl TypeAliases {
     pub fn set(&mut self, alias: Ustr, ty: Type) {
@@ -677,16 +680,16 @@ impl TypeAliases {
         self.types.iter().copied()
     }
 
-    pub fn set_bare_native(&mut self, alias: Ustr, bare: B<dyn BareNativeType>) {
+    pub fn set_bare_native(&mut self, alias: Ustr, bare: BareNativeTypeB) {
         self.name_to_bare_native.insert(alias, bare.clone());
         self.bare_native_to_name.insert(bare, alias);
     }
 
-    pub fn get_bare_native_name(&self, bare: &B<dyn BareNativeType>) -> Option<Ustr> {
+    pub fn get_bare_native_name(&self, bare: &BareNativeTypeB) -> Option<Ustr> {
         self.bare_native_to_name.get(bare).copied()
     }
 
-    pub fn get_bare_native_by_name(&self, name: Ustr) -> Option<&B<dyn BareNativeType>> {
+    pub fn get_bare_native_by_name(&self, name: Ustr) -> Option<&BareNativeTypeB> {
         self.name_to_bare_native.get(&name)
     }
 
@@ -694,7 +697,7 @@ impl TypeAliases {
         self.bare_native_to_name.len()
     }
 
-    pub fn bare_native_iter(&self) -> impl Iterator<Item = (Ustr, &B<dyn BareNativeType>)> {
+    pub fn bare_native_iter(&self) -> impl Iterator<Item = (Ustr, &BareNativeTypeB)> {
         self.bare_native_to_name
             .iter()
             .map(|(bare, name)| (*name, bare))

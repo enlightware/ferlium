@@ -12,16 +12,11 @@ use crate::{
     module::{Module, ModuleFunction, ModuleId, Modules, path::Path},
     std::STD_MODULE_ID,
     r#trait::TraitRef,
-    r#type::TypeDefRef,
+    r#type::{BareNativeTypeB, Type, TypeDefRef},
     typing_env::TraitFunctionDescription,
 };
 use derive_new::new;
 use ustr::{Ustr, ustr};
-
-use crate::{
-    containers::B,
-    r#type::{BareNativeType, Type},
-};
 
 #[derive(Debug, Clone)]
 pub enum TypeDefLookupResult {
@@ -64,7 +59,7 @@ impl<'m> ModuleEnv<'m> {
         )
     }
 
-    pub fn bare_native_name(&self, native: &B<dyn BareNativeType>) -> Option<String> {
+    pub fn bare_native_name(&self, native: &BareNativeTypeB) -> Option<String> {
         self.current
             .type_aliases
             .get_bare_native_name(native)
@@ -116,7 +111,7 @@ impl<'m> ModuleEnv<'m> {
     pub fn bare_native_type_alias_with_module(
         &self,
         path: &ast::Path,
-    ) -> Result<Option<(Option<ModuleId>, crate::containers::B<dyn BareNativeType>)>, InternalCompilationError> {
+    ) -> Result<Option<(Option<ModuleId>, BareNativeTypeB)>, InternalCompilationError> {
         self.get_module_member(&path.segments, &|name, module| {
             module.get_bare_native_type_alias(ustr(name))
         })

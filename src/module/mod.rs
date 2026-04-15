@@ -359,7 +359,10 @@ impl Module {
     }
 
     /// Look-up a bare native type alias by name in this module.
-    pub fn get_bare_native_type_alias(&self, name: Ustr) -> Option<crate::containers::B<dyn crate::r#type::BareNativeType>> {
+    pub fn get_bare_native_type_alias(
+        &self,
+        name: Ustr,
+    ) -> Option<crate::containers::B<dyn crate::r#type::BareNativeType>> {
         self.type_aliases.get_bare_native_by_name(name).cloned()
     }
 
