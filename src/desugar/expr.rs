@@ -1,6 +1,7 @@
 use super::format_string::emit_format_string_ast;
-use super::patterns::{desugar_block_exprs, desugar_let_exprs};
+use super::patterns::{desugar_block_exprs, desugar_let_exprs, desugar_pattern_bindings};
 use super::*;
+use crate::parser_helpers::ext_b;
 
 /// Desugar a single parsed expression ID into a desugared expression ID.
 /// Reads from `parsed_arena` and writes into `desugared_arena`.
@@ -277,7 +278,7 @@ pub(super) fn desugar(
         }
         ForLoop(for_loop) => {
             let ForLoopData {
-                var_name,
+                pattern,
                 iterator,
                 body,
             } = *for_loop;
@@ -305,13 +306,31 @@ pub(super) fn desugar(
                 desugared_arena,
             );
             let it_next = desugared_arena.alloc(DExpr::new(it_next, body_start_span));
+            let loop_item_name = ctx.fresh_generated_local("for_item", pattern.span);
+            let loop_item_expr =
+                desugared_arena.alloc(DExpr::single_identifier(loop_item_name.0, pattern.span));
             let desugared_body = {
                 let env_size = ctx.locals.len();
-                ctx.locals.push(var_name.0);
+                let pattern_stmts = desugar_pattern_bindings(
+                    &pattern,
+                    loop_item_expr,
+                    None,
+                    pattern.span,
+                    ctx,
+                    desugared_arena,
+                    modules_used,
+                )?;
                 let desugared_body =
                     desugar(body, ctx, parsed_arena, desugared_arena, modules_used)?;
                 ctx.locals.truncate(env_size);
-                desugared_body
+                if pattern_stmts.is_empty() {
+                    desugared_body
+                } else {
+                    desugared_arena.alloc(DExpr::new(
+                        ExprKind::block(ext_b(pattern_stmts, desugared_body)),
+                        body_span,
+                    ))
+                }
             };
             let soft_break =
                 desugared_arena.alloc(DExpr::new(ExprKind::soft_break(), body_end_span));
@@ -323,9 +342,9 @@ pub(super) fn desugar(
                             Pattern::new(
                                 PatternKind::tuple_variant(
                                     (ustr("Some"), body_start_span),
-                                    vec![PatternVar::Named(var_name)],
+                                    vec![PatternVar::Named(loop_item_name)],
                                 ),
-                                var_name.1,
+                                pattern.span,
                             ),
                             desugared_body,
                         ),

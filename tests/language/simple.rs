@@ -221,6 +221,62 @@ fn let_destructuring() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn for_loop_destructuring() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.run(indoc! { r#"
+            let mut s = "";
+            for (i, value) in ["zero", "one", "two"] |> enumerate() {
+                s = f"{s}{i}={value};"
+            };
+            s
+        "# }),
+        string("0=zero;1=one;2=two;")
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            let mut s = 0;
+            for { l, r } in [{ l: 1, r: 2 }, { l: 3, r: 4 }] {
+                s += l + r
+            };
+            s
+        "# }),
+        int(10)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            let mut s = 0;
+            for (_, value) in [(0, 1), (1, 2), (2, 3)] {
+                s += value
+            };
+            s
+        "# }),
+        int(6)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            let mut total = 0;
+            for (mut value, _) in [(1, 0), (2, 0)] {
+                value += 10; total += value
+            };
+            total
+        "# }),
+        int(23)
+    );
+    assert_eq!(
+        session.run(indoc! { r#"
+            let mut count = 0;
+            for (_, _) in [(1, 2), (3, 4)] {
+                count += 1
+            };
+            count
+        "# }),
+        int(2)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn type_annotation_in_let() {
     let mut session = TestSession::new();
     assert_eq!(session.run("let a: int = 1 ; a"), int(1));

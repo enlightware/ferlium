@@ -485,15 +485,15 @@ impl<P: Phase, T: VisitExpr<P> + ?Sized> VisitExpr<P> for Box<T> {
 /// The data of a for loop
 #[derive(Clone, Debug)]
 pub struct ForLoopData {
-    pub var_name: UstrSpan,
+    pub pattern: PLetPattern,
     pub iterator: PExprId,
     pub body: PExprId,
 }
 
 impl ForLoopData {
-    pub fn new(var_name: UstrSpan, iterator: PExprId, body: PExprId) -> Self {
+    pub fn new(pattern: PLetPattern, iterator: PExprId, body: PExprId) -> Self {
         Self {
-            var_name,
+            pattern,
             iterator,
             body,
         }
@@ -509,7 +509,7 @@ impl FormatWithIndent<Parsed> for B<ForLoopData> {
         indent: usize,
     ) -> std::fmt::Result {
         let indent_str = "  ".repeat(indent);
-        writeln!(f, "{indent_str}for {} in", self.var_name.0)?;
+        writeln!(f, "{indent_str}for {} in", self.pattern)?;
         arena[self.iterator].format_ind(f, env, arena, indent + 1)?;
         writeln!(f, "{indent_str}do")?;
         arena[self.body].format_ind(f, env, arena, indent + 1)

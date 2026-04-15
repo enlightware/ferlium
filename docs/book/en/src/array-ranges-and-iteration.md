@@ -118,6 +118,16 @@ for i in 0..3 { /* ... */ };
 for x in [10, 20, 30] { /* ... */ };
 ```
 
+### Destructuring in `for` loops
+
+The loop variable can destructure tuples and records:
+
+```ferlium
+for (i, name) in [(0, "zero"), (1, "one"), (2, "two")] {
+    log(f"{i} = {name}");
+};
+```
+
 ### Accumulating with `let mut`
 
 A common pattern is to keep mutable state outside the loop and update it inside:
@@ -125,7 +135,7 @@ A common pattern is to keep mutable state outside the loop and update it inside:
 ```ferlium
 let mut sum = 0;
 for i in 1..=4 {
-    sum = sum + i;
+    sum += i;
 };
 sum
 ```
@@ -147,7 +157,7 @@ The loop variable is local to the loop body. The `for` expression itself evaluat
 ```ferlium
 let mut count = 0;
 for n in [1, 2, 3] {
-    count = count + 1;
+    count += 1;
 };
 count
 ```

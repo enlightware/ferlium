@@ -97,9 +97,8 @@ Ferlium includes functions to process sequences, producing iterators.
 This is useful for iterating over a collection with the index of the elements:
 
 ```ferlium
-for tuple in ["zero", "one", "two"] |> enumerate() {
-    let (i, value) = tuple;
-    log(f"{i} = {value}")
+for (i, name) in ["zero", "one", "two"] |> enumerate() {
+    log(f"{i} = {name}")
 }
 ```
 

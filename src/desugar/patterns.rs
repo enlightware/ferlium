@@ -463,6 +463,27 @@ fn expand_let_pattern(
     }
 }
 
+pub(super) fn desugar_pattern_bindings(
+    pattern: &LetPattern,
+    source_expr: DExprId,
+    source_ty_ascription_span: Option<Location>,
+    stmt_span: Location,
+    ctx: &mut DesugarCtx,
+    desugared_arena: &mut DExprArena,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<Vec<DExprId>, InternalCompilationError> {
+    ensure_unique_let_pattern_bindings(pattern)?;
+    expand_let_pattern(
+        pattern,
+        source_expr,
+        source_ty_ascription_span,
+        stmt_span,
+        ctx,
+        desugared_arena,
+        modules_used,
+    )
+}
+
 pub(super) fn desugar_let_exprs(
     data: LetData<Parsed>,
     stmt_span: Location,
@@ -471,10 +492,9 @@ pub(super) fn desugar_let_exprs(
     desugared_arena: &mut DExprArena,
     modules_used: &mut FxHashSet<ModuleId>,
 ) -> Result<Vec<DExprId>, InternalCompilationError> {
-    ensure_unique_let_pattern_bindings(&data.pattern)?;
     let expr = desugar(data.expr, ctx, parsed_arena, desugared_arena, modules_used)?;
     let ty_ascription_span = data.ty_ascription.map(|(span, _)| span);
-    expand_let_pattern(
+    desugar_pattern_bindings(
         &data.pattern,
         expr,
         ty_ascription_span,

@@ -395,7 +395,7 @@ Match {
 }
 
 For {
-    kw<'for'> Identifier kw<'in'> expr Block
+    kw<'for'> letPattern kw<'in'> expr Block
 }
 
 Tuple {

@@ -17,6 +17,7 @@ use crate::ast::PExpr;
 use crate::ast::PExprArena;
 use crate::ast::PExprId;
 use crate::ast::PExprKind;
+use crate::ast::PLetPattern;
 use crate::ast::PType;
 use crate::ast::Path;
 use crate::ast::Pattern;
@@ -319,7 +320,7 @@ pub(crate) fn cond_if(cond: PExprId, if_true: PExprId, arena: &mut PExprArena) -
 
 /// Create a for loop
 pub(crate) fn for_loop(
-    var_name: UstrSpan,
+    pattern: PLetPattern,
     seq: PExprId,
     body: PExprId,
     arena: &mut PExprArena,
@@ -328,7 +329,7 @@ pub(crate) fn for_loop(
     let seq_span_start = seq_span.start_location();
     let iter_kind = syn_static_apply((ustr("iter"), seq_span_start), vec![seq], arena);
     let iterator = arena.alloc(PExpr::new(iter_kind, seq_span));
-    ExprKind::for_loop(b(ForLoopData::new(var_name, iterator, body)))
+    ExprKind::for_loop(b(ForLoopData::new(pattern, iterator, body)))
 }
 
 /// Extend v with a single element e at the end

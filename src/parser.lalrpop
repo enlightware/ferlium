@@ -644,8 +644,8 @@ PathIdentifier<E>: Ustr = {
 }
 
 ForExpr: ExprKind = {
-    "for" <id:Sp<UIdentifier>> "in" <seq:Es<TopExpr<"NoStruct">>> <body:Es<BranchBlock>> =>
-        for_loop(id, seq, body, arena),
+    "for" <pattern:LetBindingPattern> "in" <seq:Es<TopExpr<"NoStruct">>> <body:Es<BranchBlock>> =>
+        for_loop(pattern, seq, body, arena),
 }
 
 IfExpr: ExprKind = {
