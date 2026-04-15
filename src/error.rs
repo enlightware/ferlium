@@ -1924,6 +1924,12 @@ impl CompilationError {
                 if current_ty == cur_ty && expected_ty == exp_ty {
                     return;
                 }
+                let expected = alpha_normalize_type_strings([cur_ty, exp_ty]);
+                let actual =
+                    alpha_normalize_type_strings([current_ty.as_str(), expected_ty.as_str()]);
+                if actual == expected {
+                    return;
+                }
                 panic!(
                     "expect_type_mismatch failed: expected \"{}\" ≰ \"{}\", got \"{}\" ≰ \"{}\"",
                     cur_ty, exp_ty, current_ty, expected_ty
@@ -2118,6 +2124,71 @@ impl CompilationError {
             ),
         }
     }
+}
+
+/// Canonicalize rendered type/error fragments modulo fresh variable renaming.
+///
+/// This is only used in test helpers for comparing diagnostic strings whose
+/// fresh type/effect variable names may differ while the mismatch shape stays
+/// the same.
+fn alpha_normalize_type_strings<const N: usize>(parts: [&str; N]) -> [String; N] {
+    use std::collections::HashMap;
+
+    fn is_boundary(ch: Option<char>) -> bool {
+        ch.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+    }
+
+    fn is_subscript_digit(ch: char) -> bool {
+        matches!(
+            ch,
+            '₀' | '₁' | '₂' | '₃' | '₄' | '₅' | '₆' | '₇' | '₈' | '₉'
+        )
+    }
+
+    let mut ty_vars = HashMap::<String, usize>::new();
+    let mut eff_vars = HashMap::<String, usize>::new();
+    parts.map(|part| {
+        let chars = part.chars().collect::<Vec<_>>();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            let ch = chars[i];
+            let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+            let next = if i + 1 < chars.len() {
+                Some(chars[i + 1])
+            } else {
+                None
+            };
+            if ch.is_ascii_uppercase() && is_boundary(prev) && is_boundary(next) {
+                let key = ch.to_string();
+                let next_index = ty_vars.len();
+                let index = *ty_vars.entry(key).or_insert(next_index);
+                out.push('T');
+                out.push_str(&index.to_string());
+                i += 1;
+            } else if ch == 'e' && is_boundary(prev) {
+                let mut j = i + 1;
+                while j < chars.len() && is_subscript_digit(chars[j]) {
+                    j += 1;
+                }
+                if j > i + 1 && is_boundary(chars.get(j).copied()) {
+                    let key = chars[i..j].iter().collect::<String>();
+                    let next_index = eff_vars.len();
+                    let index = *eff_vars.entry(key).or_insert(next_index);
+                    out.push('e');
+                    out.push_str(&index.to_string());
+                    i = j;
+                } else {
+                    out.push(ch);
+                    i += 1;
+                }
+            } else {
+                out.push(ch);
+                i += 1;
+            }
+        }
+        out
+    })
 }
 
 /// Runtime error

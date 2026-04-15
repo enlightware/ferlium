@@ -40,7 +40,7 @@ use crate::{
 };
 use derive_new::new;
 use ena::unify::{EqUnifyValue, InPlace, InPlaceUnificationTable, Snapshot, UnifyKey, UnifyValue};
-use itertools::{Itertools, multiunzip};
+use itertools::Itertools;
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -613,7 +613,12 @@ impl TypeInference {
                     index: index as u32,
                     id,
                 });
-                (node, Type::unit(), MutType::constant(), node_effects)
+                let ty = if node_ty == Type::never() {
+                    Type::never()
+                } else {
+                    Type::unit()
+                };
+                (node, ty, MutType::constant(), node_effects)
             }
             PatternConstraint(data) => {
                 let (node_id, mut_type) = self.infer_expr(env, data.expr)?;
@@ -687,34 +692,57 @@ impl TypeInference {
                         return Ok((node_id, mut_ty));
                     }
                 }
-                // No, we emit code to evaluate function
-                // Infer the type and mutability of the arguments and collect their code and constraints
-                let (args_nodes, args_tys, args_effects) =
-                    self.infer_exprs_ret_arg_ty(env, &data.args)?;
-                // Allocate a fresh variable for the return type and effects of the function
-                let ret_ty = self.fresh_type_var_ty();
-                let call_effects = self.fresh_effect_var_ty();
-                // Build the function type
-                let func_ty =
-                    Type::function_type(FnType::new(args_tys, ret_ty, call_effects.clone()));
-                // Check the function against its function type
-                let func_node_id =
-                    self.check_expr(env, data.func, func_ty, MutType::constant(), expr_span)?;
-                // Unify effects
-                let func_effects = &env.ir_arena[func_node_id].effects;
-                let combined_effects =
-                    self.make_dependent_effect([&args_effects, func_effects, &call_effects]);
-                // Store and return the result
-                let node = K::Apply(b(ir::Application {
-                    function: func_node_id,
-                    arguments: args_nodes,
-                }));
-                (node, ret_ty, MutType::constant(), combined_effects)
+                // No, we emit code to evaluate function.
+                // Evaluate left-to-right: function first, then arguments.
+                let func_node_id = self.infer_expr_drop_mut(env, data.func)?;
+                let func_effects = env.ir_arena[func_node_id].effects.clone();
+                if env.ir_arena[func_node_id].ty == Type::never() {
+                    let effects = self.make_dependent_effect([&func_effects]);
+                    Self::diverging_prefix_result([func_node_id], effects)
+                } else {
+                    // Infer the type and mutability of the arguments and collect their code and constraints
+                    let (args_nodes, args_tys, args_effects, args_diverge) =
+                        self.infer_exprs_ret_arg_ty_until_never(env, &data.args)?;
+                    if args_diverge {
+                        let nodes = once(func_node_id).chain(args_nodes).collect::<Vec<_>>();
+                        let effects = self.make_dependent_effect([&func_effects, &args_effects]);
+                        Self::diverging_prefix_result(nodes, effects)
+                    } else {
+                        // Allocate a fresh variable for the return type and effects of the function
+                        let ret_ty = self.fresh_type_var_ty();
+                        let call_effects = self.fresh_effect_var_ty();
+                        // Build the function type
+                        let func_ty = Type::function_type(FnType::new(
+                            args_tys,
+                            ret_ty,
+                            call_effects.clone(),
+                        ));
+                        self.add_sub_type_constraint(
+                            env.ir_arena[func_node_id].ty,
+                            sp(data.func),
+                            func_ty,
+                            expr_span,
+                        );
+                        // Unify effects
+                        let combined_effects = self.make_dependent_effect([
+                            &func_effects,
+                            &args_effects,
+                            &call_effects,
+                        ]);
+                        // Store and return the result
+                        let node = K::Apply(b(ir::Application {
+                            function: func_node_id,
+                            arguments: args_nodes,
+                        }));
+                        (node, ret_ty, MutType::constant(), combined_effects)
+                    }
+                }
             }
             Block(exprs) => {
                 assert!(!exprs.is_empty());
                 let env_size = env.cur_locals.len();
-                let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
+                let (nodes, types, effects, _diverges) =
+                    self.infer_exprs_drop_mut_until_never(env, exprs)?;
                 // Adjust the lexical scope of the variables declared in the block to end at the end of the block.
                 for local_id in env.cur_locals.iter().skip(env_size) {
                     let local = &mut env.all_locals[local_id.as_index()];
@@ -751,64 +779,84 @@ impl TypeInference {
                     let node_id = env.ir_arena.alloc(N::new(node, ty, effects, expr_span));
                     return Ok((node_id, mut_ty));
                 }
-                let value_id = self.infer_expr_drop_mut(env, data.value)?;
                 let (place_id, place_mut) = self.infer_expr(env, data.place)?;
                 let place_span = env.ir_arena[place_id].span;
-                self.add_mut_be_at_least_constraint(
-                    place_mut,
-                    place_span,
-                    MutType::mutable(),
-                    data.sign_span,
-                );
-                let value_ty = env.ir_arena[value_id].ty;
-                let value_span = env.ir_arena[value_id].span;
-                let place_ty = env.ir_arena[place_id].ty;
-                self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
-                let value_effects = &env.ir_arena[value_id].effects;
-                let place_effects = &env.ir_arena[place_id].effects;
-                let combined_effects = self.make_dependent_effect([value_effects, place_effects]);
-                let node = K::Assign(ir::Assignment {
-                    place: place_id,
-                    value: value_id,
-                });
-                (node, Type::unit(), MutType::constant(), combined_effects)
+                let place_effects = env.ir_arena[place_id].effects.clone();
+                if env.ir_arena[place_id].ty == Type::never() {
+                    let effects = self.make_dependent_effect([&place_effects]);
+                    Self::diverging_prefix_result([place_id], effects)
+                } else {
+                    self.add_mut_be_at_least_constraint(
+                        place_mut,
+                        place_span,
+                        MutType::mutable(),
+                        data.sign_span,
+                    );
+                    let value_id = self.infer_expr_drop_mut(env, data.value)?;
+                    let value_ty = env.ir_arena[value_id].ty;
+                    let value_span = env.ir_arena[value_id].span;
+                    let place_ty = env.ir_arena[place_id].ty;
+                    self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
+                    let value_effects = env.ir_arena[value_id].effects.clone();
+                    if value_ty == Type::never() {
+                        let effects = self.make_dependent_effect([&place_effects, &value_effects]);
+                        Self::diverging_prefix_result([place_id, value_id], effects)
+                    } else {
+                        let combined_effects =
+                            self.make_dependent_effect([&value_effects, &place_effects]);
+                        let node = K::Assign(ir::Assignment {
+                            place: place_id,
+                            value: value_id,
+                        });
+                        (node, Type::unit(), MutType::constant(), combined_effects)
+                    }
+                }
             }
             Tuple(exprs) => {
-                let (nodes, types, effects) = self.infer_exprs_drop_mut(env, exprs)?;
-                let ty = Type::tuple(types);
-                let node = if let Some(values) = nodes_as_bare_immediate(env.ir_arena, &nodes) {
-                    K::Immediate(Immediate::new(Value::tuple(values)))
+                let (nodes, types, effects, diverges) =
+                    self.infer_exprs_drop_mut_until_never(env, exprs)?;
+                if diverges {
+                    Self::diverging_prefix_result(nodes, effects)
                 } else {
-                    K::Tuple(b(SVec2::from_vec(nodes)))
-                };
-                (node, ty, MutType::constant(), effects)
+                    let ty = Type::tuple(types);
+                    let node = if let Some(values) = nodes_as_bare_immediate(env.ir_arena, &nodes) {
+                        K::Immediate(Immediate::new(Value::tuple(values)))
+                    } else {
+                        K::Tuple(b(SVec2::from_vec(nodes)))
+                    };
+                    (node, ty, MutType::constant(), effects)
+                }
             }
             Project(data) => {
                 // Generates the following constraints:
                 // Project(tuple_expr: T, index) -> V
                 //     where T: Coercible<Target = U>, TupleHasField(U, V, index)
                 let (tuple_node_id, tuple_mut) = self.infer_expr(env, data.expr)?;
+                let effects = env.ir_arena[tuple_node_id].effects.clone();
                 // Note: tuple_node.ty is T
                 let tuple_node_ty = env.ir_arena[tuple_node_id].ty;
-                let tuple_ty = self.fresh_type_var_ty(); // U
-                let (index, index_span) = data.index;
-                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                    REPR_TRAIT.clone(),
-                    vec![tuple_node_ty],
-                    vec![tuple_ty],
-                    index_span,
-                ));
-                let element_ty = self.fresh_type_var_ty(); // V
-                self.add_pub_constraint(PubTypeConstraint::new_tuple_at_index_is(
-                    tuple_ty,
-                    sp(data.expr),
-                    index,
-                    index_span,
-                    element_ty,
-                ));
-                let effects = env.ir_arena[tuple_node_id].effects.clone();
-                let node = K::Project(tuple_node_id, index);
-                (node, element_ty, tuple_mut, effects)
+                if tuple_node_ty == Type::never() {
+                    Self::diverging_prefix_result([tuple_node_id], effects)
+                } else {
+                    let tuple_ty = self.fresh_type_var_ty(); // U
+                    let (index, index_span) = data.index;
+                    self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                        REPR_TRAIT.clone(),
+                        vec![tuple_node_ty],
+                        vec![tuple_ty],
+                        index_span,
+                    ));
+                    let element_ty = self.fresh_type_var_ty(); // V
+                    self.add_pub_constraint(PubTypeConstraint::new_tuple_at_index_is(
+                        tuple_ty,
+                        sp(data.expr),
+                        index,
+                        index_span,
+                        element_ty,
+                    ));
+                    let node = K::Project(tuple_node_id, index);
+                    (node, element_ty, tuple_mut, effects)
+                }
             }
             Record(fields) => {
                 // Check that all fields are unique and collect their expressions and names.
@@ -887,49 +935,40 @@ impl TypeInference {
                         }));
                     }
                     // Here we know that we have the right fields, validate the types.
-                    let mut effects = EffType::empty();
-                    let nodes: Vec<_> = layout
+                    let expected_tys = layout
                         .iter()
-                        .zip(fields.iter())
-                        .map(|(layout_field, field)| {
-                            assert_eq!(
-                                layout_field.0, field.0.0,
-                                "Record field names should match the layout",
-                            );
-                            let node_id = self.check_expr(
-                                env,
-                                field.1,
-                                layout_field.1,
-                                MutType::constant(),
-                                sp(field.1),
-                            )?;
-                            effects = effects.union(&env.ir_arena[node_id].effects);
-                            Ok(node_id)
-                        })
-                        .collect::<Result<_, _>>()?;
-                    // But the value of the node is the underlying record.
-                    // If all nodes can be resolved to bare immediates, we can create an immediate value.
-                    let resolved_nodes_value =
-                        nodes_as_bare_immediate(env.ir_arena, &nodes).map(Value::tuple);
-                    let node = if let Some(tag) = tag {
-                        if let Some(value) = resolved_nodes_value {
-                            let value = Value::raw_variant(tag, value);
+                        .map(|(_, ty)| FnArgType::new(*ty, MutType::constant()))
+                        .collect::<Vec<_>>();
+                    let exprs = fields.iter().map(|(_, expr)| *expr).collect::<Vec<_>>();
+                    let (nodes, effects, diverges) =
+                        self.check_exprs_until_never(env, &exprs, &expected_tys, expr_span)?;
+                    if diverges {
+                        Self::diverging_prefix_result(nodes, effects)
+                    } else {
+                        // But the value of the node is the underlying record.
+                        // If all nodes can be resolved to bare immediates, we can create an immediate value.
+                        let resolved_nodes_value =
+                            nodes_as_bare_immediate(env.ir_arena, &nodes).map(Value::tuple);
+                        let node = if let Some(tag) = tag {
+                            if let Some(value) = resolved_nodes_value {
+                                let value = Value::raw_variant(tag, value);
+                                K::Immediate(Immediate::new(value))
+                            } else {
+                                let record_node_id = env.ir_arena.alloc(N::new(
+                                    K::Record(b(SVec2::from_vec(nodes))),
+                                    payload_ty,
+                                    effects.clone(),
+                                    expr_span,
+                                ));
+                                K::Variant(tag, record_node_id)
+                            }
+                        } else if let Some(value) = resolved_nodes_value {
                             K::Immediate(Immediate::new(value))
                         } else {
-                            let record_node_id = env.ir_arena.alloc(N::new(
-                                K::Record(b(SVec2::from_vec(nodes))),
-                                payload_ty,
-                                effects.clone(),
-                                expr_span,
-                            ));
-                            K::Variant(tag, record_node_id)
-                        }
-                    } else if let Some(value) = resolved_nodes_value {
-                        K::Immediate(Immediate::new(value))
-                    } else {
-                        K::Record(b(SVec2::from_vec(nodes)))
-                    };
-                    (node, ty, MutType::constant(), effects)
+                            K::Record(b(SVec2::from_vec(nodes)))
+                        };
+                        (node, ty, MutType::constant(), effects)
+                    }
                 } else {
                     // Structural variants cannot be paths
                     if data.path.segments.len() > 1 {
@@ -976,27 +1015,31 @@ impl TypeInference {
                 // FieldAccess(record_expr: T, field) -> V
                 //     where T: Coercible<Target = U>, RecordFieldIs(U, V, field)
                 let (record_node_id, record_mut) = self.infer_expr(env, data.expr)?;
+                let effects = env.ir_arena[record_node_id].effects.clone();
                 // Note: record_node.ty is T
                 let record_node_ty = env.ir_arena[record_node_id].ty;
-                let record_ty = self.fresh_type_var_ty(); // U
-                let (field, field_span) = data.name;
-                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                    REPR_TRAIT.clone(),
-                    vec![record_node_ty],
-                    vec![record_ty],
-                    field_span,
-                ));
-                let element_ty = self.fresh_type_var_ty(); // V
-                self.add_pub_constraint(PubTypeConstraint::new_record_field_is(
-                    record_ty,
-                    sp(data.expr),
-                    field,
-                    field_span,
-                    element_ty,
-                ));
-                let effects = env.ir_arena[record_node_id].effects.clone();
-                let node = K::FieldAccess(record_node_id, field);
-                (node, element_ty, record_mut, effects)
+                if record_node_ty == Type::never() {
+                    Self::diverging_prefix_result([record_node_id], effects)
+                } else {
+                    let record_ty = self.fresh_type_var_ty(); // U
+                    let (field, field_span) = data.name;
+                    self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                        REPR_TRAIT.clone(),
+                        vec![record_node_ty],
+                        vec![record_ty],
+                        field_span,
+                    ));
+                    let element_ty = self.fresh_type_var_ty(); // V
+                    self.add_pub_constraint(PubTypeConstraint::new_record_field_is(
+                        record_ty,
+                        sp(data.expr),
+                        field,
+                        field_span,
+                        element_ty,
+                    ));
+                    let node = K::FieldAccess(record_node_id, field);
+                    (node, element_ty, record_mut, effects)
+                }
             }
             Array(exprs) => {
                 use crate::std::array::Array;
@@ -1012,33 +1055,32 @@ impl TypeInference {
                         no_effects(),
                     )
                 } else {
-                    // The element type is the first element's type
-                    let first_node_id = self.infer_expr_drop_mut(env, exprs[0])?;
-                    // Infer the type of the elements and collect their code and constraints
-                    let (other_nodes, types, other_effects) =
-                        self.infer_exprs_drop_mut(env, &exprs[1..])?;
-                    // All elements must be of the first element's type
-                    let element_ty = env.ir_arena[first_node_id].ty;
-                    for (ty, expr) in types.into_iter().zip(exprs.iter().skip(1)) {
-                        self.add_sub_type_constraint(ty, sp(*expr), element_ty, sp(exprs[0]));
-                    }
-                    // Unify effects
-                    let first_effects = &env.ir_arena[first_node_id].effects;
-                    let combined_effects =
-                        self.make_dependent_effect([first_effects, &other_effects]);
-                    // Build the array node and return it
-                    let element_nodes: SVec2<_> = once(first_node_id).chain(other_nodes).collect();
-                    let ty = array_type(element_ty);
-                    // Can we build it as an immediate?
-                    let node = if let Some(values) =
-                        nodes_as_bare_immediate(env.ir_arena, &element_nodes)
-                    {
-                        let value = Value::native(Array::from_vec(values));
-                        K::Immediate(Immediate::new(value))
+                    let (nodes, types, effects, diverges) =
+                        self.infer_exprs_drop_mut_until_never(env, exprs)?;
+                    if diverges {
+                        Self::diverging_prefix_result(nodes, effects)
                     } else {
-                        K::Array(b(element_nodes))
-                    };
-                    (node, ty, MutType::constant(), combined_effects)
+                        // The element type is the first element's type
+                        // All elements must be of the first element's type
+                        let element_ty = types[0];
+                        // Infer the type of the elements and collect their code and constraints
+                        for (ty, expr) in types.into_iter().skip(1).zip(exprs.iter().skip(1)) {
+                            self.add_sub_type_constraint(ty, sp(*expr), element_ty, sp(exprs[0]));
+                        }
+                        // Build the array node and return it
+                        let element_nodes = SVec2::from_vec(nodes);
+                        let ty = array_type(element_ty);
+                        // Can we build it as an immediate?
+                        let node = if let Some(values) =
+                            nodes_as_bare_immediate(env.ir_arena, &element_nodes)
+                        {
+                            let value = Value::native(Array::from_vec(values));
+                            K::Immediate(Immediate::new(value))
+                        } else {
+                            K::Array(b(element_nodes))
+                        };
+                        (node, ty, MutType::constant(), effects)
+                    }
                 }
             }
             Index(data) => {
@@ -1047,31 +1089,41 @@ impl TypeInference {
                 let array_ty = array_type(element_ty);
                 // Infer type of the array expression and make sure it is an array
                 let (array_node_id, array_expr_mut) = self.infer_expr(env, data.array)?;
-                let array_node_ty = env.ir_arena[array_node_id].ty;
-                self.add_sub_type_constraint(
-                    array_node_ty,
-                    sp(data.array),
-                    array_ty,
-                    sp(data.array),
-                );
-                // Check type of the index expression to be int
-                let index_node_id = self.check_expr(
-                    env,
-                    data.index,
-                    int_type(),
-                    MutType::constant(),
-                    sp(data.index),
-                )?;
-                // Build the index node and return it
-                let array_effects = &env.ir_arena[array_node_id].effects;
-                let index_effects = &env.ir_arena[index_node_id].effects;
-                let combined_effects = self.make_dependent_effect([
-                    &effect(PrimitiveEffect::Fallible),
-                    array_effects,
-                    index_effects,
-                ]);
-                let node = K::Index(array_node_id, index_node_id);
-                (node, element_ty, array_expr_mut, combined_effects)
+                let array_effects = env.ir_arena[array_node_id].effects.clone();
+                if env.ir_arena[array_node_id].ty == Type::never() {
+                    let effects = self.make_dependent_effect([&array_effects]);
+                    Self::diverging_prefix_result([array_node_id], effects)
+                } else {
+                    let array_node_ty = env.ir_arena[array_node_id].ty;
+                    self.add_sub_type_constraint(
+                        array_node_ty,
+                        sp(data.array),
+                        array_ty,
+                        sp(data.array),
+                    );
+                    // Check type of the index expression to be int
+                    let index_node_id = self.check_expr(
+                        env,
+                        data.index,
+                        int_type(),
+                        MutType::constant(),
+                        sp(data.index),
+                    )?;
+                    // Build the index node and return it
+                    let index_effects = env.ir_arena[index_node_id].effects.clone();
+                    if env.ir_arena[index_node_id].ty == Type::never() {
+                        let effects = self.make_dependent_effect([&array_effects, &index_effects]);
+                        Self::diverging_prefix_result([array_node_id, index_node_id], effects)
+                    } else {
+                        let combined_effects = self.make_dependent_effect([
+                            &effect(PrimitiveEffect::Fallible),
+                            &array_effects,
+                            &index_effects,
+                        ]);
+                        let node = K::Index(array_node_id, index_node_id);
+                        (node, element_ty, array_expr_mut, combined_effects)
+                    }
+                }
             }
             Match(data) => {
                 let (node, ty, mut_ty, effects) = self.infer_match(
@@ -1165,6 +1217,22 @@ impl TypeInference {
         Ok(self.infer_expr(env, expr)?.0)
     }
 
+    pub(crate) fn diverging_prefix_node(node_ids: impl IntoIterator<Item = NodeId>) -> NodeKind {
+        NodeKind::Block(b(SVec2::from_vec(node_ids.into_iter().collect())))
+    }
+
+    pub(crate) fn diverging_prefix_result(
+        node_ids: impl IntoIterator<Item = NodeId>,
+        effects: EffType,
+    ) -> (NodeKind, Type, MutType, EffType) {
+        (
+            Self::diverging_prefix_node(node_ids),
+            Type::never(),
+            MutType::constant(),
+            effects,
+        )
+    }
+
     fn infer_static_apply(
         &mut self,
         env: &mut TypingEnv,
@@ -1206,34 +1274,38 @@ impl TypeInference {
                     self.add_pub_constraint(constraint);
                 });
                 // Make sure the types of the trait arguments match the expected types
-                let (args_node_ids, args_effects) =
-                    self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
-                let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
-                assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
-                let output_tys = trait_tys.split_off(trait_ref.input_type_count() as usize);
-                let input_tys = trait_tys;
-                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                    trait_ref.clone(),
-                    input_tys.clone(),
-                    output_tys,
-                    path_span,
-                ));
-                // Build and return the trait function node
-                let ret_ty = inst_fn_ty.ret;
-                let combined_effects =
-                    self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                let node = K::TraitFnApply(b(ir::TraitFnApplication {
-                    trait_ref,
-                    function_index,
-                    function_path: path.clone(),
-                    function_span: path_span,
-                    arguments: args_node_ids,
-                    arguments_unnamed,
-                    ty: inst_fn_ty,
-                    input_tys,
-                    inst_data,
-                }));
-                (node, ret_ty, MutType::constant(), combined_effects)
+                let (args_node_ids, args_effects, args_diverge) =
+                    self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
+                if args_diverge {
+                    Self::diverging_prefix_result(args_node_ids, args_effects)
+                } else {
+                    let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
+                    assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
+                    let output_tys = trait_tys.split_off(trait_ref.input_type_count() as usize);
+                    let input_tys = trait_tys;
+                    self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                        trait_ref.clone(),
+                        input_tys.clone(),
+                        output_tys,
+                        path_span,
+                    ));
+                    // Build and return the trait function node
+                    let ret_ty = inst_fn_ty.ret;
+                    let combined_effects =
+                        self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
+                    let node = K::TraitFnApply(b(ir::TraitFnApplication {
+                        trait_ref,
+                        function_index,
+                        function_path: path.clone(),
+                        function_span: path_span,
+                        arguments: args_node_ids,
+                        arguments_unnamed,
+                        ty: inst_fn_ty,
+                        input_tys,
+                        inst_data,
+                    }));
+                    (node, ret_ty, MutType::constant(), combined_effects)
+                }
             } else if let Some((definition, function, _module_name)) = env.get_function(path)? {
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -1250,22 +1322,26 @@ impl TypeInference {
                 // Get argument names if any
                 let argument_names = arguments_unnamed.filter_args(&definition.arg_names);
                 // Get the code and make sure the types of its arguments match the expected types
-                let (args_node_ids, args_effects) =
-                    self.check_exprs(env, args, &inst_fn_ty.args, path_span)?;
-                // Build and return the function node
-                let ret_ty = inst_fn_ty.ret;
-                let combined_effects =
-                    self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                let node = K::StaticApply(b(ir::StaticApplication {
-                    function,
-                    function_path: Some(path.clone()),
-                    function_span: path_span,
-                    arguments: args_node_ids,
-                    argument_names,
-                    ty: inst_fn_ty,
-                    inst_data,
-                }));
-                (node, ret_ty, MutType::constant(), combined_effects)
+                let (args_node_ids, args_effects, args_diverge) =
+                    self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
+                if args_diverge {
+                    Self::diverging_prefix_result(args_node_ids, args_effects)
+                } else {
+                    // Build and return the function node
+                    let ret_ty = inst_fn_ty.ret;
+                    let combined_effects =
+                        self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
+                    let node = K::StaticApply(b(ir::StaticApplication {
+                        function,
+                        function_path: Some(path.clone()),
+                        function_span: path_span,
+                        arguments: args_node_ids,
+                        argument_names,
+                        ty: inst_fn_ty,
+                        inst_data,
+                    }));
+                    (node, ret_ty, MutType::constant(), combined_effects)
+                }
             } else if let Some(type_def) = env.get_type_def(path)? {
                 // Retrieve the payload type and the tag, if it is an enum.
                 let (type_def, payload_ty, ty, tag) =
@@ -1299,43 +1375,37 @@ impl TypeInference {
                     }));
                 }
                 // Here we know that we have the right number of arguments, validate the types.
-                let mut effects = EffType::empty();
-                let node_ids: Vec<_> = payload_tys
+                let expected_tys = payload_tys
                     .iter()
-                    .zip(args.iter())
-                    .map(|(ty, arg)| {
-                        let node_id = self.check_expr(
-                            env,
-                            *arg,
-                            *ty,
-                            MutType::constant(),
-                            env.ast_arena[*arg].span,
-                        )?;
-                        effects = effects.union(&env.ir_arena[node_id].effects);
-                        Ok(node_id)
-                    })
-                    .collect::<Result<_, _>>()?;
-                // But the value of the node is the underlying tuple.
-                // If all nodes can be resolved to bare immediates, we can create an immediate value.
-                let resolved_nodes_value =
-                    nodes_as_bare_immediate(env.ir_arena, &node_ids).map(Value::tuple);
-                let inner_kind = if let Some(value) = resolved_nodes_value {
-                    K::Immediate(Immediate::new(value))
+                    .map(|ty| FnArgType::new(*ty, MutType::constant()))
+                    .collect::<Vec<_>>();
+                let (node_ids, effects, diverges) =
+                    self.check_exprs_until_never(env, args, &expected_tys, expr_span)?;
+                if diverges {
+                    Self::diverging_prefix_result(node_ids, effects)
                 } else {
-                    K::Tuple(b(SVec2::from_vec(node_ids)))
-                };
-                let node = if let Some(tag) = tag {
-                    let inner_node_id = env.ir_arena.alloc(N::new(
-                        inner_kind,
-                        payload_ty,
-                        effects.clone(),
-                        expr_span,
-                    ));
-                    K::Variant(tag, inner_node_id)
-                } else {
-                    inner_kind
-                };
-                (node, ty, MutType::constant(), effects)
+                    // But the value of the node is the underlying tuple.
+                    // If all nodes can be resolved to bare immediates, we can create an immediate value.
+                    let resolved_nodes_value =
+                        nodes_as_bare_immediate(env.ir_arena, &node_ids).map(Value::tuple);
+                    let inner_kind = if let Some(value) = resolved_nodes_value {
+                        K::Immediate(Immediate::new(value))
+                    } else {
+                        K::Tuple(b(SVec2::from_vec(node_ids)))
+                    };
+                    let node = if let Some(tag) = tag {
+                        let inner_node_id = env.ir_arena.alloc(N::new(
+                            inner_kind,
+                            payload_ty,
+                            effects.clone(),
+                            expr_span,
+                        ));
+                        K::Variant(tag, inner_node_id)
+                    } else {
+                        inner_kind
+                    };
+                    (node, ty, MutType::constant(), effects)
+                }
             } else {
                 // Structural variants cannot be paths
                 if path.segments.len() > 1 {
@@ -1344,85 +1414,94 @@ impl TypeInference {
                     }));
                 }
                 // If it is not a known function or trait or type def, assume it to be a variant constructor.
-                // Build the payload type and node.
-                let (payload_node_ids, payload_types, effects) =
-                    self.infer_exprs_drop_mut(env, args)?;
-                let (payload_ty, payload_node_id) = match payload_node_ids.len() {
-                    0 => (
-                        Type::unit(),
-                        env.ir_arena.alloc(N::new(
-                            K::Immediate(Immediate::new(Value::unit())),
-                            Type::unit(),
-                            no_effects(),
-                            path_span,
-                        )),
-                    ),
-                    _ => {
-                        let payload_ty = Type::tuple(payload_types);
-                        let payload_span = Location::fuse(
-                            payload_node_ids.iter().map(|id| env.ir_arena[*id].span),
-                        )
-                        .unwrap();
-                        let node = if let Some(values) =
-                            nodes_as_bare_immediate(env.ir_arena, &payload_node_ids)
-                        {
-                            K::Immediate(Immediate::new(Value::tuple(values)))
-                        } else {
-                            K::Tuple(b(SVec2::from_vec(payload_node_ids)))
-                        };
-                        let payload_node_id = env.ir_arena.alloc(N::new(
-                            node,
-                            payload_ty,
-                            effects.clone(),
-                            payload_span,
-                        ));
-                        (payload_ty, payload_node_id)
-                    }
-                };
-                // Create a fresh type and add a constraint for that type to include this variant.
-                let tag = path.segments[0].0;
-                let variant_ty = self.fresh_type_var_ty();
-                let payload_span = env.ir_arena[payload_node_id].span;
-                self.ty_constraints.push(TypeConstraint::Pub(
-                    PubTypeConstraint::new_type_has_variant(
-                        variant_ty,
-                        expr_span,
-                        tag,
-                        payload_ty,
-                        payload_span,
-                    ),
-                ));
-                // Build the variant construction node.
-                let node = if let Some(values) =
-                    nodes_as_bare_immediate_ids(env.ir_arena, &[payload_node_id])
-                {
-                    let value = values.first().unwrap().clone();
-                    K::Immediate(Immediate::new(Value::raw_variant(tag, value)))
+                let (payload_node_ids, payload_types, effects, diverges) =
+                    self.infer_exprs_drop_mut_until_never(env, args)?;
+                if diverges {
+                    Self::diverging_prefix_result(payload_node_ids, effects)
                 } else {
-                    K::Variant(tag, payload_node_id)
-                };
-                (node, variant_ty, MutType::constant(), effects)
+                    let (payload_ty, payload_node_id) = match payload_node_ids.len() {
+                        0 => (
+                            Type::unit(),
+                            env.ir_arena.alloc(N::new(
+                                K::Immediate(Immediate::new(Value::unit())),
+                                Type::unit(),
+                                no_effects(),
+                                path_span,
+                            )),
+                        ),
+                        _ => {
+                            let payload_ty = Type::tuple(payload_types);
+                            let payload_span = Location::fuse(
+                                payload_node_ids.iter().map(|id| env.ir_arena[*id].span),
+                            )
+                            .unwrap();
+                            let node = if let Some(values) =
+                                nodes_as_bare_immediate(env.ir_arena, &payload_node_ids)
+                            {
+                                K::Immediate(Immediate::new(Value::tuple(values)))
+                            } else {
+                                K::Tuple(b(SVec2::from_vec(payload_node_ids)))
+                            };
+                            let payload_node_id = env.ir_arena.alloc(N::new(
+                                node,
+                                payload_ty,
+                                effects.clone(),
+                                payload_span,
+                            ));
+                            (payload_ty, payload_node_id)
+                        }
+                    };
+                    // Create a fresh type and add a constraint for that type to include this variant.
+                    let tag = path.segments[0].0;
+                    let variant_ty = self.fresh_type_var_ty();
+                    let payload_span = env.ir_arena[payload_node_id].span;
+                    self.ty_constraints.push(TypeConstraint::Pub(
+                        PubTypeConstraint::new_type_has_variant(
+                            variant_ty,
+                            expr_span,
+                            tag,
+                            payload_ty,
+                            payload_span,
+                        ),
+                    ));
+                    // Build the variant construction node.
+                    let node = if let Some(values) =
+                        nodes_as_bare_immediate_ids(env.ir_arena, &[payload_node_id])
+                    {
+                        let value = values.first().unwrap().clone();
+                        K::Immediate(Immediate::new(Value::raw_variant(tag, value)))
+                    } else {
+                        K::Variant(tag, payload_node_id)
+                    };
+                    (node, variant_ty, MutType::constant(), effects)
+                }
             },
         )
     }
 
-    fn infer_exprs_drop_mut(
+    fn infer_exprs_drop_mut_until_never(
         &mut self,
         env: &mut TypingEnv,
         exprs: &[DExprId],
-    ) -> Result<(Vec<NodeId>, Vec<Type>, EffType), InternalCompilationError> {
-        let (nodes, tys, effects): (_, _, Vec<_>) = exprs
-            .iter()
-            .map(|arg| {
-                let node_id = self.infer_expr_drop_mut(env, *arg)?;
-                let ty = env.ir_arena[node_id].ty;
-                let effects = env.ir_arena[node_id].effects.clone();
-                Ok::<(NodeId, Type, EffType), InternalCompilationError>((node_id, ty, effects))
-            })
-            .process_results(|iter| multiunzip(iter))?;
-
+    ) -> Result<(Vec<NodeId>, Vec<Type>, EffType, bool), InternalCompilationError> {
+        let mut nodes = Vec::with_capacity(exprs.len());
+        let mut tys = Vec::with_capacity(exprs.len());
+        let mut effects = Vec::with_capacity(exprs.len());
+        let mut diverges = false;
+        for expr in exprs {
+            let node_id = self.infer_expr_drop_mut(env, *expr)?;
+            let ty = env.ir_arena[node_id].ty;
+            let expr_effects = env.ir_arena[node_id].effects.clone();
+            nodes.push(node_id);
+            tys.push(ty);
+            effects.push(expr_effects);
+            if ty == Type::never() {
+                diverges = true;
+                break;
+            }
+        }
         let combined_effects = self.make_dependent_effect(&effects);
-        Ok((nodes, tys, combined_effects))
+        Ok((nodes, tys, combined_effects, diverges))
     }
 
     fn infer_record(
@@ -1431,14 +1510,21 @@ impl TypeInference {
         fields: &[&RecordField<Desugared>],
     ) -> Result<(NodeKind, Type, EffType), InternalCompilationError> {
         let exprs = fields.iter().map(|(_, expr)| *expr).collect::<Vec<_>>();
-        let (node_ids, types, effects) = self.infer_exprs_drop_mut(env, &exprs)?;
-        let payload_ty = fields_to_record_type(fields, types);
-        let payload_node = if let Some(values) = nodes_as_bare_immediate(env.ir_arena, &node_ids) {
-            NodeKind::Immediate(Immediate::new(Value::tuple(values)))
+        let (node_ids, types, effects, diverges) =
+            self.infer_exprs_drop_mut_until_never(env, &exprs)?;
+        if diverges {
+            let payload_node = Self::diverging_prefix_node(node_ids);
+            Ok((payload_node, Type::never(), effects))
         } else {
-            NodeKind::Record(b(SVec2::from_vec(node_ids)))
-        };
-        Ok((payload_node, payload_ty, effects))
+            let payload_ty = fields_to_record_type(fields, types);
+            let payload_node =
+                if let Some(values) = nodes_as_bare_immediate(env.ir_arena, &node_ids) {
+                    NodeKind::Immediate(Immediate::new(Value::tuple(values)))
+                } else {
+                    NodeKind::Record(b(SVec2::from_vec(node_ids)))
+                };
+            Ok((payload_node, payload_ty, effects))
+        }
     }
 
     // fn infer_exprs_drop_mut_zipped(
@@ -1461,26 +1547,29 @@ impl TypeInference {
     //     Ok((nodes_and_tys, combined_effects))
     // }
 
-    fn infer_exprs_ret_arg_ty(
+    fn infer_exprs_ret_arg_ty_until_never(
         &mut self,
         env: &mut TypingEnv,
         exprs: &[DExprId],
-    ) -> Result<(Vec<NodeId>, Vec<FnArgType>, EffType), InternalCompilationError> {
-        let (node_ids, tys, effects): (_, _, Vec<_>) = exprs
-            .iter()
-            .map(|arg| {
-                let (node_id, mut_ty) = self.infer_expr(env, *arg)?;
-                let ty = env.ir_arena[node_id].ty;
-                let effects = env.ir_arena[node_id].effects.clone();
-                Ok::<(NodeId, FnArgType, EffType), InternalCompilationError>((
-                    node_id,
-                    FnArgType::new(ty, mut_ty),
-                    effects,
-                ))
-            })
-            .process_results(|iter| multiunzip(iter))?;
+    ) -> Result<(Vec<NodeId>, Vec<FnArgType>, EffType, bool), InternalCompilationError> {
+        let mut node_ids = Vec::with_capacity(exprs.len());
+        let mut tys = Vec::with_capacity(exprs.len());
+        let mut effects = Vec::with_capacity(exprs.len());
+        let mut diverges = false;
+        for expr in exprs {
+            let (node_id, mut_ty) = self.infer_expr(env, *expr)?;
+            let ty = env.ir_arena[node_id].ty;
+            let expr_effects = env.ir_arena[node_id].effects.clone();
+            node_ids.push(node_id);
+            tys.push(FnArgType::new(ty, mut_ty));
+            effects.push(expr_effects);
+            if ty == Type::never() {
+                diverges = true;
+                break;
+            }
+        }
         let combined_effects = self.make_dependent_effect(&effects);
-        Ok((node_ids, tys, combined_effects))
+        Ok((node_ids, tys, combined_effects, diverges))
     }
 
     fn check_and_sort_record_fields(
@@ -1506,25 +1595,29 @@ impl TypeInference {
         Ok(fields)
     }
 
-    fn check_exprs(
+    fn check_exprs_until_never(
         &mut self,
         env: &mut TypingEnv,
         exprs: &[DExprId],
         expected_tys: &[FnArgType],
         expected_span: Location,
-    ) -> Result<(Vec<NodeId>, EffType), InternalCompilationError> {
-        let (node_ids, effects): (_, Vec<_>) = exprs
-            .iter()
-            .zip(expected_tys)
-            .map(|(arg, arg_ty)| {
-                let node_id =
-                    self.check_expr(env, *arg, arg_ty.ty, arg_ty.mut_ty, expected_span)?;
-                let effects = env.ir_arena[node_id].effects.clone();
-                Ok((node_id, effects))
-            })
-            .process_results(|iter| multiunzip(iter))?;
+    ) -> Result<(Vec<NodeId>, EffType, bool), InternalCompilationError> {
+        let mut node_ids = Vec::with_capacity(exprs.len());
+        let mut effects = Vec::with_capacity(exprs.len());
+        let mut diverges = false;
+        for (arg, arg_ty) in exprs.iter().zip(expected_tys) {
+            let node_id = self.check_expr(env, *arg, arg_ty.ty, arg_ty.mut_ty, expected_span)?;
+            let ty = env.ir_arena[node_id].ty;
+            let expr_effects = env.ir_arena[node_id].effects.clone();
+            node_ids.push(node_id);
+            effects.push(expr_effects);
+            if ty == Type::never() {
+                diverges = true;
+                break;
+            }
+        }
         let combined_effects = self.make_dependent_effect(&effects);
-        Ok((node_ids, combined_effects))
+        Ok((node_ids, combined_effects, diverges))
     }
 
     pub fn check_expr(

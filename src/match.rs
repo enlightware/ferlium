@@ -69,6 +69,9 @@ impl TypeInference {
         let (condition_node_id, _) = self.infer_expr(env, cond_expr)?;
         let condition_node = &env.ir_arena[condition_node_id];
         let cond_eff = condition_node.effects.clone();
+        if condition_node.ty == Type::never() {
+            return Ok(Self::diverging_prefix_result([condition_node_id], cond_eff));
+        }
 
         // Generate a repr projection to get a condition_node.ty: Repr<Is = U> type
         let pattern_ty = self.fresh_type_var_ty(); // U
@@ -393,6 +396,11 @@ impl TypeInference {
             // Generate the final code node
             let default_eff = env.ir_arena[default].effects.clone();
             let case_eff = self.make_dependent_effect([&alt_eff, &default_eff]);
+            let case_ret_ty = if Self::case_arms_all_never(env, &alternatives, default) {
+                Type::never()
+            } else {
+                return_ty
+            };
             let case = K::Case(b(ir::Case {
                 value: extract_tag_id,
                 alternatives,
@@ -400,7 +408,7 @@ impl TypeInference {
             }));
             let case_node_id = env
                 .ir_arena
-                .alloc(N::new(case, return_ty, case_eff, match_span));
+                .alloc(N::new(case, case_ret_ty, case_eff, match_span));
             let store_eff = &env.ir_arena[store_variant_node_id].effects;
             let case_node_eff = &env.ir_arena[case_node_id].effects;
             let effects = self.make_dependent_effect([store_eff, case_node_eff]);
@@ -408,11 +416,11 @@ impl TypeInference {
                 store_variant_node_id,
                 case_node_id,
             ])));
-            (node, return_ty, MutType::constant(), effects)
+            (node, case_ret_ty, MutType::constant(), effects)
         } else {
             // Literal patterns, convert optional default to mandatory one
             let return_ty = self.fresh_type_var_ty();
-            let (node, return_ty, effects) = if let Some(default) = default {
+            let (alternatives, default_id, effects) = if let Some(default) = default {
                 let default_id =
                     self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
                 let (alternatives, alt_eff) = self.check_literal_patterns(
@@ -426,15 +434,7 @@ impl TypeInference {
                 )?;
                 let default_eff = &env.ir_arena[default_id].effects;
                 let effects = self.make_dependent_effect([&cond_eff, &alt_eff, default_eff]);
-                (
-                    K::Case(b(ir::Case {
-                        value: condition_node_id,
-                        alternatives,
-                        default: default_id,
-                    })),
-                    return_ty,
-                    effects,
-                )
+                (alternatives, default_id, effects)
             } else {
                 let (mut alternatives, alt_eff) = self.check_literal_patterns(
                     env,
@@ -452,18 +452,31 @@ impl TypeInference {
                 );
                 let effects = self.make_dependent_effect([cond_eff, alt_eff]);
                 let default_id = alternatives.pop().unwrap().1;
-                (
-                    K::Case(b(ir::Case {
-                        value: condition_node_id,
-                        alternatives,
-                        default: default_id,
-                    })),
-                    return_ty,
-                    effects,
-                )
+                (alternatives, default_id, effects)
             };
-            (node, return_ty, MutType::constant(), effects)
+            let case_ret_ty = if Self::case_arms_all_never(env, &alternatives, default_id) {
+                Type::never()
+            } else {
+                return_ty
+            };
+            let node = K::Case(b(ir::Case {
+                value: condition_node_id,
+                alternatives,
+                default: default_id,
+            }));
+            (node, case_ret_ty, MutType::constant(), effects)
         })
+    }
+
+    fn case_arms_all_never<V>(
+        env: &TypingEnv,
+        alternatives: &[(V, NodeId)],
+        default: NodeId,
+    ) -> bool {
+        alternatives
+            .iter()
+            .all(|(_, node_id)| env.ir_arena[*node_id].ty == Type::never())
+            && env.ir_arena[default].ty == Type::never()
     }
 
     #[allow(clippy::too_many_arguments)]

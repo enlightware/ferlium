@@ -11,7 +11,9 @@ use test_log::test;
 use indoc::indoc;
 
 use crate::harness::{TestSession, bool, float, int, unit};
-use ferlium::{error::MutabilityMustBeWhat, value::Value};
+use ferlium::{
+    error::MutabilityMustBeWhat, std::math::NUM_TRAIT, type_scheme::PubTypeConstraint, value::Value,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -853,6 +855,262 @@ fn calling_fn_field_on_named_fn_record_parameter() {
             get_label({ value: 99, label: || 7 })
         "# }),
         int(7)
+    );
+}
+
+fn assert_f_defaults_num_after_dead_suffix(session: &mut TestSession, src: &str) {
+    let runnable_src = format!("{src}\n\nf()");
+    assert_eq!(
+        session.run(&runnable_src),
+        int(42),
+        "runtime regression for:\n{src}"
+    );
+
+    let fn_def = session.compile_and_get_fn_def(src, "f");
+    assert_eq!(
+        fn_def.ty_scheme.ty_quantifiers.len(),
+        1,
+        "type regression for:\n{src}"
+    );
+    assert_eq!(
+        fn_def.ty_scheme.constraints.len(),
+        1,
+        "type regression for:\n{src}"
+    );
+    match &fn_def.ty_scheme.constraints[0] {
+        PubTypeConstraint::HaveTrait {
+            trait_ref,
+            input_tys,
+            output_tys,
+            ..
+        } => {
+            assert_eq!(*trait_ref, *NUM_TRAIT, "type regression for:\n{src}");
+            assert_eq!(
+                input_tys.as_slice(),
+                &[fn_def.ty_scheme.ty().ret],
+                "type regression for:\n{src}",
+            );
+            assert!(output_tys.is_empty(), "type regression for:\n{src}");
+        }
+        other => panic!("expected Num constraint on the return type for:\n{src}\n got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unreachable_block_suffix_does_not_constrain_return_type() {
+    let mut session = TestSession::new();
+    let src = indoc! { r#"
+        fn f() {
+            let x = { return 42 };
+            || x
+        }
+
+        f()
+    "# };
+    assert_eq!(session.run(src), int(42));
+
+    let fn_def = session.compile_and_get_fn_def(
+        indoc! { r#"
+            fn f() {
+                let x = { return 42 };
+                || x
+            }
+        "# },
+        "f",
+    );
+    let module_env = session.std_module_env();
+    assert_eq!(
+        fn_def.ty_scheme.display_rust_style(&module_env).to_string(),
+        "() -> A where A: Num"
+    );
+    assert_eq!(fn_def.ty_scheme.ty_quantifiers.len(), 1);
+    assert_eq!(fn_def.ty_scheme.constraints.len(), 1);
+    match &fn_def.ty_scheme.constraints[0] {
+        PubTypeConstraint::HaveTrait {
+            trait_ref,
+            input_tys,
+            output_tys,
+            ..
+        } => {
+            assert_eq!(*trait_ref, *NUM_TRAIT);
+            assert_eq!(input_tys.as_slice(), &[fn_def.ty_scheme.ty().ret]);
+            assert!(output_tys.is_empty());
+        }
+        other => panic!("expected Num constraint on the return type, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unreachable_suffixes_in_other_expressions_do_not_constrain_return_type() {
+    let mut session = TestSession::new();
+
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = ({ return 42 }, || 0);
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = [{ return 42 }, || 0];
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = { x: { return 42 }, y: || 0 };
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn add(a, b) { a + b }
+
+            fn f() {
+                let x = add({ return 42 }, || 0);
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = { return 42 } + (|| 0);
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let g = |a, b| a + b;
+                let x = g({ return 42 }, || 0);
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = ({ return 42; |a| a })(|| 0);
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = ({ return 42; (0, 1) }).0;
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = ({ return 42; { value: 0 } }).value;
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = ({ return 42; [0] })[|| 0];
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = [0][{ return 42 }];
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            struct Pair(int, int)
+
+            fn f() {
+                let x = Pair({ return 42 }, || 0);
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = Foo({ return 42 }, || 0);
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = match { return 42 } {
+                    0 => 0,
+                    _ => || 0,
+                };
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let x = match 0 {
+                    0 => { return 42 },
+                    _ => { return 7 },
+                };
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let mut a = [0];
+                let x = a[0] = { return 42 };
+                || x
+            }
+        "# },
+    );
+    assert_f_defaults_num_after_dead_suffix(
+        &mut session,
+        indoc! { r#"
+            fn f() {
+                let mut a = [0];
+                let x = ({ return 42; a[0] }) = 0;
+                || x
+            }
+        "# },
     );
 }
 
