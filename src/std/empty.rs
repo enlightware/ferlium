@@ -12,6 +12,7 @@ use crate::{
     effects::EffType,
     function::FunctionDefinition,
     module::Module,
+    std::product_value_deriver::add_product_value_deriver,
     r#trait::TraitRef,
     r#type::{FnType, Type},
 };
@@ -20,7 +21,7 @@ use FunctionDefinition as Def;
 
 pub static EMPTY_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var_ty = Type::variable_id(0);
-    TraitRef::new_with_self_input_type(
+    let mut trait_ref = TraitRef::new_with_self_input_type(
         "Empty",
         "A type with a canonical empty value, typically used as the identity for concatenation.",
         [],
@@ -32,7 +33,9 @@ pub static EMPTY_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                 "Returns the empty value for this type.",
             ),
         )],
-    )
+    );
+    add_product_value_deriver(&mut trait_ref);
+    trait_ref
 });
 
 pub fn add_to_module(to: &mut Module) {

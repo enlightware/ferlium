@@ -826,6 +826,22 @@ fn default() {
     assert_eq!(session.run("(default(): float)"), float(0.0));
     assert_eq!(session.run("(default(): string)"), string(""));
     assert_eq!(session.run("(default(): [int])"), int_a![]);
+    assert_eq!(
+        session.run("(default(): (int, bool, string))"),
+        tuple!(int(0), bool(false), string(""))
+    );
+    assert_eq!(
+        session.run("(default(): {items: [int], name: string})"),
+        tuple!(int_a![], string(""))
+    );
+    assert_eq!(
+        session.run("struct Pair(int, string) (default(): Pair)"),
+        tuple!(int(0), string(""))
+    );
+    assert_eq!(
+        session.run("struct Struct { name: string, toys: [int]} (default(): Struct)"),
+        tuple!(string(""), int_a![])
+    );
 }
 
 #[test]
@@ -834,6 +850,22 @@ fn empty() {
     let mut session = TestSession::new();
     assert_eq!(session.run("(empty(): string)"), string(""));
     assert_eq!(session.run("(empty(): [int])"), int_a![]);
+    assert_eq!(
+        session.run("(empty(): (string, [int]))"),
+        tuple!(string(""), int_a![])
+    );
+    assert_eq!(
+        session.run("(empty(): {items: [int], name: string})"),
+        tuple!(int_a![], string(""))
+    );
+    assert_eq!(
+        session.run("struct Pair(string, [int]) (empty(): Pair)"),
+        tuple!(string(""), int_a![])
+    );
+    assert_eq!(
+        session.run("struct Struct { name: string, toys: [int]} (empty(): Struct)"),
+        tuple!(string(""), int_a![])
+    );
 }
 
 #[test]

@@ -37,6 +37,7 @@ pub mod mem;
 pub mod option;
 pub mod ordering;
 mod prelude;
+mod product_value_deriver;
 pub mod serde;
 pub mod split;
 pub mod string;
