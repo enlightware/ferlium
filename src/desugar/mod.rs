@@ -37,7 +37,7 @@ use crate::{
     mutability::{MutType, MutVal},
     parser_helpers::syn_static_apply,
     std::{array::array_type, math::int_type},
-    r#type::{FnArgType, FnType, Type, TypeDefRef, TypeVar},
+    r#type::{FnArgType, FnType, NativeType, Type, TypeDefRef, TypeVar},
     type_like::TypeLike,
     type_scheme::{PubTypeConstraint, TypeScheme},
 };

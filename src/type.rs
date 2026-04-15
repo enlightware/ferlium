@@ -652,6 +652,8 @@ pub(crate) struct TypeAliases {
     type_to_name: FxHashMap<Type, Ustr>,
     /// Names for the native part of generic native types, used for formatting
     bare_native_to_name: FxHashMap<B<dyn BareNativeType>, Ustr>,
+    /// Reverse mapping: name → bare native type, used for type resolution in Ferlium code
+    name_to_bare_native: FxHashMap<Ustr, B<dyn BareNativeType>>,
 }
 impl TypeAliases {
     pub fn set(&mut self, alias: Ustr, ty: Type) {
@@ -676,11 +678,16 @@ impl TypeAliases {
     }
 
     pub fn set_bare_native(&mut self, alias: Ustr, bare: B<dyn BareNativeType>) {
+        self.name_to_bare_native.insert(alias, bare.clone());
         self.bare_native_to_name.insert(bare, alias);
     }
 
     pub fn get_bare_native_name(&self, bare: &B<dyn BareNativeType>) -> Option<Ustr> {
         self.bare_native_to_name.get(bare).copied()
+    }
+
+    pub fn get_bare_native_by_name(&self, name: Ustr) -> Option<&B<dyn BareNativeType>> {
+        self.name_to_bare_native.get(&name)
     }
 
     pub fn bare_native_len(&self) -> usize {

@@ -279,6 +279,11 @@ impl ast::PType {
                         }));
                     }
                     Type::named(type_def, Vec::new())
+                } else if let Some((module_id, bare)) =
+                    env.bare_native_type_alias_with_module(path)?
+                {
+                    record_module_use(module_id, modules_used);
+                    Type::native_type(NativeType::new(bare, vec![]))
                 } else if let [(name, _)] = &path.segments[..] {
                     Type::variant([(*name, Type::unit())])
                 } else {
@@ -319,6 +324,23 @@ impl ast::PType {
                         }));
                     }
                     Type::named(type_def, desugared_args)
+                } else if let Some((module_id, bare)) =
+                    env.bare_native_type_alias_with_module(path)?
+                {
+                    record_module_use(module_id, modules_used);
+                    let desugared_args = args
+                        .iter()
+                        .map(|(ty, ty_span)| {
+                            ty.desugar_with_ty_params(
+                                *ty_span,
+                                false,
+                                env,
+                                generic_ty_params,
+                                modules_used,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Type::native_type(NativeType::new(bare, desugared_args))
                 } else if let [(name, name_span)] = &path.segments[..] {
                     if generic_ty_params.contains_key(name) {
                         return Err(internal_compilation_error!(WrongNumberOfArguments {

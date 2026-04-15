@@ -111,6 +111,17 @@ impl<'m> ModuleEnv<'m> {
         })
     }
 
+    /// Look up a bare native type alias by path, returning the bare native type and the source
+    /// module id (None means the current module).
+    pub fn bare_native_type_alias_with_module(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<(Option<ModuleId>, crate::containers::B<dyn BareNativeType>)>, InternalCompilationError> {
+        self.get_module_member(&path.segments, &|name, module| {
+            module.get_bare_native_type_alias(ustr(name))
+        })
+    }
+
     pub fn type_def_with_module(
         &self,
         path: &ast::Path,

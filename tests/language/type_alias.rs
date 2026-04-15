@@ -11,6 +11,8 @@
 use indoc::indoc;
 use ustr::ustr;
 
+use ferlium::std::option::some;
+
 use crate::harness::{TestSession, float, int, string};
 
 #[cfg(target_arch = "wasm32")]
@@ -124,4 +126,54 @@ fn type_aliases() {
 fn keyword_type_is_acceptable() {
     let mut session = TestSession::new();
     assert_eq!(session.run("({type: 1}: {type: int}).type"), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn native_generic_type_aliases_in_explicit_typing() {
+    // Native generic type aliases (registered via add_bare_native_type_alias_str) must be
+    // resolvable as types in Ferlium code, including in function signatures, impl headers,
+    // and trait output bindings.
+    let mut session = TestSession::new();
+
+    // A function that explicitly names a native generic type alias in its signature.
+    let result = session.run(indoc! { r#"
+        fn my_next(iter: &mut array_iterator<int>) -> None | Some(int) {
+            array_iterator_next(iter)
+        }
+        let mut it = iter([10, 20, 30]);
+        my_next(it)
+    "# });
+    assert_eq!(result, some(int(10)));
+
+    // Using a native generic type alias in return type position.
+    let result = session.run(indoc! { r#"
+        fn make_iter(arr: [int]) -> array_iterator<int> {
+            iter(arr)
+        }
+        let mut it = make_iter([5, 6, 7]);
+        next(it)
+    "# });
+    assert_eq!(result, some(int(5)));
+
+    // Using a native generic type alias in a type annotation.
+    let result = session.run(indoc! { r#"
+        let mut it = (iter([42]): array_iterator<int>);
+        next(it)
+    "# });
+    assert_eq!(result, some(int(42)));
+
+    // Using a native generic type alias in a trait impl method signature.
+    let result = session.run(indoc! { r#"
+        struct Wrapper<A> { arr: [A] }
+        impl<A> Iterator for <Self = Wrapper<A> |-> Item = A> {
+            fn next(w: &mut Wrapper<A>) -> None | Some(A) {
+                let mut it = (iter(w.arr): array_iterator<A>);
+                next(it)
+            }
+        }
+        let mut w = Wrapper { arr: [99, 88] };
+        next(w)
+    "# });
+    assert_eq!(result, some(int(99)));
 }
