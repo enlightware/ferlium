@@ -20,6 +20,7 @@ use ustr::Ustr;
 use crate::{
     Location,
     containers::{B, b},
+    effects::PrimitiveEffect,
     error::{InternalCompilationError, LocatedError},
     format::{FormatWith, write_with_separator},
     internal_compilation_error,
@@ -209,12 +210,30 @@ impl FormatWith<ModuleEnv<'_>> for PFnArgType {
     }
 }
 
+/// Effect information attached to a parsed function type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PFnEffects {
+    ImplicitPure,
+    ImplicitGeneric,
+    Explicit(Vec<PrimitiveEffect>),
+}
+
+impl PFnEffects {
+    pub fn implicit(has_generic_effects: bool) -> Self {
+        if has_generic_effects {
+            Self::ImplicitGeneric
+        } else {
+            Self::ImplicitPure
+        }
+    }
+}
+
 /// The type of a function
 #[derive(Debug, Clone, PartialEq, Eq, new)]
 pub struct PFnType {
     pub args: Vec<PFnArgType>,
     pub ret: TypeSpan<Parsed>,
-    pub effects: bool, // true if this function should have generic effects
+    pub effects: PFnEffects,
 }
 impl PFnType {
     /// Collect indices of types in ty_names that are referenced in this type.
@@ -241,7 +260,15 @@ impl FormatWith<ModuleEnv<'_>> for PFnType {
             arg.fmt_with(f, env)?;
         }
         write!(f, ") -> ")?;
-        self.ret.0.fmt_with(f, env)
+        self.ret.0.fmt_with(f, env)?;
+        if let PFnEffects::Explicit(effects) = &self.effects {
+            write!(f, " !")?;
+            if !effects.is_empty() {
+                write!(f, " ")?;
+                write_with_separator(effects, ", ", f)?;
+            }
+        }
+        Ok(())
     }
 }
 

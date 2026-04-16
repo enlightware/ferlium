@@ -224,11 +224,11 @@ impl ast::PFnType {
             generic_ty_params,
             modules_used,
         )?;
-        // if this function has generic effects, always emit variable id 0 that will be replaced by fresh variables in type inference
-        let effects = if self.effects {
-            EffType::single_variable_id(0)
-        } else {
-            EffType::empty()
+        let effects = match &self.effects {
+            ast::PFnEffects::ImplicitPure => EffType::empty(),
+            // Always emit variable id 0 here; type inference will freshen it later.
+            ast::PFnEffects::ImplicitGeneric => EffType::single_variable_id(0),
+            ast::PFnEffects::Explicit(effects) => EffType::multiple_primitive(effects),
         };
         Ok(FnType::new(args, ret, effects))
     }
