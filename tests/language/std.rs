@@ -167,6 +167,10 @@ fn array_slice() {
     assert_eq!(session.run("array_slice([1, 2, 3], 0, -1)"), int_a![1, 2]);
     assert_eq!(session.run("array_slice([1, 2, 3], -2, -1)"), int_a![2]);
     assert_eq!(session.run("array_slice([1, 2, 3], 3, 5)"), int_a![]);
+    assert_eq!(session.run("slice([1, 2, 3], 0, 2)"), int_a![1, 2]);
+    assert_eq!(session.run("slice([1, 2, 3], -2, 3)"), int_a![2, 3]);
+    assert_eq!(session.run("slice([1, 2, 3], 0, -1)"), int_a![1, 2]);
+    assert_eq!(session.run("slice([1, 2, 3], -2, -1)"), int_a![2]);
 }
 
 #[test]
@@ -1131,6 +1135,11 @@ fn string_slice() {
     // flag emoji (2 regional indicators = 1 grapheme)
     assert_eq!(session.run(r#"string_slice("🇫🇷", 0, 1)"#), string("🇫🇷"));
     assert_eq!(session.run(r#"string_slice("a🇫🇷b", 1, 2)"#), string("🇫🇷"));
+    assert_eq!(session.run(r#"slice("hello", 1, 4)"#), string("ell"));
+    assert_eq!(session.run(r#"slice("hello", 0, -1)"#), string("hell"));
+    assert_eq!(session.run(r#"slice("hello", -4, -2)"#), string("el"));
+    assert_eq!(session.run(r#"slice("a🇫🇷b", 1, 2)"#), string("🇫🇷"));
+    assert_eq!(session.run(r#"slice("a🇫🇷b", -2, -1)"#), string("🇫🇷"));
 }
 
 #[test]

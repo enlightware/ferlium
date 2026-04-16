@@ -76,3 +76,15 @@ impl Split for <Self = string, Separator = string |-> Part = string, Iter = stri
 		string_split_iterator(value, separator)
 	}
 }
+
+impl Slice for <Self = string |-> Output = string> {
+	fn slice(value: string, start: int, end: int) {
+		string_slice(value, start, end)
+	}
+}
+
+impl<A> Slice for <Self = [A] |-> Output = [A]> {
+	fn slice(value: [A], start: int, end: int) {
+		array_slice(value, start, end)
+	}
+}
