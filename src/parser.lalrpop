@@ -174,41 +174,58 @@ pub HoledType: Type = {
 // P: placeholder allowed, R: return type context
 Type<P, R>: Type = {
     PlaceholderType if P != "",
-    NonPathType<P, R>,
+    NonFunctionType<P, R>,
+    FunctionType<P, R>,
     PathType<P>,
 }
 
 NonPathType<P, R>: Type = {
+    NonFunctionType<P, R>,
+    FunctionType<P, R>,
+}
+
+NonFunctionType<P, R>: Type = {
+    UnitType,
     ArrayType<P>,
     SetType<P>,
     MapType<P>,
     RecordType<P>,
     VariantType<P, R>,
-    TupleOrFnType<P, R>,
+    ParenthesizedType<P, R>,
+    TupleType<P, R>,
 }
 
-TupleOrFnType<P, R>: Type = {
+UnitType: Type = {
     "(" ")" => Type::Unit,
-    "(" ")" <ret:EffFnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, ret.1)),
-    "(" <arg:ArgType<P, R>> ")" <ret:EffFnRet<P>?> =>?
-        Ok(if let Some(ret) = ret {
-            Type::function_type(FnType::new(vec![arg], ret.0, ret.1))
-        } else if arg.mut_ty.is_some() {
+}
+
+ParenthesizedType<P, R>: Type = {
+    "(" <arg:ArgType<P, R>> ")" =>?
+        if arg.mut_ty.is_some() {
             return error("types outside function arguments cannot be &mut".into(), arg.span);
         } else {
-            arg.ty.0
-        }),
-    "(" <arg0:ArgType<P, R>> "," <args:Sep<ArgType<P, R>, ",">> ")" <ret:EffFnRet<P>?> =>?
+            Ok(arg.ty.0)
+        }
+}
+
+TupleType<P, R>: Type = {
+    "(" <arg0:ArgType<P, R>> "," <args:Sep<ArgType<P, R>, ",">> ")" =>?
     {
         let args = ext_f(arg0, args);
-        Ok(if let Some(ret) = ret {
-            Type::function_type(FnType::new(args, ret.0, ret.1))
-        } else if let Some(arg) = args.iter().find(|a| a.mut_ty.is_some()) {
+        if let Some(arg) = args.iter().find(|a| a.mut_ty.is_some()) {
             return error("types outside function arguments cannot be &mut".into(), arg.span);
         } else {
-            Type::Tuple(args.into_iter().map(|a| a.ty).collect::<Vec<_>>())
-        })
+            Ok(Type::Tuple(args.into_iter().map(|a| a.ty).collect::<Vec<_>>()))
+        }
     }
+}
+
+FunctionType<P, R>: Type = {
+    "(" ")" <ret:EffFnRet<P>> => Type::function_type(FnType::new(vec![], ret.0, ret.1)),
+    "(" <arg:ArgType<P, R>> ")" <ret:EffFnRet<P>> =>
+        Type::function_type(FnType::new(vec![arg], ret.0, ret.1)),
+    "(" <arg0:ArgType<P, R>> "," <args:Sep<ArgType<P, R>, ",">> ")" <ret:EffFnRet<P>> =>
+        Type::function_type(FnType::new(ext_f(arg0, args), ret.0, ret.1)),
 }
 
 #[inline]
