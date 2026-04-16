@@ -680,6 +680,18 @@ fn chain() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn reverse() {
+    let mut session = TestSession::new();
+
+    assert_eq!(session.run("reverse([1, 2, 3])"), int_a![3, 2, 1]);
+    assert_eq!(
+        session.run(r#"reverse(["a", "b", "c"])"#),
+        array![string("c"), string("b"), string("a")]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn collect() {
     let mut session = TestSession::new();
     assert_eq!(

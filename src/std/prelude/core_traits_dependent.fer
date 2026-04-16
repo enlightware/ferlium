@@ -88,3 +88,19 @@ impl<A> Slice for <Self = [A] |-> Output = [A]> {
 		array_slice(value, start, end)
 	}
 }
+
+// Reverse, sort and dedup for arrays
+
+impl<A> Reverse for <Self = [A] |-> Output = [A]> {
+	fn reverse(value: [A]) -> [A] {
+		let mut result = [];
+		for item in value {
+			array_prepend(result, item);
+		};
+		result
+	}
+}
+
+// SortBy and DedupBy are temporarily left without Ferlium implementations.
+// Their natural source-level signatures need explicit pure function types,
+// which requires additional parser work.
