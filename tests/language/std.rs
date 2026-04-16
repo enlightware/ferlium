@@ -959,6 +959,27 @@ fn string_trim_and_prefix_suffix() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn scalar_parsers() {
+    let mut session = TestSession::new();
+
+    assert_eq!(session.run(r#"parse_int("42")"#), some(int(42)));
+    assert_eq!(session.run(r#"parse_int(" 42")"#), none());
+    assert_eq!(
+        session.run(r#"parse_int("999999999999999999999999999999")"#),
+        none()
+    );
+
+    assert_eq!(session.run(r#"parse_float("3.5")"#), some(float(3.5)));
+    assert_eq!(session.run(r#"parse_float("NaN")"#), none());
+    assert_eq!(session.run(r#"parse_float("inf")"#), none());
+
+    assert_eq!(session.run(r#"parse_bool("true")"#), some(bool(true)));
+    assert_eq!(session.run(r#"parse_bool("false")"#), some(bool(false)));
+    assert_eq!(session.run(r#"parse_bool("True")"#), none());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concat() {
     let mut session = TestSession::new();
     // strings

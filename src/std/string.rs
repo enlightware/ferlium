@@ -24,12 +24,15 @@ use crate::{
     error::RuntimeErrorKind,
     function::{
         BinaryNativeFnMNN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
-        NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnVN,
+        NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnNV,
+        UnaryNativeFnVN,
     },
     module::{Module, ModuleFunction},
     std::{
         default::DEFAULT_TRAIT,
         empty::EMPTY_TRAIT,
+        logic::bool_type,
+        math::{float_type, float_value, int_type, int_value},
         ordering::{ORD_TRAIT, compare},
     },
     r#type::{FnType, Type},
@@ -146,6 +149,68 @@ impl String {
 
     fn contains_substring(haystack: Self, needle: Self) -> bool {
         haystack.as_ref().contains(needle.as_ref())
+    }
+
+    fn parse_int(value: Self) -> Value {
+        value
+            .as_ref()
+            .parse::<isize>()
+            .ok()
+            .map(int_value)
+            .map(some)
+            .unwrap_or_else(none)
+    }
+
+    fn parse_int_descr() -> ModuleFunction {
+        UnaryNativeFnNV::description_with_ty(
+            Self::parse_int,
+            ["value"],
+            "Parses `value` as a decimal integer, returning `Some` on success and `None` otherwise.",
+            string_type(),
+            option_type(int_type()),
+            no_effects(),
+        )
+    }
+
+    fn parse_float(value: Self) -> Value {
+        value
+            .as_ref()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(float_value)
+            .map(some)
+            .unwrap_or_else(none)
+    }
+
+    fn parse_float_descr() -> ModuleFunction {
+        UnaryNativeFnNV::description_with_ty(
+            Self::parse_float,
+            ["value"],
+            "Parses `value` as a finite floating-point number, returning `Some` on success and `None` otherwise.",
+            string_type(),
+            option_type(float_type()),
+            no_effects(),
+        )
+    }
+
+    fn parse_bool(value: Self) -> Value {
+        match value.as_ref() {
+            "true" => some(Value::native(true)),
+            "false" => some(Value::native(false)),
+            _ => none(),
+        }
+    }
+
+    fn parse_bool_descr() -> ModuleFunction {
+        UnaryNativeFnNV::description_with_ty(
+            Self::parse_bool,
+            ["value"],
+            "Parses `value` as a boolean, accepting only `true` and `false`.",
+            string_type(),
+            option_type(bool_type()),
+            no_effects(),
+        )
     }
 
     /// Creates an iterator over the grapheme clusters of the string.
@@ -463,6 +528,9 @@ pub fn add_to_module(to: &mut Module) {
             no_effects(),
         ),
     );
+    to.add_function(ustr("parse_int"), String::parse_int_descr());
+    to.add_function(ustr("parse_float"), String::parse_float_descr());
+    to.add_function(ustr("parse_bool"), String::parse_bool_descr());
     to.add_function(
         ustr("string_push_str"),
         BinaryNativeFnMNN::description_with_default_ty(
