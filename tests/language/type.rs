@@ -8,7 +8,7 @@
 //
 
 use ferlium::{
-    effects::EffType,
+    effects::{EffType, PrimitiveEffect, effect, effects},
     error::CompilationErrorImpl,
     format::{FormatWith, FormatWithData},
     std::{
@@ -298,6 +298,78 @@ fn fn_type() {
             Type::unit(),
             EffType::single_variable_id(0)
         ))
+    );
+    assert_eq!(
+        session.resolve_defined_type("((int) -> int !)").unwrap(),
+        Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
+    );
+    assert_eq!(
+        session
+            .resolve_defined_type("((int) -> int ! fallible)")
+            .unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type()],
+            int_type(),
+            effect(PrimitiveEffect::Fallible)
+        )
+    );
+    assert_eq!(
+        session
+            .resolve_defined_type("((int) -> int ! write, read)")
+            .unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type()],
+            int_type(),
+            effects(&[PrimitiveEffect::Read, PrimitiveEffect::Write])
+        )
+    );
+    assert_eq!(
+        session.resolve_holed_type("((int) -> int !)").unwrap(),
+        Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty())
+    );
+    assert_eq!(
+        session.resolve_holed_type("((int) -> int ! read)").unwrap(),
+        Type::function_by_val_with_effects([int_type()], int_type(), effect(PrimitiveEffect::Read))
+    );
+    assert_eq!(
+        session
+            .resolve_defined_type("(int) -> ((int) -> int ! read)")
+            .unwrap(),
+        Type::function_by_val_with_effects(
+            [int_type()],
+            Type::function_by_val_with_effects(
+                [int_type()],
+                int_type(),
+                effect(PrimitiveEffect::Read)
+            ),
+            EffType::empty()
+        )
+    );
+    assert!(
+        format!(
+            "{}",
+            FormatWithData::new(
+                &session
+                    .resolve_defined_type("((int) -> int ! unknown)")
+                    .unwrap_err(),
+                session.source_table(),
+            )
+        )
+        .starts_with("Parsing failed: unknown effect `unknown`")
+    );
+    assert_eq!(
+        session
+            .resolve_defined_type("(() -> ((int) -> int) ! read)")
+            .unwrap(),
+        Type::function_by_val_with_effects(
+            [],
+            Type::function_by_val_with_effects(
+                [int_type()],
+                int_type(),
+                EffType::empty()
+            ),
+            effect(PrimitiveEffect::Read)
+        )
     );
 
     assert!(

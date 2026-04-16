@@ -1143,10 +1143,35 @@ impl Default for Compiler {
 }
 
 fn remove_effects(signature: &str) -> &str {
-    match signature.rsplit_once("!") {
-        // If "!" is found, return the part before it (removing the effects)
-        Some((before_effects, _)) => before_effects.trim(),
-        // If "!" is not found, return the original string (no effects to remove)
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut angle_depth = 0usize;
+    let mut bang_at_toplevel = None;
+
+    for (index, ch) in signature.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '!' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && angle_depth == 0 =>
+            {
+                bang_at_toplevel = Some(index);
+            }
+            _ => {}
+        }
+    }
+
+    match bang_at_toplevel {
+        Some(index) => signature[..index].trim(),
         None => signature.trim(),
     }
 }
@@ -1241,5 +1266,17 @@ mod tests {
         let compiler = build("fn main(x) { string_len(x) }");
         let signature = compiler.fn_signature("main").unwrap();
         assert_eq!(signature, "(string) -> int");
+    }
+
+    #[test]
+    fn remove_effects_ignores_nested_function_effects() {
+        assert_eq!(
+            remove_effects("((int) -> int ! read) -> int"),
+            "((int) -> int ! read) -> int"
+        );
+        assert_eq!(
+            remove_effects("((int) -> int ! read) -> int ! write"),
+            "((int) -> int ! read) -> int"
+        );
     }
 }

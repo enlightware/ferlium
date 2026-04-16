@@ -1,5 +1,6 @@
 use crate::{SourceId, Location, LocatedError};
 use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::effects::PrimitiveEffect;
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
 use crate::parser_helpers::*;
@@ -174,12 +175,14 @@ pub HoledType: Type = {
 // P: placeholder allowed, R: return type context
 Type<P, R>: Type = {
     PlaceholderType if P != "",
+    ExplicitFunctionType<P, R>,
     NonFunctionType<P, R>,
     FunctionType<P, R>,
     PathType<P>,
 }
 
 NonPathType<P, R>: Type = {
+    ExplicitFunctionType<P, R>,
     NonFunctionType<P, R>,
     FunctionType<P, R>,
 }
@@ -237,6 +240,31 @@ EffFnRet<P>: (TypeSpan, PFnEffects) = {
 #[inline]
 SpFnRet<P>: TypeSpan = {
     "->" <ret:Sp<Type<P, "">>> => ret
+}
+
+FnEffectsAnnotation: (PFnEffects, Location) = {
+    <l:@L> "!" <effects:Sep<PrimitiveEffectName, ",">> <r:@R> =>
+        (PFnEffects::Explicit(effects), span(l, r, source_id)),
+}
+
+ExplicitFunctionType<P, R>: Type = {
+    "(" <fn_ty:FunctionType<P, R>> <effects:FnEffectsAnnotation> ")" =>? {
+        let Type::Function(fn_ty) = fn_ty else {
+            unreachable!();
+        };
+        let mut fn_ty = *fn_ty;
+        fn_ty.effects = effects.0;
+        Ok(Type::function_type(fn_ty))
+    }
+}
+
+PrimitiveEffectName: PrimitiveEffect = {
+    <name:Sp<UIdentifier>> =>? match name.0.as_str() {
+        "read" => Ok(PrimitiveEffect::Read),
+        "write" => Ok(PrimitiveEffect::Write),
+        "fallible" => Ok(PrimitiveEffect::Fallible),
+        _ => error(format!("unknown effect `{}`", name.0), name.1),
+    }
 }
 
 ArgType<P, R>: FnArgType = {

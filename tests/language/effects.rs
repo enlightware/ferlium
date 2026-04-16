@@ -231,12 +231,25 @@ fn effects_of_fn_called_multiple_times() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn effects_in_fn_type_ascription() {
     let mut session = TestSession::new();
+    use PrimitiveEffect::*;
 
     test_mod(
         &mut session,
         "fn g(f: (() -> (), () -> ())) { (f.0(), f.1()) }",
         "g",
         effect_vars(&[0, 1]),
+    );
+    test_mod(
+        &mut session,
+        "fn g(f: ((() -> () !), (() -> () ! read))) { (f.0(), f.1()) }",
+        "g",
+        effect(Read),
+    );
+    test_mod(
+        &mut session,
+        "fn g(f: ((() -> () ! fallible), (() -> () ! read, write))) { (f.0(), f.1()) }",
+        "g",
+        effects(&[Fallible, Read, Write]),
     );
 }
 
