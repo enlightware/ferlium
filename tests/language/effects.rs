@@ -8,6 +8,7 @@
 //
 use test_log::test;
 
+use indoc::indoc;
 use ustr::ustr;
 
 use crate::harness::TestSession;
@@ -48,42 +49,17 @@ fn effects_in_mod() {
 
     let mut session = TestSession::new();
 
-    test_mod(
-        &mut session,
-        "fn r() { effects::read() } fn w() { effects::write() }",
-        "r",
-        effect(Read),
-    );
-    test_mod(
-        &mut session,
-        "fn r() { effects::read() } fn w() { effects::write() }",
-        "w",
-        effect(Write),
-    );
-    test_mod(
-        &mut session,
-        "fn rw() { effects::write(); effects::read() }",
-        "rw",
-        effects(&[Read, Write]),
-    );
-    test_mod(
-        &mut session,
-        "fn rw() { effects::write(); effects::read() } fn o() { rw() } ",
-        "o",
-        effects(&[Read, Write]),
-    );
-    test_mod(
-        &mut session,
-        "fn r() { effects::read() } fn t1() { r() } fn t2() { t1() }",
-        "t2",
-        effect(Read),
-    );
-    test_mod(
-        &mut session,
-        "fn rw() { effects::write(); effects::read() } fn o() { ((rw, ).0)() } ",
-        "o",
-        effects(&[Read, Write]),
-    );
+    let mod_src = "fn r() { effects::read() } fn w() { effects::write() }";
+    test_mod(&mut session, mod_src, "r", effect(Read));
+    test_mod(&mut session, mod_src, "w", effect(Write));
+    let mod_src = "fn rw() { effects::write(); effects::read() }";
+    test_mod(&mut session, mod_src, "rw", effects(&[Read, Write]));
+    let mod_src = "fn rw() { effects::write(); effects::read() } fn o() { rw() } ";
+    test_mod(&mut session, mod_src, "o", effects(&[Read, Write]));
+    let mod_src = "fn r() { effects::read() } fn t1() { r() } fn t2() { t1() }";
+    test_mod(&mut session, mod_src, "t2", effect(Read));
+    let mod_src = "fn rw() { effects::write(); effects::read() } fn o() { ((rw, ).0)() } ";
+    test_mod(&mut session, mod_src, "o", effects(&[Read, Write]));
 }
 
 #[test]
@@ -108,26 +84,14 @@ fn fn_variance() {
     let mut session = TestSession::new();
 
     // passing pure to read
-    test_mod(
-        &mut session,
-        "fn pure() { () } fn f() { effects::take_read(pure) } ",
-        "f",
-        effect(Read),
-    );
+    let mod_src = "fn pure() { () } fn f() { effects::take_read(pure) } ";
+    test_mod(&mut session, mod_src, "f", effect(Read));
 
     // passing read to read
-    test_mod(
-        &mut session,
-        "fn f() { effects::take_read(effects::read) } ",
-        "f",
-        effect(Read),
-    );
-    test_mod(
-        &mut session,
-        "fn r() { effects::read() } fn f() { effects::take_read(r) } ",
-        "f",
-        effect(Read),
-    );
+    let mod_src = "fn f() { effects::take_read(effects::read) } ";
+    test_mod(&mut session, mod_src, "f", effect(Read));
+    let mod_src = "fn r() { effects::read() } fn f() { effects::take_read(r) } ";
+    test_mod(&mut session, mod_src, "f", effect(Read));
 
     // passing write to read, should fail
     session
@@ -155,34 +119,34 @@ fn effects_from_fn_value() {
 
     let mut session = TestSession::new();
 
-    let code1 = "fn a(f) { f() } fn b() { a(|| effects::write()) }";
-    test_mod(&mut session, code1, "a", effect_var(0));
-    test_mod(&mut session, code1, "b", effect(Write));
+    let mod_src = "fn a(f) { f() } fn b() { a(|| effects::write()) }";
+    test_mod(&mut session, mod_src, "a", effect_var(0));
+    test_mod(&mut session, mod_src, "b", effect(Write));
 
-    let code2 = "fn a(f, g) { b(f); f(); g(); () } fn b(f) { a(f, || effects::write()) }";
+    let mod_src = "fn a(f, g) { b(f); f(); g(); () } fn b(f) { a(f, || effects::write()) }";
     test_mod(
         &mut session,
-        code2,
+        mod_src,
         "a",
         effect(Write).union(&effect_vars(&[0, 1])),
     );
     test_mod(
         &mut session,
-        code2,
+        mod_src,
         "b",
         effect(Write).union(&effect_var(0)),
     );
 
-    let code3 = "fn b(f) { a(f, || effects::write()) } fn a(f, g) { b(f); f(); g(); () } ";
+    let mod_src = "fn b(f) { a(f, || effects::write()) } fn a(f, g) { b(f); f(); g(); () } ";
     test_mod(
         &mut session,
-        code3,
+        mod_src,
         "a",
         effect(Write).union(&effect_vars(&[0, 1])),
     );
     test_mod(
         &mut session,
-        code3,
+        mod_src,
         "b",
         effect(Write).union(&effect_var(0)),
     );
@@ -193,19 +157,11 @@ fn effects_from_fn_value() {
 fn effects_in_recursive_fns() {
     let mut session = TestSession::new();
 
-    test_mod(
-        &mut session,
-        "fn a(f) { b(f); f() } fn b(f) { a(f) }",
-        "b",
-        effect_var(0),
-    );
+    let mod_src = "fn a(f) { b(f); f() } fn b(f) { a(f) }";
+    test_mod(&mut session, mod_src, "b", effect_var(0));
 
-    test_mod(
-        &mut session,
-        "fn a(f, g) { b(f, g); f() } fn b(f, g) { a(f, g); g() }",
-        "a",
-        effect_vars(&[0, 1]),
-    );
+    let mod_src = "fn a(f, g) { b(f, g); f() } fn b(f, g) { a(f, g); g() }";
+    test_mod(&mut session, mod_src, "a", effect_vars(&[0, 1]));
 }
 
 #[test]
@@ -213,18 +169,10 @@ fn effects_in_recursive_fns() {
 fn effects_of_fn_called_multiple_times() {
     let mut session = TestSession::new();
 
-    test_mod(
-        &mut session,
-        "fn a(f) { f(); f(); f(); () }",
-        "a",
-        effect_var(0),
-    );
-    test_mod(
-        &mut session,
-        "fn a(f, g) { f(); g(); g(); f(); f(); g(); () }",
-        "a",
-        effect_vars(&[0, 1]),
-    );
+    let mod_src = "fn a(f) { f(); f(); f(); () }";
+    test_mod(&mut session, mod_src, "a", effect_var(0));
+    let mod_src = "fn a(f, g) { f(); g(); g(); f(); f(); g(); () }";
+    test_mod(&mut session, mod_src, "a", effect_vars(&[0, 1]));
 }
 
 #[test]
@@ -233,21 +181,14 @@ fn effects_in_fn_type_ascription() {
     let mut session = TestSession::new();
     use PrimitiveEffect::*;
 
+    let mod_src = "fn g(f: (() -> (), () -> ())) { (f.0(), f.1()) }";
+    test_mod(&mut session, mod_src, "g", effect_vars(&[0, 1]));
+    let mod_src = "fn g(f: ((() -> () !), (() -> () ! read))) { (f.0(), f.1()) }";
+    test_mod(&mut session, mod_src, "g", effect(Read));
+    let mod_src = "fn g(f: ((() -> () ! fallible), (() -> () ! read, write))) { (f.0(), f.1()) }";
     test_mod(
         &mut session,
-        "fn g(f: (() -> (), () -> ())) { (f.0(), f.1()) }",
-        "g",
-        effect_vars(&[0, 1]),
-    );
-    test_mod(
-        &mut session,
-        "fn g(f: ((() -> () !), (() -> () ! read))) { (f.0(), f.1()) }",
-        "g",
-        effect(Read),
-    );
-    test_mod(
-        &mut session,
-        "fn g(f: ((() -> () ! fallible), (() -> () ! read, write))) { (f.0(), f.1()) }",
+        mod_src,
         "g",
         effects(&[Fallible, Read, Write]),
     );
@@ -259,18 +200,10 @@ fn array_access_must_be_fallible() {
     use PrimitiveEffect::*;
     let mut session = TestSession::new();
 
-    test_mod(
-        &mut session,
-        "fn f(a: [_]) { a[0] } ",
-        "f",
-        effect(Fallible),
-    );
-    test_mod(
-        &mut session,
-        "fn f() { let mut a = []; a[0] = 1; } ",
-        "f",
-        effect(Fallible),
-    );
+    let mod_src = "fn f(a: [_]) { a[0] } ";
+    test_mod(&mut session, mod_src, "f", effect(Fallible));
+    let mod_src = "fn f() { let mut a = []; a[0] = 1; } ";
+    test_mod(&mut session, mod_src, "f", effect(Fallible));
 }
 
 #[test]
@@ -308,16 +241,15 @@ fn trait_impl_effect_must_have_at_least_def_effects() {
     let mut session = TestSession::new();
 
     // Deserialize trait method is fallible, pure implementation is OK (subset).
-    let module = session.compile_and_get_module(
-        r#"
-        struct S;
-        impl Deserialize {
-            fn deserialize(v) {
-                S
-            }
-        }
-        "#,
-    );
+    let mod_src = indoc! { r#"
+	    struct S;
+	    impl Deserialize {
+	        fn deserialize(v) {
+	            S
+	        }
+	    }
+    "# };
+    let module = session.compile_and_get_module(mod_src);
     let fn_id = module
         .get_impl_data(LocalImplId::from_index(0))
         .unwrap()

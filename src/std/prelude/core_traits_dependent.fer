@@ -89,18 +89,113 @@ impl<A> Slice for <Self = [A] |-> Output = [A]> {
 	}
 }
 
-// Reverse, sort and dedup for arrays
+// Reverse for arrays
 
-impl<A> Reverse for <Self = [A] |-> Output = [A]> {
-	fn reverse(value: [A]) -> [A] {
-		let mut result = [];
-		for item in value {
-			array_prepend(result, item);
-		};
-		result
+impl<A> Reverse for <Self = [A]> {
+	fn reverse(value: &mut [A]) {
+		let mut left = 0;
+		let mut right = len(value);
+		loop {
+			if left >= right {
+				return ()
+			};
+			right -= 1;
+			if left >= right {
+				return ()
+			};
+			let temp = value[left];
+			value[left] = value[right];
+			value[right] = temp;
+			left += 1;
+		}
 	}
 }
 
-// SortBy and DedupBy are temporarily left without Ferlium implementations.
-// Their natural source-level signatures need explicit pure function types,
-// which requires additional parser work.
+/// Returns a reversed copy of `value`.
+fn reversed<S>(value: S) -> S
+where
+	Reverse<Self = S>
+{
+	let mut result = value;
+	reverse(result);
+	result
+}
+
+// Sort for arrays
+
+fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: ((A, A) -> Ordering !)) {
+	let mut left = start;
+	let mut right = middle;
+
+	for index in start..end {
+		if left < middle {
+			if right >= end {
+				target[index] = source[left];
+				left += 1;
+			} else if compare(source[left], source[right]) != Greater {
+				// Keep equal elements from the left run first to preserve stability.
+				target[index] = source[left];
+				left += 1;
+			} else {
+				target[index] = source[right];
+				right += 1;
+			}
+		} else {
+			target[index] = source[right];
+			right += 1;
+		}
+	};
+}
+
+fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: ((A, A) -> Ordering !)) {
+	if end - start > 1 {
+		let middle = shift_right(start + end, 1);
+		array_split_merge_by(target, source, start, middle, compare);
+		array_split_merge_by(target, source, middle, end, compare);
+		array_merge_ranges_by(source, target, start, middle, end, compare)
+	}
+}
+
+/// Sorts `value` in place with a stable merge sort using `compare`.
+fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering !)) {
+	let size = len(value);
+	if size > 1 {
+		// Use one full-size scratch array and alternate source/target roles recursively.
+		let mut scratch = value;
+		array_split_merge_by(scratch, value, 0, size, compare);
+	}
+}
+
+impl<A> SortBy for <Self = [A] |-> Item = A> {
+	fn sort_by(value: &mut [A], compare: ((A, A) -> Ordering !)) {
+		array_merge_sort_by(value, compare)
+	}
+}
+
+/// Sorts `value` in place using its default ordering.
+fn sort<S, A>(value: &mut S)
+where
+	SortBy<Self = S |-> Item = A>,
+	A: Ord
+{
+	sort_by(value, |left, right| cmp(left, right))
+}
+
+/// Returns a sorted copy of `value` using `compare`.
+fn sorted_by<S, A>(value: S, compare: ((A, A) -> Ordering !)) -> S
+where
+	SortBy<Self = S |-> Item = A>
+{
+	let mut result = value;
+	sort_by(result, compare);
+	result
+}
+
+/// Returns a sorted copy of `value` using its default ordering.
+fn sorted<S, A>(value: S) -> S
+where
+	SortBy<Self = S |-> Item = A>,
+	A: Ord
+{
+	sorted_by(value, |left, right| cmp(left, right))
+}

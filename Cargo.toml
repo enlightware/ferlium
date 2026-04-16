@@ -14,7 +14,7 @@ rust-version = "1.85"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-lalrpop = "0.22.0"
+lalrpop = "0.23.1"
 
 [dev-dependencies]
 test-log = "0.2.16"

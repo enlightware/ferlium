@@ -363,11 +363,7 @@ fn fn_type() {
             .unwrap(),
         Type::function_by_val_with_effects(
             [],
-            Type::function_by_val_with_effects(
-                [int_type()],
-                int_type(),
-                EffType::empty()
-            ),
+            Type::function_by_val_with_effects([int_type()], int_type(), EffType::empty()),
             effect(PrimitiveEffect::Read)
         )
     );

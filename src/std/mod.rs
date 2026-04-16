@@ -25,7 +25,6 @@ pub mod cast;
 pub mod concat;
 pub mod contains;
 pub mod core;
-pub mod dedup;
 pub mod default;
 pub mod empty;
 pub mod flow;
@@ -64,7 +63,6 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     contains::add_to_module(&mut module);
     reverse::add_to_module(&mut module);
     sort::add_to_module(&mut module);
-    dedup::add_to_module(&mut module);
     slice::add_to_module(&mut module);
     split::add_to_module(&mut module);
     math::add_to_module(&mut module);

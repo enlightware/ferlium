@@ -2,6 +2,56 @@
 
 After learning about functions as values and trait-based abstraction, you can use Ferlium's standard-library sequence combinators more effectively. This chapter covers the main transformation and reduction functions over collections and iterators, and explains when results are built eagerly versus lazily.
 
+## Sorting
+
+Sorting comes in two forms:
+
+- `sort(array)` sorts an array in place
+- `sorted(array)` returns a sorted copy
+
+For example:
+
+```ferlium
+let mut xs = [3, 1, 2, 1];
+sort(xs);
+xs
+```
+
+```ferlium
+sorted([3, 1, 2, 1])
+```
+
+Ferlium's array sort is stable, so equal elements keep their relative order.
+
+When you need a custom ordering, use `sort_by` or `sorted_by`:
+
+```ferlium
+let mut xs = [(1, "b"), (0, "x"), (1, "a")];
+sort_by(xs, |left, right| cmp(left.0, right.0));
+xs
+```
+
+```ferlium
+sorted_by([(1, "b"), (0, "x"), (1, "a")], |left, right| cmp(left.0, right.0))
+```
+
+## Reversing
+
+Arrays also support reversal in two forms:
+
+```ferlium
+let mut xs = [1, 2, 3];
+reverse(xs);
+xs
+```
+
+```ferlium
+reversed([1, 2, 3])
+```
+
+`reverse` mutates an array in place.
+`reversed` returns a reversed copy.
+
 ## Transforming sequences
 
 Ferlium provides `map`, `filter`, and `filter_map` for both collections and iterators.
@@ -48,7 +98,7 @@ The same eager/lazy distinction applies to `filter` and `filter_map`.
 
 ### Callback purity
 
-Callbacks passed to `map`, `filter`, and `filter_map` are currently required to be pure.
+Callbacks passed to `map`, `filter`, and `filter_map` and `sort` functions are currently required to be pure.
 
 ## Collecting results
 

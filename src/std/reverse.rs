@@ -10,7 +10,7 @@
 use std::sync::LazyLock;
 
 use crate::{
-    effects::EffType,
+    effects::effect,
     function::FunctionDefinition,
     module::Module,
     r#trait::TraitRef,
@@ -22,18 +22,18 @@ use FunctionDefinition as Def;
 pub static REVERSE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     TraitRef::new_with_self_input_type(
         "Reverse",
-        "A value that can produce a reversed version of itself.",
-        ["Output"],
+        "A value that can be reversed in place.",
+        [],
         [(
             "reverse",
             Def::new_infer_quantifiers(
-                FnType::new_by_val(
-                    [Type::variable_id(0)],
-                    Type::variable_id(1),
-                    EffType::empty(),
+                FnType::new_mut_resolved(
+                    [(Type::variable_id(0), true)],
+                    Type::unit(),
+                    effect(crate::effects::PrimitiveEffect::Fallible),
                 ),
                 ["value"],
-                "Returns the elements of `value` in reverse order.",
+                "Reverses `value` in place.",
             ),
         )],
     )

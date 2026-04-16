@@ -23,24 +23,27 @@ use FunctionDefinition as Def;
 pub static SORT_BY_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     TraitRef::new_with_self_input_type(
         "SortBy",
-        "A value that can be sorted with a custom comparator.",
-        ["Item", "Output"],
+        "A value that can be sorted in place with a custom comparator.",
+        ["Item"],
         [(
             "sort_by",
             Def::new_infer_quantifiers(
-                FnType::new_by_val(
+                FnType::new_mut_resolved(
                     [
-                        Type::variable_id(0),
-                        Type::function_by_val(
-                            [Type::variable_id(1), Type::variable_id(1)],
-                            ordering_type(),
+                        (Type::variable_id(0), true),
+                        (
+                            Type::function_by_val(
+                                [Type::variable_id(1), Type::variable_id(1)],
+                                ordering_type(),
+                            ),
+                            false,
                         ),
                     ],
-                    Type::variable_id(2),
+                    Type::unit(),
                     effect(PrimitiveEffect::Fallible),
                 ),
                 ["value", "compare"],
-                "Returns a stable sort of `value` using `compare`.",
+                "Sorts `value` in place using `compare`.",
             ),
         )],
     )

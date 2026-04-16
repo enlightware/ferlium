@@ -736,7 +736,7 @@ StructVariantPattern: PatK = {
 }
 
 LiteralPatternKind: PatK = {
-    LiteralPattern => PatK::Literal(<>.0, <>.1),
+    <pat:LiteralPattern> => PatK::Literal(pat.0, pat.1),
 }
 
 LiteralPattern = {
@@ -771,7 +771,7 @@ TupleLiteralPattern: (LiteralValue, IrType) = {
 }
 
 LiteralExpr: ExprKind = {
-    LiteralValue => ExprKind::literal(<>.0.into_value(), <>.1),
+    <val:LiteralValue> => ExprKind::literal(val.0.into_value(), val.1),
 }
 
 LiteralValue = {
@@ -1109,19 +1109,19 @@ OpEqual: Vec<&'static str> = {
 // Build an Expr out of an ExprKind by adding its span
 #[inline]
 Es<K>: PExprId = {
-    Sp<K> => arena.alloc(Expr::new(<>.0, <>.1)),
+    <e:Sp<K>> => arena.alloc(Expr::new(e.0, e.1)),
 };
 
 // Build a Pattern out of an PatternKind by adding its span
 #[inline]
 Ps<T>: Pattern = {
-    Sp<T> => Pattern::new(<>.0, <>.1),
+    <pat:Sp<T>> => Pattern::new(pat.0, pat.1),
 };
 
 // Build a LetPattern out of an LetPatternKind by adding its span
 #[inline]
 Lps<T>: LetPattern = {
-    Sp<T> => LetPattern::new(<>.0, <>.1),
+    <pat:Sp<T>> => LetPattern::new(pat.0, pat.1),
 };
 
 // Return T along with its location

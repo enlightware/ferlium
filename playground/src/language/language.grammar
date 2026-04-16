@@ -117,6 +117,7 @@ attrMetaItem {
 
 TypeAllowRecordVariant {
     placeholderType
+    | explicitFnTypeAllowRecord
     | PathType
     | arrayType
     | recordType
@@ -126,6 +127,7 @@ TypeAllowRecordVariant {
 
 TypeNoRecordVariant {
     placeholderType
+    | explicitFnTypeNoRecord
     | PathType
     | arrayType
     | recordType
@@ -134,7 +136,8 @@ TypeNoRecordVariant {
 }
 
 AliasType {
-    PathType
+    explicitFnTypeAllowRecord
+    | PathType
     | arrayType
     | recordType
     | variantTypeAllowRecord
@@ -160,8 +163,38 @@ tupleOrFnTypeNoRecord {
     | '(' (argTypeNoRecord ',')* argTypeNoRecord? ')' fnRet?
 }
 
+explicitFnTypeAllowRecord {
+    '(' fnTypeAllowRecord fnEffects ')'
+}
+
+explicitFnTypeNoRecord {
+    '(' fnTypeNoRecord fnEffects ')'
+}
+
+fnTypeAllowRecord {
+    '(' ')' fnRet
+    | '(' (argTypeAllowRecord ',')* argTypeAllowRecord? ')' fnRet
+}
+
+fnTypeNoRecord {
+    '(' ')' fnRet
+    | '(' (argTypeNoRecord ',')* argTypeNoRecord? ')' fnRet
+}
+
 fnRet {
     '->' TypeNoRecordVariant
+}
+
+fnEffects {
+    '!' effectList?
+}
+
+effectList {
+    effectName (',' effectName)*
+}
+
+effectName {
+    Identifier
 }
 
 argTypeAllowRecord {

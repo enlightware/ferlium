@@ -683,11 +683,83 @@ fn chain() {
 fn reverse() {
     let mut session = TestSession::new();
 
-    assert_eq!(session.run("reverse([1, 2, 3])"), int_a![3, 2, 1]);
     assert_eq!(
-        session.run(r#"reverse(["a", "b", "c"])"#),
+        session.run("let mut values = [1, 2, 3]; reverse(values); values"),
+        int_a![3, 2, 1]
+    );
+    assert_eq!(
+        session.run(r#"let mut values = ["a", "b", "c"]; reverse(values); values"#),
         array![string("c"), string("b"), string("a")]
     );
+    assert_eq!(session.run("reversed([1, 2, 3])"), int_a![3, 2, 1]);
+    assert_eq!(
+        session.run("let values = [1, 2, 3]; (values, reversed(values))"),
+        tuple!(int_a![1, 2, 3], int_a![3, 2, 1])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn sort() {
+    let mut session = TestSession::new();
+
+    assert_eq!(
+        session.run("let mut values = [3, 1, 2, 1]; sort(values); values"),
+        int_a![1, 1, 2, 3]
+    );
+    assert_eq!(
+        session.run(r#"let mut values = ["b", "a", "c"]; sort(values); values"#),
+        array![string("a"), string("b"), string("c")]
+    );
+    assert_eq!(
+        session
+            .run(r#"let mut values = [(1, "b"), (0, "x"), (1, "a")]; sort_by(values, |left, right| cmp(left.0, right.0)); values"#),
+        array![
+            tuple!(int(0), string("x")),
+            tuple!(int(1), string("b")),
+            tuple!(int(1), string("a"))
+        ]
+    );
+    assert_eq!(session.run("sorted([3, 1, 2, 1])"), int_a![1, 1, 2, 3]);
+    assert_eq!(
+        session.run("let values = [3, 1, 2, 1]; (values, sorted(values))"),
+        tuple!(int_a![3, 1, 2, 1], int_a![1, 1, 2, 3])
+    );
+    assert_eq!(
+        session.run(
+            r#"sorted_by([(1, "b"), (0, "x"), (1, "a")], |left, right| cmp(left.0, right.0))"#
+        ),
+        array![
+            tuple!(int(0), string("x")),
+            tuple!(int(1), string("b")),
+            tuple!(int(1), string("a"))
+        ]
+    );
+
+    use PrimitiveEffect::*;
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { let mut values = [3, 1, 2]; sort(values) }",
+        "f",
+        effect(Fallible),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { let mut values = [3, 1, 2]; sort_by(values, |left, right| cmp(left, right)) }",
+        "f",
+        effect(Fallible),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { sorted([3, 1, 2]) }",
+        "f",
+        effect(Fallible),
+    );
+    session
+        .fail_compilation(
+            "fn f() { let mut values = [1, 2]; sort_by(values, |left, right| { effects::read(); cmp(left, right) }) }",
+        )
+        .expect_invalid_effect_dependency(effect(Read), no_effects());
 }
 
 #[test]
