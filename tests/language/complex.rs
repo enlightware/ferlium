@@ -622,7 +622,7 @@ fn early_returns_in_unexpected_places() {
         session.run(indoc! { r#"
             fn f() {
                 let arr = [1, 2, 3];
-                array_map(arr, |x| { if x == 2 { return 42 } else { x } })
+                map(arr, |x| { if x == 2 { return 42 } else { x } })
             }
             f()
         "# }),

@@ -197,38 +197,6 @@ fn array_concat() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn array_map() {
-    let mut session = TestSession::new();
-    assert_eq!(session.run("array_map([1], |x| x)"), int_a![1]);
-    assert_eq!(session.run("array_map([1], |x| x + 1)"), int_a![2]);
-    assert_eq!(
-        session.run("array_map([1, 2, 3], |x| x + 1)"),
-        int_a![2, 3, 4]
-    );
-    assert_eq!(
-        session.run("array_map([1, 2, 3], |x| x >= 2)"),
-        bool_a![false, true, true]
-    );
-    assert_eq!(
-        session.run("array_map([(1, 2), (2, 3), (3, 4)], |v| v.0 + v.1)"),
-        int_a![3, 5, 7]
-    );
-    use PrimitiveEffect::*;
-    test_mod_for_effects(
-        &mut session,
-        "fn f() { let a = [1]; array_map(a, |v| { v >= 1 }) }",
-        "f",
-        no_effects(),
-    );
-    test_mod_for_effects(
-        &mut session,
-        "fn f() { let a = [1]; array_map(a, |v| { effects::read(); v >= 1 }) }",
-        "f",
-        effect(Read),
-    );
-}
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_any() {
     let mut session = TestSession::new();
     assert_eq!(

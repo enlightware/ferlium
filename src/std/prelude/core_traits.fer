@@ -111,24 +111,18 @@ fn array_peek_back(array) -> None | Some(_) {
 	}
 }
 
-/// Maps a function over an array, returning a new array with the results.
-fn array_map(array: [_], f) {
-	let mut result = [];
-	for a in array {
-		array_append(result, f(a));
-	};
-	result
-}
-
 impl Concat {
 	fn concat(left, right) {
 		array_concat(left, right)
 	}
 }
 
-impl Cast {
-	fn cast(array) {
-		array_map(array, |element| cast(element))
+impl<F, T> Cast for <From = [F], To = [T]>
+where
+	Cast<From = F, To = T>
+{
+	fn cast(array: [F]) -> [T] {
+		map(array, (|element| cast(element): (F) -> T))
 	}
 }
 
@@ -726,7 +720,7 @@ impl Deserialize {
 // Serde for arrays
 impl Serialize {
 	fn serialize(a: [_]) {
-		let mut result = [];
+		let mut result = array_with_capacity(array_len(a));
 		for value in a {
 			array_append(result, serialize(value));
 		};
@@ -737,7 +731,7 @@ impl Deserialize {
 	fn deserialize(a) {
 		match (a) {
 			Array(a) => {
-				let mut result = [];
+				let mut result = array_with_capacity(array_len(a));
 				for i in 0..array_len(a) {
 					array_append(result, deserialize(a[i]));
 				};

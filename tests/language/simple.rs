@@ -2033,7 +2033,7 @@ fn fn_pipes() {
         float(3.5)
     );
     assert_eq!(
-        session.run("[1, 2] |> array_concat([3, 4]) |> array_map(|x| x*x)"),
+        session.run("[1, 2] |> concat([3, 4]) |> map(|x| x*x)"),
         int_a![1, 4, 9, 16]
     );
 }
