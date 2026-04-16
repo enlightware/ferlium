@@ -646,15 +646,14 @@ pub(super) fn extend_generic_ty_params(
     generic_params: &[UstrSpan],
     owner: GenericParamsOwner,
 ) -> Result<GenericTyParams, InternalCompilationError> {
-    let mut generic_ty_params = existing.clone();
-    let mut next_index = generic_ty_params
+    let next_index = existing
         .values()
         .map(TypeVar::name)
         .max()
         .map_or(0, |index| index + 1);
-    for param in generic_params.iter() {
-        let ty_var = TypeVar::new(next_index);
-        next_index += 1;
+    let mut generic_ty_params = existing.clone();
+    for (generic_index, param) in generic_params.iter().enumerate() {
+        let ty_var = TypeVar::new(next_index + generic_index as u32);
         if generic_ty_params.insert(param.0, ty_var).is_some() {
             return Err(invalid_generic_params_error(owner, param.0, param.1));
         }

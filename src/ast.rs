@@ -319,6 +319,7 @@ impl PType {
     ) -> Result<(), InternalCompilationError> {
         use PType::*;
         match self {
+            #[allow(clippy::collapsible_match)]
             Path(path) => {
                 if path.segments.len() == 1 {
                     let ty_name = path.segments[0].0;

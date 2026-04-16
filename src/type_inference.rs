@@ -1591,7 +1591,7 @@ impl TypeInference {
         }
         // Reorder the names, the types and the nodes to have fields sorted by name.
         let mut fields = fields.iter().collect::<Vec<_>>();
-        fields.sort_by(|(name_a, _), (name_b, _)| name_a.0.cmp(&name_b.0));
+        fields.sort_by_key(|(name_a, _)| name_a.0);
         Ok(fields)
     }
 
@@ -2906,9 +2906,7 @@ impl UnifiedTypeInference {
                         sub_or_same: SameType,
                     }));
                 }
-                for (cur_arg_ty, exp_arg_ty) in
-                    cur.arguments.into_iter().zip(exp.arguments.into_iter())
-                {
+                for (cur_arg_ty, exp_arg_ty) in cur.arguments.into_iter().zip(exp.arguments) {
                     self.unify_sub_or_same_type(
                         cur_arg_ty,
                         current_span,
@@ -2929,7 +2927,7 @@ impl UnifiedTypeInference {
                         sub_or_same,
                     }));
                 }
-                for (cur_variant, exp_variant) in cur.into_iter().zip(exp.into_iter()) {
+                for (cur_variant, exp_variant) in cur.into_iter().zip(exp) {
                     if cur_variant.0 != exp_variant.0 {
                         return Err(internal_compilation_error!(TypeMismatch {
                             current_ty,
@@ -2959,7 +2957,7 @@ impl UnifiedTypeInference {
                         sub_or_same,
                     }));
                 }
-                for (cur_el_ty, exp_el_ty) in cur.into_iter().zip(exp.into_iter()) {
+                for (cur_el_ty, exp_el_ty) in cur.into_iter().zip(exp) {
                     self.unify_sub_or_same_type(
                         cur_el_ty,
                         current_span,
@@ -3045,7 +3043,7 @@ impl UnifiedTypeInference {
                     exp.params.len(),
                     "A Named type must have the same number of arguments for all its instances"
                 );
-                for (cur_el_ty, exp_el_ty) in cur.params.into_iter().zip(exp.params.into_iter()) {
+                for (cur_el_ty, exp_el_ty) in cur.params.into_iter().zip(exp.params) {
                     self.unify_sub_or_same_type(
                         cur_el_ty,
                         current_span,

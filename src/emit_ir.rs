@@ -757,7 +757,7 @@ where
         ));
         descr.locals = locals;
         output.import_fn_slots.extend(new_import_slots);
-        output.type_deps.extend(new_type_deps.into_iter());
+        output.type_deps.extend(new_type_deps);
     }
     let module_env = ModuleEnv::new(output, others);
     ty_inf.log_debug_constraints(module_env);

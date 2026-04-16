@@ -1084,7 +1084,7 @@ impl<'a> TraitSolver<'a> {
                 let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
                 let (methods, tys): (Vec<_>, Vec<_>) = gen_functions
                     .iter()
-                    .zip(definitions.into_iter())
+                    .zip(definitions)
                     .enumerate()
                     .map(|(method_index, (fn_id, def))| {
                         // Build the concrete function type and hash its signature.

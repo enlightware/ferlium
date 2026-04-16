@@ -1217,8 +1217,8 @@ impl TypeKind {
         self.validate();
         use TypeKind::*;
         match self {
-            Variant(items) => items.sort_by(|(a, _), (b, _)| a.cmp(b)),
-            Record(fields) => fields.sort_by(|a, b| a.0.cmp(&b.0)),
+            Variant(items) => items.sort_by_key(|(a, _)| *a),
+            Record(fields) => fields.sort_by_key(|a| a.0),
             _ => (),
         }
     }
