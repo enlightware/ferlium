@@ -42,6 +42,14 @@ impl Array {
         Self(Rc::new(VecDeque::new()))
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Rc::new(VecDeque::with_capacity(capacity)))
+    }
+
+    pub fn with_capacity_signed(capacity: isize) -> Self {
+        Self::with_capacity(capacity.max(0) as usize)
+    }
+
     pub fn from_vec(values: Vec<Value>) -> Self {
         Self::from_deque(VecDeque::from(values))
     }
@@ -215,6 +223,21 @@ impl Array {
             |a: Self| a.len() as isize,
             ["array"],
             "Returns the length of the array.",
+            ty_scheme,
+        )
+    }
+
+    fn with_capacity_descr() -> ModuleFunction {
+        let array = array_type_generic();
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
+            [int_type()],
+            array,
+            no_effects(),
+        ));
+        UnaryNativeFnNN::description_with_ty_scheme(
+            |capacity: isize| Self::with_capacity_signed(capacity),
+            ["capacity"],
+            "Creates an empty array with at least the specified capacity.",
             ty_scheme,
         )
     }
@@ -675,6 +698,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(ustr("array_pop_back"), Array::pop_back_desc());
     to.add_function(ustr("array_pop_front"), Array::pop_front_desc());
     to.add_function(ustr("array_len"), Array::len_descr());
+    to.add_function(ustr("array_with_capacity"), Array::with_capacity_descr());
     to.add_function(ustr("array_slice"), Array::slice_descr());
     to.add_function(ustr("array_concat"), Array::concat_descr());
     to.add_function(ustr("array_split_iterator"), Array::split_iter_descr());
@@ -682,7 +706,6 @@ pub fn add_to_module(to: &mut Module) {
         ustr("array_split_element_iterator"),
         Array::split_element_iter_descr(),
     );
-    // to.add_local_function(ustr("array_map"), Array::map_descr());
     to.add_function(ustr("array_iter"), Array::iter_descr());
     to.add_blanket_impl_no_locals(
         DEFAULT_TRAIT.clone(),
