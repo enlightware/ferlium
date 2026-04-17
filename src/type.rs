@@ -648,10 +648,18 @@ define_id_type!(
     LocalTypeAliasId
 );
 
+/// A single type alias entry, potentially generic.
+#[derive(Debug, Clone)]
+pub struct TypeAliasEntry {
+    pub param_names: Vec<Ustr>,
+    pub ty_var_count: u32,
+    pub ty: Type,
+}
+
 /// Aliased types
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TypeAliases {
-    types: Vec<Type>,
+    entries: Vec<TypeAliasEntry>,
     type_to_name: FxHashMap<Type, Ustr>,
     /// Names for the native part of generic native types, used for formatting
     bare_native_to_name: FxHashMap<BareNativeTypeB, Ustr>,
@@ -659,25 +667,32 @@ pub(crate) struct TypeAliases {
     name_to_bare_native: FxHashMap<Ustr, BareNativeTypeB>,
 }
 impl TypeAliases {
-    pub fn set(&mut self, alias: Ustr, ty: Type) {
-        self.types.push(ty);
-        self.type_to_name.insert(ty, alias);
+    pub fn set(&mut self, alias: Ustr, param_names: Vec<Ustr>, ty_var_count: u32, ty: Type) {
+        // Only register non-generic aliases in the reverse name lookup
+        if param_names.is_empty() {
+            self.type_to_name.insert(ty, alias);
+        }
+        self.entries.push(TypeAliasEntry {
+            param_names,
+            ty_var_count,
+            ty,
+        });
     }
 
     pub fn get_name(&self, ty: Type) -> Option<Ustr> {
         self.type_to_name.get(&ty).copied()
     }
 
-    pub fn get_type(&self, id: LocalTypeAliasId) -> Type {
-        self.types[id.as_index()]
+    pub fn get_entry(&self, id: LocalTypeAliasId) -> &TypeAliasEntry {
+        &self.entries[id.as_index()]
     }
 
     pub fn type_len(&self) -> usize {
-        self.types.len()
+        self.entries.len()
     }
 
-    pub fn type_iter(&self) -> impl Iterator<Item = Type> {
-        self.types.iter().copied()
+    pub fn type_iter(&self) -> impl Iterator<Item = Type> + '_ {
+        self.entries.iter().map(|e| e.ty)
     }
 
     pub fn set_bare_native(&mut self, alias: Ustr, bare: BareNativeTypeB) {
@@ -704,7 +719,9 @@ impl TypeAliases {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.types.is_empty() && self.type_to_name.is_empty() && self.bare_native_to_name.is_empty()
+        self.entries.is_empty()
+            && self.type_to_name.is_empty()
+            && self.bare_native_to_name.is_empty()
     }
 }
 

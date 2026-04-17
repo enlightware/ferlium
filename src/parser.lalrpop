@@ -339,8 +339,8 @@ TypeDefinition: TypeDef = {
 }
 
 TypeAliasDefinition: TypeAlias = {
-    <l:@L> "type" <name:Sp<UIdentifier>> "=" <ty:Sp<DefinedType>> <r:@R> ";" => {
-        TypeAlias::new(name, ty)
+    <l:@L> "type" <name:Sp<UIdentifier>> <generics:GenericParams?> "=" <ty:Sp<DefinedType>> <r:@R> ";" => {
+        TypeAlias::new(name, generics.unwrap_or_default(), ty)
     }
 }
 

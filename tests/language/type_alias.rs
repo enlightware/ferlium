@@ -123,6 +123,171 @@ fn type_aliases() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_type_aliases() {
+    let mut session = TestSession::new();
+
+    // Simple generic alias with one parameter
+    let result = session.run(indoc! { r#"
+        type Wrapped<A> = (A, string);
+
+        fn wrap(x: int) -> Wrapped<int> {
+            (x, "hello")
+        }
+
+        wrap(42).0
+    "# });
+    assert_eq!(result, int(42));
+
+    // Generic alias with two parameters
+    let result = session.run(indoc! { r#"
+        type Pair<A, B> = (A, B);
+
+        fn make_pair(a: int, b: string) -> Pair<int, string> {
+            (a, b)
+        }
+
+        make_pair(1, "two").0
+    "# });
+    assert_eq!(result, int(1));
+
+    // Generic alias used in function argument position
+    let result = session.run(indoc! { r#"
+        type Pair<A, B> = (A, B);
+
+        fn first(p: Pair<int, string>) -> int {
+            p.0
+        }
+
+        first((10, "x"))
+    "# });
+    assert_eq!(result, int(10));
+
+    // Generic alias wrapping a record type
+    let result = session.run(indoc! { r#"
+        type Named<A> = { name: string, value: A };
+
+        fn get_value(n: Named<int>) -> int {
+            n.value
+        }
+
+        get_value({ name: "x", value: 99 })
+    "# });
+    assert_eq!(result, int(99));
+
+    // Generic alias wrapping an array
+    let result = session.run(indoc! { r#"
+        type List<A> = [A];
+
+        fn head(xs: List<int>) -> int {
+            xs[0]
+        }
+
+        head([7, 8, 9])
+    "# });
+    assert_eq!(result, int(7));
+
+    // Generic alias wrapping a variant type
+    let result = session.run(indoc! { r#"
+        type Maybe<A> = Nothing | Just(A);
+
+        fn unwrap_or(m: Maybe<int>, default: int) -> int {
+            match m {
+                Nothing => default,
+                Just(x) => x,
+            }
+        }
+
+        unwrap_or(Just(42), 0)
+    "# });
+    assert_eq!(result, int(42));
+
+    // Generic alias wrapping a function type
+    let result = session.run(indoc! { r#"
+        type Transform<A, B> = (A) -> B;
+
+        fn apply(f: Transform<int, int>, x: int) -> int {
+            f(x)
+        }
+
+        apply(|x| x * 3, 10)
+    "# });
+    assert_eq!(result, int(30));
+
+    // Nested generic aliases
+    let result = session.run(indoc! { r#"
+        type Pair<A, B> = (A, B);
+        type IntPair = Pair<int, int>;
+
+        fn sum(p: IntPair) -> int {
+            p.0 + p.1
+        }
+
+        sum((3, 4))
+    "# });
+    assert_eq!(result, int(7));
+
+    // Generic alias used with a named type (struct)
+    let result = session.run(indoc! { r#"
+        struct Box<A> { value: A }
+        type BoxedInt = Box<int>;
+
+        fn unbox(b: BoxedInt) -> int {
+            b.value
+        }
+
+        unbox(Box { value: 55 })
+    "# });
+    assert_eq!(result, int(55));
+
+    // Generic alias to a struct with where constraints: constraints must be instantiated properly
+    let result = session.run(indoc! { r#"
+        struct MapIterator<I, T, O>
+        where
+            I: Iterator<Item = T>
+        {
+            iterator: I,
+            mapper: (T) -> O,
+        }
+
+        impl<I, T, O> Iterator for MapIterator<I, T, O>
+        where
+            I: Iterator<Item = T>
+        {
+            fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
+                match next(it.iterator) {
+                    Some(data) => Some(it.mapper(data)),
+                    None => None,
+                }
+            }
+        }
+
+        type Mapper<I, T, O> = MapIterator<I, T, O>;
+
+        let mut m: Mapper<array_iterator<int>, int, int> = MapIterator {
+            iterator: iter([1, 2, 3]),
+            mapper: |x| x * 2,
+        };
+        let mut total = 0;
+        for v in m {
+            total += v;
+        };
+        total
+    "# });
+    assert_eq!(result, int(12));
+
+    // Verify generic type alias is stored in the module
+    let module = session.compile_and_get_module(indoc! { r#"
+        type Pair<A, B> = (A, B);
+
+        fn dummy() -> int { 0 }
+    "# });
+    let entry = module.get_type_alias(ustr("Pair"));
+    assert!(entry.is_some());
+    assert_eq!(entry.unwrap().param_names.len(), 2);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn keyword_type_is_acceptable() {
     let mut session = TestSession::new();
     assert_eq!(session.run("({type: 1}: {type: int}).type"), int(1));

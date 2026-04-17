@@ -44,7 +44,7 @@ use crate::{
     ir::{self, NodeArena},
     module::id::{Id, NamedIndexed},
     r#trait::TraitRef,
-    r#type::{LocalTypeAliasId, Type, TypeAliases, TypeDefRef},
+    r#type::{LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDefRef},
     value::build_dictionary_value,
 };
 
@@ -336,25 +336,31 @@ impl Module {
 
     // Type aliases
 
-    /// Add a type alias to this module, name by &str, returning its ID.
+    /// Add a non-generic type alias to this module (by &str), returning its ID.
     pub(crate) fn add_type_alias_str(&mut self, name: &str, ty: Type) -> LocalTypeAliasId {
-        self.add_type_alias(ustr(name), ty)
+        self.add_type_alias(ustr(name), vec![], 0, ty)
     }
 
     /// Add a type alias to this module, returning its ID.
-    pub(crate) fn add_type_alias(&mut self, name: Ustr, ty: Type) -> LocalTypeAliasId {
+    pub(crate) fn add_type_alias(
+        &mut self,
+        name: Ustr,
+        param_names: Vec<Ustr>,
+        ty_var_count: u32,
+        ty: Type,
+    ) -> LocalTypeAliasId {
         let id = LocalTypeAliasId::from_index(self.type_aliases.type_len());
-        self.type_aliases.set(name, ty);
+        self.type_aliases.set(name, param_names, ty_var_count, ty);
         self.def_table.insert(name, DefKind::TypeAlias(id));
         id
     }
 
-    /// Look-up a type alias by name in this module.
-    pub fn get_type_alias(&self, name: Ustr) -> Option<Type> {
+    /// Look-up a type alias by name in this module, returning the full entry.
+    pub fn get_type_alias(&self, name: Ustr) -> Option<&TypeAliasEntry> {
         self.get_definition(name).and_then(|def_kind| {
             def_kind
                 .as_type_alias()
-                .map(|type_alias_id| self.type_aliases.get_type(*type_alias_id))
+                .map(|type_alias_id| self.type_aliases.get_entry(*type_alias_id))
         })
     }
 

@@ -25,6 +25,7 @@ use crate::{
     },
     containers::b,
     effects::EffType,
+    effects::EffectsSubstitution,
     error::{
         DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
         InternalCompilationError, InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind,

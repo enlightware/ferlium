@@ -104,11 +104,18 @@ pub type TypeSpan<P> = (<P as Phase>::Type, Location);
 #[derive(Debug, Clone, new)]
 pub struct TypeAlias {
     pub name: UstrSpan,
+    pub generic_params: Vec<UstrSpan>,
     pub ty: TypeSpan<Parsed>,
 }
 impl FormatWith<ModuleEnv<'_>> for TypeAlias {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
-        write!(f, "{}: {}", self.name.0, self.ty.0.format_with(env))?;
+        write!(f, "{}", self.name.0)?;
+        if !self.generic_params.is_empty() {
+            write!(f, "<")?;
+            write_with_separator(self.generic_params.iter().map(|(s, _)| s), ", ", f)?;
+            write!(f, ">")?;
+        }
+        write!(f, ": ")?;
         self.ty.0.fmt_with(f, env)
     }
 }

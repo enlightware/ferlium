@@ -13,6 +13,22 @@ type Point = (int, int);
 type PersonView = { name: string, age: int };
 ```
 
+Aliases can also be generic:
+
+```ferlium
+type Pair<T> = (T, T);
+type Mapping<K, V> = [(K, V)];
+```
+
+Generic aliases are expanded at each use site with the provided type arguments:
+
+```ferlium
+# type Pair<T> = (T, T);
+# type Mapping<K, V> = [(K, V)];
+let p: Pair<int> = (1, 2);
+let m: Mapping<string, int> = [("a", 1)];
+```
+
 Aliases improve readability, but they do not create a new nominal type.
 For type checking, they are treated as the underlying type.
 

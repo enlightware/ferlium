@@ -12,7 +12,7 @@ use crate::{
     module::{Module, ModuleFunction, ModuleId, Modules, path::Path},
     std::STD_MODULE_ID,
     r#trait::TraitRef,
-    r#type::{BareNativeTypeB, Type, TypeDefRef},
+    r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDefRef},
     typing_env::TraitFunctionDescription,
 };
 use derive_new::new;
@@ -92,15 +92,16 @@ impl<'m> ModuleEnv<'m> {
             .get_module_member(&path.segments, &|name, module| {
                 module.get_type_alias(ustr(name))
             })?
-            .map(|(_, ty)| ty))
+            .and_then(|(_, entry)| entry.param_names.is_empty().then_some(entry.ty)))
     }
 
     /// Like [`type_alias_type`], but also returns the source [`ModuleId`] when the alias
     /// is defined in another module (`None` means it belongs to the current module).
-    pub fn type_alias_type_with_module(
-        &self,
-        path: &ast::Path,
-    ) -> Result<Option<(Option<ModuleId>, Type)>, InternalCompilationError> {
+    /// Returns the full [`TypeAliasEntry`] to support generic aliases.
+    pub fn type_alias_with_module<'a>(
+        &'a self,
+        path: &'a ast::Path,
+    ) -> Result<Option<(Option<ModuleId>, &'a TypeAliasEntry)>, InternalCompilationError> {
         self.get_module_member(&path.segments, &|name, module| {
             module.get_type_alias(ustr(name))
         })

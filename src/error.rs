@@ -119,6 +119,7 @@ impl WhatIsNotAProductType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericParamsOwner {
     TypeDef { name: Ustr },
+    TypeAlias { name: Ustr },
     Function { name: Ustr },
     TraitImpl { trait_name: Ustr },
 }
@@ -127,6 +128,7 @@ impl GenericParamsOwner {
     pub fn description(&self) -> String {
         match self {
             Self::TypeDef { name } => format!("type definition `{name}`"),
+            Self::TypeAlias { name } => format!("type alias `{name}`"),
             Self::Function { name } => format!("function `{name}`"),
             Self::TraitImpl { trait_name } => format!("impl of trait `{trait_name}`"),
         }

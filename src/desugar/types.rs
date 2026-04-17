@@ -265,9 +265,17 @@ impl ast::PType {
                     && let Some(ty_var) = generic_ty_params.get(name)
                 {
                     Type::variable(*ty_var)
-                } else if let Some((module_id, ty)) = env.type_alias_type_with_module(path)? {
+                } else if let Some((module_id, entry)) = env.type_alias_with_module(path)? {
                     record_module_use(module_id, modules_used);
-                    ty
+                    if !entry.param_names.is_empty() {
+                        return Err(internal_compilation_error!(WrongNumberOfArguments {
+                            expected: entry.param_names.len(),
+                            expected_span: path.span().unwrap_or(span),
+                            got: 0,
+                            got_span: span,
+                        }));
+                    }
+                    entry.ty
                 } else if let Some((module_id, type_def)) = env.type_def_with_module(path)? {
                     record_module_use(module_id, modules_used);
                     if !type_def.param_names.is_empty() {
@@ -291,16 +299,35 @@ impl ast::PType {
                 }
             }
             AppliedPath { path, args } => {
-                if let Some((module_id, ty)) = env.type_alias_type_with_module(path)? {
+                if let Some((module_id, entry)) = env.type_alias_with_module(path)? {
                     record_module_use(module_id, modules_used);
-                    let expected_span = path.span().unwrap_or(span);
-                    let _ = ty;
-                    return Err(internal_compilation_error!(WrongNumberOfArguments {
-                        expected: 0,
-                        expected_span,
-                        got: args.len(),
-                        got_span: span,
-                    }));
+                    let desugared_args = args
+                        .iter()
+                        .map(|(ty, ty_span)| {
+                            ty.desugar_with_ty_params(
+                                *ty_span,
+                                false,
+                                env,
+                                generic_ty_params,
+                                modules_used,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if entry.param_names.len() != desugared_args.len() {
+                        return Err(internal_compilation_error!(WrongNumberOfArguments {
+                            expected: entry.param_names.len(),
+                            expected_span: path.span().unwrap_or(span),
+                            got: desugared_args.len(),
+                            got_span: span,
+                        }));
+                    }
+                    let ty_subst = (0..entry.ty_var_count)
+                        .map(TypeVar::new)
+                        .zip(desugared_args)
+                        .collect();
+                    entry
+                        .ty
+                        .instantiate(&(ty_subst, EffectsSubstitution::default()))
                 } else if let Some((module_id, type_def)) = env.type_def_with_module(path)? {
                     record_module_use(module_id, modules_used);
                     let desugared_args = args
@@ -551,7 +578,7 @@ fn collect_trait_impl_generic_ty_params_from_ty(
         Never | Unit | Infer | Resolved(_) => {}
         Path(path) => {
             if let [(name, _)] = &path.segments[..]
-                && env.type_alias_type_with_module(path)?.is_none()
+                && env.type_alias_with_module(path)?.is_none()
                 && env.type_def_with_module(path)?.is_none()
             {
                 generic_ty_params.entry(*name).or_insert_with(|| {

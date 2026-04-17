@@ -1,9 +1,11 @@
+use crate::desugar::types::extend_generic_ty_params;
+
 use super::expr::desugar;
 use super::*;
 
 /// A reference to name of a type, either an alias or a definition, in parsed AST.
 enum NamedTypeData {
-    Alias(UstrSpan, PTypeSpan),
+    Alias(UstrSpan, Vec<UstrSpan>, PTypeSpan),
     Def(PTypeDef),
 }
 impl NamedTypeData {
@@ -14,7 +16,7 @@ impl NamedTypeData {
     ) -> Result<(), InternalCompilationError> {
         use NamedTypeData::*;
         match self {
-            Alias(name, alias) => alias.0.collect_refs(name.0, ty_names, collected),
+            Alias(name, _, alias) => alias.0.collect_refs(name.0, ty_names, collected),
             Def(def) => {
                 def.shape.collect_refs(def.name.0, ty_names, collected)?;
                 def.where_clause.iter().try_for_each(|constraint| {
@@ -26,14 +28,14 @@ impl NamedTypeData {
     fn name(&self) -> Ustr {
         use NamedTypeData::*;
         match self {
-            Alias(name, _) => name.0,
+            Alias(name, _, _) => name.0,
             Def(def) => def.name.0,
         }
     }
     fn name_span(&self) -> Location {
         use NamedTypeData::*;
         match self {
-            Alias(name, _) => name.1,
+            Alias(name, _, _) => name.1,
             Def(def) => def.name.1,
         }
     }
@@ -59,7 +61,12 @@ impl PModule {
         let (ty_names, ty_refs): (FxHashMap<_, _>, Vec<_>) = self
             .type_aliases
             .into_iter()
-            .map(|alias| (alias.name.0, NamedTypeData::Alias(alias.name, alias.ty)))
+            .map(|alias| {
+                (
+                    alias.name.0,
+                    NamedTypeData::Alias(alias.name, alias.generic_params, alias.ty),
+                )
+            })
             .chain(
                 self.type_defs
                     .into_iter()
@@ -105,9 +112,23 @@ impl PModule {
             assert_eq!(scc.len(), 1);
             let ty_ref = &ty_refs[scc[0]];
             match ty_ref {
-                NamedTypeData::Alias(name, alias) => {
-                    let ty = alias.0.desugar(alias.1, false, &env, &mut modules_used)?;
-                    output.add_type_alias(name.0, ty);
+                NamedTypeData::Alias(name, generic_params, alias) => {
+                    let generic_ty_params = extend_generic_ty_params(
+                        &GenericTyParams::default(),
+                        generic_params,
+                        GenericParamsOwner::TypeAlias { name: name.0 },
+                    )?;
+                    let ty_var_count = generic_params.len() as u32;
+                    let param_names: Vec<_> =
+                        generic_params.iter().map(|(name, _)| *name).collect();
+                    let ty = alias.0.desugar_with_ty_params(
+                        alias.1,
+                        false,
+                        &env,
+                        &generic_ty_params,
+                        &mut modules_used,
+                    )?;
+                    output.add_type_alias(name.0, param_names, ty_var_count, ty);
                 }
                 NamedTypeData::Def(def) => {
                     output.add_type_def(def.name.0, def.desugar(&env, &mut modules_used)?);

@@ -67,7 +67,7 @@ TypeDef {
 }
 
 TypeAliasDef {
-    kw<'type'> TypeName { Identifier } '=' AliasType ';'
+    kw<'type'> TypeName { Identifier } GenericParams? '=' AliasType ';'
 }
 
 UseDecl {
