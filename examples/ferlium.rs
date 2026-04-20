@@ -596,6 +596,13 @@ fn process_input(
         }
     }
 
+    let print_ssa: bool = env::args().any(|arg| arg == "--print-ssa");
+
+    if print_ssa {
+        let ssa = session.emit_ssa(name, input);
+        println!("{}", ssa);
+    }
+
     Ok(module_id)
 }
 
@@ -643,6 +650,7 @@ fn main() {
         println!();
         println!("Usage:");
         println!("  {} [--help|-h]        Show the help.", args[0]);
+        println!("  {} [--print-ssa]      Print the ssa output", args[0]);
         println!(
             "  {} [--print-std]      Print the standard library module (interactive mode only).",
             args[0]
@@ -710,6 +718,7 @@ fn main() {
 fn run_interactive_repl() {
     // Logging
     env_logger::init();
+
 
     // ferlium emission and evaluation contexts
     let mut session = CompilerSession::new();

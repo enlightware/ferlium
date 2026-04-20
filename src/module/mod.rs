@@ -30,7 +30,9 @@ pub use path::*;
 pub use trait_impl::*;
 pub use uses::*;
 
-use std::{fmt, hash::Hash};
+use std::{
+fmt, hash::{Hash}
+};
 
 use ustr::{Ustr, ustr};
 
@@ -588,6 +590,7 @@ impl Module {
     pub fn own_symbols(&self) -> impl Iterator<Item = Ustr> + use<'_> {
         self.def_table.iter_names().copied()
     }
+
 
     /// Return the type for the source pos, if any.
     pub fn type_at(&self, pos: usize) -> Option<Type> {
