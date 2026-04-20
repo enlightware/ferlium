@@ -3,7 +3,6 @@ use std::ops::{Index, IndexMut};
 
 /// A doubly linked list.
 pub struct List<T> {
-
   /// The number of elements in the list.
   size: usize,
 
@@ -18,14 +17,12 @@ pub struct List<T> {
 
   /// The elements in list.
   storage: Vec<Bucket<T>>,
-
 }
 
 impl<T> List<T> {
-
   /// Creates an empty list.
   pub fn new() -> Self {
-    Self{
+    Self {
       size: 0,
       head_offset: !0,
       tail_offset: !0,
@@ -51,12 +48,20 @@ impl<T> List<T> {
 
   /// Returns the position of the first element.
   pub fn first_address(&self) -> Option<Address> {
-    if self.storage.is_empty() { None } else { Some(Address::new(self.head_offset)) }
+    if self.storage.is_empty() {
+      None
+    } else {
+      Some(Address::new(self.head_offset))
+    }
   }
 
   /// Returns position of the last element.
   pub fn last_address(&self) -> Option<Address> {
-    if self.storage.is_empty() { None } else { Some(Address::new(self.tail_offset)) }
+    if self.storage.is_empty() {
+      None
+    } else {
+      Some(Address::new(self.tail_offset))
+    }
   }
 
   ///s Returns the position that immediately follows `a`, if any.
@@ -81,12 +86,17 @@ impl<T> List<T> {
 
   /// Returns an iterator over the contents of `self`.
   pub fn iter(&self) -> ListIterator<'_, T> {
-    ListIterator { addresses: self.addresses() }
+    ListIterator {
+      addresses: self.addresses(),
+    }
   }
 
   /// Returns an iterator over the addresses in `self`.
   pub fn addresses(&self) -> AddressIterator<'_, T> {
-    AddressIterator  { base: self, position: self.first_address() }
+    AddressIterator {
+      base: self,
+      position: self.first_address(),
+    }
   }
 
   /// Reserves enough space to store the `additional` new elements in `self` without allocating new
@@ -94,7 +104,9 @@ impl<T> List<T> {
   pub fn reserve(&mut self, k: usize) {
     let n = self.storage.len();
     let r = n - self.size;
-    if k > r { self.storage.reserve(k - r); }
+    if k > r {
+      self.storage.reserve(k - r);
+    }
   }
 
   /// Inserts `x` at the end of `self` and returns its position.
@@ -108,7 +120,6 @@ impl<T> List<T> {
       self.storage = vec![Bucket::new(!0, !0, x)];
       Address::new(0)
     }
-
     // Has the list been emptied?
     else if self.size == 0 {
       let new_offset = self.free_offset;
@@ -119,7 +130,6 @@ impl<T> List<T> {
       self.storage[new_offset].assign(!1, !1, x);
       Address::new(new_offset)
     }
-
     // Regular insertion.
     else {
       self.insert_after(Address::new(self.tail_offset), x)
@@ -136,7 +146,7 @@ impl<T> List<T> {
   }
 
   /// Inserts `x` before the element at `a` and returns its position.
-  pub fn insert_before(& mut self, a: Address, x: T) -> Address {
+  pub fn insert_before(&mut self, a: Address, x: T) -> Address {
     assert!(self.in_bounds(a));
 
     // The offset of the previous bucket, if any.
@@ -204,17 +214,25 @@ impl<T> List<T> {
     assert!(self.in_bounds(a));
 
     let p = self.storage[a.offset].previous;
-    if p != !0 { self.storage[p].next = self.storage[a.offset].next; }
+    if p != !0 {
+      self.storage[p].next = self.storage[a.offset].next;
+    }
 
     let n = self.storage[a.offset].next;
-    if n != !0 { self.storage[n].previous = self.storage[a.offset].previous; }
+    if n != !0 {
+      self.storage[n].previous = self.storage[a.offset].previous;
+    }
 
     self.storage[a.offset].next = self.free_offset;
 
     self.size -= 1;
     self.free_offset = a.offset;
-    if a.offset == self.head_offset { self.head_offset = n; }
-    if a.offset == self.tail_offset { self.tail_offset = p; }
+    if a.offset == self.head_offset {
+      self.head_offset = n;
+    }
+    if a.offset == self.tail_offset {
+      self.tail_offset = p;
+    }
 
     self.storage[a.offset].element.take().unwrap()
   }
@@ -223,52 +241,42 @@ impl<T> List<T> {
   fn in_bounds(&self, a: Address) -> bool {
     a.offset < self.storage.len()
   }
-
 }
 
 impl<T> Index<Address> for List<T> {
-
   type Output = T;
 
   fn index(&self, a: Address) -> &T {
     assert!(self.in_bounds(a));
     self.storage[a.offset].element.as_ref().unwrap()
   }
-
 }
 
 impl<T> IndexMut<Address> for List<T> {
-
   fn index_mut(&mut self, a: Address) -> &mut T {
     assert!(self.in_bounds(a));
     self.storage[a.offset].element.as_mut().unwrap()
   }
-
 }
 
-impl<'a, T> IntoIterator for  &'a List<T> {
-
+impl<'a, T> IntoIterator for &'a List<T> {
   type Item = &'a T;
   type IntoIter = ListIterator<'a, T>;
 
   fn into_iter(self) -> ListIterator<'a, T> {
     self.iter()
   }
-
 }
 
 impl<T> Extend<T> for List<T> {
-
   fn extend<I: IntoIterator<Item = T>>(&mut self, xs: I) {
     for x in xs {
       self.append(x);
     }
   }
-
 }
 
-impl<T : std::fmt::Debug> fmt::Debug for List<T> {
-
+impl<T: std::fmt::Debug> fmt::Debug for List<T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let mut builder = f.debug_list();
 
@@ -280,68 +288,62 @@ impl<T : std::fmt::Debug> fmt::Debug for List<T> {
 
     builder.finish()
   }
-
 }
 
 /// The address of an element in a doubly linked list.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Address {
-
   /// The raw representation of this address.
   offset: usize,
-
 }
 
 impl Address {
-
   /// Creates a new instance with the given offset.
-  fn new(offset: usize) -> Self { Address { offset } }
+  fn new(offset: usize) -> Self {
+    Address { offset }
+  }
 
   /// Returns the raw value of this address.
-  pub fn raw(&self) -> usize { self.offset }
-
+  pub fn raw(&self) -> usize {
+    self.offset
+  }
 }
 
 impl PartialEq<Option<Address>> for Address {
-
   /// Returns `true` iff `self` is equal to the value wrapped in `other`.
   fn eq(&self, other: &Option<Address>) -> bool {
-    if let Some(rhs) = other { self == rhs } else { false }
+    if let Some(rhs) = other {
+      self == rhs
+    } else {
+      false
+    }
   }
-
 }
 
 /// An iterator over the contents of a doubly-linked list.
 pub struct ListIterator<'a, T> {
-
   /// An iterator over the addresses of the contents produced by `self`.
   addresses: AddressIterator<'a, T>,
-
 }
 
 impl<'a, T> Iterator for ListIterator<'a, T> {
-
   type Item = &'a T;
 
   fn next(&mut self) -> Option<&'a T> {
     self.addresses.next().map(|a| &self.addresses.base[a])
   }
-
 }
 
 /// An iterator over the addresses of the elements of a doubly-linked list.
 pub struct AddressIterator<'a, T> {
-
   /// The list whose contents is being iterated over.
   base: &'a List<T>,
 
   /// The current position of the iterator.
   position: Option<Address>,
-
 }
 
 impl<'a, T> Iterator for AddressIterator<'a, T> {
-
   type Item = Address;
 
   fn next(&mut self) -> Option<Address> {
@@ -352,12 +354,10 @@ impl<'a, T> Iterator for AddressIterator<'a, T> {
       None
     }
   }
-
 }
 
 /// A bucket in the internal storage of a doubly linked list.
 struct Bucket<T> {
-
   /// If the bucket is busy, this property is either the offset of the preceding bucket or `!0` if
   /// there isn't any. If the bucket is free, this property is unspecified.
   previous: usize,
@@ -368,14 +368,16 @@ struct Bucket<T> {
 
   /// The stored element iff the bucket is busy.
   element: Option<T>,
-
 }
 
 impl<T> Bucket<T> {
-
   /// Creates a new instance with the given properties.
   fn new(previous: usize, next: usize, element: T) -> Self {
-    Self { previous, next, element: Some(element) }
+    Self {
+      previous,
+      next,
+      element: Some(element),
+    }
   }
 
   /// Assigns the value of `self`, assuming it is free.
@@ -384,7 +386,6 @@ impl<T> Bucket<T> {
     self.next = next;
     self.element = Some(element);
   }
-
 }
 
 #[cfg(test)]
@@ -551,5 +552,4 @@ mod tests {
     xs.insert_after(a, "c");
     assert!(xs.iter().eq(vec!["a", "c", "b"].iter()));
   }
-
 }

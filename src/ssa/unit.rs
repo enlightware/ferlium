@@ -1,4 +1,2 @@
 /// A compilation unit.
-pub struct Unit {
-
-}
+pub struct Unit {}

@@ -1,14 +1,14 @@
 use crate::{
-  Location, Modules, containers, format::FormatWith, ir::{self, Case, NodeArena}, module::{
-    FunctionId, LocalFunctionId, Module, ModuleEnv, TraitImplId
-  }, ssa::{self, BlockIdentity}, value::{self, Value}
+  Location, Modules, containers,
+  format::FormatWith,
+  ir::{self, Case, NodeArena},
+  module::{FunctionId, LocalFunctionId, Module, ModuleEnv, TraitImplId},
+  ssa::{self, BlockIdentity},
+  value::{self, Value},
 };
 
 /// Emit the low-level (aka SSA) ferlium IR of `module`.
-pub fn emit_ssa(
-  module: &Module,
-  others: &Modules
-) -> String {
+pub fn emit_ssa(module: &Module, others: &Modules) -> String {
   let mut a: Vec<String> = [].to_vec();
   for n in module.own_symbols() {
     a.push(format!("{:?}", n));
@@ -21,7 +21,6 @@ pub fn emit_ssa(
 
 /// A constructor of SSA IR.
 struct Emitter<'a> {
-
   /// The module being lowered.
   module: &'a Module,
 
@@ -32,12 +31,10 @@ struct Emitter<'a> {
   context: InsertionContext,
 
   // The HIR node arena
-  hir_arena: &'a NodeArena
-
+  hir_arena: &'a NodeArena,
 }
 
 impl<'a> Emitter<'a> {
-
   /// Generates the IR of `source`, which has the given `identity`.
   fn emit_ssa_fn(identity: LocalFunctionId, module: &'a Module, others: &'a Modules) -> String {
     let f = module.get_function_by_id(identity).unwrap();
@@ -71,16 +68,15 @@ impl<'a> Emitter<'a> {
             span: code.span,
             environment,
           },
-         hir_arena: &module.ir_arena
+          hir_arena: &module.ir_arena,
         };
 
         // The body of the function evaluates to the return value.
         let v = emitter.lower_as_rvalue(code);
         emitter.insert(ssa::Instruction::ret(emitter.context.span, v));
 
-
         format!("{}", emitter.context.function)
-      },
+      }
 
       None => panic!(),
     }
@@ -100,17 +96,34 @@ impl<'a> Emitter<'a> {
       _ => {
         // QUESTION: Should we explicitly drop values?
         self.lower_as_rvalue(node);
-      },
+      }
     }
   }
 
   /// Returns the blocks created for the `n` case node
-  fn create_case_blocks(&mut self, n: &Box<Case>) -> (Vec<BlockIdentity>, Vec<BlockIdentity>, BlockIdentity, BlockIdentity,) {
-    let (condition_block, body_blocks) = n.alternatives.iter().map(|_| (self.context.function.add_block().id(), self.context.function.add_block().id())).unzip();
+  fn create_case_blocks(
+    &mut self,
+    n: &Box<Case>,
+  ) -> (
+    Vec<BlockIdentity>,
+    Vec<BlockIdentity>,
+    BlockIdentity,
+    BlockIdentity,
+  ) {
+    let (condition_block, body_blocks) = n
+      .alternatives
+      .iter()
+      .map(|_| {
+        (
+          self.context.function.add_block().id(),
+          self.context.function.add_block().id(),
+        )
+      })
+      .unzip();
     let default: ssa::BlockIdentity = self.context.function.add_block().id();
     let tail: ssa::BlockIdentity = self.context.function.add_block().id();
 
-    return (condition_block, body_blocks, default, tail)
+    return (condition_block, body_blocks, default, tail);
   }
 
   /// Generates the IR for `node`, which occurs as rvalue.
@@ -119,9 +132,11 @@ impl<'a> Emitter<'a> {
     match &node.kind {
       K::Block(n) => {
         let (last, prefix) = n.split_last().unwrap();
-        prefix.iter().for_each(|s| self.lower_as_statement(&self.hir_arena[*s]));
+        prefix
+          .iter()
+          .for_each(|s| self.lower_as_statement(&self.hir_arena[*s]));
         self.lower_as_rvalue(&self.hir_arena[*last])
-      },
+      }
 
       K::Case(n) => {
         let (conditions, bodies, default, tail) = self.create_case_blocks(n);
@@ -131,14 +146,20 @@ impl<'a> Emitter<'a> {
         let scrutinee = self.lower_as_rvalue(&self.hir_arena[n.value]);
 
         // Memory holder for the case expression value
-        let temporary = self.insert(ssa::Instruction::alloca(node.span, node.ty)).unwrap();
+        let temporary = self
+          .insert(ssa::Instruction::alloca(node.span, node.ty))
+          .unwrap();
         self.insert(ssa::Instruction::br(node.span, conditions[0]));
 
         // Alternatives
         for (i, (c, a)) in n.alternatives.iter().enumerate() {
           // Load the next condition head
           // Either the next alternative, or the default case if we are at the last condition
-          let next = if i < &n.alternatives.len() - 1 {conditions[i + 1]} else {default};
+          let next = if i < &n.alternatives.len() - 1 {
+            conditions[i + 1]
+          } else {
+            default
+          };
 
           // Move to condition head
           self.context.point = InsertionPoint::End(conditions[i]);
@@ -147,7 +168,13 @@ impl<'a> Emitter<'a> {
           // TODO: We may want to check if the types of the lowered condition and the scrutinee are the same
           let x0 = self.lower_as_primitive(c).unwrap();
           // We compare and branch either on the current condition body, or to the next condition head
-          let v = self.insert(ssa::Instruction::compare_eq(node.span, scrutinee.clone(), x0)).unwrap();
+          let v = self
+            .insert(ssa::Instruction::compare_eq(
+              node.span,
+              scrutinee.clone(),
+              x0,
+            ))
+            .unwrap();
           self.insert(ssa::Instruction::condbr(node.span, v, bodies[i], next));
 
           // Lower condition body
@@ -163,36 +190,41 @@ impl<'a> Emitter<'a> {
         self.context.point = InsertionPoint::End(default);
         let v = self.lower_as_rvalue(&self.hir_arena[n.default]);
         self.insert(ssa::Instruction::store(node.span, v, temporary.clone()));
-        self.insert(ssa::Instruction::br(node.span, tail,));
+        self.insert(ssa::Instruction::br(node.span, tail));
         self.context.environment.truncate(end);
 
         // Tail
         self.context.point = InsertionPoint::End(tail);
-        self.insert(ssa::Instruction::load(node.span, temporary)).unwrap()
-      },
+        self
+          .insert(ssa::Instruction::load(node.span, temporary))
+          .unwrap()
+      }
 
       K::Immediate(n) => {
         if let Some(result) = self.lower_as_primitive(&n.value) {
           result
         } else {
           let s = self.show(node.ty);
-          println!("lowering is unimplemented for node of kind '{:?}' of type {:?}", n.value, s);
+          println!(
+            "lowering is unimplemented for node of kind '{:?}' of type {:?}",
+            n.value, s
+          );
           panic!()
         }
-      },
+      }
 
       K::EnvLoad(n) => {
         // The following assumes we can simply copy any value referred to by a load.
         // TODO: Is the casting from u32 to usize acceptable ?
         self.context.environment[n.index as usize].clone()
-      },
+      }
 
       K::EnvStore(n) => {
         let rhs = self.lower_as_rvalue(&self.hir_arena[n.value]);
         self.context.environment.push(rhs);
 
         ssa::Value::Unit
-      },
+      }
 
       K::StaticApply(n) => {
         let f = self.demand_function(n.function);
@@ -202,19 +234,28 @@ impl<'a> Emitter<'a> {
         }
 
         assert!(node.ty == n.ty.ret);
-        self.insert(ssa::Instruction::call(node.span, f, a, n.ty.ret)).unwrap()
-      },
+        self
+          .insert(ssa::Instruction::call(node.span, f, a, n.ty.ret))
+          .unwrap()
+      }
 
       K::GetDictionary(n) => {
         let v = match n.dictionary {
-            TraitImplId::Local(id) => {
-              self.module.get_impl_data(id).unwrap().dictionary_value.clone()
-            },
-            TraitImplId::Import(id) => {
-              let slot = self.module.get_import_impl_slot(id).unwrap();
-              let other_module = self.others.get(slot.module).unwrap().module().unwrap();
-              other_module.get_impl_data_by_trait_key(&slot.key).unwrap().dictionary_value.clone()
-            }
+          TraitImplId::Local(id) => self
+            .module
+            .get_impl_data(id)
+            .unwrap()
+            .dictionary_value
+            .clone(),
+          TraitImplId::Import(id) => {
+            let slot = self.module.get_import_impl_slot(id).unwrap();
+            let other_module = self.others.get(slot.module).unwrap().module().unwrap();
+            other_module
+              .get_impl_data_by_trait_key(&slot.key)
+              .unwrap()
+              .dictionary_value
+              .clone()
+          }
         };
         let mut r: Vec<ssa::Value> = vec![];
         match v {
@@ -236,7 +277,7 @@ impl<'a> Emitter<'a> {
                     format!("{}", f.format_with(&e))
                   };
                   r.push(ssa::Value::Function(n.into()));
-                },
+                }
                 _ => {
                   panic!("unreachable: all node in dictionnary tuple should be functions");
                 }
@@ -248,15 +289,26 @@ impl<'a> Emitter<'a> {
           }
         }
         ssa::Value::Dictionary(r)
-      },
+      }
 
       K::Apply(n) => {
         let f = self.lower_as_rvalue(&self.hir_arena[n.function]);
 
-        let a: Vec<ssa::Value> = n.arguments.iter().map(|a| self.lower_as_rvalue(&self.hir_arena[*a])).collect();
+        let a: Vec<ssa::Value> = n
+          .arguments
+          .iter()
+          .map(|a| self.lower_as_rvalue(&self.hir_arena[*a]))
+          .collect();
 
-        self.insert(ssa::Instruction::call(node.span, f, a, self.hir_arena[n.function].ty)).unwrap()
-      },
+        self
+          .insert(ssa::Instruction::call(
+            node.span,
+            f,
+            a,
+            self.hir_arena[n.function].ty,
+          ))
+          .unwrap()
+      }
 
       K::Project(n, i) => {
         let m = &self.hir_arena[*n];
@@ -265,17 +317,18 @@ impl<'a> Emitter<'a> {
 
         // TODO: For now, the index is passed as a usize directly, and just printed in the instruction.
         // We may want to lower it as a primitive to have the type information directly wrapped in here
-        self.insert(ssa::Instruction::project(node.span, v, *i)).unwrap()
-      },
+        self
+          .insert(ssa::Instruction::project(node.span, v, *i))
+          .unwrap()
+      }
 
       K::Loop(n) => {
-
         match &self.hir_arena[*n].kind {
           K::Block(b) => {
             let (head, body, tail) = (
-              self.context.function.add_block().id(), 
-              self.context.function.add_block().id(), 
-              self.context.function.add_block().id()
+              self.context.function.add_block().id(),
+              self.context.function.add_block().id(),
+              self.context.function.add_block().id(),
             );
 
             // Writing the loop head
@@ -284,20 +337,25 @@ impl<'a> Emitter<'a> {
             // We store the next iterator element on the memory
             self.lower_as_rvalue(&self.hir_arena[b[0]]);
 
-
             match &self.hir_arena[b[1]].kind {
               K::Case(n) => {
                 // We lower in the loop head. This is the instruction we need to run to evaluate the condition each iteration in the loop
                 let scrutinee = self.lower_as_rvalue(&self.hir_arena[n.value]);
-                
+
                 // We assumes that we have a single alternative
                 assert_eq!(&n.alternatives.len(), &(1 as usize));
-                
+
                 // We lower the condition of the first alternative (=> The loop condition to check)
                 let c0 = self.lower_as_primitive(&n.alternatives[0].0).unwrap();
 
                 // We compare to branch -> either to loop head again || to loop tail
-                let v = self.insert(ssa::Instruction::compare_eq(node.span, scrutinee.clone(), c0)).unwrap();
+                let v = self
+                  .insert(ssa::Instruction::compare_eq(
+                    node.span,
+                    scrutinee.clone(),
+                    c0,
+                  ))
+                  .unwrap();
                 self.insert(ssa::Instruction::condbr(node.span, v, body, tail));
 
                 // We target the loop body block now
@@ -311,31 +369,36 @@ impl<'a> Emitter<'a> {
                 self.context.point = InsertionPoint::End(tail);
                 // Loop evaluation = Unit
                 ssa::Value::Unit
-              },
+              }
               _ => {
                 panic!("unreachable : First node of loop block was not a case")
               }
             }
-          },
+          }
           _ => {
             panic!("unreachable : First node of loop was not a block")
           }
         }
-      },
+      }
 
       K::ExtractTag(n) => {
         let m = &self.hir_arena[*n];
 
         let s = self.lower_as_rvalue(m);
-        
+
         // Do we want to fix the index here ? Or what ?
-        self.insert(ssa::Instruction::project(node.span, s, 1)).unwrap()
-      },
+        self
+          .insert(ssa::Instruction::project(node.span, s, 1))
+          .unwrap()
+      }
 
       _ => {
-        println!("lowering is unimplemented for node of kind '{:?}'", node.kind);
+        println!(
+          "lowering is unimplemented for node of kind '{:?}'",
+          node.kind
+        );
         todo!()
-      },
+      }
     }
   }
 
@@ -376,16 +439,14 @@ impl<'a> Emitter<'a> {
   }
 
   /// Returns a textual representation of `x`.
-  fn show<T: FormatWith::<ModuleEnv<'a>>>(&self, x: T) -> String {
+  fn show<T: FormatWith<ModuleEnv<'a>>>(&self, x: T) -> String {
     let e = ModuleEnv::new(self.module, self.others);
     format!("{}", x.format_with(&e))
   }
-
 }
 
 /// The context in which instructions are inserted.
 struct InsertionContext {
-
   /// The function in which new instructions are inserted.
   function: ssa::Function,
 
@@ -396,13 +457,10 @@ struct InsertionContext {
   span: Location,
 
   environment: Vec<ssa::Value>,
-
 }
 
 /// Where an instruction should be inserted in a basic block.
 enum InsertionPoint {
-
   /// The end of a basic block.
-  End(ssa::BlockIdentity)
-
+  End(ssa::BlockIdentity),
 }

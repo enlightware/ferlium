@@ -2,58 +2,58 @@ use test_log::test;
 
 use indoc::indoc;
 
-use crate::harness::{TestSession};
+use crate::harness::TestSession;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
 
 #[test]
 fn simple_functions() {
-    let mut session = TestSession::new();
-    assert_eq!(
-        session.emit_ssa("fn t(x:int) {x}"),
-        r#"u!("t")
+  let mut session = TestSession::new();
+  assert_eq!(
+    session.emit_ssa("fn t(x:int) {x}"),
+    r#"u!("t")
 fn t:
   0:
     %r0 = ret %p0
 "#,
-    );
+  );
 }
 
 #[test]
 fn call_functions() {
-    let mut session = TestSession::new();
+  let mut session = TestSession::new();
 
-    assert_eq!(
-        session.emit_ssa("fn a0(x:int) {x + 1}"),
-        r#"u!("a0")
+  assert_eq!(
+    session.emit_ssa("fn a0(x:int) {x + 1}"),
+    r#"u!("a0")
 fn a0:
   0:
     %r0 = call imported function std::<impl Num for int>::from_int (slot #0)(i32 1)
     %r1 = call imported function std::<impl Num for int>::add (slot #1)(%p0, %r0)
     %r2 = ret %r1
 "#
-    );
+  );
 
-    assert_eq!(
-        session.emit_ssa("fn a0(x:int) {let y:int = 2 * x; y}"),
-        r#"u!("a0")
+  assert_eq!(
+    session.emit_ssa("fn a0(x:int) {let y:int = 2 * x; y}"),
+    r#"u!("a0")
 fn a0:
   0:
     %r0 = call imported function std::<impl Num for int>::from_int (slot #0)(i32 2)
     %r1 = call imported function std::<impl Num for int>::mul (slot #1)(%r0, %p0)
     %r2 = ret %r1
 "#
-    );
+  );
 }
 
 #[test]
 fn match_case_functions() {
-    let mut session = TestSession::new();
+  let mut session = TestSession::new();
 
-    assert_eq!(
-        session.emit_ssa("fn a0(x:int) {if true {x} else {2}}"),
-        r#"u!("a0")
+  assert_eq!(
+    session.emit_ssa("fn a0(x:int) {if true {x} else {2}}"),
+    r#"u!("a0")
 fn a0:
   0:
     %r0 = alloca Type { world: Some(0), index: 7 }
@@ -72,11 +72,11 @@ fn a0:
     %r9 = load %r0
     %r10 = ret %r9
 "#
-    );
+  );
 
-    assert_eq!(
-        session.emit_ssa("fn a0(x:int) {match x { 0 => x, 1 => x - 1, _ => -1 }}"),
-        r#"u!("a0")
+  assert_eq!(
+    session.emit_ssa("fn a0(x:int) {match x { 0 => x, 1 => x - 1, _ => -1 }}"),
+    r#"u!("a0")
 fn a0:
   0:
     %r0 = alloca Type { world: Some(0), index: 7 }
@@ -104,48 +104,48 @@ fn a0:
     %r16 = load %r0
     %r17 = ret %r16
 "#
-    );
+  );
 }
 
 #[test]
 fn generic_functions() {
-    let mut sessions = TestSession::new();
+  let mut sessions = TestSession::new();
 
-    assert_eq!(
-        sessions.emit_ssa("fn a0(x) { x < 2 }"),
-        r#"u!("a0")
+  assert_eq!(
+    sessions.emit_ssa("fn a0(x) { x < 2 }"),
+    r#"u!("a0")
 fn a0:
   0:
     %r0 = project 6 from %p0
     %r1 = call %r0(i32 2)
     %r2 = call imported function std::lt (slot #0)(%p1, %p2, %r1)
     %r3 = ret %r2
-"#)
+"#
+  )
 }
 
 #[test]
 fn user_function_call() {
-    let mut sessions = TestSession::new();
+  let mut sessions = TestSession::new();
 
-    assert_eq!(
-        sessions.emit_ssa("fn a0(x: int) {a0(x)}"),
-        r#"u!("a0")
+  assert_eq!(
+    sessions.emit_ssa("fn a0(x: int) {a0(x)}"),
+    r#"u!("a0")
 fn a0:
   0:
     %r0 = call local function a0 (#0)(%p0)
     %r1 = ret %r0
 "#
-    )
+  )
 }
-
 
 #[test]
 fn factorial() {
-    let mut sessions = TestSession::new();
+  let mut sessions = TestSession::new();
 
-    assert_eq!(
-      sessions.emit_ssa("fn factorial(x: int) {if x > 1 {x * factorial(x - 1)} else {1}}"),
-      r#"u!("factorial")
+  assert_eq!(
+    sessions.emit_ssa("fn factorial(x: int) {if x > 1 {x * factorial(x - 1)} else {1}}"),
+    r#"u!("factorial")
 fn factorial:
   0:
     %r0 = call imported function std::<impl Num for int>::from_int (slot #1)(i32 1)
@@ -170,5 +170,5 @@ fn factorial:
     %r15 = load %r2
     %r16 = ret %r15
 "#
-    );
+  );
 }

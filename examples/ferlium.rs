@@ -719,7 +719,6 @@ fn run_interactive_repl() {
     // Logging
     env_logger::init();
 
-
     // ferlium emission and evaluation contexts
     let mut session = CompilerSession::new();
     // Last module that compiled successfully, start with the std module.

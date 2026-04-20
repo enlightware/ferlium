@@ -591,7 +591,6 @@ impl Module {
         self.def_table.iter_names().copied()
     }
 
-
     /// Return the type for the source pos, if any.
     pub fn type_at(&self, pos: usize) -> Option<Type> {
         for function in self.functions.iter() {
