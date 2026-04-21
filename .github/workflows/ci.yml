@@ -136,6 +136,7 @@ jobs:
       pages: write
       id-token: write
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     needs: build_site
     steps:
       - name: Deploy to GitHub Pages
