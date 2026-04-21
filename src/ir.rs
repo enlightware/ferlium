@@ -139,6 +139,7 @@ impl TraitFnApplication {
     }
 }
 
+/// Introduces a binding into the evaluation context.
 #[derive(Debug, Clone)]
 pub struct EnvStore {
     pub value: NodeId,
@@ -146,6 +147,7 @@ pub struct EnvStore {
     pub id: LocalDeclId,
 }
 
+/// Reads the value of a binding from the evaluation context.
 #[derive(Debug, Clone)]
 pub struct EnvLoad {
     pub index: u32,

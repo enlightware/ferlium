@@ -176,14 +176,20 @@ pub trait Callable: DynClone {
         locals: &[LocalDecl],
     ) -> EvalControlFlowResult;
     fn as_script(&self) -> Option<&ScriptFunction> {
+        // Default implementation, which is reimplemented in `ScriptFunction`.
         None
     }
+
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
+        // Default implementation, which is reimplemented in `ScriptFunction`.
         None
     }
+
     fn into_script(self: Box<Self>) -> Option<ScriptFunction> {
+        // Default implementation, which is reimplemented in `ScriptFunction`.
         None
     }
+
     fn format_ind(
         &self,
         f: &mut std::fmt::Formatter,

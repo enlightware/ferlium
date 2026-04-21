@@ -450,6 +450,10 @@ impl TestSession {
         self.session.compile(src, name, Path::single_str(name))
     }
 
+    pub fn emit_ssa(&mut self, src: &str) -> String {
+        self.session.emit_ssa("<test>", src)
+    }
+
     /// Compile the src and return its module and expression
     pub fn compile(&mut self, src: &str) -> ModuleAndExpr {
         self.try_compile(src)

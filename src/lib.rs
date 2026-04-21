@@ -30,6 +30,7 @@ mod desugar;
 mod dictionary_passing;
 pub mod effects;
 pub mod emit_ir;
+pub mod emit_ssa;
 pub mod error;
 mod escapes;
 pub mod eval;
@@ -40,12 +41,14 @@ pub mod ide;
 mod import_resolver;
 pub mod ir;
 mod ir_syn;
+mod list;
 mod location;
 mod r#match;
 pub mod module;
 pub mod mutability;
 mod never;
 mod parser_helpers;
+pub mod ssa;
 pub mod std;
 mod sync;
 pub mod r#trait;
@@ -523,6 +526,17 @@ impl CompilerSession {
         }
 
         Ok(output)
+    }
+
+    pub fn emit_ssa(
+        &mut self,
+        source_name: &str,
+        src: &str,
+    ) -> String {
+        let path = module::Path::single_str(source_name);
+        let i = self.compile(src, source_name, path).unwrap().module_id;
+        let module = self.expect_fresh_module(i);
+        emit_ssa::emit_ssa(module, self.modules())
     }
 
     /// Compile a source code and return the compiled module and an expression (if any), or an error.
