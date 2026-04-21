@@ -1,4 +1,5 @@
 use super::*;
+use crate::r#type::{BareNativeTypeB, TypeAliasEntry};
 
 fn desugar_type_constraint(
     constraint: &ast::PTypeConstraint,
@@ -265,33 +266,8 @@ impl ast::PType {
                     && let Some(ty_var) = generic_ty_params.get(name)
                 {
                     Type::variable(*ty_var)
-                } else if let Some((module_id, entry)) = env.type_alias_with_module(path)? {
-                    record_module_use(module_id, modules_used);
-                    if !entry.param_names.is_empty() {
-                        return Err(internal_compilation_error!(WrongNumberOfArguments {
-                            expected: entry.param_names.len(),
-                            expected_span: path.span().unwrap_or(span),
-                            got: 0,
-                            got_span: span,
-                        }));
-                    }
-                    entry.ty
-                } else if let Some((module_id, type_def)) = env.type_def_with_module(path)? {
-                    record_module_use(module_id, modules_used);
-                    if !type_def.param_names.is_empty() {
-                        return Err(internal_compilation_error!(WrongNumberOfArguments {
-                            expected: type_def.param_names.len(),
-                            expected_span: type_def.span,
-                            got: 0,
-                            got_span: span,
-                        }));
-                    }
-                    Type::named(type_def, Vec::new())
-                } else if let Some((module_id, bare)) =
-                    env.bare_native_type_alias_with_module(path)?
-                {
-                    record_module_use(module_id, modules_used);
-                    Type::native_type(NativeType::new(bare, vec![]))
+                } else if let Some(resolved) = resolve_type_path(path, env, modules_used)? {
+                    desugar_resolved_type_without_args(resolved, path, span)?
                 } else if let [(name, _)] = &path.segments[..] {
                     Type::variant([(*name, Type::unit())])
                 } else {
@@ -299,75 +275,10 @@ impl ast::PType {
                 }
             }
             AppliedPath { path, args } => {
-                if let Some((module_id, entry)) = env.type_alias_with_module(path)? {
-                    record_module_use(module_id, modules_used);
-                    let desugared_args = args
-                        .iter()
-                        .map(|(ty, ty_span)| {
-                            ty.desugar_with_ty_params(
-                                *ty_span,
-                                false,
-                                env,
-                                generic_ty_params,
-                                modules_used,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if entry.param_names.len() != desugared_args.len() {
-                        return Err(internal_compilation_error!(WrongNumberOfArguments {
-                            expected: entry.param_names.len(),
-                            expected_span: path.span().unwrap_or(span),
-                            got: desugared_args.len(),
-                            got_span: span,
-                        }));
-                    }
-                    let ty_subst = (0..entry.ty_var_count)
-                        .map(TypeVar::new)
-                        .zip(desugared_args)
-                        .collect();
-                    entry
-                        .ty
-                        .instantiate(&(ty_subst, EffectsSubstitution::default()))
-                } else if let Some((module_id, type_def)) = env.type_def_with_module(path)? {
-                    record_module_use(module_id, modules_used);
-                    let desugared_args = args
-                        .iter()
-                        .map(|(ty, ty_span)| {
-                            ty.desugar_with_ty_params(
-                                *ty_span,
-                                false,
-                                env,
-                                generic_ty_params,
-                                modules_used,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if type_def.param_names.len() != desugared_args.len() {
-                        return Err(internal_compilation_error!(WrongNumberOfArguments {
-                            expected: type_def.param_names.len(),
-                            expected_span: type_def.span,
-                            got: desugared_args.len(),
-                            got_span: span,
-                        }));
-                    }
-                    Type::named(type_def, desugared_args)
-                } else if let Some((module_id, bare)) =
-                    env.bare_native_type_alias_with_module(path)?
-                {
-                    record_module_use(module_id, modules_used);
-                    let desugared_args = args
-                        .iter()
-                        .map(|(ty, ty_span)| {
-                            ty.desugar_with_ty_params(
-                                *ty_span,
-                                false,
-                                env,
-                                generic_ty_params,
-                                modules_used,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Type::native_type(NativeType::new(bare, desugared_args))
+                if let Some(resolved) = resolve_type_path(path, env, modules_used)? {
+                    let desugared_args =
+                        desugar_type_arguments(args, env, generic_ty_params, modules_used)?;
+                    desugar_resolved_type_with_args(resolved, path, desugared_args, span)?
                 } else if let [(name, name_span)] = &path.segments[..] {
                     if generic_ty_params.contains_key(name) {
                         return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -843,6 +754,135 @@ fn desugar_trait_impl_for(
             .collect(),
         span: for_trait.span,
     })
+}
+
+#[derive(Clone)]
+enum ResolvedTypePath {
+    Alias(TypeAliasEntry),
+    TypeDef(TypeDefRef),
+    BareNative(BareNativeTypeB),
+}
+
+fn resolve_type_path(
+    path: &ast::Path,
+    env: &ModuleEnv<'_>,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<Option<ResolvedTypePath>, InternalCompilationError> {
+    if let [(name, _)] = &path.segments[..] {
+        if let Some(entry) = env.current.get_type_alias(ustr(name)).cloned() {
+            return Ok(Some(ResolvedTypePath::Alias(entry)));
+        }
+        if let Some(type_def) = env.current.get_type_def(ustr(name)).cloned() {
+            return Ok(Some(ResolvedTypePath::TypeDef(type_def)));
+        }
+        if let Some(bare) = env.current.get_bare_native_type_alias(ustr(name)) {
+            return Ok(Some(ResolvedTypePath::BareNative(bare)));
+        }
+    }
+
+    if let Some((module_id, entry)) = env.type_alias_with_module(path)? {
+        record_module_use(module_id, modules_used);
+        return Ok(Some(ResolvedTypePath::Alias(entry.clone())));
+    }
+    if let Some((module_id, type_def)) = env.type_def_with_module(path)? {
+        record_module_use(module_id, modules_used);
+        return Ok(Some(ResolvedTypePath::TypeDef(type_def)));
+    }
+    if let Some((module_id, bare)) = env.bare_native_type_alias_with_module(path)? {
+        record_module_use(module_id, modules_used);
+        return Ok(Some(ResolvedTypePath::BareNative(bare)));
+    }
+
+    Ok(None)
+}
+
+fn desugar_type_arguments(
+    args: &[ast::TypeSpan<Parsed>],
+    env: &ModuleEnv<'_>,
+    generic_ty_params: &GenericTyParams,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<Vec<Type>, InternalCompilationError> {
+    args.iter()
+        .map(|(ty, ty_span)| {
+            ty.desugar_with_ty_params(*ty_span, false, env, generic_ty_params, modules_used)
+        })
+        .collect()
+}
+
+fn expect_type_argument_count(
+    expected: usize,
+    expected_span: Location,
+    got: usize,
+    got_span: Location,
+) -> Result<(), InternalCompilationError> {
+    if expected == got {
+        Ok(())
+    } else {
+        Err(internal_compilation_error!(WrongNumberOfArguments {
+            expected,
+            expected_span,
+            got,
+            got_span,
+        }))
+    }
+}
+
+fn desugar_resolved_type_without_args(
+    resolved: ResolvedTypePath,
+    path: &ast::Path,
+    span: Location,
+) -> Result<Type, InternalCompilationError> {
+    match resolved {
+        ResolvedTypePath::Alias(entry) => {
+            expect_type_argument_count(
+                entry.param_names.len(),
+                path.span().unwrap_or(span),
+                0,
+                span,
+            )?;
+            Ok(entry.ty)
+        }
+        ResolvedTypePath::TypeDef(type_def) => {
+            expect_type_argument_count(type_def.param_names.len(), type_def.span, 0, span)?;
+            Ok(Type::named(type_def, Vec::new()))
+        }
+        ResolvedTypePath::BareNative(bare) => Ok(Type::native_type(NativeType::new(bare, vec![]))),
+    }
+}
+
+fn desugar_resolved_type_with_args(
+    resolved: ResolvedTypePath,
+    path: &ast::Path,
+    args: Vec<Type>,
+    span: Location,
+) -> Result<Type, InternalCompilationError> {
+    match resolved {
+        ResolvedTypePath::Alias(entry) => {
+            expect_type_argument_count(
+                entry.param_names.len(),
+                path.span().unwrap_or(span),
+                args.len(),
+                span,
+            )?;
+            let ty_subst = (0..entry.ty_var_count)
+                .map(TypeVar::new)
+                .zip(args)
+                .collect();
+            Ok(entry
+                .ty
+                .instantiate(&(ty_subst, EffectsSubstitution::default())))
+        }
+        ResolvedTypePath::TypeDef(type_def) => {
+            expect_type_argument_count(
+                type_def.param_names.len(),
+                type_def.span,
+                args.len(),
+                span,
+            )?;
+            Ok(Type::named(type_def, args))
+        }
+        ResolvedTypePath::BareNative(bare) => Ok(Type::native_type(NativeType::new(bare, args))),
+    }
 }
 
 impl PTraitImpl {

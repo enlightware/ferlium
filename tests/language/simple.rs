@@ -685,10 +685,10 @@ fn match_expr() {
     );
     session
         .fail_compilation("match testing::some_int(0) { None => 0 }")
-        .expect_type_mismatch("None | Some (int)", "None");
+        .expect_type_mismatch("Option<int>", "None");
     session
         .fail_compilation("match testing::some_int(0) { Some(x) => 0 }")
-        .expect_type_mismatch("None | Some (int)", "Some (C)");
+        .expect_type_mismatch("Option<int>", "Some (C)");
     // TODO: add more complex literals (tuples, array) once optimisation is in place
 }
 

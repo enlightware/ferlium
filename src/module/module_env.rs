@@ -9,7 +9,10 @@
 use crate::{
     ast::{self, UstrSpan},
     error::InternalCompilationError,
-    module::{Module, ModuleFunction, ModuleId, Modules, path::Path},
+    module::{
+        Module, ModuleFunction, ModuleId, Modules, path::Path,
+        type_alias_name::find_generic_alias_name,
+    },
     std::STD_MODULE_ID,
     r#trait::TraitRef,
     r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDefRef},
@@ -41,22 +44,36 @@ pub struct ModuleEnv<'m> {
 
 impl<'m> ModuleEnv<'m> {
     pub fn type_alias_name(&self, ty: Type) -> Option<String> {
-        self.current.type_aliases.get_name(ty).map_or_else(
-            || {
-                self.modules.iter_named().find_map(|(mod_path, entry)| {
-                    entry.module().and_then(|module| {
-                        module.type_aliases.get_name(ty).map(|ty_name| {
-                            if self.current.uses(mod_path, ty_name) {
-                                ty_name.to_string()
+        if let Some(name) = self.current.type_aliases.get_name(ty) {
+            return Some(name.to_string());
+        }
+        if let Some(alias_name) = find_generic_alias_name(self.current, ty, self) {
+            return Some(alias_name.rendered);
+        }
+
+        self.modules.iter_named().find_map(|(mod_path, entry)| {
+            entry.module().and_then(|module| {
+                module
+                    .type_aliases
+                    .get_name(ty)
+                    .map(|ty_name| {
+                        if self.current.uses(mod_path, ty_name) {
+                            ty_name.to_string()
+                        } else {
+                            format!("{mod_path}::{ty_name}")
+                        }
+                    })
+                    .or_else(|| {
+                        find_generic_alias_name(module, ty, self).map(|alias_name| {
+                            if self.current.uses(mod_path, alias_name.name) {
+                                alias_name.rendered
                             } else {
-                                format!("{mod_path}::{ty_name}")
+                                format!("{mod_path}::{}", alias_name.rendered)
                             }
                         })
                     })
-                })
-            },
-            |name| Some(name.to_string()),
-        )
+            })
+        })
     }
 
     pub fn bare_native_name(&self, native: &BareNativeTypeB) -> Option<String> {

@@ -1,3 +1,4 @@
+type Option<T> = Some(T) | None;
 type Ordering = Less | Equal | Greater;
 
 /// A type that has a total ordering.

@@ -11,7 +11,7 @@
 use indoc::indoc;
 use ustr::ustr;
 
-use ferlium::{format::FormatWith, std::option::some};
+use ferlium::{format::FormatWith, module::ModuleEnv, std::option::some};
 
 use crate::harness::{TestSession, float, int, string};
 
@@ -288,7 +288,28 @@ fn generic_type_aliases() {
     assert!(entry.is_some());
     assert_eq!(entry.unwrap().param_names.len(), 2);
     let rendered = module.format_with(session.session().modules()).to_string();
-    assert!(rendered.contains("Pair: (A, B)"));
+    assert!(rendered.contains("Pair<A, B>: (A, B)"));
+
+    let module_id = session
+        .compile(indoc! { r#"
+        type Option<T> = Some(T) | None;
+
+        fn func(x) -> (Some(int) | None) {
+            None
+        }
+    "# })
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    let module_env = ModuleEnv::new(module, session.session().modules());
+    let fn_def = module
+        .get_function(ustr("func"))
+        .unwrap()
+        .definition
+        .clone();
+    assert_eq!(
+        fn_def.ty_scheme.ty().format_with(&module_env).to_string(),
+        "(A) -> Option<int>"
+    );
 }
 
 #[test]

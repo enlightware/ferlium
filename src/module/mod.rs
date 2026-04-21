@@ -19,6 +19,7 @@ pub mod id;
 pub mod module_env;
 pub mod path;
 pub mod trait_impl;
+mod type_alias_name;
 pub mod uses;
 
 use derive_new::new;
@@ -44,7 +45,7 @@ use crate::{
     ir::{self, NodeArena},
     module::id::{Id, NamedIndexed},
     r#trait::TraitRef,
-    r#type::{LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDefRef},
+    r#type::{LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDefRef, TypeVar},
     value::build_dictionary_value,
 };
 
@@ -864,7 +865,11 @@ impl Module {
         if self.type_aliases.type_len() > 0 {
             writeln!(f, "Type aliases ({}):\n", self.type_aliases.type_len())?;
             for alias in self.type_aliases.type_entries() {
-                writeln!(f, "{}: {}", alias.name, alias.ty.data().format_with(&env))?;
+                write!(f, "{}", alias.name)?;
+                if alias.ty_var_count > 0 {
+                    fmt_ordered_quantifiers(f, alias.ty_var_count)?;
+                }
+                writeln!(f, ": {}", alias.ty.data().format_with(&env))?;
             }
             writeln!(f, "\n")?;
         }
@@ -954,6 +959,17 @@ impl FormatWith<ShowModuleWithOptions<'_>> for Module {
             options.show_all_functions,
         )
     }
+}
+
+pub(crate) fn fmt_ordered_quantifiers(f: &mut fmt::Formatter<'_>, count: u32) -> fmt::Result {
+    write!(f, "<")?;
+    for i in 0..count {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        write!(f, "{}", TypeVar::new(i))?;
+    }
+    write!(f, ">")
 }
 
 // impl FormatWith<ModuleEnv<'_>> for LocalFunction {

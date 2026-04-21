@@ -9,7 +9,7 @@
 
 use std::{fmt, hash::Hash};
 
-use crate::FxHashMap;
+use crate::{FxHashMap, module::fmt_ordered_quantifiers};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -638,14 +638,7 @@ fn format_impl_header_expanded(
 ) -> Result<TypeSubstitution, std::fmt::Error> {
     write!(f, "impl")?;
     if ty_var_count > 0 {
-        write!(f, "<")?;
-        for i in 0..ty_var_count {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", TypeVar::new(i))?;
-        }
-        write!(f, ">")?;
+        fmt_ordered_quantifiers(f, ty_var_count)?;
     }
     if input_tys.len() == 1 && output_tys.is_empty() {
         write!(

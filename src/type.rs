@@ -1920,9 +1920,9 @@ mod tests {
         check("(bool, (string, int))");
         check("{ a: int, b: float }");
         check("{ a: int, b: { c: bool, d: string } }");
-        check("None | Some (int)");
+        check("Option<int>");
         check("Color (string) | RGB (int, int, int)");
-        check("[[(string, { age: int, name: string, nick: None | Some (string) })]]");
+        check("[[(string, { age: int, name: string, nick: Option<string> })]]");
     }
 
     #[test]
