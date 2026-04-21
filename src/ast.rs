@@ -139,6 +139,7 @@ pub trait Phase: Sized {
     type MutType: Debug + Clone + FormatInFnArg;
     type LetTyAscriptionComplete: Debug + Clone;
     type WhereClause: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
+    type TraitInModule: Debug + Clone;
     type TypeAliasInModule: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
     type TypeDefInModule: Debug + Clone;
 }
@@ -161,6 +162,7 @@ impl Phase for Parsed {
     type MutType = PMutType;
     type LetTyAscriptionComplete = ();
     type WhereClause = TypeConstraint<Self>;
+    type TraitInModule = TraitDefinition;
     type TypeAliasInModule = TypeAlias;
     type TypeDefInModule = TypeDef<Self>;
 }
@@ -175,6 +177,7 @@ impl Phase for Desugared {
     type MutType = IrMutType;
     type LetTyAscriptionComplete = bool;
     type WhereClause = PubTypeConstraint;
+    type TraitInModule = Never;
     type TypeAliasInModule = Never;
     type TypeDefInModule = Never;
 }
@@ -602,6 +605,50 @@ pub type PModuleFunction = ModuleFunction<Parsed>;
 /// An AST module function after desugaring
 pub type DModuleFunction = ModuleFunction<Desugared>;
 
+#[derive(Debug, Clone)]
+pub struct TraitFunctionArg {
+    pub name: UstrSpan,
+    pub ty: PFnArgType,
+}
+
+impl FormatWith<ModuleEnv<'_>> for TraitFunctionArg {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.name.0, self.ty.format_with(env))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitFunction {
+    pub name: UstrSpan,
+    pub args: Vec<TraitFunctionArg>,
+    pub ret_ty: Option<PTypeSpan>,
+    pub effects: PFnEffects,
+    pub span: Location,
+    pub doc: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitDefinition {
+    pub name: UstrSpan,
+    pub input_type_names: Vec<UstrSpan>,
+    pub output_type_names: Vec<UstrSpan>,
+    pub where_clause: Vec<PTypeConstraint>,
+    pub functions: Vec<TraitFunction>,
+    pub span: Location,
+    pub doc: Option<String>,
+}
+
+impl TraitDefinition {
+    pub(crate) fn iter_input_type_names(&self) -> impl Iterator<Item = Ustr> {
+        self.input_type_names.iter().map(|(s, _)| *s)
+    }
+    pub(crate) fn iter_output_type_names(&self) -> impl Iterator<Item = Ustr> {
+        self.output_type_names.iter().map(|(s, _)| *s)
+    }
+}
+
+pub type PTraitDefinition = TraitDefinition;
+
 /// A trait implementation
 #[derive(Debug, Clone)]
 pub struct TraitImplFor<P: Phase> {
@@ -688,6 +735,7 @@ pub type DTraitImpl = TraitImpl<Desugared>;
 // A module is a collection of functions and types, and is the top-level structure of the AST
 #[derive(Debug, Clone)]
 pub struct Module<P: Phase> {
+    pub traits: Vec<P::TraitInModule>,
     pub functions: Vec<ModuleFunction<P>>,
     pub impls: Vec<TraitImpl<P>>,
     pub type_aliases: Vec<P::TypeAliasInModule>,
@@ -695,6 +743,12 @@ pub struct Module<P: Phase> {
     pub uses: Vec<UseTree>,
 }
 impl<P: Phase> Module<P> {
+    pub fn single_trait(trait_def: P::TraitInModule) -> Self {
+        Self {
+            traits: vec![trait_def],
+            ..Self::default()
+        }
+    }
     pub fn single_function(function: ModuleFunction<P>) -> Self {
         Self {
             functions: vec![function],
@@ -728,6 +782,7 @@ impl<P: Phase> Module<P> {
     }
 
     pub fn extend(&mut self, other: Self) {
+        self.traits.extend(other.traits);
         self.functions.extend(other.functions);
         self.impls.extend(other.impls);
         self.type_aliases.extend(other.type_aliases);
@@ -745,7 +800,8 @@ impl<P: Phase> Module<P> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.functions.is_empty()
+        self.traits.is_empty()
+            && self.functions.is_empty()
             && self.impls.is_empty()
             && self.type_aliases.is_empty()
             && self.type_defs.is_empty()
@@ -753,11 +809,12 @@ impl<P: Phase> Module<P> {
     }
 }
 impl Module<Parsed> {
-    /// Returns all the names defined in this module, including functions, type aliases, and type definitions.
+    /// Returns all the names defined in this module, including traits, functions, type aliases, and type definitions.
     pub fn own_symbols(&self) -> impl Iterator<Item = UstrSpan> + '_ {
-        self.functions
+        self.traits
             .iter()
-            .map(|f| f.name)
+            .map(|trait_def| trait_def.name)
+            .chain(self.functions.iter().map(|f| f.name))
             .chain(self.type_aliases.iter().map(|alias| alias.name))
             .chain(self.type_defs.iter().map(|def| def.name))
     }
@@ -766,6 +823,7 @@ impl Module<Parsed> {
 impl<P: Phase> Default for Module<P> {
     fn default() -> Self {
         Self {
+            traits: Vec::new(),
             functions: Vec::new(),
             impls: Vec::new(),
             type_aliases: Vec::new(),
@@ -793,6 +851,33 @@ impl<P: Phase> VisitExpr<P> for Module<P> {
 pub struct ModuleDisplay<'a, P: Phase> {
     pub module: &'a Module<P>,
     pub arena: &'a ExprArena<P>,
+}
+
+fn fmt_trait_function(
+    f: &mut fmt::Formatter<'_>,
+    env: &ModuleEnv<'_>,
+    function: &TraitFunction,
+    doc_prefix: &str,
+) -> fmt::Result {
+    if let Some(doc) = &function.doc {
+        for line in doc.split("\n") {
+            writeln!(f, "{doc_prefix}/// {line}")?;
+        }
+    }
+    write!(f, "{doc_prefix}fn {}(", function.name.0)?;
+    write_with_separator_and_format_fn(&function.args, ", ", |arg, f| arg.fmt_with(f, env), f)?;
+    write!(f, ")")?;
+    if let Some((ret_ty, _)) = &function.ret_ty {
+        write!(f, " → {}", ret_ty.format_with(env))?;
+    }
+    if let PFnEffects::Explicit(effects) = &function.effects {
+        write!(f, " !")?;
+        if !effects.is_empty() {
+            write!(f, " ")?;
+            write_with_separator(effects, ", ", f)?;
+        }
+    }
+    writeln!(f, ";")
 }
 
 fn fmt_module_function<P: Phase>(
@@ -859,7 +944,7 @@ fn fmt_module_function<P: Phase>(
     arena[*body].format_ind(f, env, arena, body_indent)
 }
 
-impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, P> {
+impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
         let module = self.module;
         let arena = self.arena;
@@ -867,6 +952,37 @@ impl<'a, P: Phase> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, P> {
             writeln!(f, "Types:")?;
             for alias in module.type_aliases.iter() {
                 writeln!(f, "  {}", alias.format_with(env))?;
+            }
+        }
+        if !module.traits.is_empty() {
+            writeln!(f, "Traits:")?;
+            for trait_def in module.traits.iter() {
+                if let Some(doc) = &trait_def.doc {
+                    for line in doc.split("\n") {
+                        writeln!(f, "  /// {line}")?;
+                    }
+                }
+                write!(f, "  trait {}<", trait_def.name.0)?;
+                write_with_separator(trait_def.iter_input_type_names(), ", ", f)?;
+                if !trait_def.output_type_names.is_empty() {
+                    write!(f, " |-> ")?;
+                    write_with_separator(trait_def.iter_output_type_names(), ", ", f)?;
+                }
+                write!(f, ">")?;
+                if !trait_def.where_clause.is_empty() {
+                    write!(f, " where ")?;
+                    write_with_separator_and_format_fn(
+                        &trait_def.where_clause,
+                        ", ",
+                        |constraint, f| constraint.fmt_with(f, env),
+                        f,
+                    )?;
+                }
+                writeln!(f, " {{")?;
+                for function in &trait_def.functions {
+                    fmt_trait_function(f, env, function, "    ")?;
+                }
+                writeln!(f, "  }}")?;
             }
         }
         if !module.impls.is_empty() {

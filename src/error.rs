@@ -29,7 +29,7 @@ use ustr::Ustr;
 
 use crate::{
     ast::{PatternType, PropertyAccess},
-    effects::EffType,
+    effects::{EffType, EffectVar},
     module::ModuleEnv,
     r#type::{Type, TypeVar},
 };
@@ -121,6 +121,7 @@ pub enum GenericParamsOwner {
     TypeDef { name: Ustr },
     TypeAlias { name: Ustr },
     Function { name: Ustr },
+    Trait { name: Ustr },
     TraitImpl { trait_name: Ustr },
 }
 
@@ -130,6 +131,7 @@ impl GenericParamsOwner {
             Self::TypeDef { name } => format!("type definition `{name}`"),
             Self::TypeAlias { name } => format!("type alias `{name}`"),
             Self::Function { name } => format!("function `{name}`"),
+            Self::Trait { name } => format!("trait `{name}`"),
             Self::TraitImpl { trait_name } => format!("impl of trait `{trait_name}`"),
         }
     }
@@ -190,6 +192,92 @@ impl InvalidTraitConstraintKind {
             ),
             ExpectedNamedInputs { expected_count } => format!(
                 "Trait `{trait_name}` expects {expected_count} named input type parameters in this constraint"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidTraitDefinitionKind {
+    MissingInputTypes,
+    InvalidConstraintTypeVar {
+        ty_var: TypeVar,
+    },
+    MissingInputTypeVarInMethod {
+        method_name: Ustr,
+        ty_var: TypeVar,
+    },
+    UnreachableConstraintInputTypeVar {
+        method_name: Ustr,
+        constraint_index: usize,
+    },
+}
+
+impl InvalidTraitDefinitionKind {
+    pub fn message(&self, trait_name: Ustr) -> String {
+        use InvalidTraitDefinitionKind::*;
+        match self {
+            MissingInputTypes => {
+                format!("Trait `{trait_name}` must have at least one input type parameter")
+            }
+            InvalidConstraintTypeVar { ty_var } => format!(
+                "Trait `{trait_name}` refers to invalid type variable `{ty_var}` in its where clause"
+            ),
+            MissingInputTypeVarInMethod {
+                method_name,
+                ty_var,
+            } => format!(
+                "Trait method `{trait_name}::{method_name}` must mention input type variable `{ty_var}` in its signature"
+            ),
+            UnreachableConstraintInputTypeVar {
+                method_name,
+                constraint_index,
+            } => format!(
+                "Trait method `{trait_name}::{method_name}` cannot use where-clause constraint #{} because its input types are not reachable from the method signature or earlier constraints",
+                constraint_index + 1
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsupportedTraitDefinitionKind {
+    GenericMethod {
+        method_name: Ustr,
+        quantifier: TypeVar,
+    },
+    GenericEffect {
+        method_name: Ustr,
+        effect_vars: Vec<EffectVar>,
+    },
+    GenericConstraints {
+        method_name: Ustr,
+        constraint_count: usize,
+    },
+}
+
+impl UnsupportedTraitDefinitionKind {
+    pub fn message(&self, trait_name: Ustr) -> String {
+        use UnsupportedTraitDefinitionKind::*;
+        match self {
+            GenericMethod {
+                method_name,
+                quantifier,
+            } => format!(
+                "Generic trait methods are not supported yet, but `{trait_name}::{method_name}` quantifies over `{quantifier}`"
+            ),
+            GenericEffect {
+                method_name,
+                effect_vars,
+            } => format!(
+                "Generic effects in trait methods are not supported yet, but `{trait_name}::{method_name}` uses effect variables {}",
+                iterable_to_string(effect_vars, ", ")
+            ),
+            GenericConstraints {
+                method_name,
+                constraint_count,
+            } => format!(
+                "Generic constraints in trait methods are not supported yet, but `{trait_name}::{method_name}` has {constraint_count} generic constraints"
             ),
         }
     }
@@ -386,6 +474,16 @@ pub enum CompilationErrorImpl<S: Scope> {
     InvalidTraitConstraint {
         trait_name: String,
         kind: InvalidTraitConstraintKind,
+        span: Location,
+    },
+    InvalidTraitDefinition {
+        trait_name: Ustr,
+        kind: InvalidTraitDefinitionKind,
+        span: Location,
+    },
+    UnsupportedTraitDefinition {
+        trait_name: Ustr,
+        kind: UnsupportedTraitDefinitionKind,
         span: Location,
     },
     InvalidEnumDefaultAttribute {
@@ -796,6 +894,20 @@ impl FormatWith<SourceTable> for CompilationError {
                 span,
             } => {
                 write!(f, "{} in {}", kind.message(trait_name), fmt_span(span))
+            }
+            InvalidTraitDefinition {
+                trait_name,
+                kind,
+                span,
+            } => {
+                write!(f, "{} in {}", kind.message(*trait_name), fmt_span(span))
+            }
+            UnsupportedTraitDefinition {
+                trait_name,
+                kind,
+                span,
+            } => {
+                write!(f, "{} in {}", kind.message(*trait_name), fmt_span(span))
             }
             InvalidEnumDefaultAttribute {
                 type_name,
@@ -1414,6 +1526,24 @@ impl CompilationError {
                 kind,
                 span,
             } => compilation_error!(InvalidTraitConstraint {
+                trait_name,
+                kind,
+                span,
+            }),
+            InvalidTraitDefinition {
+                trait_name,
+                kind,
+                span,
+            } => compilation_error!(InvalidTraitDefinition {
+                trait_name,
+                kind,
+                span,
+            }),
+            UnsupportedTraitDefinition {
+                trait_name,
+                kind,
+                span,
+            } => compilation_error!(UnsupportedTraitDefinition {
                 trait_name,
                 kind,
                 span,
@@ -2323,7 +2453,7 @@ mod tests {
         let span = Location::new_usize(0, src.len(), SourceId::from_index(1));
         let expected = ["(1+2)"];
         for (index, expected) in expected.into_iter().enumerate() {
-            let arg_span = super::extract_ith_fn_arg(src, span, index);
+            let arg_span = extract_ith_fn_arg(src, span, index);
             assert_eq!(&src[arg_span.as_range()], expected);
         }
     }
@@ -2334,7 +2464,7 @@ mod tests {
         let span = Location::new_usize(0, src.len(), SourceId::from_index(1));
         let expected = ["12", " (1 + 3)"];
         for (index, expected) in expected.into_iter().enumerate() {
-            let arg_span = super::extract_ith_fn_arg(src, span, index);
+            let arg_span = extract_ith_fn_arg(src, span, index);
             assert_eq!(&src[arg_span.as_range()], expected);
         }
     }

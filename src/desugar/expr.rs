@@ -26,7 +26,7 @@ pub fn desugar_expr_with_empty_ctx(
 }
 
 /// Desugar an expression
-pub(super) fn desugar(
+pub(crate) fn desugar(
     id: ExprId<Parsed>,
     ctx: &mut DesugarCtx,
     parsed_arena: &PExprArena,

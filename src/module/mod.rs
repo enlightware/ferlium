@@ -419,7 +419,7 @@ impl Module {
     pub fn add_trait(&mut self, trait_ref: TraitRef) -> LocalTraitId {
         let id = LocalTraitId::from_index(self.traits.len());
         self.traits.push(trait_ref.clone());
-        // As currently only std defines traits, we asserts that it has not been added yet.
+        // Trait names are module-level symbols, so they must remain unique.
         assert!(self.def_table.get_by_name(&trait_ref.name).is_none());
         self.def_table.insert(trait_ref.name, DefKind::Trait(id));
         id

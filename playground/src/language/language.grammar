@@ -40,14 +40,31 @@ Module {
 }
 
 modelItem {
-    Function
+    TraitDef
+    | Function
     | TraitImpl
     | TypeDef
     | UseDecl
 }
 
+TraitDef {
+    kw<'trait'> Identifier traitTypeParams whereClause? '{' TraitFunction* '}'
+}
+
+traitTypeParams {
+    '<' Identifier (',' Identifier)* traitOutputParams? '>'
+}
+
+traitOutputParams {
+    '|->' Identifier (',' Identifier)*
+}
+
 Function {
     kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
+}
+
+TraitFunction {
+    kw<'fn'> Identifier '(' traitFunctionArgs ')' fnRet? fnEffects? ';'
 }
 
 TraitImpl {
@@ -497,6 +514,14 @@ identifierWithOptTypeArgs {
 
 identifierWithOptTypeArg {
     kw<'mut'>? Identifier RefMutTypeAscription?
+}
+
+traitFunctionArgs {
+    (traitFunctionArg ',')* traitFunctionArg?
+}
+
+traitFunctionArg {
+    Identifier ':' argTypeNoRecord
 }
 
 identifiersOrMoreOptComma {

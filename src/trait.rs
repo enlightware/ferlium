@@ -16,13 +16,13 @@ use std::{
 use crate::{FxHashMap, FxHashSet};
 
 use dyn_clone::DynClone;
+use itertools::Itertools;
 use ustr::Ustr;
 use ustr::ustr;
 
 use crate::{
     Location,
-    containers::iterable_to_string,
-    error::InternalCompilationError,
+    error::{InternalCompilationError, InvalidTraitDefinitionKind, UnsupportedTraitDefinitionKind},
     format::{FormatWith, write_with_separator_and_format_fn},
     function::FunctionDefinition,
     module::{ModuleEnv, TraitImplId},
@@ -48,6 +48,29 @@ pub trait Deriver: Debug + DynClone + Sync + Send {
 
 dyn_clone::clone_trait_object!(Deriver);
 
+/// A trait method argument span, storing the spans of the argument name and its type.
+pub type TraitFunctionArgSpan = (Location, Location);
+
+/// If the trait method is from code, this struct contains the spans of the method.
+#[derive(Debug, Clone)]
+pub struct TraitFunctionSpans {
+    pub name: Location,
+    pub args: Vec<TraitFunctionArgSpan>,
+    pub ret_ty: Option<Location>,
+    pub span: Location,
+}
+
+/// If the trait is from code, this struct contains the spans of the trait definition.
+#[derive(Debug, Clone)]
+pub struct TraitSpans {
+    pub name: Location,
+    pub input_type_names: Vec<Location>,
+    pub output_type_names: Vec<Location>,
+    pub constraints: Vec<Location>,
+    pub functions: Vec<TraitFunctionSpans>,
+    pub span: Location,
+}
+
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
 #[derive(Debug, Clone)]
 pub struct Trait {
@@ -66,7 +89,29 @@ pub struct Trait {
     pub functions: Vec<(Ustr, FunctionDefinition)>,
     /// The trait derivators
     pub derives: Vec<Box<dyn Deriver>>,
-    // TODO: add spans once traits can be defined in user code.
+    /// If the trait is from code, this contains the source spans of the definition.
+    pub spans: Option<TraitSpans>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraitValidationError {
+    Invalid {
+        trait_name: Ustr,
+        kind: InvalidTraitDefinitionKind,
+    },
+    Unsupported {
+        trait_name: Ustr,
+        kind: UnsupportedTraitDefinitionKind,
+    },
+}
+
+impl TraitValidationError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Invalid { trait_name, kind } => kind.message(*trait_name),
+            Self::Unsupported { trait_name, kind } => kind.message(*trait_name),
+        }
+    }
 }
 
 impl Trait {
@@ -110,12 +155,21 @@ impl Trait {
 
     /// Validate the trait, ensuring that its function signatures adhere to the limitations of the current implementation.
     pub fn validate(&self) {
+        self.try_validate()
+            .unwrap_or_else(|error| panic!("{}", error.message()));
+    }
+
+    /// Validate the trait and return a descriptive error instead of panicking.
+    pub fn try_validate(&self) -> Result<(), TraitValidationError> {
         // Make sure that constraints only refer to the input or the output type variables.
         let trait_type_count = self.type_var_count();
         for constraint in &self.constraints {
             for ty_var in constraint.inner_ty_vars() {
                 if ty_var.name() >= trait_type_count {
-                    panic!("Invalid type variable in trait {}: {}", self.name, ty_var);
+                    return Err(TraitValidationError::Invalid {
+                        trait_name: self.name,
+                        kind: InvalidTraitDefinitionKind::InvalidConstraintTypeVar { ty_var },
+                    });
                 }
             }
         }
@@ -124,35 +178,49 @@ impl Trait {
         for (name, function) in &self.functions {
             for quantifier in &function.ty_scheme.ty_quantifiers {
                 if quantifier.name() >= trait_type_count {
-                    panic!(
-                        "Generic trait functions are not supported yet, but function {} of trait {} has a quantifier {}.",
-                        name, self.name, quantifier
-                    );
+                    return Err(TraitValidationError::Unsupported {
+                        trait_name: self.name,
+                        kind: UnsupportedTraitDefinitionKind::GenericMethod {
+                            method_name: *name,
+                            quantifier: *quantifier,
+                        },
+                    });
                 }
             }
             if !function.ty_scheme.eff_quantifiers.is_empty() {
-                panic!(
-                    "Generic effects are not supported in trait functions yet, but function {} of trait {} has generic effects {}.",
-                    name,
-                    self.name,
-                    iterable_to_string(&function.ty_scheme.eff_quantifiers, ", ")
-                );
+                return Err(TraitValidationError::Unsupported {
+                    trait_name: self.name,
+                    kind: UnsupportedTraitDefinitionKind::GenericEffect {
+                        method_name: *name,
+                        effect_vars: function
+                            .ty_scheme
+                            .eff_quantifiers
+                            .iter()
+                            .copied()
+                            .sorted()
+                            .collect(),
+                    },
+                });
             }
             if !function.ty_scheme.constraints.is_empty() {
-                panic!(
-                    "Generic constraints are not supported in trait functions yet, but function {} of trait {} has {} generic constraints.",
-                    name,
-                    self.name,
-                    function.ty_scheme.constraints.len()
-                );
+                return Err(TraitValidationError::Unsupported {
+                    trait_name: self.name,
+                    kind: UnsupportedTraitDefinitionKind::GenericConstraints {
+                        method_name: *name,
+                        constraint_count: function.ty_scheme.constraints.len(),
+                    },
+                });
             }
             for input_ty_var in 0..self.input_type_count() {
                 let ty_var = TypeVar::new(input_ty_var);
                 if !function.ty_scheme.ty_quantifiers.contains(&ty_var) {
-                    panic!(
-                        "Input type variable {} does appear in the quantifiers of function {} of trait {}.",
-                        ty_var, name, self.name
-                    );
+                    return Err(TraitValidationError::Invalid {
+                        trait_name: self.name,
+                        kind: InvalidTraitDefinitionKind::MissingInputTypeVarInMethod {
+                            method_name: *name,
+                            ty_var,
+                        },
+                    });
                 }
             }
             // Make sure that all constraints have their input type variables reachable from
@@ -165,22 +233,26 @@ impl Trait {
                 let (_, input_tys, output_tys, _) = constraint
                     .as_have_trait()
                     .expect("Only HaveTrait constraints are supported in traits.");
-                assert!(
-                    input_tys
-                        .iter()
-                        .flat_map(TypeLike::inner_ty_vars)
-                        .all(|ty_var| quantifiers.contains(&ty_var)),
-                    "In trait {}, constraint #{} has unreachable input type variable in function {}.",
-                    self.name,
-                    i,
-                    name
-                );
+                if !input_tys
+                    .iter()
+                    .flat_map(TypeLike::inner_ty_vars)
+                    .all(|ty_var| quantifiers.contains(&ty_var))
+                {
+                    return Err(TraitValidationError::Invalid {
+                        trait_name: self.name,
+                        kind: InvalidTraitDefinitionKind::UnreachableConstraintInputTypeVar {
+                            method_name: *name,
+                            constraint_index: i,
+                        },
+                    });
+                }
                 let mut additional_ty_vars = FxHashSet::default();
                 let mut collector = TyVarsCollector(&mut additional_ty_vars);
                 output_tys.iter().for_each(|ty| ty.visit(&mut collector));
                 quantifiers.extend(additional_ty_vars);
             }
         }
+        Ok(())
     }
 
     /// Instantiate all function definitions of this trait for the given input and output types.
@@ -296,6 +368,17 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
 pub struct TraitRef(pub(crate) Arc<Trait>);
 
 impl TraitRef {
+    pub fn from_trait_data(trait_data: Trait) -> Result<Self, TraitValidationError> {
+        if trait_data.input_type_names.is_empty() {
+            return Err(TraitValidationError::Invalid {
+                trait_name: trait_data.name,
+                kind: InvalidTraitDefinitionKind::MissingInputTypes,
+            });
+        }
+        trait_data.try_validate()?;
+        Ok(Self(Arc::new(trait_data)))
+    }
+
     pub fn new<'a>(
         name: &str,
         doc: &str,
@@ -321,9 +404,9 @@ impl TraitRef {
             constraints: Vec::new(),
             functions,
             derives: Vec::new(),
+            spans: None,
         };
-        trait_data.validate();
-        Self(Arc::new(trait_data))
+        Self::from_trait_data(trait_data).unwrap()
     }
 
     pub fn new_with_self_input_type<'a>(
@@ -361,9 +444,9 @@ impl TraitRef {
             constraints: constraints.into(),
             functions,
             derives: Vec::new(),
+            spans: None,
         };
-        trait_data.validate();
-        Self(Arc::new(trait_data))
+        Self::from_trait_data(trait_data).unwrap()
     }
 
     pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], fn_count: usize) {
@@ -385,6 +468,13 @@ impl TraitRef {
             "Mismatched function count when implementing trait {}.",
             self.name,
         );
+    }
+
+    /// Span of the trait definition, or synthesized if not available.
+    pub fn trait_span(&self) -> Location {
+        self.spans
+            .as_ref()
+            .map_or_else(Location::new_synthesized, |spans| spans.span)
     }
 }
 

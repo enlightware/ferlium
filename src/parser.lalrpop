@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitDefinition as TraitDefinition, TraitFunction, TraitFunctionArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::effects::PrimitiveEffect;
 use crate::value::LiteralValue;
 use crate::r#type::Type as IrType;
@@ -50,6 +50,7 @@ pub Module: Module = {
 }
 
 ModuleItem = {
+    ModuleTraitDefinition,
     ModuleFunction,
     ModuleTraitImpl,
     ModuleTypeDef,
@@ -57,8 +58,35 @@ ModuleItem = {
     ModuleUseDecl,
 }
 
+ModuleTraitDefinition: Module = {
+    TraitDefinition => Module::single_trait(<>)
+}
+
 ModuleTraitImpl: Module = {
     TraitImpl => Module::single_impl(<>)
+}
+
+TraitDefinition: TraitDefinition = {
+    <doc:DOC_COMMENT*> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <where_clause:WhereClause?> "{" <functions:TraitFunction*> "}" <r:@R> => {
+        TraitDefinition {
+            name,
+            input_type_names: header.0,
+            output_type_names: header.1,
+            where_clause: where_clause.unwrap_or_default(),
+            functions,
+            span: span(l, r, source_id),
+            doc: parse_doc_comments(doc),
+        }
+    },
+}
+
+TraitDefinitionHeader: (Vec<UstrSpan>, Vec<UstrSpan>) = {
+    "<" <input_type_names:Sep1<Sp<UIdentifier>, ",">> <output_type_names:TraitDefinitionOutputSection?> ">" =>
+        (input_type_names, output_type_names.unwrap_or_default()),
+}
+
+TraitDefinitionOutputSection: Vec<UstrSpan> = {
+    "|->" <output_type_names:Sep1<Sp<UIdentifier>, ",">> => output_type_names,
 }
 
 TraitImpl: TraitImpl = {
@@ -156,10 +184,30 @@ Function: ModuleFunction = {
         ),
 }
 
+TraitFunction: TraitFunction = {
+    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> "(" <args:TraitFunctionArgs> ")" <ret:SpFnRet<"">?> <effects:FnEffectsAnnotation?> ";" <r:@R> =>
+        TraitFunction {
+            name,
+            args,
+            ret_ty: ret,
+            effects: effects.map(|(effects, _)| effects).unwrap_or(PFnEffects::ImplicitPure),
+            span: span(l, r, source_id),
+            doc: parse_doc_comments(doc),
+        },
+}
+
 ModuleFunctionArgs: Vec<ModuleFunctionArg> = {
     <args:StrWithOptTypeArgs> => args.into_iter().map(|(is_mut, name, ty)| {
         ModuleFunctionArg { name, ty, mut_binding: is_mut }
     }).collect(),
+}
+
+TraitFunctionArgs: Vec<TraitFunctionArg> = {
+    Sep<TraitFunctionArg, ",">,
+}
+
+TraitFunctionArg: TraitFunctionArg = {
+    <name:Sp<UIdentifier>> ":" <ty:ArgType<"", "">> => TraitFunctionArg { name, ty },
 }
 
 // Type

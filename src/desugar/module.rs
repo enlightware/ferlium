@@ -1,4 +1,6 @@
-use crate::desugar::types::extend_generic_ty_params;
+use crate::desugar::types::{desugar_type_constraints, extend_generic_ty_params};
+use crate::function::FunctionDefinition;
+use crate::r#trait::{Trait, TraitFunctionSpans, TraitRef, TraitSpans, TraitValidationError};
 
 use super::expr::desugar;
 use super::*;
@@ -53,13 +55,21 @@ impl PModule {
     ) -> Result<(DModule, DExprArena, FnSccs), InternalCompilationError> {
         // Flatten uses from self and check for conflicts with local definitions.
         let local_names = self.own_symbols().collect();
+        let PModule {
+            traits,
+            functions,
+            impls,
+            type_aliases,
+            type_defs,
+            uses,
+        } = self;
+
         let resolver = ModulesResolver::new(others);
-        resolve_imports(&self.uses, &local_names, &resolver, &mut output.uses)?;
+        resolve_imports(&uses, &local_names, &resolver, &mut output.uses)?;
 
         // Build a map of type names to their location and definitions or aliases.
         // The ty_names map holds indices to the ty_refs vector, which contains the data.
-        let (ty_names, ty_refs): (FxHashMap<_, _>, Vec<_>) = self
-            .type_aliases
+        let (ty_names, ty_refs): (FxHashMap<_, _>, Vec<_>) = type_aliases
             .into_iter()
             .map(|alias| {
                 (
@@ -68,7 +78,7 @@ impl PModule {
                 )
             })
             .chain(
-                self.type_defs
+                type_defs
                     .into_iter()
                     .map(|def| (def.name.0, NamedTypeData::Def(def))),
             )
@@ -137,16 +147,20 @@ impl PModule {
             env = ModuleEnv::new(output, others);
         }
 
+        for trait_def in traits {
+            output.add_trait(trait_def.desugar(&env, &mut modules_used)?);
+            env = ModuleEnv::new(output, others);
+        }
+
         // Desugar functions
-        let fn_map = self
-            .functions
+        let fn_map = functions
             .iter()
             .enumerate()
             .map(|(index, func)| (func.name.0, index))
             .collect::<FxHashMap<_, _>>();
         let mut desugared_arena = new_desugared_arena_sized_from_parsed_arena(parsed_arena);
         let (functions, fn_dep_graph): (_, Vec<_>) = process_results(
-            self.functions.into_iter().map(|f| {
+            functions.into_iter().map(|f| {
                 f.desugar(
                     &fn_map,
                     &env,
@@ -161,8 +175,7 @@ impl PModule {
         let sorted_sccs = topological_sort_sccs(&fn_dep_graph, &sccs);
 
         // Desugar trait implementations
-        let impls = self
-            .impls
+        let impls = impls
             .into_iter()
             .map(|i| i.desugar(&env, parsed_arena, &mut desugared_arena, &mut modules_used))
             .collect::<Result<_, _>>()?;
@@ -170,13 +183,153 @@ impl PModule {
         // Build result
         output.type_deps.extend(modules_used);
         let module = DModule {
+            traits: vec![],
             functions,
             impls,
             type_aliases: vec![],
             type_defs: vec![],
-            uses: self.uses,
+            uses,
         };
         Ok((module, desugared_arena, sorted_sccs))
+    }
+}
+
+impl ast::TraitDefinition {
+    pub fn desugar(
+        self,
+        env: &ModuleEnv<'_>,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<TraitRef, InternalCompilationError> {
+        let generic_params = self
+            .input_type_names
+            .iter()
+            .chain(self.output_type_names.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        let generic_ty_params = extend_generic_ty_params(
+            &GenericTyParams::default(),
+            &generic_params,
+            GenericParamsOwner::Trait { name: self.name.0 },
+        )?;
+        let constraints =
+            desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
+        let function_spans = self
+            .functions
+            .iter()
+            .map(|function| function.spans())
+            .collect();
+        let spans = self.spans(function_spans);
+        let input_type_names = self.iter_input_type_names().collect();
+        let output_type_names = self.iter_output_type_names().collect();
+        let functions = self
+            .functions
+            .into_iter()
+            .map(|function| function.desugar(env, &generic_ty_params, modules_used))
+            .collect::<Result<Vec<_>, _>>()?;
+        let trait_span = self.span;
+        TraitRef::from_trait_data(Trait {
+            name: self.name.0,
+            doc: self.doc,
+            input_type_names,
+            output_type_names,
+            constraints,
+            functions,
+            derives: vec![],
+            spans: Some(spans),
+        })
+        .map_err(|error| match error {
+            TraitValidationError::Invalid { trait_name, kind } => {
+                internal_compilation_error!(InvalidTraitDefinition {
+                    trait_name,
+                    kind,
+                    span: trait_span,
+                })
+            }
+            TraitValidationError::Unsupported { trait_name, kind } => {
+                internal_compilation_error!(UnsupportedTraitDefinition {
+                    trait_name,
+                    kind,
+                    span: trait_span,
+                })
+            }
+        })
+    }
+}
+
+impl ast::TraitFunction {
+    fn spans(&self) -> TraitFunctionSpans {
+        TraitFunctionSpans {
+            name: self.name.1,
+            args: self
+                .args
+                .iter()
+                .map(|arg| (arg.name.1, arg.ty.span))
+                .collect(),
+            ret_ty: self.ret_ty.as_ref().map(|(_, span)| *span),
+            span: self.span,
+        }
+    }
+
+    fn desugar(
+        self,
+        env: &ModuleEnv<'_>,
+        generic_ty_params: &GenericTyParams,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<(Ustr, FunctionDefinition), InternalCompilationError> {
+        let args = self
+            .args
+            .iter()
+            .map(|arg| {
+                arg.ty
+                    .desugar_with_ty_params(env, generic_ty_params, modules_used)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ret = self.ret_ty.map_or_else(
+            || Ok(Type::unit()),
+            |(ret_ty, span)| {
+                ret_ty.desugar_with_ty_params(span, false, env, generic_ty_params, modules_used)
+            },
+        )?;
+        use ast::PFnEffects::*;
+        let effects = match self.effects {
+            ImplicitPure => EffType::empty(),
+            ImplicitGeneric => EffType::single_variable_id(0),
+            Explicit(effects) => EffType::multiple_primitive(&effects),
+        };
+        let fn_ty = FnType::new(args, ret, effects);
+        Ok((
+            self.name.0,
+            FunctionDefinition::new(
+                TypeScheme::new_infer_quantifiers(fn_ty),
+                self.args.into_iter().map(|arg| arg.name.0).collect(),
+                self.doc,
+            ),
+        ))
+    }
+}
+
+impl ast::TraitDefinition {
+    fn spans(&self, functions: Vec<TraitFunctionSpans>) -> TraitSpans {
+        TraitSpans {
+            name: self.name.1,
+            input_type_names: self
+                .input_type_names
+                .iter()
+                .map(|(_, span)| *span)
+                .collect(),
+            output_type_names: self
+                .output_type_names
+                .iter()
+                .map(|(_, span)| *span)
+                .collect(),
+            constraints: self
+                .where_clause
+                .iter()
+                .map(|constraint| constraint.span)
+                .collect(),
+            functions,
+            span: self.span,
+        }
     }
 }
 
@@ -200,7 +353,7 @@ impl PModuleFunction {
         )
     }
 
-    pub(super) fn desugar_with_ty_params(
+    pub(crate) fn desugar_with_ty_params(
         self,
         fn_map: &FnMap,
         env: &ModuleEnv<'_>,
@@ -209,7 +362,7 @@ impl PModuleFunction {
         desugared_arena: &mut DExprArena,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<(DModuleFunction, DepGraphNode), InternalCompilationError> {
-        let generic_ty_params = super::types::extend_generic_ty_params(
+        let generic_ty_params = extend_generic_ty_params(
             generic_ty_params,
             &self.generic_params,
             GenericParamsOwner::Function { name: self.name.0 },
@@ -272,12 +425,8 @@ impl PModuleFunction {
                 ))
             })
             .transpose()?;
-        let where_clause = super::types::desugar_type_constraints(
-            &self.where_clause,
-            &generic_ty_params,
-            env,
-            modules_used,
-        )?;
+        let where_clause =
+            desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
         let function = ModuleFunction {
             name: self.name,
             generic_params: self.generic_params,

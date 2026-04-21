@@ -94,7 +94,7 @@ fn desugar_type_constraint(
     ))
 }
 
-pub(super) fn desugar_type_constraints(
+pub(crate) fn desugar_type_constraints(
     constraints: &[ast::PTypeConstraint],
     generic_ty_params: &GenericTyParams,
     env: &ModuleEnv<'_>,
@@ -171,7 +171,7 @@ impl ast::PFnArgType {
         self.desugar_with_ty_params(env, &generic_ty_params, modules_used)
     }
 
-    fn desugar_with_ty_params(
+    pub(crate) fn desugar_with_ty_params(
         &self,
         env: &ModuleEnv<'_>,
         generic_ty_params: &GenericTyParams,
@@ -246,7 +246,7 @@ impl ast::PType {
         self.desugar_with_ty_params(span, in_ty_def, env, &generic_ty_params, modules_used)
     }
 
-    pub(super) fn desugar_with_ty_params(
+    pub(crate) fn desugar_with_ty_params(
         &self,
         span: Location,
         in_ty_def: bool,
@@ -481,7 +481,7 @@ impl ast::PType {
 }
 
 impl PTypeDef {
-    pub(super) fn desugar(
+    pub(crate) fn desugar(
         &self,
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
@@ -538,7 +538,7 @@ impl PModuleFunctionArg {
         self.desugar_with_ty_params(env, &generic_ty_params, modules_used)
     }
 
-    pub(super) fn desugar_with_ty_params(
+    pub(crate) fn desugar_with_ty_params(
         self,
         env: &ModuleEnv<'_>,
         generic_ty_params: &GenericTyParams,
@@ -668,7 +668,7 @@ fn invalid_generic_params_error(
     })
 }
 
-pub(super) fn extend_generic_ty_params(
+pub(crate) fn extend_generic_ty_params(
     existing: &GenericTyParams,
     generic_params: &[UstrSpan],
     owner: GenericParamsOwner,

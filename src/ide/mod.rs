@@ -192,6 +192,16 @@ fn compilation_error_to_data(
             kind,
             span,
         } => vec![error_data_from_location(span, kind.message(trait_name))],
+        InvalidTraitDefinition {
+            trait_name,
+            kind,
+            span,
+        } => vec![error_data_from_location(span, kind.message(*trait_name))],
+        UnsupportedTraitDefinition {
+            trait_name,
+            kind,
+            span,
+        } => vec![error_data_from_location(span, kind.message(*trait_name))],
         InvalidEnumDefaultAttribute {
             type_name,
             kind,

@@ -463,7 +463,7 @@ fn expand_let_pattern(
     }
 }
 
-pub(super) fn desugar_pattern_bindings(
+pub(crate) fn desugar_pattern_bindings(
     pattern: &LetPattern,
     source_expr: DExprId,
     source_ty_ascription_span: Option<Location>,
@@ -484,7 +484,7 @@ pub(super) fn desugar_pattern_bindings(
     )
 }
 
-pub(super) fn desugar_let_exprs(
+pub(crate) fn desugar_let_exprs(
     data: LetData<Parsed>,
     stmt_span: Location,
     ctx: &mut DesugarCtx,
@@ -505,7 +505,7 @@ pub(super) fn desugar_let_exprs(
     )
 }
 
-pub(super) fn desugar_block_exprs(
+pub(crate) fn desugar_block_exprs(
     ids: Vec<ExprId<Parsed>>,
     ctx: &mut DesugarCtx,
     parsed_arena: &PExprArena,
