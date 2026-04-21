@@ -85,7 +85,7 @@ trait Bits<Self> {
 /// An iterator that can produce a sequence of values.
 trait Iterator<Self |-> Item> {
     /// Returns the next item from the iterator, or `None` if the iterator is exhausted.
-    fn next(iterator: &mut Self) -> Some(Item) | None;
+    fn next(iterator: &mut Self) -> Option<Item>;
 }
 
 /// A sequence of elements that can produce an iterator over its elements.
@@ -120,7 +120,7 @@ trait Filter<Self |-> Item, Output> {
 /// Filters and maps a value in one pass, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
 trait FilterMap<Self, Mapped |-> Item, Output> {
     /// Applies `mapper` to each element, keeping only `Some` results.
-    fn filter_map(value: Self, mapper: (Item) -> Some(Mapped) | None) -> Output;
+    fn filter_map(value: Self, mapper: (Item) -> Option<Mapped>) -> Output;
 }
 
 /// A sequence with a known, fixed size.
