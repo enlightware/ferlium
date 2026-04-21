@@ -12,7 +12,8 @@ use indoc::indoc;
 
 use crate::harness::{TestSession, bool, float, int, unit};
 use ferlium::{
-    error::MutabilityMustBeWhat, std::math::NUM_TRAIT, type_scheme::PubTypeConstraint, value::Value,
+    error::MutabilityMustBeWhat, std::core_traits_names::NUM_TRAIT_NAME,
+    type_scheme::PubTypeConstraint, value::Value,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -867,6 +868,7 @@ fn assert_f_defaults_num_after_dead_suffix(session: &mut TestSession, src: &str)
     );
 
     let fn_def = session.compile_and_get_fn_def(src, "f");
+    let num_trait = session.std_trait(NUM_TRAIT_NAME);
     assert_eq!(
         fn_def.ty_scheme.ty_quantifiers.len(),
         1,
@@ -884,7 +886,7 @@ fn assert_f_defaults_num_after_dead_suffix(session: &mut TestSession, src: &str)
             output_tys,
             ..
         } => {
-            assert_eq!(*trait_ref, *NUM_TRAIT, "type regression for:\n{src}");
+            assert_eq!(*trait_ref, num_trait, "type regression for:\n{src}");
             assert_eq!(
                 input_tys.as_slice(),
                 &[fn_def.ty_scheme.ty().ret],
@@ -919,6 +921,7 @@ fn unreachable_block_suffix_does_not_constrain_return_type() {
         "# },
         "f",
     );
+    let num_trait = session.std_trait(NUM_TRAIT_NAME);
     let module_env = session.std_module_env();
     assert_eq!(
         fn_def.ty_scheme.display_rust_style(&module_env).to_string(),
@@ -933,7 +936,7 @@ fn unreachable_block_suffix_does_not_constrain_return_type() {
             output_tys,
             ..
         } => {
-            assert_eq!(*trait_ref, *NUM_TRAIT);
+            assert_eq!(*trait_ref, num_trait);
             assert_eq!(input_tys.as_slice(), &[fn_def.ty_scheme.ty().ret]);
             assert!(output_tys.is_empty());
         }

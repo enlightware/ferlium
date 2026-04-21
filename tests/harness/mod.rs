@@ -167,9 +167,9 @@ fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDefRef {
 
 fn testing_module(module_id: ModuleId) -> Module {
     let mut module = Module::new(module_id);
-    let test_assoc_trait = test_assoc_trait();
-    let test_iterator_trait = test_iterator_trait();
-    let test_witnessed_project_trait = test_witnessed_project_trait();
+    let test_assoc_trait = test_assoc_trait().with_module_id(module_id);
+    let test_iterator_trait = test_iterator_trait().with_module_id(module_id);
+    let test_witnessed_project_trait = test_witnessed_project_trait().with_module_id(module_id);
     let option_type_def = option_type_def();
     let map_iterator_type_def = map_iterator_type_def(test_iterator_trait.clone());
     let witnessed_type_def = witnessed_type_def(test_assoc_trait.clone());
@@ -417,6 +417,14 @@ impl TestSession {
     /// for debugging purposes.
     pub fn std_module_env(&self) -> ModuleEnv<'_> {
         self.session.module_env()
+    }
+
+    pub fn std_trait(&self, name: &str) -> TraitRef {
+        self.session
+            .module_env()
+            .get_trait_ref((ustr(name), Location::new_synthesized()))
+            .expect("standard trait lookup should succeed")
+            .unwrap_or_else(|| panic!("Standard trait `{name}` not found"))
     }
 
     /// Get the source table for this compilation session.

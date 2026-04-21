@@ -20,20 +20,29 @@ macro_rules! prelude {
     };
 }
 
-pub fn add_to_module(
-    mut to: Module,
-    source_table: &mut SourceTable,
-    module_id: ModuleId,
-) -> Module {
+pub fn declare_traits(to: Module, source_table: &mut SourceTable, module_id: ModuleId) -> Module {
+    let code = prelude!("core_traits.fer");
+    let other_modules = Modules::default();
+    add_code_to_module(code.0, code.1, to, module_id, &other_modules, source_table).unwrap_or_else(
+        |e| {
+            panic!(
+                "Failed to declare traits to module: {}",
+                FormatWithData::new(&e, source_table)
+            )
+        },
+    )
+}
+
+pub fn add_impls(mut to: Module, source_table: &mut SourceTable, module_id: ModuleId) -> Module {
     // The prelude code is split into multiple parts
     // to allow dependencies between trait implementations.
     let codes = [
         // First compiles basic comparison functions.
         prelude!("comparison.fer"),
         // Then most of the core traits.
-        prelude!("core_traits.fer"),
+        prelude!("core_impls.fer"),
         // These functions depend on array iterator being available.
-        prelude!("core_traits_dependent.fer"),
+        prelude!("core_impls_dependent.fer"),
         // Json depends on expect_variant_object_entry being available.
         prelude!("json.fer"),
     ];

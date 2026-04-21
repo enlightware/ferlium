@@ -13,7 +13,13 @@ use crate::{
     containers::b,
     function::{Function, NullaryNativeFnN},
     module::Module,
-    std::default::DEFAULT_TRAIT,
+    std::{
+        STD_MODULE_ID,
+        default::DEFAULT_TRAIT,
+        logic::bool_type,
+        math::{float_type, int_type},
+        string::string_type,
+    },
     r#trait::TraitRef,
     r#type::Type,
 };
@@ -25,11 +31,16 @@ pub static REPR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
         ["Is"],
         [],
     )
+    .with_module_id(STD_MODULE_ID)
 });
 
 pub fn add_to_module(to: &mut Module) {
-    // Add the unit type `()`
+    // Add aliases for basic types
     to.add_type_alias_str("()", Type::unit());
+    to.add_type_alias_str("bool", bool_type());
+    to.add_type_alias_str("int", int_type());
+    to.add_type_alias_str("float", float_type());
+    to.add_type_alias_str("string", string_type());
 
     // Add the `Repr` trait
     to.add_trait(REPR_TRAIT.clone());

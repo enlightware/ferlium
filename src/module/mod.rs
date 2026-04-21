@@ -416,7 +416,20 @@ impl Module {
     // Trait definitions and implementations
 
     /// Add a trait definition to this module, returning its ID.
-    pub fn add_trait(&mut self, trait_ref: TraitRef) -> LocalTraitId {
+    pub fn add_trait(&mut self, mut trait_ref: TraitRef) -> LocalTraitId {
+        if let Some(module_id) = trait_ref.module_id() {
+            assert_eq!(
+                module_id,
+                self.module_id(),
+                "trait {} belongs to module #{module_id}, cannot add it to module #{}",
+                trait_ref.name,
+                self.module_id(),
+            );
+        } else {
+            let local_trait = std::sync::Arc::get_mut(&mut trait_ref.0)
+                .expect("trait module id must be assigned before sharing the trait reference");
+            local_trait.module_id = Some(self.module_id());
+        }
         let id = LocalTraitId::from_index(self.traits.len());
         self.traits.push(trait_ref.clone());
         // Trait names are module-level symbols, so they must remain unique.
@@ -428,6 +441,20 @@ impl Module {
     /// Iterate over all traits defined in this module.
     pub fn trait_iter(&self) -> impl Iterator<Item = &TraitRef> + '_ {
         self.traits.iter()
+    }
+
+    /// Look-up a trait definition by name in this module.
+    pub fn get_trait(&self, name: Ustr) -> Option<&TraitRef> {
+        self.get_definition(name).and_then(|def_kind| {
+            def_kind
+                .as_trait()
+                .map(|trait_id| &self.traits[trait_id.as_index()])
+        })
+    }
+
+    /// Look-up a trait definition by name in this module, using &str.
+    pub fn get_trait_str(&self, name: &str) -> Option<&TraitRef> {
+        self.get_trait(ustr(name))
     }
 
     // Trait implementations

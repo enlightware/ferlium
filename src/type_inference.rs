@@ -30,7 +30,7 @@ use crate::{
     internal_compilation_error,
     location::Location,
     module::{LocalDecl, LocalDeclId, ModuleFunction, TypeDefLookupResult, id::Id},
-    std::core::REPR_TRAIT,
+    std::{core::REPR_TRAIT, core_traits_names::NUM_TRAIT_NAME},
     r#trait::TraitRef,
     trait_solver::TraitSolver,
     type_like::TypeLike,
@@ -2526,7 +2526,10 @@ impl UnifiedTypeInference {
         }
 
         use crate::module::ConcreteTraitImplKey;
-        use crate::std::math::{NUM_TRAIT, float_type, int_type};
+        use crate::std::{
+            STD_MODULE_ID,
+            math::{float_type, int_type},
+        };
 
         let default_tys = [int_type(), float_type()];
         let mut progress = true;
@@ -2548,7 +2551,9 @@ impl UnifiedTypeInference {
                 } = constraint
                 {
                     assert!(!input_tys.is_empty());
-                    if *trait_ref == *NUM_TRAIT {
+                    if trait_ref.module_id() == Some(STD_MODULE_ID)
+                        && trait_ref.name == ustr(NUM_TRAIT_NAME)
+                    {
                         let maybe_ty_var = input_tys[0].data().as_variable().cloned();
                         if let Some(ty_var) = maybe_ty_var {
                             num_ty_vars.insert(ty_var);

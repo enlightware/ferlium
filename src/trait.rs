@@ -25,7 +25,7 @@ use crate::{
     error::{InternalCompilationError, InvalidTraitDefinitionKind, UnsupportedTraitDefinitionKind},
     format::{FormatWith, write_with_separator_and_format_fn},
     function::FunctionDefinition,
-    module::{ModuleEnv, TraitImplId},
+    module::{ModuleEnv, ModuleId, TraitImplId},
     trait_solver::TraitSolver,
     r#type::{Type, TypeSubstitution, TypeVar},
     type_like::TypeLike,
@@ -74,6 +74,8 @@ pub struct TraitSpans {
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
 #[derive(Debug, Clone)]
 pub struct Trait {
+    /// Module where this trait is defined, when known.
+    pub(crate) module_id: Option<ModuleId>,
     /// Name of the trait, for debugging purposes.
     pub name: Ustr,
     /// Optional documentation for the trait.
@@ -300,6 +302,10 @@ impl Trait {
             .map(|(i, ty)| (TypeVar::new(i as u32), *ty))
             .collect::<FxHashMap<_, _>>()
     }
+
+    pub fn module_id(&self) -> Option<ModuleId> {
+        self.module_id
+    }
 }
 
 impl FormatWith<ModuleEnv<'_>> for Trait {
@@ -358,6 +364,7 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
                 writeln!(f)?;
             }
             def.fmt_with_name_and_module_env(f, *name, "    ", env)?;
+            write!(f, ";")?;
         }
         writeln!(f, "\n}}")?;
         Ok(())
@@ -397,6 +404,7 @@ impl TraitRef {
             .map(|(name, def)| (ustr(name), def))
             .collect();
         let trait_data = Trait {
+            module_id: None,
             name: ustr(name),
             doc: Some(doc.to_string()),
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
@@ -437,6 +445,7 @@ impl TraitRef {
             .map(|(name, def)| (ustr(name), def))
             .collect();
         let trait_data = Trait {
+            module_id: None,
             name: ustr(name),
             doc: Some(doc.to_string()),
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
@@ -475,6 +484,18 @@ impl TraitRef {
         self.spans
             .as_ref()
             .map_or_else(Location::new_synthesized, |spans| spans.span)
+    }
+
+    pub fn module_id(&self) -> Option<ModuleId> {
+        self.0.module_id()
+    }
+
+    /// Set the module_id of the trait, which is required before sharing the trait reference across threads.
+    pub fn with_module_id(mut self, module_id: ModuleId) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("trait module id must be assigned before sharing the trait reference")
+            .module_id = Some(module_id);
+        self
     }
 }
 

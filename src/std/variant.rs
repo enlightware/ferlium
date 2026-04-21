@@ -20,6 +20,7 @@ use crate::{
 };
 use ustr::ustr;
 
+/// A variant type alias, must be defined in Rust as it is recursive.
 pub fn variant_type() -> Type {
     cached_ty!(|| {
         let bool_tuple1 = Type::tuple([bool_type()]);

@@ -16,6 +16,7 @@ use crate::{
     function::FunctionDefinition,
     ir, ir_syn,
     module::{LocalDeclId, Module, TraitImplId, id::Id},
+    std::STD_MODULE_ID,
     r#trait::{Deriver, TraitRef},
     trait_solver::TraitSolver,
     r#type::{FnType, Type},
@@ -76,7 +77,7 @@ pub static CAST_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
         .unwrap()
         .derives
         .push(Box::new(SelfCastDeriver));
-    cast_trait
+    cast_trait.with_module_id(STD_MODULE_ID)
 });
 
 pub fn add_to_module(to: &mut Module) {

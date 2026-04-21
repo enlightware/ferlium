@@ -1,743 +1,167 @@
-/// Clamps a value between a minimum and maximum bound, inclusively.
-fn clamp(value, min_bound, max_bound) {
-	if min_bound > max_bound {
-		panic("min_bound must be less than or equal to max_bound")
-	} else {
-		max(min_bound, min(value, max_bound))
-	}
+type Ordering = Less | Equal | Greater;
+
+/// A type that has a total ordering.
+trait Ord<Self> {
+    /// Returns an `Ordering` between `left` and `right`.
+    fn cmp(left: Self, right: Self) -> Ordering;
 }
 
-// Ranges
+/// A numeric type supporting basic arithmetic operations.
+trait Num<Self> {
+    /// Adds two numbers.
+    fn add(left: Self, right: Self) -> Self;
 
-/// A range bounded inclusively at start and exclusively at end: [start..end)
-struct Range {
-	start: int,
-	end: int,
+    /// Subtracts `right` from `left`.
+    fn sub(left: Self, right: Self) -> Self;
+
+    /// Multiplies two numbers.
+    fn mul(left: Self, right: Self) -> Self;
+
+    /// Negates a number.
+    fn neg(value: Self) -> Self;
+
+    /// Returns the absolute value of a number.
+    fn abs(value: Self) -> Self;
+
+    /// Returns the sign of a number.
+    fn signum(value: Self) -> Self;
+
+    /// Converts an integer to a number.
+    fn from_int(value: int) -> Self;
 }
 
-/// An iterator over a range.
-struct RangeIterator {
-	range: Range,
-	next: int,
+/// A type that supports division.
+trait Div<Self> {
+    /// Divides `left` by `right`.
+    fn div(left: Self, right: Self) -> Self ! fallible;
 }
 
-impl Iterator {
-	fn next(it: &mut RangeIterator) {
-		let next = it.next;
-		if it.range.end >= it.range.start {
-			if next < it.range.end {
-				it.next += 1;
-				Some(next)
-			} else {
-				None
-			}
-		} else {
-			if next > it.range.end {
-				it.next -= 1;
-				Some(next)
-			} else {
-				None
-			}
-		}
-	}
+/// A type that has bitwise operations.
+trait Bits<Self> {
+    /// Returns the bitwise AND of `left` and `right`.
+    fn bit_and(left: Self, right: Self) -> Self;
+
+    /// Returns the bitwise OR of `left` and `right`.
+    fn bit_or(left: Self, right: Self) -> Self;
+
+    /// Returns the bitwise XOR of `left` and `right`.
+    fn bit_xor(left: Self, right: Self) -> Self;
+
+    /// Returns the bitwise NOT of `value`.
+    fn bit_not(value: Self) -> Self;
+
+    /// Returns `value` shifted left by `shift` bits.
+    fn shift_left(value: Self, shift: int) -> Self;
+
+    /// Returns `value` shifted right by `shift` bits.
+    fn shift_right(value: Self, shift: int) -> Self;
+
+    /// Returns `value` rotated left by `rotate` bits.
+    fn rotate_left(value: Self, rotate: int) -> Self;
+
+    /// Returns `value` rotated right by `rotate` bits.
+    fn rotate_right(value: Self, rotate: int) -> Self;
+
+    /// Returns the number of one bits in `value`.
+    fn count_ones(value: Self) -> int;
+
+    /// Returns the number of zero bits in `value`.
+    fn count_zeros(value: Self) -> int;
+
+    /// Returns a value with only the bit at `position` set.
+    fn bit(position: int) -> Self;
+
+    /// Returns `value` with the bit at `position` set to 1.
+    fn set_bit(value: Self, position: int) -> Self;
+
+    /// Returns `value` with the bit at `position` cleared to 0.
+    fn clear_bit(value: Self, position: int) -> Self;
+
+    /// Returns `true` if the bit at `position` in `value` is set, otherwise `false`.
+    fn test_bit(value: Self, position: int) -> bool;
 }
 
-impl Seq {
-	fn iter(r: Range) {
-		RangeIterator { range: r, next: r.start }
-	}
+/// An iterator that can produce a sequence of values.
+trait Iterator<Self |-> Item> {
+    /// Returns the next item from the iterator, or `None` if the iterator is exhausted.
+    fn next(iterator: &mut Self) -> Some(Item) | None;
 }
 
-impl SizedSeq {
-	fn len(r: Range) {
-		abs(r.end - r.start)
-	}
-}
-
-/// A range bounded inclusively at start and at end: [start..end]
-struct RangeInclusive {
-	start: int,
-	end: int,
-}
-
-/// An iterator over an inclusive range.
-struct RangeInclusiveIterator {
-	range: RangeInclusive,
-	next: int,
-}
-
-impl Iterator {
-	fn next(it: &mut RangeInclusiveIterator) {
-		let next = it.next;
-		if it.range.end >= it.range.start {
-			if next <= it.range.end {
-				it.next += 1;
-				Some(next)
-			} else {
-				None
-			}
-		} else {
-			if next >= it.range.end {
-				it.next -= 1;
-				Some(next)
-			} else {
-				None
-			}
-		}
-	}
-}
-
-impl Seq {
-	fn iter(r: RangeInclusive) {
-		RangeInclusiveIterator { range: r, next: r.start }
-	}
-}
-
-impl SizedSeq {
-	fn len(r: RangeInclusive) {
-		abs(r.end - r.start) + 1
-	}
-}
-
-// Arrays
-
-/// Return the last element of an array, or None if the array is empty.
-fn array_peek_back(array) -> None | Some(_) {
-	let l = array_len(array);
-	if l <= 0 {
-		None
-	} else {
-		Some(array[l - 1])
-	}
-}
-
-impl Concat {
-	fn concat(left, right) {
-		array_concat(left, right)
-	}
-}
-
-impl<F, T> Cast for <From = [F], To = [T]>
-where
-	Cast<From = F, To = T>
+/// A sequence of elements that can produce an iterator over its elements.
+trait Seq<Self |-> Item, Iter>
+    where Iter: Iterator<Item = Item>
 {
-	fn cast(array: [F]) -> [T] {
-		map(array, (|element| cast(element): (F) -> T))
-	}
+    /// Gets an iterator over the elements of this sequence.
+    fn iter(seq: Self) -> Iter;
 }
 
-// Strings
-
-impl Concat {
-	fn concat(left, right) {
-		string_concat(left, right)
-	}
+/// A collection that can be built from an iterator.
+trait FromIterator<Self, Iter> {
+    /// Creates a collection from an iterator.
+    fn from_iter(iterator: Iter) -> Self;
 }
 
-// Sequence and reduction functions
+/// Marker trait that relates a collection family to the collection obtained by replacing its element type.
+trait RebindItem<Self, Item |-> Output> {}
 
-/// Returns true if the collection contains no elements.
-fn is_empty(seq) {
-	len(seq) == 0
+/// Maps a function over a value, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
+trait Map<Self, Mapped |-> Item, Output> {
+    /// Maps `mapper` over `value`.
+    fn map(value: Self, mapper: (Item) -> Mapped) -> Output;
 }
 
-/// Reduces the sequence seq to a single value by repeatedly applying f, left to right.
-fn fold(seq, init, f) {
-	let mut it = iter(seq);
-	let mut acc = init;
-	loop {
-		match next(it) {
-			Some(element) => {
-				acc = f(acc, element);
-			},
-			None => soft_break,
-		}
-	};
-	acc
+/// Filters a value with a predicate, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
+trait Filter<Self |-> Item, Output> {
+    /// Keeps only the elements of `value` that satisfy `predicate`.
+    fn filter(value: Self, predicate: (Item) -> bool) -> Output;
 }
 
-/// Reduces the sequence seq to a single value by repeatedly applying f, left to right, as long as f returns Continue.
-fn try_fold(seq, init, f) {
-	let mut it = iter(seq);
-	let mut acc = init;
-	loop {
-		match next(it) {
-			Some(element) => {
-				match f(acc, element) {
-					Continue(value) => {
-						acc = value;
-					},
-					// Note: we do not have residuals here because it would result in an unbound generic.
-					// If we had a ControlFlow enum newtype with default generics, we could have residuals.
-					Break => {
-						return Break;
-					}
-				}
-			},
-			None => soft_break,
-		}
-	};
-	Continue(acc)
+/// Filters and maps a value in one pass, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
+trait FilterMap<Self, Mapped |-> Item, Output> {
+    /// Applies `mapper` to each element, keeping only `Some` results.
+    fn filter_map(value: Self, mapper: (Item) -> Some(Mapped) | None) -> Output;
 }
 
-/// Tests if every element of the sequence matches a predicate.
-fn all(seq, f) {
-	try_fold(seq, (), |_acc, element| if f(element) { Continue(()) } else { Break }) == Continue(())
+/// A sequence with a known, fixed size.
+trait SizedSeq<Self> {
+    /// Returns the number of elements in this sequence.
+    fn len(seq: Self) -> int;
 }
 
-/// Tests if any element of the sequence matches a predicate.
-fn any(seq, f) {
-	try_fold(seq, (), |_acc, element| if f(element) { Break } else { Continue(()) }) == Break
+/// A value that can be concatenated.
+trait Concat<Self> {
+    /// Concatenates `left` and `right`.
+    fn concat(left: Self, right: Self) -> Self;
 }
 
-/// Counts the number of elements in the sequence.
-fn count(seq) {
-	fold(seq, 0, |sum, _element| sum + 1)
-}
-
-/// Sums the elements in the sequence.
-fn sum(seq) {
-	fold(seq, 0, |acc, element| acc + element)
-}
-
-/// Averages the elements in the sequence.
-fn average(seq) {
-	sum(seq) / count(seq)
-}
-
-/// Returns the minimum element in the sequence.
-fn minimum(seq) {
-	let mut it = iter(seq);
-	match next(it) {
-		Some(first) => {
-			fold(it, first, |min_so_far, element| min(min_so_far, element))
-		},
-		None => panic("minimum of empty sequence"),
-	}
-}
-
-/// Returns the maximum element in the sequence.
-fn maximum(seq) {
-	let mut it = iter(seq);
-	match next(it) {
-		Some(first) => {
-			fold(it, first, |max_so_far, element| max(max_so_far, element))
-		},
-		None => panic("maximum of empty sequence"),
-	}
-}
-
-/// Finds the first element in the sequence that matches a predicate, returning None if not found.
-fn find(seq, predicate) -> None | Some(_) {
-	let mut it = iter(seq);
-	loop {
-		match next(it) {
-			Some(element) => {
-				if predicate(element) {
-					return Some(element);
-				}
-			},
-			None => soft_break,
-		}
-	};
-	None
-}
-
-/// Finds the position of the first element in the sequence that matches a predicate, returning None if not found.
-fn position(seq, predicate) -> None | Some(int) {
-	let mut it = iter(seq);
-	let mut index = 0;
-	loop {
-		match next(it) {
-			Some(element) => {
-				if predicate(element) {
-					return Some(index);
-				};
-				index = index + 1;
-			},
-			None => soft_break,
-		}
-	};
-	None
-}
-
-// Iterator adaptors
-
-// Blanket implementation of Seq for iterators
-impl<I, T> Seq for <Self = I |-> Item = T, Iter = I> {
-	fn iter(seq: I) -> I {
-		seq
-	}
-}
-
-fn collect(value) {
-	from_iter(iter(value))
-}
-
-/// An iterator that maps a function over another iterator.
-struct MapIterator<I, T, O>
-	where I: Iterator<Item = T>
+/// A sequence-like value that can be split around a non-empty separator, yielding parts lazily.
+trait Split<Self, Separator |-> Part, Iter, Output>
+    where Iterator<Self = Iter |-> Item = Part>
 {
-	iterator: I,
-	mapper: (T) -> O,
+    /// Returns an iterator that yields the parts of `value` split around `separator`.
+    fn split_iterator(value: Self, separator: Separator) -> Iter ! fallible;
 }
 
-impl Iterator for MapIterator<I, T, O> {
-	fn next(it: &mut MapIterator<I, T, O>) -> None | Some(O) {
-		match next(it.iterator) {
-			Some(data) => Some(it.mapper(data)),
-			None => None,
-		}
-	}
+/// A sequence-like value that can extract a subrange.
+trait Slice<Self |-> Output> {
+    /// Returns the slice of `value` from `start` to `end` (end-exclusive). Negative indices count from the end.
+    fn slice(value: Self, start: int, end: int) -> Output;
 }
 
-impl<I, T, O> Map for <Self = I, Mapped = O |-> Item = T, Output = MapIterator<I, T, O>>
-where
-	I: Iterator<Item = T>
-{
-	fn map(value: I, mapper: (T) -> O) -> MapIterator<I, T, O> {
-		MapIterator { iterator: value, mapper }
-	}
+/// A type that can be checked for the presence of an element.
+trait Contains<Self |-> Element> {
+    /// Returns true if `container` contains `element`.
+    fn contains(container: Self, element: Element) -> bool;
 }
 
-impl<A, B, C, I> Map for <Self = [A], Mapped = B |-> Item = A, Output = C>
-where
-	[A]: Seq<Item = A, Iter = I>,
-	RebindItem<Self = [A], Item = B |-> Output = C>,
-	FromIterator<Self = C, Iter = MapIterator<I, A, B>>
-{
-	fn map(value: [A], mapper: (A) -> B) -> C {
-		from_iter(MapIterator { iterator: iter(value), mapper })
-	}
+/// A container whose elements can be reversed in place.
+trait Reverse<Self> {
+    /// Reverses the elements of `value` in place.
+    fn reverse(value: &mut Self) -> () ! fallible;
 }
 
-/// An iterator that filters another iterator with a predicate.
-struct FilterIterator<I, T>
-	where I: Iterator<Item = T>
-{
-	iterator: I,
-	filter: (T) -> bool,
-}
-
-impl Iterator for FilterIterator<I, T> {
-	fn next(it: &mut FilterIterator<I, T>) -> None | Some(T) {
-		loop {
-			match next(it.iterator) {
-				Some(data) => if it.filter(data) {
-					return Some(data)
-				} else {
-					// filter data out
-				},
-				None => return None
-			}
-		}
-	}
-}
-
-impl<I, T> Filter for <Self = I |-> Item = T, Output = FilterIterator<I, T>>
-where
-	I: Iterator<Item = T>
-{
-	fn filter(value: I, predicate: (T) -> bool) -> FilterIterator<I, T> {
-		FilterIterator { iterator: value, filter: predicate }
-	}
-}
-
-impl<A, C, I> Filter for <Self = [A] |-> Item = A, Output = C>
-where
-	[A]: Seq<Item = A, Iter = I>,
-	RebindItem<Self = [A], Item = A |-> Output = C>,
-	FromIterator<Self = C, Iter = FilterIterator<I, A>>
-{
-	fn filter(value: [A], predicate: (A) -> bool) -> C {
-		from_iter(FilterIterator { iterator: iter(value), filter: predicate })
-	}
-}
-
-/// An iterator that uses a function to both filter and map another iterator.
-struct FilterMapIterator<I, T, O>
-	where I: Iterator<Item = T>
-{
-	iterator: I,
-	filter_map: (T) -> None | Some(O),
-}
-
-impl Iterator for FilterMapIterator<I, T, O> {
-	fn next(it: &mut FilterMapIterator<I, T, O>) -> None | Some(O) {
-		loop {
-			match next(it.iterator) {
-				Some(data) => match it.filter_map(data) {
-					Some(mapped) => return Some(mapped),
-					None => {
-						// filter data out
-					}
-				},
-				None => return None
-			}
-		}
-	}
-}
-
-impl<I, T, O> FilterMap for <Self = I, Mapped = O |-> Item = T, Output = FilterMapIterator<I, T, O>>
-where
-	I: Iterator<Item = T>
-{
-	fn filter_map(value: I, mapper: (T) -> None | Some(O)) -> FilterMapIterator<I, T, O> {
-		FilterMapIterator { iterator: value, filter_map: mapper }
-	}
-}
-
-impl<A, B, C, I> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = C>
-where
-	[A]: Seq<Item = A, Iter = I>,
-	RebindItem<Self = [A], Item = B |-> Output = C>,
-	FromIterator<Self = C, Iter = FilterMapIterator<I, A, B>>
-{
-	fn filter_map(value: [A], mapper: (A) -> None | Some(B)) -> C {
-		from_iter(FilterMapIterator { iterator: iter(value), filter_map: mapper })
-	}
-}
-
-/// An iterator that zips two iterators together, yielding pairs of their items.
-struct ZipIterator<I, J, A, B>
-	where I: Iterator<Item = A>,
-		  J: Iterator<Item = B>
-{
-	left: I,
-	right: J,
-}
-
-impl Iterator for ZipIterator<I, J, A, B> {
-	fn next(it: &mut ZipIterator<I, J, A, B>) -> None | Some((A, B)) {
-		match next(it.left) {
-			Some(a) => match next(it.right) {
-				Some(b) => Some((a, b)),
-				None => None,
-			},
-			None => None,
-		}
-	}
-}
-
-/// Zips two sequences together, yielding pairs of their items. Stops at the shorter sequence.
-fn zip(seq1, seq2) {
-	ZipIterator { left: iter(seq1), right: iter(seq2) }
-}
-
-/// An iterator that yields (index, item) pairs.
-struct EnumerateIterator<I, T>
-	where I: Iterator<Item = T>
-{
-	iterator: I,
-	index: int,
-}
-
-impl Iterator for EnumerateIterator<I, T> {
-	fn next(it: &mut EnumerateIterator<I, T>) -> None | Some((int, T)) {
-		match next(it.iterator) {
-			Some(item) => {
-				let idx = it.index;
-				it.index += 1;
-				Some((idx, item))
-			},
-			None => None,
-		}
-	}
-}
-
-/// Enumerates a sequence, yielding (index, item) pairs starting from 0.
-fn enumerate(seq) {
-	EnumerateIterator { iterator: iter(seq), index: 0 }
-}
-
-/// An iterator that yields at most n items from another iterator.
-struct TakeIterator<I, T>
-	where I: Iterator<Item = T>
-{
-	iterator: I,
-	remaining: int,
-}
-
-impl Iterator for TakeIterator<I, T> {
-	fn next(it: &mut TakeIterator<I, T>) -> None | Some(T) {
-		if it.remaining <= 0 {
-			None
-		} else {
-			match next(it.iterator) {
-				Some(item) => {
-					it.remaining -= 1;
-					Some(item)
-				},
-				None => None,
-			}
-		}
-	}
-}
-
-/// Returns an iterator that yields at most n items from the sequence.
-fn take(seq, n) {
-	TakeIterator { iterator: iter(seq), remaining: n }
-}
-
-/// An iterator that skips the first n items of another iterator.
-struct SkipIterator<I, T>
-	where I: Iterator<Item = T>
-{
-	iterator: I,
-	to_skip: int,
-}
-
-impl Iterator for SkipIterator<I, T> {
-	fn next(it: &mut SkipIterator<I, T>) -> None | Some(T) {
-		loop {
-			match next(it.iterator) {
-				None => return None,
-				Some(item) => if it.to_skip > 0 {
-					it.to_skip -= 1
-				} else {
-					return Some(item)
-				}
-			}
-		}
-	}
-}
-
-/// Returns an iterator that skips the first n items of the sequence.
-fn skip(seq, n) {
-	SkipIterator { iterator: iter(seq), to_skip: n }
-}
-
-/// An iterator that chains two iterators of the same item type together.
-struct ChainIterator<I, J, T>
-	where I: Iterator<Item = T>,
-		  J: Iterator<Item = T>
-{
-	first: I,
-	second: J,
-	first_done: bool,
-}
-
-impl Iterator for ChainIterator<I, J, T> {
-	fn next(it: &mut ChainIterator<I, J, T>) -> None | Some(T) {
-		if it.first_done {
-			next(it.second)
-		} else {
-			match next(it.first) {
-				Some(item) => Some(item),
-				None => {
-					it.first_done = true;
-					next(it.second)
-				},
-			}
-		}
-	}
-}
-
-/// Chains two sequences together, yielding all items from the first then all from the second.
-/// Both sequences must have the same item type.
-fn chain(seq1, seq2) {
-	ChainIterator { first: iter(seq1), second: iter(seq2), first_done: false }
-}
-
-// Compatibility, mark as deprecated when supported
-
-/// Deprecated, use `all` instead.
-fn array_all(array: [_], f) {
-	all(array, f)
-}
-
-/// Deprecated, use `any` instead.
-fn array_any(array: [_], f) {
-	any(array, f)
-}
-
-// Iterator and Seq for string
-
-impl Iterator {
-	fn next(s) {
-		string_iterator_next(s)
-	}
-}
-impl Seq {
-	fn iter(s) {
-		string_iter(s)
-	}
-}
-impl SizedSeq {
-	fn len(s) {
-		string_len(s)
-	}
-}
-
-// Iterator and Seq for array
-impl Iterator {
-	fn next(a) {
-		array_iterator_next(a)
-	}
-}
-impl Seq {
-	fn iter(a) {
-		array_iter(a)
-	}
-}
-impl<A, B> RebindItem for <Self = [A], Item = B |-> Output = [B]> {}
-
-impl<I, T> FromIterator for <Self = [T], Iter = I>
-where
-	I: Iterator<Item = T>
-{
-	fn from_iter(iterator: I) -> [T] {
-		let mut iterator = iterator;
-		let mut result = [];
-		loop {
-			match next(iterator) {
-				Some(item) => {
-					array_append(result, item);
-				},
-				None => return result,
-			}
-		}
-	}
-}
-impl SizedSeq {
-	fn len(a) {
-		array_len(a)
-	}
-}
-
-// Serde for basic types
-
-/// Downcasts a variant to None, panicking if the variant is not None.
-fn variant_to_none(v: Variant) -> () {
-	match (v) {
-		None => (),
-		Array(a) => {
-			if array_len(a) == 0 {
-				()
-			} else {
-				panic("Expected array of size 0")
-			}
-		},
-		_ => panic(f"Expected None variant or Array variant of size 0, got \"{v}\"")
-	}
-}
-/// Downcasts a variant to a bool, panicking if the variant is not a bool.
-fn variant_to_bool(v: Variant) {
-	match (v) {
-		Bool(b) => b,
-		_ => panic(f"Expected Bool variant, got \"{v}\"")
-	}
-}
-/// Downcasts a variant to an int, panicking if the variant is not an int or a float.
-fn variant_to_int(v: Variant) {
-	match (v) {
-		Int(i) => i,
-		Float(f) => round(f),
-		_ => panic(f"Expected Int variant, got \"{v}\"")
-	}
-}
-/// Downcasts a variant to a float, panicking if the variant is not a float or int.
-fn variant_to_float(v: Variant) {
-	match (v) {
-		Float(f) => f,
-		Int(i) => from_int(i),
-		_ => panic(f"Expected Float or Int variant, got \"{v}\"")
-	}
-}
-/// Downcasts a variant to a string, panicking if the variant is not a string.
-fn variant_to_string(v: Variant) {
-	match (v) {
-		String(s) => s,
-		_ => panic(f"Expected String variant, got \"{v}\"")
-	}
-}
-/// Downcasts a variant to an array, panicking if the variant is not an array.
-fn variant_to_array(v: Variant) {
-	match (v) {
-		Array(a) => a,
-		_ => panic(f"Expected Array variant, got \"{v}\"")
-	}
-}
-/// Downcasts a variant to an object payload, panicking if the variant is not an object.
-fn variant_to_object(v: Variant) {
-	match (v) {
-		Object(o) => o,
-		_ => panic(f"Expected Object variant, got \"{v}\"")
-	}
-}
-
-impl Serialize {
-	fn serialize(v: ()) {
-		None
-	}
-}
-impl Deserialize {
-	fn deserialize(v) -> () {
-		variant_to_none(v)
-	}
-}
-impl Serialize {
-	fn serialize(v: bool) {
-		Bool(v)
-	}
-}
-impl Deserialize {
-	fn deserialize(v) -> bool {
-		variant_to_bool(v)
-	}
-}
-impl Serialize {
-	fn serialize(v: int) {
-		Int(v)
-	}
-}
-impl Deserialize {
-	fn deserialize(v) -> int {
-		variant_to_int(v)
-	}
-}
-impl Serialize {
-	fn serialize(v: float) {
-		Float(v)
-	}
-}
-impl Deserialize {
-	fn deserialize(v) -> float {
-		variant_to_float(v)
-	}
-}
-impl Serialize {
-	fn serialize(v: string) {
-		String(v)
-	}
-}
-impl Deserialize {
-	fn deserialize(v) -> string {
-		variant_to_string(v)
-	}
-}
-
-// Serde for arrays
-impl Serialize {
-	fn serialize(a: [_]) {
-		let mut result = array_with_capacity(array_len(a));
-		for value in a {
-			array_append(result, serialize(value));
-		};
-		Array(result)
-	}
-}
-impl Deserialize {
-	fn deserialize(a) {
-		match (a) {
-			Array(a) => {
-				let mut result = array_with_capacity(array_len(a));
-				for i in 0..array_len(a) {
-					array_append(result, deserialize(a[i]));
-				};
-				result
-			},
-			_ => panic(f"Expected Array variant, got \"{a}\"")
-		}
-	}
+/// A container that can be sorted in place with a custom comparator.
+trait SortBy<Self |-> Item> {
+    /// Sorts `value` in place using `compare`.
+    fn sort_by(self: &mut Self, comparator: (Item, Item) -> Ordering) ! fallible;
 }

@@ -20,6 +20,7 @@ use crate::{
         NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN,
     },
     module::{BlanketTraitImplSubKey, Module, ModuleFunction},
+    std::core_traits_names::{ITERATOR_TRAIT_NAME, SPLIT_TRAIT_NAME},
     r#type::{FnType, NativeType, Type, bare_native_type},
     type_scheme::TypeScheme,
     value::{NativeDisplay, NativeValue, Value},
@@ -28,10 +29,8 @@ use crate::{
 use super::{
     default::DEFAULT_TRAIT,
     empty::EMPTY_TRAIT,
-    iterator::ITERATOR_TRAIT,
     math::int_type,
     option::{none, option_type, option_type_generic, some},
-    split::SPLIT_TRAIT,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -727,8 +726,9 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [Box::new(NullaryNativeFnN::new(Array::new)) as Function],
     );
+    let iterator_trait = to.get_trait_str(ITERATOR_TRAIT_NAME).unwrap().clone();
     to.add_blanket_impl_no_locals(
-        ITERATOR_TRAIT.clone(),
+        iterator_trait.clone(),
         BlanketTraitImplSubKey {
             input_tys: vec![array_split_iter_type_generic()],
             ty_var_count: 1,
@@ -738,7 +738,7 @@ pub fn add_to_module(to: &mut Module) {
         [Box::new(UnaryNativeFnMV::new(ArraySplitIterator::next_value)) as Function],
     );
     to.add_blanket_impl_no_locals(
-        ITERATOR_TRAIT.clone(),
+        iterator_trait.clone(),
         BlanketTraitImplSubKey {
             input_tys: vec![array_split_element_iter_type_generic()],
             ty_var_count: 1,
@@ -747,8 +747,9 @@ pub fn add_to_module(to: &mut Module) {
         [array_type_generic()],
         [Box::new(UnaryNativeFnMV::new(ArraySplitElementIterator::next_value)) as Function],
     );
+    let split_trait = to.get_trait_str(SPLIT_TRAIT_NAME).unwrap().clone();
     to.add_blanket_impl_no_locals(
-        SPLIT_TRAIT.clone(),
+        split_trait.clone(),
         BlanketTraitImplSubKey {
             input_tys: vec![array_type_generic(), Type::variable_id(0)],
             ty_var_count: 1,
@@ -766,7 +767,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_blanket_impl_no_locals(
-        SPLIT_TRAIT.clone(),
+        split_trait,
         BlanketTraitImplSubKey {
             input_tys: vec![array_type_generic(), array_type_generic()],
             ty_var_count: 1,

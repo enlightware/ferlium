@@ -16,7 +16,7 @@ use crate::{
     effects::no_effects,
     function::{BinaryNativeFnNNN, BinaryNativeFnVVN, Function, NullaryNativeFnN, UnaryNativeFnNN},
     module::Module,
-    std::{bits::BITS_TRAIT, default::DEFAULT_TRAIT, math::Int},
+    std::{core_traits_names::BITS_TRAIT_NAME, default::DEFAULT_TRAIT, math::Int},
     r#type::Type,
     value::{NativeDisplay, Value},
 };
@@ -61,13 +61,14 @@ fn test_bit(value: bool, position: Int) -> bool {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.add_type_alias_str("bool", bool_type());
+    // Note: bool alias is added in core.rs
 
     // Operations on booleans
     use BinaryNativeFnNNN as BinaryFn;
     use UnaryNativeFnNN as UnaryFn;
+    let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
-        BITS_TRAIT.clone(),
+        bits_trait,
         [bool_type()],
         [],
         [

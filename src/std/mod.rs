@@ -20,16 +20,13 @@ use array::Array;
 use math::{Float, Int};
 
 pub mod array;
-pub mod bits;
 pub mod cast;
-pub mod concat;
-pub mod contains;
 pub mod core;
+pub mod core_traits_names;
 pub mod default;
 pub mod empty;
 pub mod flow;
 pub mod io;
-pub mod iterator;
 mod json;
 pub mod logic;
 pub mod math;
@@ -38,11 +35,7 @@ pub mod option;
 pub mod ordering;
 mod prelude;
 mod product_value_deriver;
-pub mod reverse;
 pub mod serde;
-pub mod slice;
-pub mod sort;
-pub mod split;
 pub mod string;
 pub mod variant;
 
@@ -50,30 +43,23 @@ pub(crate) static STD_MODULE_ID: ModuleId = ModuleId(0);
 
 pub fn std_module(source_table: &mut SourceTable) -> Module {
     let mut module = Module::new(STD_MODULE_ID);
+    // Built-in or derivable
     core::add_to_module(&mut module);
     default::add_to_module(&mut module);
     empty::add_to_module(&mut module);
     flow::add_to_module(&mut module);
     cast::add_to_module(&mut module);
+    module = prelude::declare_traits(module, source_table, STD_MODULE_ID);
     // mem::add_to_module(&mut module);
-    bits::add_to_module(&mut module);
     logic::add_to_module(&mut module);
-    ordering::add_to_module(&mut module);
-    concat::add_to_module(&mut module);
-    contains::add_to_module(&mut module);
-    reverse::add_to_module(&mut module);
-    sort::add_to_module(&mut module);
-    slice::add_to_module(&mut module);
-    split::add_to_module(&mut module);
     math::add_to_module(&mut module);
     array::add_to_module(&mut module);
     io::add_to_module(&mut module);
     string::add_to_module(&mut module);
     variant::add_to_module(&mut module);
-    iterator::add_to_module(&mut module);
     serde::add_to_module(&mut module);
     json::add_to_module(&mut module);
-    prelude::add_to_module(module, source_table, STD_MODULE_ID)
+    prelude::add_impls(module, source_table, STD_MODULE_ID)
 }
 
 pub fn new_module_using_std(module_id: ModuleId) -> Module {

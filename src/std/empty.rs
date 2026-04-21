@@ -12,7 +12,7 @@ use crate::{
     effects::EffType,
     function::FunctionDefinition,
     module::Module,
-    std::product_value_deriver::add_product_value_deriver,
+    std::{STD_MODULE_ID, product_value_deriver::add_product_value_deriver},
     r#trait::TraitRef,
     r#type::{FnType, Type},
 };
@@ -35,7 +35,7 @@ pub static EMPTY_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
         )],
     );
     add_product_value_deriver(&mut trait_ref);
-    trait_ref
+    trait_ref.with_module_id(STD_MODULE_ID)
 });
 
 pub fn add_to_module(to: &mut Module) {

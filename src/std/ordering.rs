@@ -7,16 +7,11 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::LazyLock;
 use ustr::ustr;
 
 use crate::{
     cached_ty,
-    effects::EffType,
-    function::FunctionDefinition,
-    module::Module,
-    r#trait::TraitRef,
-    r#type::{FnType, Type, variant_type},
+    r#type::{Type, variant_type},
     value::Value,
 };
 
@@ -42,33 +37,4 @@ where
         Equal => Value::unit_variant(ustr(ORDERING_EQUAL)),
         Greater => Value::unit_variant(ustr(ORDERING_GREATER)),
     }
-}
-
-use FunctionDefinition as Def;
-
-pub static ORD_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
-    let var0_ty = Type::variable_id(0);
-    let binary_fn_ty = FnType::new_by_val([var0_ty, var0_ty], ordering_type(), EffType::empty());
-
-    TraitRef::new_with_self_input_type(
-        "Ord",
-        "A type that has a total ordering.",
-        [],
-        [(
-            "cmp",
-            Def::new_infer_quantifiers(
-                binary_fn_ty.clone(),
-                ["left", "right"],
-                "Returns an `Ordering` between `left` and `right`.",
-            ),
-        )],
-    )
-});
-
-pub fn add_to_module(to: &mut Module) {
-    // Types
-    to.add_type_alias_str("Ordering", ordering_type());
-
-    // Traits
-    to.add_trait(ORD_TRAIT.clone());
 }

@@ -17,7 +17,7 @@ use crate::{
     ir::{self, NodeArena, NodeId},
     ir_syn,
     module::{Module, TraitImplId},
-    std::product_value_deriver::add_product_value_deriver,
+    std::{STD_MODULE_ID, product_value_deriver::add_product_value_deriver},
     r#trait::{Deriver, TraitRef},
     trait_solver::TraitSolver,
     r#type::{FnType, Type, TypeKind},
@@ -117,7 +117,7 @@ pub static DEFAULT_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     );
     add_enum_default_deriver(&mut trait_ref);
     add_product_value_deriver(&mut trait_ref);
-    trait_ref
+    trait_ref.with_module_id(STD_MODULE_ID)
 });
 
 pub fn add_to_module(to: &mut Module) {

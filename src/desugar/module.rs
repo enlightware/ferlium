@@ -228,6 +228,7 @@ impl ast::TraitDefinition {
             .collect::<Result<Vec<_>, _>>()?;
         let trait_span = self.span;
         TraitRef::from_trait_data(Trait {
+            module_id: None,
             name: self.name.0,
             doc: self.doc,
             input_type_names,

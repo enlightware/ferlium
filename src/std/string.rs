@@ -29,11 +29,12 @@ use crate::{
     },
     module::{Module, ModuleFunction},
     std::{
+        core_traits_names::ORD_TRAIT_NAME,
         default::DEFAULT_TRAIT,
         empty::EMPTY_TRAIT,
         logic::bool_type,
         math::{float_type, float_value, int_type, int_value},
-        ordering::{ORD_TRAIT, compare},
+        ordering::compare,
     },
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
@@ -498,10 +499,11 @@ pub fn string_value(s: &str) -> Value {
 }
 
 pub fn add_to_module(to: &mut Module) {
-    to.add_type_alias_str("string", string_type());
+    // Note: string alias is added in core.rs
 
+    let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
-        ORD_TRAIT.clone(),
+        ord_trait,
         [string_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<String>)) as Function],

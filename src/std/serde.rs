@@ -22,6 +22,7 @@ use crate::{
     module::{self, LocalDeclId, Module, TraitImplId, id::Id},
     mutability::MutVal,
     std::{
+        STD_MODULE_ID,
         array::array_type,
         math::int_type,
         string::{string_type, string_value},
@@ -555,7 +556,7 @@ pub fn add_to_module(to: &mut Module) {
         .unwrap()
         .derives
         .push(Box::new(AlgebraicTypeSerializeDeriver));
-    to.add_trait(serialize_trait);
+    to.add_trait(serialize_trait.with_module_id(STD_MODULE_ID));
 
     // Deserialize trait
     let mut deserialize_trait = TraitRef::new_with_self_input_type(
@@ -579,7 +580,7 @@ pub fn add_to_module(to: &mut Module) {
         .unwrap()
         .derives
         .push(Box::new(AlgebraicTypeDeserializeDeriver));
-    to.add_trait(deserialize_trait);
+    to.add_trait(deserialize_trait.with_module_id(STD_MODULE_ID));
 
     // Trait implementations for basic types are in the prelude.
 }

@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{convert::identity, fmt, sync::LazyLock};
+use std::{convert::identity, fmt};
 
 use num_traits::{Bounded, NumCast, PrimInt, Signed, Zero};
 use ordered_float::{FloatCore, NotNan};
@@ -15,21 +15,20 @@ use ustr::ustr;
 use crate::{
     cached_primitive_ty,
     containers::b,
-    effects::{EffType, PrimitiveEffect, effect, no_effects},
+    effects::{PrimitiveEffect, effect, no_effects},
     error::RuntimeErrorKind,
     function::{
-        BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, FunctionDefinition,
-        NullaryNativeFnN, UnaryNativeFnNN,
+        BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, NullaryNativeFnN,
+        UnaryNativeFnNN,
     },
     module::Module,
     std::{
-        bits::BITS_TRAIT,
         cast::CAST_TRAIT,
+        core_traits_names::{BITS_TRAIT_NAME, DIV_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
         default::DEFAULT_TRAIT,
-        ordering::{ORD_TRAIT, compare},
+        ordering::compare,
     },
-    r#trait::TraitRef,
-    r#type::{FnType, Type},
+    r#type::Type,
     value::{NativeDisplay, Value},
 };
 
@@ -202,103 +201,11 @@ fn test_bit(value: Int, position: Int) -> bool {
     (value & bit(position)) != 0
 }
 
-use FunctionDefinition as Def;
-
-pub static NUM_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
-    let var0_ty = Type::variable_id(0);
-    let unary_fn_ty = FnType::new_by_val([var0_ty], var0_ty, EffType::empty());
-    let binary_fn_ty = FnType::new_by_val([var0_ty, var0_ty], var0_ty, EffType::empty());
-
-    TraitRef::new_with_self_input_type(
-        "Num",
-        "A numeric type supporting basic arithmetic operations.",
-        [],
-        [
-            (
-                "add",
-                Def::new_infer_quantifiers(
-                    binary_fn_ty.clone(),
-                    ["left", "right"],
-                    "Adds two numbers.",
-                ),
-            ),
-            (
-                "sub",
-                Def::new_infer_quantifiers(
-                    binary_fn_ty.clone(),
-                    ["left", "right"],
-                    "Subtracts `right` from `left`.",
-                ),
-            ),
-            (
-                "mul",
-                Def::new_infer_quantifiers(
-                    binary_fn_ty.clone(),
-                    ["left", "right"],
-                    "Multiplies two numbers.",
-                ),
-            ),
-            (
-                "neg",
-                Def::new_infer_quantifiers(unary_fn_ty.clone(), ["value"], "Negates a number."),
-            ),
-            (
-                "abs",
-                Def::new_infer_quantifiers(
-                    unary_fn_ty.clone(),
-                    ["value"],
-                    "Returns the absolute value of a number.",
-                ),
-            ),
-            (
-                "signum",
-                Def::new_infer_quantifiers(unary_fn_ty, ["value"], "Returns the sign of a number."),
-            ),
-            (
-                "from_int",
-                Def::new_infer_quantifiers(
-                    FnType::new_by_val([int_type()], var0_ty, EffType::empty()),
-                    ["value"],
-                    "Converts an integer to a number.",
-                ),
-            ),
-        ],
-    )
-});
-
-pub static DIV_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
-    let var0_ty = Type::variable_id(0);
-    let binary_fn_ty_f = FnType::new_by_val(
-        [var0_ty, var0_ty],
-        var0_ty,
-        effect(PrimitiveEffect::Fallible),
-    );
-
-    TraitRef::new_with_self_input_type(
-        "Div",
-        "A type that supports division.",
-        [],
-        [(
-            "div",
-            Def::new_infer_quantifiers(
-                binary_fn_ty_f,
-                ["left", "right"],
-                "Divides `left` by `right`.",
-            ),
-        )],
-    )
-});
-
 pub fn add_to_module(to: &mut Module) {
     use RuntimeErrorKind::*;
 
     // Types
-    to.add_type_alias_str("int", int_type());
-    to.add_type_alias_str("float", float_type());
-
-    // Traits
-    to.add_trait(NUM_TRAIT.clone());
-    to.add_trait(DIV_TRAIT.clone());
+    // Note: aliases are added in core.rs
 
     // Trait implementations
     use BinaryNativeFnNNN as BinaryFn;
@@ -306,8 +213,9 @@ pub fn add_to_module(to: &mut Module) {
     use std::ops;
 
     // int
+    let num_trait = to.get_trait_str(NUM_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
-        NUM_TRAIT.clone(),
+        num_trait.clone(),
         [int_type()],
         [],
         [
@@ -320,8 +228,9 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(identity::<Int>)) as Function,
         ],
     );
+    let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
-        BITS_TRAIT.clone(),
+        bits_trait,
         [int_type()],
         [],
         [
@@ -341,8 +250,9 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(test_bit)) as Function,
         ],
     );
+    let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
-        ORD_TRAIT.clone(),
+        ord_trait.clone(),
         [int_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
@@ -416,7 +326,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // float
     to.add_concrete_impl_no_locals(
-        NUM_TRAIT.clone(),
+        num_trait.clone(),
         [float_type()],
         [],
         [
@@ -430,13 +340,14 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     to.add_concrete_impl_no_locals(
-        ORD_TRAIT.clone(),
+        ord_trait.clone(),
         [float_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
     );
+    let div_trait = to.get_trait_str(DIV_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
-        DIV_TRAIT.clone(),
+        div_trait,
         [float_type()],
         [],
         [b(BinaryNativeFnNNFN::new(|lhs: Float, rhs: Float| {
