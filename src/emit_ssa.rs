@@ -3,7 +3,7 @@ use crate::{
   format::FormatWith,
   ir::{self, Case, NodeArena},
   module::{FunctionId, LocalFunctionId, Module, ModuleEnv, TraitImplId},
-  ssa::{self, BlockIdentity},
+  ssa::{self, BlockIdentity, Program},
   value::{self, Value},
 };
 
@@ -36,22 +36,32 @@ struct CaseBlocks {
 
 /// A constructor of SSA IR.
 struct Emitter<'a> {
+
   /// The module being lowered.
   module: &'a Module,
 
   /// The other modules.
   others: &'a Modules,
 
+  /// The program into which IR is being emitted.
+  program: &'a mut Program,
+
   /// The context in which the emitter inserts new IR.
   context: InsertionContext,
 
   /// The HIR node arena.
   hir_arena: &'a NodeArena,
+
 }
 
 impl<'a> Emitter<'a> {
+
   /// Generates the IR of `source`, which has the given `identity`.
   fn emit_ssa_fn(identity: LocalFunctionId, module: &'a Module, others: &'a Modules) -> String {
+    // TODO: This is the program into which IR is being inserted. Eventually that should become
+    // an argument of the function, as this data structure should persist.
+    let mut program = Program::new();
+
     let f = module.get_function_by_id(identity).unwrap();
     match f.code.as_ref().as_script() {
       Some(syntax) => {
@@ -74,9 +84,10 @@ impl<'a> Emitter<'a> {
         let code = &module.ir_arena[syntax.entry_node_id];
 
         // Instantiate an emitter to generate the function's contents.
-        let mut emitter = Self {
+        let mut emitter = Emitter {
           module,
           others,
+          program: &mut program,
           context: InsertionContext {
             function: lowered,
             point: InsertionPoint::End(entry),
@@ -90,7 +101,10 @@ impl<'a> Emitter<'a> {
         let v = emitter.lower_as_rvalue(code);
         emitter.insert(ssa::Instruction::ret(emitter.context.span, v));
 
-        format!("{}", emitter.context.function)
+        // Save the definition of the lowered function into the SSA program.
+        lowered = emitter.context.function;
+        let g = program.set_definition(lowered);
+        format!("{}", *g)
       }
 
       None => panic!(),
@@ -435,10 +449,12 @@ impl<'a> Emitter<'a> {
     let e = ModuleEnv::new(self.module, self.others);
     format!("{}", x.format_with(&e))
   }
+
 }
 
 /// The context in which instructions are inserted.
 struct InsertionContext {
+
   /// The function in which new instructions are inserted.
   function: ssa::Function,
 
@@ -449,10 +465,13 @@ struct InsertionContext {
   span: Location,
 
   environment: Vec<ssa::Value>,
+
 }
 
 /// Where an instruction should be inserted in a basic block.
 enum InsertionPoint {
+
   /// The end of a basic block.
   End(ssa::BlockIdentity),
+
 }
