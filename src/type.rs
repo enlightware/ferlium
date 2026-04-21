@@ -651,6 +651,7 @@ define_id_type!(
 /// A single type alias entry, potentially generic.
 #[derive(Debug, Clone)]
 pub struct TypeAliasEntry {
+    pub name: Ustr,
     pub param_names: Vec<Ustr>,
     pub ty_var_count: u32,
     pub ty: Type,
@@ -673,6 +674,7 @@ impl TypeAliases {
             self.type_to_name.insert(ty, alias);
         }
         self.entries.push(TypeAliasEntry {
+            name: alias,
             param_names,
             ty_var_count,
             ty,
@@ -691,8 +693,8 @@ impl TypeAliases {
         self.entries.len()
     }
 
-    pub fn type_iter(&self) -> impl Iterator<Item = Type> + '_ {
-        self.entries.iter().map(|e| e.ty)
+    pub fn type_entries(&self) -> impl Iterator<Item = &TypeAliasEntry> + '_ {
+        self.entries.iter()
     }
 
     pub fn set_bare_native(&mut self, alias: Ustr, bare: BareNativeTypeB) {

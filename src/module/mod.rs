@@ -863,9 +863,8 @@ impl Module {
         }
         if self.type_aliases.type_len() > 0 {
             writeln!(f, "Type aliases ({}):\n", self.type_aliases.type_len())?;
-            for ty in self.type_aliases.type_iter() {
-                let name = self.type_aliases.get_name(ty).unwrap();
-                writeln!(f, "{}: {}", name, ty.data().format_with(&env))?;
+            for alias in self.type_aliases.type_entries() {
+                writeln!(f, "{}: {}", alias.name, alias.ty.data().format_with(&env))?;
             }
             writeln!(f, "\n")?;
         }

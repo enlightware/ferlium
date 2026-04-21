@@ -11,7 +11,7 @@
 use indoc::indoc;
 use ustr::ustr;
 
-use ferlium::std::option::some;
+use ferlium::{format::FormatWith, std::option::some};
 
 use crate::harness::{TestSession, float, int, string};
 
@@ -276,14 +276,19 @@ fn generic_type_aliases() {
     assert_eq!(result, int(12));
 
     // Verify generic type alias is stored in the module
-    let module = session.compile_and_get_module(indoc! { r#"
+    let module_id = session
+        .compile(indoc! { r#"
         type Pair<A, B> = (A, B);
 
         fn dummy() -> int { 0 }
-    "# });
+    "# })
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
     let entry = module.get_type_alias(ustr("Pair"));
     assert!(entry.is_some());
     assert_eq!(entry.unwrap().param_names.len(), 2);
+    let rendered = module.format_with(session.session().modules()).to_string();
+    assert!(rendered.contains("Pair: (A, B)"));
 }
 
 #[test]
