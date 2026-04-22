@@ -30,7 +30,7 @@ pub use path::*;
 pub use trait_impl::*;
 pub use uses::*;
 
-use std::{fmt, hash::{Hash}};
+use std::{fmt, hash::Hash};
 
 use ustr::{Ustr, ustr};
 
