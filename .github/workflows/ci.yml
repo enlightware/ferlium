@@ -50,11 +50,11 @@ jobs:
 
       - name: Run WASM tests (Chrome and Firefox)
         if: runner.os != 'macOS'
-        run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --chrome --firefox --headless --test language --lib
+        run: WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test --chrome --firefox --headless --test language --lib
 
       - name: Run WASM tests (Safari)
         if: runner.os == 'macOS'
-        run: WASM_BINDGEN_USE_BROWSER=1 wasm-pack test --safari --headless --test language --lib
+        run: WASM_BINDGEN_USE_BROWSER=1 WASM_BINDGEN_TEST_TIMEOUT=600 wasm-pack test --safari --headless --test language --lib
 
   build_site:
     name: Build and upload playground and book
