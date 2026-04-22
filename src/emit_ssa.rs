@@ -145,7 +145,7 @@ impl<'a> Emitter<'a> {
 
         let end: usize = self.context.environment.len();
 
-        // We want to lower the scrutinee before the case blocks.
+        // We want to lower the scrutinee before the case blocks. This allows us to use the lowered scrutinee value in all conditions blocks
         let scrutinee = self.lower_as_rvalue(&self.hir_arena[n.value]);
 
         // Create a temporary allocation to store the result of the match.
