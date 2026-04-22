@@ -194,6 +194,22 @@ impl InstructionKind for Call {
 
 }
 
+/// A equal comparision in SSA.
+struct CompareEqual {}
+
+impl InstructionKind for CompareEqual {
+
+  fn result(&self, whole: &Instruction) -> InstructionResult {
+    InstructionResult::pointer_to(InstructionResult::Lowered(cached_primitive_ty!(bool)))
+  }
+
+  fn fmt_within(&self, f: &mut fmt::Formatter<'_>, whole: &Instruction) -> std::fmt::Result {
+      write!(f, "comp_eq {} {}", whole.operands[0], whole.operands[1])
+  }
+
+}
+
+
 /// A conditional jump in SSA.
 struct ConditionalBranch {
 
@@ -296,18 +312,4 @@ impl InstructionKind for UnconditionalBranch {
   fn fmt_within(&self, f: &mut fmt::Formatter<'_>, whole: &Instruction) -> fmt::Result {
     write!(f, "br {}", self.target.raw())
   }
-}
-
-struct CompareEqual {}
-
-impl InstructionKind for CompareEqual {
-
-  fn result(&self, whole: &Instruction) -> InstructionResult {
-    InstructionResult::pointer_to(InstructionResult::Lowered(cached_primitive_ty!(bool)))
-  }
-
-  fn fmt_within(&self, f: &mut fmt::Formatter<'_>, whole: &Instruction) -> std::fmt::Result {
-      write!(f, "comp_eq {} {}", whole.operands[0], whole.operands[1])
-  }
-
 }
