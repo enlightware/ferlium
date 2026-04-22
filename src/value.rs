@@ -140,7 +140,8 @@ impl Value {
 
     pub fn to_literal_value(&self) -> Option<LiteralValue> {
         match self {
-            Self::Native(_) => {
+            Self::Native(_) =>
+            {
                 #[allow(clippy::manual_map)]
                 if self.as_primitive_ty::<()>().is_some() {
                     Some(LiteralValue::new_native(()))
