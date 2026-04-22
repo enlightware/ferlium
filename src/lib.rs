@@ -10,6 +10,7 @@
 use derive_new::new;
 pub use rustc_hash::{FxHashMap, FxHashSet};
 
+use ::std::cell::RefCell;
 use ::std::mem;
 use std::new_module_using_std;
 
@@ -201,6 +202,10 @@ pub type AstInspectorCb<'a> =
 
 static FIRST_USER_MODULE_ID: ModuleId = ModuleId(2);
 
+thread_local! {
+    static EMPTY_COMPILER_SESSION_CACHE: RefCell<Option<CompilerSession>> = const { RefCell::new(None) };
+}
+
 /// All data needed to rebuild the module.
 #[derive(Clone, Debug, new)]
 pub struct ModuleSrcInfo {
@@ -211,7 +216,7 @@ pub struct ModuleSrcInfo {
 }
 
 /// A module that has been attempted to be compiled at least once.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ModuleEntry {
     /// Informations needed to rebuild the module, if it supports rebuilding (std doesn't).
     src_info: Option<ModuleSrcInfo>,
@@ -314,7 +319,7 @@ impl ModuleEntry {
 pub type Modules = NamedIndexed<Path, ModuleId, ModuleEntry>;
 
 /// A compilation session, that contains a source table and the standard library.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompilerSession {
     /// Source table for this compilation session.
     source_table: SourceTable,
@@ -335,6 +340,10 @@ pub(crate) enum EvalExprError {
 impl CompilerSession {
     /// Create a new compilation session with an empty source table and the standard library loaded.
     pub fn new() -> Self {
+        if let Some(session) = EMPTY_COMPILER_SESSION_CACHE.with(|cache| cache.borrow().clone()) {
+            return session;
+        }
+
         let mut source_table = SourceTable::default();
         let mut modules = Modules::default();
         assert_eq!(modules.next_id(), STD_MODULE_ID);
@@ -348,12 +357,18 @@ impl CompilerSession {
         );
         assert_eq!(modules.next_id(), FIRST_USER_MODULE_ID);
         let initial_source_table_size = source_table.len();
-        Self {
+        let session = Self {
             source_table,
             modules,
             empty_std_user,
             initial_source_table_size,
-        }
+        };
+
+        EMPTY_COMPILER_SESSION_CACHE.with(|cache| {
+            *cache.borrow_mut() = Some(session.clone());
+        });
+
+        session
     }
 
     /// Get the source table for this compilation session.
