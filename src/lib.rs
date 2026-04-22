@@ -492,6 +492,17 @@ impl CompilerSession {
         )
     }
 
+    pub fn default_value_for_type(&mut self, ty: Type) -> Option<Value> {
+        if ty.data().is_variable() {
+            return None;
+        }
+
+        let module_env = self.module_env();
+        let source = format!("(default(): {})", ty.format_with(&module_env));
+        self.eval_std_expr_with_locals("<default_value_for_type>", &source, vec![], vec![])
+            .ok()
+    }
+
     /// Reset the compiler session to its initial state, without rebuilding std.
     pub fn reset(&mut self) {
         // We only keep std and $empty_std_user and drop the rest.

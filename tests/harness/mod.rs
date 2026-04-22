@@ -195,6 +195,11 @@ pub fn assert_value_eq(actual: &Value, expected: &Value) {
     }
 }
 
+pub fn assert_some_value_eq(actual: Option<Value>, expected: Value) {
+    let actual = actual.expect("expected Some(value)");
+    assert_value_eq(&actual, &expected)
+}
+
 #[macro_export]
 macro_rules! assert_val_eq {
     ($actual:expr, $expected:expr, $($arg:tt)+) => {{
@@ -723,6 +728,10 @@ impl TestSession {
                 _ => panic!("Expected compilation error, got {error:?}"),
             },
         }
+    }
+
+    pub fn default_value_for_type(&mut self, ty: Type) -> Option<Value> {
+        self.session.default_value_for_type(ty)
     }
 }
 
