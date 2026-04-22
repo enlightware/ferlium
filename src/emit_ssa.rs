@@ -19,6 +19,21 @@ pub fn emit_ssa(module: &Module, others: &Modules) -> String {
   a.join("\n")
 }
 
+/// The SSA blocks composing a Case HIR node.
+struct CaseBlocks {
+  /// The conditions head blocks
+  heads: Vec<BlockIdentity>,
+
+  /// The conditions bodies blocks
+  bodies: Vec<BlockIdentity>,
+
+  /// The default case block
+  default: BlockIdentity,
+
+  /// The tail of the case
+  tail: BlockIdentity
+}
+
 /// A constructor of SSA IR.
 struct Emitter<'a> {
   /// The module being lowered.
@@ -101,26 +116,16 @@ impl<'a> Emitter<'a> {
   }
 
   /// Returns the blocks created for `n`.
-  fn create_case_blocks(&mut self, n: &Box<Case>) -> (
-    Vec<BlockIdentity>,
-    Vec<BlockIdentity>,
-    BlockIdentity,
-    BlockIdentity,
-  ) {
-    let (condition_block, body_blocks) = n
-      .alternatives
-      .iter()
-      .map(|_| {
-        (
-          self.context.function.add_block().id(),
-          self.context.function.add_block().id(),
-        )
-      })
-      .unzip();
+  fn create_case_blocks(&mut self, n: &Box<Case>) -> CaseBlocks {
+    let mut heads: Vec<BlockIdentity> = vec![];
+    let mut bodies: Vec<BlockIdentity> = vec![];
+    for _ in n.alternatives.iter() {
+      heads.push(self.context.function.add_block().id());
+      bodies.push(self.context.function.add_block().id());
+    }
     let default: ssa::BlockIdentity = self.context.function.add_block().id();
     let tail: ssa::BlockIdentity = self.context.function.add_block().id();
-
-    return (condition_block, body_blocks, default, tail);
+    CaseBlocks { heads, bodies, default: default, tail:tail }
   }
 
   /// Generates the IR for `node`, which occurs as rvalue.
@@ -129,37 +134,37 @@ impl<'a> Emitter<'a> {
     match &node.kind {
       K::Block(n) => {
         let (last, prefix) = n.split_last().unwrap();
-        prefix
-          .iter()
-          .for_each(|s| self.lower_as_statement(&self.hir_arena[*s]));
+        for s in prefix.iter() {
+          self.lower_as_statement(&self.hir_arena[*s]);
+        }
         self.lower_as_rvalue(&self.hir_arena[*last])
       }
 
       K::Case(n) => {
-        let (conditions, bodies, default, tail) = self.create_case_blocks(n);
+        let blocks = self.create_case_blocks(n);
 
         let end: usize = self.context.environment.len();
-        // We want to lower it here, before any conditions
+
+        // We want to lower the scrutinee before the case blocks.
         let scrutinee = self.lower_as_rvalue(&self.hir_arena[n.value]);
 
         // Create a temporary allocation to store the result of the match.
         let temporary = self
           .insert(ssa::Instruction::alloca(node.span, node.ty))
           .unwrap();
-        self.insert(ssa::Instruction::br(node.span, conditions[0]));
+        self.insert(ssa::Instruction::br(node.span, blocks.heads[0]));
 
         // Lower the alternatives.
         for (i, (c, a)) in n.alternatives.iter().enumerate() {
-          // Load the next condition head
-          // Either the next alternative, or the default case if we are at the last condition
+          // Load the next alternative's condition. If there aren't any left, we've reached the base case.
           let next = if i < &n.alternatives.len() - 1 {
-            conditions[i + 1]
+            blocks.heads[i + 1]
           } else {
-            default
+            blocks.default
           };
 
           // Transfer control flow to the head of the loop.
-          self.context.point = InsertionPoint::End(conditions[i]);
+          self.context.point = InsertionPoint::End(blocks.heads[i]);
 
           // Lower the condition value
           // TODO: We may want to check if the types of the lowered condition and the scrutinee are the same
@@ -169,27 +174,27 @@ impl<'a> Emitter<'a> {
             .insert(ssa::Instruction::compare_eq(
               node.span, scrutinee.clone(), x0))
             .unwrap();
-          self.insert(ssa::Instruction::condbr(node.span, v, bodies[i], next));
+          self.insert(ssa::Instruction::condbr(node.span, v, blocks.bodies[i], next));
 
           // Lower the condition.
-          self.context.point = InsertionPoint::End(bodies[i]);
+          self.context.point = InsertionPoint::End(blocks.bodies[i]);
           let x1 = self.lower_as_rvalue(&self.hir_arena[*a]);
 
           // Store the result of the expression.
           self.insert(ssa::Instruction::store(node.span, x1, temporary.clone()));
-          self.insert(ssa::Instruction::br(node.span, tail));
+          self.insert(ssa::Instruction::br(node.span, blocks.tail));
           self.context.environment.truncate(end);
         }
 
         // Default case
-        self.context.point = InsertionPoint::End(default);
+        self.context.point = InsertionPoint::End(blocks.default);
         let v = self.lower_as_rvalue(&self.hir_arena[n.default]);
         self.insert(ssa::Instruction::store(node.span, v, temporary.clone()));
-        self.insert(ssa::Instruction::br(node.span, tail));
+        self.insert(ssa::Instruction::br(node.span, blocks.tail));
         self.context.environment.truncate(end);
 
         // Tail
-        self.context.point = InsertionPoint::End(tail);
+        self.context.point = InsertionPoint::End(blocks.tail);
         self
           .insert(ssa::Instruction::load(node.span, temporary))
           .unwrap()
@@ -200,11 +205,8 @@ impl<'a> Emitter<'a> {
           result
         } else {
           let s = self.show(node.ty);
-          println!(
-            "lowering is unimplemented for node of kind '{:?}' of type {:?}",
-            n.value, s
-          );
-          panic!()
+          panic!("lowering is unimplemented for node of kind '{:?}' of type {:?}",
+            n.value, s)
         }
       }
 
