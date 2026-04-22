@@ -327,8 +327,8 @@ impl Eq for Box<ScriptFunction> {}
 
 /// A trait that must be satisfied by the output of a native function.
 /// This is used to ensure that the output can be converted to a `Value`.
-pub trait NativeOutput: Debug + Clone + Eq + NativeDisplay + 'static {}
-impl<T: Debug + Clone + Eq + NativeDisplay + 'static> NativeOutput for T {}
+pub trait NativeOutput: Debug + Clone + NativeDisplay + 'static {}
+impl<T: Debug + Clone + NativeDisplay + 'static> NativeOutput for T {}
 
 /// Marker struct to declare argument by value to native functions.
 pub struct NatVal<T> {

@@ -34,7 +34,7 @@ use crate::module::ImportFunctionTarget;
 
 /// Either a value or a unique mutable reference to a value.
 /// This allows to implement the mutable value semantics.
-#[derive(Debug, Clone, PartialEq, Eq, EnumAsInner)]
+#[derive(Debug, Clone, EnumAsInner)]
 pub enum ValOrMut {
     /// A value, itself
     Val(Value),
@@ -461,7 +461,7 @@ impl FormatWith<EvalCtx<'_>> for Place {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ControlFlow<V> {
     Continue(V),
     Return(Value),
@@ -823,6 +823,12 @@ pub fn eval_node_with_ctx(
         }
         Case(case) => {
             let value = eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals));
+            let value = value.to_literal_value().unwrap_or_else(||
+                panic!(
+                    "Case evaluated a non-literal scrutinee: {}. This IR should have been rejected before evaluation.",
+                    value.to_string_repr()
+                )
+            );
             for (alternative, node) in &case.alternatives {
                 if value == *alternative {
                     return eval_node_with_ctx(arena, *node, ctx, locals);

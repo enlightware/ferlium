@@ -67,7 +67,7 @@ fn quicksort() {
         .module_id;
     let array_ty = array_type(int_type());
     let input = int_a![5, 3, 8, 1, 2, 7, 4, 11, 0];
-    assert_eq!(
+    assert_val_eq!(
         call_fn!(session.session(), module_id, "quicksort_int_a", [input => array_ty] -> array_ty)
             .unwrap(),
         int_a![0, 1, 2, 3, 4, 5, 7, 8, 11],
@@ -87,8 +87,8 @@ fn sieve() {
         call_fn!(session.session(), module_id, "primes_up_to", [n => int_type()] -> array_ty)
             .unwrap()
     };
-    assert_eq!(primes_up_to(int(10)), int_a![2, 3, 5, 7]);
-    assert_eq!(
+    assert_val_eq!(primes_up_to(int(10)), int_a![2, 3, 5, 7]);
+    assert_val_eq!(
         primes_up_to(int(30)),
         int_a![2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
     );
@@ -147,10 +147,10 @@ fn bank_account() {
         .unwrap();
 
     session.run("account::assert_consistency()");
-    assert_eq!(session.run("account::richest_person()"), string("Bob"));
-    assert_eq!(session.run("account::most_active_person()"), string("Eve"));
+    assert_val_eq!(session.run("account::richest_person()"), string("Bob"));
+    assert_val_eq!(session.run("account::most_active_person()"), string("Eve"));
     // FIXME: this cannot be in bank_account.fer due to issue #111
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             let data = account::test_data();
             let json = json_encode(data);

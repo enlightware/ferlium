@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 
 use crate::{
     containers::b,
-    function::{Function, NullaryNativeFnN},
+    function::{BinaryNativeFnNNN, Function, NullaryNativeFnN},
     module::Module,
     std::{
         STD_MODULE_ID,
@@ -19,6 +19,7 @@ use crate::{
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
+        value::VALUE_TRAIT,
     },
     r#trait::TraitRef,
     r#type::Type,
@@ -45,6 +46,12 @@ pub fn add_to_module(to: &mut Module) {
     // Add the `Repr` trait
     to.add_trait(REPR_TRAIT.clone());
 
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [Type::unit()],
+        [],
+        [b(BinaryNativeFnNNN::new(|_: (), _: ()| true)) as Function],
+    );
     to.add_concrete_impl_no_locals(
         DEFAULT_TRAIT.clone(),
         [Type::unit()],

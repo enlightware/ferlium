@@ -32,7 +32,7 @@ use crate::{
     trait_solver::TraitSolver,
     r#type::{FnType, Type, TypeKind, tuple_type},
     type_like::TypeLike,
-    value::{Value, ustr_to_isize},
+    value::{LiteralValue, ustr_to_isize},
 };
 
 use super::variant::variant_type;
@@ -248,7 +248,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     let payload_ty = tuple_type([array_ty]);
                     let payload = n(arena, tuple([array_node]), payload_ty);
                     let code = n(arena, variant(ustr("Object"), payload), variant_type());
-                    let tag_value = Value::native(ustr_to_isize(tag));
+                    let tag_value = LiteralValue::new_native(ustr_to_isize(tag));
                     Ok((tag_value, code))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -484,7 +484,9 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let variant_cases = variants
                 .into_iter()
                 .map(|(tag, payload_ty)| {
-                    let tag_value = string_value(&tag);
+                    let tag_value = string_value(&tag)
+                        .to_literal_value()
+                        .expect("variant tag strings should always lower to literal values");
                     let build_variant = if payload_ty != Type::unit() {
                         // variant with payload
                         let load_object_for_data =

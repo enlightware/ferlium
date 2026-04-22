@@ -845,7 +845,7 @@ ArrayExpr: ExprKind = {
 }
 
 RecordExpr: ExprKind = {
-    <r:RecordExprImpl> => ExprKind::record(r),
+    <r:RecordExprImpl> => record(r, arena),
 }
 
 // Records with support for field abbreviation syntax.

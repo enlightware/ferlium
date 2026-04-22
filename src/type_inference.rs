@@ -57,7 +57,7 @@ use crate::{
     r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
     type_scheme::PubTypeConstraint,
     typing_env::{LoopFrame, TypingEnv},
-    value::Value,
+    value::{LiteralValue, Value},
 };
 
 pub type InstSubstitution = (TypeSubstitution, EffectsSubstitution);
@@ -237,7 +237,7 @@ pub struct TypeInference {
     ty_constraints: Vec<TypeConstraint>,
     mut_unification_table: InPlaceUnificationTable<MutVarKey>,
     mut_constraints: Vec<MutConstraint>,
-    ty_coverage_constraints: Vec<(Location, Type, Vec<Value>)>,
+    ty_coverage_constraints: Vec<(Location, Type, Vec<LiteralValue>)>,
     effect_unification_table: InPlaceUnificationTable<EffectVarKey>,
     effect_constraints: Vec<EffectConstraint>,
 }
@@ -299,7 +299,12 @@ impl TypeInference {
             .push(TypeConstraint::Pub(pub_constraint));
     }
 
-    pub fn add_ty_coverage_constraint(&mut self, span: Location, ty: Type, values: Vec<Value>) {
+    pub fn add_ty_coverage_constraint(
+        &mut self,
+        span: Location,
+        ty: Type,
+        values: Vec<LiteralValue>,
+    ) {
         self.ty_coverage_constraints.push((span, ty, values));
     }
 

@@ -1,3 +1,26 @@
+// Value implementation for arrays
+// (must be after array iter/next are defined)
+
+impl<A> Value for [A] where A: Value {
+	fn eq(left: [A], right: [A]) -> bool {
+		let l = array_len(left);
+		if l != array_len(right) {
+			return false;
+		};
+		let mut it_l = iter(left);
+		let mut it_r = iter(right);
+		loop {
+			match next(it_l) {
+				Some(a) => match next(it_r) {
+					Some(b) => if not eq(a, b) { return false },
+					None    => return false,
+				},
+				None => return true,
+			}
+		}
+	}
+}
+
 // Serde derive helper
 
 /// Gets an entry from a Variant Object by name, returning None if not found.
@@ -65,6 +88,86 @@ where
 	from_iter(split_iterator(value, separator))
 }
 
+struct ArraySplitElementIterator<A>
+	where A: Value
+{
+	array: [A],
+	separator: A,
+	next_start: int,
+	finished: bool,
+}
+
+impl Iterator for ArraySplitElementIterator<A>
+where
+	A: Value
+{
+	fn next(it: &mut ArraySplitElementIterator<A>) -> None | Some([A]) {
+		if it.finished {
+			return None;
+		};
+
+		let len = len(it.array);
+		match position(skip(it.array, it.next_start), |item| item == it.separator) {
+			Some(relative_start) => {
+				let separator_start = it.next_start + relative_start;
+				let part = array_slice(it.array, it.next_start, separator_start);
+				it.next_start = separator_start + 1;
+				Some(part)
+			},
+			None => {
+				let part = array_slice(it.array, it.next_start, len);
+				it.finished = true;
+				Some(part)
+			}
+		}
+	}
+}
+
+struct ArraySplitIterator<A>
+	where A: Value
+{
+	array: [A],
+	separator: [A],
+	next_start: int,
+	finished: bool,
+}
+
+impl Iterator for ArraySplitIterator<A>
+where
+	A: Value
+{
+	fn next(it: &mut ArraySplitIterator<A>) -> None | Some([A]) {
+		if it.finished {
+			return None;
+		};
+
+		let array_len = len(it.array);
+		let separator_len = len(it.separator);
+		if separator_len > array_len - it.next_start {
+			let part = array_slice(it.array, it.next_start, array_len);
+			it.finished = true;
+			return Some(part);
+		};
+
+		let last_candidate = array_len - separator_len;
+		match position(it.next_start..(last_candidate + 1), |candidate_start| {
+			array_slice(it.array, candidate_start, candidate_start + separator_len) == it.separator
+		}) {
+			Some(relative_start) => {
+				let separator_start = it.next_start + relative_start;
+				let part = array_slice(it.array, it.next_start, separator_start);
+				it.next_start = separator_start + separator_len;
+				Some(part)
+			},
+			None => {
+				let part = array_slice(it.array, it.next_start, array_len);
+				it.finished = true;
+				Some(part)
+			}
+		}
+	}
+}
+
 impl Iterator {
 	fn next(s) {
 		string_split_iterator_next(s)
@@ -74,6 +177,38 @@ impl Iterator {
 impl Split for <Self = string, Separator = string |-> Part = string, Iter = string_split_iterator, Output = [string]> {
 	fn split_iterator(value: string, separator: string) {
 		string_split_iterator(value, separator)
+	}
+}
+
+impl<A> Split for <Self = [A], Separator = A |-> Part = [A], Iter = ArraySplitElementIterator<A>, Output = [[A]]>
+where
+	A: Value
+{
+	fn split_iterator(value: [A], separator: A) {
+		ArraySplitElementIterator {
+			array: value,
+			separator,
+			next_start: 0,
+			finished: false,
+		}
+	}
+}
+
+impl<A> Split for <Self = [A], Separator = [A] |-> Part = [A], Iter = ArraySplitIterator<A>, Output = [[A]]>
+where
+	A: Value
+{
+	fn split_iterator(value: [A], separator: [A]) {
+		if is_empty(separator) {
+			invalid_argument("separator must not be empty")
+		} else {
+			ArraySplitIterator {
+				array: value,
+				separator,
+				next_start: 0,
+				finished: false,
+			}
+		}
 	}
 }
 

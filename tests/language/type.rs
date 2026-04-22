@@ -481,7 +481,7 @@ fn variant_type_ascription() {
             score(unit),
         )
     "# });
-    assert_eq!(result, tuple!(int(40), int(3), int(0)),);
+    assert_val_eq!(result, tuple!(int(40), int(3), int(0)),);
 
     // Limitation: to avoid a conflict, return types instantiate the grammar without record variants.
     let err = session.fail_compilation(indoc! { r#"
@@ -501,7 +501,7 @@ fn variant_type_ascription() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn ret_type_overloading() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn f() { let a = 0; a }
             ((f(): int), (f(): float))
@@ -634,7 +634,7 @@ fn variant_type_alias_in_function_signature() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_impl_for_specified() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct S(string)
             struct Wrapper<T>(T)
@@ -666,7 +666,7 @@ fn trait_impl_for_specified() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trait_impl_where_clause_is_used_for_selection() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct Wrapper<T>(T)
 

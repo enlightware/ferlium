@@ -33,7 +33,7 @@ fn type_aliases() {
 
         use_int(42)
     "# });
-    assert_eq!(result, int(43));
+    assert_val_eq!(result, int(43));
 
     // Test tuple type alias
     let result = session.run(indoc! { r#"
@@ -45,7 +45,7 @@ fn type_aliases() {
 
         add_coords((10, 20))
     "# });
-    assert_eq!(result, int(30));
+    assert_val_eq!(result, int(30));
 
     // Test record type alias
     let result = session.run(indoc! { r#"
@@ -57,7 +57,7 @@ fn type_aliases() {
 
         get_name({ name: "Alice", age: 30 })
     "# });
-    assert_eq!(result, string("Alice"));
+    assert_val_eq!(result, string("Alice"));
 
     // Test variant type alias
     let result = session.run(indoc! { r#"
@@ -72,7 +72,7 @@ fn type_aliases() {
 
         area(Circle(5.0))
     "# });
-    assert_eq!(result, float(3.14 * 5.0 * 5.0));
+    assert_val_eq!(result, float(3.14 * 5.0 * 5.0));
 
     // Test array type alias
     let result = session.run(indoc! { r#"
@@ -84,7 +84,7 @@ fn type_aliases() {
 
         first([1, 2, 3])
     "# });
-    assert_eq!(result, int(1));
+    assert_val_eq!(result, int(1));
 
     // Test function type alias
     let result = session.run(indoc! { r#"
@@ -96,7 +96,7 @@ fn type_aliases() {
 
         apply(|x| x * 2, 21)
     "# });
-    assert_eq!(result, int(42));
+    assert_val_eq!(result, int(42));
 
     // Test nested type alias
     let result = session.run(indoc! { r#"
@@ -110,7 +110,7 @@ fn type_aliases() {
 
         get_first_x([("point1", { x: 5, y: 10 })])
     "# });
-    assert_eq!(result, int(5));
+    assert_val_eq!(result, int(5));
 
     // Verify the type alias is stored in the module
     let module = session.compile_and_get_module(indoc! { r#"
@@ -136,7 +136,7 @@ fn generic_type_aliases() {
 
         wrap(42).0
     "# });
-    assert_eq!(result, int(42));
+    assert_val_eq!(result, int(42));
 
     // Generic alias with two parameters
     let result = session.run(indoc! { r#"
@@ -148,7 +148,7 @@ fn generic_type_aliases() {
 
         make_pair(1, "two").0
     "# });
-    assert_eq!(result, int(1));
+    assert_val_eq!(result, int(1));
 
     // Generic alias used in function argument position
     let result = session.run(indoc! { r#"
@@ -160,7 +160,7 @@ fn generic_type_aliases() {
 
         first((10, "x"))
     "# });
-    assert_eq!(result, int(10));
+    assert_val_eq!(result, int(10));
 
     // Generic alias wrapping a record type
     let result = session.run(indoc! { r#"
@@ -172,7 +172,7 @@ fn generic_type_aliases() {
 
         get_value({ name: "x", value: 99 })
     "# });
-    assert_eq!(result, int(99));
+    assert_val_eq!(result, int(99));
 
     // Generic alias wrapping an array
     let result = session.run(indoc! { r#"
@@ -184,7 +184,7 @@ fn generic_type_aliases() {
 
         head([7, 8, 9])
     "# });
-    assert_eq!(result, int(7));
+    assert_val_eq!(result, int(7));
 
     // Generic alias wrapping a variant type
     let result = session.run(indoc! { r#"
@@ -199,7 +199,7 @@ fn generic_type_aliases() {
 
         unwrap_or(Just(42), 0)
     "# });
-    assert_eq!(result, int(42));
+    assert_val_eq!(result, int(42));
 
     // Generic alias wrapping a function type
     let result = session.run(indoc! { r#"
@@ -211,7 +211,7 @@ fn generic_type_aliases() {
 
         apply(|x| x * 3, 10)
     "# });
-    assert_eq!(result, int(30));
+    assert_val_eq!(result, int(30));
 
     // Nested generic aliases
     let result = session.run(indoc! { r#"
@@ -224,7 +224,7 @@ fn generic_type_aliases() {
 
         sum((3, 4))
     "# });
-    assert_eq!(result, int(7));
+    assert_val_eq!(result, int(7));
 
     // Generic alias used with a named type (struct)
     let result = session.run(indoc! { r#"
@@ -237,7 +237,7 @@ fn generic_type_aliases() {
 
         unbox(Box { value: 55 })
     "# });
-    assert_eq!(result, int(55));
+    assert_val_eq!(result, int(55));
 
     // Generic alias to a struct with where constraints: constraints must be instantiated properly
     let result = session.run(indoc! { r#"
@@ -273,7 +273,7 @@ fn generic_type_aliases() {
         };
         total
     "# });
-    assert_eq!(result, int(12));
+    assert_val_eq!(result, int(12));
 
     // Verify generic type alias is stored in the module
     let module_id = session
@@ -316,7 +316,7 @@ fn generic_type_aliases() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn keyword_type_is_acceptable() {
     let mut session = TestSession::new();
-    assert_eq!(session.run("({type: 1}: {type: int}).type"), int(1));
+    assert_val_eq!(session.run("({type: 1}: {type: int}).type"), int(1));
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn native_generic_type_aliases_in_explicit_typing() {
         let mut it = iter([10, 20, 30]);
         my_next(it)
     "# });
-    assert_eq!(result, some(int(10)));
+    assert_val_eq!(result, some(int(10)));
 
     // Using a native generic type alias in return type position.
     let result = session.run(indoc! { r#"
@@ -345,14 +345,14 @@ fn native_generic_type_aliases_in_explicit_typing() {
         let mut it = make_iter([5, 6, 7]);
         next(it)
     "# });
-    assert_eq!(result, some(int(5)));
+    assert_val_eq!(result, some(int(5)));
 
     // Using a native generic type alias in a type annotation.
     let result = session.run(indoc! { r#"
         let mut it = (iter([42]): array_iterator<int>);
         next(it)
     "# });
-    assert_eq!(result, some(int(42)));
+    assert_val_eq!(result, some(int(42)));
 
     // Using a native generic type alias in a trait impl method signature.
     let result = session.run(indoc! { r#"
@@ -366,5 +366,5 @@ fn native_generic_type_aliases_in_explicit_typing() {
         let mut w = Wrapper { arr: [99, 88] };
         next(w)
     "# });
-    assert_eq!(result, some(int(99)));
+    assert_val_eq!(result, some(int(99)));
 }

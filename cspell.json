@@ -4,20 +4,21 @@
 		"en-gb",
 		"en_us"
 	],
-        "words": [
-                "bijective",
-                "cmark",
-                "configurer",
-                "contravariance",
-                "desugar",
-                "desugars",
-                "equirecursive",
-                "highlightable",
-                "keymap",
-                "optimisation",
-                "sccs",
-                "serde",
-                "uninstantiated",
-                "ustr"
-        ]
+	"words": [
+		"bijective",
+		"cmark",
+		"configurer",
+		"contravariance",
+		"desugar",
+		"desugars",
+		"equirecursive",
+		"highlightable",
+		"keymap",
+		"optimisation",
+		"sccs",
+		"scrutinee",
+		"serde",
+		"uninstantiated",
+		"ustr"
+	]
 }

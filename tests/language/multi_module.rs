@@ -120,7 +120,7 @@ fn cascade_recompile_direct_dep() {
     );
 
     // Verify run-time correctness.
-    assert_eq!(session.run("user::result()"), int(1));
+    assert_val_eq!(session.run("user::result()"), int(1));
 }
 
 /// Cascade recompilation propagates transitively through a linear chain
@@ -153,7 +153,7 @@ fn cascade_recompile_chain() {
     assert_fresh(&session, c_id, "c after transitive cascade");
 
     // Verify run-time correctness end-to-end.
-    assert_eq!(session.run("c::val()"), int(3));
+    assert_val_eq!(session.run("c::val()"), int(3));
 }
 
 /// Diamond dependency: base → {b, c} → d.
@@ -188,7 +188,7 @@ fn cascade_recompile_diamond() {
     assert_fresh(&session, c_id, "c after cascade");
     assert_fresh(&session, d_id, "d after diamond cascade");
 
-    assert_eq!(session.run("d::val()"), int(2));
+    assert_val_eq!(session.run("d::val()"), int(2));
 }
 
 /// A module compiled for the *first time* while one of its dependencies is
@@ -218,7 +218,7 @@ fn cascade_recompile_first_compile_with_stale_dep() {
     assert_fresh(&session, base_id, "base after fix");
     assert_fresh(&session, user_id, "user after cascade recompile");
 
-    assert_eq!(session.run("user::result()"), int(42));
+    assert_val_eq!(session.run("user::result()"), int(42));
 }
 
 /// When a module is *re*compiled and its new version introduces a dependency
@@ -262,7 +262,7 @@ fn stale_propagates_when_new_dep_introduced() {
     assert_fresh(&session, mid_id, "mid after cascade");
     assert_fresh(&session, top_id, "top after cascade");
 
-    assert_eq!(session.run("top::val()"), int(1));
+    assert_val_eq!(session.run("top::val()"), int(1));
 }
 
 /// Attempting to introduce a circular dependency during *re*compilation must be

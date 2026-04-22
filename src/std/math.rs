@@ -27,6 +27,7 @@ use crate::{
         core_traits_names::{BITS_TRAIT_NAME, DIV_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
         default::DEFAULT_TRAIT,
         ordering::compare,
+        value::{VALUE_TRAIT, equal},
     },
     r#type::Type,
     value::{NativeDisplay, Value},
@@ -213,6 +214,12 @@ pub fn add_to_module(to: &mut Module) {
     use std::ops;
 
     // int
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [int_type()],
+        [],
+        [b(BinaryFn::new(equal::<Int>)) as Function],
+    );
     let num_trait = to.get_trait_str(NUM_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
         num_trait.clone(),
@@ -325,6 +332,12 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // float
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [float_type()],
+        [],
+        [b(BinaryFn::new(equal::<Float>)) as Function],
+    );
     to.add_concrete_impl_no_locals(
         num_trait.clone(),
         [float_type()],

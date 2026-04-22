@@ -27,7 +27,7 @@ use wasm_bindgen_test::*;
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn user_defined_trait_impls_are_callable() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! {r#"
             trait Double<Self> {
                 fn double(value: Self) -> Self;

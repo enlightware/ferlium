@@ -27,7 +27,7 @@ use crate::{
     module::ModuleEnv,
     r#type::{FnType, Type, TypeVar},
     type_inference::InstSubstitution,
-    value::Value,
+    value::{LiteralValue, Value},
 };
 
 /// An index to a node in the IR arena
@@ -161,7 +161,7 @@ pub struct Assignment {
 #[derive(Debug, Clone)]
 pub struct Case {
     pub value: NodeId,
-    pub alternatives: Vec<(Value, NodeId)>,
+    pub alternatives: Vec<(LiteralValue, NodeId)>,
     pub default: NodeId,
 }
 
@@ -495,7 +495,7 @@ impl Node {
                 format_ind(arena, case.value, f, locals, env, spacing, indent + 1)?;
                 for (alternative, node) in &case.alternatives {
                     write!(f, "{indent_str}case ",)?;
-                    alternative.format_as_string_repr(f)?;
+                    write!(f, "{alternative}")?;
                     writeln!(f)?;
                     format_ind(arena, *node, f, locals, env, spacing, indent + 1)?;
                 }

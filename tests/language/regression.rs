@@ -35,7 +35,7 @@ use wasm_bindgen_test::*;
 fn if_else_after_match_expression() {
     let mut session = TestSession::new();
     // `if cond { match ... } else { ... }` — true-branch ends with a match expression
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn first_or_zero(a: [int]) {
                 if a[0] > 0 {
@@ -48,7 +48,7 @@ fn if_else_after_match_expression() {
         "# }),
         int(42)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn first_or_zero(a: [int]) {
                 if a[0] > 0 {
@@ -68,7 +68,7 @@ fn if_else_after_match_expression() {
 fn if_else_after_nested_block_expression() {
     let mut session = TestSession::new();
     // `if cond { { ... } } else { ... }` — true-branch ends with a nested block
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn choose(flag) {
                 if flag {
@@ -81,7 +81,7 @@ fn if_else_after_nested_block_expression() {
         "# }),
         int(1)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn choose(flag) {
                 if flag {
@@ -100,7 +100,7 @@ fn if_else_after_nested_block_expression() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_iterator() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
 			fn it(x) {
 				for i in x { }
@@ -116,7 +116,7 @@ fn array_iterator() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn count_some_bug_minimized() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
 		fn count_some(a: [None | Some(int)]) {
 			let mut sum = 0;
@@ -139,7 +139,7 @@ fn count_some_bug_minimized() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn enum_constructors() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
 			enum Action { Quit }
 
@@ -153,7 +153,7 @@ fn enum_constructors() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_in_if_branches() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn unwrap(v) {
                 match v {
@@ -172,7 +172,7 @@ fn never_in_if_branches() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn never_in_if_branches_after_value_branch() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn unwrap(v) {
                 match v {

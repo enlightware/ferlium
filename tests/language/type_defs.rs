@@ -1264,7 +1264,7 @@ fn generic_named_type_from_user_definition() {
             unwrap_or_zero(Option::Some(41))
         "# },
     ]);
-    assert_eq!(session.run(&unwrap_or_zero_src), int(41));
+    assert_val_eq!(session.run(&unwrap_or_zero_src), int(41));
 
     let annotated_value_src = join_src(&[
         option_type_def_src(),
@@ -1276,7 +1276,7 @@ fn generic_named_type_from_user_definition() {
             }
         "# },
     ]);
-    assert_eq!(session.run(&annotated_value_src), int(41));
+    assert_val_eq!(session.run(&annotated_value_src), int(41));
 }
 
 #[test]
@@ -1335,7 +1335,7 @@ fn multi_parameter_trait_constraints_from_user_definition() {
 fn generic_struct_patterns_from_user_definition() {
     let mut session = TestSession::new();
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct Box<T>(T)
 
@@ -1380,7 +1380,7 @@ fn map_iterator_named_type_from_user_definition() {
             total
         "# },
     ]);
-    assert_eq!(session.run(&run_map_iterator_src), int(3));
+    assert_val_eq!(session.run(&run_map_iterator_src), int(3));
 }
 
 #[test]
@@ -1417,7 +1417,7 @@ fn generic_trait_impl_with_explicit_binders_for_user_defined_map_iterator() {
             total
         "# },
     ]);
-    assert_eq!(session.run(&run_map_iterator_src), int(3));
+    assert_val_eq!(session.run(&run_map_iterator_src), int(3));
 }
 
 #[test]
@@ -1454,7 +1454,7 @@ fn generic_trait_impl_with_explicit_outputs_for_user_defined_map_iterator() {
             total
         "# },
     ]);
-    assert_eq!(session.run(&run_map_iterator_src), int(3));
+    assert_val_eq!(session.run(&run_map_iterator_src), int(3));
 }
 
 #[test]
@@ -1491,7 +1491,7 @@ fn generic_trait_impl_with_where_clause_for_user_defined_map_iterator() {
             total
         "# },
     ]);
-    assert_eq!(session.run(&run_map_iterator_src), int(3));
+    assert_val_eq!(session.run(&run_map_iterator_src), int(3));
 }
 
 #[test]
@@ -1499,7 +1499,7 @@ fn generic_trait_impl_with_where_clause_for_user_defined_map_iterator() {
 fn grammar_extractor_covers_advanced_generic_type_syntax() {
     let mut session = TestSession::new();
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             enum Option<T> {
                 None,
@@ -1603,7 +1603,7 @@ fn generic_trait_impl_for_user_defined_zip_iterator() {
             total
         "# },
     ]);
-    assert_eq!(session.run(&run_zip_iterator_src), int(25));
+    assert_val_eq!(session.run(&run_zip_iterator_src), int(25));
 }
 
 #[test]
@@ -1737,7 +1737,7 @@ fn generic_named_type_from_rust_definition() {
         "() -> Option<string>"
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn unwrap_or_zero(value) {
                 match value {
@@ -1750,7 +1750,7 @@ fn generic_named_type_from_rust_definition() {
         "# }),
         int(41)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             fn unwrap_or_zero(value) {
                 match value {
@@ -1873,7 +1873,7 @@ fn map_iterator_named_type_from_rust_definition() {
         "() -> MapIterator<array_iterator<string>, string, int>"
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             let it = testing::MapIterator {
                 iterator: array_iter(["a", "bc"]),
@@ -1889,7 +1889,7 @@ fn map_iterator_named_type_from_rust_definition() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_record_enum_values() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             enum Message {
                 Quit,
@@ -1907,7 +1907,7 @@ fn create_record_enum_values() {
             Flag { v0: bool, v1: bool }
         }
     " };
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(
             "{mod_src} Message::Flag {{ v1: false, v0: true }}"
         )),
@@ -1948,7 +1948,7 @@ fn create_record_enum_values() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_tuple_enum_values() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             enum Player {
                 Basic(string),
@@ -1966,11 +1966,11 @@ fn create_tuple_enum_values() {
             State(bool)
         }
     " };
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(r#"{mod_src} Player::Basic("ok")"#)),
         Value::raw_variant(ustr("Basic"), Value::tuple([string("ok")]))
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!("{mod_src} Player::State(false)")),
         Value::raw_variant(ustr("State"), Value::tuple([bool(false)]))
     );
@@ -1999,22 +1999,22 @@ fn create_mix_enum_values() {
         }
     "# };
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!("{mod_src} Message::Quit")),
         Value::raw_variant(ustr("Quit"), Value::unit())
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!("{mod_src} Message::Move {{ x: 30, y: 40 }}")),
         Value::raw_variant(ustr("Move"), Value::tuple(vec![int(30), int(40)]))
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(r#"{mod_src} Message::Write("Hello, world!")"#)),
         Value::raw_variant(ustr("Write"), Value::tuple(vec![string("Hello, world!")])),
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!("{mod_src} Message::ChangeColor(255, 0, 0)")),
         Value::raw_variant(
             ustr("ChangeColor"),
@@ -2030,7 +2030,7 @@ fn create_mix_enum_values() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn enum_projections() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             enum Action {
                 Quit,
@@ -2048,7 +2048,7 @@ fn enum_projections() {
         "# }),
         float(-5.0)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             enum Action {
                 Move1 { x: float, y: float },
@@ -2186,7 +2186,7 @@ fn define_struct_types() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_record_struct_values() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct Person {
                 name: string,
@@ -2204,7 +2204,7 @@ fn create_record_struct_values() {
     );
 
     let mod_src = "struct Person { name: string, is_active: bool }";
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(
             r#"{mod_src} Person {{ name: "Alice", is_active: true }}"#
         )),
@@ -2245,8 +2245,8 @@ fn create_record_struct_values() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_empty_struct_values() {
     let mut session = TestSession::new();
-    assert_eq!(session.run(r#"struct Empty; Empty"#), Value::unit());
-    assert_eq!(
+    assert_val_eq!(session.run(r#"struct Empty; Empty"#), Value::unit());
+    assert_val_eq!(
         session.run(r#"struct Empty2 {} Empty2 {}"#),
         Value::empty_tuple()
     );
@@ -2256,29 +2256,29 @@ fn create_empty_struct_values() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn create_tuple_struct_values() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Email(string) Email(string_concat("h", "i"))"#),
         Value::tuple(vec![string("hi")])
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Email(string) Email("hi")"#),
         Value::tuple(vec![string("hi")])
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Email((string, )) Email((string_concat("h", "i"), ))"#),
         Value::tuple(vec![Value::tuple(vec![string("hi")])])
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Email((string, )) Email(("hi", ))"#),
         Value::tuple(vec![Value::tuple(vec![string("hi")])])
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Point(int, int) Point(1 + 0, 2)"#),
         Value::tuple(vec![int(1), int(2)])
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Point(float, float) Point(1.0, 2.0)"#),
         Value::tuple(vec![float(1.0), float(2.0)])
     );
@@ -2288,24 +2288,24 @@ fn create_tuple_struct_values() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn struct_projections() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Email(string) Email("hi").0"#),
         string("hi")
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Person(string, int) Person("John", 30).0"#),
         string("John")
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(
             r#"struct Person { name: string, age: int } Person { name: "John", age: 30 }.name"#
         ),
         string("John")
     );
 
-    assert_eq!(
+    assert_val_eq!(
         session.run(r#"struct Age(int) struct Person(string, Age) Person("John", Age(30)).0"#),
         string("John")
     );
@@ -2315,7 +2315,7 @@ fn struct_projections() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn struct_destructuring() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct Pair(int, int)
             let Pair(x, y) = Pair(1, 2);
@@ -2323,7 +2323,7 @@ fn struct_destructuring() {
         "# }),
         Value::tuple([int(1), int(2)])
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct Vec3(int, int, int)
             let Vec3(x, ..) = Vec3(1, 2, 3);
@@ -2331,7 +2331,7 @@ fn struct_destructuring() {
         "# }),
         int(1)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct Point { x: int, y: int, z: int }
             let Point { x: mut horizontal, mut y, .. } = Point { x: 1, y: 2, z: 3 };
@@ -2341,7 +2341,7 @@ fn struct_destructuring() {
         "# }),
         int(15)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct Point { x: int, y: int }
             let ((feet, inches), Point { x, y }) = ((3, 10), Point { x: 3, y: -10 });
@@ -2387,7 +2387,7 @@ fn struct_destructuring() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn projections_through_repr_in_match() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct S(bool)
             let s = S(true);
@@ -2398,7 +2398,7 @@ fn projections_through_repr_in_match() {
         "# }),
         int(1)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct S { x: bool }
             let s = S { x: true };
@@ -2415,7 +2415,7 @@ fn projections_through_repr_in_match() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn same_module_references() {
     let mut session = TestSession::new();
-    assert_eq!(
+    assert_val_eq!(
         session.run(indoc! { r#"
             struct Age(int)
             struct Name(string)
@@ -2471,19 +2471,19 @@ fn type_annotations() {
         fn age(d) { d.age.0 }
         fn age1(d: Person1) { d.age.0 }
     "# };
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(r"{mod_src} age(Person1 {{ age: Age(30) }})")),
         int(30)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(r"{mod_src} age1(Person1 {{ age: Age(30) }})")),
         int(30)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(r"{mod_src} age(Person2 {{ age: Age(30) }})")),
         int(30)
     );
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(r"{mod_src} age({{ age: Age(30) }})")),
         int(30)
     );
@@ -2506,7 +2506,7 @@ fn double_newtype() {
         struct Person(string)
         struct Creature(Person)
     "# };
-    assert_eq!(
+    assert_val_eq!(
         session.run(&format!(r#"{mod_src} Creature(Person("Alice")).0.0"#)),
         string("Alice")
     );

@@ -274,6 +274,35 @@ pub(crate) fn tuple(args: Vec<PExprId>, arena: &PExprArena) -> PExprKind {
     ExprKind::literal(Value::tuple(values), Type::tuple(tys))
 }
 
+/// If all record fields are literals, create a literal record, otherwise create a record node.
+pub(crate) fn record(fields: Vec<(UstrSpan, PExprId)>, arena: &PExprArena) -> PExprKind {
+    use ExprKind::*;
+
+    let mut values_and_tys = Vec::with_capacity(fields.len());
+    let mut field_names = std::collections::HashSet::with_capacity(fields.len());
+    for ((name, _span), expr) in &fields {
+        if !field_names.insert(*name) {
+            return ExprKind::record(fields);
+        }
+        if let Literal(value, ty) = &arena[*expr].kind {
+            values_and_tys.push((*name, value.clone(), *ty));
+        } else {
+            return ExprKind::record(fields);
+        }
+    }
+
+    values_and_tys.sort_by_key(|(name, _, _)| *name);
+    let values: SVec2<_> = values_and_tys
+        .iter()
+        .map(|(_, value, _)| value.clone())
+        .collect();
+    let tys = values_and_tys
+        .into_iter()
+        .map(|(name, _, ty)| (name, ty))
+        .collect::<Vec<_>>();
+    ExprKind::literal(Value::tuple(values), Type::record(tys))
+}
+
 /// Build a record literal pattern from a list of `(name, (value, type))` pairs.
 /// Fields are sorted by name to match how records are stored internally.
 pub(crate) fn record_literal_pattern(

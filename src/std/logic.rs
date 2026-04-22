@@ -14,11 +14,16 @@ use crate::{
     cached_primitive_ty,
     containers::b,
     effects::no_effects,
-    function::{BinaryNativeFnNNN, BinaryNativeFnVVN, Function, NullaryNativeFnN, UnaryNativeFnNN},
+    function::{BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN},
     module::Module,
-    std::{core_traits_names::BITS_TRAIT_NAME, default::DEFAULT_TRAIT, math::Int},
+    std::{
+        core_traits_names::BITS_TRAIT_NAME,
+        default::DEFAULT_TRAIT,
+        math::Int,
+        value::{VALUE_TRAIT, equal},
+    },
     r#type::Type,
-    value::{NativeDisplay, Value},
+    value::NativeDisplay,
 };
 
 pub fn bool_type() -> Type {
@@ -66,6 +71,12 @@ pub fn add_to_module(to: &mut Module) {
     // Operations on booleans
     use BinaryNativeFnNNN as BinaryFn;
     use UnaryNativeFnNN as UnaryFn;
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [bool_type()],
+        [],
+        [b(BinaryFn::new(equal::<bool>)) as Function],
+    );
     let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
         bits_trait,
@@ -100,17 +111,6 @@ pub fn add_to_module(to: &mut Module) {
             std::ops::Not::not as fn(bool) -> bool,
             ["value"],
             "Performs a logical NOT operation.",
-            no_effects(),
-        ),
-    );
-
-    // Generic equalities
-    to.add_function(
-        ustr("eq"),
-        BinaryNativeFnVVN::description_with_default_ty(
-            |a: Value, b: Value| a == b,
-            ["left", "right"],
-            "Returns `true` if `left` is equal to `right`, otherwise `false`.",
             no_effects(),
         ),
     );

@@ -37,6 +37,7 @@ mod prelude;
 mod product_value_deriver;
 pub mod serde;
 pub mod string;
+pub mod value;
 pub mod variant;
 
 pub(crate) static STD_MODULE_ID: ModuleId = ModuleId(0);
@@ -44,6 +45,7 @@ pub(crate) static STD_MODULE_ID: ModuleId = ModuleId(0);
 pub fn std_module(source_table: &mut SourceTable) -> Module {
     let mut module = Module::new(STD_MODULE_ID);
     // Built-in or derivable
+    value::add_to_module(&mut module);
     core::add_to_module(&mut module);
     default::add_to_module(&mut module);
     empty::add_to_module(&mut module);
@@ -121,38 +123,108 @@ mod tests {
         value::Value,
     };
 
+    fn test_values_eq(actual: &Value, expected: &Value) -> bool {
+        match (actual, expected) {
+            (Value::Native(_), Value::Native(_)) => {
+                if actual.as_primitive_ty::<()>().is_some()
+                    && expected.as_primitive_ty::<()>().is_some()
+                {
+                    true
+                } else if let (Some(actual), Some(expected)) = (
+                    actual.as_primitive_ty::<bool>(),
+                    expected.as_primitive_ty::<bool>(),
+                ) {
+                    actual == expected
+                } else if let (Some(actual), Some(expected)) = (
+                    actual.as_primitive_ty::<isize>(),
+                    expected.as_primitive_ty::<isize>(),
+                ) {
+                    actual == expected
+                } else if let (Some(actual), Some(expected)) = (
+                    actual.as_primitive_ty::<NotNan<f64>>(),
+                    expected.as_primitive_ty::<NotNan<f64>>(),
+                ) {
+                    actual == expected
+                } else if let (Some(actual), Some(expected)) = (
+                    actual.as_primitive_ty::<string::String>(),
+                    expected.as_primitive_ty::<string::String>(),
+                ) {
+                    actual == expected
+                } else if let (Some(actual), Some(expected)) = (
+                    actual.as_primitive_ty::<Array>(),
+                    expected.as_primitive_ty::<Array>(),
+                ) {
+                    actual.len() == expected.len()
+                        && (0..actual.len()).all(|index| {
+                            test_values_eq(actual.get(index).unwrap(), expected.get(index).unwrap())
+                        })
+                } else {
+                    false
+                }
+            }
+            (Value::Variant(actual), Value::Variant(expected)) => {
+                actual.tag == expected.tag && test_values_eq(&actual.value, &expected.value)
+            }
+            (Value::Tuple(actual), Value::Tuple(expected)) => {
+                actual.len() == expected.len()
+                    && actual
+                        .iter()
+                        .zip(expected.iter())
+                        .all(|(actual, expected)| test_values_eq(actual, expected))
+            }
+            (Value::Function(actual), Value::Function(expected)) => {
+                actual.function == expected.function
+                    && actual.module == expected.module
+                    && actual.captured.len() == expected.captured.len()
+                    && actual
+                        .captured
+                        .iter()
+                        .zip(expected.captured.iter())
+                        .all(|(actual, expected)| test_values_eq(actual, expected))
+            }
+            _ => false,
+        }
+    }
+
+    fn assert_some_value_eq(actual: Option<Value>, expected: Value) {
+        let actual = actual.expect("expected Some(value)");
+        assert!(
+            test_values_eq(&actual, &expected),
+            "expected {}, got {}",
+            expected.to_string_repr(),
+            actual.to_string_repr()
+        );
+    }
+
     #[test]
     fn default_value_for_type() {
         use super::default_value_for_type as def_val;
-        assert_eq!(def_val(Type::unit()), Some(Value::unit()));
-        assert_eq!(def_val(bool_type()), Some(Value::native(false)));
-        assert_eq!(def_val(int_type()), Some(Value::native(0_isize)));
-        assert_eq!(
+        assert_some_value_eq(def_val(Type::unit()), Value::unit());
+        assert_some_value_eq(def_val(bool_type()), Value::native(false));
+        assert_some_value_eq(def_val(int_type()), Value::native(0_isize));
+        assert_some_value_eq(
             def_val(float_type()),
-            Some(Value::native(NotNan::new(0.0_f64).unwrap()))
+            Value::native(NotNan::new(0.0_f64).unwrap()),
         );
-        assert_eq!(
+        assert_some_value_eq(
             def_val(string_type()),
-            Some(Value::native(string::String::from_str("").unwrap()))
+            Value::native(string::String::from_str("").unwrap()),
         );
-        assert_eq!(
-            def_val(array_type(int_type())),
-            Some(Value::native(Array::new()))
-        );
-        assert_eq!(
+        assert_some_value_eq(def_val(array_type(int_type())), Value::native(Array::new()));
+        assert_some_value_eq(
             def_val(array_type(float_type())),
-            Some(Value::native(Array::new()))
+            Value::native(Array::new()),
         );
-        assert_eq!(
+        assert_some_value_eq(
             def_val(tuple_type([int_type(), bool_type()])),
-            Some(Value::tuple([Value::native(0_isize), Value::native(false)]))
+            Value::tuple([Value::native(0_isize), Value::native(false)]),
         );
-        assert_eq!(
+        assert_some_value_eq(
             def_val(Type::record([
                 (ustr("a"), int_type()),
-                (ustr("b"), bool_type())
+                (ustr("b"), bool_type()),
             ])),
-            Some(Value::tuple([Value::native(0_isize), Value::native(false)]))
+            Value::tuple([Value::native(0_isize), Value::native(false)]),
         );
     }
 }

@@ -43,6 +43,179 @@ pub enum Error {
 
 pub type CompileRunResult = Result<Value, Error>;
 
+fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result<(), String> {
+    if actual.as_primitive_ty::<()>().is_some() && expected.as_primitive_ty::<()>().is_some() {
+        return Ok(());
+    }
+
+    if let (Some(actual), Some(expected)) = (
+        actual.as_primitive_ty::<bool>(),
+        expected.as_primitive_ty::<bool>(),
+    ) {
+        return if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{path}: expected {expected}, got {actual}"))
+        };
+    }
+
+    if let (Some(actual), Some(expected)) = (
+        actual.as_primitive_ty::<isize>(),
+        expected.as_primitive_ty::<isize>(),
+    ) {
+        return if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{path}: expected {expected}, got {actual}"))
+        };
+    }
+
+    if let (Some(actual), Some(expected)) = (
+        actual.as_primitive_ty::<ferlium::std::math::Float>(),
+        expected.as_primitive_ty::<ferlium::std::math::Float>(),
+    ) {
+        return if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{path}: expected {expected}, got {actual}"))
+        };
+    }
+
+    if let (Some(actual), Some(expected)) = (
+        actual.as_primitive_ty::<ferlium::std::string::String>(),
+        expected.as_primitive_ty::<ferlium::std::string::String>(),
+    ) {
+        return if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{path}: expected {expected}, got {actual}"))
+        };
+    }
+
+    if let (Some(actual), Some(expected)) = (
+        actual.as_primitive_ty::<Array>(),
+        expected.as_primitive_ty::<Array>(),
+    ) {
+        if actual.len() != expected.len() {
+            return Err(format!(
+                "{path}: expected array length {}, got {}",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        for index in 0..actual.len() {
+            let actual = actual.get(index).unwrap();
+            let expected = expected.get(index).unwrap();
+            compare_values(actual, expected, &format!("{path}[{index}]"))?;
+        }
+        return Ok(());
+    }
+
+    Err(format!(
+        "{path}: unsupported native comparison between {} and {}",
+        actual.to_string_repr(),
+        expected.to_string_repr()
+    ))
+}
+
+pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Result<(), String> {
+    match (actual, expected) {
+        (Value::Native(_), Value::Native(_)) => compare_native_values(actual, expected, path),
+        (Value::Variant(actual), Value::Variant(expected)) => {
+            if actual.tag != expected.tag {
+                return Err(format!(
+                    "{path}: expected variant tag {}, got {}",
+                    expected.tag, actual.tag
+                ));
+            }
+            compare_values(
+                &actual.value,
+                &expected.value,
+                &format!("{path}.{}", actual.tag),
+            )
+        }
+        (Value::Tuple(actual), Value::Tuple(expected)) => {
+            if actual.len() != expected.len() {
+                return Err(format!(
+                    "{path}: expected tuple length {}, got {}",
+                    expected.len(),
+                    actual.len()
+                ));
+            }
+            for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+                compare_values(actual, expected, &format!("{path}.{index}"))?;
+            }
+            Ok(())
+        }
+        (Value::Function(actual), Value::Function(expected)) => {
+            if actual.function != expected.function {
+                return Err(format!(
+                    "{path}: expected function id {}, got {}",
+                    expected.function, actual.function
+                ));
+            }
+            if actual.module != expected.module {
+                return Err(format!(
+                    "{path}: expected module {}, got {}",
+                    expected.module, actual.module
+                ));
+            }
+            if actual.captured.len() != expected.captured.len() {
+                return Err(format!(
+                    "{path}: expected {} captured values, got {}",
+                    expected.captured.len(),
+                    actual.captured.len()
+                ));
+            }
+            for (index, (actual, expected)) in actual
+                .captured
+                .iter()
+                .zip(expected.captured.iter())
+                .enumerate()
+            {
+                compare_values(actual, expected, &format!("{path}.captured[{index}]"))?;
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "{path}: expected {}, got {}",
+            expected.to_string_repr(),
+            actual.to_string_repr()
+        )),
+    }
+}
+
+pub fn assert_value_eq(actual: &Value, expected: &Value) {
+    if let Err(message) = compare_values(actual, expected, "value") {
+        panic!(
+            "Value assertion failed: {message}\nactual: {}\nexpected: {}",
+            actual.to_string_repr(),
+            expected.to_string_repr()
+        );
+    }
+}
+
+#[macro_export]
+macro_rules! assert_val_eq {
+    ($actual:expr, $expected:expr, $($arg:tt)+) => {{
+        let actual = $actual;
+        let expected = $expected;
+        if let Err(message) = $crate::harness::compare_values(&actual, &expected, "value") {
+            panic!(
+                "Value assertion failed: {message}\nactual: {}\nexpected: {}\n{}",
+                actual.to_string_repr(),
+                expected.to_string_repr(),
+                format_args!($($arg)+),
+            );
+        }
+    }};
+    ($actual:expr, $expected:expr $(,)?) => {{
+        let actual = $actual;
+        let expected = $expected;
+        $crate::harness::assert_value_eq(&actual, &expected);
+    }};
+}
+
 fn test_assoc_trait() -> TraitRef {
     TraitRef::new_with_self_input_type(
         "TestAssoc",

@@ -31,7 +31,7 @@ use crate::{
     type_inference::TypeInference,
     type_scheme::PubTypeConstraint,
     typing_env::TypingEnv,
-    value::Value,
+    value::LiteralValue,
 };
 
 impl TypeInference {
@@ -251,7 +251,7 @@ impl TypeInference {
                 .zip(exprs)
                 .map(
                     |((tag, inner_tys, variant_inner_ty), (expr, bind_var_names))| {
-                        let tag_value = Value::native(tag.as_char_ptr() as isize);
+                        let tag_value = LiteralValue::new_native(tag.as_char_ptr() as isize);
 
                         // Prepare the environment for the alternative by adapting the type of the variant value
                         let alt_start_env_size = env.cur_locals.len();
@@ -489,7 +489,7 @@ impl TypeInference {
         expected_pattern_span: Location,
         expected_return_type: Type,
         expected_return_span: Location,
-    ) -> Result<(Vec<(Value, NodeId)>, EffType), InternalCompilationError> {
+    ) -> Result<(Vec<(LiteralValue, NodeId)>, EffType), InternalCompilationError> {
         let mut seen_values = FxHashMap::default();
         let (pairs, effects): (Vec<_>, Vec<_>) = pairs
             .iter()
@@ -517,7 +517,7 @@ impl TypeInference {
                         expected_return_span,
                     )?;
                     let effects = env.ir_arena[node_id].effects.clone();
-                    Ok(((literal.clone().into_value(), node_id), effects))
+                    Ok(((literal.clone(), node_id), effects))
                 } else {
                     Err(internal_compilation_error!(InconsistentPattern {
                         a_type: PatternType::Literal,

@@ -35,6 +35,7 @@ use crate::{
         logic::bool_type,
         math::{float_type, float_value, int_type, int_value},
         ordering::compare,
+        value::{VALUE_TRAIT, equal},
     },
     r#type::{FnType, Type},
     type_scheme::TypeScheme,
@@ -501,6 +502,12 @@ pub fn string_value(s: &str) -> Value {
 pub fn add_to_module(to: &mut Module) {
     // Note: string alias is added in core.rs
 
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [string_type()],
+        [],
+        [b(BinaryNativeFnNNN::new(equal::<String>)) as Function],
+    );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
         ord_trait,

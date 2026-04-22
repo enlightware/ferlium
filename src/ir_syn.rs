@@ -15,7 +15,7 @@ use crate::{
     mutability::{MutType, MutVal},
     std::{math::int_type, string::string_value},
     r#type::{FnType, Type},
-    value::{NativeValue, Value},
+    value::{LiteralValue, NativeValue, Value},
 };
 use ustr::{Ustr, ustr};
 
@@ -166,7 +166,7 @@ pub fn array(values: impl IntoSVec2<NodeId>) -> NodeKind {
     K::Array(b(values.into_svec2()))
 }
 
-pub fn case(value: NodeId, alternatives: Vec<(Value, NodeId)>, default: NodeId) -> NodeKind {
+pub fn case(value: NodeId, alternatives: Vec<(LiteralValue, NodeId)>, default: NodeId) -> NodeKind {
     K::Case(b(ir::Case {
         value,
         alternatives,
@@ -176,7 +176,7 @@ pub fn case(value: NodeId, alternatives: Vec<(Value, NodeId)>, default: NodeId) 
 
 pub fn case_from_complete_alternatives(
     value: NodeId,
-    mut alternatives: Vec<(Value, NodeId)>,
+    mut alternatives: Vec<(LiteralValue, NodeId)>,
 ) -> NodeKind {
     let default = alternatives.pop().unwrap().1;
     K::Case(b(ir::Case {

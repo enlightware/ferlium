@@ -48,16 +48,15 @@ impl NativeDisplay for () {
     }
 }
 
-pub trait NativeValue: Any + fmt::Debug + DynClone + DynEq + NativeDisplay + 'static {
+pub trait NativeValue: Any + fmt::Debug + DynClone + NativeDisplay + 'static {
     fn as_any(&self) -> &dyn Any;
     fn as_mut_any(&mut self) -> &mut dyn Any;
     fn into_any(self: B<Self>) -> B<dyn Any>;
 }
 
 dyn_clone::clone_trait_object!(NativeValue);
-dyn_eq::eq_trait_object!(NativeValue);
 
-impl<T: Any + fmt::Debug + std::cmp::Eq + Clone + NativeDisplay> NativeValue for T {
+impl<T: Any + fmt::Debug + Clone + NativeDisplay> NativeValue for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -71,21 +70,23 @@ impl<T: Any + fmt::Debug + std::cmp::Eq + Clone + NativeDisplay> NativeValue for
     }
 }
 
-pub trait HashableNativeValue:
+/// A native value that can be hashed and compared for equality.
+/// This is required for values to be used as literal values in patterns, etc.
+pub trait LiteralNativeValue:
     Any + fmt::Debug + DynClone + DynEq + DynHash + NativeDisplay + 'static
 {
     fn into_native_value(self: B<Self>) -> B<dyn NativeValue>;
 }
 
-impl<T: NativeValue + Hash> HashableNativeValue for T {
+impl<T: NativeValue + Hash + Eq> LiteralNativeValue for T {
     fn into_native_value(self: B<Self>) -> B<dyn NativeValue> {
         self
     }
 }
 
-dyn_clone::clone_trait_object!(HashableNativeValue);
-dyn_eq::eq_trait_object!(HashableNativeValue);
-dyn_hash::hash_trait_object!(HashableNativeValue);
+dyn_clone::clone_trait_object!(LiteralNativeValue);
+dyn_eq::eq_trait_object!(LiteralNativeValue);
+dyn_hash::hash_trait_object!(LiteralNativeValue);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompoundValueType {
@@ -97,7 +98,7 @@ pub fn ustr_to_isize(tag: Ustr) -> isize {
     tag.as_char_ptr() as isize
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct VariantValue {
     pub tag: Ustr,
     pub value: Value,
@@ -115,15 +116,6 @@ pub struct FunctionValue {
     pub captured: Vec<Value>,
 }
 
-impl PartialEq for FunctionValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.function == other.function
-            && self.module == other.module
-            && self.captured == other.captured
-    }
-}
-impl Eq for FunctionValue {}
-
 /// A value in the system
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum Value {
@@ -137,25 +129,39 @@ pub enum Value {
     Function(B<FunctionValue>),
 }
 
-// Note: later we will not need that as Eq will be implemented through a trait
-impl PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        use Value::*;
-        match (self, other) {
-            (Native(l0), Native(r0)) => l0 == r0,
-            (Variant(l0), Variant(r0)) => l0 == r0,
-            (Tuple(l0), Tuple(r0)) => l0 == r0,
-            (Function(l0), Function(r0)) => l0 == r0,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for Value {}
-
 impl Value {
     pub fn unit() -> Self {
         Self::native::<()>(())
+    }
+
+    pub fn is_unit(&self) -> bool {
+        self.as_primitive_ty::<()>().is_some()
+    }
+
+    pub fn to_literal_value(&self) -> Option<LiteralValue> {
+        match self {
+            Self::Native(_) => {
+                #[allow(clippy::manual_map)]
+                if self.as_primitive_ty::<()>().is_some() {
+                    Some(LiteralValue::new_native(()))
+                } else if let Some(value) = self.as_primitive_ty::<bool>() {
+                    Some(LiteralValue::new_native(*value))
+                } else if let Some(value) = self.as_primitive_ty::<isize>() {
+                    Some(LiteralValue::new_native(*value))
+                } else if let Some(value) = self.as_primitive_ty::<crate::std::string::String>() {
+                    Some(LiteralValue::new_native(value.clone()))
+                } else {
+                    None
+                }
+            }
+            Self::Tuple(values) => Some(LiteralValue::new_tuple(
+                values
+                    .iter()
+                    .map(Value::to_literal_value)
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            Self::Variant(_) | Self::Function(_) => None,
+        }
     }
 
     pub fn native<T: NativeValue + 'static>(value: T) -> Self {
@@ -286,7 +292,7 @@ impl Value {
                 writeln!(f)
             }
             Variant(variant) => {
-                if variant.value == Self::unit() {
+                if variant.value.is_unit() {
                     writeln!(f, "{indent_str}{}", variant.tag)
                 } else {
                     writeln!(f, "{indent_str}{} ", variant.tag)?;
@@ -347,7 +353,7 @@ impl Value {
                         variant.tag,
                         variant.value.display_pretty(&inner_ty)
                     )
-                } else if variant.value == Value::unit() {
+                } else if variant.value.is_unit() {
                     write!(f, "{}", variant.tag)
                 } else {
                     write!(
@@ -422,12 +428,12 @@ impl<'a> std::fmt::Display for PrettyPrint<'a> {
 /// A literal value is a native value that can be hashed.
 #[derive(Debug, Clone, PartialEq, Eq, EnumAsInner, Hash)]
 pub enum LiteralValue {
-    Native(B<dyn HashableNativeValue>),
+    Native(B<dyn LiteralNativeValue>),
     Tuple(B<SVec2<LiteralValue>>),
 }
 
 impl LiteralValue {
-    pub fn new_native<T: HashableNativeValue + 'static>(value: T) -> Self {
+    pub fn new_native<T: LiteralNativeValue + 'static>(value: T) -> Self {
         Self::Native(b(value))
     }
 

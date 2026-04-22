@@ -1,3 +1,5 @@
+// Extra math
+
 /// Clamps a value between a minimum and maximum bound, inclusively.
 fn clamp(value, min_bound, max_bound) {
 	if min_bound > max_bound {

@@ -34,7 +34,7 @@ use crate::type_like::CastableToType;
 use crate::type_like::TypeLike;
 use crate::type_mapper::TypeMapper;
 use crate::type_visitor::TypeInnerVisitor;
-use crate::value::Value;
+use crate::value::LiteralValue;
 use crate::{FxHashMap, FxHashSet, Location};
 use derive_new::new;
 use dyn_clone::DynClone;
@@ -989,12 +989,12 @@ pub enum TypeKind {
 // TODO: traits as bounds of generics
 
 /// Return the Cartesian product of all values of each element type, stored as
-/// `Value::tuple` entries, or `None` if any element is not enumerable or the
+/// `LiteralValue::Tuple` entries, or `None` if any element is not enumerable or the
 /// total cardinality exceeds `max_cardinality`.
 fn cartesian_product_values(
     element_types: impl Iterator<Item = Type>,
     max_cardinality: usize,
-) -> Option<Vec<Value>> {
+) -> Option<Vec<LiteralValue>> {
     let mut cardinality = 1usize;
     let element_values = element_types
         .map(|ty| {
@@ -1018,7 +1018,7 @@ fn cartesian_product_values(
         }
         result = new_result;
     }
-    Some(result.into_iter().map(Value::tuple).collect())
+    Some(result.into_iter().map(LiteralValue::new_tuple).collect())
 }
 
 impl TypeKind {
@@ -1243,7 +1243,7 @@ impl TypeKind {
     }
 
     /// If all values can be exhaustively enumerated, return them,
-    pub fn all_values(&self) -> Option<Vec<Value>> {
+    pub fn all_values(&self) -> Option<Vec<LiteralValue>> {
         // The maximum cardinality for a type to agree to be enumerated
         const MAX_CARDINALITY: usize = 1000;
         use TypeKind::*;
@@ -1251,9 +1251,12 @@ impl TypeKind {
             Native(native) => {
                 if native.arguments.is_empty() {
                     if native.bare_ty == bare_native_type::<()>() {
-                        Some(vec![Value::unit()])
+                        Some(vec![LiteralValue::new_native(())])
                     } else if native.bare_ty == bare_native_type::<bool>() {
-                        Some(vec![Value::native(false), Value::native(true)])
+                        Some(vec![
+                            LiteralValue::new_native(false),
+                            LiteralValue::new_native(true),
+                        ])
                     } else {
                         None
                     }
