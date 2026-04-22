@@ -308,7 +308,7 @@ impl<'a> Emitter<'a> {
         // TODO: For now, the index is passed as a usize directly, and just printed in the instruction.
         // We may want to lower it as a primitive to have the type information directly wrapped in here
         self
-          .insert(ssa::Instruction::project(node.span, v, *i))
+          .insert(ssa::Instruction::project(node.span, v, *i, node.ty))
           .unwrap()
       }
 
@@ -378,7 +378,7 @@ impl<'a> Emitter<'a> {
 
         // Do we want to fix the index here ? Or what ?
         self
-          .insert(ssa::Instruction::project(node.span, s, 1))
+          .insert(ssa::Instruction::project(node.span, s, 1, node.ty))
           .unwrap()
       }
 

@@ -76,8 +76,8 @@ impl Instruction {
   }
 
   /// Creates a 'project' instruction accessing the tuple `source` at index `i`
-  pub fn project(span: Location, source: ssa::Value, i: usize) -> Self {
-    Instruction { span, operands: vec![source], kind: Box::new(Project {index:i}) }
+  pub fn project(span: Location, source: ssa::Value, i: usize, ty: Type) -> Self {
+    Instruction { span, operands: vec![source], kind: Box::new(Project {index:i, ty:ty}) }
   }
 
   /// Creates a 'ret' instruction with the given properties.
@@ -236,14 +236,18 @@ impl InstructionKind for Load {
 
 /// A project instruction in SSA.
 struct Project {
-  index: usize
+
+  /// The index to project the tuple to
+  index: usize,
+
+  /// The type of the projected value
+  ty: Type
 }
 
 impl InstructionKind for Project {
 
   fn result(&self, whole: &Instruction) -> InstructionResult {
-      //TODO : Switch that for the real type of the tuple if we can get it here
-      InstructionResult::Same(whole.operands[0].clone())
+      InstructionResult::Lowered(self.ty)
   }
 
   fn fmt_within(&self, f: &mut fmt::Formatter<'_>, whole: &Instruction) -> std::fmt::Result {
