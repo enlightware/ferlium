@@ -34,12 +34,12 @@ impl Instruction {
     self.kind.is_terminator()
   }
 
-  /// Creats an `alloca` instruction with the given properties.
+  /// Creates an `alloca` instruction with the given properties.
   pub fn alloca(span: Location, ty: Type) -> Self {
     Instruction { span, operands: vec![], kind: Box::new(Alloca { ty }) }
   }
 
-  /// Create a 'br' instruction with the given properties.
+  /// Creates a 'br' instruction with the given properties.
   pub fn br(span: Location, target: ssa::BlockIdentity) -> Self {
     Instruction { span,operands: vec![], kind: Box::new(UnconditionalBranch {target}) }
   }
@@ -53,13 +53,9 @@ impl Instruction {
     Instruction { span, operands, kind: Box::new(Call { ty }) }
   }
 
-  /// Create a `compare_eq` instruction with the given properties.
+  /// Creates a `compare_eq` instruction with the given properties.
   pub fn compare_eq(span: Location, v1: ssa::Value, v2: ssa::Value) -> Self {
-    Instruction {
-      span,
-      operands: vec![v1, v2],
-      kind: Box::new(CompareEqual {})
-    }
+    Instruction { span, operands: vec![v1, v2], kind: Box::new(CompareEqual {}) }
   }
 
   /// Creates a `condbr` instruction with the given properties.
@@ -79,7 +75,7 @@ impl Instruction {
     Instruction { span, operands: vec![source], kind: Box::new(Load {}) }
   }
 
-  /// Project the tuple `source` at index `i`
+  /// Creates a 'project' instruction accessing the tuple `source` at index `i`
   pub fn project(span: Location, source: ssa::Value, i: usize) -> Self {
     Instruction { span, operands: vec![source], kind: Box::new(Project {index:i}) }
   }
@@ -223,6 +219,7 @@ impl InstructionKind for ConditionalBranch {
 
 }
 
+/// A load instruction in SSA, which copies a value stored in memory into a register.
 struct Load {}
 
 impl InstructionKind for Load {
@@ -270,6 +267,7 @@ impl InstructionKind for Ret {
 
 }
 
+/// A store instruction in SSA, which writes the contents of a register to memory.
 struct Store {}
 
 impl InstructionKind for Store {
@@ -280,6 +278,7 @@ impl InstructionKind for Store {
 
 }
 
+/// A SSA terminator that unconditionally transfers control flow to the start of another block, unconditionally.
 struct UnconditionalBranch {
     target: ssa::BlockIdentity
 }

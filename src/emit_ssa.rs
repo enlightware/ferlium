@@ -30,7 +30,7 @@ struct Emitter<'a> {
   /// The context in which the emitter inserts new IR.
   context: InsertionContext,
 
-  // The HIR node arena
+  /// The HIR node arena.
   hir_arena: &'a NodeArena,
 }
 
@@ -100,11 +100,8 @@ impl<'a> Emitter<'a> {
     }
   }
 
-  /// Returns the blocks created for the `n` case node
-  fn create_case_blocks(
-    &mut self,
-    n: &Box<Case>,
-  ) -> (
+  /// Returns the blocks created for `n`.
+  fn create_case_blocks(&mut self, n: &Box<Case>) -> (
     Vec<BlockIdentity>,
     Vec<BlockIdentity>,
     BlockIdentity,
@@ -145,13 +142,13 @@ impl<'a> Emitter<'a> {
         // We want to lower it here, before any conditions
         let scrutinee = self.lower_as_rvalue(&self.hir_arena[n.value]);
 
-        // Memory holder for the case expression value
+        // Create a temporary allocation to store the result of the match.
         let temporary = self
           .insert(ssa::Instruction::alloca(node.span, node.ty))
           .unwrap();
         self.insert(ssa::Instruction::br(node.span, conditions[0]));
 
-        // Alternatives
+        // Lower the alternatives.
         for (i, (c, a)) in n.alternatives.iter().enumerate() {
           // Load the next condition head
           // Either the next alternative, or the default case if we are at the last condition
@@ -161,7 +158,7 @@ impl<'a> Emitter<'a> {
             default
           };
 
-          // Move to condition head
+          // Transfer control flow to the head of the loop.
           self.context.point = InsertionPoint::End(conditions[i]);
 
           // Lower the condition value
@@ -170,17 +167,15 @@ impl<'a> Emitter<'a> {
           // We compare and branch either on the current condition body, or to the next condition head
           let v = self
             .insert(ssa::Instruction::compare_eq(
-              node.span,
-              scrutinee.clone(),
-              x0,
-            ))
+              node.span, scrutinee.clone(), x0))
             .unwrap();
           self.insert(ssa::Instruction::condbr(node.span, v, bodies[i], next));
 
-          // Lower condition body
+          // Lower the condition.
           self.context.point = InsertionPoint::End(bodies[i]);
           let x1 = self.lower_as_rvalue(&self.hir_arena[*a]);
-          // Store the expression result
+
+          // Store the result of the expression.
           self.insert(ssa::Instruction::store(node.span, x1, temporary.clone()));
           self.insert(ssa::Instruction::br(node.span, tail));
           self.context.environment.truncate(end);
@@ -222,7 +217,6 @@ impl<'a> Emitter<'a> {
       K::EnvStore(n) => {
         let rhs = self.lower_as_rvalue(&self.hir_arena[n.value]);
         self.context.environment.push(rhs);
-
         ssa::Value::Unit
       }
 
@@ -293,7 +287,6 @@ impl<'a> Emitter<'a> {
 
       K::Apply(n) => {
         let f = self.lower_as_rvalue(&self.hir_arena[n.function]);
-
         let a: Vec<ssa::Value> = n
           .arguments
           .iter()
@@ -302,10 +295,7 @@ impl<'a> Emitter<'a> {
 
         self
           .insert(ssa::Instruction::call(
-            node.span,
-            f,
-            a,
-            self.hir_arena[n.function].ty,
+            node.span, f, a, self.hir_arena[n.function].ty,
           ))
           .unwrap()
       }

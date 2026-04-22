@@ -529,9 +529,7 @@ impl CompilerSession {
     }
 
     pub fn emit_ssa(
-        &mut self,
-        source_name: &str,
-        src: &str,
+        &mut self, source_name: &str, src: &str,
     ) -> String {
         let path = module::Path::single_str(source_name);
         let i = self.compile(src, source_name, path).unwrap().module_id;
