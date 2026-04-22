@@ -1881,6 +1881,34 @@ fn to_string() {
         session.run("to_string(\"hello world\")"),
         string("hello world")
     );
+    assert_val_eq!(session.run("to_string((1, true))"), string("(1, true)"));
+    assert_val_eq!(
+        session.run("to_string({x: 1, y: true})"),
+        string("{ x: 1, y: true }")
+    );
+    assert_val_eq!(session.run("to_string(MyVariant)"), string("MyVariant"));
+    assert_val_eq!(
+        session.run("to_string(MyVariant2(1, true))"),
+        string("MyVariant2 (1, true)")
+    );
+    assert_val_eq!(
+        session.run("struct Point(int, int) to_string(Point(1, 2))"),
+        string("Point (1, 2)")
+    );
+    assert_val_eq!(
+        session.run(
+            r#"struct Person { name: string, age: int } to_string(Person { name: "Alice", age: 30 })"#
+        ),
+        string("Person { age: 30, name: Alice }")
+    );
+    assert_val_eq!(
+        session.run("enum OptionInt { None, Some(int) } to_string(OptionInt::None)"),
+        string("OptionInt::None")
+    );
+    assert_val_eq!(
+        session.run("enum OptionInt { None, Some(int) } to_string(OptionInt::Some(32))"),
+        string("OptionInt::Some (32)")
+    );
 }
 
 #[test]

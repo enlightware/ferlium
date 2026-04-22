@@ -25,7 +25,6 @@ use crate::{
     function::{
         BinaryNativeFnMNN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
         NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnNV,
-        UnaryNativeFnVN,
     },
     module::{Module, ModuleFunction},
     std::{
@@ -54,10 +53,6 @@ pub struct String(
 impl String {
     pub fn new(s: &str) -> Self {
         Self(Rc::new(s.nfc().collect()))
-    }
-
-    pub fn any_to_string(value: Value) -> Self {
-        Self::new(&value.to_string_repr())
     }
 
     pub fn push_str(&mut self, value: Self) {
@@ -506,7 +501,10 @@ pub fn add_to_module(to: &mut Module) {
         VALUE_TRAIT.clone(),
         [string_type()],
         [],
-        [b(BinaryNativeFnNNN::new(equal::<String>)) as Function],
+        [
+            b(BinaryNativeFnNNN::new(equal::<String>)) as Function,
+            b(UnaryNativeFnNN::new(|value: String| value)) as Function,
+        ],
     );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
@@ -526,16 +524,6 @@ pub fn add_to_module(to: &mut Module) {
         [string_type()],
         [],
         [b(NullaryNativeFnN::new(String::default)) as Function],
-    );
-
-    to.add_function(
-        ustr("to_string"),
-        UnaryNativeFnVN::description_with_default_ty(
-            String::any_to_string,
-            ["value"],
-            "Converts any value to its string representation.",
-            no_effects(),
-        ),
     );
     to.add_function(ustr("parse_int"), String::parse_int_descr());
     to.add_function(ustr("parse_float"), String::parse_float_descr());

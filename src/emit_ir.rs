@@ -840,6 +840,7 @@ where
             ty_inf.resolve_specific_defaults_to_fixed_point(
                 orphan_constraints,
                 None,
+                None,
                 &mut solver,
                 ir_arena,
             )?;
@@ -1035,9 +1036,19 @@ where
                 select_constraints_accessible_from(ty_inf.remaining_constraints(), &sig_ty_vars);
             let orphan_constraints: Vec<_> = orphan_constraints.into_iter().cloned().collect();
             let mut solver = trait_solver_from_module!(output, others);
+            // If the signature still exposes type variables, it defines the boundary for
+            // defaulting and body-local `None`/unit evidence must not bias it.
+            // Only functions with no remaining signature boundary can use their body root
+            // to seed the narrow unit-constructor fallback.
+            let root_node = if sig_ty_vars.is_empty() {
+                descr.get_code_entry()
+            } else {
+                None
+            };
             ty_inf.resolve_specific_defaults_to_fixed_point(
                 orphan_constraints,
                 None,
+                root_node,
                 &mut solver,
                 ir_arena,
             )?;
@@ -1342,7 +1353,14 @@ fn emit_expr_unsafe_inner(
     {
         let node_ty = ty_inf.substitute_in_type(ir_arena[node_id].ty);
         let mut solver = trait_solver_from_module!(module, others);
-        ty_inf.resolve_expr_defaults_to_fixed_point(node_ty, &mut solver, ir_arena)?;
+        let orphan_constraints = ty_inf.remaining_constraints().to_vec();
+        ty_inf.resolve_specific_defaults_to_fixed_point(
+            orphan_constraints,
+            Some(node_ty),
+            Some(node_id),
+            &mut solver,
+            ir_arena,
+        )?;
         solver.commit(&mut module.functions, &mut module.def_table);
     }
 

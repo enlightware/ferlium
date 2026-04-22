@@ -73,13 +73,15 @@ use crate::{
     ast::PExprArena,
     containers::b,
     emit_ir::EmitModuleFrom,
+    eval::{EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
     module::{
-        Module, ModuleFunction, ModuleId, Uses,
+        LocalDecl, Module, ModuleFunction, ModuleId, Uses,
         id::{Id, NamedIndexed},
     },
     std::STD_MODULE_ID,
     r#type::Type,
+    value::Value,
 };
 
 lalrpop_mod!(
@@ -324,6 +326,12 @@ pub struct CompilerSession {
     initial_source_table_size: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum EvalExprError {
+    Compilation(CompilationError),
+    Runtime(RuntimeError),
+}
+
 impl CompilerSession {
     /// Create a new compilation session with an empty source table and the standard library loaded.
     pub fn new() -> Self {
@@ -375,6 +383,113 @@ impl CompilerSession {
     /// Get the standard library module.
     pub fn std_module(&self) -> &Module {
         self.expect_fresh_module(STD_MODULE_ID)
+    }
+
+    fn eval_expr_with_locals_in_module(
+        &mut self,
+        source_name: &str,
+        source: &str,
+        module: &Module,
+        locals: Vec<LocalDecl>,
+        environment: Vec<ValOrMut>,
+    ) -> Result<Value, EvalExprError> {
+        let source_id = self
+            .source_table
+            .add_source(source_name.to_string(), source.to_string());
+        let (module_ast, expr_ast, arena) = parse_module_and_expr(source, source_id, true)
+            .map_err(|error| {
+                EvalExprError::Compilation(compilation_error!(ParsingFailed(error)))
+            })?;
+        let emit_from = EmitModuleFrom::Existing(b(module.clone()));
+        let mut temp_module = emit_module(
+            module_ast,
+            &arena,
+            module.module_id(),
+            &self.modules,
+            emit_from,
+        )
+        .map_err(|error| {
+            let env = ModuleEnv::new(module, &self.modules);
+            EvalExprError::Compilation(CompilationError::resolve_types(
+                error,
+                &env,
+                &self.source_table,
+            ))
+        })?;
+        let expr_ast = expr_ast.expect("snippet source must contain an expression");
+        let compiled = emit_expr(expr_ast, &arena, &mut temp_module, &self.modules, locals)
+            .map_err(|error| {
+                let env = ModuleEnv::new(&temp_module, &self.modules);
+                EvalExprError::Compilation(CompilationError::resolve_types(
+                    error,
+                    &env,
+                    &self.source_table,
+                ))
+            })?;
+        let previous_module = {
+            let entry = self
+                .modules
+                .get_mut(module.module_id())
+                .expect("snippet base module must be registered in the session");
+            let slot = entry
+                .module
+                .as_mut()
+                .expect("snippet base module must have a compiled module");
+            mem::replace(slot, temp_module)
+        };
+
+        let result = {
+            let temp_module = self.expect_fresh_module(module.module_id());
+            let mut ctx = EvalCtx::with_environment(module.module_id(), environment, self);
+            eval_node_with_ctx(
+                &temp_module.ir_arena,
+                compiled.expr,
+                &mut ctx,
+                &compiled.locals,
+            )
+            .map(|value| value.into_value())
+            .map_err(EvalExprError::Runtime)
+        };
+
+        let entry = self
+            .modules
+            .get_mut(module.module_id())
+            .expect("snippet base module must still be registered in the session");
+        let slot = entry
+            .module
+            .as_mut()
+            .expect("snippet base module must still have a compiled module");
+        *slot = previous_module;
+
+        result
+    }
+
+    pub(crate) fn eval_expr_with_locals(
+        &mut self,
+        source_name: &str,
+        source: &str,
+        module_id: ModuleId,
+        locals: Vec<LocalDecl>,
+        environment: Vec<ValOrMut>,
+    ) -> Result<Value, EvalExprError> {
+        let module = self.expect_fresh_module(module_id).clone();
+        self.eval_expr_with_locals_in_module(source_name, source, &module, locals, environment)
+    }
+
+    pub(crate) fn eval_std_expr_with_locals(
+        &mut self,
+        source_name: &str,
+        source: &str,
+        locals: Vec<LocalDecl>,
+        environment: Vec<ValOrMut>,
+    ) -> Result<Value, EvalExprError> {
+        self.eval_expr_with_locals(
+            source_name,
+            source,
+            self.empty_std_user,
+            locals,
+            environment,
+        )
     }
 
     /// Reset the compiler session to its initial state, without rebuilding std.

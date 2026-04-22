@@ -13,14 +13,15 @@ use std::{
 };
 
 use crate::{
-    CompilationError, CompilerSession, DisplayStyle, FxHashMap, FxHashSet, Location, ModuleAndExpr,
-    ModuleEnv, Path, SourceId, call_fn,
+    CompilationError, CompilerSession, DisplayStyle, EvalExprError, FxHashMap, FxHashSet, Location,
+    ModuleAndExpr, ModuleEnv, Path, SourceId, call_fn,
     error::{
         CompilationErrorImpl, ImportKind, MutabilityMustBeWhat, WhatIsNotAProductType,
         WhichProductTypeIsNot,
     },
-    eval::eval_node,
+    eval::{ValOrMut, eval_node},
     format::FormatWith,
+    ir_syn::local,
     location::SourceTable,
     run_fn_native,
     r#type::{Type, tuple_type},
@@ -891,18 +892,15 @@ impl Compiler {
             .map(str::to_string)
     }
 
-    pub fn run_expr(&self) -> Option<ExecutionResult> {
+    pub fn run_expr(&mut self) -> Option<ExecutionResult> {
         self.user_module.expr.as_ref().map(|expr| {
-            let entry = self
-                .session
-                .modules()
-                .get(self.user_module.module_id)
-                .unwrap();
-            if entry.is_stale() {
+            let module_id = self.user_module.module_id;
+            let is_stale = self.session.modules().get(module_id).unwrap().is_stale();
+            if is_stale {
                 let module_name = self
                     .session
                     .modules()
-                    .get_name(self.user_module.module_id)
+                    .get_name(module_id)
                     .map_or("".into(), |path| path.to_string());
                 return ExecutionResult::error(ExecutionErrorData::new(
                     "Stale module".into(),
@@ -910,22 +908,58 @@ impl Compiler {
                     None,
                 ));
             }
-            let module = entry.module().unwrap();
-            match eval_node(
-                &module.ir_arena,
-                expr.expr,
-                self.user_module.module_id,
-                &expr.locals,
-                &self.session,
-            ) {
+            let value = {
+                let module = self.session.expect_fresh_module(module_id);
+                eval_node(
+                    &module.ir_arena,
+                    expr.expr,
+                    module_id,
+                    &expr.locals,
+                    &self.session,
+                )
+            };
+            match value {
                 Ok(value) => {
                     let value = value.into_value();
+                    let rendered = match self.session.eval_expr_with_locals(
+                        "<ide:to_string>",
+                        "to_string(value)",
+                        module_id,
+                        vec![local("value", expr.ty.ty)],
+                        vec![ValOrMut::Val(value.clone())],
+                    ) {
+                        Ok(rendered) => {
+                            let rendered = rendered
+                                .into_primitive_ty::<crate::std::string::String>()
+                                .expect("to_string(value) must return a Ferlium string");
+                            rendered.to_string()
+                        }
+                        Err(EvalExprError::Compilation(error)) => {
+                            let summary = "Formatting error".to_string();
+                            let complete =
+                                format!("{}", error.format_with(self.session.source_table()));
+                            return ExecutionResult::error(ExecutionErrorData::new(
+                                summary, complete, None,
+                            ));
+                        }
+                        Err(EvalExprError::Runtime(error)) => {
+                            let summary = "Formatting error".to_string();
+                            let complete = format!(
+                                "{}",
+                                error.format_with(&(
+                                    self.session.source_table(),
+                                    self.session.modules()
+                                ))
+                            );
+                            return ExecutionResult::error(ExecutionErrorData::new(
+                                summary, complete, None,
+                            ));
+                        }
+                    };
+                    let module = self.session.expect_fresh_module(module_id);
                     let module_env = ModuleEnv::new(module, self.session.modules());
-                    let output = format!(
-                        "{}: {}",
-                        value.display_pretty(&expr.ty.ty),
-                        expr.ty.display_rust_style(&module_env)
-                    );
+                    let output =
+                        format!("{}: {}", rendered, expr.ty.display_rust_style(&module_env));
                     ExecutionResult::success(output)
                 }
                 Err(error) => {

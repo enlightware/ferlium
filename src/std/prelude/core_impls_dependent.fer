@@ -19,6 +19,21 @@ impl<A> Value for [A] where A: Value {
 			}
 		}
 	}
+
+	fn to_string(value: [A]) -> string {
+		let mut rendered = "[";
+		let mut first = true;
+		for element in value {
+			if not first {
+				string_push_str(rendered, ", ");
+			} else {
+				first = false;
+			};
+			string_push_str(rendered, to_string(element));
+		};
+		string_push_str(rendered, "]");
+		rendered
+	}
 }
 
 // Serde derive helper
@@ -40,7 +55,7 @@ fn expect_variant_object_entry(entries: [(string, Variant)], name: string) -> Va
 			return entry.1;
 		}
 	};
-	panic(f"Object variant key \"{name}\" not found in {entries}")
+	panic(f"Object variant key \"{name}\" not found")
 }
 
 impl Contains {

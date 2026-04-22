@@ -6,18 +6,14 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::str::FromStr;
-
 use crate::{
-    Location,
+    CompilerSession, Location,
+    format::FormatWith,
     location::SourceTable,
     module::{self, Module, ModuleId},
-    r#type::{Type, TypeKind, bare_native_type},
+    r#type::{Type, TypeKind},
     value::Value,
 };
-
-use array::Array;
-use math::{Float, Int};
 
 pub mod array;
 pub mod cast;
@@ -71,38 +67,20 @@ pub fn new_module_using_std(module_id: ModuleId) -> Module {
 }
 
 pub fn default_value_for_type(ty: Type) -> Option<Value> {
-    use TypeKind::*;
-    match &*ty.data() {
-        Variable(_) => None,
-        Native(native_type) => {
-            if native_type.bare_ty == bare_native_type::<()>() {
-                Some(Value::unit())
-            } else if native_type.bare_ty == bare_native_type::<bool>() {
-                Some(Value::native(false))
-            } else if native_type.bare_ty == bare_native_type::<Int>() {
-                Some(Value::native(0))
-            } else if native_type.bare_ty == bare_native_type::<Float>() {
-                Some(Value::native::<Float>(Float::new(0.0).unwrap()))
-            } else if native_type.bare_ty == bare_native_type::<string::String>() {
-                Some(Value::native(string::String::from_str("").unwrap()))
-            } else if native_type.bare_ty == bare_native_type::<Array>() {
-                Some(Value::native(Array::new()))
-            } else {
-                None
-            }
-        }
-        Tuple(tys) => tys
-            .iter()
-            .map(|ty| default_value_for_type(*ty))
-            .collect::<Option<Vec<_>>>()
-            .map(Value::tuple),
-        Record(fields) => fields
-            .iter()
-            .map(|(_, ty)| default_value_for_type(*ty))
-            .collect::<Option<Vec<_>>>()
-            .map(Value::tuple),
-        _ => None,
+    let mut session = CompilerSession::new();
+    default_value_for_type_in_session(&mut session, ty)
+}
+
+pub fn default_value_for_type_in_session(session: &mut CompilerSession, ty: Type) -> Option<Value> {
+    if matches!(&*ty.data(), TypeKind::Variable(_)) {
+        return None;
     }
+
+    let module_env = session.module_env();
+    let source = format!("(default(): {})", ty.format_with(&module_env));
+    session
+        .eval_std_expr_with_locals("<default_value_for_type>", &source, vec![], vec![])
+        .ok()
 }
 
 #[cfg(test)]

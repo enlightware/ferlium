@@ -620,14 +620,14 @@ fn variant_to_none(v: Variant) -> () {
 				panic("Expected array of size 0")
 			}
 		},
-		_ => panic(f"Expected None variant or Array variant of size 0, got \"{v}\"")
+		_ => panic("Expected None variant or Array variant of size 0")
 	}
 }
 /// Downcasts a variant to a bool, panicking if the variant is not a bool.
 fn variant_to_bool(v: Variant) {
 	match (v) {
 		Bool(b) => b,
-		_ => panic(f"Expected Bool variant, got \"{v}\"")
+		_ => panic(f"Expected Bool variant")
 	}
 }
 /// Downcasts a variant to an int, panicking if the variant is not an int or a float.
@@ -635,7 +635,7 @@ fn variant_to_int(v: Variant) {
 	match (v) {
 		Int(i) => i,
 		Float(f) => round(f),
-		_ => panic(f"Expected Int variant, got \"{v}\"")
+		_ => panic("Expected Int variant")
 	}
 }
 /// Downcasts a variant to a float, panicking if the variant is not a float or int.
@@ -643,28 +643,28 @@ fn variant_to_float(v: Variant) {
 	match (v) {
 		Float(f) => f,
 		Int(i) => from_int(i),
-		_ => panic(f"Expected Float or Int variant, got \"{v}\"")
+		_ => panic("Expected Float or Int variant")
 	}
 }
 /// Downcasts a variant to a string, panicking if the variant is not a string.
 fn variant_to_string(v: Variant) {
 	match (v) {
 		String(s) => s,
-		_ => panic(f"Expected String variant, got \"{v}\"")
+		_ => panic("Expected String variant")
 	}
 }
 /// Downcasts a variant to an array, panicking if the variant is not an array.
 fn variant_to_array(v: Variant) {
 	match (v) {
 		Array(a) => a,
-		_ => panic(f"Expected Array variant, got \"{v}\"")
+		_ => panic("Expected Array variant")
 	}
 }
 /// Downcasts a variant to an object payload, panicking if the variant is not an object.
 fn variant_to_object(v: Variant) {
 	match (v) {
 		Object(o) => o,
-		_ => panic(f"Expected Object variant, got \"{v}\"")
+		_ => panic("Expected Object variant")
 	}
 }
 
@@ -739,7 +739,7 @@ impl Deserialize {
 				};
 				result
 			},
-			_ => panic(f"Expected Array variant, got \"{a}\"")
+			_ => panic("Expected Array variant")
 		}
 	}
 }

@@ -20,6 +20,7 @@ use crate::{
         core_traits_names::BITS_TRAIT_NAME,
         default::DEFAULT_TRAIT,
         math::Int,
+        string::String,
         value::{VALUE_TRAIT, equal},
     },
     r#type::Type,
@@ -75,7 +76,10 @@ pub fn add_to_module(to: &mut Module) {
         VALUE_TRAIT.clone(),
         [bool_type()],
         [],
-        [b(BinaryFn::new(equal::<bool>)) as Function],
+        [
+            b(BinaryFn::new(equal::<bool>)) as Function,
+            b(UnaryFn::new(|value: bool| String::new(&value.to_string()))) as Function,
+        ],
     );
     let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(

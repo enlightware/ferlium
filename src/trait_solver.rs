@@ -49,6 +49,8 @@ use crate::type_visitor::AllVarsCollector;
 pub struct TraitSolver<'a> {
     /// Current module implementations.
     pub impls: &'a mut TraitImpls,
+    /// Current module functions available by name.
+    pub current_functions: FxHashMap<Ustr, LocalFunctionId>,
     /// Current module function import slots.
     pub import_fn_slots: &'a mut Vec<ImportFunctionSlot>,
     /// Current module trait import slots.
@@ -74,21 +76,25 @@ const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
 /// This cannot be a function because of lifetime issues, as we must
 /// mutably borrow parts of the module's data while not touching the function field.
 macro_rules! trait_solver_from_module {
-    ($module:expr, $program:expr) => {
+    ($module:expr, $program:expr) => {{
+        let current_functions = crate::trait_solver::current_function_map(&$module.def_table);
+        let function_count = $module.functions.len();
         TraitSolver::new(
             &mut $module.impls,
+            current_functions,
             &mut $module.import_fn_slots,
             &mut $module.import_impl_slots,
-            crate::module::FunctionCollector::new($module.functions.len()),
+            crate::module::FunctionCollector::new(function_count),
             $program,
         )
-    };
+    }};
 }
 pub(crate) use trait_solver_from_module;
 
 /// Scratch overlay for running trait-solver queries without mutating a real module.
 pub(crate) struct TraitSolverProbe<'a> {
     impls: TraitImpls,
+    current_functions: FxHashMap<Ustr, LocalFunctionId>,
     import_fn_slots: Vec<ImportFunctionSlot>,
     import_impl_slots: Vec<ImportImplSlot>,
     fn_collector: FunctionCollector,
@@ -101,6 +107,17 @@ struct TraitImprovementKey {
     trait_ref: TraitRef,
     input_tys: Vec<Type>,
     output_tys: Vec<Type>,
+}
+
+pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, LocalFunctionId> {
+    def_table
+        .iter()
+        .filter_map(|(def_kind, name)| {
+            let name = name.as_ref()?;
+            let local_id = def_kind.as_function().copied()?;
+            Some((*name, local_id))
+        })
+        .collect()
 }
 
 /// Minimal query interface needed by blanket matching.
@@ -134,6 +151,7 @@ impl<'a> TraitSolverProbe<'a> {
     pub(crate) fn from_module(module: &Module, others: &'a Modules) -> Self {
         Self {
             impls: module.impls.clone(),
+            current_functions: current_function_map(&module.def_table),
             import_fn_slots: module.import_fn_slots.clone(),
             import_impl_slots: module.import_impl_slots.clone(),
             fn_collector: FunctionCollector::new(module.functions.len()),
@@ -145,6 +163,7 @@ impl<'a> TraitSolverProbe<'a> {
     fn from_solver(solver: &TraitSolver<'a>) -> Self {
         Self {
             impls: solver.impls.clone(),
+            current_functions: solver.current_functions.clone(),
             import_fn_slots: solver.import_fn_slots.clone(),
             import_impl_slots: solver.import_impl_slots.clone(),
             fn_collector: solver.fn_collector.clone(),
@@ -161,6 +180,7 @@ impl<'a> TraitSolverProbe<'a> {
         );
         let mut solver = TraitSolver::new(
             &mut self.impls,
+            self.current_functions.clone(),
             &mut self.import_fn_slots,
             &mut self.import_impl_slots,
             fn_collector,
@@ -800,6 +820,35 @@ impl<'a> TraitSolver<'a> {
         )
     }
 
+    /// Add a concrete trait implementation from one code body per trait method.
+    pub fn add_concrete_impl_from_code_entries(
+        &mut self,
+        code_entries: impl Into<Vec<(ir::NodeId, Vec<LocalDecl>)>>,
+        trait_ref: &TraitRef,
+        input_types: impl Into<Vec<Type>>,
+        output_types: impl Into<Vec<Type>>,
+    ) -> LocalImplId {
+        let functions = trait_ref
+            .functions
+            .iter()
+            .zip(code_entries.into())
+            .map(|((_, definition), (code_entry, locals))| {
+                let arg_names = definition.arg_names.clone();
+                (
+                    b(ScriptFunction::new(code_entry, arg_names)) as Function,
+                    locals,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.impls.add_concrete_raw(
+            trait_ref.clone(),
+            input_types.into(),
+            output_types.into(),
+            functions,
+            &mut self.fn_collector,
+        )
+    }
+
     /// Check if a concrete trait implementation exists, without performing any solving.
     /// This searches in current module first, then in other modules.
     /// Only public implementations from other modules are considered.
@@ -1319,6 +1368,23 @@ impl<'a> TraitSolver<'a> {
         Ok(FunctionId::Import(
             self.import_function(module_id, function_name),
         ))
+    }
+
+    /// Get a function from the current module if it is defined locally, otherwise import it.
+    pub fn get_local_or_import_function(
+        &mut self,
+        use_site: Location,
+        module_path: &module::Path,
+        function_name: Ustr,
+    ) -> Result<FunctionId, InternalCompilationError> {
+        // We are only interested in named functions, not trait impl functions or lambdas, so we can ignore fn_collector.
+        // if let Some(local_id) = self.fn_collector.get_function(function_name) {
+        //     return Ok(FunctionId::Local(local_id));
+        // }
+        if let Some(local_id) = self.current_functions.get(&function_name).copied() {
+            return Ok(FunctionId::Local(local_id));
+        }
+        self.get_function(use_site, module_path, function_name)
     }
 
     /// Import a function from another module, possibly updating the import slots.

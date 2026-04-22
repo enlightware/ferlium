@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 
 use crate::{
     containers::b,
-    function::{BinaryNativeFnNNN, Function, NullaryNativeFnN},
+    function::{BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN},
     module::Module,
     std::{
         STD_MODULE_ID,
@@ -35,6 +35,10 @@ pub static REPR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     .with_module_id(STD_MODULE_ID)
 });
 
+fn unit_to_string(_: ()) -> crate::std::string::String {
+    crate::std::string::String::new("()")
+}
+
 pub fn add_to_module(to: &mut Module) {
     // Add aliases for basic types
     to.add_type_alias_str("()", Type::unit());
@@ -50,7 +54,10 @@ pub fn add_to_module(to: &mut Module) {
         VALUE_TRAIT.clone(),
         [Type::unit()],
         [],
-        [b(BinaryNativeFnNNN::new(|_: (), _: ()| true)) as Function],
+        [
+            b(BinaryNativeFnNNN::new(|_: (), _: ()| true)) as Function,
+            b(UnaryNativeFnNN::new(unit_to_string)) as Function,
+        ],
     );
     to.add_concrete_impl_no_locals(
         DEFAULT_TRAIT.clone(),
