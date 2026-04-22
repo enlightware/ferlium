@@ -493,8 +493,10 @@ mod tests {
     let mut xs = List::<&str>::new();
     xs.extend(vec!["a", "b"]);
 
-    let ys = xs.addresses().map(|a| xs[a].clone());
-    assert_eq!(ys, vec!["a", "b"]);
+    let ys = xs.addresses().map(|a| &xs[a]);
+    assert!(ys.eq(vec!["a", "b"].iter()));
+
+    Ok(())
   }
 
   #[test]

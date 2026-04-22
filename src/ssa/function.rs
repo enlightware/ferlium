@@ -10,6 +10,7 @@ use crate::{
 
 /// A function in the SSA form of Ferlium.
 pub struct Function {
+
   /// The name of the function.
   pub name: Ustr,
 
@@ -21,6 +22,7 @@ pub struct Function {
 
   /// The use chains of the values in this function.
   uses: HashMap<ssa::Value, Vec<Use>>,
+
 }
 
 impl Function {
