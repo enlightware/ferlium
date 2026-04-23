@@ -6,7 +6,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{borrow::Borrow, mem};
+use std::mem;
 
 use crate::{
     FxHashMap, FxHashSet, Modules, borrow_checker::check_borrows, containers::B,
@@ -41,7 +41,10 @@ use crate::{
     trait_solver::{TraitSolver, trait_solver_from_module},
     r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
     type_constraints::named_type_constraints_in_types,
-    type_inference::{AnnotationTypeMapper, InstSubstitution, TypeInference, UnifiedTypeInference},
+    type_inference::{
+        AnnotationTypeMapper, ConstraintBoundary, DefaultingScope, InstSubstitution, TypeInference,
+        UnifiedTypeInference,
+    },
     type_like::{TypeLike, instantiate_types},
     type_mapper::TypeMapper,
     type_scheme::{
@@ -831,19 +834,13 @@ where
             head_tys.extend(output_tys.iter().copied());
             let head_quantifiers = collect_ty_vars(&head_tys);
             ty_inf.normalize_remaining_constraints();
-            let (_, orphan_constraints) = select_constraints_accessible_from(
-                ty_inf.remaining_constraints(),
-                &head_quantifiers,
-            );
-            let orphan_constraints = orphan_constraints.into_iter().cloned().collect();
+            let head_boundary =
+                ConstraintBoundary::from_seed_ty_vars(head_quantifiers.iter().copied());
+            let orphan_constraints =
+                head_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
+            let scope = DefaultingScope::from_constraints(&orphan_constraints);
             let mut solver = trait_solver_from_module!(output, others);
-            ty_inf.resolve_specific_defaults_to_fixed_point(
-                orphan_constraints,
-                None,
-                None,
-                &mut solver,
-                ir_arena,
-            )?;
+            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
             solver.commit(&mut output.functions, &mut output.def_table);
 
             // Check for remaining orphans.
@@ -853,11 +850,10 @@ where
             let mut head_tys = input_tys.clone();
             head_tys.extend(output_tys.iter().copied());
             let head_quantifiers = collect_ty_vars(&head_tys);
-            let (_, remaining_orphans) = select_constraints_accessible_from(
-                ty_inf.remaining_constraints(),
-                &head_quantifiers,
-            );
-            let remaining_orphans: Vec<_> = remaining_orphans
+            let head_boundary =
+                ConstraintBoundary::from_seed_ty_vars(head_quantifiers.iter().copied());
+            let remaining_orphans: Vec<_> = head_boundary
+                .inaccessible_constraints(ty_inf.remaining_constraints())
                 .into_iter()
                 .filter(|c| !c.is_type_has_variant())
                 .collect();
@@ -919,9 +915,9 @@ where
         let mut head_tys = trait_output.input_tys.clone();
         head_tys.extend(trait_output.output_tys.iter().copied());
         let input_quantifiers = collect_ty_vars(&head_tys);
-        let constraints_refs: Vec<_> = all_constraints.iter().collect();
-        let (related_constraints, _) =
-            select_constraints_accessible_from(&constraints_refs, &input_quantifiers);
+        let head_boundary =
+            ConstraintBoundary::from_seed_ty_vars(input_quantifiers.iter().copied());
+        let related_constraints = head_boundary.accessible_constraints(&all_constraints);
         let mut quantifiers = input_quantifiers.to_vec();
         let mut collector = TyVarsCollector(&mut quantifiers);
         for constraint in related_constraints.iter() {
@@ -1032,26 +1028,27 @@ where
             );
             sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
             ty_inf.normalize_remaining_constraints();
-            let (_, orphan_constraints) =
-                select_constraints_accessible_from(ty_inf.remaining_constraints(), &sig_ty_vars);
-            let orphan_constraints: Vec<_> = orphan_constraints.into_iter().cloned().collect();
+            let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
+            let orphan_constraints =
+                sig_boundary.owned_inaccessible_constraints(ty_inf.remaining_constraints());
             let mut solver = trait_solver_from_module!(output, others);
             // If the signature still exposes type variables, it defines the boundary for
             // defaulting and body-local `None`/unit evidence must not bias it.
             // Only functions with no remaining signature boundary can use their body root
             // to seed the narrow unit-constructor fallback.
-            let root_node = if sig_ty_vars.is_empty() {
-                descr.get_code_entry()
+            let unit_variant_seed_tys = if sig_ty_vars.is_empty() {
+                descr
+                    .get_code_entry()
+                    .map(|root_node| {
+                        UnifiedTypeInference::collect_unit_variant_seed_types(ir_arena, root_node)
+                    })
+                    .unwrap_or_default()
             } else {
-                None
+                Vec::new()
             };
-            ty_inf.resolve_specific_defaults_to_fixed_point(
-                orphan_constraints,
-                None,
-                root_node,
-                &mut solver,
-                ir_arena,
-            )?;
+            let scope = DefaultingScope::from_constraints(&orphan_constraints)
+                .with_unit_variant_seed_tys(unit_variant_seed_tys);
+            ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
             solver.commit(&mut output.functions, &mut output.def_table);
         }
         for (id, explicit_root_tys) in local_fns.iter().zip(function_explicit_root_tys.iter()) {
@@ -1066,9 +1063,9 @@ where
             );
             sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
             ty_inf.normalize_remaining_constraints();
-            let (_, remaining_orphans) =
-                select_constraints_accessible_from(ty_inf.remaining_constraints(), &sig_ty_vars);
-            let remaining_orphans: Vec<_> = remaining_orphans
+            let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
+            let remaining_orphans: Vec<_> = sig_boundary
+                .inaccessible_constraints(ty_inf.remaining_constraints())
                 .into_iter()
                 .filter(|c| !c.is_type_has_variant())
                 .collect();
@@ -1109,8 +1106,8 @@ where
                 .collect::<Vec<_>>();
             sig_ty_vars.extend(explicit_ty_vars.iter().copied());
             sig_ty_vars = sig_ty_vars.into_iter().unique().collect();
-            let (related_constraints, _) =
-                select_constraints_accessible_from(&all_constraints, &sig_ty_vars);
+            let sig_boundary = ConstraintBoundary::from_seed_ty_vars(sig_ty_vars.iter().copied());
+            let related_constraints = sig_boundary.accessible_constraints(&all_constraints);
             let related_ptrs: FxHashSet<PubTypeConstraintPtr> = related_constraints
                 .iter()
                 .map(|c| constraint_ptr(c))
@@ -1122,7 +1119,7 @@ where
             // Compute quantifiers.
             let mut quantifiers = TypeScheme::list_ty_vars(
                 &descr.definition.ty_scheme.ty,
-                related_constraints.iter().map(|c| *c as &PubTypeConstraint),
+                related_constraints.iter().copied(),
             );
             quantifiers.extend(explicit_ty_vars.iter().copied());
             quantifiers = quantifiers.into_iter().unique().collect();
@@ -1354,13 +1351,12 @@ fn emit_expr_unsafe_inner(
         let node_ty = ty_inf.substitute_in_type(ir_arena[node_id].ty);
         let mut solver = trait_solver_from_module!(module, others);
         let orphan_constraints = ty_inf.remaining_constraints().to_vec();
-        ty_inf.resolve_specific_defaults_to_fixed_point(
-            orphan_constraints,
-            Some(node_ty),
-            Some(node_id),
-            &mut solver,
-            ir_arena,
-        )?;
+        let unit_variant_seed_tys =
+            UnifiedTypeInference::collect_unit_variant_seed_types(ir_arena, node_id);
+        let scope = DefaultingScope::from_constraints(&orphan_constraints)
+            .with_expr_root_ty(node_ty)
+            .with_unit_variant_seed_tys(unit_variant_seed_tys);
+        ty_inf.resolve_defaults_to_fixed_point(&scope, &mut solver, ir_arena)?;
         solver.commit(&mut module.functions, &mut module.def_table);
     }
 
@@ -1557,61 +1553,6 @@ pub fn emit_expr(
         }));
     }
     Ok(CompiledExpr { ty, expr, locals })
-}
-
-/// Return the constraints that are transitively accessible from the ty_vars
-fn select_constraints_accessible_from<'c: 'r, 'r, C: ?Sized, T>(
-    constraints: &'r C,
-    ty_vars: &[TypeVar],
-) -> (
-    FxHashSet<&'c PubTypeConstraint>,
-    FxHashSet<&'c PubTypeConstraint>,
-)
-where
-    &'r C: IntoIterator<Item = &'c T>,
-    T: Borrow<PubTypeConstraint> + 'c,
-{
-    // Split the constraints into those that contain at least one of the ty_vars and those that don't.
-    fn partition<'c: 'r, 'r, C: ?Sized, T>(
-        constraints: &'r C,
-        ty_vars: &[TypeVar],
-    ) -> (
-        FxHashSet<&'c PubTypeConstraint>,
-        FxHashSet<&'c PubTypeConstraint>,
-    )
-    where
-        &'r C: IntoIterator<Item = &'c T>,
-        T: Borrow<PubTypeConstraint> + 'c,
-    {
-        constraints
-            .into_iter()
-            .map(|item| item.borrow())
-            .partition(|constraint| constraint.contains_any_ty_vars(ty_vars))
-    }
-
-    // First partition with the input ty_vars.
-    let (mut ins, mut outs) = partition(constraints, ty_vars);
-
-    // As long as there is progress, loop.
-    loop {
-        // Collect the type variables that are accessible from the constraints in ins.
-        let accessible_ty_vars: Vec<_> = ins
-            .iter()
-            .flat_map(|c| c.inner_ty_vars())
-            .unique()
-            .collect();
-
-        // Re-partition with the new type variables.
-        let (new_ins, new_outs) = partition(constraints, &accessible_ty_vars);
-
-        // In case we did not collect any new constraints, we are done.
-        if new_ins.len() == ins.len() {
-            break;
-        }
-        ins = new_ins;
-        outs = new_outs;
-    }
-    (ins, outs)
 }
 
 type PubTypeConstraintPtr = *const PubTypeConstraint;

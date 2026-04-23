@@ -141,10 +141,43 @@ trait TraitOutputQuery {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError>;
+}
+
+/// Borrowed view over the ambient public trait constraints that may discharge
+/// nested blanket-impl requirements.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ConstraintAssumptions<'a> {
+    constraints: &'a [PubTypeConstraint],
+    skipped_index: Option<usize>,
+}
+
+impl<'a> ConstraintAssumptions<'a> {
+    pub(crate) fn all(constraints: &'a [PubTypeConstraint]) -> Self {
+        Self {
+            constraints,
+            skipped_index: None,
+        }
+    }
+
+    pub(crate) fn excluding(constraints: &'a [PubTypeConstraint], skipped_index: usize) -> Self {
+        Self {
+            constraints,
+            skipped_index: Some(skipped_index),
+        }
+    }
+
+    pub(crate) fn iter(self) -> impl Iterator<Item = &'a PubTypeConstraint> {
+        self.constraints
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, constraint)| {
+                (self.skipped_index != Some(index)).then_some(constraint)
+            })
+    }
 }
 
 impl<'a> TraitSolverProbe<'a> {
@@ -224,7 +257,7 @@ impl TraitOutputQuery for TraitSolverProbe<'_> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
@@ -381,7 +414,7 @@ impl<'a> TraitSolver<'a> {
         candidate: &TraitImprovementCandidate,
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
@@ -450,7 +483,7 @@ impl<'a> TraitSolver<'a> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
@@ -482,7 +515,7 @@ impl<'a> TraitSolver<'a> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
@@ -554,7 +587,7 @@ impl<'a> TraitSolver<'a> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<bool, InternalCompilationError> {
@@ -579,9 +612,25 @@ impl<'a> TraitSolver<'a> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
     ) -> bool {
         assumptions.iter().any(|assumption| {
+            let PubTypeConstraint::HaveTrait {
+                trait_ref: assumption_trait_ref,
+                input_tys: assumption_input_tys,
+                output_tys: assumption_output_tys,
+                ..
+            } = assumption
+            else {
+                return false;
+            };
+            if assumption_trait_ref != trait_ref
+                || assumption_input_tys.len() != input_tys.len()
+                || assumption_output_tys.len() != output_tys.len()
+            {
+                return false;
+            }
+
             let substituted_assumption = ty_inf.substitute_in_constraint(assumption);
             let Some((ass_trait_ref, ass_input_tys, ass_output_tys, _)) =
                 substituted_assumption.as_have_trait()
@@ -647,7 +696,7 @@ impl<'a> TraitSolver<'a> {
         imp_constraints: &[PubTypeConstraint],
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
         mode: BlanketConstraintMode,
@@ -1072,7 +1121,7 @@ impl<'a> TraitSolver<'a> {
                     imp_constraints,
                     input_tys,
                     &[],
-                    &[],
+                    ConstraintAssumptions::all(&[]),
                     fn_span,
                     arena,
                     BlanketConstraintMode::RequireAllResolved,
@@ -1472,7 +1521,7 @@ impl TraitOutputQuery for TraitSolver<'_> {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         output_tys: &[Type],
-        assumptions: &[&PubTypeConstraint],
+        assumptions: ConstraintAssumptions<'_>,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
