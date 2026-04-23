@@ -759,6 +759,20 @@ fn collect() {
         float_a![1.0, 2.0, 3.0]
     );
     assert_val_eq!(session.run("(0..3 |> collect(): [int])"), int_a![0, 1, 2]);
+    assert_val_eq!(
+        session.run(
+            "let values = ([1, 2, 3] |> iter() |> collect(): set<_>);
+             (len(values), set_contains(values, 2), set_contains(values, 4))"
+        ),
+        tuple!(int(3), bool(true), bool(false))
+    );
+    assert_val_eq!(
+        session.run(
+            "let values = ([(1, \"one\"), (2, \"two\")] |> iter() |> collect(): map<_, _>);
+             (len(values), map_get(values, 1), map_get(values, 3))"
+        ),
+        tuple!(int(2), some(string("one")), none())
+    );
     session
         .fail_compilation("[1, 2, 3] |> iter() |> collect()")
         .expect_unbound_ty_var();
@@ -1074,6 +1088,18 @@ fn scalar_parsers() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn hashing() {
     let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(
+            "let mut h = hasher_new();
+             hasher_write_int(h, 123);
+             let h = hasher_finish(h);
+             let as_int = h as int;
+             as_int == (h as int)"
+        ),
+        bool(true)
+    );
+
     let mut run_hash = |src| session.run(src).to_string_repr();
 
     let ordered_12 = run_hash(
@@ -1190,6 +1216,214 @@ fn value_hashing() {
              left == right"
         ),
         bool(false)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_set() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(
+            "let mut values: set<int> = empty();
+             let inserted_first = set_insert(values, 1);
+             let inserted_second = set_insert(values, 2);
+             let inserted_duplicate = set_insert(values, 1);
+             (inserted_first, inserted_second, inserted_duplicate, len(values), set_contains(values, 2), set_contains(values, 3))"
+        ),
+        tuple!(
+            bool(true),
+            bool(true),
+            bool(false),
+            int(2),
+            bool(true),
+            bool(false)
+        )
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let mut left: set<int> = empty();
+             set_insert(left, 1);
+             set_insert(left, 2);
+             let mut right: set<int> = empty();
+             set_insert(right, 2);
+             set_insert(right, 1);
+             let mut left_hasher = hasher_new();
+             hash(left, left_hasher);
+             let left_hash = hasher_finish(left_hasher);
+             let mut right_hasher = hasher_new();
+             hash(right, right_hasher);
+             let right_hash = hasher_finish(right_hasher);
+             (left == right, left_hash == right_hash)"
+        ),
+        tuple!(bool(true), bool(true))
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let values = ([1, 2, 3] |> iter() |> collect(): set<_>);
+             let squares = (values |> iter() |> map(|value| value * value) |> collect(): set<_>);
+             (squares |> iter() |> collect(): [_]) |> sorted()"
+        ),
+        int_a![1, 4, 9]
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let values = (0..40 |> iter() |> collect(): set<int>);
+             let items = ((values |> iter() |> collect(): [_]) |> sorted());
+             (len(values), items[0], items[17], items[39], set_contains(values, 40))"
+        ),
+        tuple!(int(40), int(0), int(17), int(39), bool(false))
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let one_two = ([1, 2] |> iter() |> collect(): set<_>);
+             let two_one = ([2, 1] |> iter() |> collect(): set<_>);
+             let one_three = ([1, 3] |> iter() |> collect(): set<_>);
+             let mut values: set<set<int>> = empty();
+             let inserted_first = set_insert(values, one_two);
+             let inserted_duplicate = set_insert(values, two_one);
+             let inserted_distinct = set_insert(values, one_three);
+             (inserted_first, inserted_duplicate, inserted_distinct, len(values), set_contains(values, two_one), set_contains(values, one_three))"
+        ),
+        tuple!(
+            bool(true),
+            bool(false),
+            bool(true),
+            int(2),
+            bool(true),
+            bool(true)
+        )
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let first = ([(1, \"one\"), (2, \"two\")] |> iter() |> collect(): map<_, _>);
+             let equivalent = ([(2, \"two\"), (1, \"one\")] |> iter() |> collect(): map<_, _>);
+             let changed = ([(1, \"one\"), (2, \"dos\")] |> iter() |> collect(): map<_, _>);
+             let mut values: set<map<int, string>> = empty();
+             let inserted_first = set_insert(values, first);
+             let inserted_duplicate = set_insert(values, equivalent);
+             let inserted_distinct = set_insert(values, changed);
+             (inserted_first, inserted_duplicate, inserted_distinct, len(values), set_contains(values, equivalent), set_contains(values, changed))"
+        ),
+        tuple!(
+            bool(true),
+            bool(false),
+            bool(true),
+            int(2),
+            bool(true),
+            bool(true)
+        )
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hash_map() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(
+            "let mut values: map<int, string> = empty();
+             let first = map_insert(values, 1, \"one\");
+             let second = map_insert(values, 1, \"uno\");
+             map_insert(values, 2, \"two\");
+             (first, second, len(values), map_get(values, 1), map_get(values, 3), map_contains_key(values, 2), map_contains_key(values, 3))"
+        ),
+        tuple!(
+            none(),
+            some(string("one")),
+            int(2),
+            some(string("uno")),
+            none(),
+            bool(true),
+            bool(false)
+        )
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let mut left: map<int, string> = empty();
+             map_insert(left, 1, \"one\");
+             map_insert(left, 2, \"two\");
+             let mut right: map<int, string> = empty();
+             map_insert(right, 2, \"two\");
+             map_insert(right, 1, \"one\");
+             let mut left_hasher = hasher_new();
+             hash(left, left_hasher);
+             let left_hash = hasher_finish(left_hasher);
+             let mut right_hasher = hasher_new();
+             hash(right, right_hasher);
+             let right_hash = hasher_finish(right_hasher);
+             (left == right, left_hash == right_hash)"
+        ),
+        tuple!(bool(true), bool(true))
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let values = ([(1, 10), (2, 20), (3, 30)] |> iter() |> collect(): map<_, _>);
+             let swapped = (values |> iter() |> map(|entry| (entry.1, entry.0)) |> collect(): map<_, _>);
+             (len(swapped), map_get(swapped, 10), map_get(swapped, 20), map_get(swapped, 30), map_get(swapped, 40))"
+        ),
+        tuple!(int(3), some(int(1)), some(int(2)), some(int(3)), none())
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let values = ([(1, \"one\"), (2, \"two\"), (1, \"uno\")] |> iter() |> collect(): map<_, _>);
+             (len(values), map_get(values, 1), map_get(values, 2), map_get(values, 3))"
+        ),
+        tuple!(int(2), some(string("uno")), some(string("two")), none())
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let values = (0..40 |> iter() |> map(|x| (x, x * x)) |> collect(): map<_, _>);
+             (len(values), map_get(values, 0), map_get(values, 17), map_get(values, 39), map_get(values, 40))"
+        ),
+        tuple!(int(40), some(int(0)), some(int(289)), some(int(1521)), none())
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let one_two = ([1, 2] |> iter() |> collect(): set<_>);
+             let two_one = ([2, 1] |> iter() |> collect(): set<_>);
+             let one_three = ([1, 3] |> iter() |> collect(): set<_>);
+             let mut values: map<set<int>, string> = empty();
+             map_insert(values, one_two, \"hit\");
+             (len(values), map_get(values, two_one), map_get(values, one_three), map_contains_key(values, two_one), map_contains_key(values, one_three))"
+        ),
+        tuple!(
+            int(1),
+            some(string("hit")),
+            none(),
+            bool(true),
+            bool(false)
+        )
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let first = ([(1, \"one\"), (2, \"two\")] |> iter() |> collect(): map<_, _>);
+             let equivalent = ([(2, \"two\"), (1, \"one\")] |> iter() |> collect(): map<_, _>);
+             let changed = ([(1, \"one\"), (2, \"dos\")] |> iter() |> collect(): map<_, _>);
+             let mut values: map<map<int, string>, string> = empty();
+             map_insert(values, first, \"hit\");
+             (len(values), map_get(values, equivalent), map_get(values, changed), map_contains_key(values, equivalent), map_contains_key(values, changed))"
+        ),
+        tuple!(
+            int(1),
+            some(string("hit")),
+            none(),
+            bool(true),
+            bool(false)
+        )
     );
 }
 

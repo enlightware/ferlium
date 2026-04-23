@@ -1,0 +1,540 @@
+/// Computes the hash of a value.
+fn value_hash<V>(value: V) -> hash
+where
+	V: Value
+{
+	let mut state = hasher_new();
+	hash(value, state);
+	hasher_finish(state)
+}
+
+// Hash sets
+
+struct HashSetSlot<V>
+where
+	V: Value
+{
+	hash: hash,
+	value: V,
+}
+
+struct HashSet<V>
+where
+	V: Value
+{
+	buckets: [Option<HashSetSlot<V>>],
+	len: int,
+}
+
+type set<V> = HashSet<V>;
+
+struct HashSetIterator<V>
+where
+	V: Value
+{
+	buckets: [Option<HashSetSlot<V>>],
+	index: int,
+}
+
+fn hash_set_new<V>() -> HashSet<V>
+where
+	V: Value
+{
+	HashSet { buckets: [], len: 0 }
+}
+
+/// Inserts `value` into `collection`, returning `true` if the value was not already present.
+fn set_insert<V>(collection: &mut HashSet<V>, value: V) -> bool
+where
+	V: Value
+{
+    let key_getter = |slot| slot.value;
+	let slot_hash = value_hash(value);
+	if hash_collection_find_index_with_hash(collection, slot_hash, value, key_getter) != None {
+		return false;
+	};
+
+	hash_collection_reserve_for_insert(collection, key_getter);
+	let slot = HashSetSlot { hash: slot_hash, value: value };
+	hash_collection_insert_entry(collection.buckets, slot, key_getter);
+	collection.len += 1;
+	true
+}
+
+/// Returns `true` if `value` is present in `collection`, otherwise `false`.
+fn set_contains<V>(collection: HashSet<V>, value: V) -> bool
+where
+	V: Value
+{
+    let key_getter = |slot| slot.value;
+	hash_collection_find_index_with_hash(collection, value_hash(value), value, key_getter) != None
+}
+
+impl<V> Iterator for <Self = HashSetIterator<V> |-> Item = V>
+where
+	V: Value
+{
+	fn next(it: &mut HashSetIterator<V>) -> Option<V> {
+		let capacity = len(it.buckets);
+		loop {
+			if it.index >= capacity {
+				return None;
+			};
+
+			let bucket = effects_unsafe { it.buckets[it.index] };
+			it.index += 1;
+			match bucket {
+				Some(slot) => return Some(slot.value),
+				None => (),
+			}
+		}
+	}
+}
+
+impl<V> Seq for <Self = HashSet<V> |-> Item = V, Iter = HashSetIterator<V>>
+where
+	V: Value
+{
+	fn iter(collection: HashSet<V>) -> HashSetIterator<V> {
+		HashSetIterator {
+			buckets: collection.buckets,
+			index: 0,
+		}
+	}
+}
+
+impl<V> SizedSeq for <Self = HashSet<V>>
+where
+	V: Value
+{
+	fn len(collection: HashSet<V>) -> int {
+		collection.len
+	}
+}
+
+impl<V> Empty for <Self = HashSet<V>>
+where
+	V: Value
+{
+	fn empty() -> HashSet<V> {
+		hash_set_new()
+	}
+}
+
+impl<V> Default for <Self = HashSet<V>>
+where
+	V: Value
+{
+	fn default() -> HashSet<V> {
+		hash_set_new()
+	}
+}
+
+impl<V, I> FromIterator for <Self = HashSet<V>, Iter = I>
+where
+	V: Value,
+	I: Iterator<Item = V>
+{
+	fn from_iter(iterator: I) -> HashSet<V> {
+		let mut iterator = iterator;
+		let mut result = hash_set_new();
+		loop {
+			match next(iterator) {
+				Some(value) => {
+					set_insert(result, value);
+				},
+				None => return result,
+			}
+		}
+	}
+}
+
+impl<V> Value for HashSet<V>
+where
+	V: Value
+{
+	fn eq(left: HashSet<V>, right: HashSet<V>) -> bool {
+	    hash_collection_eq(left, right, set_contains)
+	}
+
+	fn to_string(value: HashSet<V>) -> string {
+	    hash_collection_to_string(value)
+	}
+
+	fn hash(value: HashSet<V>, state: &mut hasher) {
+	    hash_collection_hash(value, "hash_set", state)
+	}
+}
+
+// Hash maps
+
+struct HashMapEntry<K, V>
+where
+	K: Value,
+	V: Value
+{
+	hash: hash,
+	key: K,
+	value: V,
+}
+
+impl<K, V> Value for HashMapEntry<K, V>
+where
+	K: Value,
+	V: Value
+{
+	fn eq(left: HashMapEntry<K, V>, right: HashMapEntry<K, V>) -> bool {
+		eq(left.key, right.key) and eq(left.value, right.value)
+	}
+
+	fn to_string(value: HashMapEntry<K, V>) -> string {
+		let mut rendered = to_string(value.key);
+		string_push_str(rendered, " => ");
+		string_push_str(rendered, to_string(value.value));
+		rendered
+	}
+
+	fn hash(value: HashMapEntry<K, V>, state: &mut hasher) {
+		hasher_write_string(state, "hash_map_entry");
+		hash(value.key, state);
+		hash(value.value, state);
+	}
+}
+
+struct HashMap<K, V>
+where
+	K: Value,
+	V: Value
+{
+	buckets: [Option<HashMapEntry<K, V>>],
+	len: int,
+}
+
+type map<K, V> = HashMap<K, V>;
+
+struct HashMapIterator<K, V>
+where
+	K: Value,
+	V: Value
+{
+	buckets: [Option<HashMapEntry<K, V>>],
+	index: int,
+}
+
+fn hash_map_new<K, V>() -> HashMap<K, V>
+where
+	K: Value,
+	V: Value
+{
+	HashMap { buckets: [], len: 0 }
+}
+
+/// Inserts `value` into `collection` with the given `key`, returning the previous value if the key was already present.
+fn map_insert<K, V>(collection: &mut HashMap<K, V>, key: K, value: V) -> Option<V>
+where
+	K: Value,
+	V: Value
+{
+    let key_getter = |entry| entry.key;
+	let key_hash = value_hash(key);
+	let existing_index = hash_collection_find_index_with_hash(collection, key_hash, key, key_getter);
+	if existing_index == None {
+		hash_collection_reserve_for_insert(collection, key_getter);
+		let entry = HashMapEntry { hash: key_hash, key: key, value: value };
+		hash_collection_insert_entry(collection.buckets, entry, key_getter);
+		collection.len += 1;
+		return None;
+	};
+
+	let index = match existing_index {
+		Some(index) => index,
+		None => 0,
+	};
+	match effects_unsafe { collection.buckets[index] } {
+		Some(entry) => {
+			let previous = entry.value;
+			let updated = HashMapEntry { hash: key_hash, key: key, value: value };
+			effects_unsafe { collection.buckets[index] = Some(updated) };
+			Some(previous)
+		},
+		None => None,
+	}
+}
+
+/// Gets the value associated with `key` in `collection`, or `None` if the key is not present.
+fn map_get<K, V>(collection: HashMap<K, V>, key: K) -> Option<V>
+where
+	K: Value,
+	V: Value
+{
+    let key_getter = |entry| entry.key;
+	let key_hash = value_hash(key);
+	match hash_collection_find_index_with_hash(collection, key_hash, key, key_getter) {
+		Some(index) => match effects_unsafe { collection.buckets[index] } {
+			Some(entry) => Some(entry.value),
+			None => None,
+		},
+		None => None,
+	}
+}
+
+/// Returns `true` if `key` is present in `collection`, otherwise `false`.
+fn map_contains_key<K, V>(collection: HashMap<K, V>, key: K) -> bool
+where
+	K: Value,
+	V: Value
+{
+	match map_get(collection, key) {
+		Some(value) => {
+			let present = value;
+			true
+		},
+		None => false,
+	}
+}
+
+/// Returns `true` if `collection` contains an entry with the given `key` and `value`, otherwise `false`.
+fn map_contains_key_value<K, V>(collection: HashMap<K, V>, key: K, value: V) -> bool
+where
+    K: Value,
+    V: Value
+{
+    match map_get(collection, key) {
+        Some(existing) => existing == value,
+        None => false,
+    }
+}
+
+fn hash_map_contains_entry<K, V>(collection: HashMap<K, V>, entry: HashMapEntry<K, V>) -> bool
+where
+    K: Value,
+    V: Value
+{
+    map_contains_key_value(collection, entry.key, entry.value)
+}
+
+impl<K, V> Iterator for <Self = HashMapIterator<K, V> |-> Item = (K, V)>
+where
+	K: Value,
+	V: Value
+{
+	fn next(it: &mut HashMapIterator<K, V>) -> Option<(K, V)> {
+		let capacity = len(it.buckets);
+		loop {
+			if it.index >= capacity {
+				return None;
+			};
+
+			let bucket = effects_unsafe { it.buckets[it.index] };
+			it.index += 1;
+			match bucket {
+				Some(entry) => return Some((entry.key, entry.value)),
+				None => (),
+			}
+		}
+	}
+}
+
+impl<K, V> Seq for <Self = HashMap<K, V> |-> Item = (K, V), Iter = HashMapIterator<K, V>>
+where
+	K: Value,
+	V: Value
+{
+	fn iter(collection: HashMap<K, V>) -> HashMapIterator<K, V> {
+		HashMapIterator {
+			buckets: collection.buckets,
+			index: 0,
+		}
+	}
+}
+
+impl<K, V> SizedSeq for <Self = HashMap<K, V>>
+where
+	K: Value,
+	V: Value
+{
+	fn len(collection: HashMap<K, V>) -> int {
+		collection.len
+	}
+}
+
+impl<K, V> Empty for <Self = HashMap<K, V>>
+where
+	K: Value,
+	V: Value
+{
+	fn empty() -> HashMap<K, V> {
+		hash_map_new()
+	}
+}
+
+impl<K, V> Default for <Self = HashMap<K, V>>
+where
+	K: Value,
+	V: Value
+{
+	fn default() -> HashMap<K, V> {
+		hash_map_new()
+	}
+}
+
+impl<K, V, I> FromIterator for <Self = HashMap<K, V>, Iter = I>
+where
+	K: Value,
+	V: Value,
+	I: Iterator<Item = (K, V)>
+{
+	fn from_iter(iterator: I) -> HashMap<K, V> {
+		let mut iterator = iterator;
+		let mut result = hash_map_new();
+		loop {
+			match next(iterator) {
+				Some(entry) => {
+				    map_insert(result, entry.0, entry.1);
+				},
+				None => return result,
+			}
+		}
+	}
+}
+
+impl<K, V> Value for HashMap<K, V>
+where
+	K: Value,
+	V: Value
+{
+	fn eq(left: HashMap<K, V>, right: HashMap<K, V>) -> bool {
+	    hash_collection_eq(left, right, hash_map_contains_entry)
+	}
+
+	fn to_string(value: HashMap<K, V>) -> string {
+	    hash_collection_to_string(value)
+	}
+
+	fn hash(value: HashMap<K, V>, state: &mut hasher) {
+	    hash_collection_hash(value, "hash_map", state)
+	}
+}
+
+// Common hash collection machinery functions
+
+fn hash_collection_bucket_index(slot_hash: hash, capacity: int) -> int {
+	bit_and(slot_hash as int, capacity - 1)
+}
+
+fn hash_collection_empty_buckets(capacity: int) {
+	let mut buckets = [];
+	for index in 0..capacity {
+		array_append(buckets, None);
+	};
+	buckets
+}
+
+fn hash_collection_insert_entry<K, V>(buckets, entry, key_getter) -> int {
+	let capacity = len(buckets);
+	let mut index = hash_collection_bucket_index(entry.hash, capacity);
+	loop {
+		match effects_unsafe { buckets[index] } {
+			Some(existing) => {
+				if existing.hash == entry.hash and key_getter(existing) == key_getter(entry) {
+					effects_unsafe { buckets[index] = Some(entry) };
+					return index;
+				}
+			},
+			None => {
+				effects_unsafe { buckets[index] = Some(entry) };
+				return index;
+			},
+		};
+
+		index = bit_and(index + 1, capacity - 1);
+	}
+}
+
+fn hash_collection_rehash(collection, key_getter, new_capacity) {
+	let old_buckets = collection.buckets;
+	let mut new_buckets = hash_collection_empty_buckets(new_capacity);
+	for bucket in old_buckets {
+		match bucket {
+			Some(entry) => {
+			    hash_collection_insert_entry(new_buckets, entry, key_getter);
+			},
+			None => (),
+		}
+	};
+	collection.buckets = new_buckets;
+}
+
+fn hash_collection_reserve_for_insert(collection, key_getter) {
+	let capacity = len(collection.buckets);
+	if capacity <= 0 {
+		hash_collection_rehash(collection, key_getter, 8);
+	} else if (collection.len + 1) * 3 >= capacity * 2 {
+		hash_collection_rehash(collection, key_getter, capacity * 2);
+	}
+}
+
+fn hash_collection_find_index_with_hash(collection, entry_hash: hash, value, key_getter) -> Option<int> {
+	let capacity = len(collection.buckets);
+	if capacity <= 0 {
+		return None;
+	};
+
+	let mut index = hash_collection_bucket_index(entry_hash, capacity);
+	let mut remaining = capacity;
+	loop {
+		if remaining <= 0 {
+			return None;
+		};
+
+		match effects_unsafe { collection.buckets[index] } {
+			Some(entry) => {
+				if entry.hash == entry_hash and key_getter(entry) == value {
+					return Some(index);
+				}
+			},
+			None => return None,
+		};
+
+		index = bit_and(index + 1, capacity - 1);
+		remaining -= 1;
+	}
+}
+
+fn hash_collection_eq(left, right, contain_fn) -> bool {
+    if left.len != right.len {
+		return false;
+	};
+
+	for value in left {
+		if not contain_fn(right, value) {
+			return false;
+		}
+	};
+	true
+}
+
+fn hash_collection_to_string(collection) -> string {
+    let mut rendered = "{ ";
+	let mut first = true;
+	for element in collection {
+		if not first {
+			string_push_str(rendered, ", ");
+		} else {
+			first = false;
+		};
+		string_push_str(rendered, to_string(element));
+	};
+	string_push_str(rendered, " }");
+	rendered
+}
+
+fn hash_collection_hash(collection, tag, state: &mut hasher) {
+    hasher_write_string(state, tag);
+	let mut acc = unordered_hasher_new();
+	for entry in collection {
+		unordered_hasher_add(acc, value_hash(entry));
+	};
+	hasher_write_hash(state, unordered_hasher_finish(acc));
+	hasher_write_int(state, collection.len)
+}

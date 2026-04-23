@@ -19,6 +19,8 @@ use crate::{
     },
     module::Module,
     std::{
+        cast::CAST_TRAIT,
+        math::int_type,
         string::String,
         value::{VALUE_TRAIT, equal},
     },
@@ -183,6 +185,10 @@ fn hash_hash_value(value: HashValue, state: &mut Hasher) {
     state.write_hash(value);
 }
 
+fn hash_to_int(value: HashValue) -> isize {
+    value.0 as isize
+}
+
 pub fn add_to_module(to: &mut Module) {
     // Types
     to.add_type_alias_str("hash", hash_type());
@@ -198,6 +204,12 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryNativeFnNN::new(hash_value_to_string)) as Function,
             b(BinaryNativeFnNMN::new(hash_hash_value)) as Function,
         ],
+    );
+    to.add_concrete_impl_no_locals(
+        CAST_TRAIT.clone(),
+        [hash_type(), int_type()],
+        [],
+        [b(UnaryNativeFnNN::new(hash_to_int)) as Function],
     );
 
     // Functions

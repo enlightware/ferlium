@@ -43,6 +43,8 @@ pub fn add_impls(mut to: Module, source_table: &mut SourceTable, module_id: Modu
         prelude!("core_impls.fer"),
         // These functions depend on array iterator being available.
         prelude!("core_impls_dependent.fer"),
+        // Keep hash-based containers isolated so they can be toggled during step-by-step debugging.
+        prelude!("hash_collections.fer"),
         // Json depends on expect_variant_object_entry being available.
         prelude!("json.fer"),
     ];
