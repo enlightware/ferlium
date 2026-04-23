@@ -434,7 +434,7 @@ fn trait_constraint_may_be_satisfiable(
     }
 
     stack.remove(&query);
-    Ok(!trait_ref.derives.is_empty())
+    Ok(!trait_ref.derivers.is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]

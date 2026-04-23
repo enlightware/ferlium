@@ -7,17 +7,18 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use crate::{
     Location,
+    containers::b,
     effects::EffType,
     error::InternalCompilationError,
     function::FunctionDefinition,
     ir::{self, NodeArena, NodeId},
     ir_syn,
     module::{Module, TraitImplId},
-    std::{STD_MODULE_ID, product_value_deriver::add_product_value_deriver},
+    std::{STD_MODULE_ID, product_value_deriver::ProductValueDeriver},
     r#trait::{Deriver, TraitRef},
     trait_solver::TraitSolver,
     r#type::{FnType, Type, TypeKind},
@@ -25,13 +26,6 @@ use crate::{
 };
 
 use FunctionDefinition as Def;
-
-fn add_enum_default_deriver(trait_ref: &mut TraitRef) {
-    Arc::get_mut(&mut trait_ref.0)
-        .unwrap()
-        .derives
-        .push(Box::new(EnumDefaultDeriver));
-}
 
 #[derive(Debug, Clone)]
 struct EnumDefaultDeriver;
@@ -102,7 +96,7 @@ impl Deriver for EnumDefaultDeriver {
 
 pub static DEFAULT_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var_ty = Type::variable_id(0);
-    let mut trait_ref = TraitRef::new_with_self_input_type(
+    let trait_ref = TraitRef::new_with_self_input_type(
         "Default",
         "A type with a default value.",
         [],
@@ -115,9 +109,10 @@ pub static DEFAULT_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
             ),
         )],
     );
-    add_enum_default_deriver(&mut trait_ref);
-    add_product_value_deriver(&mut trait_ref);
-    trait_ref.with_module_id(STD_MODULE_ID)
+    trait_ref.with_module_id_and_derivers(
+        STD_MODULE_ID,
+        vec![b(EnumDefaultDeriver), b(ProductValueDeriver)],
+    )
 });
 
 pub fn add_to_module(to: &mut Module) {

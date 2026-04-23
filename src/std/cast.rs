@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use crate::{
     Location,
@@ -59,7 +59,7 @@ pub static CAST_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var0_ty = Type::variable_id(0);
     let var1_ty = Type::variable_id(1);
     let unary_fn_ty = FnType::new_by_val([var0_ty], var1_ty, EffType::empty());
-    let mut cast_trait = TraitRef::new(
+    let cast_trait = TraitRef::new(
         "Cast",
         "Conversion of a value from one type to another.",
         ["From", "To"],
@@ -73,11 +73,7 @@ pub static CAST_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
             ),
         )],
     );
-    Arc::get_mut(&mut cast_trait.0)
-        .unwrap()
-        .derives
-        .push(Box::new(SelfCastDeriver));
-    cast_trait.with_module_id(STD_MODULE_ID)
+    cast_trait.with_module_id_and_deriver(STD_MODULE_ID, SelfCastDeriver)
 });
 
 pub fn add_to_module(to: &mut Module) {

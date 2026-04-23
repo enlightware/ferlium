@@ -235,7 +235,7 @@ impl ast::TraitDefinition {
             output_type_names,
             constraints,
             functions,
-            derives: vec![],
+            derivers: vec![],
             spans: Some(spans),
         })
         .map_err(|error| match error {

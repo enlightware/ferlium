@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 use crate::{
     Location,
@@ -37,13 +37,6 @@ const VALUE_EQ_METHOD_INDEX: usize = 0;
 const VALUE_TO_STRING_METHOD_INDEX: usize = 1;
 
 use FunctionDefinition as Def;
-
-fn add_value_deriver(trait_ref: &mut TraitRef) {
-    Arc::get_mut(&mut trait_ref.0)
-        .unwrap()
-        .derives
-        .push(Box::new(ValueDeriver));
-}
 
 fn derive_value_to_string_body(
     trait_ref: &TraitRef,
@@ -464,7 +457,7 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var_ty = Type::variable_id(0);
     let binary_fn_ty = FnType::new_by_val([var_ty, var_ty], bool_type(), EffType::empty());
     let unary_to_string_ty = FnType::new_by_val([var_ty], string_type(), EffType::empty());
-    let mut trait_ref = TraitRef::new_with_self_input_type(
+    let trait_ref = TraitRef::new_with_self_input_type(
         "Value",
         "A type that supports semantic equality and string conversion.",
         [],
@@ -487,8 +480,7 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
             ),
         ],
     );
-    add_value_deriver(&mut trait_ref);
-    trait_ref.with_module_id(STD_MODULE_ID)
+    trait_ref.with_module_id_and_deriver(STD_MODULE_ID, ValueDeriver)
 });
 
 pub fn add_to_module(to: &mut Module) {

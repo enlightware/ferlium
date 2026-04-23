@@ -556,7 +556,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     Arc::get_mut(&mut serialize_trait.0)
         .unwrap()
-        .derives
+        .derivers
         .push(Box::new(AlgebraicTypeSerializeDeriver));
     to.add_trait(serialize_trait.with_module_id(STD_MODULE_ID));
 
@@ -580,7 +580,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     Arc::get_mut(&mut deserialize_trait.0)
         .unwrap()
-        .derives
+        .derivers
         .push(Box::new(AlgebraicTypeDeserializeDeriver));
     to.add_trait(deserialize_trait.with_module_id(STD_MODULE_ID));
 

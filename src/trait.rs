@@ -89,8 +89,8 @@ pub struct Trait {
     pub constraints: Vec<PubTypeConstraint>,
     /// The functions provided by the trait.
     pub functions: Vec<(Ustr, FunctionDefinition)>,
-    /// The trait derivators
-    pub derives: Vec<Box<dyn Deriver>>,
+    /// The trait derivers
+    pub derivers: Vec<Box<dyn Deriver>>,
     /// If the trait is from code, this contains the source spans of the definition.
     pub spans: Option<TraitSpans>,
 }
@@ -411,7 +411,7 @@ impl TraitRef {
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: Vec::new(),
             functions,
-            derives: Vec::new(),
+            derivers: Vec::new(),
             spans: None,
         };
         Self::from_trait_data(trait_data).unwrap()
@@ -452,7 +452,7 @@ impl TraitRef {
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: constraints.into(),
             functions,
-            derives: Vec::new(),
+            derivers: Vec::new(),
             spans: None,
         };
         Self::from_trait_data(trait_data).unwrap()
@@ -495,6 +495,32 @@ impl TraitRef {
         Arc::get_mut(&mut self.0)
             .expect("trait module id must be assigned before sharing the trait reference")
             .module_id = Some(module_id);
+        self
+    }
+
+    /// Set the module_id of the trait and a deriver, which is required before sharing the trait reference across threads.
+    pub fn with_module_id_and_deriver(
+        mut self,
+        module_id: ModuleId,
+        deriver: impl Deriver + 'static,
+    ) -> Self {
+        let self_ref = Arc::get_mut(&mut self.0)
+            .expect("trait module id must be assigned before sharing the trait reference");
+        self_ref.module_id = Some(module_id);
+        self_ref.derivers.push(Box::new(deriver));
+        self
+    }
+
+    /// Set the module_id of the trait and derivers, which is required before sharing the trait reference across threads.
+    pub fn with_module_id_and_derivers(
+        mut self,
+        module_id: ModuleId,
+        derivers: Vec<Box<dyn Deriver + 'static>>,
+    ) -> Self {
+        let self_ref = Arc::get_mut(&mut self.0)
+            .expect("trait module id must be assigned before sharing the trait reference");
+        self_ref.module_id = Some(module_id);
+        self_ref.derivers = derivers;
         self
     }
 }

@@ -7,8 +7,6 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::Arc;
-
 use crate::{
     Location,
     containers::SVec2,
@@ -23,19 +21,12 @@ use crate::{
     type_like::TypeLike,
 };
 
-pub fn add_product_value_deriver(trait_ref: &mut TraitRef) {
-    Arc::get_mut(&mut trait_ref.0)
-        .unwrap()
-        .derives
-        .push(Box::new(ProductValueDeriver));
-}
-
 /// A deriver for traits with a single input type, no output type,
 /// and a single constructor method that returns an instance of the input type.
 /// Calls recursively the method of each member of a product type and combines the results using the same constructor.
 /// Useful for traits like `Default` and `Empty`.
 #[derive(Debug, Clone)]
-struct ProductValueDeriver;
+pub(crate) struct ProductValueDeriver;
 
 impl Deriver for ProductValueDeriver {
     fn derive_impl(

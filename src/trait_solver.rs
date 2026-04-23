@@ -1294,7 +1294,7 @@ impl<'a> TraitSolver<'a> {
         }
 
         // No blanket implementation found, look for a derived implementation.
-        for derive in &trait_ref.derives {
+        for derive in &trait_ref.derivers {
             if let Some(impl_id) = derive.derive_impl(trait_ref, input_tys, fn_span, arena, self)? {
                 return Ok(impl_id);
             } else {
