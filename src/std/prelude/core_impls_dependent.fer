@@ -34,6 +34,13 @@ impl<A> Value for [A] where A: Value {
 		string_push_str(rendered, "]");
 		rendered
 	}
+
+	fn hash(value: [A], state: &mut hasher) {
+		hasher_write_int(state, array_len(value));
+		for element in value {
+			hash(element, state);
+		}
+	}
 }
 
 // Serde derive helper

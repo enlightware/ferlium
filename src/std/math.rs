@@ -18,14 +18,15 @@ use crate::{
     effects::{PrimitiveEffect, effect, no_effects},
     error::RuntimeErrorKind,
     function::{
-        BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function, NullaryNativeFnN,
-        UnaryNativeFnNN,
+        BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
+        NullaryNativeFnN, UnaryNativeFnNN,
     },
     module::Module,
     std::{
         cast::CAST_TRAIT,
         core_traits_names::{BITS_TRAIT_NAME, DIV_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
         default::DEFAULT_TRAIT,
+        hash::Hasher,
         ordering::compare,
         string::String,
         value::{VALUE_TRAIT, equal},
@@ -203,6 +204,14 @@ fn test_bit(value: Int, position: Int) -> bool {
     (value & bit(position)) != 0
 }
 
+fn hash_int(value: Int, state: &mut Hasher) {
+    state.write_isize(value);
+}
+
+fn hash_float(value: Float, state: &mut Hasher) {
+    state.write_u64(value.into_inner().to_bits());
+}
+
 pub fn add_to_module(to: &mut Module) {
     use RuntimeErrorKind::*;
 
@@ -222,6 +231,7 @@ pub fn add_to_module(to: &mut Module) {
         [
             b(BinaryFn::new(equal::<Int>)) as Function,
             b(UnaryFn::new(|value: Int| String::new(&value.to_string()))) as Function,
+            b(BinaryNativeFnNMN::new(hash_int)) as Function,
         ],
     );
     let num_trait = to.get_trait_str(NUM_TRAIT_NAME).unwrap().clone();
@@ -343,6 +353,7 @@ pub fn add_to_module(to: &mut Module) {
         [
             b(BinaryFn::new(equal::<Float>)) as Function,
             b(UnaryFn::new(|value: Float| String::new(&value.to_string()))) as Function,
+            b(BinaryNativeFnNMN::new(hash_float)) as Function,
         ],
     );
     to.add_concrete_impl_no_locals(

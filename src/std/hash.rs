@@ -11,16 +11,24 @@ use std::fmt;
 
 use crate::{
     cached_primitive_ty,
+    containers::b,
     effects::no_effects,
-    function::{BinaryNativeFnMNN, NullaryNativeFnN, UnaryNativeFnNN},
+    function::{
+        BinaryNativeFnMNN, BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN,
+        UnaryNativeFnNN,
+    },
     module::Module,
+    std::{
+        string::String,
+        value::{VALUE_TRAIT, equal},
+    },
     r#type::Type,
     value::NativeDisplay,
 };
 use ustr::ustr;
 
 /// A hash value
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HashValue(u64);
 
 impl NativeDisplay for HashValue {
@@ -78,6 +86,10 @@ impl Hasher {
         for &b in bytes {
             self.write_u8(b);
         }
+    }
+
+    pub fn write_string(&mut self, s: String) {
+        self.write_bytes(s.as_ref().as_bytes());
     }
 
     pub fn write_hash(&mut self, h: HashValue) {
@@ -163,11 +175,30 @@ pub fn unordered_hasher_type() -> Type {
     cached_primitive_ty!(UnorderedHasher)
 }
 
+fn hash_value_to_string(value: HashValue) -> String {
+    String::new(&format!("hash({})", value.0))
+}
+
+fn hash_hash_value(value: HashValue, state: &mut Hasher) {
+    state.write_hash(value);
+}
+
 pub fn add_to_module(to: &mut Module) {
     // Types
     to.add_type_alias_str("hash", hash_type());
     to.add_type_alias_str("hasher", hasher_type());
     to.add_type_alias_str("unordered_hasher", unordered_hasher_type());
+
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [hash_type()],
+        [],
+        [
+            b(BinaryNativeFnNNN::new(equal::<HashValue>)) as Function,
+            b(UnaryNativeFnNN::new(hash_value_to_string)) as Function,
+            b(BinaryNativeFnNMN::new(hash_hash_value)) as Function,
+        ],
+    );
 
     // Functions
     to.add_function(
@@ -198,6 +229,15 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.add_function(
+        ustr("hasher_write_string"),
+        BinaryNativeFnMNN::description_with_default_ty(
+            Hasher::write_string,
+            ["hasher", "value"],
+            "Write a string value into a hasher.",
+            no_effects(),
+        ),
+    );
+    to.add_function(
         ustr("hasher_finish"),
         UnaryNativeFnNN::description_with_default_ty(
             Hasher::finish,
@@ -207,7 +247,7 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.add_function(
-        ustr("unorderered_hasher_new"),
+        ustr("unordered_hasher_new"),
         NullaryNativeFnN::description_with_default_ty(
             UnorderedHasher::new,
             [],
@@ -216,7 +256,7 @@ pub fn add_to_module(to: &mut Module) {
         ),
     );
     to.add_function(
-        ustr("unorderered_hasher_add"),
+        ustr("unordered_hasher_add"),
         BinaryNativeFnMNN::description_with_default_ty(
             UnorderedHasher::add,
             ["acc", "hash"],

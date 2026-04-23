@@ -11,11 +11,12 @@ use std::sync::LazyLock;
 
 use crate::{
     containers::b,
-    function::{BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN},
+    function::{BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN},
     module::Module,
     std::{
         STD_MODULE_ID,
         default::DEFAULT_TRAIT,
+        hash::Hasher,
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
@@ -39,6 +40,8 @@ fn unit_to_string(_: ()) -> crate::std::string::String {
     crate::std::string::String::new("()")
 }
 
+fn unit_hash(_: (), _: &mut Hasher) {}
+
 pub fn add_to_module(to: &mut Module) {
     // Add aliases for basic types
     to.add_type_alias_str("()", Type::unit());
@@ -57,6 +60,7 @@ pub fn add_to_module(to: &mut Module) {
         [
             b(BinaryNativeFnNNN::new(|_: (), _: ()| true)) as Function,
             b(UnaryNativeFnNN::new(unit_to_string)) as Function,
+            b(BinaryNativeFnNMN::new(unit_hash)) as Function,
         ],
     );
     to.add_concrete_impl_no_locals(

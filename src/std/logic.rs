@@ -14,11 +14,12 @@ use crate::{
     cached_primitive_ty,
     containers::b,
     effects::no_effects,
-    function::{BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN},
+    function::{BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN},
     module::Module,
     std::{
         core_traits_names::BITS_TRAIT_NAME,
         default::DEFAULT_TRAIT,
+        hash::Hasher,
         math::Int,
         string::String,
         value::{VALUE_TRAIT, equal},
@@ -65,6 +66,10 @@ fn test_bit(value: bool, position: Int) -> bool {
     if position == 0 { value } else { false }
 }
 
+fn hash_bool(value: bool, state: &mut Hasher) {
+    state.write_bool(value);
+}
+
 pub fn add_to_module(to: &mut Module) {
     // Types
     // Note: bool alias is added in core.rs
@@ -79,6 +84,7 @@ pub fn add_to_module(to: &mut Module) {
         [
             b(BinaryFn::new(equal::<bool>)) as Function,
             b(UnaryFn::new(|value: bool| String::new(&value.to_string()))) as Function,
+            b(BinaryNativeFnNMN::new(hash_bool)) as Function,
         ],
     );
     let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();

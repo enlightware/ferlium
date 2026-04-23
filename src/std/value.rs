@@ -16,9 +16,11 @@ use crate::{
     function::FunctionDefinition,
     ir::{self, NodeArena, NodeId},
     ir_syn,
-    module::{self, LocalDeclId, Module, TraitImplId, id::Id},
+    module::{self, LocalDecl, LocalDeclId, Module, TraitImplId, id::Id},
     mutability::{MutType, MutVal},
-    std::{STD_MODULE_ID, logic::bool_type, math::int_type, string::string_type},
+    std::{
+        STD_MODULE_ID, hash::hasher_type, logic::bool_type, math::int_type, string::string_type,
+    },
     r#trait::{Deriver, TraitRef},
     trait_solver::TraitSolver,
     r#type::{FnArgType, FnType, Type, TypeKind},
@@ -35,6 +37,7 @@ where
 
 const VALUE_EQ_METHOD_INDEX: usize = 0;
 const VALUE_TO_STRING_METHOD_INDEX: usize = 1;
+const VALUE_HASH_METHOD_INDEX: usize = 2;
 
 use FunctionDefinition as Def;
 
@@ -405,6 +408,171 @@ fn derive_value_eq_body(
     Ok(root.map(|root| (root, locals)))
 }
 
+fn derive_value_hash_body(
+    trait_ref: &TraitRef,
+    input_types: &[Type],
+    span: Location,
+    arena: &mut NodeArena,
+    solver: &mut TraitSolver,
+) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
+    use ir_syn::*;
+
+    assert!(input_types.len() == 1);
+    let ty = input_types[0];
+    assert!(ty.is_constant());
+
+    let n = |arena: &mut NodeArena, kind: ir::NodeKind, ty: Type| -> NodeId {
+        arena.alloc(ir::Node::new(
+            kind,
+            ty,
+            EffType::empty(),
+            Location::new_synthesized(),
+        ))
+    };
+
+    let unit_ty = Type::unit();
+    let hasher_ty = hasher_type();
+    let hasher_write_string = solver.get_local_or_import_function(
+        span,
+        &module::Path::single_str("std"),
+        crate::ustr("hasher_write_string"),
+    )?;
+
+    let locals = vec![
+        local("self", ty),
+        LocalDecl::new(
+            (crate::ustr("state"), Location::new_synthesized()),
+            MutType::mutable(),
+            hasher_ty,
+            None,
+            Location::new_synthesized(),
+        ),
+    ];
+    let l_self_id = LocalDeclId::from_index(0);
+    let l_state_id = LocalDeclId::from_index(1);
+
+    let value_hash_fn_ty = |value_ty| {
+        FnType::new(
+            vec![
+                FnArgType::new_by_val(value_ty),
+                FnArgType::new(hasher_ty, MutType::mutable()),
+            ],
+            unit_ty,
+            EffType::empty(),
+        )
+    };
+    let hasher_write_string_ty = FnType::new(
+        vec![
+            FnArgType::new(hasher_ty, MutType::mutable()),
+            FnArgType::new_by_val(string_type()),
+        ],
+        unit_ty,
+        EffType::empty(),
+    );
+
+    let build_write_string = |arena: &mut NodeArena, value: &str| {
+        let state = n(arena, load(1, l_state_id), hasher_ty);
+        let value = n(arena, native_str(value), string_type());
+        n(
+            arena,
+            static_apply(
+                hasher_write_string,
+                hasher_write_string_ty.clone(),
+                [state, value],
+                span,
+            ),
+            unit_ty,
+        )
+    };
+    let mut build_hash_value = |arena: &mut NodeArena,
+                                value: NodeId,
+                                value_ty: Type|
+     -> Result<NodeId, InternalCompilationError> {
+        let function = solver.solve_impl_method(
+            trait_ref,
+            &[value_ty],
+            VALUE_HASH_METHOD_INDEX,
+            span,
+            arena,
+        )?;
+        let state = n(arena, load(1, l_state_id), hasher_ty);
+        Ok(n(
+            arena,
+            static_apply(function, value_hash_fn_ty(value_ty), [value, state], span),
+            unit_ty,
+        ))
+    };
+
+    let ty_data = ty.data();
+    use TypeKind::*;
+    let root = match &*ty_data {
+        Tuple(member_tys) => {
+            let member_tys = member_tys.clone();
+            drop(ty_data);
+            let load_self = n(arena, load(0, l_self_id), ty);
+            let mut statements = Vec::with_capacity(member_tys.len() + 1);
+            for (index, member_ty) in member_tys.into_iter().enumerate() {
+                let member = n(arena, project(load_self, index), member_ty);
+                statements.push(build_hash_value(arena, member, member_ty)?);
+            }
+            statements.push(n(arena, native(()), unit_ty));
+            Some((n(arena, block(statements), unit_ty), locals))
+        }
+        Record(fields) => {
+            let fields = fields.clone();
+            drop(ty_data);
+            let load_self = n(arena, load(0, l_self_id), ty);
+            let mut statements = Vec::with_capacity(fields.len() + 1);
+            for (index, (_, member_ty)) in fields.into_iter().enumerate() {
+                let member = n(arena, project(load_self, index), member_ty);
+                statements.push(build_hash_value(arena, member, member_ty)?);
+            }
+            statements.push(n(arena, native(()), unit_ty));
+            Some((n(arena, block(statements), unit_ty), locals))
+        }
+        Variant(variants) => {
+            let variants = variants.clone();
+            drop(ty_data);
+
+            let self_value = n(arena, load(0, l_self_id), ty);
+            let self_tag = n(arena, extract_tag(self_value), int_type());
+            let mut alternatives = Vec::with_capacity(variants.len());
+
+            for (tag, payload_ty) in variants.into_iter() {
+                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let mut statements = vec![build_write_string(arena, tag.as_str())];
+                if payload_ty != Type::unit() {
+                    let self_value = n(arena, load(0, l_self_id), ty);
+                    let payload = n(arena, project(self_value, 0), payload_ty);
+                    statements.push(build_hash_value(arena, payload, payload_ty)?);
+                }
+                statements.push(n(arena, native(()), unit_ty));
+                let branch = n(arena, block(statements), unit_ty);
+                alternatives.push((tag_val, branch));
+            }
+
+            let default = n(arena, native(()), unit_ty);
+            Some((
+                n(arena, case(self_tag, alternatives, default), unit_ty),
+                locals,
+            ))
+        }
+        Named(named) => {
+            let named = named.clone();
+            drop(ty_data);
+            let shape_ty = named.instantiated_shape();
+            let load_self = n(arena, load(0, l_self_id), shape_ty);
+            Some((build_hash_value(arena, load_self, shape_ty)?, locals))
+        }
+        _ => {
+            drop(ty_data);
+            None
+        }
+    };
+
+    Ok(root)
+}
+
 fn derive_structural_value_impl(
     trait_ref: &TraitRef,
     input_types: &[Type],
@@ -422,9 +590,18 @@ fn derive_structural_value_impl(
     else {
         return Ok(None);
     };
+    let Some((hash_root, hash_locals)) =
+        derive_value_hash_body(trait_ref, input_types, span, arena, solver)?
+    else {
+        return Ok(None);
+    };
     Ok(Some(TraitImplId::Local(
         solver.add_concrete_impl_from_code_entries(
-            [(eq_root, eq_locals), (to_string_root, to_string_locals)],
+            [
+                (eq_root, eq_locals),
+                (to_string_root, to_string_locals),
+                (hash_root, hash_locals),
+            ],
             trait_ref,
             input_types,
             [],
@@ -457,9 +634,17 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     let var_ty = Type::variable_id(0);
     let binary_fn_ty = FnType::new_by_val([var_ty, var_ty], bool_type(), EffType::empty());
     let unary_to_string_ty = FnType::new_by_val([var_ty], string_type(), EffType::empty());
+    let binary_hash_ty = FnType::new(
+        vec![
+            FnArgType::new_by_val(var_ty),
+            FnArgType::new(hasher_type(), MutType::mutable()),
+        ],
+        Type::unit(),
+        EffType::empty(),
+    );
     let trait_ref = TraitRef::new_with_self_input_type(
         "Value",
-        "A type that supports semantic equality and string conversion.",
+        "A type that supports semantic equality, string conversion, and hashing.",
         [],
         [
             (
@@ -476,6 +661,14 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                     unary_to_string_ty,
                     ["value"],
                     "Returns the string representation of `value`.",
+                ),
+            ),
+            (
+                "hash",
+                Def::new_infer_quantifiers(
+                    binary_hash_ty,
+                    ["value", "state"],
+                    "Writes the hash of `value` into `state`.",
                 ),
             ),
         ],

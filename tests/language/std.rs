@@ -1093,33 +1093,104 @@ fn hashing() {
         "fn hash_int(x) { let mut h = hasher_new(); hasher_write_int(h, x); hasher_finish(h) }
          let h1 = hash_int(1);
          let h2 = hash_int(2);
-         let mut acc = unorderered_hasher_new();
-         unorderered_hasher_add(acc, h1);
-         unorderered_hasher_add(acc, h2);
+         let mut acc = unordered_hasher_new();
+         unordered_hasher_add(acc, h1);
+         unordered_hasher_add(acc, h2);
          unordered_hasher_finish(acc)",
     );
     let unordered_21 = run_hash(
         "fn hash_int(x) { let mut h = hasher_new(); hasher_write_int(h, x); hasher_finish(h) }
          let h1 = hash_int(1);
          let h2 = hash_int(2);
-         let mut acc = unorderered_hasher_new();
-         unorderered_hasher_add(acc, h2);
-         unorderered_hasher_add(acc, h1);
+         let mut acc = unordered_hasher_new();
+         unordered_hasher_add(acc, h2);
+         unordered_hasher_add(acc, h1);
          unordered_hasher_finish(acc)",
     );
     let unordered_with_duplicate = run_hash(
         "fn hash_int(x) { let mut h = hasher_new(); hasher_write_int(h, x); hasher_finish(h) }
          let h1 = hash_int(1);
          let h2 = hash_int(2);
-         let mut acc = unorderered_hasher_new();
-         unorderered_hasher_add(acc, h1);
-         unorderered_hasher_add(acc, h2);
-         unorderered_hasher_add(acc, h1);
+         let mut acc = unordered_hasher_new();
+         unordered_hasher_add(acc, h1);
+         unordered_hasher_add(acc, h2);
+         unordered_hasher_add(acc, h1);
          unordered_hasher_finish(acc)",
     );
 
     assert_eq!(unordered_12, unordered_21);
     assert_ne!(unordered_12, unordered_with_duplicate);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn value_hashing() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(
+            "let mut via_value = hasher_new();
+             hash(1, via_value);
+             let via_value = hasher_finish(via_value);
+             let mut direct = hasher_new();
+             hasher_write_int(direct, 1);
+             let direct = hasher_finish(direct);
+             via_value == direct"
+        ),
+        bool(true)
+    );
+
+    assert_val_eq!(
+        session.run(
+            "let mut left = hasher_new();
+             hash([1, 2], left);
+             let left = hasher_finish(left);
+             let mut right = hasher_new();
+             hash([1, 2], right);
+             let right = hasher_finish(right);
+             left == right"
+        ),
+        bool(true)
+    );
+    assert_val_eq!(
+        session.run(
+            "let mut left = hasher_new();
+             hash([1, 2], left);
+             let left = hasher_finish(left);
+             let mut right = hasher_new();
+             hash([2, 1], right);
+             let right = hasher_finish(right);
+             left == right"
+        ),
+        bool(false)
+    );
+
+    assert_val_eq!(
+        session.run(
+            "struct Pair(int, int)
+             let mut left = hasher_new();
+             hash(Pair(1, 2), left);
+             let left = hasher_finish(left);
+             let mut right = hasher_new();
+             hash(Pair(1, 2), right);
+             let right = hasher_finish(right);
+             left == right"
+        ),
+        bool(true)
+    );
+    assert_val_eq!(
+        session.run(
+            "enum Entry { Int(int), Flag(bool) }
+             let mut left = hasher_new();
+             hash(Int(1), left);
+             let left = hasher_finish(left);
+             let mut right = hasher_new();
+             hash(Flag(true), right);
+             let right = hasher_finish(right);
+             left == right"
+        ),
+        bool(false)
+    );
 }
 
 #[test]

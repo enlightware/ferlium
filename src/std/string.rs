@@ -23,14 +23,16 @@ use crate::{
     effects::{PrimitiveEffect, effect, no_effects},
     error::RuntimeErrorKind,
     function::{
-        BinaryNativeFnMNN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
-        NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnNV,
+        BinaryNativeFnMNN, BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN,
+        BinaryNativeFnNNV, Function, NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV,
+        UnaryNativeFnNN, UnaryNativeFnNV,
     },
     module::{Module, ModuleFunction},
     std::{
         core_traits_names::ORD_TRAIT_NAME,
         default::DEFAULT_TRAIT,
         empty::EMPTY_TRAIT,
+        hash::Hasher,
         logic::bool_type,
         math::{float_type, float_value, int_type, int_value},
         ordering::compare,
@@ -494,6 +496,10 @@ pub fn string_value(s: &str) -> Value {
     Value::native(String::from_str(s).unwrap())
 }
 
+fn hash_string(value: String, state: &mut Hasher) {
+    state.write_bytes(value.as_ref().as_bytes());
+}
+
 pub fn add_to_module(to: &mut Module) {
     // Note: string alias is added in core.rs
 
@@ -504,6 +510,7 @@ pub fn add_to_module(to: &mut Module) {
         [
             b(BinaryNativeFnNNN::new(equal::<String>)) as Function,
             b(UnaryNativeFnNN::new(|value: String| value)) as Function,
+            b(BinaryNativeFnNMN::new(hash_string)) as Function,
         ],
     );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
