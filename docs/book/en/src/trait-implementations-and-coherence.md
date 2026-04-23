@@ -1,6 +1,6 @@
 # Trait Implementations and Coherence
 
-Ferlium lets user code implement existing standard-library traits for user-defined types.
+Ferlium lets user code implement both standard-library traits and user-defined traits.
 This chapter covers the surface syntax for `impl`, generic impls, explicit trait bindings, and the rules that keep trait resolution unambiguous.
 
 ## Basic impl syntax
@@ -181,14 +181,13 @@ Combined with coherence, it keeps trait resolution predictable across module bou
 
 Today, user code can:
 
-- implement existing standard-library traits
+- implement standard-library and user-defined traits
 - write generic impls
 - write impl-level `where` clauses
 - use explicit trait input and output bindings in impl headers
 
 User code still cannot:
 
-- define new traits
 - write per-method generic parameter lists inside traits or impls
 - write method-local `where` clauses inside trait impls
 

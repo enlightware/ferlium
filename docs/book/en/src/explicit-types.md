@@ -150,17 +150,17 @@ Ferlium still has an inference-first design, but several parts of type abstracti
 - you can write function-level `where` clauses
 - you can define generic `struct` and `enum` types
 - you can add `where` clauses to generic type definitions
-- you can write generic `impl` blocks for existing traits
+- you can define traits in user code
+- you can write generic `impl` blocks for traits
 - you can add `where` clauses to those `impl` blocks
 - you can write explicit trait input and output bindings in impl headers
 
 Some limitations remain:
 
-- you cannot define new traits in user code yet
 - you cannot write per-method generic parameter lists or method-local `where` clauses inside trait impls
 
-You still get polymorphism and trait-based behavior through inference and standard-library traits, and explicit syntax mainly serves to document or constrain that inferred structure.
+You still get polymorphism and trait-based behavior primarily through inference, and explicit syntax mainly serves to document or constrain that inferred structure.
 
 ## What comes next
 
-The next chapter introduces trait implementations and coherence, describing how you can implement existing traits for your types, and how Ferlium ensures that trait resolution remains predictable across module boundaries.
+The next chapter introduces trait implementations and coherence, describing how you can implement traits for your types, and how Ferlium ensures that trait resolution remains predictable across module boundaries.

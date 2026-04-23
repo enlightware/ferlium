@@ -35,6 +35,30 @@ Another useful way to think of a trait is as a **relation over types**.
 
 Traits are also called [type classes](https://en.wikipedia.org/wiki/Type_class) in some languages, and they are a powerful way to achieve polymorphism and code reuse without inheritance.
 
+### A common standard trait: `Value`
+
+One important standard trait is `Value`.
+It describes types that support:
+
+- semantic equality
+- conversion to string
+- hashing
+
+In everyday code, this trait is what supports operations and functions such as:
+
+- `left == right`
+- `to_string(value)`
+- `hash(value, state)`
+
+Many built-in types implement `Value`, including `bool`, `int`, `float`, `string`, and arrays whose elements also implement `Value`.
+Structured data also participates naturally:
+
+- tuples and records support `Value` structurally
+- `struct` and `enum` types derive `Value` from their fields or variants when their components do
+
+For product types, hashing follows the type-defined field order.
+For sum types, hashing includes the active variant together with its payload.
+
 ### Traits relating multiple types
 
 A good example of trait relating multiple types is `Cast`, which relates a source type and a target type.
@@ -59,7 +83,7 @@ This helps explain annotations: when the IDE shows inferred constraints, you may
 
 ## Constraints: how operations shape types
 
-When you use an operation, you introduce a **constraint**.
+When you use a function from a trait, you introduce a **constraint**.
 A constraint says: “this type must implement a given trait”.
 
 Examples:
@@ -93,28 +117,62 @@ next(it)
 
 Here, the element type (`Item`) is inferred as `int`, and the return type of `next` follows as `None | Some(int)`.
 
-## Implementing existing traits
+## Defining your own traits
 
-At the moment, traits are defined in the standard library, and user code can implement those existing traits for user-defined types.
+User code can also define traits.
+A simple trait with one main input type looks like this:
 
 ```ferlium
-struct S;
-
-impl Serialize {
-    fn serialize(x: S) {
-        None
-    }
+trait Double<Self> {
+    fn double(value: Self) -> Self;
 }
 ```
 
-Another example:
+Traits may also expose output type slots and carry `where` clauses that specify constraints:
 
 ```ferlium
-struct S;
+trait Project<Self |-> Output>
+where
+    Self: Value
+{
+    fn project(value: Self) -> Output;
+}
+```
 
-impl Deserialize {
-    fn deserialize(v) {
-        S
+This reads as a relation over types:
+
+- `Double` relates one input type, `Self`
+- `Project` relates one input type, `Self`, to one output type, `Output`
+
+The method signatures form the contract that implementations must satisfy.
+
+## Implementing traits
+
+Once a trait exists, you can implement it for suitable types.
+For example, using the trait defined above:
+
+```ferlium
+trait Double<Self> {
+    fn double(value: Self) -> Self;
+}
+
+impl Double for int {
+    fn double(value: int) -> int {
+        value * 2
+    }
+}
+
+double(21)
+```
+
+You can also implement standard-library traits for your own types:
+
+```ferlium
+struct Wrapper(int)
+
+impl Ord for Wrapper {
+    fn cmp(left: Wrapper, right: Wrapper) {
+        cmp(left.0, right.0)
     }
 }
 ```
@@ -122,9 +180,7 @@ impl Deserialize {
 When writing an `impl`, the method signatures and behavior must match the requirements of the trait.
 Impls can also be generic, and Ferlium supports explicit trait input and output bindings in impl headers.
 
-The next chapter, [Trait Implementations and Coherence](./trait-implementations-and-coherence.md), covers this in detail.
-
-
+A later chapter, [Trait Implementations and Coherence](./trait-implementations-and-coherence.md), covers this in detail.
 
 ## Defaulting of ambiguous types
 
