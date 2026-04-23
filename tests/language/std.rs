@@ -1072,6 +1072,58 @@ fn scalar_parsers() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hashing() {
+    let mut session = TestSession::new();
+    let mut run_hash = |src| session.run(src).to_string_repr();
+
+    let ordered_12 = run_hash(
+        "let mut h = hasher_new(); hasher_write_int(h, 1); hasher_write_int(h, 2); hasher_finish(h)",
+    );
+    let ordered_12_again = run_hash(
+        "let mut h = hasher_new(); hasher_write_int(h, 1); hasher_write_int(h, 2); hasher_finish(h)",
+    );
+    let ordered_21 = run_hash(
+        "let mut h = hasher_new(); hasher_write_int(h, 2); hasher_write_int(h, 1); hasher_finish(h)",
+    );
+
+    assert_eq!(ordered_12, ordered_12_again);
+    assert_ne!(ordered_12, ordered_21);
+
+    let unordered_12 = run_hash(
+        "fn hash_int(x) { let mut h = hasher_new(); hasher_write_int(h, x); hasher_finish(h) }
+         let h1 = hash_int(1);
+         let h2 = hash_int(2);
+         let mut acc = unorderered_hasher_new();
+         unorderered_hasher_add(acc, h1);
+         unorderered_hasher_add(acc, h2);
+         unordered_hasher_finish(acc)",
+    );
+    let unordered_21 = run_hash(
+        "fn hash_int(x) { let mut h = hasher_new(); hasher_write_int(h, x); hasher_finish(h) }
+         let h1 = hash_int(1);
+         let h2 = hash_int(2);
+         let mut acc = unorderered_hasher_new();
+         unorderered_hasher_add(acc, h2);
+         unorderered_hasher_add(acc, h1);
+         unordered_hasher_finish(acc)",
+    );
+    let unordered_with_duplicate = run_hash(
+        "fn hash_int(x) { let mut h = hasher_new(); hasher_write_int(h, x); hasher_finish(h) }
+         let h1 = hash_int(1);
+         let h2 = hash_int(2);
+         let mut acc = unorderered_hasher_new();
+         unorderered_hasher_add(acc, h1);
+         unorderered_hasher_add(acc, h2);
+         unorderered_hasher_add(acc, h1);
+         unordered_hasher_finish(acc)",
+    );
+
+    assert_eq!(unordered_12, unordered_21);
+    assert_ne!(unordered_12, unordered_with_duplicate);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concat() {
     let mut session = TestSession::new();
     // strings

@@ -19,6 +19,7 @@ pub mod core_traits_names;
 pub mod default;
 pub mod empty;
 pub mod flow;
+pub mod hash;
 pub mod io;
 mod json;
 pub mod logic;
@@ -40,6 +41,7 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     // Built-in or derivable
     value::add_to_module(&mut module);
     core::add_to_module(&mut module);
+    hash::add_to_module(&mut module);
     default::add_to_module(&mut module);
     empty::add_to_module(&mut module);
     flow::add_to_module(&mut module);
