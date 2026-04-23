@@ -30,7 +30,7 @@ use crate::{
     internal_compilation_error,
     location::Location,
     module::{LocalDecl, LocalDeclId, ModuleFunction, TypeDefLookupResult, id::Id},
-    std::{core::REPR_TRAIT, core_traits_names::NUM_TRAIT_NAME},
+    std::{STD_MODULE_ID, core::REPR_TRAIT, core_traits_names::NUM_TRAIT_NAME},
     r#trait::TraitRef,
     trait_solver::{ConstraintAssumptions, TraitSolver},
     type_like::TypeLike,
@@ -1129,6 +1129,27 @@ impl TypeInference {
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
                 }
+            }
+            EffectsUnsafe(expr) => {
+                if env.current_module_id() != STD_MODULE_ID {
+                    return Err(internal_compilation_error!(Unsupported {
+                        span: expr_span,
+                        reason: "`effects_unsafe` is only available while compiling the standard library"
+                            .to_string(),
+                    }));
+                }
+
+                let (inner_node_id, inner_mut_ty) = self.infer_expr(env, *expr)?;
+                let inner_node = env.ir_arena[inner_node_id].clone();
+                return Ok((
+                    env.ir_arena.alloc(N::new(
+                        inner_node.kind,
+                        inner_node.ty,
+                        no_effects(),
+                        expr_span,
+                    )),
+                    inner_mut_ty,
+                ));
             }
             Match(data) => {
                 let (node, ty, mut_ty, effects) = self.infer_match(
@@ -4416,6 +4437,7 @@ fn collect_free_variables(
             }
         }
         PatternConstraint(data) => collect_free_variables(data.expr, arena, bound, free),
+        EffectsUnsafe(expr) => collect_free_variables(*expr, arena, bound, free),
         Abstract(data) => {
             let mut scope = FxHashSet::default();
             for (arg, _) in &data.args {

@@ -707,6 +707,7 @@ StmtLikeExpr = {
     MatchExpr,
     ForExpr,
     LoopExpr,
+    EffectsUnsafeExpr,
     Block,
 }
 
@@ -893,6 +894,10 @@ PropertyPath: (Path, Ustr) = {
 
 LoopExpr: ExprKind = {
     "loop" <b:Es<BranchBlock>> => ExprKind::loop_(b),
+}
+
+EffectsUnsafeExpr: ExprKind = {
+    "effects_unsafe" <e:Es<Block>> => ExprKind::effects_unsafe(e),
 }
 
 SoftBreakExpr: ExprKind = {

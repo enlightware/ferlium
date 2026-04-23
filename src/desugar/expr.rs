@@ -246,6 +246,13 @@ pub(crate) fn desugar(
                 desugared_index,
             )
         }
+        EffectsUnsafe(expr) => ExprKind::effects_unsafe(desugar(
+            expr,
+            ctx,
+            parsed_arena,
+            desugared_arena,
+            modules_used,
+        )?),
         Match(data) => {
             let MatchData {
                 cond_expr: expr,

@@ -14,7 +14,10 @@ use ustr::ustr;
 use crate::harness::TestSession;
 use ferlium::{
     effects::*,
+    emit_ir::emit_expr_unsafe,
     module::{LocalImplId, id::Id},
+    parse_module_and_expr,
+    std::new_module_using_std,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -204,6 +207,41 @@ fn array_access_must_be_fallible() {
     test_mod(&mut session, mod_src, "f", effect(Fallible));
     let mod_src = "fn f() { let mut a = []; a[0] = 1; } ";
     test_mod(&mut session, mod_src, "f", effect(Fallible));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_unsafe_is_rejected_in_user_code() {
+    let mut session = TestSession::new();
+
+    let error = session.fail_compilation("effects_unsafe { [1][0] }");
+    let error_text = format!("{error:?}");
+    assert!(
+        error_text
+            .contains("`effects_unsafe` is only available while compiling the standard library"),
+        "unexpected error: {error_text}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn effects_unsafe_erases_effects_in_std_context() {
+    let session = TestSession::new();
+    let source_id = session.source_table().next_id();
+    let mod_src = "effects_unsafe { [1][0] }";
+    let (_module, expr, arena) = parse_module_and_expr(mod_src, source_id, true)
+        .expect("std-context expression should parse");
+    let mut module = new_module_using_std(ferlium::module::ModuleId(0));
+    let compiled = emit_expr_unsafe(
+        expr.expect("expected expression"),
+        &arena,
+        &mut module,
+        session.session().modules(),
+        vec![],
+    )
+    .expect("std-context expression should compile");
+
+    assert_eq!(module.ir_arena[compiled.expr].effects, EffType::empty());
 }
 
 #[test]

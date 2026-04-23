@@ -1396,6 +1396,7 @@ pub enum ExprKind<P: Phase> {
     FieldAccess(B<FieldAccessData<P>>),
     Array(Vec<ExprId<P>>),
     Index(IndexData<P>),
+    EffectsUnsafe(ExprId<P>),
     Match(B<MatchData<P>>),
     ForLoop(P::ForLoop),
     Loop(ExprId<P>),
@@ -1505,6 +1506,11 @@ impl<P: Phase> ExprKind<P> {
     /// Construct an [`Index`](ExprKind::Index) expression (array indexing).
     pub fn index(array: ExprId<P>, index: ExprId<P>) -> Self {
         ExprKind::Index(IndexData { array, index })
+    }
+
+    /// Construct an [`EffectsUnsafe`](ExprKind::EffectsUnsafe) expression.
+    pub fn effects_unsafe(expr: ExprId<P>) -> Self {
+        ExprKind::EffectsUnsafe(expr)
     }
 
     /// Construct a [`Match`](ExprKind::Match) expression.
@@ -1665,6 +1671,10 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
                 arena[data.index].format_ind(f, env, arena, indent + 1)?;
                 writeln!(f, "{indent_str}]")
             }
+            EffectsUnsafe(expr) => {
+                writeln!(f, "{indent_str}effects_unsafe")?;
+                arena[*expr].format_ind(f, env, arena, indent + 1)
+            }
             Match(data) => {
                 writeln!(f, "{indent_str}match")?;
                 arena[data.cond_expr].format_ind(f, env, arena, indent + 1)?;
@@ -1726,6 +1736,7 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
                 arena[data.array].visit(visitor, arena);
                 arena[data.index].visit(visitor, arena);
             }
+            EffectsUnsafe(expr) => arena[*expr].visit(visitor, arena),
             Match(data) => {
                 arena[data.cond_expr].visit(visitor, arena);
                 visitor.visit_exprs(data.alternatives.iter().map(|(_, expr)| *expr), arena);

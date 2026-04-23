@@ -437,6 +437,7 @@ atomExpr {
     | For
     | If
     | Match
+    | EffectsUnsafe
     | Literal
     | Tuple
     | Array
@@ -456,6 +457,10 @@ If {
 Match {
     kw<'match'> expr '{' matchArgsOptComma '}'
     | kw<'match'> expr '{' (matchArgs ',')? kw<'_'> '=>' exprOptComma '}'
+}
+
+EffectsUnsafe {
+    kw<'effects_unsafe'> Block
 }
 
 For {
