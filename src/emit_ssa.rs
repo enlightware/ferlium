@@ -2,7 +2,7 @@ use crate::{
   Location, Modules, containers,
   format::FormatWith,
   ir::{self, Case, NodeArena},
-  module::{FunctionId, LocalFunctionId, Module, ModuleEnv, TraitImplId},
+  module::{FunctionId, LocalFunctionId, Module, ModuleEnv, TraitImpl, TraitImplId},
   ssa::{self, BlockIdentity, Program},
   value::{self, Value},
 };
@@ -142,6 +142,11 @@ impl<'a> Emitter<'a> {
     CaseBlocks { heads, bodies, default: default, tail:tail }
   }
 
+  /// Returns a copy of the dictionnary value from `t`
+  fn dictionnary_value(&mut self, t: Option<&TraitImpl>) -> Value {
+    t.unwrap().dictionary_value.clone()
+  }
+
   /// Generates the IR for `node`, which occurs as rvalue.
   fn lower_as_rvalue(&mut self, node: &ir::Node) -> ssa::Value {
     use ir::NodeKind as K;
@@ -180,7 +185,7 @@ impl<'a> Emitter<'a> {
           // Transfer control flow to the head of the loop.
           self.context.point = InsertionPoint::End(blocks.heads[i]);
 
-          // Lower the condition value
+          // Lower the pattern
           // TODO: We may want to check if the types of the lowered condition and the scrutinee are the same
           let x0 = self.lower_as_primitive(c).unwrap();
           // We compare and branch either on the current condition body, or to the next condition head
@@ -190,7 +195,7 @@ impl<'a> Emitter<'a> {
             .unwrap();
           self.insert(ssa::Instruction::condbr(node.span, v, blocks.bodies[i], next));
 
-          // Lower the condition.
+          // Lower the pattern body
           self.context.point = InsertionPoint::End(blocks.bodies[i]);
           let x1 = self.lower_as_rvalue(&self.hir_arena[*a]);
 
@@ -251,20 +256,13 @@ impl<'a> Emitter<'a> {
 
       K::GetDictionary(n) => {
         let v = match n.dictionary {
-          TraitImplId::Local(id) => self
-            .module
-            .get_impl_data(id)
-            .unwrap()
-            .dictionary_value
-            .clone(),
+          TraitImplId::Local(id) => {
+            self.dictionnary_value(self.module.get_impl_data(id))
+          },
           TraitImplId::Import(id) => {
             let slot = self.module.get_import_impl_slot(id).unwrap();
             let other_module = self.others.get(slot.module).unwrap().module().unwrap();
-            other_module
-              .get_impl_data_by_trait_key(&slot.key)
-              .unwrap()
-              .dictionary_value
-              .clone()
+            self.dictionnary_value(other_module.get_impl_data_by_trait_key(&slot.key))
           }
         };
         let mut r: Vec<ssa::Value> = vec![];
