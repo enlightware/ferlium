@@ -780,6 +780,63 @@ fn collect() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn set_and_map_literals() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(
+            "let values = set { 1, 2, 3, 2 };
+             (len(values), set_contains(values, 2), set_contains(values, 4))"
+        ),
+        tuple!(int(3), bool(true), bool(false))
+    );
+    assert_val_eq!(
+        session.run(
+            "let values = map { 1 => \"one\", 2 => \"two\", 1 => \"uno\" };
+             (len(values), map_get(values, 1), map_get(values, 2), map_get(values, 3))"
+        ),
+        tuple!(int(2), some(string("uno")), some(string("two")), none())
+    );
+    assert_val_eq!(
+        session.run(
+            "fn f(value) { value }
+             let values = set { f(\"hi\"), f(\"ho\") };
+             (len(values), set_contains(values, f(\"hi\")))"
+        ),
+        tuple!(int(2), bool(true))
+    );
+    assert_val_eq!(
+        session.run(
+            "fn key(value) { value + 1 }
+             fn label(value) { value }
+             let values = map { key(0) => label(\"hi\"), key(1) => label(\"lo\") };
+             (len(values), map_get(values, key(0)), map_get(values, key(1)))"
+        ),
+        tuple!(int(2), some(string("hi")), some(string("lo")))
+    );
+    assert_val_eq!(
+        session.run(
+            "let values: set<int> = set {};
+             let labels: map<int, string> = map {};
+             (len(values), len(labels))"
+        ),
+        tuple!(int(0), int(0))
+    );
+    assert_val_eq!(
+        session.run(
+            "fn iter(value) { \"local iter\" }
+             fn collect(value) { \"local collect\" }
+             fn empty() { \"local empty\" }
+             let values = set { 1, 2 };
+             let empty_values: set<int> = set {};
+             (len(values), len(empty_values))"
+        ),
+        tuple!(int(2), int(0))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn plain_join_is_inferred_as_generic_function() {
     let mut session = TestSession::new();
     assert_val_eq!(

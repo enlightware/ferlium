@@ -1118,6 +1118,9 @@ impl TypeInference {
                     }
                 }
             }
+            SetLiteral(_) | MapLiteral(_) => {
+                unreachable!("collection literals should be desugared before type inference")
+            }
             Index(data) => {
                 // New type for the array
                 let element_ty = self.fresh_type_var_ty();
@@ -4520,6 +4523,9 @@ fn collect_free_variables(
             for arg in args {
                 collect_free_variables(*arg, arena, bound, free);
             }
+        }
+        SetLiteral(_) | MapLiteral(_) => {
+            unreachable!("collection literals should be desugared before free-variable analysis")
         }
         Project(data) => collect_free_variables(data.expr, arena, bound, free),
         FieldAccess(data) => collect_free_variables(data.expr, arena, bound, free),

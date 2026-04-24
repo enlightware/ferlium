@@ -133,6 +133,8 @@ pub type PMutTypeTypeSpan = MutTypeTypeSpan<Parsed>;
 pub trait Phase: Sized {
     type FormattedString: Debug + Clone + Display;
     type ForLoop: Debug + Clone + FormatWithIndent<Self> + VisitExpr<Self>;
+    type SetLiteralElement: Debug + Clone + FormatWithIndent<Self> + VisitExpr<Self>;
+    type MapLiteralEntry: Debug + Clone + FormatWithIndent<Self> + VisitExpr<Self>;
     type LetPatternContent: Debug + Clone + Display;
     type PatternConstraint: Debug + Clone + Display + FormatWithIndent<Self> + VisitExpr<Self>;
     type Type: Debug + Clone + for<'a> FormatWith<ModuleEnv<'a>>;
@@ -156,6 +158,8 @@ pub struct Desugared;
 impl Phase for Parsed {
     type FormattedString = String;
     type ForLoop = B<ForLoopData>;
+    type SetLiteralElement = ExprId<Parsed>;
+    type MapLiteralEntry = MapLiteralEntry;
     type LetPatternContent = LetPatternKind;
     type PatternConstraint = Never;
     type Type = PType;
@@ -171,6 +175,8 @@ impl Phase for Parsed {
 impl Phase for Desugared {
     type FormattedString = Never;
     type ForLoop = Never;
+    type SetLiteralElement = Never;
+    type MapLiteralEntry = Never;
     type LetPatternContent = LetBindingPattern;
     type PatternConstraint = B<PatternConstraintData>;
     type Type = IrType;
@@ -484,6 +490,18 @@ impl<P: Phase, T: FormatWithIndent<P> + ?Sized> FormatWithIndent<P> for Box<T> {
     }
 }
 
+impl<P: Phase> FormatWithIndent<P> for ExprId<P> {
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &ModuleEnv,
+        arena: &ExprArena<P>,
+        indent: usize,
+    ) -> std::fmt::Result {
+        arena[*self].format_ind(f, env, arena, indent)
+    }
+}
+
 /// A visitor pattern for expressions
 pub trait ExprVisitor<P: Phase> {
     fn visit_start(&mut self, _expr: &Expr<P>) {}
@@ -517,6 +535,40 @@ impl<P: Phase> VisitExpr<P> for Never {
 impl<P: Phase, T: VisitExpr<P> + ?Sized> VisitExpr<P> for Box<T> {
     fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V, arena: &ExprArena<P>) {
         (**self).visit(visitor, arena)
+    }
+}
+
+impl<P: Phase> VisitExpr<P> for ExprId<P> {
+    fn visit<V: ExprVisitor<P>>(&self, visitor: &mut V, arena: &ExprArena<P>) {
+        arena[*self].visit(visitor, arena);
+    }
+}
+
+#[derive(Debug, Clone, Copy, new)]
+pub struct MapLiteralEntry {
+    pub key: PExprId,
+    pub value: PExprId,
+}
+
+impl FormatWithIndent<Parsed> for MapLiteralEntry {
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &ModuleEnv,
+        arena: &ExprArena<Parsed>,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = "  ".repeat(indent.saturating_sub(1));
+        arena[self.key].format_ind(f, env, arena, indent)?;
+        writeln!(f, "{indent_str}=>")?;
+        arena[self.value].format_ind(f, env, arena, indent)
+    }
+}
+
+impl VisitExpr<Parsed> for MapLiteralEntry {
+    fn visit<V: ExprVisitor<Parsed>>(&self, visitor: &mut V, arena: &ExprArena<Parsed>) {
+        arena[self.key].visit(visitor, arena);
+        arena[self.value].visit(visitor, arena);
     }
 }
 
@@ -1395,6 +1447,8 @@ pub enum ExprKind<P: Phase> {
     StructLiteral(B<StructLiteralData<P>>),
     FieldAccess(B<FieldAccessData<P>>),
     Array(Vec<ExprId<P>>),
+    SetLiteral(Vec<P::SetLiteralElement>),
+    MapLiteral(Vec<P::MapLiteralEntry>),
     Index(IndexData<P>),
     EffectsUnsafe(ExprId<P>),
     Match(B<MatchData<P>>),
@@ -1501,6 +1555,16 @@ impl<P: Phase> ExprKind<P> {
     /// Construct an [`Array`](ExprKind::Array) expression.
     pub fn array(elements: Vec<ExprId<P>>) -> Self {
         ExprKind::Array(elements)
+    }
+
+    /// Construct a set literal expression.
+    pub fn set_literal(elements: Vec<P::SetLiteralElement>) -> Self {
+        ExprKind::SetLiteral(elements)
+    }
+
+    /// Construct a map literal expression.
+    pub fn map_literal(entries: Vec<P::MapLiteralEntry>) -> Self {
+        ExprKind::MapLiteral(entries)
     }
 
     /// Construct an [`Index`](ExprKind::Index) expression (array indexing).
@@ -1665,6 +1729,20 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
                     writeln!(f, "{indent_str}]")
                 }
             }
+            SetLiteral(args) => {
+                writeln!(f, "{indent_str}set {{")?;
+                for arg in args.iter() {
+                    arg.format_ind(f, env, arena, indent + 1)?;
+                }
+                writeln!(f, "{indent_str}}}")
+            }
+            MapLiteral(entries) => {
+                writeln!(f, "{indent_str}map {{")?;
+                for entry in entries.iter() {
+                    entry.format_ind(f, env, arena, indent + 1)?;
+                }
+                writeln!(f, "{indent_str}}}")
+            }
             Index(data) => {
                 arena[data.array].format_ind(f, env, arena, indent)?;
                 writeln!(f, "{indent_str}[")?;
@@ -1732,6 +1810,16 @@ impl<P: Phase> VisitExpr<P> for Expr<P> {
             Record(fields) => visitor.visit_exprs(fields.iter().map(|(_, id)| *id), arena),
             FieldAccess(data) => arena[data.expr].visit(visitor, arena),
             Array(args) => visitor.visit_exprs(args.iter().copied(), arena),
+            SetLiteral(args) => {
+                for arg in args {
+                    arg.visit(visitor, arena);
+                }
+            }
+            MapLiteral(entries) => {
+                for entry in entries {
+                    entry.visit(visitor, arena);
+                }
+            }
             Index(data) => {
                 arena[data.array].visit(visitor, arena);
                 arena[data.index].visit(visitor, arena);

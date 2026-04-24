@@ -18,6 +18,7 @@ where
 	value: V,
 }
 
+/// A set storing unique, unordered elements of type `V`.
 struct HashSet<V>
 where
 	V: Value
@@ -201,6 +202,7 @@ where
 	}
 }
 
+/// A map storing unique, unordered key-value pairs of types `K` and `V`.
 struct HashMap<K, V>
 where
 	K: Value,

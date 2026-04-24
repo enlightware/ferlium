@@ -572,8 +572,17 @@ PropertyPath {
 
 pathOrStructCtor {
     Path !noStruct
-    | Path Record !structLiteral
-    | Path '{' '}' !structLiteral
+    | Path pathBrace !structLiteral
+}
+
+pathBrace {
+    '{' (pathBraceItem ',')* pathBraceItem? '}'
+}
+
+pathBraceItem {
+    recordExplicitField
+    | expr '=>' expr
+    | expr
 }
 
 Path {

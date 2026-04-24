@@ -13,6 +13,7 @@ use crate::ast::ExprArena;
 use crate::ast::ExprId;
 use crate::ast::ExprKind;
 use crate::ast::ForLoopData;
+use crate::ast::MapLiteralEntry;
 use crate::ast::PExpr;
 use crate::ast::PExprArena;
 use crate::ast::PExprId;
@@ -51,11 +52,6 @@ use ustr::{Ustr, ustr};
 /// Create a span from two numbers (used by lalrpop with @L/@R positions)
 pub(crate) fn span(l: usize, r: usize, source_id: SourceId) -> Location {
     Location::new_usize(l, r, source_id)
-}
-
-/// Create a span from two u32 values (used when combining locations)
-pub(crate) fn span_u32(l: u32, r: u32, source_id: SourceId) -> Location {
-    Location::new(l, r, source_id)
 }
 
 /// Make a custom parse error
@@ -318,6 +314,77 @@ pub(crate) fn record_literal_pattern(
     let val = LiteralValue::new_tuple(vals);
     let ty = Type::record(names_tys);
     (val, ty)
+}
+
+pub(crate) enum PathBraceItem {
+    Field((UstrSpan, PExprId)),
+    Expr(PExprId),
+    MapEntry(MapLiteralEntry),
+}
+
+fn is_single_segment_path(path: &Path, name: &str) -> bool {
+    path.segments.len() == 1 && path.segments[0].0 == ustr(name)
+}
+
+pub(crate) fn path_brace_expr<L, T>(
+    path: Path,
+    items: Vec<PathBraceItem>,
+    span: Location,
+    arena: &mut PExprArena,
+) -> Result<PExprKind, ParseError<L, T, LocatedError>> {
+    if is_single_segment_path(&path, "set") {
+        let mut elements = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                PathBraceItem::Expr(expr) => elements.push(expr),
+                PathBraceItem::Field(_) | PathBraceItem::MapEntry(_) => {
+                    return error("set literal entries must be expressions".into(), span);
+                }
+            }
+        }
+        return Ok(PExprKind::set_literal(elements));
+    }
+
+    if is_single_segment_path(&path, "map") {
+        let mut entries = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                PathBraceItem::MapEntry(entry) => entries.push(entry),
+                PathBraceItem::Field(_) | PathBraceItem::Expr(_) => {
+                    return error(
+                        "map literal entries must use `key => value` syntax".into(),
+                        span,
+                    );
+                }
+            }
+        }
+        return Ok(PExprKind::map_literal(entries));
+    }
+
+    let mut fields = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            PathBraceItem::Field(field) => fields.push(field),
+            PathBraceItem::Expr(expr) => match &arena[expr].kind {
+                PExprKind::Identifier(path) if path.segments.len() == 1 => {
+                    fields.push((path.segments[0], expr));
+                }
+                _ => {
+                    return error(
+                        "struct literal shorthand fields must be identifiers".into(),
+                        span,
+                    );
+                }
+            },
+            PathBraceItem::MapEntry(_) => {
+                return error(
+                    "map entry syntax is only supported in map literals".into(),
+                    span,
+                );
+            }
+        }
+    }
+    Ok(PExprKind::struct_literal(path, fields))
 }
 
 /// Create an if else block.

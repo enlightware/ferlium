@@ -1,6 +1,7 @@
 use super::format_string::emit_format_string_ast;
 use super::patterns::{desugar_block_exprs, desugar_let_exprs, desugar_pattern_bindings};
 use super::*;
+use crate::ast::Desugared;
 use crate::parser_helpers::ext_b;
 
 /// Desugar a single parsed expression ID into a desugared expression ID.
@@ -229,6 +230,31 @@ pub(crate) fn desugar(
             desugared_arena,
             modules_used,
         )?),
+        SetLiteral(elements) => build_set_literal(
+            desugar_exprs(elements, ctx, parsed_arena, desugared_arena, modules_used)?,
+            expr_span,
+            ctx,
+            desugared_arena,
+            modules_used,
+        )?,
+        MapLiteral(entries) => {
+            let entries = entries
+                .into_iter()
+                .map(|entry| {
+                    Ok((
+                        desugar(entry.key, ctx, parsed_arena, desugared_arena, modules_used)?,
+                        desugar(
+                            entry.value,
+                            ctx,
+                            parsed_arena,
+                            desugared_arena,
+                            modules_used,
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, InternalCompilationError>>()?;
+            build_map_literal(entries, expr_span, ctx, desugared_arena, modules_used)?
+        }
         Index(data) => {
             let IndexData { array, index } = data;
             // Check if the index is a literal directly, to avoid re-desugaring
@@ -424,4 +450,95 @@ fn desugar_exprs(
     ids.into_iter()
         .map(|id| desugar(id, ctx, parsed_arena, desugared_arena, modules_used))
         .collect()
+}
+
+fn inferred_collection_type(
+    name: &str,
+    arg_count: usize,
+    span: Location,
+    ctx: &DesugarCtx<'_>,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<Type, InternalCompilationError> {
+    let ty = ast::PType::AppliedPath {
+        path: std_path(name, span),
+        args: (0..arg_count).map(|_| (ast::PType::Infer, span)).collect(),
+    };
+    ty.desugar_with_ty_params(
+        span,
+        false,
+        ctx.module_env,
+        ctx.generic_ty_params,
+        modules_used,
+    )
+}
+
+fn std_path(name: &str, span: Location) -> Path {
+    Path::new(vec![(ustr("std"), span), (ustr(name), span)])
+}
+
+fn std_identifier(name: &str, span: Location, arena: &mut DExprArena) -> DExprId {
+    arena.alloc(DExpr::new(ExprKind::identifier(std_path(name, span)), span))
+}
+
+fn collect_as(
+    collection: DExprId,
+    ty: Type,
+    span: Location,
+    arena: &mut DExprArena,
+) -> ExprKind<Desugared> {
+    let iter = std_identifier("iter", span, arena);
+    let iterator = arena.alloc(DExpr::new(
+        ExprKind::apply(iter, vec![collection], UnnamedArg::First),
+        span,
+    ));
+    let collect = std_identifier("collect", span, arena);
+    let collected = arena.alloc(DExpr::new(
+        ExprKind::apply(collect, vec![iterator], UnnamedArg::First),
+        span,
+    ));
+    ExprKind::type_ascription(collected, ty, span)
+}
+
+fn empty_as(ty: Type, span: Location, arena: &mut DExprArena) -> ExprKind<Desugared> {
+    let empty = std_identifier("empty", span, arena);
+    let value = arena.alloc(DExpr::new(
+        ExprKind::apply(empty, vec![], UnnamedArg::None),
+        span,
+    ));
+    ExprKind::type_ascription(value, ty, span)
+}
+
+fn build_set_literal(
+    elements: Vec<DExprId>,
+    span: Location,
+    ctx: &DesugarCtx<'_>,
+    arena: &mut DExprArena,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<ExprKind<Desugared>, InternalCompilationError> {
+    let ty = inferred_collection_type("set", 1, span, ctx, modules_used)?;
+    if elements.is_empty() {
+        Ok(empty_as(ty, span, arena))
+    } else {
+        let array = arena.alloc(DExpr::new(ExprKind::array(elements), span));
+        Ok(collect_as(array, ty, span, arena))
+    }
+}
+
+fn build_map_literal(
+    entries: Vec<(DExprId, DExprId)>,
+    span: Location,
+    ctx: &DesugarCtx<'_>,
+    arena: &mut DExprArena,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<ExprKind<Desugared>, InternalCompilationError> {
+    let ty = inferred_collection_type("map", 2, span, ctx, modules_used)?;
+    if entries.is_empty() {
+        return Ok(empty_as(ty, span, arena));
+    }
+    let entries = entries
+        .into_iter()
+        .map(|(key, value)| arena.alloc(DExpr::new(ExprKind::tuple(vec![key, value]), span)))
+        .collect();
+    let array = arena.alloc(DExpr::new(ExprKind::array(entries), span));
+    Ok(collect_as(array, ty, span, arena))
 }
