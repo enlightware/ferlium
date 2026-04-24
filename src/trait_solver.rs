@@ -1136,6 +1136,10 @@ impl<'a> TraitSolver<'a> {
 
                 let mut constraint_dict_ids = Vec::with_capacity(resolved_constraints.len());
                 for resolved_constraint in resolved_constraints {
+                    // Marker traits have no runtime dictionary entries.
+                    if resolved_constraint.trait_ref.functions.is_empty() {
+                        continue;
+                    }
                     let dict_id = match self.solve_impl(
                         &resolved_constraint.trait_ref,
                         &resolved_constraint.input_tys,

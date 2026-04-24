@@ -1101,8 +1101,8 @@ pub(crate) fn extra_parameters_from_constraints(
                         "Type scheme with trait having only non-variable input types in constraints"
                     )
                 }
-                if trait_ref == &*REPR_TRAIT {
-                    None // Repr is a special marker trait with an empty function dictionary.
+                if trait_ref.functions.is_empty() {
+                    None // Marker traits have no runtime dictionary entries.
                 } else {
                     Some(DictionaryReq::new_trait_impl(
                         trait_ref.clone(),

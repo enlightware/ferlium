@@ -342,7 +342,11 @@ impl Value {
                 "Cannot pretty-print value with uninstantiated type variable: {:?}",
                 type_var
             ),
-            Native(ty) => self.as_native().unwrap().fmt_pretty(f, ty),
+            Native(ty) => {
+                let ty = ty.clone();
+                drop(ty_data);
+                self.as_native().unwrap().fmt_pretty(f, &ty)
+            }
             Variant(types) => {
                 let variant = self.as_variant().unwrap();
                 let inner_ty = types.iter().find(|(tag, _)| *tag == variant.tag).unwrap().1;
