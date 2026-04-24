@@ -117,6 +117,8 @@ ys
 
 This is especially useful when you want to switch back from lazy iterator code to an eager collection value.
 
+The next chapter covers the unordered collection targets that `collect()` can build, including `set` and `map`.
+
 You can also give explicit types using the expression annotation syntax.
 For example, to collect into an array:
 
@@ -330,4 +332,4 @@ This keeps code readable and makes evaluation timing explicit from the shape of 
 
 ## What comes next
 
-The next chapter introduces effects, showing how Ferlium tracks interactions such as reading, writing, and failure alongside ordinary values.
+The next chapter introduces unordered collections, including `set` and `map`, and shows how they relate to `iter()` and `collect()`.

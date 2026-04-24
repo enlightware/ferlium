@@ -26,6 +26,7 @@
 # Standard Library
 
 - [Sequence Processing](./sequence-processing.md)
+- [Unordered Collections](./unordered-collections.md)
 
 # Effects and Execution
 
