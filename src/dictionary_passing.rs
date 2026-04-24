@@ -622,6 +622,46 @@ impl Node {
                     }));
                 }
             }
+            GetTraitFunction(get_fn) => {
+                assert!(
+                    get_fn.inst_data.dicts_req.is_empty(),
+                    "Instantiation data for trait function is not supported yet."
+                );
+                let resolved = get_fn.input_tys.iter().all(Type::is_constant);
+                if resolved {
+                    let function = ctx.trait_solver.solve_impl_method(
+                        &get_fn.trait_ref,
+                        &get_fn.input_tys,
+                        get_fn.function_index,
+                        get_fn.function_span,
+                        arena,
+                    )?;
+                    kind = GetFunction(b(ir::GetFunction {
+                        function,
+                        function_path: get_fn.function_path.clone(),
+                        function_span: get_fn.function_span,
+                        inst_data: ir::FnInstData::none(),
+                    }));
+                } else {
+                    let fns_tuple_index = find_trait_impl_dict_index(
+                        ctx.dicts,
+                        &get_fn.trait_ref,
+                        &get_fn.input_tys,
+                    )
+                    .expect(
+                        "Dictionary for trait impl not found, type inference should have failed",
+                    );
+                    let fns_tuple_ty = ctx.dicts.requirements[fns_tuple_index].to_dict_type();
+                    let load_id = LocalDeclId::from_index(local_count + fns_tuple_index);
+                    let load_fns_tuple_id = arena.alloc(Node::new(
+                        ir_syn::load(fns_tuple_index, load_id),
+                        fns_tuple_ty,
+                        no_effects(),
+                        get_fn.function_span,
+                    ));
+                    kind = Project(load_fns_tuple_id, get_fn.function_index);
+                }
+            }
             GetDictionary(_) => {
                 // nothing to do
             }

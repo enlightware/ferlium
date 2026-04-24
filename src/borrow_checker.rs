@@ -174,6 +174,7 @@ impl Node {
                 check_arguments(&app.ty.args, &app.arguments, arena, app.function_span)?;
             }
             GetFunction(_) => {}
+            GetTraitFunction(_) => {}
             GetDictionary(_) => {}
             EnvStore(node) => {
                 check_borrows(arena, node.value)?;

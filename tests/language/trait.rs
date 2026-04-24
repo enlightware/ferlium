@@ -47,6 +47,62 @@ fn user_defined_trait_impls_are_callable() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn std_trait_methods_are_first_class_values() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            fn f1(a) {
+                let my_f = add;
+                my_f(a, a)
+            }
+
+            f1(21)
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn first_class_trait_methods_can_be_passed_as_arguments() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            fn apply2(f, left, right) {
+                f(left, right)
+            }
+
+            apply2(add, 20, 22)
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn user_defined_trait_methods_are_first_class_values() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Double<Self> {
+                fn double(value: Self) -> Self;
+            }
+
+            impl Double for int {
+                fn double(value: int) -> int {
+                    value * 2
+                }
+            }
+
+            let my_double = double;
+            my_double(21)
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn user_defined_traits_store_outputs_constraints_and_effects() {
     let mut session = TestSession::new();
     let mod_src = indoc! {r#"

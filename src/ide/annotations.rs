@@ -280,6 +280,9 @@ impl Node {
                 // There is no TraitFnApply left in the final IR.
             }
             GetFunction(_) => {}
+            GetTraitFunction(_) => {
+                // There is no GetTraitFunction left in the final IR.
+            }
             GetDictionary(_) => {}
             EnvStore(node) => {
                 // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.

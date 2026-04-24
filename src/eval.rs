@@ -702,6 +702,11 @@ pub fn eval_node_with_ctx(
                 "Trait function application should not be executed, but transformed to StaticApply"
             );
         }
+        GetTraitFunction(_) => {
+            panic!(
+                "Trait function value should not be executed, but transformed to a function value"
+            );
+        }
         GetFunction(get_fn) => {
             let (function, module_id) = ctx.get_function_local_id(get_fn.function);
             cont(Value::function(function, module_id))

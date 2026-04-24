@@ -51,6 +51,33 @@ transform(3)
 This is the key shift: functions are first-class values.
 They are not special syntax that only works at declaration sites.
 
+## Named functions and trait methods are values
+
+Named functions can also be used directly as values.
+This includes functions provided by traits.
+
+```ferlium
+fn apply2(f, left, right) {
+    f(left, right)
+}
+
+apply2(add, 20, 22)
+```
+
+Here `add` is the method from the standard-library `Num` trait.
+The call to `apply2` constrains the argument types so Ferlium can choose the right `Num` implementation.
+
+You can also bind a trait method to a local name before calling it:
+
+```ferlium
+fn double_with_add(value) {
+    let my_add = add;
+    my_add(value, value)
+}
+
+double_with_add(21)
+```
+
 ## Passing functions as arguments
 
 You can pass a function value to another function:

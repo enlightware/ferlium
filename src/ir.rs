@@ -174,6 +174,17 @@ pub struct GetFunction {
 }
 
 #[derive(Debug, Clone)]
+pub struct GetTraitFunction {
+    pub trait_ref: TraitRef,
+    pub function_index: usize,
+    pub function_path: ast::Path,
+    pub function_span: Location,
+    pub input_tys: Vec<Type>,
+    pub output_tys: Vec<Type>,
+    pub inst_data: FnInstData,
+}
+
+#[derive(Debug, Clone)]
 pub struct GetDictionary {
     pub dictionary: TraitImplId,
 }
@@ -188,6 +199,8 @@ pub enum NodeKind {
     /// Note: this should only exist transiently in the IR and never be executed
     TraitFnApply(B<TraitFnApplication>),
     GetFunction(B<GetFunction>),
+    /// Note: this should only exist transiently in the IR and never be executed
+    GetTraitFunction(B<GetTraitFunction>),
     GetDictionary(GetDictionary),
     EnvStore(EnvStore),
     EnvLoad(EnvLoad),
@@ -218,8 +231,8 @@ impl NodeKind {
         use NodeKind::*;
         use smallvec::smallvec;
         match self {
-            Immediate(_) | GetFunction(_) | GetDictionary(_) | EnvLoad(_) | SoftBreak
-            | Unimplemented => smallvec![],
+            Immediate(_) | GetFunction(_) | GetTraitFunction(_) | GetDictionary(_) | EnvLoad(_)
+            | SoftBreak | Unimplemented => smallvec![],
             BuildClosure(bc) => {
                 let mut v: SVec4<NodeId> = smallvec![bc.function];
                 v.extend_from_slice(&bc.captures);
@@ -385,6 +398,11 @@ impl Node {
             }
             GetFunction(get_fn) => {
                 writeln!(f, "{indent_str}get {}", get_fn.function.format_with(env))?;
+            }
+            GetTraitFunction(get_fn) => {
+                let fn_name = get_fn.trait_ref.functions[get_fn.function_index].0;
+                let trait_name = get_fn.trait_ref.name;
+                writeln!(f, "{indent_str}get trait fn {fn_name} (from {trait_name})")?;
             }
             GetDictionary(get_dict) => {
                 writeln!(
@@ -563,6 +581,9 @@ impl Node {
             GetFunction(_) => {
                 // GetFunction nodes don't contain child expressions with types
             }
+            GetTraitFunction(_) => {
+                // GetTraitFunction nodes don't contain child expressions with types
+            }
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
             }
@@ -707,6 +728,7 @@ impl Node {
             GetFunction(_) => {
                 // no need to look into the value's type as it is already in this node's type
             }
+            GetTraitFunction(_) => {}
             GetDictionary(_) => {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
@@ -794,6 +816,19 @@ pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitut
             app.inst_data.instantiate(subst);
         }
         GetFunction(get_fn) => {
+            get_fn.inst_data.instantiate(subst);
+        }
+        GetTraitFunction(get_fn) => {
+            get_fn.input_tys = get_fn
+                .input_tys
+                .iter()
+                .map(|ty| ty.instantiate(subst))
+                .collect();
+            get_fn.output_tys = get_fn
+                .output_tys
+                .iter()
+                .map(|ty| ty.instantiate(subst))
+                .collect();
             get_fn.inst_data.instantiate(subst);
         }
         _ => {}

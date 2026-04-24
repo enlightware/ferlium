@@ -519,20 +519,50 @@ impl TypeInference {
                     (node, local.ty, local.mut_ty, no_effects())
                 }
                 // Retrieve the trait method from the environment, if it exists
-                else if let Some((module_name, _trait_descr)) =
+                else if let Some((_module_name, trait_descr)) =
                     env.module_env.get_trait_function(path)?
                 {
-                    // TODO: add TraitFnImmediate for trait functions
-                    let module_text = match module_name {
-                        Some(name) => format!(" in module {name}"),
-                        None => "current module".to_string(),
-                    };
-                    return Err(internal_compilation_error!(Unsupported {
-                        span: expr_span,
-                        reason: format!(
-                            "First-class trait method is unsupported: method {path} in {module_text} cannot be used"
-                        )
+                    let (trait_ref, function_index, definition) = trait_descr;
+                    let (inst_fn_ty, inst_data, subst) =
+                        definition.ty_scheme.instantiate_with_fresh_vars(
+                            self,
+                            expr_span,
+                            Some(trait_ref.type_var_count()),
+                        );
+                    assert!(
+                        inst_data.dicts_req.is_empty(),
+                        "Instantiation data for trait function is not supported yet."
+                    );
+                    trait_ref.constraints.iter().for_each(|constraint| {
+                        let mut constraint = constraint.instantiate(&subst);
+                        constraint.instantiate_location(expr_span);
+                        self.add_pub_constraint(constraint);
+                    });
+                    let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
+                    assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
+                    let output_tys = trait_tys.split_off(trait_ref.input_type_count() as usize);
+                    let input_tys = trait_tys;
+                    self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                        trait_ref.clone(),
+                        input_tys.clone(),
+                        output_tys.clone(),
+                        expr_span,
+                    ));
+                    let node = K::GetTraitFunction(b(ir::GetTraitFunction {
+                        trait_ref,
+                        function_index,
+                        function_path: path.clone(),
+                        function_span: expr_span,
+                        input_tys,
+                        output_tys,
+                        inst_data,
                     }));
+                    (
+                        node,
+                        Type::function_type(inst_fn_ty),
+                        MutType::constant(),
+                        no_effects(),
+                    )
                 }
                 // Retrieve the function from the environment, if it exists
                 else if let Some((definition, function, _module_name)) = env.get_function(path)? {
@@ -4151,6 +4181,11 @@ impl UnifiedTypeInference {
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
             GetFunction(get_fn) => {
+                self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
+            }
+            GetTraitFunction(get_fn) => {
+                get_fn.input_tys = self.substitute_in_types(&get_fn.input_tys);
+                get_fn.output_tys = self.substitute_in_types(&get_fn.output_tys);
                 self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
             }
             _ => {}
