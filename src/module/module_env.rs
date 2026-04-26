@@ -7,16 +7,16 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
-    ast::{self, UstrSpan},
-    error::InternalCompilationError,
+    compiler::error::InternalCompilationError,
     module::{
         Module, ModuleFunction, ModuleId, Modules, path::Path,
         type_alias_name::find_generic_alias_name,
     },
+    parser::ast::{self, UstrSpan},
     std::STD_MODULE_ID,
-    r#trait::TraitRef,
-    r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDefRef},
-    typing_env::TraitFunctionDescription,
+    types::r#trait::TraitRef,
+    types::r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDefRef},
+    types::typing_env::TraitFunctionDescription,
 };
 use derive_new::new;
 use ustr::{Ustr, ustr};

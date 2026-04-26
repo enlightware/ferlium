@@ -13,25 +13,25 @@ use std::{
 };
 
 use crate::{
-    ast,
     containers::iterable_to_string,
     format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
-    location::{Location, SourceTable},
     module::ModuleId,
-    r#trait::TraitRef,
-    r#type::TypeDefRef,
-    type_inference::SubOrSameType,
-    type_scheme::PubTypeConstraint,
+    parser::ast,
+    parser::location::{Location, SourceTable},
+    types::r#trait::TraitRef,
+    types::r#type::TypeDefRef,
+    types::type_inference::SubOrSameType,
+    types::type_scheme::PubTypeConstraint,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
-    ast::{PatternType, PropertyAccess},
-    effects::{EffType, EffectVar},
     module::ModuleEnv,
-    r#type::{Type, TypeVar},
+    parser::ast::{PatternType, PropertyAccess},
+    types::effects::{EffType, EffectVar},
+    types::r#type::{Type, TypeVar},
 };
 
 pub type LocatedError = (String, Location);
@@ -752,7 +752,7 @@ pub type InternalCompilationError = BoxedCompilationError<Internal>;
 macro_rules! internal_compilation_error {
     ($($ctor:tt)*) => {
         InternalCompilationError::new(
-            $crate::error::CompilationErrorImpl::$($ctor)*
+            $crate::compiler::error::CompilationErrorImpl::$($ctor)*
         )
     };
 }
@@ -1478,7 +1478,7 @@ impl FormatWith<SourceTable> for CompilationError {
 macro_rules! compilation_error {
     ($($ctor:tt)*) => {
         CompilationError::new(
-            $crate::error::CompilationErrorImpl::$($ctor)*
+            $crate::compiler::error::CompilationErrorImpl::$($ctor)*
         )
     };
 }

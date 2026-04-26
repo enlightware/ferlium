@@ -13,8 +13,10 @@ use ustr::ustr;
 use crate::{
     cached_primitive_ty,
     containers::b,
-    effects::no_effects,
-    function::{BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN},
+    hir::function::{
+        BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN,
+    },
+    hir::value::NativeDisplay,
     module::Module,
     std::{
         core_traits_names::BITS_TRAIT_NAME,
@@ -24,8 +26,8 @@ use crate::{
         string::String,
         value::{VALUE_TRAIT, equal},
     },
-    r#type::Type,
-    value::NativeDisplay,
+    types::effects::no_effects,
+    types::r#type::Type,
 };
 
 pub fn bool_type() -> Type {

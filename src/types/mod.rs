@@ -6,18 +6,20 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-// Note: disabled for now until we have a borrow checker
-// use crate::{hir::value::Value, module::Module};
 
-// use ustr::ustr;
+pub mod effects;
+pub mod mutability;
+pub mod r#trait;
+pub mod trait_solver;
+pub mod r#type;
+pub mod type_scheme;
+pub mod typing_env;
 
-// pub fn swap(a: &mut Value, b: &mut Value) {
-//     std::mem::swap(a, b);
-// }
-
-// pub fn add_to_module(to: &mut Module) {
-//     to.functions.insert(
-//         ustr("swap"),
-//         BinaryNativeFnMMP::description_gen0_gen0(swap),
-//     );
-// }
+pub(crate) mod coherence;
+pub(crate) mod never;
+pub(crate) mod type_constraints;
+pub(crate) mod type_inference;
+pub(crate) mod type_like;
+pub(crate) mod type_mapper;
+pub(crate) mod type_substitution;
+pub(crate) mod type_visitor;

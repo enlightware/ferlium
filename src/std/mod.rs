@@ -8,8 +8,8 @@
 //
 use crate::{
     Location,
-    location::SourceTable,
     module::{self, Module, ModuleId},
+    parser::location::SourceTable,
 };
 
 pub mod array;

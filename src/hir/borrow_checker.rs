@@ -10,10 +10,10 @@ use ustr::Ustr;
 
 use crate::{
     Location,
-    error::InternalCompilationError,
+    compiler::error::InternalCompilationError,
+    hir::{Node, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
-    ir::{Node, NodeArena, NodeId, NodeKind},
-    r#type::FnArgType,
+    types::r#type::FnArgType,
 };
 
 enum PathPart {
@@ -201,7 +201,7 @@ impl Node {
                 check_borrows(arena, *data)?;
             }
             ProjectAt(_, _) => {
-                panic!("ProjectAt should not be in the IR at this point");
+                panic!("ProjectAt should not be in the HIR at this point");
             }
             Variant(_, payload) => {
                 check_borrows(arena, *payload)?;

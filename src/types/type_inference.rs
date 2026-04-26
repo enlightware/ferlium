@@ -16,27 +16,29 @@ use std::{
 
 use crate::{
     FxHashMap, FxHashSet,
-    ast::{
+    compiler::error::{
+        DuplicatedFieldContext, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
+    },
+    containers::continuous_hashmap_to_vec,
+    format::FormatWith,
+    hir::function::{Function, FunctionDefinition},
+    internal_compilation_error,
+    module::{LocalDecl, LocalDeclId, ModuleFunction, TypeDefLookupResult, id::Id},
+    parser::ast::{
         self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternConstraintKind,
         PatternKind, PatternVar, RecordField, RecordFields, UnnamedArg,
     },
-    containers::continuous_hashmap_to_vec,
-    effects::{PrimitiveEffect, effect},
-    error::{
-        DuplicatedFieldContext, MutabilityMustBeWhat, WhatIsNotAProductType, WhichProductTypeIsNot,
-    },
-    format::FormatWith,
-    function::{Function, FunctionDefinition},
-    internal_compilation_error,
-    location::Location,
-    module::{LocalDecl, LocalDeclId, ModuleFunction, TypeDefLookupResult, id::Id},
+    parser::location::Location,
     std::{STD_MODULE_ID, core::REPR_TRAIT, core_traits_names::NUM_TRAIT_NAME},
-    r#trait::TraitRef,
-    trait_solver::{ConstraintAssumptions, TraitSolver},
-    type_like::TypeLike,
-    type_mapper::TypeMapper,
-    type_scheme::TypeScheme,
-    type_substitution::{TypeSubstituer, substitute_fn_type, substitute_type, substitute_types},
+    types::effects::{PrimitiveEffect, effect},
+    types::r#trait::TraitRef,
+    types::trait_solver::{ConstraintAssumptions, TraitSolver},
+    types::type_like::TypeLike,
+    types::type_mapper::TypeMapper,
+    types::type_scheme::TypeScheme,
+    types::type_substitution::{
+        TypeSubstituer, substitute_fn_type, substitute_type, substitute_types,
+    },
 };
 use derive_new::new;
 use ena::unify::{EqUnifyValue, InPlace, InPlaceUnificationTable, Snapshot, UnifyKey, UnifyValue};
@@ -44,20 +46,20 @@ use itertools::Itertools;
 use ustr::{Ustr, ustr};
 
 use crate::{
-    ast::PropertyAccess,
+    compiler::error::{ADTAccessType, InternalCompilationError, MutabilityMustBeContext},
     containers::{SVec2, b},
-    dictionary_passing::DictionaryReq,
-    effects::{EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution, no_effects},
-    error::{ADTAccessType, InternalCompilationError, MutabilityMustBeContext},
-    function::ScriptFunction,
-    ir::{self, EnvStore, FnInstData, Immediate, NodeArena, NodeId, NodeKind},
+    hir::dictionary_passing::DictionaryReq,
+    hir::function::ScriptFunction,
+    hir::value::{LiteralValue, Value},
+    hir::{self, EnvStore, FnInstData, Immediate, NodeArena, NodeId, NodeKind},
     module::ModuleEnv,
-    mutability::{MutType, MutVal, MutVar, MutVarKey},
+    parser::ast::PropertyAccess,
     std::{array::array_type, math::int_type},
-    r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
-    type_scheme::PubTypeConstraint,
-    typing_env::{LoopFrame, TypingEnv},
-    value::{LiteralValue, Value},
+    types::effects::{EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution, no_effects},
+    types::mutability::{MutType, MutVal, MutVar, MutVarKey},
+    types::r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
+    types::type_scheme::PubTypeConstraint,
+    types::typing_env::{LoopFrame, TypingEnv},
 };
 
 pub type InstSubstitution = (TypeSubstitution, EffectsSubstitution);
@@ -312,7 +314,7 @@ impl TypeInference {
         &mut self,
         type_def_lookup: TypeDefLookupResult,
         use_site: Location,
-    ) -> (crate::r#type::TypeDefRef, Type, Type, Option<Ustr>) {
+    ) -> (crate::types::r#type::TypeDefRef, Type, Type, Option<Ustr>) {
         let (type_def, tag) = type_def_lookup.lookup_payload();
         let (payload_ty, _inst_data, subst) = type_def
             .payload_scheme(tag)
@@ -335,8 +337,8 @@ impl TypeInference {
         expected_fn_ty: Option<FnType>,
         span: Location,
     ) -> Result<(NodeId, Type, MutType, EffType), InternalCompilationError> {
-        use ir::Node as N;
-        use ir::NodeKind as K;
+        use hir::Node as N;
+        use hir::NodeKind as K;
 
         // 1. Collect free variables in the body.
         let mut free_vars = FxHashSet::default();
@@ -361,7 +363,7 @@ impl TypeInference {
                 // It is a local variable in the current environment, capture it.
                 let local = &env.all_locals[outer_id.as_index()];
                 let capture_id = env.ir_arena.alloc(N::new(
-                    K::EnvLoad(ir::EnvLoad {
+                    K::EnvLoad(hir::EnvLoad {
                         index: index as u32,
                         id: outer_id,
                     }),
@@ -421,7 +423,7 @@ impl TypeInference {
             .map(|local| local.name.0)
             .collect::<Vec<_>>();
 
-        // The lambda uses the same IR arena as the outer function (module's arena).
+        // The lambda uses the same HIR arena as the outer function (module's arena).
         let mut inner_env = TypingEnv::new(
             &mut fn_all_locals,
             fn_cur_locals,
@@ -474,7 +476,7 @@ impl TypeInference {
         let node_id = if capture_node_ids.is_empty() {
             fn_node_id
         } else {
-            let node = K::BuildClosure(b(ir::BuildClosure {
+            let node = K::BuildClosure(b(hir::BuildClosure {
                 function: fn_node_id,
                 captures: capture_node_ids,
             }));
@@ -491,8 +493,8 @@ impl TypeInference {
         expr_id: DExprId,
     ) -> Result<(NodeId, MutType), InternalCompilationError> {
         use ExprKind::*;
-        use ir::Node as N;
-        use ir::NodeKind as K;
+        use hir::Node as N;
+        use hir::NodeKind as K;
         let expr = &env.ast_arena[expr_id];
         let expr_span = expr.span;
         let sp = |id: DExprId| env.ast_arena[id].span;
@@ -512,7 +514,7 @@ impl TypeInference {
                     && let Some((index, id)) = env.get_variable_index_and_id(name)
                 {
                     let local = &env.all_locals[id.as_index()];
-                    let node = K::EnvLoad(ir::EnvLoad {
+                    let node = K::EnvLoad(hir::EnvLoad {
                         index: index as u32,
                         id,
                     });
@@ -548,7 +550,7 @@ impl TypeInference {
                         output_tys.clone(),
                         expr_span,
                     ));
-                    let node = K::GetTraitFunction(b(ir::GetTraitFunction {
+                    let node = K::GetTraitFunction(b(hir::GetTraitFunction {
                         trait_ref,
                         function_index,
                         function_path: path.clone(),
@@ -569,7 +571,7 @@ impl TypeInference {
                     let (fn_ty, inst_data, _subst) = definition
                         .ty_scheme
                         .instantiate_with_fresh_vars(self, expr_span, None);
-                    let node = K::GetFunction(b(ir::GetFunction {
+                    let node = K::GetFunction(b(hir::GetFunction {
                         function,
                         function_path: path.clone(),
                         function_span: expr_span,
@@ -765,7 +767,7 @@ impl TypeInference {
                             &call_effects,
                         ]);
                         // Store and return the result
-                        let node = K::Apply(b(ir::Application {
+                        let node = K::Apply(b(hir::Application {
                             function: func_node_id,
                             arguments: args_nodes,
                         }));
@@ -839,7 +841,7 @@ impl TypeInference {
                     } else {
                         let combined_effects =
                             self.make_dependent_effect([&value_effects, &place_effects]);
-                        let node = K::Assign(ir::Assignment {
+                        let node = K::Assign(hir::Assignment {
                             place: place_id,
                             value: value_id,
                         });
@@ -1301,8 +1303,8 @@ impl TypeInference {
         expr_span: Location,
         arguments_unnamed: UnnamedArg,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
-        use ir::Node as N;
-        use ir::NodeKind as K;
+        use hir::Node as N;
+        use hir::NodeKind as K;
         let args_span =
             || Location::fuse(args.iter().map(|arg| env.ast_arena[*arg].span)).unwrap_or(path_span);
         // Get the function and its type from the environment.
@@ -1352,7 +1354,7 @@ impl TypeInference {
                     let ret_ty = inst_fn_ty.ret;
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                    let node = K::TraitFnApply(b(ir::TraitFnApplication {
+                    let node = K::TraitFnApply(b(hir::TraitFnApplication {
                         trait_ref,
                         function_index,
                         function_path: path.clone(),
@@ -1390,7 +1392,7 @@ impl TypeInference {
                     let ret_ty = inst_fn_ty.ret;
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                    let node = K::StaticApply(b(ir::StaticApplication {
+                    let node = K::StaticApply(b(hir::StaticApplication {
                         function,
                         function_path: Some(path.clone()),
                         function_span: path_span,
@@ -1590,7 +1592,7 @@ impl TypeInference {
     //     &mut self,
     //     env: &mut TypingEnv,
     //     exprs: &[DExprId],
-    // ) -> Result<(Vec<(ir::Node, Type)>, EffType), InternalCompilationError> {
+    // ) -> Result<(Vec<(hir::Node, Type)>, EffType), InternalCompilationError> {
     //     let mut effects = Vec::with_capacity(exprs.len());
     //     let nodes_and_tys = exprs
     //         .iter()
@@ -1598,7 +1600,7 @@ impl TypeInference {
     //             let node = self.infer_expr_drop_mut(env, *arg)?;
     //             let ty = node.ty;
     //             effects.push(node.effects.clone());
-    //             Ok::<(ir::Node, Type), InternalCompilationError>((node, ty))
+    //             Ok::<(hir::Node, Type), InternalCompilationError>((node, ty))
     //         })
     //         .collect::<Result<Vec<_>, _>>()?;
 
@@ -1690,8 +1692,8 @@ impl TypeInference {
         let expr = &env.ast_arena[expr_id];
         let expr_span = expr.span;
         use ExprKind::*;
-        use ir::Node as N;
-        use ir::NodeKind as K;
+        use hir::Node as N;
+        use hir::NodeKind as K;
 
         // Literal of correct type, we are good
         if let Literal(value, ty) = &expr.kind {
@@ -2713,7 +2715,7 @@ impl UnifiedTypeInference {
         &mut self,
         constraints: &[PubTypeConstraint],
     ) -> Result<(), InternalCompilationError> {
-        use crate::type_scheme::VariantConstraint;
+        use crate::types::type_scheme::VariantConstraint;
 
         // First, collect the type variables that are invalid for variant simplification.
         let mut invalid_ty_vars = FxHashSet::<TypeVar>::default();
@@ -4091,7 +4093,7 @@ impl UnifiedTypeInference {
     pub fn substitute_in_module_function(
         &mut self,
         descr: &mut ModuleFunction,
-        arena: &mut crate::ir::NodeArena,
+        arena: &mut crate::hir::NodeArena,
     ) {
         descr.definition.ty_scheme.ty = self.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
         descr.definition.ty_scheme.constraints =
@@ -4164,7 +4166,7 @@ impl UnifiedTypeInference {
         }
     }
 
-    pub fn substitute_in_node(&mut self, arena: &mut ir::NodeArena, id: ir::NodeId) {
+    pub fn substitute_in_node(&mut self, arena: &mut hir::NodeArena, id: hir::NodeId) {
         let children = arena[id].kind.child_node_ids();
         for child in children {
             self.substitute_in_node(arena, child);
@@ -4172,7 +4174,7 @@ impl UnifiedTypeInference {
         let node = &mut arena[id];
         node.ty = self.substitute_in_type(node.ty);
         node.effects = SubstituteTypes(self).substitute_effect_type(&node.effects);
-        use ir::NodeKind::*;
+        use hir::NodeKind::*;
         match &mut arena[id].kind {
             StaticApply(app) => {
                 app.ty = self.substitute_in_fn_type(&app.ty);
@@ -4585,7 +4587,7 @@ fn property_to_fn_path(
     }
 }
 
-fn fields_to_record_type<P: crate::ast::Phase>(
+fn fields_to_record_type<P: crate::parser::ast::Phase>(
     fields: &[&RecordField<P>],
     types: Vec<Type>,
 ) -> Type {

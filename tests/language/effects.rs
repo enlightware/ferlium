@@ -13,11 +13,11 @@ use ustr::ustr;
 
 use crate::harness::TestSession;
 use ferlium::{
-    effects::*,
-    emit_ir::emit_expr_unsafe,
+    hir::emit_ir::emit_expr_unsafe,
     module::{LocalImplId, id::Id},
     parse_module_and_expr,
     std::new_module_using_std,
+    types::effects::*,
 };
 
 #[cfg(target_arch = "wasm32")]

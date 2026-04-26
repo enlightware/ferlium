@@ -10,8 +10,8 @@
 use crate::{
     Modules, add_code_to_module,
     format::FormatWithData,
-    location::SourceTable,
     module::{Module, ModuleId},
+    parser::location::SourceTable,
 };
 
 macro_rules! prelude {

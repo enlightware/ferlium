@@ -17,17 +17,17 @@ use ustr::{Ustr, ustr};
 use crate::module::id::Id;
 use crate::{
     CompilerSession, Location, SourceId, SourceTable,
+    compiler::error::RuntimeErrorKind,
     containers::b,
-    error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
+    hir::value::{FunctionValue, NativeValue, Value},
     module::{FunctionId, LocalDecl, LocalFunctionId, ModuleFunction, ModuleId, TraitImplId},
     std::array,
-    r#type::FnArgType,
-    value::{FunctionValue, NativeValue, Value},
+    types::r#type::FnArgType,
 };
 use crate::{
     Modules,
-    ir::{NodeArena, NodeId, NodeKind},
+    hir::{NodeArena, NodeId, NodeKind},
 };
 
 use crate::module::ImportFunctionTarget;
@@ -615,10 +615,10 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
     }
 }
 
-/// The result of evaluating an IR node, either a control flow action or a runtime error.
+/// The result of evaluating an HIR node, either a control flow action or a runtime error.
 pub type EvalControlFlowResult = Result<ControlFlow<Value>, RuntimeError>;
 
-/// The result of evaluating an IR node, either a value or a runtime error.
+/// The result of evaluating an HIR node, either a value or a runtime error.
 pub type EvalResult = Result<Value, RuntimeError>;
 
 pub fn cont(value: Value) -> EvalControlFlowResult {
@@ -830,7 +830,7 @@ pub fn eval_node_with_ctx(
             let value = eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals));
             let value = value.to_literal_value().unwrap_or_else(||
                 panic!(
-                    "Case evaluated a non-literal scrutinee: {}. This IR should have been rejected before evaluation.",
+                    "Case evaluated a non-literal scrutinee: {}. This HIR should have been rejected before evaluation.",
                     value.to_string_repr()
                 )
             );
@@ -855,7 +855,7 @@ pub fn eval_node_with_ctx(
             cont(Value::unit())
         }
         Unimplemented => {
-            panic!("Unimplemented IR node executed!")
+            panic!("Unimplemented HIR node executed!")
         }
     }
 }

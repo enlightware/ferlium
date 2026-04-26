@@ -20,21 +20,21 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
-use crate::ast::Attribute;
-use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
 use crate::define_id_type;
 use crate::format::FormatWith;
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
+use crate::hir::value::LiteralValue;
 use crate::module::LocalDecl;
 use crate::module::id::Id;
-use crate::mutability::FormatInFnArg;
-use crate::type_like::CastableToType;
-use crate::type_like::TypeLike;
-use crate::type_mapper::TypeMapper;
-use crate::type_visitor::TypeInnerVisitor;
-use crate::value::LiteralValue;
+use crate::parser::ast::Attribute;
+use crate::parser::ast::UstrSpan;
+use crate::types::mutability::FormatInFnArg;
+use crate::types::type_like::CastableToType;
+use crate::types::type_like::TypeLike;
+use crate::types::type_mapper::TypeMapper;
+use crate::types::type_visitor::TypeInnerVisitor;
 use crate::{FxHashMap, FxHashSet, Location};
 use derive_new::new;
 use dyn_clone::DynClone;
@@ -48,16 +48,16 @@ use ustr::{Ustr, ustr};
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::{B, b};
-use crate::effects::{EffType, EffectVar, EffectsSubstitution};
 use crate::format::type_variable_index_to_string_greek;
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::module::ModuleEnv;
-use crate::mutability::MutType;
 use crate::sync::SyncPhantomData;
-use crate::type_scheme::{DisplayStyle, TypeScheme};
+use crate::types::effects::{EffType, EffectVar, EffectsSubstitution};
+use crate::types::mutability::MutType;
+use crate::types::type_scheme::{DisplayStyle, TypeScheme};
 
-// use crate::typing_env::Local;
+// use crate::types::typing_env::Local;
 
 #[macro_export]
 macro_rules! cached_primitive_ty {

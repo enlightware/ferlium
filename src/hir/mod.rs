@@ -6,13 +6,21 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
+pub(crate) mod borrow_checker;
+pub(crate) mod dictionary_passing;
+pub mod emit_ir;
+pub mod function;
+pub(crate) mod hir_syn;
+pub(crate) mod r#match;
+pub mod value;
+
 use crate::{
     Location,
-    ast::{self, UnnamedArg},
     format::FormatWith,
     module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
-    r#trait::TraitRef,
-    type_like::{CastableToType, TypeLike},
+    parser::ast::{self, UnnamedArg},
+    types::r#trait::TraitRef,
+    types::type_like::{CastableToType, TypeLike},
 };
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -22,18 +30,18 @@ use ustr::Ustr;
 
 use crate::{
     containers::{B, SVec2, SVec4, b},
-    dictionary_passing::DictionariesReq,
-    effects::EffType,
+    hir::dictionary_passing::DictionariesReq,
+    hir::value::{LiteralValue, Value},
     module::ModuleEnv,
-    r#type::{FnType, Type, TypeVar},
-    type_inference::InstSubstitution,
-    value::{LiteralValue, Value},
+    types::effects::EffType,
+    types::r#type::{FnType, Type, TypeVar},
+    types::type_inference::InstSubstitution,
 };
 
-/// An index to a node in the IR arena
+/// An index to a node in the HIR arena
 pub type NodeId = Idx<Node>;
 
-/// An arena of IR nodes
+/// An arena of HIR nodes
 pub type NodeArena = Arena<Node>;
 
 /// Function instantiation data that are needed to fill dictionaries
@@ -196,7 +204,7 @@ pub enum NodeKind {
     BuildClosure(B<BuildClosure>),
     Apply(B<Application>),
     StaticApply(B<StaticApplication>),
-    /// Note: this should only exist transiently in the IR and never be executed
+    /// Note: this should only exist transiently in the HIR and never be executed
     TraitFnApply(B<TraitFnApplication>),
     GetFunction(B<GetFunction>),
     /// Note: this should only exist transiently in the IR and never be executed
@@ -210,7 +218,7 @@ pub enum NodeKind {
     Tuple(B<SVec2<NodeId>>),
     Project(NodeId, usize),
     Record(B<SVec2<NodeId>>),
-    // Note: this should only exist transiently in the IR and never be executed
+    // Note: this should only exist transiently in the HIR and never be executed
     FieldAccess(NodeId, Ustr),
     /// Access a tuple value using a local variable as index, after dictionary passing phase
     ProjectAt(NodeId, usize),
@@ -751,7 +759,7 @@ impl Node {
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
             FieldAccess(data, _) => unbound_ty_vars(arena, *data, result, ignore),
             ProjectAt(_, _) => {
-                panic!("ProjectAt should not be in the IR at this point");
+                panic!("ProjectAt should not be in the HIR at this point");
             }
             Variant(_, payload) => unbound_ty_vars(arena, *payload, result, ignore),
             ExtractTag(node) => unbound_ty_vars(arena, *node, result, ignore),

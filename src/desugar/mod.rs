@@ -9,12 +9,23 @@
 use itertools::process_results;
 use std::mem;
 
+mod import_resolver;
+
 use crate::{FxHashMap, FxHashSet, Modules};
 use ustr::{Ustr, ustr};
 
 use crate::{
     Location,
-    ast::{
+    compiler::error::{
+        DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
+        InternalCompilationError, InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind,
+        InvalidTraitConstraintKind, WhatIsNotAProductType, WhichProductTypeIsNot,
+    },
+    containers::b,
+    graph::{find_strongly_connected_components, topological_sort_sccs},
+    internal_compilation_error,
+    module::{Module, ModuleEnv, ModuleId, TypeDefLookupResult},
+    parser::ast::{
         self, AbstractData, ApplyData, AssignData, DExpr, DExprArena, DExprId, DLetPattern,
         DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, ExprId, ExprKind,
         FieldAccessData, ForLoopData, IndexData, LetData, LetPatternKind, LetRecordPatternField,
@@ -23,25 +34,16 @@ use crate::{
         Path, Pattern, PatternConstraintKind, PatternKind, PatternVar, ProjectData,
         StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
     },
-    containers::b,
-    effects::EffType,
-    effects::EffectsSubstitution,
-    error::{
-        DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
-        InternalCompilationError, InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind,
-        InvalidTraitConstraintKind, WhatIsNotAProductType, WhichProductTypeIsNot,
-    },
-    graph::{find_strongly_connected_components, topological_sort_sccs},
-    import_resolver::{ModulesResolver, resolve_imports},
-    internal_compilation_error,
-    module::{Module, ModuleEnv, ModuleId, TypeDefLookupResult},
-    mutability::{MutType, MutVal},
-    parser_helpers::syn_static_apply,
+    parser::helpers::syn_static_apply,
     std::{array::array_type, math::int_type},
-    r#type::{FnArgType, FnType, NativeType, Type, TypeDefRef, TypeVar},
-    type_like::TypeLike,
-    type_scheme::{PubTypeConstraint, TypeScheme},
+    types::effects::EffType,
+    types::effects::EffectsSubstitution,
+    types::mutability::{MutType, MutVal},
+    types::r#type::{FnArgType, FnType, NativeType, Type, TypeDefRef, TypeVar},
+    types::type_like::TypeLike,
+    types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
+use import_resolver::{ModulesResolver, resolve_imports};
 
 /// A node of a function dependency graph
 #[derive(Debug)]

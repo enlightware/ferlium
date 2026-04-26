@@ -9,18 +9,18 @@
 use crate::{
     Location,
     containers::{IntoSVec2, b},
-    effects::EffType,
-    ir::{self, NodeArena, NodeId},
+    hir::value::{LiteralValue, NativeValue, Value},
+    hir::{self, NodeArena, NodeId},
     module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
-    mutability::{MutType, MutVal},
     std::{math::int_type, string::string_value},
-    r#type::{FnType, Type},
-    value::{LiteralValue, NativeValue, Value},
+    types::effects::EffType,
+    types::mutability::{MutType, MutVal},
+    types::r#type::{FnType, Type},
 };
 use ustr::{Ustr, ustr};
 
 use NodeKind as K;
-use ir::NodeKind;
+use hir::NodeKind;
 
 #[allow(dead_code)]
 pub fn native<T: NativeValue + 'static>(value: T) -> NodeKind {
@@ -32,7 +32,7 @@ pub fn native_str(value: &str) -> NodeKind {
 }
 
 pub fn immediate(value: Value) -> NodeKind {
-    K::Immediate(ir::Immediate::new(value))
+    K::Immediate(hir::Immediate::new(value))
 }
 
 pub fn static_apply(
@@ -42,7 +42,7 @@ pub fn static_apply(
     span: Location,
 ) -> NodeKind {
     let arguments = arguments.into();
-    K::StaticApply(b(ir::StaticApplication {
+    K::StaticApply(b(hir::StaticApplication {
         function,
         function_path: None,
         function_span: span,
@@ -51,7 +51,7 @@ pub fn static_apply(
             .collect(),
         arguments,
         ty,
-        inst_data: ir::FnInstData::none(),
+        inst_data: hir::FnInstData::none(),
     }))
 }
 
@@ -98,7 +98,7 @@ pub fn store_new(
     );
     locals.push(local);
     (
-        K::EnvStore(ir::EnvStore {
+        K::EnvStore(hir::EnvStore {
             value,
             index: index as u32,
             id,
@@ -109,7 +109,7 @@ pub fn store_new(
 
 #[allow(dead_code)]
 pub fn store_to(value: NodeId, index: usize, id: LocalDeclId) -> NodeKind {
-    K::EnvStore(ir::EnvStore {
+    K::EnvStore(hir::EnvStore {
         value,
         index: index as u32,
         id,
@@ -117,11 +117,11 @@ pub fn store_to(value: NodeId, index: usize, id: LocalDeclId) -> NodeKind {
 }
 
 pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
-    K::GetDictionary(ir::GetDictionary { dictionary })
+    K::GetDictionary(hir::GetDictionary { dictionary })
 }
 
 pub fn load(index: usize, id: LocalDeclId) -> NodeKind {
-    K::EnvLoad(ir::EnvLoad {
+    K::EnvLoad(hir::EnvLoad {
         index: index as u32,
         id,
     })
@@ -133,7 +133,7 @@ pub fn project(tuple: NodeId, index: usize) -> NodeKind {
 
 pub fn index_immediate(arena: &mut NodeArena, array: NodeId, index: isize) -> NodeKind {
     let array_span = arena[array].span;
-    let index_node = arena.alloc(ir::Node::new(
+    let index_node = arena.alloc(hir::Node::new(
         immediate(Value::native(index)),
         int_type(),
         EffType::empty(),
@@ -167,7 +167,7 @@ pub fn array(values: impl IntoSVec2<NodeId>) -> NodeKind {
 }
 
 pub fn case(value: NodeId, alternatives: Vec<(LiteralValue, NodeId)>, default: NodeId) -> NodeKind {
-    K::Case(b(ir::Case {
+    K::Case(b(hir::Case {
         value,
         alternatives,
         default,
@@ -179,7 +179,7 @@ pub fn case_from_complete_alternatives(
     mut alternatives: Vec<(LiteralValue, NodeId)>,
 ) -> NodeKind {
     let default = alternatives.pop().unwrap().1;
-    K::Case(b(ir::Case {
+    K::Case(b(hir::Case {
         value,
         alternatives,
         default,

@@ -11,18 +11,18 @@
 
 use crate::{
     Location,
-    ast::UstrSpan,
-    borrow_checker::check_borrows,
+    compiler::error::InternalCompilationError,
     containers::b,
     define_id_type,
-    dictionary_passing::{DictElaborationCtx, elaborate_dictionaries},
-    error::InternalCompilationError,
     format::FormatWith,
-    function::{Function, FunctionDefinition},
-    ir::{NodeArena, NodeId},
+    hir::borrow_checker::check_borrows,
+    hir::dictionary_passing::{DictElaborationCtx, elaborate_dictionaries},
+    hir::function::{Function, FunctionDefinition},
+    hir::{NodeArena, NodeId},
     module::{ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
-    mutability::MutType,
-    r#type::{FnArgType, Type},
+    parser::ast::UstrSpan,
+    types::mutability::MutType,
+    types::r#type::{FnArgType, Type},
 };
 
 use derive_new::new;

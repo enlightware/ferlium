@@ -9,13 +9,13 @@
 use ustr::ustr;
 
 use crate::{
-    effects::{PrimitiveEffect, effect},
-    error::RuntimeErrorKind,
-    function::{NullaryNativeFnFN, UnaryNativeFnNFN},
+    compiler::error::RuntimeErrorKind,
+    hir::function::{NullaryNativeFnFN, UnaryNativeFnNFN},
     module::Module,
     std::string::String as Str,
-    r#type::{FnType, Type},
-    type_scheme::TypeScheme,
+    types::effects::{PrimitiveEffect, effect},
+    types::r#type::{FnType, Type},
+    types::type_scheme::TypeScheme,
 };
 
 use super::string::string_type;

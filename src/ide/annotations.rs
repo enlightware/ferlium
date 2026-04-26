@@ -13,11 +13,12 @@ use crate::FxHashSet;
 use heck::ToSnakeCase;
 
 use crate::{
-    CompilerSession, ModuleAndExpr, SourceId, ast,
+    CompilerSession, ModuleAndExpr, SourceId,
     format::FormatWith,
-    ir::{Node, NodeArena, NodeId, NodeKind},
+    hir::{Node, NodeArena, NodeId, NodeKind},
     module::{LocalDecl, ModuleEnv, id::Id},
-    type_scheme::DisplayStyle,
+    parser::ast,
+    types::type_scheme::DisplayStyle,
 };
 
 impl ModuleAndExpr {
@@ -277,7 +278,7 @@ impl Node {
                 }
             }
             TraitFnApply(_) => {
-                // There is no TraitFnApply left in the final IR.
+                // There is no TraitFnApply left in the final HIR.
             }
             GetFunction(_) => {}
             GetTraitFunction(_) => {

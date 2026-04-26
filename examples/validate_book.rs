@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use directories::ProjectDirs;
-use ferlium::error::CompilationError;
+use ferlium::CompilationError;
 use ferlium::eval::eval_node;
 use ferlium::eval::{ControlFlow, RuntimeError};
 use ferlium::{CompilerSession, ModuleAndExpr};

@@ -21,21 +21,21 @@ use ferlium_macros::declare_native_fn_aliases;
 
 use crate::{
     Location,
-    effects::EffType,
-    error::RuntimeErrorKind,
+    compiler::error::RuntimeErrorKind,
     eval::{
         ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, cont,
         eval_node_with_ctx,
     },
     format::FormatWith,
-    ir::{self, NodeId},
+    hir::value::{NativeDisplay, Value},
+    hir::{self, NodeId},
     module::{LocalDecl, ModuleEnv, ModuleFunction},
-    r#type::{FnType, Type, fmt_fn_type_with_arg_names},
-    type_like::TypeLike,
-    type_mapper::TypeMapper,
-    type_scheme::{PubTypeConstraint, TypeScheme},
-    type_visitor::TypeInnerVisitor,
-    value::{NativeDisplay, Value},
+    types::effects::EffType,
+    types::r#type::{FnType, Type, fmt_fn_type_with_arg_names},
+    types::type_like::TypeLike,
+    types::type_mapper::TypeMapper,
+    types::type_scheme::{PubTypeConstraint, TypeScheme},
+    types::type_visitor::TypeInnerVisitor,
 };
 
 /// The definition of a function, to be used in modules, traits and IDEs.
@@ -238,7 +238,7 @@ impl Callable for VoidFunction {
 pub struct ScriptFunction {
     pub entry_node_id: NodeId,
     pub arg_names: Vec<Ustr>,
-    // pub monomorphised: HashMap<Vec<Type>, ir::Node>,
+    // pub monomorphised: HashMap<Vec<Type>, hir::Node>,
 }
 
 impl Callable for ScriptFunction {
@@ -303,7 +303,7 @@ impl Callable for ScriptFunction {
         spacing: usize,
         indent: usize,
     ) -> std::fmt::Result {
-        ir::format_ind(
+        hir::format_ind(
             &env.current.ir_arena,
             self.entry_node_id,
             f,

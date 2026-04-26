@@ -11,21 +11,20 @@ use std::sync::LazyLock;
 
 use crate::{
     Location,
-    effects::EffType,
-    error::InternalCompilationError,
-    function::FunctionDefinition,
-    ir::{self, NodeArena, NodeId},
-    ir_syn,
+    compiler::error::InternalCompilationError,
+    hir::function::FunctionDefinition,
+    hir::value::{LiteralValue, ustr_to_isize},
+    hir::{self, NodeArena, NodeId},
     module::{self, LocalDecl, LocalDeclId, Module, TraitImplId, id::Id},
-    mutability::{MutType, MutVal},
     std::{
         STD_MODULE_ID, hash::hasher_type, logic::bool_type, math::int_type, string::string_type,
     },
-    r#trait::{Deriver, TraitRef},
-    trait_solver::TraitSolver,
-    r#type::{FnArgType, FnType, Type, TypeKind},
-    type_like::TypeLike,
-    value::{LiteralValue, ustr_to_isize},
+    types::effects::EffType,
+    types::mutability::{MutType, MutVal},
+    types::r#trait::{Deriver, TraitRef},
+    types::trait_solver::TraitSolver,
+    types::r#type::{FnArgType, FnType, Type, TypeKind},
+    types::type_like::TypeLike,
 };
 
 pub(crate) fn equal<T>(lhs: T, rhs: T) -> bool
@@ -48,14 +47,14 @@ fn derive_value_to_string_body(
     arena: &mut NodeArena,
     solver: &mut TraitSolver,
 ) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
-    use ir_syn::*;
+    use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
     assert!(ty.is_constant());
 
-    let n = |arena: &mut NodeArena, kind: ir::NodeKind, ty: Type| -> NodeId {
-        arena.alloc(ir::Node::new(
+    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+        arena.alloc(hir::Node::new(
             kind,
             ty,
             EffType::empty(),
@@ -250,14 +249,14 @@ fn derive_value_eq_body(
     arena: &mut NodeArena,
     solver: &mut TraitSolver,
 ) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
-    use ir_syn::*;
+    use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
     assert!(ty.is_constant());
 
-    let n = |arena: &mut NodeArena, kind: ir::NodeKind, ty: Type| -> NodeId {
-        arena.alloc(ir::Node::new(
+    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+        arena.alloc(hir::Node::new(
             kind,
             ty,
             EffType::empty(),
@@ -415,14 +414,14 @@ fn derive_value_hash_body(
     arena: &mut NodeArena,
     solver: &mut TraitSolver,
 ) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
-    use ir_syn::*;
+    use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
     assert!(ty.is_constant());
 
-    let n = |arena: &mut NodeArena, kind: ir::NodeKind, ty: Type| -> NodeId {
-        arena.alloc(ir::Node::new(
+    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+        arena.alloc(hir::Node::new(
             kind,
             ty,
             EffType::empty(),

@@ -7,22 +7,25 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use ferlium::{FxHashMap, FxHashSet};
-use ferlium::{Modules, ir};
+use ferlium::{Modules, hir};
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
 
 use ariadne::{Label, Source};
-use ferlium::ast::{PExprArena, PExprId, PModule};
-use ferlium::error::{CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat};
+use ferlium::compiler::error::{
+    CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat,
+};
 use ferlium::format::FormatWith;
 use ferlium::module::id::Id;
 use ferlium::module::{
     LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
 };
+use ferlium::parser::ast;
+use ferlium::parser::ast::{PExprArena, PExprId, PModule};
 use ferlium::std::new_module_using_std;
 use ferlium::{
-    CompilerSession, Location, ModuleAndExpr, SourceId, SourceTable, SubOrSameType, ast,
+    CompilerSession, Location, ModuleAndExpr, SourceId, SourceTable, SubOrSameType,
     parse_module_and_expr,
 };
 use rustyline::DefaultEditor;
@@ -542,18 +545,18 @@ fn process_input(
             1
         })?;
 
-    // Show IR
+    // Show HIR
     if is_repl {
         let module = session.expect_fresh_module(module_id);
         println!(
-            "Module IR:\n{}",
+            "Module HIR:\n{}",
             module.format_with(&ShowModuleWithOptions::new(session.modules(), false, false))
         );
         if let Some(expr) = expr.as_ref() {
             let module_env = ModuleEnv::new(module, session.modules());
             println!(
-                "Expr IR:\n{}",
-                ir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&module_env)
+                "Expr HIR:\n{}",
+                hir::ExprDisplay::new(expr.expr, &expr.locals).format_with(&module_env)
             );
         }
     }
@@ -652,7 +655,7 @@ fn main() {
             args[0]
         );
         println!(
-            "  {} [--print-std-full] Print the standard library module with all functions and their IR (interactive mode only).",
+            "  {} [--print-std-full] Print the standard library module with all functions and their HIR (interactive mode only).",
             args[0]
         );
         println!(

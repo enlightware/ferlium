@@ -1,6 +1,8 @@
 use crate::desugar::types::{desugar_type_constraints, extend_generic_ty_params};
-use crate::function::FunctionDefinition;
-use crate::r#trait::{Trait, TraitFunctionSpans, TraitRef, TraitSpans, TraitValidationError};
+use crate::hir::function::FunctionDefinition;
+use crate::types::r#trait::{
+    Trait, TraitFunctionSpans, TraitRef, TraitSpans, TraitValidationError,
+};
 
 use super::expr::desugar;
 use super::*;

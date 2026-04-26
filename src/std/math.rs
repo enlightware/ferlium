@@ -14,13 +14,13 @@ use ustr::ustr;
 
 use crate::{
     cached_primitive_ty,
+    compiler::error::RuntimeErrorKind,
     containers::b,
-    effects::{PrimitiveEffect, effect, no_effects},
-    error::RuntimeErrorKind,
-    function::{
+    hir::function::{
         BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
         NullaryNativeFnN, UnaryNativeFnNN,
     },
+    hir::value::{NativeDisplay, Value},
     module::Module,
     std::{
         cast::CAST_TRAIT,
@@ -31,8 +31,8 @@ use crate::{
         string::String,
         value::{VALUE_TRAIT, equal},
     },
-    r#type::Type,
-    value::{NativeDisplay, Value},
+    types::effects::{PrimitiveEffect, effect, no_effects},
+    types::r#type::Type,
 };
 
 pub fn int_type() -> Type {

@@ -15,17 +15,17 @@ use std::{
 use crate::{
     CompilationError, CompilerSession, DisplayStyle, EvalExprError, FxHashMap, FxHashSet, Location,
     ModuleAndExpr, ModuleEnv, Path, SourceId, call_fn,
-    error::{
+    compiler::error::{
         CompilationErrorImpl, ImportKind, MutabilityMustBeWhat, WhatIsNotAProductType,
         WhichProductTypeIsNot,
     },
     eval::{ValOrMut, eval_node},
     format::FormatWith,
-    ir_syn::local,
-    location::SourceTable,
+    hir::hir_syn::local,
+    hir::value::{NativeValue, Value},
+    parser::location::SourceTable,
     run_fn_native,
-    r#type::{Type, tuple_type},
-    value::{NativeValue, Value},
+    types::r#type::{Type, tuple_type},
 };
 use derive_new::new;
 use enum_as_inner::EnumAsInner;

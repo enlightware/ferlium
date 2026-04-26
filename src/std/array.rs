@@ -12,16 +12,16 @@ use ustr::ustr;
 
 use crate::{
     cached_ty,
-    effects::no_effects,
     format::{write_with_separator, write_with_separator_and_format_fn},
-    function::{
+    hir::function::{
         BinaryNativeFnMVN, BinaryNativeFnNNN, Function, NullaryNativeFnN, TernaryNativeFnNNNN,
         UnaryNativeFnMV, UnaryNativeFnNN,
     },
+    hir::value::{NativeDisplay, NativeValue, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleFunction},
-    r#type::{FnType, NativeType, Type, bare_native_type},
-    type_scheme::TypeScheme,
-    value::{NativeDisplay, NativeValue, Value},
+    types::effects::no_effects,
+    types::r#type::{FnType, NativeType, Type, bare_native_type},
+    types::type_scheme::TypeScheme,
 };
 
 use super::{

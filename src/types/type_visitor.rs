@@ -10,10 +10,10 @@
 use itertools::Itertools;
 
 use crate::{
-    effects::{EffType, EffectVar},
-    mutability::{MutType, MutVar},
-    r#type::{TypeKind, TypeVar},
-    type_like::TypeLike,
+    types::effects::{EffType, EffectVar},
+    types::mutability::{MutType, MutVar},
+    types::r#type::{TypeKind, TypeVar},
+    types::type_like::TypeLike,
 };
 
 /// Allow for multiple TypeKind traversal strategies

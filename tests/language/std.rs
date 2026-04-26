@@ -15,17 +15,17 @@ use crate::harness::{
     TestSession, assert_some_value_eq, bool, float, int, string, unit, variant_0, variant_t1,
 };
 use ferlium::{
-    effects::{PrimitiveEffect, effect, no_effects},
-    error::RuntimeErrorKind,
+    compiler::error::RuntimeErrorKind,
+    hir::value::Value,
     std::option::{none, some},
-    value::Value,
+    types::effects::{PrimitiveEffect, effect, no_effects},
 };
 
 use ferlium::std::array::{Array, array_type};
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
 use ferlium::std::string::string_type;
-use ferlium::r#type::{Type, tuple_type};
+use ferlium::types::r#type::{Type, tuple_type};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;

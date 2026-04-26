@@ -11,15 +11,15 @@ use std::sync::LazyLock;
 
 use crate::{
     Location,
-    effects::EffType,
-    error::InternalCompilationError,
-    function::FunctionDefinition,
-    ir, ir_syn,
+    compiler::error::InternalCompilationError,
+    hir,
+    hir::function::FunctionDefinition,
     module::{LocalDeclId, Module, TraitImplId, id::Id},
     std::STD_MODULE_ID,
-    r#trait::{Deriver, TraitRef},
-    trait_solver::TraitSolver,
-    r#type::{FnType, Type},
+    types::effects::EffType,
+    types::r#trait::{Deriver, TraitRef},
+    types::trait_solver::TraitSolver,
+    types::r#type::{FnType, Type},
 };
 
 use FunctionDefinition as Def;
@@ -32,10 +32,10 @@ impl Deriver for SelfCastDeriver {
         trait_ref: &TraitRef,
         input_types: &[Type],
         span: Location,
-        arena: &mut ir::NodeArena,
+        arena: &mut hir::NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
-        use ir_syn::*;
+        use hir::hir_syn::*;
         let from_ty = input_types[0];
         let to_ty = input_types[1];
         if from_ty != to_ty {
@@ -45,7 +45,7 @@ impl Deriver for SelfCastDeriver {
         // No-op implementation
         let locals = vec![local("self", from_ty)];
         let id = LocalDeclId::from_index(0);
-        let code_id = arena.alloc(ir::Node::new(load(0, id), from_ty, EffType::empty(), span));
+        let code_id = arena.alloc(hir::Node::new(load(0, id), from_ty, EffType::empty(), span));
         let local_impl_id =
             solver.add_concrete_impl_from_code(code_id, locals, trait_ref, input_types, []);
         Ok(Some(TraitImplId::Local(local_impl_id)))

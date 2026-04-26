@@ -9,16 +9,15 @@
 
 use crate::{
     Location,
+    compiler::error::InternalCompilationError,
     containers::SVec2,
-    effects::EffType,
-    error::InternalCompilationError,
-    ir::{self, NodeArena, NodeId},
-    ir_syn,
+    hir::{self, NodeArena, NodeId},
     module::TraitImplId,
-    r#trait::{Deriver, TraitRef},
-    trait_solver::TraitSolver,
-    r#type::{Type, TypeKind},
-    type_like::TypeLike,
+    types::effects::EffType,
+    types::r#trait::{Deriver, TraitRef},
+    types::trait_solver::TraitSolver,
+    types::r#type::{Type, TypeKind},
+    types::type_like::TypeLike,
 };
 
 /// A deriver for traits with a single input type, no output type,
@@ -37,7 +36,7 @@ impl Deriver for ProductValueDeriver {
         arena: &mut NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
-        use ir_syn::*;
+        use hir::hir_syn::*;
 
         // Validate the trait shape.
         assert!(trait_ref.input_type_count() == 1);
@@ -54,8 +53,8 @@ impl Deriver for ProductValueDeriver {
         let ty = input_types[0];
         assert!(ty.is_constant());
 
-        let n = |arena: &mut NodeArena, kind: ir::NodeKind, ty: Type| -> NodeId {
-            arena.alloc(ir::Node::new(
+        let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+            arena.alloc(hir::Node::new(
                 kind,
                 ty,
                 EffType::empty(),

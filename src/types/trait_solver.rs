@@ -9,7 +9,7 @@
 
 use std::{iter::repeat, mem};
 
-use crate::{FxHashMap, FxHashSet, Modules, type_scheme::PubTypeConstraint};
+use crate::{FxHashMap, FxHashSet, Modules, types::type_scheme::PubTypeConstraint};
 
 use derive_new::new;
 use itertools::MultiUnzip;
@@ -17,13 +17,13 @@ use ustr::Ustr;
 
 use crate::{
     Location,
+    compiler::error::InternalCompilationError,
     containers::b,
-    effects::EffType,
-    error::InternalCompilationError,
-    function::{Function, ScriptFunction},
+    hir::function::{Function, ScriptFunction},
+    hir::hir_syn::{get_dictionary, load, static_apply},
+    hir::value::{Value, build_dictionary_value},
+    hir::{self, Node, NodeArena},
     internal_compilation_error,
-    ir::{self, Node, NodeArena},
-    ir_syn::{get_dictionary, load, static_apply},
     module::{
         self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
         FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
@@ -31,17 +31,17 @@ use crate::{
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitImpl,
         TraitImplId, TraitImpls, TraitKey, id::Id,
     },
-    mutability::MutType,
     std::{core::REPR_TRAIT, new_module_using_std},
-    r#trait::TraitRef,
-    r#type::{FnArgType, Type},
-    type_inference::UnifiedTypeInference,
-    type_like::{TypeLike, instantiate_types},
-    value::{Value, build_dictionary_value},
+    types::effects::EffType,
+    types::mutability::MutType,
+    types::r#trait::TraitRef,
+    types::r#type::{FnArgType, Type},
+    types::type_inference::UnifiedTypeInference,
+    types::type_like::{TypeLike, instantiate_types},
 };
 
 #[cfg(debug_assertions)]
-use crate::type_visitor::AllVarsCollector;
+use crate::types::type_visitor::AllVarsCollector;
 
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.
 #[derive(Debug, new)]
@@ -77,7 +77,8 @@ const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
 /// mutably borrow parts of the module's data while not touching the function field.
 macro_rules! trait_solver_from_module {
     ($module:expr, $program:expr) => {{
-        let current_functions = crate::trait_solver::current_function_map(&$module.def_table);
+        let current_functions =
+            crate::types::trait_solver::current_function_map(&$module.def_table);
         let function_count = $module.functions.len();
         TraitSolver::new(
             &mut $module.impls,
@@ -852,7 +853,7 @@ impl<'a> TraitSolver<'a> {
     /// Add a concrete trait implementation from the given code body, for single-function traits.
     pub fn add_concrete_impl_from_code(
         &mut self,
-        code_entry: ir::NodeId,
+        code_entry: hir::NodeId,
         locals: Vec<LocalDecl>,
         trait_ref: &TraitRef,
         input_types: impl Into<Vec<Type>>,
@@ -872,7 +873,7 @@ impl<'a> TraitSolver<'a> {
     /// Add a concrete trait implementation from one code body per trait method.
     pub fn add_concrete_impl_from_code_entries(
         &mut self,
-        code_entries: impl Into<Vec<(ir::NodeId, Vec<LocalDecl>)>>,
+        code_entries: impl Into<Vec<(hir::NodeId, Vec<LocalDecl>)>>,
         trait_ref: &TraitRef,
         input_types: impl Into<Vec<Type>>,
         output_types: impl Into<Vec<Type>>,

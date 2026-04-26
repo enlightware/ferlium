@@ -11,12 +11,12 @@ use crate::FxHashSet;
 
 use itertools::Itertools;
 
-use crate::effects::EffectVar;
-use crate::mutability::MutVar;
-use crate::r#type::{Type, TypeVar};
-use crate::type_inference::InstSubstitution;
-use crate::type_mapper::{SubstitutionTypeMapper, TypeMapper};
-use crate::type_visitor::{
+use crate::types::effects::EffectVar;
+use crate::types::mutability::MutVar;
+use crate::types::r#type::{Type, TypeVar};
+use crate::types::type_inference::InstSubstitution;
+use crate::types::type_mapper::{SubstitutionTypeMapper, TypeMapper};
+use crate::types::type_visitor::{
     ContainsAnyTyVars, ContainsOnlyTyVars, EffectVarsCollector, MutVarsCollector, TyVarsCollector,
     TypeInnerVisitor,
 };

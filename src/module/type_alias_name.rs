@@ -12,7 +12,7 @@ use ustr::Ustr;
 use crate::{
     format::FormatWith,
     module::{Module, ModuleEnv},
-    r#type::{NamedType, Type, TypeAliasEntry, TypeKind, TypeSubstitution, TypeVar},
+    types::r#type::{NamedType, Type, TypeAliasEntry, TypeKind, TypeSubstitution, TypeVar},
 };
 
 #[derive(Debug, Clone)]

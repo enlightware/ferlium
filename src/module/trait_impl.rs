@@ -19,15 +19,15 @@ use ustr::Ustr;
 use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
-    function::Function,
-    location::Location,
+    hir::function::Function,
+    hir::value::{Value, build_dictionary_value},
     module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id},
-    r#trait::TraitRef,
-    r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
-    type_inference::InstSubstitution,
-    type_like::TypeLike,
-    type_scheme::{PubTypeConstraint, format_constraints_consolidated},
-    value::{Value, build_dictionary_value},
+    parser::location::Location,
+    types::r#trait::TraitRef,
+    types::r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
+    types::type_inference::InstSubstitution,
+    types::type_like::TypeLike,
+    types::type_scheme::{PubTypeConstraint, format_constraints_consolidated},
 };
 
 define_id_type!(

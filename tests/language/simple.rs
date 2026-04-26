@@ -15,16 +15,16 @@ use crate::harness::{
     set_array_property_value, set_property_value, string, unit, variant_0, variant_t1, variant_tn,
 };
 use ferlium::{
-    error::{
+    compiler::error::{
         CompilationErrorImpl, DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeErrorKind,
     },
-    mutability::MutType,
+    hir::value::Value,
     std::{
         array::{Array, array_type_generic},
         math::{float_type, int_type},
     },
-    r#type::{Type, tuple_type},
-    value::Value,
+    types::mutability::MutType,
+    types::r#type::{Type, tuple_type},
 };
 
 #[cfg(target_arch = "wasm32")]

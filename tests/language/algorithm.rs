@@ -15,10 +15,10 @@ use crate::harness::{TestSession, int, string};
 
 use ferlium::{
     call_fn,
+    hir::value::Value,
     module::ModuleId,
     run_fn_native,
     std::{array::array_type, math::int_type, string::String as Str},
-    value::Value,
 };
 
 #[cfg(target_arch = "wasm32")]

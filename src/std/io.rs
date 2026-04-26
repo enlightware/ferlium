@@ -9,11 +9,11 @@
 use std::sync::{LazyLock, RwLock};
 
 use crate::{
-    effects::{PrimitiveEffect, effect},
-    function::UnaryNativeFnVN,
+    hir::function::UnaryNativeFnVN,
+    hir::value::Value,
     module::Module,
-    r#type::Type,
-    value::Value,
+    types::effects::{PrimitiveEffect, effect},
+    types::r#type::Type,
 };
 
 use ustr::ustr;

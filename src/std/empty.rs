@@ -9,12 +9,12 @@
 use std::sync::LazyLock;
 
 use crate::{
-    effects::EffType,
-    function::FunctionDefinition,
+    hir::function::FunctionDefinition,
     module::Module,
     std::{STD_MODULE_ID, product_value_deriver::ProductValueDeriver},
-    r#trait::TraitRef,
-    r#type::{FnType, Type},
+    types::effects::EffType,
+    types::r#trait::TraitRef,
+    types::r#type::{FnType, Type},
 };
 
 use FunctionDefinition as Def;

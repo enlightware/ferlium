@@ -12,13 +12,13 @@ use ustr::Ustr;
 
 use crate::{
     FxHashMap, Location, Modules,
-    ast::{Path as AstPath, UseTree},
-    error::{ImportKind, ImportSite, InternalCompilationError},
+    compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     internal_compilation_error,
     module::{
         path::Path as ModPath,
         uses::{UseData, Uses},
     },
+    parser::ast::{Path as AstPath, UseTree},
 };
 
 #[derive(new)]

@@ -47,6 +47,10 @@ impl Span {
         self.end - self.start
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn as_range(&self) -> Range<usize> {
         self.start as usize..self.end as usize
     }

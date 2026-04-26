@@ -11,10 +11,10 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     FxHashMap, Location,
-    effects::EffectsSubstitution,
-    r#type::{NamedType, Type, TypeKind},
-    type_like::TypeLike,
-    type_scheme::PubTypeConstraint,
+    types::effects::EffectsSubstitution,
+    types::r#type::{NamedType, Type, TypeKind},
+    types::type_like::TypeLike,
+    types::type_scheme::PubTypeConstraint,
 };
 
 struct NamedTypeConstraintCollector {

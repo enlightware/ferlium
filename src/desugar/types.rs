@@ -1,5 +1,5 @@
 use super::*;
-use crate::r#type::{BareNativeTypeB, TypeAliasEntry};
+use crate::types::r#type::{BareNativeTypeB, TypeAliasEntry};
 
 fn desugar_type_constraint(
     constraint: &ast::PTypeConstraint,
@@ -422,7 +422,7 @@ impl PTypeDef {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let default_variant = desugar_default_variant(self)?;
-        Ok(TypeDefRef::new(crate::r#type::TypeDef {
+        Ok(TypeDefRef::new(crate::types::r#type::TypeDef {
             name: self.name.0,
             doc: (!self.doc_comments.is_empty()).then(|| self.doc_comments.join("\n")),
             param_names: self.generic_params.iter().map(|(name, _)| *name).collect(),

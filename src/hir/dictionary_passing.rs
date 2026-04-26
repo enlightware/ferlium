@@ -13,16 +13,15 @@ use crate::FxHashMap;
 
 use crate::{
     Location,
-    error::InternalCompilationError,
+    compiler::error::InternalCompilationError,
     format::FormatWith,
-    ir_syn,
     module::{FunctionId, LocalDeclId, LocalFunctionId, ModuleEnv, id::Id},
-    parser_helpers::EMPTY_USTR,
-    r#trait::TraitRef,
-    trait_solver::TraitSolver,
-    r#type::TypeVar,
-    type_like::TypeLike,
-    type_scheme::format_have_trait,
+    parser::helpers::EMPTY_USTR,
+    types::r#trait::TraitRef,
+    types::trait_solver::TraitSolver,
+    types::r#type::TypeVar,
+    types::type_like::TypeLike,
+    types::type_scheme::format_have_trait,
 };
 use derive_new::new;
 use itertools::process_results;
@@ -30,13 +29,13 @@ use ustr::Ustr;
 
 use crate::{
     containers::b,
-    effects::no_effects,
-    ir::{self, Node, NodeArena, NodeId, NodeKind},
-    mutability::MutType,
+    hir::value::Value,
+    hir::{self, Node, NodeArena, NodeId, NodeKind},
     std::math::int_type,
-    r#type::{FnArgType, Type, TypeKind},
-    type_inference::InstSubstitution,
-    value::Value,
+    types::effects::no_effects,
+    types::mutability::MutType,
+    types::r#type::{FnArgType, Type, TypeKind},
+    types::type_inference::InstSubstitution,
 };
 
 /// A dictionary requirement, that will be passed as extra parameter to a function.
@@ -231,7 +230,7 @@ pub fn instantiate_dictionaries_req(
 
 fn extra_args_from_inst_data<'d, 'sr, 'sm>(
     arena: &mut NodeArena,
-    inst_data: &ir::FnInstData,
+    inst_data: &hir::FnInstData,
     span: Location,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
     local_count: usize,
@@ -252,7 +251,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                             let index = record.iter().position(|field| field.0 == *name).expect(
                                 "Field not found in type, type inference should have failed"
                             );
-                            K::Immediate(ir::Immediate::new(Value::native(index as isize)))
+                            K::Immediate(hir::Immediate::new(Value::native(index as isize)))
                         }
                         Variable(var) => {
                             // Variable, it must be in the input dictionaries, look for it.
@@ -262,7 +261,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                                 || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                             );
                             let id = LocalDeclId::from_index(local_count + index);
-                            K::EnvLoad(ir::EnvLoad { index: index as u32, id })
+                            K::EnvLoad(hir::EnvLoad { index: index as u32, id })
                         }
                         _ => {
                             panic!("FieldIndex dictionary should have a variable or record type");
@@ -276,7 +275,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                     let node_kind = if resolved {
                         // Fully resolved, look up the trait implementation and build the trait function array.
                         let dictionary = ctx.trait_solver.solve_impl(trait_ref, input_tys, span, arena)?;
-                        K::GetDictionary(ir::GetDictionary { dictionary })
+                        K::GetDictionary(hir::GetDictionary { dictionary })
                     } else {
                         // Not fully resolved, it must be in the input dictionaries, look for it.
                         let index = find_trait_impl_dict_index(ctx.dicts, trait_ref, input_tys)
@@ -285,7 +284,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                         );
                         let id = LocalDeclId::from_index(local_count + index);
                         // Load the array of trait implementation functions from the dictionary
-                        ir_syn::load(index, id)
+                        hir::hir_syn::load(index, id)
                     };
                     let ty = trait_ref.get_dictionary_type_for_tys(input_tys, output_tys);
                     (node_kind, ty)
@@ -320,7 +319,7 @@ fn extra_args_for_module_function(
             let id = LocalDeclId::from_index(local_count + index);
             (
                 arena.alloc(Node::new(
-                    NodeKind::EnvLoad(ir::EnvLoad {
+                    NodeKind::EnvLoad(hir::EnvLoad {
                         index: index as u32,
                         id,
                     }),
@@ -393,7 +392,7 @@ impl Node {
                                 let ty = req.to_dict_type();
                                 let id = LocalDeclId::from_index(local_count + index);
                                 arena.alloc(Node::new(
-                                    EnvLoad(ir::EnvLoad {
+                                    EnvLoad(hir::EnvLoad {
                                         index: index as u32,
                                         id,
                                     }),
@@ -407,7 +406,7 @@ impl Node {
                         let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
                         let function_id =
                             arena.alloc(Node::new(original_kind, node_ty, node_effects, node_span));
-                        kind = BuildClosure(b(ir::BuildClosure {
+                        kind = BuildClosure(b(hir::BuildClosure {
                             function: function_id,
                             captures,
                         }));
@@ -513,14 +512,14 @@ impl Node {
                     let function_span = app.function_span;
                     let ty = app.ty.clone();
                     let arguments = mem::take(&mut app.arguments);
-                    kind = StaticApply(b(ir::StaticApplication {
+                    kind = StaticApply(b(hir::StaticApplication {
                         function,
                         function_path,
                         function_span,
                         arguments,
                         argument_names,
                         ty,
-                        inst_data: ir::FnInstData::none(),
+                        inst_data: hir::FnInstData::none(),
                     }));
                 } else {
                     // Not fully resolved, use the dictionary to look up the trait functions tuple...
@@ -540,7 +539,7 @@ impl Node {
                     // Load that tuple from the correct local variable...
                     let load_id = LocalDeclId::from_index(local_count + fns_tuple_index);
                     let load_fns_tuple_id = arena.alloc(Node::new(
-                        ir_syn::load(fns_tuple_index, load_id),
+                        hir::hir_syn::load(fns_tuple_index, load_id),
                         fns_tuple_ty,
                         no_effects(),
                         function_span,
@@ -558,7 +557,7 @@ impl Node {
                     ));
                     // Finally use the function pointer to call the function.
                     let arguments = mem::take(&mut app.arguments);
-                    kind = Apply(b(ir::Application {
+                    kind = Apply(b(hir::Application {
                         function: project_fn_id,
                         arguments,
                     }));
@@ -595,7 +594,7 @@ impl Node {
                                     node_effects,
                                     node_span,
                                 ));
-                                kind = BuildClosure(b(ir::BuildClosure {
+                                kind = BuildClosure(b(hir::BuildClosure {
                                     function: function_id,
                                     captures,
                                 }));
@@ -616,7 +615,7 @@ impl Node {
                     let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
                     let function_id =
                         arena.alloc(Node::new(original_kind, node_ty, node_effects, node_span));
-                    kind = BuildClosure(b(ir::BuildClosure {
+                    kind = BuildClosure(b(hir::BuildClosure {
                         function: function_id,
                         captures,
                     }));
@@ -636,11 +635,11 @@ impl Node {
                         get_fn.function_span,
                         arena,
                     )?;
-                    kind = GetFunction(b(ir::GetFunction {
+                    kind = GetFunction(b(hir::GetFunction {
                         function,
                         function_path: get_fn.function_path.clone(),
                         function_span: get_fn.function_span,
-                        inst_data: ir::FnInstData::none(),
+                        inst_data: hir::FnInstData::none(),
                     }));
                 } else {
                     let fns_tuple_index = find_trait_impl_dict_index(
@@ -654,7 +653,7 @@ impl Node {
                     let fns_tuple_ty = ctx.dicts.requirements[fns_tuple_index].to_dict_type();
                     let load_id = LocalDeclId::from_index(local_count + fns_tuple_index);
                     let load_fns_tuple_id = arena.alloc(Node::new(
-                        ir_syn::load(fns_tuple_index, load_id),
+                        hir::hir_syn::load(fns_tuple_index, load_id),
                         fns_tuple_ty,
                         no_effects(),
                         get_fn.function_span,
@@ -713,7 +712,7 @@ impl Node {
                 };
                 match &*ty_data {
                     Record(record) => {
-                        // Known type, get the index from the type and replace the IR instruction.
+                        // Known type, get the index from the type and replace the HIR instruction.
                         let index = record
                             .iter()
                             .position(|field| field.0 == field_name)

@@ -13,14 +13,12 @@ use std::sync::Arc;
 
 use crate::{
     Location, cached_ty,
+    compiler::error::InternalCompilationError,
     containers::SVec2,
-    effects::{EffType, PrimitiveEffect},
-    error::InternalCompilationError,
-    function::FunctionDefinition,
-    ir::{self, NodeArena, NodeId},
-    ir_syn,
+    hir::function::FunctionDefinition,
+    hir::value::{LiteralValue, ustr_to_isize},
+    hir::{self, NodeArena, NodeId},
     module::{self, LocalDeclId, Module, TraitImplId, id::Id},
-    mutability::MutVal,
     std::{
         STD_MODULE_ID,
         array::array_type,
@@ -28,11 +26,12 @@ use crate::{
         string::{string_type, string_value},
         variant::variant_object_entry_type,
     },
-    r#trait::{Deriver, TraitRef},
-    trait_solver::TraitSolver,
-    r#type::{FnType, Type, TypeKind, tuple_type},
-    type_like::TypeLike,
-    value::{LiteralValue, ustr_to_isize},
+    types::effects::{EffType, PrimitiveEffect},
+    types::mutability::MutVal,
+    types::r#trait::{Deriver, TraitRef},
+    types::trait_solver::TraitSolver,
+    types::r#type::{FnType, Type, TypeKind, tuple_type},
+    types::type_like::TypeLike,
 };
 
 use super::variant::variant_type;
@@ -61,7 +60,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         arena: &mut NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
-        use ir_syn::*;
+        use hir::hir_syn::*;
 
         // safety checks
         assert!(input_types.len() == 1);
@@ -69,8 +68,8 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         assert!(ty.is_constant());
 
         // Allocate a node in the arena with empty effects and synthesized span.
-        let n = |arena: &mut NodeArena, kind: ir::NodeKind, ty: Type| -> NodeId {
-            arena.alloc(ir::Node::new(
+        let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+            arena.alloc(hir::Node::new(
                 kind,
                 ty,
                 EffType::empty(),
@@ -128,7 +127,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 }
             }
 
-            Example corresponding IR:
+            Example corresponding HIR:
             variant with tag: Array
                 build tuple (
                     build array [
@@ -167,7 +166,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 }
             }
 
-            Example corresponding IR:
+            Example corresponding HIR:
             variant with tag: Object
                 build tuple (
                     build array [
@@ -310,16 +309,16 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         arena: &mut NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
-        use ir_syn::*;
+        use hir::hir_syn::*;
 
         // safety checks
         assert!(input_types.len() == 1);
         let ty = input_types[0];
         assert!(ty.is_constant());
 
-        // helpers to synthesize IR
-        let n = |arena: &mut NodeArena, kind: ir::NodeKind, ty: Type| -> NodeId {
-            arena.alloc(ir::Node::new(
+        // helpers to synthesize HIR
+        let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+            arena.alloc(hir::Node::new(
                 kind,
                 ty,
                 EffType::empty(),
@@ -593,12 +592,12 @@ fn build_panic(
     solver: &mut TraitSolver,
     message: &str,
 ) -> Result<NodeId, InternalCompilationError> {
-    use ir_syn::*;
+    use hir::hir_syn::*;
     let span = Location::new_synthesized();
 
-    // helpers to synthesize IR
+    // helpers to synthesize HIR
     let n = |arena: &mut NodeArena, kind, ty| {
-        arena.alloc(ir::Node::new(kind, ty, EffType::empty(), span))
+        arena.alloc(hir::Node::new(kind, ty, EffType::empty(), span))
     };
 
     let build_string = n(arena, native_str(message), string_type());
@@ -652,12 +651,12 @@ fn build_variant_to_x(
     ret_ty: Type,
     variant_node: NodeId,
 ) -> Result<NodeId, InternalCompilationError> {
-    use ir_syn::*;
+    use hir::hir_syn::*;
     let span = Location::new_synthesized();
 
-    // helpers to synthesize IR
+    // helpers to synthesize HIR
     let n = |arena: &mut NodeArena, kind, ty| {
-        arena.alloc(ir::Node::new(kind, ty, EffType::empty(), span))
+        arena.alloc(hir::Node::new(kind, ty, EffType::empty(), span))
     };
 
     let function = solver.get_function(
@@ -679,16 +678,16 @@ fn build_expect_variant_object_entry(
     fields: NodeId,
     name: &str,
 ) -> Result<NodeId, InternalCompilationError> {
-    use ir_syn::*;
+    use hir::hir_syn::*;
     let span = Location::new_synthesized();
 
     // types
     let element_ty = tuple_type([string_type(), variant_type()]);
     let payload_ty = array_type(element_ty);
 
-    // helpers to synthesize IR
+    // helpers to synthesize HIR
     let n = |arena: &mut NodeArena, kind, ty| {
-        arena.alloc(ir::Node::new(kind, ty, EffType::empty(), span))
+        arena.alloc(hir::Node::new(kind, ty, EffType::empty(), span))
     };
 
     let name_node = n(arena, native_str(name), string_type());

@@ -11,18 +11,17 @@ use std::sync::LazyLock;
 
 use crate::{
     Location,
+    compiler::error::InternalCompilationError,
     containers::b,
-    effects::EffType,
-    error::InternalCompilationError,
-    function::FunctionDefinition,
-    ir::{self, NodeArena, NodeId},
-    ir_syn,
+    hir::function::FunctionDefinition,
+    hir::{self, NodeArena, NodeId},
     module::{Module, TraitImplId},
     std::{STD_MODULE_ID, product_value_deriver::ProductValueDeriver},
-    r#trait::{Deriver, TraitRef},
-    trait_solver::TraitSolver,
-    r#type::{FnType, Type, TypeKind},
-    type_like::TypeLike,
+    types::effects::EffType,
+    types::r#trait::{Deriver, TraitRef},
+    types::trait_solver::TraitSolver,
+    types::r#type::{FnType, Type, TypeKind},
+    types::type_like::TypeLike,
 };
 
 use FunctionDefinition as Def;
@@ -39,7 +38,7 @@ impl Deriver for EnumDefaultDeriver {
         arena: &mut NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError> {
-        use ir_syn::*;
+        use hir::hir_syn::*;
 
         assert!(input_types.len() == 1);
         let ty = input_types[0];
@@ -67,8 +66,8 @@ impl Deriver for EnumDefaultDeriver {
             .expect("default variant must exist on enum type definitions");
         drop(shape_data);
 
-        let n = |arena: &mut NodeArena, kind: ir::NodeKind, ty: Type| -> NodeId {
-            arena.alloc(ir::Node::new(
+        let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+            arena.alloc(hir::Node::new(
                 kind,
                 ty,
                 EffType::empty(),

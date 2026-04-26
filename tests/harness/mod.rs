@@ -8,15 +8,15 @@
 //
 use ferlium::{
     CompilerSession, FxHashSet, Location, ModuleAndExpr, SourceTable,
+    compiler::error::{CompilationError, RuntimeErrorKind},
     containers::IntoSVec2,
-    effects::{PrimitiveEffect, effect, effects, no_effects},
-    emit_ir::{CompiledExpr, emit_expr_unsafe},
-    error::{CompilationError, RuntimeErrorKind},
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
-    function::{
+    hir::emit_ir::{CompiledExpr, emit_expr_unsafe},
+    hir::function::{
         BinaryNativeFnNNV, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMV,
         UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN, UnaryNativeFnVV,
     },
+    hir::value::Value,
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
     parse_module_and_expr,
     std::{
@@ -27,10 +27,10 @@ use ferlium::{
         option::option_type,
         string::string_type,
     },
-    r#trait::TraitRef,
-    r#type::{FnType, Type, TypeDef, TypeDefRef, TypeVar, variant_type},
-    type_scheme::{PubTypeConstraint, TypeScheme},
-    value::Value,
+    types::effects::{PrimitiveEffect, effect, effects, no_effects},
+    types::r#trait::TraitRef,
+    types::r#type::{FnType, Type, TypeDef, TypeDefRef, TypeVar, variant_type},
+    types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
 use std::{cell::RefCell, sync::atomic::AtomicIsize};
 use ustr::ustr;

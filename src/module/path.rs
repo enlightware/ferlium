@@ -14,7 +14,7 @@ use ustr::Ustr;
 
 use crate::format::write_with_separator;
 
-/// A non-spanned path used in IR and module lookups.
+/// A non-spanned path used in HIR and module lookups.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
 
 pub struct Path {
@@ -40,7 +40,7 @@ impl Path {
         self.segments.len() == 1 && self.segments[0] == name
     }
 
-    pub fn from_ast_segments(segments: &[crate::ast::UstrSpan]) -> Self {
+    pub fn from_ast_segments(segments: &[crate::parser::ast::UstrSpan]) -> Self {
         Self {
             segments: segments.iter().map(|(name, _)| *name).collect(),
         }

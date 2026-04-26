@@ -12,11 +12,11 @@ use std::fmt;
 use crate::{
     cached_primitive_ty,
     containers::b,
-    effects::no_effects,
-    function::{
+    hir::function::{
         BinaryNativeFnMNN, BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN,
         UnaryNativeFnNN,
     },
+    hir::value::NativeDisplay,
     module::Module,
     std::{
         cast::CAST_TRAIT,
@@ -24,8 +24,8 @@ use crate::{
         string::String,
         value::{VALUE_TRAIT, equal},
     },
-    r#type::Type,
-    value::NativeDisplay,
+    types::effects::no_effects,
+    types::r#type::Type,
 };
 use ustr::ustr;
 

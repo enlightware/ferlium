@@ -22,15 +22,17 @@ use ustr::ustr;
 
 use crate::{
     Location,
-    error::{InternalCompilationError, InvalidTraitDefinitionKind, UnsupportedTraitDefinitionKind},
+    compiler::error::{
+        InternalCompilationError, InvalidTraitDefinitionKind, UnsupportedTraitDefinitionKind,
+    },
     format::{FormatWith, write_with_separator_and_format_fn},
-    function::FunctionDefinition,
+    hir::function::FunctionDefinition,
     module::{ModuleEnv, ModuleId, TraitImplId},
-    trait_solver::TraitSolver,
-    r#type::{Type, TypeSubstitution, TypeVar},
-    type_like::TypeLike,
-    type_scheme::PubTypeConstraint,
-    type_visitor::TyVarsCollector,
+    types::trait_solver::TraitSolver,
+    types::r#type::{Type, TypeSubstitution, TypeVar},
+    types::type_like::TypeLike,
+    types::type_scheme::PubTypeConstraint,
+    types::type_visitor::TyVarsCollector,
 };
 
 /// Help deriving implementations of traits.
@@ -41,7 +43,7 @@ pub trait Deriver: Debug + DynClone + Sync + Send {
         trait_ref: &TraitRef,
         input_types: &[Type],
         span: Location,
-        arena: &mut crate::ir::NodeArena,
+        arena: &mut crate::hir::NodeArena,
         solver: &mut TraitSolver,
     ) -> Result<Option<TraitImplId>, InternalCompilationError>;
 }

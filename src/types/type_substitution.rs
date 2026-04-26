@@ -10,9 +10,9 @@
 use crate::{
     FxHashMap,
     containers::b,
-    effects::EffType,
-    mutability::MutType,
-    r#type::{FnArgType, FnType, NamedType, NativeType, Type, TypeKind, store_types},
+    types::effects::EffType,
+    types::mutability::MutType,
+    types::r#type::{FnArgType, FnType, NamedType, NativeType, Type, TypeKind, store_types},
 };
 
 /// A struct that can substitute types, possibly mutating itself in the process.

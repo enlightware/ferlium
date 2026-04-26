@@ -19,19 +19,19 @@ use ustr::Ustr;
 
 use crate::{
     Location,
+    compiler::error::{InternalCompilationError, LocatedError},
     containers::{B, b},
-    effects::PrimitiveEffect,
-    error::{InternalCompilationError, LocatedError},
     format::{FormatWith, write_with_separator},
+    hir::value::{LiteralValue, Value},
     internal_compilation_error,
     module::ModuleEnv,
-    mutability::{FormatInFnArg, MutType as IrMutType, MutVal},
-    never::Never,
-    parser_helpers::EMPTY_USTR,
-    r#type::{Type as IrType, TypeDefRef},
-    type_like::TypeLike,
-    type_scheme::PubTypeConstraint,
-    value::{LiteralValue, Value},
+    parser::helpers::EMPTY_USTR,
+    types::effects::PrimitiveEffect,
+    types::mutability::{FormatInFnArg, MutType as IrMutType, MutVal},
+    types::never::Never,
+    types::r#type::{Type as IrType, TypeDefRef},
+    types::type_like::TypeLike,
+    types::type_scheme::PubTypeConstraint,
 };
 
 /// An index into an expression arena

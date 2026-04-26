@@ -9,7 +9,7 @@
 
 use ustr::ustr;
 
-use ferlium::value::Value;
+use ferlium::hir::value::Value;
 use ferlium::{Path, eval::eval_node};
 use test_log::test;
 

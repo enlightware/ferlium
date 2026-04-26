@@ -16,9 +16,9 @@ use std::{
 
 use super::string::String as Str;
 use crate::{
-    effects::{PrimitiveEffect, effect},
-    error::RuntimeErrorKind,
-    function::UnaryNativeFnNFV,
+    compiler::error::RuntimeErrorKind,
+    hir::function::UnaryNativeFnNFV,
+    hir::value::Value,
     module::Module,
     std::{
         array::Array,
@@ -26,7 +26,7 @@ use crate::{
         string::{string_type, string_value},
         variant::variant_type,
     },
-    value::Value,
+    types::effects::{PrimitiveEffect, effect},
 };
 use enum_as_inner::EnumAsInner;
 use json_event_parser::ReaderJsonParser;

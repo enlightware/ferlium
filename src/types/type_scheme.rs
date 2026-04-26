@@ -16,30 +16,30 @@ use crate::{FxHashMap, FxHashSet};
 
 use crate::{
     Location,
-    dictionary_passing::ExtraParameters,
-    error::InternalCompilationError,
+    compiler::error::InternalCompilationError,
     format::{FormatWith, write_with_separator_and_format_fn},
-    location::InstantiableLocation,
+    hir::dictionary_passing::ExtraParameters,
+    parser::location::InstantiableLocation,
     std::core::REPR_TRAIT,
-    r#trait::TraitRef,
-    trait_solver::TraitSolver,
-    type_inference::UnifiedTypeInference,
-    type_like::TypeLike,
-    type_mapper::TypeMapper,
-    type_visitor::TypeInnerVisitor,
+    types::r#trait::TraitRef,
+    types::trait_solver::TraitSolver,
+    types::type_inference::UnifiedTypeInference,
+    types::type_like::TypeLike,
+    types::type_mapper::TypeMapper,
+    types::type_visitor::TypeInnerVisitor,
 };
 use enum_as_inner::EnumAsInner;
 use itertools::Itertools;
 use ustr::Ustr;
 
 use crate::{
-    dictionary_passing::{DictionaryReq, instantiate_dictionaries_req},
-    effects::{EffType, EffectVar, EffectsSubstitution},
     format::FormatWithData,
-    ir::FnInstData,
+    hir::FnInstData,
+    hir::dictionary_passing::{DictionaryReq, instantiate_dictionaries_req},
     module::ModuleEnv,
-    r#type::{Type, TypeSubstitution, TypeVar},
-    type_inference::{InstSubstitution, TypeInference},
+    types::effects::{EffType, EffectVar, EffectsSubstitution},
+    types::r#type::{Type, TypeSubstitution, TypeVar},
+    types::type_inference::{InstSubstitution, TypeInference},
 };
 
 /// The display style for type schemes.
@@ -203,7 +203,7 @@ impl PubTypeConstraint {
         &self,
         subst: &mut InstSubstitution,
         trait_solver: &mut TraitSolver<'_>,
-        arena: &mut crate::ir::NodeArena,
+        arena: &mut crate::hir::NodeArena,
     ) -> Result<Option<Self>, InternalCompilationError> {
         let constraint = self.instantiate(subst);
         use PubTypeConstraint::*;

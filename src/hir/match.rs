@@ -8,30 +8,30 @@
 //
 use crate::{
     FxHashMap, Location,
-    ast::{DExprId, PatternVar},
-    error::DuplicatedVariantContext,
+    compiler::error::DuplicatedVariantContext,
+    hir::hir_syn::store_new,
     internal_compilation_error,
-    ir_syn::store_new,
     module::{LocalDecl, LocalDeclId, id::Id},
-    mutability::MutVal,
+    parser::ast::{DExprId, PatternVar},
     std::core::REPR_TRAIT,
-    r#type::TypeKind,
+    types::mutability::MutVal,
+    types::r#type::TypeKind,
 };
 use itertools::{Itertools, multiunzip};
 
 use crate::{
-    ast::{Pattern, PatternKind, PatternType},
+    compiler::error::InternalCompilationError,
     containers::{SVec2, b},
-    effects::{EffType, no_effects},
-    error::InternalCompilationError,
-    ir::{self, EnvLoad, EnvStore, NodeId, NodeKind},
-    mutability::MutType,
+    hir::value::LiteralValue,
+    hir::{self, EnvLoad, EnvStore, NodeId, NodeKind},
+    parser::ast::{Pattern, PatternKind, PatternType},
     std::math::int_type,
-    r#type::Type,
-    type_inference::TypeInference,
-    type_scheme::PubTypeConstraint,
-    typing_env::TypingEnv,
-    value::LiteralValue,
+    types::effects::{EffType, no_effects},
+    types::mutability::MutType,
+    types::r#type::Type,
+    types::type_inference::TypeInference,
+    types::type_scheme::PubTypeConstraint,
+    types::typing_env::TypingEnv,
 };
 
 impl TypeInference {
@@ -43,8 +43,8 @@ impl TypeInference {
         alternatives: &[(Pattern, DExprId)],
         default: &Option<DExprId>,
     ) -> Result<(NodeKind, Type, MutType, EffType), InternalCompilationError> {
-        use ir::Node as N;
-        use ir::NodeKind as K;
+        use hir::Node as N;
+        use hir::NodeKind as K;
 
         let sp = |id: DExprId| env.ast_arena[id].span;
 
@@ -401,7 +401,7 @@ impl TypeInference {
             } else {
                 return_ty
             };
-            let case = K::Case(b(ir::Case {
+            let case = K::Case(b(hir::Case {
                 value: extract_tag_id,
                 alternatives,
                 default,
@@ -459,7 +459,7 @@ impl TypeInference {
             } else {
                 return_ty
             };
-            let node = K::Case(b(ir::Case {
+            let node = K::Case(b(hir::Case {
                 value: condition_node_id,
                 alternatives,
                 default: default_id,

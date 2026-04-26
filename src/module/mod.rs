@@ -36,17 +36,18 @@ use std::{fmt, hash::Hash};
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashSet, Location, Modules, define_id_type,
-    emit_ir::EmitTraitOutput,
-    error::{ImportKind, ImportSite, InternalCompilationError},
+    FxHashSet, Location, Modules,
+    compiler::error::{ImportKind, ImportSite, InternalCompilationError},
+    define_id_type,
     format::FormatWith,
-    function::Function,
+    hir::emit_ir::EmitTraitOutput,
+    hir::function::Function,
+    hir::value::build_dictionary_value,
+    hir::{self, NodeArena},
     internal_compilation_error,
-    ir::{self, NodeArena},
     module::id::{Id, NamedIndexed},
-    r#trait::TraitRef,
-    r#type::{LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDefRef, TypeVar},
-    value::build_dictionary_value,
+    types::r#trait::TraitRef,
+    types::r#type::{LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDefRef, TypeVar},
 };
 
 define_id_type!(
@@ -111,7 +112,7 @@ pub struct Module {
     traits: Traits,
     pub(crate) impls: TraitImpls,
 
-    /// Arena holding all IR nodes for all functions in this module.
+    /// Arena holding all HIR nodes for all functions in this module.
     pub ir_arena: NodeArena,
 }
 
@@ -369,7 +370,7 @@ impl Module {
     pub fn get_bare_native_type_alias(
         &self,
         name: Ustr,
-    ) -> Option<crate::containers::B<dyn crate::r#type::BareNativeType>> {
+    ) -> Option<crate::containers::B<dyn crate::types::r#type::BareNativeType>> {
         self.type_aliases.get_bare_native_by_name(name).cloned()
     }
 
@@ -377,7 +378,7 @@ impl Module {
     pub(crate) fn add_bare_native_type_alias_str(
         &mut self,
         name: &str,
-        native: Box<dyn crate::r#type::BareNativeType>,
+        native: Box<dyn crate::types::r#type::BareNativeType>,
     ) {
         self.add_bare_native_type_alias(ustr(name), native)
     }
@@ -386,7 +387,7 @@ impl Module {
     pub(crate) fn add_bare_native_type_alias(
         &mut self,
         name: Ustr,
-        native: Box<dyn crate::r#type::BareNativeType>,
+        native: Box<dyn crate::types::r#type::BareNativeType>,
     ) {
         self.type_aliases.set_bare_native(name, native);
     }
@@ -623,7 +624,7 @@ impl Module {
             let ty = function
                 .code
                 .as_script()
-                .and_then(|script_fn| ir::type_at(&self.ir_arena, script_fn.entry_node_id, pos));
+                .and_then(|script_fn| hir::type_at(&self.ir_arena, script_fn.entry_node_id, pos));
             if ty.is_some() {
                 return ty;
             }

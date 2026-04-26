@@ -19,14 +19,14 @@ use ustr::ustr;
 
 use crate::{
     cached_primitive_ty, cached_ty,
+    compiler::error::RuntimeErrorKind,
     containers::b,
-    effects::{PrimitiveEffect, effect, no_effects},
-    error::RuntimeErrorKind,
-    function::{
+    hir::function::{
         BinaryNativeFnMNN, BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN,
         BinaryNativeFnNNV, Function, NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV,
         UnaryNativeFnNN, UnaryNativeFnNV,
     },
+    hir::value::{NativeDisplay, Value},
     module::{Module, ModuleFunction},
     std::{
         core_traits_names::ORD_TRAIT_NAME,
@@ -38,9 +38,9 @@ use crate::{
         ordering::compare,
         value::{VALUE_TRAIT, equal},
     },
-    r#type::{FnType, Type},
-    type_scheme::TypeScheme,
-    value::{NativeDisplay, Value},
+    types::effects::{PrimitiveEffect, effect, no_effects},
+    types::r#type::{FnType, Type},
+    types::type_scheme::TypeScheme,
 };
 
 use super::option::{none, option_type, some};

@@ -22,7 +22,7 @@ use crate::{
     containers::{B, IntoSVec2, SVec2, b},
     format::{FormatWithData, write_with_separator, write_with_separator_and_format_fn},
     module::{LocalFunctionId, ModuleEnv, ModuleId},
-    r#type::{NativeType, Type, TypeKind},
+    types::r#type::{NativeType, Type, TypeKind},
 };
 
 // Support for primitive values

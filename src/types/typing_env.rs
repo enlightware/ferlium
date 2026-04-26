@@ -10,18 +10,18 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     FxHashSet, Location,
-    ast::{self, DExprArena},
-    error::InternalCompilationError,
-    function::FunctionDefinition,
-    ir::NodeArena,
+    compiler::error::InternalCompilationError,
+    hir::NodeArena,
+    hir::function::FunctionDefinition,
     module::{
         self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget,
         LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
         TypeDefLookupResult, id::Id,
     },
+    parser::ast::{self, DExprArena},
     std::STD_MODULE_ID,
-    r#trait::TraitRef,
-    r#type::{Type, TypeSubstitution, TypeVar},
+    types::r#trait::TraitRef,
+    types::r#type::{Type, TypeSubstitution, TypeVar},
 };
 
 use derive_new::new;
@@ -99,7 +99,7 @@ pub struct TypingEnv<'m> {
     pub(crate) base_local_function_index: u32,
     /// The desugared expression arena, used to look up child expression nodes by ID.
     pub(crate) ast_arena: &'m DExprArena,
-    /// The IR node arena, used to allocate IR nodes during type inference.
+    /// The HIR node arena, used to allocate HIR nodes during type inference.
     pub(crate) ir_arena: &'m mut NodeArena,
 }
 

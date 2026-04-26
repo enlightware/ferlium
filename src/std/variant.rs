@@ -16,7 +16,7 @@ use crate::{
         math::{float_type, int_type},
         string::string_type,
     },
-    r#type::{NativeType, Type, TypeKind, bare_native_type, store_types},
+    types::r#type::{NativeType, Type, TypeKind, bare_native_type, store_types},
 };
 use ustr::ustr;
 

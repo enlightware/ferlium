@@ -7,19 +7,19 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ferlium::error::{
+use ferlium::compiler::error::{
     CompilationErrorImpl, DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
     InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind, InvalidTraitConstraintKind,
 };
 use ferlium::eval::eval_node;
 use ferlium::format::FormatWith;
+use ferlium::hir::value::Value;
 use ferlium::module::id::Id;
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
 use ferlium::std::string::string_type;
-use ferlium::r#type::{Type, TypeVar};
-use ferlium::value::Value;
-use ferlium::{CompilerSession, SourceId, ast, parse_module_and_expr};
+use ferlium::types::r#type::{Type, TypeVar};
+use ferlium::{CompilerSession, SourceId, parse_module_and_expr, parser::ast};
 use test_log::test;
 
 use indoc::indoc;

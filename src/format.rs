@@ -11,7 +11,7 @@ use std::fmt::{self, Display};
 
 use derive_new::new;
 
-use crate::{FxHashMap, never::Never};
+use crate::{FxHashMap, types::never::Never};
 
 /// A wrapper to fmt::Display types that depend on third-party data
 #[derive(new)]

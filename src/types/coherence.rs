@@ -9,20 +9,20 @@
 
 use crate::{
     FxHashMap, FxHashSet, Location, Modules,
-    error::{InternalCompilationError, InternalTraitImplHeader},
+    compiler::error::{InternalCompilationError, InternalTraitImplHeader},
+    hir::NodeArena,
     internal_compilation_error,
-    ir::NodeArena,
     module::{
         BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, Module, ModuleId,
         TraitImpl, TraitKey,
     },
-    r#trait::TraitRef,
-    trait_solver::TraitSolverProbe,
-    r#type::{Type, TypeVar},
-    type_inference::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
-    type_like::TypeLike,
-    type_like::instantiate_types,
-    type_scheme::PubTypeConstraint,
+    types::r#trait::TraitRef,
+    types::trait_solver::TraitSolverProbe,
+    types::r#type::{Type, TypeVar},
+    types::type_inference::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
+    types::type_like::TypeLike,
+    types::type_like::instantiate_types,
+    types::type_scheme::PubTypeConstraint,
 };
 
 struct CoherenceTypeUnifier {

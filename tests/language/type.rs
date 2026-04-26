@@ -8,9 +8,9 @@
 //
 
 use ferlium::{
-    effects::{EffType, PrimitiveEffect, effect, effects},
-    error::CompilationErrorImpl,
+    compiler::error::CompilationErrorImpl,
     format::{FormatWith, FormatWithData},
+    hir::value::Value,
     std::{
         array::array_type,
         logic::bool_type,
@@ -18,8 +18,8 @@ use ferlium::{
         string::string_type,
         variant,
     },
-    r#type::{FnType, Type, record_type, tuple_type, variant_type},
-    value::Value,
+    types::effects::{EffType, PrimitiveEffect, effect, effects},
+    types::r#type::{FnType, Type, record_type, tuple_type, variant_type},
 };
 
 use indoc::indoc;
@@ -611,7 +611,7 @@ fn variant_type_alias_in_function_signature() {
 
             // Dump world 1 to show the canonical Variant
             println!("\n=== Dumping world 1 (canonical Variant) ===");
-            ferlium::r#type::dump_type_world(1, &session.std_module_env());
+            ferlium::types::r#type::dump_type_world(1, &session.std_module_env());
         } else {
             panic!("Expected array element to be a tuple");
         }

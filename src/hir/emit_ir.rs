@@ -9,8 +9,13 @@
 use std::mem;
 
 use crate::{
-    FxHashMap, FxHashSet, Modules, borrow_checker::check_borrows, containers::B,
-    dictionary_passing::elaborate_dictionaries, function::VoidFunction, module::Uses,
+    FxHashMap, FxHashSet, Modules,
+    containers::B,
+    hir::{
+        borrow_checker::check_borrows, dictionary_passing::elaborate_dictionaries,
+        function::VoidFunction,
+    },
+    module::Uses,
 };
 
 use indexmap::IndexMap;
@@ -20,39 +25,39 @@ use ustr::Ustr;
 
 use crate::{
     Location,
-    ast::{self, *},
-    coherence::check_trait_impl,
+    compiler::error::InternalCompilationError,
     containers::{b, iterable_to_string},
     desugar::desugar_expr_with_empty_ctx,
-    dictionary_passing::DictElaborationCtx,
-    effects::EffType,
-    error::InternalCompilationError,
     format::FormatWith,
-    function::{FunctionDefinition, ScriptFunction},
+    hir::dictionary_passing::DictElaborationCtx,
+    hir::function::{FunctionDefinition, ScriptFunction},
+    hir::value::build_dictionary_value,
+    hir::{self, NodeArena},
     internal_compilation_error,
-    ir::{self, NodeArena},
     module::{
         ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module,
         ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl, id::Id,
     },
-    mutability::MutType,
+    parser::ast::{self, *},
     std::new_module_using_std,
-    r#trait::TraitRef,
-    trait_solver::{TraitSolver, trait_solver_from_module},
-    r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
-    type_constraints::named_type_constraints_in_types,
-    type_inference::{
+    types::coherence::check_trait_impl,
+    types::effects::EffType,
+    types::mutability::MutType,
+    types::r#trait::TraitRef,
+    types::trait_solver::{TraitSolver, trait_solver_from_module},
+    types::r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
+    types::type_constraints::named_type_constraints_in_types,
+    types::type_inference::{
         AnnotationTypeMapper, ConstraintBoundary, DefaultingScope, InstSubstitution, TypeInference,
         UnifiedTypeInference,
     },
-    type_like::{TypeLike, instantiate_types},
-    type_mapper::TypeMapper,
-    type_scheme::{
+    types::type_like::{TypeLike, instantiate_types},
+    types::type_mapper::TypeMapper,
+    types::type_scheme::{
         PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
     },
-    type_visitor::{TyVarsCollector, collect_ty_vars},
-    typing_env::TypingEnv,
-    value::build_dictionary_value,
+    types::type_visitor::{TyVarsCollector, collect_ty_vars},
+    types::typing_env::TypingEnv,
 };
 
 fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompilationError> {
@@ -82,7 +87,7 @@ fn substitute_in_function_descr(
     subst: &InstSubstitution,
 ) {
     let root = descr.get_code_entry().unwrap();
-    ir::instantiate_node(ir_arena, root, subst);
+    hir::instantiate_node(ir_arena, root, subst);
     for local in &mut descr.locals {
         local.ty = local.ty.instantiate(subst);
     }
@@ -131,7 +136,7 @@ pub enum EmitModuleFrom {
     Existing(B<Module>),
 }
 
-/// Emit IR for the given module.
+/// Emit HIR for the given module.
 /// Optionally merge with an existing module (when compiling std).
 pub fn emit_module(
     source: ast::PModule,
@@ -233,7 +238,7 @@ pub fn emit_module(
         }
     }
 
-    // Take the module's IR node arena out for compilation so it can be passed separately
+    // Take the module's HIR node arena out for compilation so it can be passed separately
     // from the module borrow, then put it back at the end.
     let mut ir_arena = std::mem::take(&mut output.ir_arena);
 
@@ -365,7 +370,7 @@ pub fn emit_module(
         log::debug!("Emitted {impl_type} {header}");
     }
 
-    // Restore the IR arena.
+    // Restore the HIR arena.
     output.ir_arena = ir_arena;
     Ok(output)
 }
@@ -805,7 +810,7 @@ where
                         descr.definition.ty_scheme.ty =
                             descr.definition.ty_scheme.ty.instantiate(&subst);
                         let root = descr.get_code_entry().unwrap();
-                        ir::instantiate_node(ir_arena, root, &subst);
+                        hir::instantiate_node(ir_arena, root, &subst);
                     });
                 }
             }
@@ -930,7 +935,7 @@ where
         for id in local_fns.iter() {
             let descr = &mut output.functions[id.as_index()];
             let root = descr.get_code_entry().unwrap();
-            let unbound = ir::all_unbound_ty_vars(ir_arena, root);
+            let unbound = hir::all_unbound_ty_vars(ir_arena, root);
             let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
             unbound_subst.extend(
                 uninstantiated_unbound
@@ -1125,7 +1130,7 @@ where
             quantifiers = quantifiers.into_iter().unique().collect();
 
             // Check for unbound type variables.
-            let unbound = ir::all_unbound_ty_vars(ir_arena, code_entry);
+            let unbound = hir::all_unbound_ty_vars(ir_arena, code_entry);
             let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
 
             // Apply unbound→Never fixup if needed.
@@ -1229,7 +1234,7 @@ where
 /// Check all unbound variables from unbound that are not in bounds,
 /// and if they are not only seen in variants, return an error.
 fn check_unbounds(
-    unbound: IndexMap<TypeVar, ir::UnboundTyCtxs>,
+    unbound: IndexMap<TypeVar, hir::UnboundTyCtxs>,
     bounds: &[TypeVar],
 ) -> Result<FxHashSet<TypeVar>, InternalCompilationError> {
     let mut uninstantiated_unbound = FxHashSet::default();
@@ -1253,12 +1258,12 @@ fn check_unbounds(
 /// A compiled expression
 #[derive(Debug)]
 pub struct CompiledExpr {
-    pub expr: ir::NodeId,
+    pub expr: hir::NodeId,
     pub ty: TypeScheme<Type>,
     pub locals: Vec<LocalDecl>,
 }
 
-/// Emit IR for an expression
+/// Emit HIR for an expression.
 /// Return the compiled expression and any remaining external constraints
 /// referring to lower-generation type variables.
 /// Note: the expression might not be safe to use if it has unbound constraints or type variables.
@@ -1382,7 +1387,7 @@ fn emit_expr_unsafe_inner(
     let mut quantifiers = TypeScheme::list_ty_vars(&node_ty, all_constraints.iter());
 
     // Check for unbound type variables.
-    let unbound = ir::all_unbound_ty_vars(ir_arena, node_id);
+    let unbound = hir::all_unbound_ty_vars(ir_arena, node_id);
     let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
 
     // Apply unbound→Never fixup if needed.
@@ -1394,12 +1399,12 @@ fn emit_expr_unsafe_inner(
         FxHashMap::default(),
     );
     if !fixup_subst.0.is_empty() {
-        ir::instantiate_node(ir_arena, node_id, &fixup_subst);
+        hir::instantiate_node(ir_arena, node_id, &fixup_subst);
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&fixup_subst);
             let root = descr.get_code_entry().unwrap();
-            ir::instantiate_node(ir_arena, root, &fixup_subst);
+            hir::instantiate_node(ir_arena, root, &fixup_subst);
             for local in &mut descr.locals {
                 local.ty = local.ty.instantiate(&fixup_subst);
             }
@@ -1439,12 +1444,12 @@ fn emit_expr_unsafe_inner(
     }
     quantifiers.retain(|ty_var| !drop_subst.0.contains_key(ty_var));
     if !drop_subst.0.is_empty() {
-        ir::instantiate_node(ir_arena, node_id, &drop_subst);
+        hir::instantiate_node(ir_arena, node_id, &drop_subst);
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&drop_subst);
             let root = descr.get_code_entry().unwrap();
-            ir::instantiate_node(ir_arena, root, &drop_subst);
+            hir::instantiate_node(ir_arena, root, &drop_subst);
             for local in &mut descr.locals {
                 local.ty = local.ty.instantiate(&drop_subst);
             }
@@ -1490,12 +1495,12 @@ fn emit_expr_unsafe_inner(
     }
 
     // Substitute the normalized types in the node, effects and locals.
-    ir::instantiate_node(ir_arena, node_id, &subst);
+    hir::instantiate_node(ir_arena, node_id, &subst);
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
         let root = descr.get_code_entry().unwrap();
-        ir::instantiate_node(ir_arena, root, &subst);
+        hir::instantiate_node(ir_arena, root, &subst);
         for local in &mut descr.locals {
             local.ty = local.ty.instantiate(&subst);
         }
@@ -1526,7 +1531,7 @@ fn emit_expr_unsafe_inner(
     })
 }
 
-/// Emit IR for an expression, and fails if there are any unbound type variables or constraints.
+/// Emit HIR for an expression, and fails if there are any unbound type variables or constraints.
 /// If the expression imports functions from the Program, module's imports will be updated.
 pub fn emit_expr(
     source: PExprId,

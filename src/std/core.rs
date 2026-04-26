@@ -11,7 +11,9 @@ use std::sync::LazyLock;
 
 use crate::{
     containers::b,
-    function::{BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN},
+    hir::function::{
+        BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN,
+    },
     module::Module,
     std::{
         STD_MODULE_ID,
@@ -22,8 +24,8 @@ use crate::{
         string::string_type,
         value::VALUE_TRAIT,
     },
-    r#trait::TraitRef,
-    r#type::Type,
+    types::r#trait::TraitRef,
+    types::r#type::Type,
 };
 
 pub static REPR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {

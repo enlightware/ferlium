@@ -11,8 +11,8 @@ use ustr::ustr;
 
 use crate::{
     cached_ty,
-    r#type::{Type, variant_type},
-    value::Value,
+    hir::value::Value,
+    types::r#type::{Type, variant_type},
 };
 
 pub const ORDERING_LESS: &str = "Less";

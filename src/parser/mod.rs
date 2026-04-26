@@ -6,18 +6,20 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-// Note: disabled for now until we have a borrow checker
-// use crate::{hir::value::Value, module::Module};
 
-// use ustr::ustr;
+use lalrpop_util::lalrpop_mod;
 
-// pub fn swap(a: &mut Value, b: &mut Value) {
-//     std::mem::swap(a, b);
-// }
+pub mod ast;
+pub mod escapes;
+pub mod helpers;
+pub mod location;
 
-// pub fn add_to_module(to: &mut Module) {
-//     to.functions.insert(
-//         ustr("swap"),
-//         BinaryNativeFnMMP::description_gen0_gen0(swap),
-//     );
-// }
+lalrpop_mod!(
+    #[allow(clippy::ptr_arg,clippy::type_complexity,clippy::needless_return)]
+    #[rustfmt::skip]
+    grammar,
+    "/parser/parser.rs"
+);
+
+pub(crate) use grammar::*;
+pub(crate) use helpers::describe_parse_error;

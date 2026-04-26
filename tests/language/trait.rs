@@ -9,11 +9,11 @@
 
 use test_log::test;
 
-use ferlium::error::{CompilationErrorImpl, InvalidTraitDefinitionKind};
-use ferlium::r#type::TypeVar;
+use ferlium::compiler::error::{CompilationErrorImpl, InvalidTraitDefinitionKind};
+use ferlium::types::r#type::TypeVar;
 use ferlium::{
-    effects::{PrimitiveEffect, effect},
     format::FormatWith,
+    types::effects::{PrimitiveEffect, effect},
 };
 use indoc::indoc;
 use ustr::ustr;

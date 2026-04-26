@@ -12,8 +12,8 @@ use indoc::indoc;
 
 use crate::harness::{TestSession, bool, float, int, unit};
 use ferlium::{
-    error::MutabilityMustBeWhat, std::core_traits_names::NUM_TRAIT_NAME,
-    type_scheme::PubTypeConstraint, value::Value,
+    compiler::error::MutabilityMustBeWhat, hir::value::Value,
+    std::core_traits_names::NUM_TRAIT_NAME, types::type_scheme::PubTypeConstraint,
 };
 
 #[cfg(target_arch = "wasm32")]
