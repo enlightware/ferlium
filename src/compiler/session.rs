@@ -22,9 +22,9 @@ use crate::{
     define_id_type,
     eval::{EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
-    hir,
     hir::emit_ir::{CompiledExpr, EmitModuleFrom, emit_expr, emit_module},
     hir::value::Value,
+    hir::{self, hir_syn::local},
     module::{
         self, LocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path, Uses,
         id::{Id, NamedIndexed},
@@ -550,6 +550,38 @@ impl CompilerSession {
     ) -> Result<Value, EvalExprError> {
         let module = self.expect_fresh_module(module_id).clone();
         self.eval_expr_with_locals_in_module(source_name, source, &module, locals, environment)
+    }
+
+    /// Render a value by evaluating Ferlium's `to_string(value)` in `module_id`.
+    ///
+    /// This is the same semantic formatting path used by the IDE execution
+    /// view. The concrete value type is required so trait-based `to_string`
+    /// resolution happens through the compiler.
+    pub fn value_to_string(
+        &mut self,
+        module_id: ModuleId,
+        value: Value,
+        ty: Type,
+    ) -> Result<String, String> {
+        match self.eval_expr_with_locals(
+            "<value_to_string>",
+            "to_string(value)",
+            module_id,
+            vec![local("value", ty)],
+            vec![ValOrMut::Val(value)],
+        ) {
+            Ok(rendered) => rendered
+                .into_primitive_ty::<crate::std::string::String>()
+                .map(|rendered| rendered.to_string())
+                .ok_or_else(|| "to_string(value) did not return a string".to_string()),
+            Err(EvalExprError::Compilation(error)) => {
+                Err(format!("{}", error.format_with(self.source_table())))
+            }
+            Err(EvalExprError::Runtime(error)) => Err(format!(
+                "{}",
+                error.format_with(&(self.source_table(), self.modules()))
+            )),
+        }
     }
 
     pub(crate) fn eval_std_expr_with_locals(
