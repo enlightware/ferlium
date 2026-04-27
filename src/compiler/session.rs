@@ -543,6 +543,17 @@ impl CompilerSession {
         )
     }
 
+
+    /// Emit the SSA form for the given `source_name`
+    pub fn emit_ssa(
+        &mut self, source_name: &str, src: &str,
+    ) -> String {
+        let path = module::Path::single_str(source_name);
+        let i = self.compile(src, source_name, path).unwrap().module_id;
+        let module = self.expect_fresh_module(i);
+        emit_ssa::emit_ssa(module, self.modules())
+    }
+
     /// Returns the entry for module_id, or panic if not found.
     pub fn expect_module_entry(&self, module_id: ModuleId) -> &ModuleEntry {
         self.modules()
