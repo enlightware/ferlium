@@ -24,7 +24,7 @@ use regex::Regex;
 use wasm_bindgen::prelude::*;
 
 use super::{
-    annotations::AnnotationData,
+    annotations::{AnnotationData, display_annotations},
     char_index_lookup::CharIndexLookup,
     diagnostics::{ErrorData, compilation_error_to_data},
     execution::{ExecutionErrorData, ExecutionResult},
@@ -214,7 +214,8 @@ impl Compiler {
             Some(source) => source,
             None => return Vec::new(),
         };
-        let annotations = self.user_module.display_annotations(
+        let annotations = display_annotations(
+            &self.user_module,
             source_id,
             source_entry.source(),
             &self.session,

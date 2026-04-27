@@ -19,331 +19,344 @@ use crate::{
     module::{LocalDecl, ModuleEnv, id::Id},
     types::type_scheme::DisplayStyle,
 };
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
-impl ModuleAndExpr {
-    /// Type and other annotations for display in a IDE, for a given source file.
-    /// Returns a vector of positions in byte offsets and annotations.
-    pub fn display_annotations(
-        &self,
-        source_id: SourceId,
-        src: &str,
-        session: &CompilerSession,
-        style: DisplayStyle,
-    ) -> Vec<(usize, String)> {
-        use DisplayStyle::*;
-        let entry = session.expect_module_entry(self.module_id);
-        let module = match entry.module() {
-            None => return vec![],
-            Some(module) => module,
+/// An annotation data struct to be used in IDEs
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(getter_with_clone))]
+pub struct AnnotationData {
+    pub pos: usize,
+    pub hint: String,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl AnnotationData {
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
+    pub fn new(pos: usize, hint: String) -> Self {
+        Self { pos, hint }
+    }
+}
+
+/// Type and other annotations for display in a IDE, for a given source file.
+/// Returns a vector of positions in byte offsets and annotations.
+pub(super) fn display_annotations(
+    module_and_expr: &ModuleAndExpr,
+    source_id: SourceId,
+    src: &str,
+    session: &CompilerSession,
+    style: DisplayStyle,
+) -> Vec<(usize, String)> {
+    use DisplayStyle::*;
+    let entry = session.expect_module_entry(module_and_expr.module_id);
+    let module = match entry.module() {
+        None => return vec![],
+        Some(module) => module,
+    };
+    let env = ModuleEnv::new(module, session.modules());
+    let mut annotations = vec![];
+
+    // Function and expression bodies.
+    for function in module.iter_functions() {
+        let spans = match &function.spans {
+            Some(spans) => spans,
+            None => continue,
         };
-        let env = ModuleEnv::new(module, session.modules());
-        let mut annotations = vec![];
-
-        // Function and expression bodies.
-        for function in module.iter_functions() {
-            let spans = match &function.spans {
-                Some(spans) => spans,
-                None => continue,
-            };
-            if spans.span.source_id != source_id {
-                continue;
-            }
-            if let Some(script_fn) = function.code.as_script() {
-                variable_type_annotations(
-                    &module.ir_arena,
-                    script_fn.entry_node_id,
-                    &mut annotations,
-                    &function.locals,
-                    &env,
-                );
-            }
+        if spans.span.source_id != source_id {
+            continue;
         }
-        if let Some(expr) = &self.expr {
-            let root_span = module.ir_arena[expr.expr].span;
-            if root_span.source_id == source_id {
-                variable_type_annotations(
-                    &module.ir_arena,
-                    expr.expr,
-                    &mut annotations,
-                    &expr.locals,
-                    &env,
-                );
-            }
+        if let Some(script_fn) = function.code.as_script() {
+            variable_type_annotations(
+                &module.ir_arena,
+                script_fn.entry_node_id,
+                &mut annotations,
+                &function.locals,
+                &env,
+            );
         }
+    }
+    if let Some(expr) = &module_and_expr.expr {
+        let root_span = module.ir_arena[expr.expr].span;
+        if root_span.source_id == source_id {
+            variable_type_annotations(
+                &module.ir_arena,
+                expr.expr,
+                &mut annotations,
+                &expr.locals,
+                &env,
+            );
+        }
+    }
 
-        // Function signatures.
-        for function in module.iter_functions() {
-            let spans = match &function.spans {
-                Some(spans) => spans,
-                None => continue,
-            };
-            if spans.span.source_id != source_id {
-                continue;
-            }
-            if !function.definition.ty_scheme.is_just_type() {
-                match style {
-                    Mathematical => {
-                        annotations.push((
-                            spans.span.start_usize(),
-                            format!(
-                                "{} ",
-                                function
-                                    .definition
-                                    .ty_scheme
-                                    .display_quantifiers_and_constraints_math_style(&env)
-                            ),
-                        ));
-                    }
-                    Rust => {
-                        annotations.push((
-                            spans.name.end_usize(),
-                            format!(
-                                "{}",
-                                function
-                                    .definition
-                                    .ty_scheme
-                                    .display_quantifiers_rust_style()
-                            ),
-                        ));
-                    }
-                }
-            }
-            for ((name_span, ty_span), arg_ty) in spans
-                .args
-                .iter()
-                .zip(&function.definition.ty_scheme.ty.args)
-            {
-                if let Some((ty_span, ty_constant)) = ty_span {
-                    if !ty_constant {
-                        annotations.push((
-                            ty_span.end_usize(),
-                            format!(" ⇨ {}", arg_ty.format_with(&env)),
-                        ));
-                    }
-                } else {
+    // Function signatures.
+    for function in module.iter_functions() {
+        let spans = match &function.spans {
+            Some(spans) => spans,
+            None => continue,
+        };
+        if spans.span.source_id != source_id {
+            continue;
+        }
+        if !function.definition.ty_scheme.is_just_type() {
+            match style {
+                Mathematical => {
                     annotations.push((
-                        name_span.end_usize(),
-                        format!(": {}", arg_ty.format_with(&env)),
+                        spans.span.start_usize(),
+                        format!(
+                            "{} ",
+                            function
+                                .definition
+                                .ty_scheme
+                                .display_quantifiers_and_constraints_math_style(&env)
+                        ),
+                    ));
+                }
+                Rust => {
+                    annotations.push((
+                        spans.name.end_usize(),
+                        format!(
+                            "{}",
+                            function
+                                .definition
+                                .ty_scheme
+                                .display_quantifiers_rust_style()
+                        ),
                     ));
                 }
             }
-            let byte_src = src.as_bytes();
-            let past_args_index = spans.args_span.end_usize();
-            let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
+        }
+        for ((name_span, ty_span), arg_ty) in spans
+            .args
+            .iter()
+            .zip(&function.definition.ty_scheme.ty.args)
+        {
+            if let Some((ty_span, ty_constant)) = ty_span {
+                if !ty_constant {
+                    annotations.push((
+                        ty_span.end_usize(),
+                        format!(" ⇨ {}", arg_ty.format_with(&env)),
+                    ));
+                }
+            } else {
+                annotations.push((
+                    name_span.end_usize(),
+                    format!(": {}", arg_ty.format_with(&env)),
+                ));
+            }
+        }
+        let byte_src = src.as_bytes();
+        let past_args_index = spans.args_span.end_usize();
+        let start_space = if past_args_index > 0 && byte_src[past_args_index - 1] == b' ' {
+            ""
+        } else {
+            " "
+        };
+        let mut annotation = if function.definition.ty_scheme.ty.effects.is_empty() {
+            if let Some((_, ty_constant)) = spans.ret_ty {
+                if !ty_constant {
+                    Some(format!(
+                        "{start_space}⇨ {}",
+                        function.definition.ty_scheme.ty.ret.format_with(&env)
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                Some(format!(
+                    "{start_space}-> {}",
+                    function.definition.ty_scheme.ty.ret.format_with(&env)
+                ))
+            }
+        } else if let Some((_, ty_constant)) = spans.ret_ty {
+            if !ty_constant {
+                Some(format!(
+                    "{start_space}⇨ {} ! {}",
+                    function.definition.ty_scheme.ty.ret.format_with(&env),
+                    function.definition.ty_scheme.ty.effects
+                ))
+            } else {
+                Some(format!(
+                    "{start_space}! {}",
+                    function.definition.ty_scheme.ty.effects
+                ))
+            }
+        } else {
+            Some(format!(
+                "{start_space}-> {} ! {}",
+                function.definition.ty_scheme.ty.ret.format_with(&env),
+                function.definition.ty_scheme.ty.effects
+            ))
+        };
+        if style == Rust && !function.definition.ty_scheme.is_just_type_and_effects() {
+            annotation = Some(format!(
+                "{}{}{}",
+                annotation.as_ref().map_or("", |v| v),
+                annotation.as_ref().map_or(start_space, |_| " "),
+                function
+                    .definition
+                    .ty_scheme
+                    .display_constraints_rust_style(&env)
+            ));
+        }
+        if let Some(mut annotation) = annotation {
+            let end_space = if past_args_index < byte_src.len() && byte_src[past_args_index] == b' '
+            {
                 ""
             } else {
                 " "
             };
-            let mut annotation = if function.definition.ty_scheme.ty.effects.is_empty() {
-                if let Some((_, ty_constant)) = spans.ret_ty {
-                    if !ty_constant {
-                        Some(format!(
-                            "{start_space}⇨ {}",
-                            function.definition.ty_scheme.ty.ret.format_with(&env)
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    Some(format!(
-                        "{start_space}-> {}",
-                        function.definition.ty_scheme.ty.ret.format_with(&env)
-                    ))
-                }
-            } else if let Some((_, ty_constant)) = spans.ret_ty {
-                if !ty_constant {
-                    Some(format!(
-                        "{start_space}⇨ {} ! {}",
-                        function.definition.ty_scheme.ty.ret.format_with(&env),
-                        function.definition.ty_scheme.ty.effects
-                    ))
-                } else {
-                    Some(format!(
-                        "{start_space}! {}",
-                        function.definition.ty_scheme.ty.effects
-                    ))
-                }
-            } else {
-                Some(format!(
-                    "{start_space}-> {} ! {}",
-                    function.definition.ty_scheme.ty.ret.format_with(&env),
-                    function.definition.ty_scheme.ty.effects
-                ))
-            };
-            if style == Rust && !function.definition.ty_scheme.is_just_type_and_effects() {
-                annotation = Some(format!(
-                    "{}{}{}",
-                    annotation.as_ref().map_or("", |v| v),
-                    annotation.as_ref().map_or(start_space, |_| " "),
-                    function
-                        .definition
-                        .ty_scheme
-                        .display_constraints_rust_style(&env)
-                ));
-            }
-            if let Some(mut annotation) = annotation {
-                let end_space =
-                    if past_args_index < byte_src.len() && byte_src[past_args_index] == b' ' {
-                        ""
-                    } else {
-                        " "
-                    };
-                annotation.push_str(end_space);
-                annotations.push((past_args_index, annotation));
-            }
+            annotation.push_str(end_space);
+            annotations.push((past_args_index, annotation));
         }
-
-        // Return type of the expression, if any.
-        if let Some(expr) = &self.expr {
-            let root_span = module.ir_arena[expr.expr].span;
-            annotations.push((
-                root_span.end_usize(),
-                match style {
-                    Mathematical => format!(": {}", expr.ty.display_math_style(&env)),
-                    Rust => format!(": {}", expr.ty.display_rust_style(&env)),
-                },
-            ));
-        }
-        // FIXME: this need better behaviour to be useful.
-        // For each end of line, we also show the type of the expression.
-        // let newline_indices = newline_indices_of_non_empty_lines(src);
-        // let mut i = 0;
-        // for function in self.module.functions.values() {
-        //     function.code.borrow_mut().apply_if_script(&mut |node| {
-        //         while i < newline_indices.len() && newline_indices[i] <= node.span.end() {
-        //             let pos = newline_indices[i];
-        //             if let Some(ty) = node.type_at(pos - 1) {
-        //                 annotations.push((pos, format!(" {}", ty.format_with(&env))));
-        //             }
-        //             i += 1;
-        //         }
-        //     });
-        // }
-        // if let Some(expr) = &self.expr {
-        //     while i < newline_indices.len() {
-        //         let pos = newline_indices[i];
-        //         if let Some(ty) = expr.expr.type_at(pos - 1) {
-        //             annotations.push((pos, format!(" {}", ty.format_with(&env))));
-        //         }
-        //         i += 1;
-        //     }
-        // }
-
-        annotations
     }
+
+    // Return type of the expression, if any.
+    if let Some(expr) = &module_and_expr.expr {
+        let root_span = module.ir_arena[expr.expr].span;
+        annotations.push((
+            root_span.end_usize(),
+            match style {
+                Mathematical => format!(": {}", expr.ty.display_math_style(&env)),
+                Rust => format!(": {}", expr.ty.display_rust_style(&env)),
+            },
+        ));
+    }
+    // FIXME: this need better behaviour to be useful.
+    // For each end of line, we also show the type of the expression.
+    // let newline_indices = newline_indices_of_non_empty_lines(src);
+    // let mut i = 0;
+    // for function in self.module.functions.values() {
+    //     function.code.borrow_mut().apply_if_script(&mut |node| {
+    //         while i < newline_indices.len() && newline_indices[i] <= node.span.end() {
+    //             let pos = newline_indices[i];
+    //             if let Some(ty) = crate::hir::type_at(arena, node, pos - 1) {
+    //                 annotations.push((pos, format!(" {}", ty.format_with(&env))));
+    //             }
+    //             i += 1;
+    //         }
+    //     });
+    // }
+    // if let Some(expr) = &self.expr {
+    //     while i < newline_indices.len() {
+    //         let pos = newline_indices[i];
+    //         if let Some(ty) = crate::hir::type_at(arena, expr.expr, pos - 1) {
+    //             annotations.push((pos, format!(" {}", ty.format_with(&env))));
+    //         }
+    //         i += 1;
+    //     }
+    // }
+
+    annotations
 }
 
-pub fn variable_type_annotations(
+fn variable_type_annotations(
     arena: &NodeArena,
     id: NodeId,
     result: &mut Vec<(usize, String)>,
     locals: &[LocalDecl],
     env: &ModuleEnv,
 ) {
-    arena[id].variable_type_annotations(arena, result, locals, env)
+    node_variable_type_annotations(&arena[id], arena, result, locals, env)
 }
 
-impl Node {
-    pub fn variable_type_annotations(
-        &self,
-        arena: &NodeArena,
-        result: &mut Vec<(usize, String)>,
-        locals: &[LocalDecl],
-        env: &ModuleEnv,
-    ) {
-        use NodeKind::*;
-        match &self.kind {
-            Immediate(_) => {}
-            BuildClosure(build_closure) => {
-                variable_type_annotations(arena, build_closure.function, result, locals, env);
-                // We do not look into captures as they are generated code.
+fn node_variable_type_annotations(
+    node: &Node,
+    arena: &NodeArena,
+    result: &mut Vec<(usize, String)>,
+    locals: &[LocalDecl],
+    env: &ModuleEnv,
+) {
+    use NodeKind::*;
+    match &node.kind {
+        Immediate(_) => {}
+        BuildClosure(build_closure) => {
+            variable_type_annotations(arena, build_closure.function, result, locals, env);
+            // We do not look into captures as they are generated code.
+        }
+        Apply(app) => {
+            variable_type_annotations(arena, app.function, result, locals, env);
+            for &arg in &app.arguments {
+                variable_type_annotations(arena, arg, result, locals, env);
             }
-            Apply(app) => {
-                variable_type_annotations(arena, app.function, result, locals, env);
-                for &arg in &app.arguments {
+        }
+        StaticApply(app) => {
+            let arity = app.argument_names.len();
+            let is_synthesized = app.function_span.is_empty();
+            if !is_synthesized && let Some(path) = &app.function_path {
+                for (&arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
+                    if !should_hide_arg_name_hint(arena, path, arity, arg_name, arg, locals) {
+                        result.push((arena[arg].span.start_usize(), format!("{arg_name}: ")));
+                    }
                     variable_type_annotations(arena, arg, result, locals, env);
                 }
             }
-            StaticApply(app) => {
-                let arity = app.argument_names.len();
-                let is_synthesized = app.function_span.is_empty();
-                if !is_synthesized && let Some(path) = &app.function_path {
-                    for (&arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
-                        if !should_hide_arg_name_hint(arena, path, arity, arg_name, arg, locals) {
-                            result.push((arena[arg].span.start_usize(), format!("{arg_name}: ")));
-                        }
-                        variable_type_annotations(arena, arg, result, locals, env);
-                    }
-                }
-            }
-            TraitFnApply(_) => {
-                // There is no TraitFnApply left in the final HIR.
-            }
-            GetFunction(_) => {}
-            GetTraitFunction(_) => {
-                // There is no GetTraitFunction left in the final IR.
-            }
-            GetDictionary(_) => {}
-            EnvStore(node) => {
-                // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.
-                // Note: synthesized let nodes have empty name span, so we ignore these.
-                let local = &locals[node.id.as_index()];
-                let (name, name_span) = local.name;
-                if !name.starts_with("@") && !name_span.is_synthesized() {
-                    let value_ty = arena[node.value].ty;
-                    if let Some((ty_span, ty_constant)) = local.ty_span {
-                        if !ty_constant {
-                            result.push((
-                                ty_span.end_usize(),
-                                format!(" ⇨ {}", value_ty.format_with(env)),
-                            ));
-                        }
-                    } else {
+        }
+        TraitFnApply(_) => {
+            // There is no TraitFnApply left in the final HIR.
+        }
+        GetFunction(_) => {}
+        GetTraitFunction(_) => {
+            // There is no GetTraitFunction left in the final IR.
+        }
+        GetDictionary(_) => {}
+        EnvStore(node) => {
+            // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.
+            // Note: synthesized let nodes have empty name span, so we ignore these.
+            let local = &locals[node.id.as_index()];
+            let (name, name_span) = local.name;
+            if !name.starts_with("@") && !name_span.is_synthesized() {
+                let value_ty = arena[node.value].ty;
+                if let Some((ty_span, ty_constant)) = local.ty_span {
+                    if !ty_constant {
                         result.push((
-                            name_span.end_usize(),
-                            format!(": {}", value_ty.format_with(env)),
+                            ty_span.end_usize(),
+                            format!(" ⇨ {}", value_ty.format_with(env)),
                         ));
                     }
+                } else {
+                    result.push((
+                        name_span.end_usize(),
+                        format!(": {}", value_ty.format_with(env)),
+                    ));
                 }
-                variable_type_annotations(arena, node.value, result, locals, env);
             }
-            EnvLoad(_) => {}
-            Return(node) => variable_type_annotations(arena, *node, result, locals, env),
-            Block(nodes) => nodes
-                .iter()
-                .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-            Assign(assignment) => {
-                variable_type_annotations(arena, assignment.place, result, locals, env);
-                variable_type_annotations(arena, assignment.value, result, locals, env);
-            }
-            Tuple(nodes) => nodes
-                .iter()
-                .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-            Project(data, _) => variable_type_annotations(arena, *data, result, locals, env),
-            Record(nodes) => nodes
-                .iter()
-                .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-            FieldAccess(data, _) => variable_type_annotations(arena, *data, result, locals, env),
-            ProjectAt(data, _) => variable_type_annotations(arena, *data, result, locals, env),
-            Variant(_, payload) => variable_type_annotations(arena, *payload, result, locals, env),
-            ExtractTag(node) => variable_type_annotations(arena, *node, result, locals, env),
-            Array(nodes) => nodes
-                .iter()
-                .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-            Index(array, index) => {
-                variable_type_annotations(arena, *array, result, locals, env);
-                variable_type_annotations(arena, *index, result, locals, env);
-            }
-            Case(case) => {
-                variable_type_annotations(arena, case.value, result, locals, env);
-                for &(_, alt_id) in &case.alternatives {
-                    variable_type_annotations(arena, alt_id, result, locals, env);
-                }
-                variable_type_annotations(arena, case.default, result, locals, env);
-            }
-            Loop(body) => variable_type_annotations(arena, *body, result, locals, env),
-            SoftBreak | Unimplemented => {}
+            variable_type_annotations(arena, node.value, result, locals, env);
         }
+        EnvLoad(_) => {}
+        Return(node) => variable_type_annotations(arena, *node, result, locals, env),
+        Block(nodes) => nodes
+            .iter()
+            .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
+        Assign(assignment) => {
+            variable_type_annotations(arena, assignment.place, result, locals, env);
+            variable_type_annotations(arena, assignment.value, result, locals, env);
+        }
+        Tuple(nodes) => nodes
+            .iter()
+            .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
+        Project(data, _) => variable_type_annotations(arena, *data, result, locals, env),
+        Record(nodes) => nodes
+            .iter()
+            .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
+        FieldAccess(data, _) => variable_type_annotations(arena, *data, result, locals, env),
+        ProjectAt(data, _) => variable_type_annotations(arena, *data, result, locals, env),
+        Variant(_, payload) => variable_type_annotations(arena, *payload, result, locals, env),
+        ExtractTag(node) => variable_type_annotations(arena, *node, result, locals, env),
+        Array(nodes) => nodes
+            .iter()
+            .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
+        Index(array, index) => {
+            variable_type_annotations(arena, *array, result, locals, env);
+            variable_type_annotations(arena, *index, result, locals, env);
+        }
+        Case(case) => {
+            variable_type_annotations(arena, case.value, result, locals, env);
+            for &(_, alt_id) in &case.alternatives {
+                variable_type_annotations(arena, alt_id, result, locals, env);
+            }
+            variable_type_annotations(arena, case.default, result, locals, env);
+        }
+        Loop(body) => variable_type_annotations(arena, *body, result, locals, env),
+        SoftBreak | Unimplemented => {}
     }
 }
 
