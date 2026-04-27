@@ -14,7 +14,7 @@ The compiler transforms source code into a parsed abstract syntax tree (AST), de
 - `hir/`: the typed high-level IR, HIR synthesis helpers, AST-to-HIR emission, borrow checking, dictionary passing, function representation, pattern-match lowering helpers, and runtime values.
 - `module/`: module identity, paths, imports, module environments, function metadata, trait impl metadata, and symbol lookup.
 - `std/`: Rust-backed standard library modules and bundled Ferlium prelude source.
-- `ide/`: IDE-facing compiler wrapper, annotations, error shaping, and source index helpers.
+- `ide/`: IDE-facing compiler wrapper, annotations, diagnostics, execution result shaping, signatures, and source index helpers.
 - Top-level helpers: small shared utilities such as `containers.rs`, `format.rs`, `graph.rs`, `assert.rs`, and `sync.rs`.
 
 ## Compiler Flow
@@ -38,4 +38,3 @@ Some central modules remain large. Good candidates for later splits are:
 - `src/hir/emit_ir.rs`
 - `src/types/type.rs`
 - `src/module/mod.rs`
-- `src/ide/mod.rs`
