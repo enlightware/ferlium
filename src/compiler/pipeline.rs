@@ -15,8 +15,12 @@ use crate::{
     Location, SourceId, SourceTable,
     ast::{self, PExprArena, UnstableCollector, VisitExpr},
     compilation_error,
+    compiler::diagnostics::diagnostics_from_error,
     compiler::error::{CompilationError, LocatedError},
-    compiler::session::{AstInspectorCb, ModuleAndExpr, ModuleEntry, ModuleSrcInfo, Modules},
+    compiler::session::{
+        AstInspectorCb, CompilationRevision, ModuleAndExpr, ModuleEntry, ModuleSrcInfo, Modules,
+        SourceVersion,
+    },
     containers::b,
     format::FormatWith,
     graph,
@@ -48,6 +52,7 @@ impl ModuleRef {
 /// [`SourceTable::add_source`] call and the associated string clones.
 pub(crate) fn compile_with_source_id(
     source_id: SourceId,
+    source_version: SourceVersion,
     source_table: &SourceTable,
     modules: &mut Modules,
     module_ref: ModuleRef,
@@ -63,29 +68,36 @@ pub(crate) fn compile_with_source_id(
     // its compiled module with a dummy so the new compilation cannot see the
     // old version of itself.
     let next_module_id = modules.next_id();
-    let (module_id, old_module) = match &module_ref {
+    let (module_id, old_module, compilation_revision) = match &module_ref {
         ModuleRef::ByPath(path) => {
             if let Some((id, entry)) = modules.get_mut_by_name(path) {
+                let compilation_revision = entry.next_compilation_revision();
                 let old = entry
                     .module
                     .as_mut()
                     .map(|m| mem::replace(m, Module::new(next_module_id)));
-                (id, old)
+                (id, old, compilation_revision)
             } else {
-                (next_module_id, None)
+                (next_module_id, None, CompilationRevision::from_index(0))
             }
         }
         ModuleRef::Existing(id) => {
             let id = *id;
-            let old = modules.get_mut(id).and_then(|e| {
-                e.module
-                    .as_mut()
-                    .map(|m| mem::replace(m, Module::new(next_module_id)))
-            });
-            (id, old)
+            let (old, compilation_revision) =
+                modules
+                    .get_mut(id)
+                    .map_or((None, CompilationRevision::from_index(0)), |e| {
+                        let compilation_revision = e.next_compilation_revision();
+                        let old = e
+                            .module
+                            .as_mut()
+                            .map(|m| mem::replace(m, Module::new(next_module_id)));
+                        (old, compilation_revision)
+                    });
+            (id, old, compilation_revision)
         }
     };
-    let src_info = ModuleSrcInfo::new(source_id, uses.clone());
+    let src_info = ModuleSrcInfo::new(source_id, source_version, uses.clone());
 
     // Closure called on every compilation failure, to restore the old module and mark dependencies.
     let process_compilation_failed =
@@ -95,11 +107,28 @@ pub(crate) fn compile_with_source_id(
          old_module: Option<Module>,
          error: &CompilationError| {
             let error = error.clone();
+            let diagnostics = diagnostics_from_error(
+                module_id,
+                src_info.source_version,
+                compilation_revision,
+                src_info.source_id,
+                &error,
+                source_table,
+            );
             if let Some(entry) = modules.get_mut(module_id) {
-                entry.update_with_compilation_error(src_info, old_module, error);
+                entry.update_with_compilation_error(
+                    src_info,
+                    old_module,
+                    error,
+                    compilation_revision,
+                    diagnostics,
+                );
                 mark_stale_transitively(modules, module_id)
             } else if let Some(path) = path_for_new {
-                modules.insert(path, ModuleEntry::new_with_error(src_info, error));
+                modules.insert(
+                    path,
+                    ModuleEntry::new_with_error(src_info, error, compilation_revision, diagnostics),
+                );
             } else {
                 panic!("Existing module not found — should never happen.");
             }
@@ -175,12 +204,15 @@ pub(crate) fn compile_with_source_id(
     let deps_stale = deps.iter().any(|&dep| modules.get(dep).unwrap().stale);
     if deps_stale {
         if let Some(entry) = modules.get_mut(module_id) {
-            entry.update_with_stale(src_info, old_module, deps);
+            entry.update_with_stale(src_info, old_module, deps, compilation_revision);
             mark_stale_transitively(modules, module_id);
         } else {
             // Only reachable for ByPath when the module does not yet exist.
             if let Some(path) = module_ref.into_path() {
-                modules.insert(path, ModuleEntry::new_stale(src_info, deps));
+                modules.insert(
+                    path,
+                    ModuleEntry::new_stale(src_info, deps, compilation_revision),
+                );
             }
         }
     } else {
@@ -189,19 +221,24 @@ pub(crate) fn compile_with_source_id(
         // For Existing: write directly through the known ID.
         match module_ref {
             ModuleRef::ByPath(path) => {
-                modules.replace(path, ModuleEntry::new_fresh(src_info, module));
+                modules.replace(
+                    path,
+                    ModuleEntry::new_fresh(src_info, module, compilation_revision),
+                );
             }
             ModuleRef::Existing(id) => {
-                *modules.get_mut(id).unwrap() = ModuleEntry::new_fresh(src_info, module);
+                *modules.get_mut(id).unwrap() =
+                    ModuleEntry::new_fresh(src_info, module, compilation_revision);
             }
         }
         // Cascade-recompile every stale direct dependent that can be rebuilt from source.
         // Each successful recompilation recurses into its own dependents via the same
         // mechanism, so the entire reverse-dependency graph is eventually brought up to date.
         let to_recompile = stale_dependents_to_recompile(modules, module_id);
-        for (dep_id, dep_source_id, dep_uses) in to_recompile {
+        for (dep_id, dep_source_id, dep_source_version, dep_uses) in to_recompile {
             let _ = compile_with_source_id(
                 dep_source_id,
+                dep_source_version,
                 source_table,
                 modules,
                 ModuleRef::Existing(dep_id),
@@ -243,7 +280,7 @@ fn mark_stale_transitively(modules: &mut Modules, root: ModuleId) {
 fn stale_dependents_to_recompile(
     modules: &mut Modules,
     target: ModuleId,
-) -> Vec<(ModuleId, SourceId, Uses)> {
+) -> Vec<(ModuleId, SourceId, SourceVersion, Uses)> {
     direct_deps(modules, target)
         .into_iter()
         .filter_map(|dep_id| {
@@ -252,7 +289,12 @@ fn stale_dependents_to_recompile(
                 return None;
             }
             let src_info = entry.src_info.as_mut()?;
-            Some((dep_id, src_info.source_id, mem::take(&mut src_info.uses)))
+            Some((
+                dep_id,
+                src_info.source_id,
+                src_info.source_version,
+                mem::take(&mut src_info.uses),
+            ))
         })
         .collect()
 }

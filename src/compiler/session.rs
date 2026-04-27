@@ -13,11 +13,13 @@ use itertools::Itertools;
 
 use crate::{
     FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
+    compiler::diagnostics::ModuleDiagnostic,
     compiler::error::{CompilationError, LocatedError},
     compiler::pipeline::{
         ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
     },
     containers::b,
+    define_id_type,
     eval::{EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
     hir,
@@ -56,11 +58,58 @@ thread_local! {
     static EMPTY_COMPILER_SESSION_CACHE: RefCell<Option<CompilerSession>> = const { RefCell::new(None) };
 }
 
+define_id_type!(
+    /// Source version of a source-backed module within a compiler session.
+    SourceVersion
+);
+
+define_id_type!(
+    /// Compilation attempt revision of a module within a compiler session.
+    CompilationRevision
+);
+
+/// Metadata for a module registered in a [`CompilerSession`].
+#[derive(Debug, Clone)]
+pub struct ModuleInfo {
+    pub module_id: ModuleId,
+    /// Human-readable module path, if the module has one.
+    pub path: Option<Path>,
+    /// Latest source version for modules backed by Ferlium source.
+    pub source_version: Option<SourceVersion>,
+    /// Whether this module or one of its dependencies is currently stale.
+    pub stale: bool,
+    /// Whether a compiled module is available for semantic fallback.
+    pub has_compiled_module: bool,
+}
+
+/// Latest source snapshot for a source-backed module.
+#[derive(Debug, Clone, Copy)]
+pub struct ModuleSource<'a> {
+    pub source_id: SourceId,
+    pub source_version: SourceVersion,
+    pub source: &'a str,
+}
+
+/// Result of replacing a module source and immediately attempting compilation.
+#[derive(Debug, Clone)]
+pub struct ModuleUpdateResult {
+    pub module_id: ModuleId,
+    /// Source version after the update. This is unchanged when the source text
+    /// is identical to the previous source text.
+    pub source_version: SourceVersion,
+    /// Compilation revision produced by the update attempt.
+    pub compilation_revision: CompilationRevision,
+    /// Diagnostics produced by the update attempt.
+    pub diagnostics: Vec<ModuleDiagnostic>,
+}
+
 /// All data needed to rebuild the module.
 #[derive(Clone, Debug, new)]
 pub struct ModuleSrcInfo {
     /// The source code used
     pub(crate) source_id: SourceId,
+    /// The logical source version for the module.
+    pub(crate) source_version: SourceVersion,
     /// The use directive used
     pub(crate) uses: Uses,
 }
@@ -77,6 +126,14 @@ pub struct ModuleEntry {
     pub(crate) last_error: Option<CompilationError>,
     /// Deps from latest successful self build, stale or not.
     pub(crate) latest_deps: Vec<ModuleId>,
+    /// Latest compilation attempt revision.
+    pub(crate) compilation_revision: CompilationRevision,
+    /// Last successful source version, if this source-backed module has compiled fresh.
+    pub(crate) last_successful_source_version: Option<SourceVersion>,
+    /// Last successful compilation revision, if this module has compiled fresh.
+    pub(crate) last_successful_compilation_revision: Option<CompilationRevision>,
+    /// Diagnostics from the latest compilation attempt.
+    pub(crate) diagnostics: Vec<ModuleDiagnostic>,
     /// Whether this module or some of its dependencies failed to compile.
     pub(crate) stale: bool,
 }
@@ -90,40 +147,70 @@ impl ModuleEntry {
             module: Some(module),
             last_error: None,
             latest_deps: deps,
+            compilation_revision: CompilationRevision::from_index(0),
+            last_successful_source_version: None,
+            last_successful_compilation_revision: Some(CompilationRevision::from_index(0)),
+            diagnostics: Vec::new(),
             stale: false,
         }
     }
 
     /// New fresh module that can be rebuilt later.
-    pub fn new_fresh(src_info: ModuleSrcInfo, module: Module) -> Self {
+    pub fn new_fresh(
+        src_info: ModuleSrcInfo,
+        module: Module,
+        compilation_revision: CompilationRevision,
+    ) -> Self {
         let deps = module.deps().collect();
+        let source_version = src_info.source_version;
         ModuleEntry {
             src_info: Some(src_info),
             module: Some(module),
             last_error: None,
             latest_deps: deps,
+            compilation_revision,
+            last_successful_source_version: Some(source_version),
+            last_successful_compilation_revision: Some(compilation_revision),
+            diagnostics: Vec::new(),
             stale: false,
         }
     }
 
     /// New module that compiled but whose dependencies are stale, and can be rebuilt later.
-    pub fn new_stale(src_info: ModuleSrcInfo, deps: Vec<ModuleId>) -> Self {
+    pub fn new_stale(
+        src_info: ModuleSrcInfo,
+        deps: Vec<ModuleId>,
+        compilation_revision: CompilationRevision,
+    ) -> Self {
         ModuleEntry {
             src_info: Some(src_info),
             module: None,
             last_error: None,
             latest_deps: deps,
+            compilation_revision,
+            last_successful_source_version: None,
+            last_successful_compilation_revision: None,
+            diagnostics: Vec::new(),
             stale: true,
         }
     }
 
     /// New module that failed to compile but can be rebuilt later.
-    pub fn new_with_error(src_info: ModuleSrcInfo, error: CompilationError) -> Self {
+    pub fn new_with_error(
+        src_info: ModuleSrcInfo,
+        error: CompilationError,
+        compilation_revision: CompilationRevision,
+        diagnostics: Vec<ModuleDiagnostic>,
+    ) -> Self {
         ModuleEntry {
             src_info: Some(src_info),
             module: None,
             last_error: Some(error),
             latest_deps: vec![],
+            compilation_revision,
+            last_successful_source_version: None,
+            last_successful_compilation_revision: None,
+            diagnostics,
             stale: true,
         }
     }
@@ -134,11 +221,14 @@ impl ModuleEntry {
         src_info: ModuleSrcInfo,
         old_module: Option<Module>,
         latest_deps: Vec<ModuleId>,
+        compilation_revision: CompilationRevision,
     ) {
         self.src_info = Some(src_info);
         self.module = old_module;
         self.last_error = None;
         self.latest_deps = latest_deps;
+        self.compilation_revision = compilation_revision;
+        self.diagnostics.clear();
         self.stale = true;
     }
 
@@ -148,10 +238,14 @@ impl ModuleEntry {
         src_info: ModuleSrcInfo,
         old_module: Option<Module>,
         error: CompilationError,
+        compilation_revision: CompilationRevision,
+        diagnostics: Vec<ModuleDiagnostic>,
     ) {
         self.src_info = Some(src_info);
         self.module = old_module;
         self.last_error = Some(error);
+        self.compilation_revision = compilation_revision;
+        self.diagnostics = diagnostics;
         self.stale = true;
     }
 
@@ -161,6 +255,34 @@ impl ModuleEntry {
 
     pub fn is_stale(&self) -> bool {
         self.stale
+    }
+
+    pub fn compilation_revision(&self) -> CompilationRevision {
+        self.compilation_revision
+    }
+
+    pub fn diagnostics(&self) -> &[ModuleDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn source_version(&self) -> Option<SourceVersion> {
+        self.src_info.as_ref().map(|info| info.source_version)
+    }
+
+    pub fn latest_deps(&self) -> &[ModuleId] {
+        &self.latest_deps
+    }
+
+    pub fn last_successful_source_version(&self) -> Option<SourceVersion> {
+        self.last_successful_source_version
+    }
+
+    pub fn last_successful_compilation_revision(&self) -> Option<CompilationRevision> {
+        self.last_successful_compilation_revision
+    }
+
+    pub(crate) fn next_compilation_revision(&self) -> CompilationRevision {
+        CompilationRevision::from_index(self.compilation_revision.as_index() + 1)
     }
 }
 
@@ -234,6 +356,95 @@ impl CompilerSession {
     /// Get a module by its ID, if it exists.
     pub fn get_module_entry_by_id(&self, id: ModuleId) -> Option<&ModuleEntry> {
         self.modules.get(id)
+    }
+
+    /// List every module registered in this session.
+    pub fn list_modules(&self) -> Vec<ModuleInfo> {
+        self.modules
+            .enumerate()
+            .map(|(module_id, entry, path)| ModuleInfo {
+                module_id,
+                path: path.cloned(),
+                source_version: entry.src_info.as_ref().map(|info| info.source_version),
+                stale: entry.stale,
+                has_compiled_module: entry.module.is_some(),
+            })
+            .collect()
+    }
+
+    /// Get the latest source snapshot for a source-backed module.
+    pub fn get_module_source(&self, module_id: ModuleId) -> Option<ModuleSource<'_>> {
+        let src_info = self.modules.get(module_id)?.src_info.as_ref()?;
+        let source = self.source_table.get_source_text(src_info.source_id)?;
+        Some(ModuleSource {
+            source_id: src_info.source_id,
+            source_version: src_info.source_version,
+            source,
+        })
+    }
+
+    /// Get modules whose latest known dependencies include this module.
+    pub fn get_module_reverse_deps(&self, module_id: ModuleId) -> Vec<ModuleId> {
+        self.modules
+            .enumerate()
+            .filter_map(|(id, entry, _)| entry.latest_deps.contains(&module_id).then_some(id))
+            .collect()
+    }
+
+    /// Get transitive reverse dependencies that may be affected if this module changes.
+    pub fn get_modules_affected_by(&self, module_id: ModuleId) -> Vec<ModuleId> {
+        let mut affected = Vec::new();
+        let mut stack = self.get_module_reverse_deps(module_id);
+        while let Some(id) = stack.pop() {
+            if affected.contains(&id) {
+                continue;
+            }
+            affected.push(id);
+            stack.extend(self.get_module_reverse_deps(id));
+        }
+        affected
+    }
+
+    /// Replace a source-backed module's source and immediately compile it.
+    ///
+    /// The source version only changes when the source text changes. The
+    /// compilation revision changes for every compilation attempt, including an
+    /// update with identical source text.
+    pub fn update_module_source(
+        &mut self,
+        module_id: ModuleId,
+        new_source: &str,
+    ) -> Result<ModuleUpdateResult, String> {
+        let src_info = self
+            .modules
+            .get(module_id)
+            .ok_or_else(|| format!("Module {module_id} not found"))?
+            .src_info
+            .as_ref()
+            .ok_or_else(|| format!("Module {module_id} is not source-backed"))?
+            .clone();
+        let uses = src_info.uses.clone();
+        let (source_id, source_version) =
+            self.add_or_reuse_module_source(Some(&src_info), None, new_source);
+        let _ = compile_with_source_id(
+            source_id,
+            source_version,
+            &self.source_table,
+            &mut self.modules,
+            ModuleRef::Existing(module_id),
+            uses,
+            None,
+        );
+        let entry = self
+            .modules
+            .get(module_id)
+            .expect("module must exist after update");
+        Ok(ModuleUpdateResult {
+            module_id,
+            source_version,
+            compilation_revision: entry.compilation_revision,
+            diagnostics: entry.diagnostics.clone(),
+        })
     }
 
     /// Get a module environment, with an empty module including the standard library
@@ -527,13 +738,16 @@ impl CompilerSession {
         uses: Uses,
         ast_inspector: Option<AstInspectorCb<'_>>,
     ) -> Result<ModuleAndExpr, CompilationError> {
-        // Add the source to the table first so every failure path can reference it.
-        let source_id = self
-            .source_table
-            .add_source(source_name.to_string(), src_code.to_string());
+        let src_info = self
+            .modules
+            .get_by_name(&module_path)
+            .and_then(|(_, entry)| entry.src_info.clone());
+        let (source_id, source_version) =
+            self.add_or_reuse_module_source(src_info.as_ref(), Some(source_name), src_code);
 
         compile_with_source_id(
             source_id,
+            source_version,
             &self.source_table,
             &mut self.modules,
             ModuleRef::ByPath(module_path),
@@ -589,6 +803,36 @@ impl CompilerSession {
             Ok(None) => Err(format!("Function {name} not found in module {module_id}")),
             Err(e) => Err(format!("Lookup error for function {name}: {e:?}")),
         }
+    }
+
+    fn add_or_reuse_module_source(
+        &mut self,
+        current: Option<&ModuleSrcInfo>,
+        source_name: Option<&str>,
+        source: &str,
+    ) -> (SourceId, SourceVersion) {
+        if let Some(src_info) = current
+            && self
+                .source_table
+                .get_source_text(src_info.source_id)
+                .is_some_and(|old_source| old_source == source)
+        {
+            return (src_info.source_id, src_info.source_version);
+        }
+
+        let source_version = current.map_or(SourceVersion::from_index(0), |src_info| {
+            SourceVersion::from_index(src_info.source_version.as_index() + 1)
+        });
+        let source_name = current
+            .and_then(|src_info| self.source_table.get_source_name(src_info.source_id))
+            .map_or_else(
+                || source_name.unwrap_or("<source>").to_string(),
+                ToString::to_string,
+            );
+        let source_id = self
+            .source_table
+            .add_source(source_name, source.to_string());
+        (source_id, source_version)
     }
 }
 

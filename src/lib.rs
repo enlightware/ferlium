@@ -27,7 +27,10 @@ mod sync;
 pub mod types;
 
 pub use compiler::error::{CompilationError, LocatedError};
-pub use compiler::{CompilerSession, ModuleAndExpr, Modules, parse_module_and_expr};
+pub use compiler::{
+    CompilationRevision, CompilerSession, ModuleAndExpr, ModuleDiagnostic, ModuleInfo,
+    ModuleSource, ModuleUpdateResult, Modules, SourceVersion, parse_module_and_expr,
+};
 pub(crate) use compiler::{EvalExprError, add_code_to_module};
 pub use ide::Compiler;
 pub use module::{ModuleEnv, Path};

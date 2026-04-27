@@ -8,7 +8,7 @@
 //
 use test_log::test;
 
-use ferlium::module::ModuleId;
+use ferlium::{CompilerSession, Path, module::ModuleId, module::id::Id};
 
 use crate::harness::{TestSession, int};
 
@@ -311,4 +311,122 @@ fn no_infinite_recursion_on_circular_dep() {
         session.session().get_module_entry_by_id(b_id).is_some(),
         "b's entry must still exist after rejected circular recompile"
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn module_source_versions_and_compilation_revisions_are_tracked() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            "fn val() -> int { 1 }",
+            "tracked",
+            Path::single_str("tracked"),
+        )
+        .expect("initial compile should succeed")
+        .module_id;
+
+    let entry = session.get_module_entry_by_id(module_id).unwrap();
+    assert_eq!(entry.source_version().unwrap().as_index(), 0);
+    assert_eq!(entry.compilation_revision().as_index(), 0);
+
+    let changed = session
+        .update_module_source(module_id, "fn val() -> int { 2 }")
+        .expect("source update should be accepted");
+    assert_eq!(changed.source_version.as_index(), 1);
+    assert_eq!(changed.compilation_revision.as_index(), 1);
+    assert!(changed.diagnostics.is_empty());
+    assert_eq!(
+        session.get_module_source(module_id).unwrap().source,
+        "fn val() -> int { 2 }"
+    );
+
+    let unchanged = session
+        .update_module_source(module_id, "fn val() -> int { 2 }")
+        .expect("same-source update should still compile");
+    assert_eq!(unchanged.source_version.as_index(), 1);
+    assert_eq!(unchanged.compilation_revision.as_index(), 2);
+    assert!(unchanged.diagnostics.is_empty());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn failed_module_source_update_records_diagnostics_and_keeps_last_good_module() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            "fn val() -> int { 1 }",
+            "broken",
+            Path::single_str("broken"),
+        )
+        .expect("initial compile should succeed")
+        .module_id;
+
+    let update = session
+        .update_module_source(module_id, "this is not valid ferlium !!!")
+        .expect("source update should be accepted even when compilation fails");
+
+    assert_eq!(update.source_version.as_index(), 1);
+    assert_eq!(update.compilation_revision.as_index(), 1);
+    assert!(!update.diagnostics.is_empty());
+    assert_eq!(
+        session
+            .get_module_entry_by_id(module_id)
+            .unwrap()
+            .diagnostics()
+            .len(),
+        update.diagnostics.len()
+    );
+    assert!(
+        session
+            .get_module_entry_by_id(module_id)
+            .unwrap()
+            .is_stale()
+    );
+    assert!(
+        session
+            .expect_compiled_module(module_id)
+            .get_function(ferlium::ustr("val"))
+            .is_some(),
+        "last good module should remain available after failed update"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn dependency_query_apis_report_direct_reverse_and_affected_modules() {
+    let mut session = CompilerSession::new();
+    let base_id = session
+        .compile("fn val() -> int { 1 }", "base", Path::single_str("base"))
+        .expect("base should compile")
+        .module_id;
+    let mid_id = session
+        .compile(
+            "fn val() -> int { base::val() }",
+            "mid",
+            Path::single_str("mid"),
+        )
+        .expect("mid should compile")
+        .module_id;
+    let top_id = session
+        .compile(
+            "fn val() -> int { mid::val() }",
+            "top",
+            Path::single_str("top"),
+        )
+        .expect("top should compile")
+        .module_id;
+
+    assert!(
+        session
+            .get_module_entry_by_id(mid_id)
+            .unwrap()
+            .latest_deps()
+            .contains(&base_id)
+    );
+    assert_eq!(session.get_module_reverse_deps(base_id), vec![mid_id]);
+
+    let affected = session.get_modules_affected_by(base_id);
+    assert!(affected.contains(&mid_id));
+    assert!(affected.contains(&top_id));
 }

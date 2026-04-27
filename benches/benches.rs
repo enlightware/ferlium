@@ -13,10 +13,10 @@ use std::hint::black_box;
 
 use ferlium::{
     CompilerSession, Path, call_fn,
+    hir::value::Value,
     module::ModuleId,
     run_fn_native,
     std::{array::array_type, math::int_type, string::String as Str},
-    value::Value,
 };
 
 // --- Benchmark Functions ---
