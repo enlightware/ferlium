@@ -30,11 +30,3 @@ The main phases are:
 7. Execute HIR through the current interpreter.
 
 Future backend work may add bytecode generation and VM execution, or JIT/native code generation.
-
-## Future Splits
-
-Some central modules remain large. Good candidates for later splits are:
-
-- `src/hir/emit_ir.rs`
-- `src/types/type.rs`
-- `src/module/mod.rs`
