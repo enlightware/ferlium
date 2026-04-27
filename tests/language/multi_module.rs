@@ -8,7 +8,12 @@
 //
 use test_log::test;
 
-use ferlium::{CompilerSession, Path, module::ModuleId, module::id::Id};
+use ferlium::{
+    CompilerSession, Path,
+    hir::value::Value,
+    module::{ModuleId, id::Id},
+    types::r#type::Type,
+};
 
 use crate::harness::{TestSession, int};
 
@@ -429,4 +434,24 @@ fn dependency_query_apis_report_direct_reverse_and_affected_modules() {
     let affected = session.get_modules_affected_by(base_id);
     assert!(affected.contains(&mid_id));
     assert!(affected.contains(&top_id));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn value_to_string_renders_int_correctly() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile("", "<test>", Path::single_str("test"))
+        .unwrap()
+        .module_id;
+
+    let rendered = session
+        .value_to_string(
+            module_id,
+            Value::native(42isize),
+            Type::primitive::<isize>(),
+        )
+        .unwrap();
+
+    assert_eq!(rendered, "42");
 }
