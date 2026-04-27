@@ -1,10 +1,9 @@
 use crate::{
   Location, Modules, containers,
   format::FormatWith,
-  ir::{self, Case, NodeArena},
+  hir::{self, Case, NodeArena, value::Value},
   module::{FunctionId, LocalFunctionId, Module, ModuleEnv, TraitImpl, TraitImplId},
   ssa::{self, BlockIdentity, Program},
-  value::{self, Value},
 };
 
 /// Emit the low-level (aka SSA) ferlium IR of `module`.
@@ -31,7 +30,7 @@ struct CaseBlocks {
   default: BlockIdentity,
 
   /// The tail of the case
-  tail: BlockIdentity
+  tail: BlockIdentity,
 }
 
 /// A constructor of SSA IR.
@@ -119,7 +118,7 @@ impl<'a> Emitter<'a> {
   }
 
   /// Generates the IR for `node`, which occurs as a statement.
-  fn lower_as_statement(&mut self, node: &ir::Node) {
+  fn lower_as_statement(&mut self, node: &hir::Node) {
     // use ir::NodeKind as K;
     match &node.kind {
       _ => {
@@ -148,8 +147,8 @@ impl<'a> Emitter<'a> {
   }
 
   /// Generates the IR for `node`, which occurs as rvalue.
-  fn lower_as_rvalue(&mut self, node: &ir::Node) -> ssa::Value {
-    use ir::NodeKind as K;
+  fn lower_as_rvalue(&mut self, node: &hir::Node) -> ssa::Value {
+    use hir::NodeKind as K;
     match &node.kind {
       K::Block(n) => {
         let (last, prefix) = n.split_last().unwrap();
@@ -187,7 +186,7 @@ impl<'a> Emitter<'a> {
 
           // Lower the pattern
           // TODO: We may want to check if the types of the lowered condition and the scrutinee are the same
-          let x0 = self.lower_as_primitive(c).unwrap();
+          let x0 = self.lower_as_primitive(&c.clone().into_value()).unwrap();
           // We compare and branch either on the current condition body, or to the next condition head
           let v = self
             .insert(ssa::Instruction::compare_eq(
@@ -350,7 +349,7 @@ impl<'a> Emitter<'a> {
                 assert_eq!(&n.alternatives.len(), &(1 as usize));
 
                 // We lower the condition of the first alternative (=> The loop condition to check)
-                let c0 = self.lower_as_primitive(&n.alternatives[0].0).unwrap();
+                let c0 = self.lower_as_primitive(&n.alternatives[0].0.clone().into_value()).unwrap();
 
                 // We compare to branch -> either to loop head again || to loop tail
                 let v = self
@@ -407,7 +406,7 @@ impl<'a> Emitter<'a> {
   }
 
   /// Returns the lowered representation of the given native value.
-  fn lower_as_primitive(&mut self, native: &value::Value) -> Option<ssa::Value> {
+  fn lower_as_primitive(&mut self, native: &hir::value::Value) -> Option<ssa::Value> {
     use ssa::value::Integer as Int;
 
     if native.as_primitive_ty::<()>() != None {

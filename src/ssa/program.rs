@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use ustr::Ustr;
 
-use crate::{ssa};
+use crate::ssa;
 
 /// A Ferlium program expressed in SSA form.
 pub struct Program {

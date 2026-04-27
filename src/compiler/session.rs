@@ -18,6 +18,7 @@ use crate::{
         ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
     },
     containers::b,
+    emit_ssa,
     eval::{EvalCtx, RuntimeError, ValOrMut, eval_node_with_ctx},
     format::FormatWith,
     hir,
@@ -543,11 +544,8 @@ impl CompilerSession {
         )
     }
 
-
     /// Emit the SSA form for the given `source_name`
-    pub fn emit_ssa(
-        &mut self, source_name: &str, src: &str,
-    ) -> String {
+    pub fn emit_ssa(&mut self, source_name: &str, src: &str) -> String {
         let path = module::Path::single_str(source_name);
         let i = self.compile(src, source_name, path).unwrap().module_id;
         let module = self.expect_fresh_module(i);

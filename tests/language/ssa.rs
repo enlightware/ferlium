@@ -56,7 +56,7 @@ fn match_case_functions() {
     r#"u!("a0")
 fn a0:
   0:
-    %r0 = alloca Type { world: Some(0), index: 7 }
+    %r0 = alloca Type { world: Some(0), index: 5 }
     %r1 = br 1
   1:
     %r2 = comp_eq i1 1 i1 1
@@ -79,7 +79,7 @@ fn a0:
     r#"u!("a0")
 fn a0:
   0:
-    %r0 = alloca Type { world: Some(0), index: 7 }
+    %r0 = alloca Type { world: Some(0), index: 5 }
     %r1 = br 1
   1:
     %r2 = comp_eq %p0 i32 0
@@ -116,9 +116,9 @@ fn generic_functions() {
     r#"u!("a0")
 fn a0:
   0:
-    %r0 = project 6 from %p0
+    %r0 = project 6 from %p1
     %r1 = call %r0(i32 2)
-    %r2 = call imported function std::lt (slot #0)(%p1, %p2, %r1)
+    %r2 = call imported function std::lt (slot #0)(%p0, %p2, %r1)
     %r3 = ret %r2
 "#
   )
@@ -149,8 +149,8 @@ fn factorial() {
 fn factorial:
   0:
     %r0 = call imported function std::<impl Num for int>::from_int (slot #1)(i32 1)
-    %r1 = call imported function std::gt (slot #0)((local function Ord<0-7>::cmp (#42)), %p0, %r0)
-    %r2 = alloca Type { world: Some(0), index: 7 }
+    %r1 = call imported function std::gt (slot #0)((local function Ord<0-5>::cmp (#62)), %p0, %r0)
+    %r2 = alloca Type { world: Some(0), index: 5 }
     %r3 = br 1
   1:
     %r4 = comp_eq %r1 i1 1

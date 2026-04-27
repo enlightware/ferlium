@@ -1,16 +1,13 @@
 use std::any::Any;
 use std::fmt;
 
-use crate::{
-  Location, cached_primitive_ty, list, ssa, r#type::{Type}
-};
+use crate::{Location, cached_primitive_ty, list, ssa, types::r#type::Type};
 
 /// The identity of an instruction in the context of its containing funtion.
 pub type InstructionIdentity = list::Address;
 
 /// An instruction in the SSA form of Ferlium.
 pub struct Instruction {
-
   /// The region of the code corresponding to this instruction.
   pub span: Location,
 
@@ -19,11 +16,9 @@ pub struct Instruction {
 
   /// The kind-specific part of `self`.
   pub kind: Box<dyn InstructionKind>,
-
 }
 
 impl Instruction {
-
   /// The type of the instruction's result.
   pub fn result(&self) -> InstructionResult {
     self.kind.result(self)
@@ -204,7 +199,7 @@ impl InstructionKind for CompareEqual {
   }
 
   fn fmt_within(&self, f: &mut fmt::Formatter<'_>, whole: &Instruction) -> std::fmt::Result {
-      write!(f, "comp_eq {} {}", whole.operands[0], whole.operands[1])
+    write!(f, "comp_eq {} {}", whole.operands[0], whole.operands[1])
   }
 
 }
@@ -263,11 +258,11 @@ struct Project {
 impl InstructionKind for Project {
 
   fn result(&self, whole: &Instruction) -> InstructionResult {
-      InstructionResult::Lowered(self.ty)
+    InstructionResult::Lowered(self.ty)
   }
 
   fn fmt_within(&self, f: &mut fmt::Formatter<'_>, whole: &Instruction) -> std::fmt::Result {
-      write!(f, "project {} from {}", self.index, whole.operands[0])
+    write!(f, "project {} from {}", self.index, whole.operands[0])
   }
 
 }
@@ -300,7 +295,7 @@ impl InstructionKind for Store {
 
 /// A SSA terminator that unconditionally transfers control flow to the start of another block, unconditionally.
 struct UnconditionalBranch {
-    target: ssa::BlockIdentity
+  target: ssa::BlockIdentity,
 }
 
 impl InstructionKind for UnconditionalBranch {
