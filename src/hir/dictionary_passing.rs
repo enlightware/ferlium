@@ -35,7 +35,7 @@ use crate::{
     types::effects::no_effects,
     types::mutability::MutType,
     types::r#type::{FnArgType, Type, TypeKind},
-    types::type_inference::InstSubstitution,
+    types::type_inference::substitution::InstSubstitution,
 };
 
 /// A dictionary requirement, that will be passed as extra parameter to a function.

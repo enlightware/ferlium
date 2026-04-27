@@ -20,7 +20,7 @@ use crate::{
     parser::location::{Location, SourceTable},
     types::r#trait::TraitRef,
     types::r#type::TypeDefRef,
-    types::type_inference::SubOrSameType,
+    types::type_inference::unify::SubOrSameType,
     types::type_scheme::PubTypeConstraint,
 };
 use enum_as_inner::EnumAsInner;

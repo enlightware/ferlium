@@ -31,7 +31,7 @@ pub(crate) use compiler::{EvalExprError, add_code_to_module};
 pub use ide::Compiler;
 pub use module::{ModuleEnv, Path};
 pub use parser::location::{Location, SourceId, SourceTable};
-pub use types::type_inference::SubOrSameType;
+pub use types::type_inference::unify::SubOrSameType;
 
 use types::type_scheme::DisplayStyle;
 

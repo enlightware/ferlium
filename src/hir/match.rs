@@ -29,7 +29,7 @@ use crate::{
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
     types::r#type::Type,
-    types::type_inference::TypeInference,
+    types::type_inference::expr::TypeInference,
     types::type_scheme::PubTypeConstraint,
     types::typing_env::TypingEnv,
 };

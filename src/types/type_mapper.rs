@@ -8,7 +8,8 @@
 //
 
 use crate::types::{
-    effects::EffType, mutability::MutType, r#type::Type, type_inference::InstSubstitution,
+    effects::EffType, mutability::MutType, r#type::Type,
+    type_inference::substitution::InstSubstitution,
 };
 
 /// A struct that can map a type and its effects to another type and effects

@@ -25,7 +25,7 @@ use crate::{
     parser::location::Location,
     types::r#trait::TraitRef,
     types::r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
-    types::type_inference::InstSubstitution,
+    types::type_inference::substitution::InstSubstitution,
     types::type_like::TypeLike,
     types::type_scheme::{PubTypeConstraint, format_constraints_consolidated},
 };

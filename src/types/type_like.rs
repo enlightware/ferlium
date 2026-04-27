@@ -14,7 +14,7 @@ use itertools::Itertools;
 use crate::types::effects::EffectVar;
 use crate::types::mutability::MutVar;
 use crate::types::r#type::{Type, TypeVar};
-use crate::types::type_inference::InstSubstitution;
+use crate::types::type_inference::substitution::InstSubstitution;
 use crate::types::type_mapper::{SubstitutionTypeMapper, TypeMapper};
 use crate::types::type_visitor::{
     ContainsAnyTyVars, ContainsOnlyTyVars, EffectVarsCollector, MutVarsCollector, TyVarsCollector,

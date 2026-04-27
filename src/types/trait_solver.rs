@@ -36,7 +36,7 @@ use crate::{
     types::mutability::MutType,
     types::r#trait::TraitRef,
     types::r#type::{FnArgType, Type},
-    types::type_inference::UnifiedTypeInference,
+    types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
 };
 

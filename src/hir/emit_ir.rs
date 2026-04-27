@@ -48,8 +48,10 @@ use crate::{
     types::r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
     types::type_constraints::named_type_constraints_in_types,
     types::type_inference::{
-        AnnotationTypeMapper, ConstraintBoundary, DefaultingScope, InstSubstitution, TypeInference,
-        UnifiedTypeInference,
+        defaulting::{ConstraintBoundary, DefaultingScope},
+        expr::{AnnotationTypeMapper, TypeInference},
+        substitution::InstSubstitution,
+        unify::UnifiedTypeInference,
     },
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::TypeMapper,

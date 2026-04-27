@@ -19,7 +19,7 @@ use crate::{
     types::r#trait::TraitRef,
     types::trait_solver::TraitSolverProbe,
     types::r#type::{Type, TypeVar},
-    types::type_inference::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
+    types::type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
     types::type_like::TypeLike,
     types::type_like::instantiate_types,
     types::type_scheme::PubTypeConstraint,

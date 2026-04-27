@@ -35,7 +35,7 @@ use crate::{
     module::ModuleEnv,
     types::effects::EffType,
     types::r#type::{FnType, Type, TypeVar},
-    types::type_inference::InstSubstitution,
+    types::type_inference::substitution::InstSubstitution,
 };
 
 /// An index to a node in the HIR arena

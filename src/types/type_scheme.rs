@@ -23,7 +23,7 @@ use crate::{
     std::core::REPR_TRAIT,
     types::r#trait::TraitRef,
     types::trait_solver::TraitSolver,
-    types::type_inference::UnifiedTypeInference,
+    types::type_inference::unify::UnifiedTypeInference,
     types::type_like::TypeLike,
     types::type_mapper::TypeMapper,
     types::type_visitor::TypeInnerVisitor,
@@ -39,7 +39,7 @@ use crate::{
     module::ModuleEnv,
     types::effects::{EffType, EffectVar, EffectsSubstitution},
     types::r#type::{Type, TypeSubstitution, TypeVar},
-    types::type_inference::{InstSubstitution, TypeInference},
+    types::type_inference::{expr::TypeInference, substitution::InstSubstitution},
 };
 
 /// The display style for type schemes.
