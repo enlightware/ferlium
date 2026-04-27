@@ -8,11 +8,11 @@
 //
 use crate::{
     FxHashMap, Location,
+    ast::{DExprId, PatternVar},
     compiler::error::DuplicatedVariantContext,
     hir::hir_syn::store_new,
     internal_compilation_error,
     module::{LocalDecl, LocalDeclId, id::Id},
-    parser::ast::{DExprId, PatternVar},
     std::core::REPR_TRAIT,
     types::mutability::MutVal,
     types::r#type::TypeKind,
@@ -20,11 +20,11 @@ use crate::{
 use itertools::{Itertools, multiunzip};
 
 use crate::{
+    ast::{Pattern, PatternKind, PatternType},
     compiler::error::InternalCompilationError,
     containers::{SVec2, b},
     hir::value::LiteralValue,
     hir::{self, EnvLoad, EnvStore, NodeId, NodeKind},
-    parser::ast::{Pattern, PatternKind, PatternType},
     std::math::int_type,
     types::effects::{EffType, no_effects},
     types::mutability::MutType,

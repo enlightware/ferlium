@@ -1,7 +1,7 @@
 use super::format_string::emit_format_string_ast;
 use super::patterns::{desugar_block_exprs, desugar_let_exprs, desugar_pattern_bindings};
 use super::*;
-use crate::parser::ast::{self, Desugared};
+use crate::ast::{self, Desugared};
 use crate::parser::helpers::ext_b;
 
 /// Desugar a single parsed expression ID into a desugared expression ID.

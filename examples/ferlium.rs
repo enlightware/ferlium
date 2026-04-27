@@ -13,6 +13,8 @@ use std::io::{self, IsTerminal, Read};
 use std::ops::Deref;
 
 use ariadne::{Label, Source};
+use ferlium::ast;
+use ferlium::ast::{PExprArena, PExprId, PModule};
 use ferlium::compiler::error::{
     CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat,
 };
@@ -21,8 +23,6 @@ use ferlium::module::id::Id;
 use ferlium::module::{
     LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
 };
-use ferlium::parser::ast;
-use ferlium::parser::ast::{PExprArena, PExprId, PModule};
 use ferlium::std::new_module_using_std;
 use ferlium::{
     CompilerSession, Location, ModuleAndExpr, SourceId, SourceTable, SubOrSameType,

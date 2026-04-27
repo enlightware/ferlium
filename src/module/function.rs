@@ -11,6 +11,7 @@
 
 use crate::{
     Location,
+    ast::UstrSpan,
     compiler::error::InternalCompilationError,
     containers::b,
     define_id_type,
@@ -20,7 +21,6 @@ use crate::{
     hir::function::{Function, FunctionDefinition},
     hir::{NodeArena, NodeId},
     module::{ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
-    parser::ast::UstrSpan,
     types::mutability::MutType,
     types::r#type::{FnArgType, Type},
 };

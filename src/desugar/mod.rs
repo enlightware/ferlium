@@ -16,6 +16,15 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     Location,
+    ast::{
+        self, AbstractData, ApplyData, AssignData, DExpr, DExprArena, DExprId, DLetPattern,
+        DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, ExprId, ExprKind,
+        FieldAccessData, ForLoopData, IndexData, LetData, LetPatternKind, LetRecordPatternField,
+        MatchData, ModuleFunction, ModuleFunctionArg, PExprArena, PLetPattern as LetPattern,
+        PModule, PModuleFunction, PModuleFunctionArg, PTraitImpl, PTypeDef, PTypeSpan, Parsed,
+        Path, Pattern, PatternConstraintKind, PatternKind, PatternVar, ProjectData,
+        StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
+    },
     compiler::error::{
         DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
         InternalCompilationError, InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind,
@@ -25,15 +34,6 @@ use crate::{
     graph::{find_strongly_connected_components, topological_sort_sccs},
     internal_compilation_error,
     module::{Module, ModuleEnv, ModuleId, TypeDefLookupResult},
-    parser::ast::{
-        self, AbstractData, ApplyData, AssignData, DExpr, DExprArena, DExprId, DLetPattern,
-        DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, ExprId, ExprKind,
-        FieldAccessData, ForLoopData, IndexData, LetData, LetPatternKind, LetRecordPatternField,
-        MatchData, ModuleFunction, ModuleFunctionArg, PExprArena, PLetPattern as LetPattern,
-        PModule, PModuleFunction, PModuleFunctionArg, PTraitImpl, PTypeDef, PTypeSpan, Parsed,
-        Path, Pattern, PatternConstraintKind, PatternKind, PatternVar, ProjectData,
-        StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
-    },
     parser::helpers::syn_static_apply,
     std::{array::array_type, math::int_type},
     types::effects::EffType,

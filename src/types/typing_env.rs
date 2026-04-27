@@ -10,6 +10,7 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     FxHashSet, Location,
+    ast::{self, DExprArena},
     compiler::error::InternalCompilationError,
     hir::NodeArena,
     hir::function::FunctionDefinition,
@@ -18,7 +19,6 @@ use crate::{
         LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
         TypeDefLookupResult, id::Id,
     },
-    parser::ast::{self, DExprArena},
     std::STD_MODULE_ID,
     types::r#trait::TraitRef,
     types::r#type::{Type, TypeSubstitution, TypeVar},

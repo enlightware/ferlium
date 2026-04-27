@@ -9,7 +9,6 @@
 
 use lalrpop_util::lalrpop_mod;
 
-pub mod ast;
 pub mod escapes;
 pub mod helpers;
 pub mod location;

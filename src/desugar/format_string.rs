@@ -8,7 +8,7 @@
 //
 use std::{str::FromStr, sync::LazyLock};
 
-use crate::parser::ast::{DExprArena, DExprId, DLetPattern as LetPattern};
+use crate::ast::{DExprArena, DExprId, DLetPattern as LetPattern};
 use crate::parser::helpers::syn_static_apply_path;
 use crate::{Location, internal_compilation_error};
 use regex::Regex;
@@ -17,9 +17,9 @@ use ustr::{Ustr, ustr};
 use crate::std::string::String;
 use crate::types::mutability::MutVal;
 use crate::{
+    ast::{DExpr as Expr, DExprKind as ExprKind},
     compiler::error::InternalCompilationError,
     hir::value::Value,
-    parser::ast::{DExpr as Expr, DExprKind as ExprKind},
     std::string::string_type,
 };
 
@@ -47,7 +47,7 @@ fn variable_to_string(
         ));
     };
     let var_expr = arena.alloc(Expr::new(
-        ExprKind::Identifier(crate::parser::ast::Path::single(ustr(var_name), var_span)),
+        ExprKind::Identifier(crate::ast::Path::single(ustr(var_name), var_span)),
         var_span,
     ));
     let kind = syn_static_apply_path(["std", "to_string"], var_span, vec![var_expr], arena);

@@ -25,6 +25,7 @@ use ustr::Ustr;
 
 use crate::{
     Location,
+    ast::{self, *},
     compiler::error::InternalCompilationError,
     containers::{b, iterable_to_string},
     desugar::desugar_expr_with_empty_ctx,
@@ -38,7 +39,6 @@ use crate::{
         ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module,
         ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl, id::Id,
     },
-    parser::ast::{self, *},
     std::new_module_using_std,
     types::coherence::check_trait_impl,
     types::effects::EffType,

@@ -12,10 +12,10 @@ use std::{
 };
 
 use crate::{
+    ast,
     containers::iterable_to_string,
     format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
     module::ModuleId,
-    parser::ast,
     parser::location::{Location, SourceTable},
     types::r#trait::TraitRef,
     types::r#type::TypeDefRef,
@@ -29,8 +29,8 @@ use ustr::Ustr;
 use super::resolve_must_be_mutable_ctx;
 
 use crate::{
+    ast::{PatternType, PropertyAccess},
     module::ModuleEnv,
-    parser::ast::{PatternType, PropertyAccess},
     types::effects::{EffType, EffectVar},
     types::r#type::{Type, TypeVar},
 };

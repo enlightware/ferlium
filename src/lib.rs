@@ -11,6 +11,7 @@ pub use rustc_hash::{FxHashMap, FxHashSet};
 pub use ustr::{Ustr, ustr};
 
 mod assert;
+pub mod ast;
 pub mod compiler;
 pub mod containers;
 mod desugar;

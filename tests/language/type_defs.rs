@@ -19,7 +19,7 @@ use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
 use ferlium::std::string::string_type;
 use ferlium::types::r#type::{Type, TypeVar};
-use ferlium::{CompilerSession, SourceId, parse_module_and_expr, parser::ast};
+use ferlium::{CompilerSession, SourceId, ast, parse_module_and_expr};
 use test_log::test;
 
 use indoc::indoc;

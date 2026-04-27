@@ -7,6 +7,10 @@ use ustr::{Ustr, ustr};
 
 use crate::{
     FxHashMap, FxHashSet,
+    ast::{
+        self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternConstraintKind,
+        PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg,
+    },
     compiler::error::{
         DuplicatedFieldContext, InternalCompilationError, WhatIsNotAProductType,
         WhichProductTypeIsNot,
@@ -18,13 +22,7 @@ use crate::{
     hir::{self, EnvStore, Immediate, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
     module::{LocalDecl, LocalDeclId, ModuleEnv, ModuleFunction, TypeDefLookupResult, id::Id},
-    parser::{
-        ast::{
-            self, DExprArena, DExprId, Desugared, ExprKind, Pattern, PatternConstraintKind,
-            PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg,
-        },
-        location::Location,
-    },
+    parser::location::Location,
     std::{STD_MODULE_ID, array::array_type, core::REPR_TRAIT, math::int_type},
     types::{
         effects::{
@@ -1987,7 +1985,7 @@ fn property_to_fn_path(
     }
 }
 
-fn fields_to_record_type<P: crate::parser::ast::Phase>(
+fn fields_to_record_type<P: crate::ast::Phase>(
     fields: &[&RecordField<P>],
     types: Vec<Type>,
 ) -> Type {

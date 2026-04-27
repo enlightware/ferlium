@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use crate::ast::Attribute;
+use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
 use crate::define_id_type;
 use crate::format::FormatWith;
@@ -28,8 +30,6 @@ use crate::graph::topological_sort_sccs;
 use crate::hir::value::LiteralValue;
 use crate::module::LocalDecl;
 use crate::module::id::Id;
-use crate::parser::ast::Attribute;
-use crate::parser::ast::UstrSpan;
 use crate::types::mutability::FormatInFnArg;
 use crate::types::type_like::CastableToType;
 use crate::types::type_like::TypeLike;

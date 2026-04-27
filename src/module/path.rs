@@ -40,7 +40,7 @@ impl Path {
         self.segments.len() == 1 && self.segments[0] == name
     }
 
-    pub fn from_ast_segments(segments: &[crate::parser::ast::UstrSpan]) -> Self {
+    pub fn from_ast_segments(segments: &[crate::ast::UstrSpan]) -> Self {
         Self {
             segments: segments.iter().map(|(name, _)| *name).collect(),
         }

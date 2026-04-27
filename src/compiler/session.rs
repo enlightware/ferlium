@@ -12,7 +12,7 @@ use derive_new::new;
 use itertools::Itertools;
 
 use crate::{
-    FxHashSet, Location, SourceId, SourceTable, compilation_error,
+    FxHashSet, Location, SourceId, SourceTable, ast, compilation_error,
     compiler::error::{CompilationError, LocatedError},
     compiler::pipeline::{
         ModuleRef, compile_with_source_id, new_ast_arena_sized_from_source, parse_module_and_expr,
@@ -27,7 +27,6 @@ use crate::{
         self, LocalDecl, Module, ModuleEnv, ModuleFunction, ModuleId, Path, Uses,
         id::{Id, NamedIndexed},
     },
-    parser::ast,
     parser::{self, describe_parse_error},
     std::{self as ferlium_std, STD_MODULE_ID, new_module_using_std},
     types::r#type::Type,

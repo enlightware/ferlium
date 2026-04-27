@@ -16,9 +16,9 @@ pub mod value;
 
 use crate::{
     Location,
+    ast::{self, UnnamedArg},
     format::FormatWith,
     module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
-    parser::ast::{self, UnnamedArg},
     types::r#trait::TraitRef,
     types::type_like::{CastableToType, TypeLike},
 };

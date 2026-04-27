@@ -12,7 +12,9 @@ use std::mem;
 use lalrpop_util::ErrorRecovery;
 
 use crate::{
-    Location, SourceId, SourceTable, compilation_error,
+    Location, SourceId, SourceTable,
+    ast::{self, PExprArena, UnstableCollector, VisitExpr},
+    compilation_error,
     compiler::error::{CompilationError, LocatedError},
     compiler::session::{AstInspectorCb, ModuleAndExpr, ModuleEntry, ModuleSrcInfo, Modules},
     containers::b,
@@ -20,7 +22,6 @@ use crate::{
     graph,
     hir::emit_ir::{EmitModuleFrom, emit_expr, emit_module},
     module::{Module, ModuleEnv, ModuleId, Path, Uses, id::Id},
-    parser::ast::{self, PExprArena, UnstableCollector, VisitExpr},
     parser::{self, describe_parse_error},
     std::new_module_using_std,
 };

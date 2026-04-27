@@ -13,11 +13,10 @@ use crate::FxHashSet;
 use heck::ToSnakeCase;
 
 use crate::{
-    CompilerSession, ModuleAndExpr, SourceId,
+    CompilerSession, ModuleAndExpr, SourceId, ast,
     format::FormatWith,
     hir::{Node, NodeArena, NodeId, NodeKind},
     module::{LocalDecl, ModuleEnv, id::Id},
-    parser::ast,
     types::type_scheme::DisplayStyle,
 };
 
