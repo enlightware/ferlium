@@ -10,6 +10,7 @@ use test_log::test;
 
 use ferlium::{
     CompilerSession, Path,
+    eval::ValOrMut,
     hir::value::Value,
     module::{ModuleId, id::Id},
     types::r#type::Type,
@@ -454,4 +455,110 @@ fn value_to_string_renders_int_correctly() {
         .unwrap();
 
     assert_eq!(rendered, "42");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn eval_expression_in_module_executes_inferred_single_arg_function() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            "fn add_one(x) { x + 1 }",
+            "<test>",
+            Path::single_str("test"),
+        )
+        .unwrap()
+        .module_id;
+
+    let (value, ty) = session
+        .eval_expression_in_module(
+            module_id,
+            "<test_expr>",
+            "add_one((arg0: int))",
+            vec![(
+                "arg0",
+                Type::primitive::<isize>(),
+                ValOrMut::Val(Value::native(5isize)),
+            )],
+        )
+        .unwrap();
+
+    assert_eq!(value.as_primitive_ty::<isize>().copied(), Some(6));
+    assert_eq!(ty, Type::primitive::<isize>());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn eval_expression_in_module_executes_inferred_multi_arg_function() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            "fn mix(a, b) { a * 2 + b }",
+            "<test>",
+            Path::single_str("test"),
+        )
+        .unwrap()
+        .module_id;
+
+    let (value, ty) = session
+        .eval_expression_in_module(
+            module_id,
+            "<test_expr>",
+            "mix((arg0: int), (arg1: int))",
+            vec![
+                (
+                    "arg0",
+                    Type::primitive::<isize>(),
+                    ValOrMut::Val(Value::native(20isize)),
+                ),
+                (
+                    "arg1",
+                    Type::primitive::<isize>(),
+                    ValOrMut::Val(Value::native(2isize)),
+                ),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(value.as_primitive_ty::<isize>().copied(), Some(42));
+    assert_eq!(ty, Type::primitive::<isize>());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn eval_expression_in_module_does_not_change_module_source_version() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            "fn add_one(x) { x + 1 }",
+            "<test>",
+            Path::single_str("test"),
+        )
+        .unwrap()
+        .module_id;
+    let source_version = session
+        .get_module_entry_by_id(module_id)
+        .unwrap()
+        .source_version();
+
+    session
+        .eval_expression_in_module(
+            module_id,
+            "<test_expr>",
+            "add_one((arg0: int))",
+            vec![(
+                "arg0",
+                Type::primitive::<isize>(),
+                ValOrMut::Val(Value::native(5isize)),
+            )],
+        )
+        .unwrap();
+
+    assert_eq!(
+        session
+            .get_module_entry_by_id(module_id)
+            .unwrap()
+            .source_version(),
+        source_version
+    );
 }

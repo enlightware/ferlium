@@ -468,7 +468,7 @@ impl CompilerSession {
         module: &Module,
         locals: Vec<LocalDecl>,
         environment: Vec<ValOrMut>,
-    ) -> Result<Value, EvalExprError> {
+    ) -> Result<(Value, Type), EvalExprError> {
         let source_id = self
             .source_table
             .add_source(source_name.to_string(), source.to_string());
@@ -502,6 +502,7 @@ impl CompilerSession {
                     &self.source_table,
                 ))
             })?;
+        let result_ty = compiled.ty.ty;
         let previous_module = {
             let entry = self
                 .modules
@@ -537,7 +538,7 @@ impl CompilerSession {
             .expect("snippet base module must still have a compiled module");
         *slot = previous_module;
 
-        result
+        result.map(|value| (value, result_ty))
     }
 
     pub(crate) fn eval_expr_with_locals(
@@ -550,6 +551,42 @@ impl CompilerSession {
     ) -> Result<Value, EvalExprError> {
         let module = self.expect_fresh_module(module_id).clone();
         self.eval_expr_with_locals_in_module(source_name, source, &module, locals, environment)
+            .map(|(value, _ty)| value)
+    }
+
+    /// Compile and evaluate a Ferlium expression in an existing module context.
+    ///
+    /// The snippet is type-checked as if it appeared in `module_id`, with the
+    /// supplied locals available to the expression. The target module's source,
+    /// source version, and compiled module are restored after evaluation.
+    pub fn eval_expression_in_module(
+        &mut self,
+        module_id: ModuleId,
+        source_name: &str,
+        source: &str,
+        bindings: Vec<(&str, Type, ValOrMut)>,
+    ) -> Result<(Value, Type), String> {
+        let module = self.expect_fresh_module(module_id).clone();
+        let (locals, environment) = bindings
+            .into_iter()
+            .map(|(name, ty, value)| (local(name, ty), value))
+            .unzip();
+        self.eval_expr_with_locals_in_module(source_name, source, &module, locals, environment)
+            .map_err(|error| self.format_eval_expr_error(error))
+    }
+
+    fn format_eval_expr_error(&self, error: EvalExprError) -> String {
+        match error {
+            EvalExprError::Compilation(error) => {
+                format!("{}", error.format_with(self.source_table()))
+            }
+            EvalExprError::Runtime(error) => {
+                format!(
+                    "{}",
+                    error.format_with(&(self.source_table(), self.modules()))
+                )
+            }
+        }
     }
 
     /// Render a value by evaluating Ferlium's `to_string(value)` in `module_id`.
@@ -574,13 +611,7 @@ impl CompilerSession {
                 .into_primitive_ty::<crate::std::string::String>()
                 .map(|rendered| rendered.to_string())
                 .ok_or_else(|| "to_string(value) did not return a string".to_string()),
-            Err(EvalExprError::Compilation(error)) => {
-                Err(format!("{}", error.format_with(self.source_table())))
-            }
-            Err(EvalExprError::Runtime(error)) => Err(format!(
-                "{}",
-                error.format_with(&(self.source_table(), self.modules()))
-            )),
+            Err(error) => Err(self.format_eval_expr_error(error)),
         }
     }
 
