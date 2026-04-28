@@ -618,6 +618,15 @@ impl Module {
         self.def_table.iter_names().copied()
     }
 
+    /// Return all own definitions in this module.
+    pub fn iter_definitions(
+        &self,
+    ) -> impl Iterator<Item = (LocalDefId, Option<Ustr>, DefKind)> + '_ {
+        self.def_table
+            .enumerates()
+            .map(|(id, kind, name)| (id, *name, *kind))
+    }
+
     /// Return the type for the source pos, if any.
     pub fn type_at(&self, pos: usize) -> Option<Type> {
         for function in self.functions.iter() {
