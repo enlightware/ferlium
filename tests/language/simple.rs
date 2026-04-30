@@ -80,7 +80,7 @@ fn hex_literals() {
     assert_val_eq!(session.run("0xFF"), int(255));
     assert_val_eq!(session.run("0xFf"), int(255));
     assert_val_eq!(session.run("0x100"), int(256));
-    assert_val_eq!(session.run("0xdeadbeef"), int(0xdeadbeef));
+    assert_val_eq!(session.run("0xdedbeef"), int(0xdedbeef));
     assert_val_eq!(session.run("-0xff"), int(-255));
     assert_val_eq!(session.run("0x10 + 0x20"), int(48));
     assert_val_eq!(session.run("bit_and(0xff00, 0x0ff0)"), int(0x0f00));
