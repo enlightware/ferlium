@@ -1143,6 +1143,10 @@ IntValue: isize = {
         Ok(value) => Ok(value),
         Err(msg) => error(msg, span(l, r, source_id)),
     },
+    <l:@L> <s:r"0x[0-9a-fA-F]+"> <r:@R> =>? match parse_hex_int(s) {
+        Ok(value) => Ok(value),
+        Err(msg) => error(msg, span(l, r, source_id)),
+    },
 };
 
 UIntValue: usize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<usize>(s) {

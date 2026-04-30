@@ -149,6 +149,18 @@ pub(crate) fn parse_bin_int(s: &str) -> Result<isize, String> {
     })
 }
 
+/// Parse a hexadecimal integer literal like "0xff" into an isize.
+pub(crate) fn parse_hex_int(s: &str) -> Result<isize, String> {
+    let digits = s.strip_prefix("0x").unwrap_or(s);
+    isize::from_str_radix(digits, 16).map_err(|_| {
+        format!(
+            "value {s} too large to fit in the range [{}, {}]",
+            isize::MIN,
+            isize::MAX
+        )
+    })
+}
+
 /// Parse a number, if it is too big, return an error
 fn parse_num_value<F>(s: &str) -> Result<(LiteralValue, Type), String>
 where

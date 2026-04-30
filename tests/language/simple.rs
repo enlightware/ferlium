@@ -70,6 +70,25 @@ fn binary_literals() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn hex_literals() {
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run("0x0"), int(0));
+    assert_val_eq!(session.run("0x1"), int(1));
+    assert_val_eq!(session.run("0xa"), int(10));
+    assert_val_eq!(session.run("0xA"), int(10));
+    assert_val_eq!(session.run("0xff"), int(255));
+    assert_val_eq!(session.run("0xFF"), int(255));
+    assert_val_eq!(session.run("0xFf"), int(255));
+    assert_val_eq!(session.run("0x100"), int(256));
+    assert_val_eq!(session.run("0xdeadbeef"), int(0xdeadbeef));
+    assert_val_eq!(session.run("-0xff"), int(-255));
+    assert_val_eq!(session.run("0x10 + 0x20"), int(48));
+    assert_val_eq!(session.run("bit_and(0xff00, 0x0ff0)"), int(0x0f00));
+    assert_val_eq!(session.run("let x = 0xcafe; x"), int(0xcafe));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn comments() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("42 // comment"), int(42));
