@@ -27,6 +27,7 @@
 
 - [Sequence Processing](./sequence-processing.md)
 - [Unordered Collections](./unordered-collections.md)
+- [Numbers](./numbers.md)
 - [Bitwise Operations](./bitwise-operations.md)
 
 # Effects and Execution

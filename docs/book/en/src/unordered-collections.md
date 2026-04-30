@@ -119,4 +119,4 @@ If you need a stable, indexed sequence, use arrays instead.
 
 ## What comes next
 
-The next chapter covers bitwise operations on integers and booleans through the `Bits` trait.
+The next chapter covers Ferlium's numeric types, their literal forms, and conversions.
