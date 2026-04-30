@@ -22,6 +22,7 @@ pub trait Id: Copy {
 macro_rules! define_id_type {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub struct $name(pub u32);
         impl $crate::module::id::Id for $name {
@@ -45,6 +46,20 @@ macro_rules! define_id_type {
             }
         }
     };
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod tests {
+    use super::*;
+
+    define_id_type!(SerdeTestId);
+
+    fn assert_serde<T: serde::Serialize + for<'de> serde::Deserialize<'de>>() {}
+
+    #[test]
+    fn defined_id_types_derive_serde_when_feature_is_enabled() {
+        assert_serde::<SerdeTestId>();
+    }
 }
 
 /// A helper struct for collections indexed by an ID type, providing both vector storage and name-to-ID mapping.
