@@ -1134,9 +1134,15 @@ IntLiteral: (LiteralValue, IrType) = {
     IntValue => literal_value(<>),
 };
 
-IntValue: isize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<isize>(s) {
-    Ok(value) => Ok(value),
-    Err(msg) => error(msg, span(l, r, source_id)),
+IntValue: isize = {
+    <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<isize>(s) {
+        Ok(value) => Ok(value),
+        Err(msg) => error(msg, span(l, r, source_id)),
+    },
+    <l:@L> <s:r"0b[01]+"> <r:@R> =>? match parse_bin_int(s) {
+        Ok(value) => Ok(value),
+        Err(msg) => error(msg, span(l, r, source_id)),
+    },
 };
 
 UIntValue: usize = <l:@L> <s:r"[1-9][0-9]*|0"> <r:@R> =>? match parse_num::<usize>(s) {

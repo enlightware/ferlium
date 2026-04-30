@@ -119,4 +119,4 @@ If you need a stable, indexed sequence, use arrays instead.
 
 ## What comes next
 
-The next chapter introduces effects, showing how Ferlium tracks reading, writing, and failure alongside ordinary values.
+The next chapter covers bitwise operations on integers and booleans through the `Bits` trait.
