@@ -113,6 +113,13 @@ let r = 5..2;   // 5, 4, 3
 let r = 5..=2;  // 5, 4, 3, 2
 ```
 
+Parenthesize computed bounds:
+
+```ferlium
+# let start = 0;
+let r = start..(start + 3);
+```
+
 ## Iteration with `for`
 
 `for` loops iterate over a sequence and execute a body for each element.
