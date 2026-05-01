@@ -15,7 +15,7 @@ use crate::harness::{
     TestSession, assert_some_value_eq, bool, float, int, string, unit, variant_0, variant_t1,
 };
 use ferlium::{
-    compiler::error::RuntimeErrorKind,
+    compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     hir::value::Value,
     std::option::{none, some},
     types::effects::{PrimitiveEffect, effect, no_effects},
@@ -29,6 +29,40 @@ use ferlium::types::r#type::{Type, tuple_type};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn immutable_native_inputs_borrow_places_without_cloning() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            let left = testing::clone_tracked_payload(value);
+            let right = testing::clone_tracked_payload(value);
+            left + right + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(14)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn trivial_copy_cannot_be_implemented_from_ferlium_source() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(
+        r#"
+        struct Local(int)
+        impl TrivialCopy for Local {}
+        "#,
+    );
+    match err.into_inner() {
+        CompilationErrorImpl::TraitImplNativeOnly { .. } => {}
+        other => panic!("expected TraitImplNativeOnly, got {other:?}"),
+    }
+}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

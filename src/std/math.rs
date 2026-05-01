@@ -17,13 +17,15 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     containers::b,
     hir::function::{
-        BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV, Function,
-        NullaryNativeFnN, UnaryNativeFnNN,
+        BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV,
+        BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN, BinaryNativeFnRRV, Function,
+        NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnRN,
     },
     hir::value::{NativeDisplay, Value},
     module::Module,
     std::{
         cast::CAST_TRAIT,
+        core::TRIVIAL_COPY_TRAIT,
         core_traits_names::{BITS_TRAIT_NAME, DIV_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
         default::DEFAULT_TRAIT,
         hash::Hasher,
@@ -117,6 +119,10 @@ where
     }
 }
 
+fn saturating_trunc_ref(value: &Float) -> Int {
+    saturating_trunc::<f64, Int>(*value)
+}
+
 fn clamp_to_u32(value: Int) -> u32 {
     if value <= 0 {
         return 0;
@@ -208,8 +214,56 @@ fn hash_int(value: Int, state: &mut Hasher) {
     state.write_isize(value);
 }
 
-fn hash_float(value: Float, state: &mut Hasher) {
+fn hash_float(value: &Float, state: &mut Hasher) {
     state.write_u64(value.into_inner().to_bits());
+}
+
+fn equal_float(lhs: &Float, rhs: &Float) -> bool {
+    lhs == rhs
+}
+
+fn compare_float(lhs: &Float, rhs: &Float) -> Value {
+    compare(*lhs, *rhs)
+}
+
+fn add_float(lhs: &Float, rhs: &Float) -> Float {
+    *lhs + *rhs
+}
+
+fn sub_float(lhs: &Float, rhs: &Float) -> Float {
+    *lhs - *rhs
+}
+
+fn mul_float(lhs: &Float, rhs: &Float) -> Float {
+    *lhs * *rhs
+}
+
+fn div_float(lhs: &Float, rhs: &Float) -> Result<Float, RuntimeErrorKind> {
+    if *rhs == 0.0 {
+        Err(RuntimeErrorKind::DivisionByZero)
+    } else {
+        Ok(*lhs / *rhs)
+    }
+}
+
+fn neg_float(value: &Float) -> Float {
+    -*value
+}
+
+fn abs_float(value: &Float) -> Float {
+    Float::abs(value)
+}
+
+fn signum_float(value: &Float) -> Float {
+    Float::signum(value)
+}
+
+fn round_float(value: &Float) -> Int {
+    value.round() as Int
+}
+
+fn float_to_string(value: &Float) -> String {
+    String::new(&value.to_string())
 }
 
 pub fn add_to_module(to: &mut Module) {
@@ -284,6 +338,12 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [b(NullaryNativeFnN::new(|| 0isize)) as Function],
     );
+    to.add_concrete_impl_no_locals(
+        TRIVIAL_COPY_TRAIT.clone(),
+        [int_type()],
+        [],
+        Vec::<Function>::new(),
+    );
     to.add_function(
         ustr("idiv"),
         BinaryNativeFnNNFN::description_with_default_ty(
@@ -351,9 +411,9 @@ pub fn add_to_module(to: &mut Module) {
         [float_type()],
         [],
         [
-            b(BinaryFn::new(equal::<Float>)) as Function,
-            b(UnaryFn::new(|value: Float| String::new(&value.to_string()))) as Function,
-            b(BinaryNativeFnNMN::new(hash_float)) as Function,
+            b(BinaryNativeFnRRN::new(equal_float)) as Function,
+            b(UnaryNativeFnRN::new(float_to_string)) as Function,
+            b(BinaryNativeFnRMN::new(hash_float)) as Function,
         ],
     );
     to.add_concrete_impl_no_locals(
@@ -361,12 +421,12 @@ pub fn add_to_module(to: &mut Module) {
         [float_type()],
         [],
         [
-            b(BinaryFn::new(<Float as ops::Add>::add)) as Function,
-            b(BinaryFn::new(<Float as ops::Sub>::sub)) as Function,
-            b(BinaryFn::new(<Float as ops::Mul>::mul)) as Function,
-            b(UnaryFn::new(<Float as ops::Neg>::neg)) as Function,
-            b(UnaryFn::new(|value: Float| Float::abs(&value))) as Function,
-            b(UnaryFn::new(|value: Float| Float::signum(&value))) as Function,
+            b(BinaryNativeFnRRN::new(add_float)) as Function,
+            b(BinaryNativeFnRRN::new(sub_float)) as Function,
+            b(BinaryNativeFnRRN::new(mul_float)) as Function,
+            b(UnaryNativeFnRN::new(neg_float)) as Function,
+            b(UnaryNativeFnRN::new(abs_float)) as Function,
+            b(UnaryNativeFnRN::new(signum_float)) as Function,
             b(UnaryFn::new(isize_to_not_nan)) as Function,
         ],
     );
@@ -374,20 +434,14 @@ pub fn add_to_module(to: &mut Module) {
         ord_trait.clone(),
         [float_type()],
         [],
-        [b(BinaryNativeFnNNV::new(compare::<Float>)) as Function],
+        [b(BinaryNativeFnRRV::new(compare_float)) as Function],
     );
     let div_trait = to.get_trait_str(DIV_TRAIT_NAME).unwrap().clone();
     to.add_concrete_impl_no_locals(
         div_trait,
         [float_type()],
         [],
-        [b(BinaryNativeFnNNFN::new(|lhs: Float, rhs: Float| {
-            if rhs == 0.0 {
-                Err(DivisionByZero)
-            } else {
-                Ok(lhs / rhs)
-            }
-        })) as Function],
+        [b(BinaryNativeFnRRFN::new(div_float)) as Function],
     );
     to.add_concrete_impl_no_locals(
         DEFAULT_TRAIT.clone(),
@@ -397,8 +451,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("round"),
-        UnaryNativeFnNN::description_with_default_ty(
-            |value: Float| value.round() as Int,
+        UnaryNativeFnRN::description_with_default_ty(
+            round_float,
             ["value"],
             "Rounds a number to the nearest integer.",
             no_effects(),
@@ -418,6 +472,6 @@ pub fn add_to_module(to: &mut Module) {
         CAST_TRAIT.clone(),
         [float_type(), int_type()],
         [],
-        [b(UnaryNativeFnNN::new(saturating_trunc::<f64, Int>)) as Function],
+        [b(UnaryNativeFnRN::new(saturating_trunc_ref)) as Function],
     );
 }

@@ -20,6 +20,7 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     containers::b,
     format::{FormatWith, write_with_separator},
+    hir::function::NativeArgPassing,
     hir::value::{FunctionValue, NativeValue, Value},
     module::{FunctionId, LocalDecl, LocalFunctionId, ModuleFunction, ModuleId, TraitImplId},
     std::array,
@@ -61,6 +62,23 @@ impl ValOrMut {
         Ok(match self {
             ValOrMut::Val(_) => None,
             ValOrMut::Mut(place) => place.target_mut(ctx)?.as_primitive_ty_mut::<T>(),
+        })
+    }
+
+    pub fn as_primitive<'a, T: 'static>(
+        &'a self,
+        ctx: &'a EvalCtx<'_>,
+    ) -> Result<Option<&'a T>, RuntimeErrorKind> {
+        Ok(match self {
+            ValOrMut::Val(val) => val.as_primitive_ty::<T>(),
+            ValOrMut::Mut(place) => place.target_ref(ctx)?.as_primitive_ty::<T>(),
+        })
+    }
+
+    pub fn as_value_ref<'a>(&'a self, ctx: &'a EvalCtx<'_>) -> Result<&'a Value, RuntimeErrorKind> {
+        Ok(match self {
+            ValOrMut::Val(value) => value,
+            ValOrMut::Mut(place) => place.target_ref(ctx)?,
         })
     }
 
@@ -240,6 +258,36 @@ impl<'a> EvalCtx<'a> {
     ) -> &ModuleFunction {
         let module = self.compiler_session.expect_fresh_module(module_id);
         module.get_function_by_id(local_id).unwrap()
+    }
+
+    fn function_argument_passing(
+        &self,
+        local_id: LocalFunctionId,
+        module_id: ModuleId,
+    ) -> Option<Vec<NativeArgPassing>> {
+        self.get_module_function(local_id, module_id)
+            .code
+            .argument_passing()
+    }
+
+    pub fn function_id_argument_passing(
+        &self,
+        function_id: FunctionId,
+    ) -> Option<Vec<NativeArgPassing>> {
+        let (local_id, module_id) = self.get_function_local_id(function_id);
+        self.function_argument_passing(local_id, module_id)
+    }
+
+    pub fn function_value_argument_passing(
+        &self,
+        function_value: &FunctionValue,
+    ) -> Option<Vec<NativeArgPassing>> {
+        let mut passing =
+            self.function_argument_passing(function_value.function, function_value.module)?;
+        if !function_value.captured.is_empty() {
+            passing.drain(0..function_value.captured.len());
+        }
+        Some(passing)
     }
 
     /// Get the dictionary value for a ImplId at runtime using module.
@@ -679,6 +727,7 @@ pub fn eval_node_with_ctx(
             let function_value =
                 eval_or_return!(eval_node_with_ctx(arena, app.function, ctx, locals));
             let function_value = function_value.as_function().unwrap();
+            let arg_passing = ctx.function_value_argument_passing(function_value);
             let args_ty = {
                 arena[app.function]
                     .ty
@@ -688,13 +737,26 @@ pub fn eval_node_with_ctx(
                     .args
                     .clone()
             };
-            let arguments =
-                eval_or_return!(eval_args(arena, &app.arguments, &args_ty, ctx, locals));
+            let arguments = eval_or_return!(eval_args(
+                arena,
+                &app.arguments,
+                &args_ty,
+                arg_passing.as_deref(),
+                ctx,
+                locals
+            ));
             ctx.call_function_value(function_value, arguments, node.span)
         }
         StaticApply(app) => {
-            let arguments =
-                eval_or_return!(eval_args(arena, &app.arguments, &app.ty.args, ctx, locals));
+            let arg_passing = ctx.function_id_argument_passing(app.function);
+            let arguments = eval_or_return!(eval_args(
+                arena,
+                &app.arguments,
+                &app.ty.args,
+                arg_passing.as_deref(),
+                ctx,
+                locals
+            ));
             ctx.call_function_id(app.function, arguments, node.span)
         }
         TraitFnApply(_) => {
@@ -929,19 +991,24 @@ fn eval_args(
     arena: &NodeArena,
     args: &[NodeId],
     args_ty: &[FnArgType],
+    arg_passing: Option<&[NativeArgPassing]>,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<ValOrMut>>, RuntimeError> {
     // Automatically cast mutable references to values if the function expects values.
     let mut results = Vec::with_capacity(args.len());
     assert_eq!(args.len(), args_ty.len());
-    for (arg, ty) in args.iter().zip(args_ty) {
+    for (index, (arg, ty)) in args.iter().zip(args_ty).enumerate() {
         let is_mutable = ty
             .mut_ty
             .as_resolved()
             .expect("Unresolved mutability variable found during execution")
             .is_mutable();
-        results.push(if is_mutable {
+        let borrow_as_place = arg_passing
+            .and_then(|passing| passing.get(index))
+            .is_some_and(|passing| *passing == NativeArgPassing::SharedRef)
+            && can_resolve_node_place(arena, *arg);
+        results.push(if is_mutable || borrow_as_place {
             ValOrMut::Mut(eval_or_return!(resolve_node_place(
                 arena, *arg, ctx, locals
             )))
@@ -952,4 +1019,14 @@ fn eval_args(
         });
     }
     Ok(ControlFlow::Continue(results))
+}
+
+fn can_resolve_node_place(arena: &NodeArena, id: NodeId) -> bool {
+    match &arena[id].kind {
+        NodeKind::EnvLoad(_) => true,
+        NodeKind::Project(node, _) | NodeKind::ProjectAt(node, _) | NodeKind::Index(node, _) => {
+            can_resolve_node_place(arena, *node)
+        }
+        _ => false,
+    }
 }

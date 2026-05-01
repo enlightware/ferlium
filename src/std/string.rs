@@ -22,9 +22,9 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     containers::b,
     hir::function::{
-        BinaryNativeFnMNN, BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN,
-        BinaryNativeFnNNV, Function, NullaryNativeFnN, TernaryNativeFnNNNN, UnaryNativeFnMV,
-        UnaryNativeFnNN, UnaryNativeFnNV,
+        BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN,
+        BinaryNativeFnRRV, Function, NullaryNativeFnN, TernaryNativeFnRNNN, TernaryNativeFnRRRN,
+        UnaryNativeFnMV, UnaryNativeFnRN, UnaryNativeFnRV,
     },
     hir::value::{NativeDisplay, Value},
     module::{Module, ModuleFunction},
@@ -36,7 +36,7 @@ use crate::{
         logic::bool_type,
         math::{float_type, float_value, int_type, int_value},
         ordering::compare,
-        value::{VALUE_TRAIT, equal},
+        value::VALUE_TRAIT,
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
     types::r#type::{FnType, Type},
@@ -57,7 +57,7 @@ impl String {
         Self(Rc::new(s.nfc().collect()))
     }
 
-    pub fn push_str(&mut self, value: Self) {
+    pub fn push_str(&mut self, value: &Self) {
         let needs_normalization = value
             .0
             .chars()
@@ -120,7 +120,7 @@ impl String {
         }
     }
 
-    pub fn replace(&self, from: Self, to: Self) -> Self {
+    pub fn replace(&self, from: &Self, to: &Self) -> Self {
         Self(Rc::new(
             self.0.replace(from.as_ref(), to.as_ref()).nfc().collect(),
         ))
@@ -138,19 +138,19 @@ impl String {
         Self(Rc::new(self.0.trim().to_owned()))
     }
 
-    fn starts_with(value: Self, prefix: Self) -> bool {
+    fn starts_with(value: &Self, prefix: &Self) -> bool {
         value.as_ref().starts_with(prefix.as_ref())
     }
 
-    fn ends_with(value: Self, suffix: Self) -> bool {
+    fn ends_with(value: &Self, suffix: &Self) -> bool {
         value.as_ref().ends_with(suffix.as_ref())
     }
 
-    fn contains_substring(haystack: Self, needle: Self) -> bool {
+    fn contains_substring(haystack: &Self, needle: &Self) -> bool {
         haystack.as_ref().contains(needle.as_ref())
     }
 
-    fn parse_int(value: Self) -> Value {
+    fn parse_int(value: &Self) -> Value {
         value
             .as_ref()
             .parse::<isize>()
@@ -161,7 +161,7 @@ impl String {
     }
 
     fn parse_int_descr() -> ModuleFunction {
-        UnaryNativeFnNV::description_with_ty(
+        UnaryNativeFnRV::description_with_ty(
             Self::parse_int,
             ["value"],
             "Parses `value` as a decimal integer, returning `Some` on success and `None` otherwise.",
@@ -171,7 +171,7 @@ impl String {
         )
     }
 
-    fn parse_float(value: Self) -> Value {
+    fn parse_float(value: &Self) -> Value {
         value
             .as_ref()
             .parse::<f64>()
@@ -183,7 +183,7 @@ impl String {
     }
 
     fn parse_float_descr() -> ModuleFunction {
-        UnaryNativeFnNV::description_with_ty(
+        UnaryNativeFnRV::description_with_ty(
             Self::parse_float,
             ["value"],
             "Parses `value` as a finite floating-point number, returning `Some` on success and `None` otherwise.",
@@ -193,7 +193,7 @@ impl String {
         )
     }
 
-    fn parse_bool(value: Self) -> Value {
+    fn parse_bool(value: &Self) -> Value {
         match value.as_ref() {
             "true" => some(Value::native(true)),
             "false" => some(Value::native(false)),
@@ -202,7 +202,7 @@ impl String {
     }
 
     fn parse_bool_descr() -> ModuleFunction {
-        UnaryNativeFnNV::description_with_ty(
+        UnaryNativeFnRV::description_with_ty(
             Self::parse_bool,
             ["value"],
             "Parses `value` as a boolean, accepting only `true` and `false`.",
@@ -232,7 +232,7 @@ impl String {
         indices
     }
 
-    fn split_iterator(&self, separator: Self) -> Result<StringSplitIterator, RuntimeErrorKind> {
+    fn split_iterator(&self, separator: &Self) -> Result<StringSplitIterator, RuntimeErrorKind> {
         if separator.is_empty() {
             return Err(RuntimeErrorKind::InvalidArgument(ustr(
                 "separator must not be empty",
@@ -243,7 +243,7 @@ impl String {
         Ok(StringSplitIterator {
             string: self.0.clone(),
             boundaries: self.grapheme_boundaries(),
-            separator: separator.0,
+            separator: separator.0.clone(),
             separator_grapheme_len,
             next_start: 0,
             finished: false,
@@ -256,8 +256,8 @@ impl String {
             string_iter_type(),
             no_effects(),
         ));
-        UnaryNativeFnNN::description_with_ty_scheme(
-            |s: Self| s.iter(),
+        UnaryNativeFnRN::description_with_ty_scheme(
+            Self::iter,
             ["string"],
             "Creates an iterator over the characters of the string.",
             ty_scheme,
@@ -265,8 +265,8 @@ impl String {
     }
 
     fn split_iter_descr() -> ModuleFunction {
-        BinaryNativeFnNNFN::description_with_ty_scheme(
-            |value: Self, separator: Self| value.split_iterator(separator),
+        BinaryNativeFnRRFN::description_with_ty_scheme(
+            Self::split_iterator,
             ["value", "separator"],
             "Creates an iterator over the parts of `value` separated by `separator`.",
             TypeScheme::new_just_type(FnType::new_by_val(
@@ -496,8 +496,16 @@ pub fn string_value(s: &str) -> Value {
     Value::native(String::from_str(s).unwrap())
 }
 
-fn hash_string(value: String, state: &mut Hasher) {
+fn hash_string(value: &String, state: &mut Hasher) {
     state.write_bytes(value.as_ref().as_bytes());
+}
+
+fn equal_string(lhs: &String, rhs: &String) -> bool {
+    lhs == rhs
+}
+
+fn compare_string(lhs: &String, rhs: &String) -> Value {
+    compare(lhs, rhs)
 }
 
 pub fn add_to_module(to: &mut Module) {
@@ -508,9 +516,9 @@ pub fn add_to_module(to: &mut Module) {
         [string_type()],
         [],
         [
-            b(BinaryNativeFnNNN::new(equal::<String>)) as Function,
-            b(UnaryNativeFnNN::new(|value: String| value)) as Function,
-            b(BinaryNativeFnNMN::new(hash_string)) as Function,
+            b(BinaryNativeFnRRN::new(equal_string)) as Function,
+            b(UnaryNativeFnRN::new(String::clone)) as Function,
+            b(BinaryNativeFnRMN::new(hash_string)) as Function,
         ],
     );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
@@ -518,7 +526,7 @@ pub fn add_to_module(to: &mut Module) {
         ord_trait,
         [string_type()],
         [],
-        [b(BinaryNativeFnNNV::new(compare::<String>)) as Function],
+        [b(BinaryNativeFnRRV::new(compare_string)) as Function],
     );
     to.add_concrete_impl_no_locals(
         DEFAULT_TRAIT.clone(),
@@ -537,7 +545,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(ustr("parse_bool"), String::parse_bool_descr());
     to.add_function(
         ustr("string_push_str"),
-        BinaryNativeFnMNN::description_with_default_ty(
+        BinaryNativeFnMRN::description_with_default_ty(
             String::push_str,
             ["target", "suffix"],
             "Appends `suffix` to the end of `target`.",
@@ -546,8 +554,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_concat"),
-        BinaryNativeFnNNN::description_with_default_ty(
-            |a: String, b: String| String::concat(&a, &b),
+        BinaryNativeFnRRN::description_with_default_ty(
+            String::concat,
             ["left", "right"],
             "Concatenates `left` and `right` strings.",
             no_effects(),
@@ -555,7 +563,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("contains_substring"),
-        BinaryNativeFnNNN::description_with_default_ty(
+        BinaryNativeFnRRN::description_with_default_ty(
             String::contains_substring,
             ["haystack", "needle"],
             "Returns `true` if `haystack` contains `needle` as a substring.",
@@ -564,8 +572,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_trim"),
-        UnaryNativeFnNN::description_with_default_ty(
-            |s: String| s.trim(),
+        UnaryNativeFnRN::description_with_default_ty(
+            String::trim,
             ["string"],
             "Returns `string` with leading and trailing whitespace removed.",
             no_effects(),
@@ -573,7 +581,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_starts_with"),
-        BinaryNativeFnNNN::description_with_default_ty(
+        BinaryNativeFnRRN::description_with_default_ty(
             String::starts_with,
             ["string", "prefix"],
             "Returns `true` if `string` starts with `prefix`.",
@@ -582,7 +590,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_ends_with"),
-        BinaryNativeFnNNN::description_with_default_ty(
+        BinaryNativeFnRRN::description_with_default_ty(
             String::ends_with,
             ["string", "suffix"],
             "Returns `true` if `string` ends with `suffix`.",
@@ -591,8 +599,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_len"),
-        UnaryNativeFnNN::description_with_default_ty(
-            |a: String| a.grapheme_count() as isize,
+        UnaryNativeFnRN::description_with_default_ty(
+            |a: &String| a.grapheme_count() as isize,
             ["string"],
             "Returns the number of characters in the string.",
             no_effects(),
@@ -600,8 +608,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_byte_len"),
-        UnaryNativeFnNN::description_with_default_ty(
-            |a: String| a.byte_len() as isize,
+        UnaryNativeFnRN::description_with_default_ty(
+            |a: &String| a.byte_len() as isize,
             ["string"],
             "Returns the length of the string in bytes.",
             no_effects(),
@@ -609,8 +617,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_is_empty"),
-        UnaryNativeFnNN::description_with_default_ty(
-            |a: String| a.is_empty(),
+        UnaryNativeFnRN::description_with_default_ty(
+            |a: &String| a.is_empty(),
             ["string"],
             "Returns `true` if the string is empty, otherwise `false`.",
             no_effects(),
@@ -618,8 +626,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_replace"),
-        TernaryNativeFnNNNN::description_with_default_ty(
-            |s: String, from: String, to: String| s.replace(from, to),
+        TernaryNativeFnRRRN::description_with_default_ty(
+            String::replace,
             ["string", "from", "to"],
             "Returns a new string with all occurrences of `from` replaced by `to`.",
             no_effects(),
@@ -627,8 +635,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("string_slice"),
-        TernaryNativeFnNNNN::description_with_default_ty(
-            |s: String, start: isize, end: isize| s.slice(start, end),
+        TernaryNativeFnRNNN::description_with_default_ty(
+            String::slice,
             ["string", "start", "end"],
             "Returns the slice of `string` from character index `start` to index `end`. Negative indices count from the end.",
             no_effects(),
@@ -636,8 +644,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("uppercase"),
-        UnaryNativeFnNN::description_with_default_ty(
-            |s: String| s.uppercase(),
+        UnaryNativeFnRN::description_with_default_ty(
+            String::uppercase,
             ["string"],
             "Returns the uppercase equivalent of this string.",
             no_effects(),
@@ -645,8 +653,8 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("lowercase"),
-        UnaryNativeFnNN::description_with_default_ty(
-            |s: String| s.lowercase(),
+        UnaryNativeFnRN::description_with_default_ty(
+            String::lowercase,
             ["string"],
             "Returns the lowercase equivalent of this string.",
             no_effects(),

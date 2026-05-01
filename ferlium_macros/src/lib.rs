@@ -23,7 +23,7 @@ pub fn declare_native_fn_aliases(input: TokenStream) -> TokenStream {
     let n = parse_macro_input!(input as LitInt);
     let arity = n.base10_parse::<usize>().unwrap();
 
-    let arg_codes = ["N", "M", "V", "W"];
+    let arg_codes = ["N", "R", "M", "V", "W"];
     let output_codes = ["N", "V", "FN", "FV"];
 
     let mut generated = quote! {};

@@ -19,6 +19,7 @@ use crate::{
     hir::value::NativeDisplay,
     module::Module,
     std::{
+        core::TRIVIAL_COPY_TRAIT,
         core_traits_names::BITS_TRAIT_NAME,
         default::DEFAULT_TRAIT,
         hash::Hasher,
@@ -116,6 +117,12 @@ pub fn add_to_module(to: &mut Module) {
         [bool_type()],
         [],
         [b(NullaryNativeFnN::new(|| false)) as Function],
+    );
+    to.add_concrete_impl_no_locals(
+        TRIVIAL_COPY_TRAIT.clone(),
+        [bool_type()],
+        [],
+        Vec::<Function>::new(),
     );
     to.add_function(
         ustr("not"),

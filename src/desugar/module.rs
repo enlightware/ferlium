@@ -238,6 +238,7 @@ impl ast::TraitDefinition {
             constraints,
             functions,
             derivers: vec![],
+            impl_policy: crate::types::r#trait::TraitImplPolicy::UserImplementable,
             spans: Some(spans),
         })
         .map_err(|error| match error {

@@ -638,6 +638,10 @@ pub enum CompilationErrorImpl<S: Scope> {
         input_tys: Vec<S::Type>,
         impl_span: Location,
     },
+    TraitImplNativeOnly {
+        trait_ref: S::TraitRef,
+        impl_span: Location,
+    },
     OverlappingTraitImpls {
         trait_ref: S::TraitRef,
         input_tys: Vec<S::Type>,
@@ -1279,6 +1283,17 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(impl_span)
                 )
             }
+            TraitImplNativeOnly {
+                trait_ref,
+                impl_span,
+            } => {
+                write!(
+                    f,
+                    "Trait `{}` can only be implemented by trusted native code (at {})",
+                    trait_ref,
+                    fmt_span(impl_span)
+                )
+            }
             OverlappingTraitImpls {
                 trait_ref,
                 input_tys,
@@ -1837,6 +1852,13 @@ impl CompilationError {
                     .zip(trait_ref.input_type_names.iter())
                     .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
+                impl_span,
+            }),
+            TraitImplNativeOnly {
+                trait_ref,
+                impl_span,
+            } => compilation_error!(TraitImplNativeOnly {
+                trait_ref: trait_ref.name.to_string(),
                 impl_span,
             }),
             OverlappingTraitImpls {

@@ -226,6 +226,10 @@ pub(crate) fn diagnostics_from_error(
             impl_span: instantiation_span,
             ..
         }
+        | TraitImplNativeOnly {
+            impl_span: instantiation_span,
+            ..
+        }
         | TraitMethodArgCountMismatch {
             args_span: instantiation_span,
             ..

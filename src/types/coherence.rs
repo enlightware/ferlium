@@ -16,7 +16,7 @@ use crate::{
         BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, Module, ModuleId,
         TraitImpl, TraitKey,
     },
-    types::r#trait::TraitRef,
+    types::r#trait::{TraitImplPolicy, TraitRef},
     types::trait_solver::TraitSolverProbe,
     types::r#type::{Type, TypeVar},
     types::type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
@@ -81,6 +81,13 @@ pub(crate) fn check_trait_impl(
     constraints: &[PubTypeConstraint],
     span: Location,
 ) -> Result<(), InternalCompilationError> {
+    if trait_ref.impl_policy == TraitImplPolicy::NativeOnly {
+        return Err(internal_compilation_error!(TraitImplNativeOnly {
+            trait_ref: trait_ref.clone(),
+            impl_span: span,
+        }));
+    }
+
     if !trait_is_local
         && !input_tys
             .iter()

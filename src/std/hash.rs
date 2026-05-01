@@ -13,17 +13,12 @@ use crate::{
     cached_primitive_ty,
     containers::b,
     hir::function::{
-        BinaryNativeFnMNN, BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN,
-        UnaryNativeFnNN,
+        BinaryNativeFnMNN, BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRN, Function,
+        NullaryNativeFnN, UnaryNativeFnRN,
     },
     hir::value::NativeDisplay,
     module::Module,
-    std::{
-        cast::CAST_TRAIT,
-        math::int_type,
-        string::String,
-        value::{VALUE_TRAIT, equal},
-    },
+    std::{cast::CAST_TRAIT, math::int_type, string::String, value::VALUE_TRAIT},
     types::effects::no_effects,
     types::r#type::Type,
 };
@@ -63,7 +58,7 @@ impl Hasher {
         Self { state: Self::INIT }
     }
 
-    pub fn finish(self) -> HashValue {
+    pub fn finish(&self) -> HashValue {
         HashValue(final_mix(self.state))
     }
 
@@ -90,11 +85,11 @@ impl Hasher {
         }
     }
 
-    pub fn write_string(&mut self, s: String) {
+    pub fn write_string(&mut self, s: &String) {
         self.write_bytes(s.as_ref().as_bytes());
     }
 
-    pub fn write_hash(&mut self, h: HashValue) {
+    pub fn write_hash(&mut self, h: &HashValue) {
         self.write_u64(h.0);
     }
 }
@@ -148,13 +143,13 @@ impl UnorderedHasher {
         }
     }
 
-    pub fn add(&mut self, h: HashValue) {
+    pub fn add(&mut self, h: &HashValue) {
         self.sum = self.sum.wrapping_add(h.0);
         self.xor ^= h.0;
         self.count = self.count.wrapping_add(1);
     }
 
-    pub fn finish(self) -> HashValue {
+    pub fn finish(&self) -> HashValue {
         let mut h = Hasher::new();
         h.write_u64(self.sum);
         h.write_u64(self.xor);
@@ -177,16 +172,20 @@ pub fn unordered_hasher_type() -> Type {
     cached_primitive_ty!(UnorderedHasher)
 }
 
-fn hash_value_to_string(value: HashValue) -> String {
+fn hash_value_to_string(value: &HashValue) -> String {
     String::new(&format!("hash({})", value.0))
 }
 
-fn hash_hash_value(value: HashValue, state: &mut Hasher) {
+fn hash_hash_value(value: &HashValue, state: &mut Hasher) {
     state.write_hash(value);
 }
 
-fn hash_to_int(value: HashValue) -> isize {
+fn hash_to_int(value: &HashValue) -> isize {
     value.0 as isize
+}
+
+fn equal_hash_value(lhs: &HashValue, rhs: &HashValue) -> bool {
+    lhs == rhs
 }
 
 pub fn add_to_module(to: &mut Module) {
@@ -200,16 +199,16 @@ pub fn add_to_module(to: &mut Module) {
         [hash_type()],
         [],
         [
-            b(BinaryNativeFnNNN::new(equal::<HashValue>)) as Function,
-            b(UnaryNativeFnNN::new(hash_value_to_string)) as Function,
-            b(BinaryNativeFnNMN::new(hash_hash_value)) as Function,
+            b(BinaryNativeFnRRN::new(equal_hash_value)) as Function,
+            b(UnaryNativeFnRN::new(hash_value_to_string)) as Function,
+            b(BinaryNativeFnRMN::new(hash_hash_value)) as Function,
         ],
     );
     to.add_concrete_impl_no_locals(
         CAST_TRAIT.clone(),
         [hash_type(), int_type()],
         [],
-        [b(UnaryNativeFnNN::new(hash_to_int)) as Function],
+        [b(UnaryNativeFnRN::new(hash_to_int)) as Function],
     );
 
     // Functions
@@ -233,7 +232,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("hasher_write_hash"),
-        BinaryNativeFnMNN::description_with_default_ty(
+        BinaryNativeFnMRN::description_with_default_ty(
             Hasher::write_hash,
             ["hasher", "hash"],
             "Write a hash value into a hasher.",
@@ -242,7 +241,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("hasher_write_string"),
-        BinaryNativeFnMNN::description_with_default_ty(
+        BinaryNativeFnMRN::description_with_default_ty(
             Hasher::write_string,
             ["hasher", "value"],
             "Write a string value into a hasher.",
@@ -251,7 +250,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("hasher_finish"),
-        UnaryNativeFnNN::description_with_default_ty(
+        UnaryNativeFnRN::description_with_default_ty(
             Hasher::finish,
             ["hasher"],
             "Finish a hasher and produce the final hash value.",
@@ -269,7 +268,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("unordered_hasher_add"),
-        BinaryNativeFnMNN::description_with_default_ty(
+        BinaryNativeFnMRN::description_with_default_ty(
             UnorderedHasher::add,
             ["acc", "hash"],
             "Add a hash value to an unordered hash accumulator.",
@@ -278,7 +277,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("unordered_hasher_finish"),
-        UnaryNativeFnNN::description_with_default_ty(
+        UnaryNativeFnRN::description_with_default_ty(
             UnorderedHasher::finish,
             ["acc"],
             "Finish an unordered hash accumulator and produce the final hash value.",

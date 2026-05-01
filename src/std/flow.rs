@@ -10,7 +10,7 @@ use ustr::ustr;
 
 use crate::{
     compiler::error::RuntimeErrorKind,
-    hir::function::{NullaryNativeFnFN, UnaryNativeFnNFN},
+    hir::function::{NullaryNativeFnFN, UnaryNativeFnRFN},
     module::Module,
     std::string::String as Str,
     types::effects::{PrimitiveEffect, effect},
@@ -24,11 +24,11 @@ fn abort() -> Result<(), RuntimeErrorKind> {
     Err(RuntimeErrorKind::Aborted(None))
 }
 
-fn panic(msg: Str) -> Result<(), RuntimeErrorKind> {
-    Err(RuntimeErrorKind::Aborted(Some(msg.into())))
+fn panic(msg: &Str) -> Result<(), RuntimeErrorKind> {
+    Err(RuntimeErrorKind::Aborted(Some(msg.as_ref().to_string())))
 }
 
-fn invalid_argument(msg: Str) -> Result<(), RuntimeErrorKind> {
+fn invalid_argument(msg: &Str) -> Result<(), RuntimeErrorKind> {
     Err(RuntimeErrorKind::InvalidArgument(ustr(msg.as_ref())))
 }
 
@@ -50,7 +50,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("panic"),
-        UnaryNativeFnNFN::description_with_ty_scheme(
+        UnaryNativeFnRFN::description_with_ty_scheme(
             panic,
             ["msg"],
             "Aborts the program with a message.",
@@ -63,7 +63,7 @@ pub fn add_to_module(to: &mut Module) {
     );
     to.add_function(
         ustr("invalid_argument"),
-        UnaryNativeFnNFN::description_with_ty_scheme(
+        UnaryNativeFnRFN::description_with_ty_scheme(
             invalid_argument,
             ["msg"],
             "Aborts the program with an invalid argument error.",

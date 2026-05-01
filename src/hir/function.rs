@@ -10,6 +10,7 @@ use std::{
     fmt::{self, Debug},
     hash::DefaultHasher,
     marker::PhantomData,
+    mem::size_of,
 };
 
 use dyn_clone::DynClone;
@@ -178,6 +179,9 @@ pub trait Callable: DynClone {
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
+    fn argument_passing(&self) -> Option<Vec<NativeArgPassing>> {
+        None
+    }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
         None
     }
@@ -205,6 +209,17 @@ dyn_clone::clone_trait_object!(Callable);
 // Function access types
 
 pub type Function = Box<dyn Callable>;
+
+/// How a callable expects an argument to be prepared at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeArgPassing {
+    /// Evaluate the source expression to an owned value.
+    OwnedValue,
+    /// Keep a place as a shared borrow when possible, falling back to a temporary owned value.
+    SharedRef,
+    /// Resolve the source expression as a mutable place.
+    MutableRef,
+}
 
 /// An empty dummy function returning (), used as placeholder
 #[derive(Clone)]
@@ -335,31 +350,83 @@ pub struct NatVal<T> {
     _marker: PhantomData<T>,
 }
 
+/// Marker struct to declare argument by shared reference to native functions.
+pub struct NatRef<T> {
+    _marker: PhantomData<T>,
+}
+
 /// Marker struct to declare argument by mutable reference to native functions.
 pub struct NatMut<T> {
     _marker: PhantomData<T>,
+}
+
+pub(crate) mod trivial_copy_private {
+    pub trait Sealed {}
+}
+
+/// Marker for native Rust values that are safe and cheap to pass by value.
+///
+/// # Safety
+///
+/// Implementors must be concrete, non-generic native types whose copied
+/// representation is a valid independent value in Ferlium native adapters.
+pub unsafe trait TrivialCopy: Copy + 'static + trivial_copy_private::Sealed {}
+
+impl trivial_copy_private::Sealed for () {}
+unsafe impl TrivialCopy for () {}
+impl trivial_copy_private::Sealed for bool {}
+unsafe impl TrivialCopy for bool {}
+impl trivial_copy_private::Sealed for isize {}
+unsafe impl TrivialCopy for isize {}
+
+pub fn extract_trivial_native_input<T: TrivialCopy>(
+    arg: &ValOrMut,
+    ctx: &mut CallCtx,
+) -> Result<T, RuntimeErrorKind> {
+    let arg2 = arg.clone();
+    Ok(arg.as_primitive::<T>(ctx)?.copied().unwrap_or_else(|| {
+        panic!(
+            "Expected a primitive of type {}, found {}",
+            std::any::type_name::<T>(),
+            arg2.format_with(ctx)
+        )
+    }))
+}
+
+pub fn extract_native_ref<'m, T: 'static>(
+    arg: &'m ValOrMut,
+    ctx: &'m mut CallCtx,
+) -> Result<&'m T, RuntimeErrorKind> {
+    let arg2 = arg.clone();
+    Ok(arg.as_primitive::<T>(ctx)?.unwrap_or_else(|| {
+        panic!(
+            "Expected a primitive of type {}, found {}",
+            std::any::type_name::<T>(),
+            arg2.format_with(ctx)
+        )
+    }))
 }
 
 /// A trait that can extract an argument from a `ValOrMut` and a `CallCtx`.
 /// This is necessary due to the lack of specialization in stable Rust.
 pub trait ArgExtractor {
     type Output<'a>;
-    const MUTABLE: bool;
+    const PASSING: NativeArgPassing;
     fn extract<'m>(
-        arg: ValOrMut,
+        arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
     ) -> Result<Self::Output<'m>, RuntimeErrorKind>;
     fn default_ty() -> Type;
 }
 
 impl ArgExtractor for Value {
-    type Output<'a> = Value;
-    const MUTABLE: bool = false;
+    type Output<'a> = &'a Value;
+    const PASSING: NativeArgPassing = NativeArgPassing::SharedRef;
     fn extract<'m>(
-        arg: ValOrMut,
-        _ctx: &'m mut CallCtx,
+        arg: &'m ValOrMut,
+        ctx: &'m mut CallCtx,
     ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
-        Ok(arg.into_val().unwrap())
+        arg.as_value_ref(ctx)
     }
     fn default_ty() -> Type {
         Type::variable_id(0)
@@ -368,9 +435,9 @@ impl ArgExtractor for Value {
 
 impl ArgExtractor for &'_ mut Value {
     type Output<'a> = &'a mut Value;
-    const MUTABLE: bool = true;
+    const PASSING: NativeArgPassing = NativeArgPassing::MutableRef;
     fn extract<'m>(
-        arg: ValOrMut,
+        arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
     ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
         arg.as_place().target_mut(ctx)
@@ -380,21 +447,28 @@ impl ArgExtractor for &'_ mut Value {
     }
 }
 
-impl<T: Clone + 'static> ArgExtractor for NatVal<T> {
+impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
-    const MUTABLE: bool = false;
+    const PASSING: NativeArgPassing = NativeArgPassing::OwnedValue;
     fn extract<'m>(
-        arg: ValOrMut,
+        arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
     ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
-        let arg2 = arg.clone();
-        Ok(arg.into_primitive::<T>().unwrap_or_else(|| {
-            panic!(
-                "Expected a primitive of type {}, found {}",
-                std::any::type_name::<T>(),
-                arg2.format_with(ctx)
-            )
-        }))
+        extract_trivial_native_input(arg, ctx)
+    }
+    fn default_ty() -> Type {
+        Type::primitive::<T>()
+    }
+}
+
+impl<T: Clone + 'static> ArgExtractor for NatRef<T> {
+    type Output<'a> = &'a T;
+    const PASSING: NativeArgPassing = NativeArgPassing::SharedRef;
+    fn extract<'m>(
+        arg: &'m ValOrMut,
+        ctx: &'m mut CallCtx,
+    ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
+        extract_native_ref(arg, ctx)
     }
     fn default_ty() -> Type {
         Type::primitive::<T>()
@@ -403,16 +477,20 @@ impl<T: Clone + 'static> ArgExtractor for NatVal<T> {
 
 impl<T: Clone + 'static> ArgExtractor for NatMut<T> {
     type Output<'a> = &'a mut T;
-    const MUTABLE: bool = true;
+    const PASSING: NativeArgPassing = NativeArgPassing::MutableRef;
     fn extract<'m>(
-        arg: ValOrMut,
+        arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
     ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
-        Ok(arg.as_mut_primitive::<T>(ctx)?.unwrap())
+        Ok(arg.clone().as_mut_primitive::<T>(ctx)?.unwrap())
     }
     fn default_ty() -> Type {
         Type::primitive::<T>()
     }
+}
+
+pub fn assert_trivial_copy_input<T: TrivialCopy>() {
+    assert!(size_of::<T>() <= size_of::<isize>());
 }
 
 /// Marker struct to declare the output of a native function as a fallible value.
@@ -536,7 +614,7 @@ macro_rules! n_ary_native_fn {
             #[allow(clippy::too_many_arguments)]
             pub fn description_with_ty(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-                    [$(([<$arg:lower _ty>], $arg::MUTABLE)), *],
+                    [$(([<$arg:lower _ty>], $arg::PASSING == NativeArgPassing::MutableRef)), *],
                     o_ty,
                     effects,
                 ));
@@ -567,7 +645,7 @@ macro_rules! n_ary_native_fn {
             fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx, _locals: &[LocalDecl]) -> EvalControlFlowResult {
                 // Extract arguments by applying repetition for each ArgExtractor
                 #[allow(unused_variables, unused_mut)]
-                let mut args_iter = args.into_iter();
+                let mut args_iter = args.iter();
                 $(
                     let [<$arg:lower>] = args_iter.next().unwrap();
                     // SAFETY: the borrow checker ensures that all mutable references are disjoint
@@ -578,6 +656,10 @@ macro_rules! n_ary_native_fn {
                 // Call the function using the extracted arguments
                 O::build((self.0)($([<$arg:lower>]),*))
             }
+            }
+
+            fn argument_passing(&self) -> Option<Vec<NativeArgPassing>> {
+                Some(vec![$($arg::PASSING),*])
             }
 
             fn format_ind(

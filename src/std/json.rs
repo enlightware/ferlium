@@ -17,7 +17,7 @@ use std::{
 use super::string::String as Str;
 use crate::{
     compiler::error::RuntimeErrorKind,
-    hir::function::UnaryNativeFnNFV,
+    hir::function::UnaryNativeFnRFV,
     hir::value::Value,
     module::Module,
     std::{
@@ -108,7 +108,7 @@ fn parse_json_stream<R: Read>(
     Ok(ParseResult::Value(value))
 }
 
-fn parse_json(input: Str) -> Result<Value, RuntimeErrorKind> {
+fn parse_json(input: &Str) -> Result<Value, RuntimeErrorKind> {
     let reader = Cursor::new(input.as_ref().as_bytes());
     let mut reader = ReaderJsonParser::new(reader);
     let value = parse_json_stream(&mut reader)?;
@@ -126,7 +126,7 @@ fn parse_json(input: Str) -> Result<Value, RuntimeErrorKind> {
 pub fn add_to_module(to: &mut Module) {
     to.add_function(
         ustr("parse_json"),
-        UnaryNativeFnNFV::description_with_ty(
+        UnaryNativeFnRFV::description_with_ty(
             parse_json,
             ["json"],
             "Parses a JSON into a variant.",

@@ -527,6 +527,15 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        TraitImplNativeOnly {
+            trait_ref,
+            impl_span,
+        } => {
+            vec![error_data_from_location(
+                impl_span,
+                format!("Trait `{trait_ref}` can only be implemented by trusted native code"),
+            )]
+        }
         OverlappingTraitImpls {
             trait_ref,
             input_tys,

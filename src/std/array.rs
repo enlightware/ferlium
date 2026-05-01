@@ -14,8 +14,8 @@ use crate::{
     cached_ty,
     format::{write_with_separator, write_with_separator_and_format_fn},
     hir::function::{
-        BinaryNativeFnMVN, BinaryNativeFnNNN, Function, NullaryNativeFnN, TernaryNativeFnNNNN,
-        UnaryNativeFnMV, UnaryNativeFnNN,
+        BinaryNativeFnMVN, BinaryNativeFnRRN, Function, NullaryNativeFnN, TernaryNativeFnRNNN,
+        UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnRN,
     },
     hir::value::{NativeDisplay, NativeValue, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleFunction},
@@ -105,8 +105,8 @@ impl Array {
         self.get_mut(self.to_unsigned_index(index))
     }
 
-    pub fn append(&mut self, value: Value) {
-        Rc::make_mut(&mut self.0).push_back(value);
+    pub fn append(&mut self, value: &Value) {
+        Rc::make_mut(&mut self.0).push_back(value.clone());
     }
 
     fn to_unsigned_index(&self, index: isize) -> usize {
@@ -134,8 +134,8 @@ impl Array {
         )
     }
 
-    pub fn prepend(&mut self, value: Value) {
-        Rc::make_mut(&mut self.0).push_front(value);
+    pub fn prepend(&mut self, value: &Value) {
+        Rc::make_mut(&mut self.0).push_front(value.clone());
     }
 
     fn prepend_descr() -> ModuleFunction {
@@ -216,8 +216,8 @@ impl Array {
             int_type(),
             no_effects(),
         ));
-        UnaryNativeFnNN::description_with_ty_scheme(
-            |a: Self| a.len() as isize,
+        UnaryNativeFnRN::description_with_ty_scheme(
+            |a: &Self| a.len() as isize,
             ["array"],
             "Returns the length of the array.",
             ty_scheme,
@@ -252,8 +252,8 @@ impl Array {
             array_ty,
             no_effects(),
         ));
-        BinaryNativeFnNNN::description_with_ty_scheme(
-            |a: Self, b: Self| Self::concat(&a, &b),
+        BinaryNativeFnRRN::description_with_ty_scheme(
+            Self::concat,
             ["left", "right"],
             "Concatenates two arrays and returns the result.",
             ty_scheme,
@@ -274,8 +274,8 @@ impl Array {
             array_iter_type_generic(),
             no_effects(),
         ));
-        UnaryNativeFnNN::description_with_ty_scheme(
-            |a: Self| a.iter(),
+        UnaryNativeFnRN::description_with_ty_scheme(
+            Self::iter,
             ["array"],
             "Creates an iterator over the array.",
             ty_scheme,
@@ -305,8 +305,8 @@ impl Array {
             array,
             no_effects(),
         ));
-        TernaryNativeFnNNNN::description_with_ty_scheme(
-            |array: Self, start: isize, end: isize| array.slice(start, end),
+        TernaryNativeFnRNNN::description_with_ty_scheme(
+            Self::slice,
             ["array", "start", "end"],
             "Returns the slice of `array` from index `start` to index `end`. Negative indices count from the end.",
             ty_scheme,

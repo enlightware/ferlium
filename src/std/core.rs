@@ -38,6 +38,17 @@ pub static REPR_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     .with_module_id(STD_MODULE_ID)
 });
 
+pub static TRIVIAL_COPY_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
+    TraitRef::new_with_self_input_type(
+        "TrivialCopy",
+        "Marker trait for trusted native types that native adapters may pass by value.",
+        [],
+        [],
+    )
+    .with_native_impl_only()
+    .with_module_id(STD_MODULE_ID)
+});
+
 fn unit_to_string(_: ()) -> crate::std::string::String {
     crate::std::string::String::new("()")
 }
@@ -54,6 +65,7 @@ pub fn add_to_module(to: &mut Module) {
 
     // Add the `Repr` trait
     to.add_trait(REPR_TRAIT.clone());
+    to.add_trait(TRIVIAL_COPY_TRAIT.clone());
 
     to.add_concrete_impl_no_locals(
         VALUE_TRAIT.clone(),
@@ -70,6 +82,12 @@ pub fn add_to_module(to: &mut Module) {
         [Type::unit()],
         [],
         [b(NullaryNativeFnN::new(|| ())) as Function],
+    );
+    to.add_concrete_impl_no_locals(
+        TRIVIAL_COPY_TRAIT.clone(),
+        [Type::unit()],
+        [],
+        Vec::<Function>::new(),
     );
 
     // All types implement `Repr` to themselves, but to avoid overlapping

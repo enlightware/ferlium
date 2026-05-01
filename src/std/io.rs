@@ -25,7 +25,7 @@ pub fn set_log_ctx(new_ctx: &str) {
     *ctx = new_ctx.to_string();
 }
 
-fn log(value: Value) {
+fn log(value: &Value) {
     let ctx = (*LOG_CTX).read().unwrap();
     log::info!("{}{}", *ctx, value.to_string_repr());
 }

@@ -14,9 +14,9 @@ use ferlium::{
     hir::emit_ir::{CompiledExpr, emit_expr_unsafe},
     hir::function::{
         BinaryNativeFnNNV, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMV,
-        UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnVN, UnaryNativeFnVV,
+        UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
-    hir::value::Value,
+    hir::value::{NativeDisplay, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
     parse_module_and_expr,
     std::{
@@ -343,6 +343,40 @@ fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDefRef {
     })
 }
 
+static TRACKED_CLONES: AtomicIsize = AtomicIsize::new(0);
+
+#[derive(Debug)]
+pub struct CloneTrackedNative(isize);
+
+impl Clone for CloneTrackedNative {
+    fn clone(&self) -> Self {
+        TRACKED_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(self.0)
+    }
+}
+
+impl NativeDisplay for CloneTrackedNative {
+    fn fmt_repr(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "clone_tracked({})", self.0)
+    }
+}
+
+fn make_clone_tracked() -> CloneTrackedNative {
+    CloneTrackedNative(7)
+}
+
+fn clone_tracked_payload(value: &CloneTrackedNative) -> isize {
+    value.0
+}
+
+fn reset_clone_tracked_clones() {
+    TRACKED_CLONES.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn clone_tracked_clone_count() -> isize {
+    TRACKED_CLONES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn testing_module(module_id: ModuleId) -> Module {
     let mut module = Module::new(module_id);
     let test_assoc_trait = test_assoc_trait().with_module_id(module_id);
@@ -359,7 +393,7 @@ fn testing_module(module_id: ModuleId) -> Module {
         [string_type()],
         [int_type()],
         [
-            Box::new(UnaryNativeFnNN::new(|_: ferlium::std::string::String| {
+            Box::new(UnaryNativeFnRN::new(|_: &ferlium::std::string::String| {
                 0isize
             })) as Function,
         ],
@@ -401,7 +435,7 @@ fn testing_module(module_id: ModuleId) -> Module {
             )],
         },
         vec![Type::variable_id(1)],
-        [Box::new(UnaryNativeFnVV::new(|_value: Value| Value::unit())) as Function],
+        [Box::new(UnaryNativeFnVV::new(|_value: &Value| Value::unit())) as Function],
     );
     module.add_function(
         "some_int".into(),
@@ -426,6 +460,42 @@ fn testing_module(module_id: ModuleId) -> Module {
             int_type(),
             int_type(),
             pair_variant_type,
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "make_clone_tracked".into(),
+        NullaryNativeFnN::description_with_default_ty(
+            make_clone_tracked,
+            [],
+            "Creates a clone-counting native test value.",
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "clone_tracked_payload".into(),
+        UnaryNativeFnRN::description_with_default_ty(
+            clone_tracked_payload,
+            ["value"],
+            "Returns the payload of a clone-counting native test value.",
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "reset_clone_tracked_clones".into(),
+        NullaryNativeFnN::description_with_default_ty(
+            reset_clone_tracked_clones,
+            [],
+            "Resets the clone counter for clone-counting native test values.",
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "clone_tracked_clone_count".into(),
+        NullaryNativeFnN::description_with_default_ty(
+            clone_tracked_clone_count,
+            [],
+            "Returns the clone counter for clone-counting native test values.",
             no_effects(),
         ),
     );
@@ -464,7 +534,7 @@ fn test_effect_module(module_id: ModuleId) -> Module {
     module.add_function(
         "take_read".into(),
         UnaryNativeFnVN::description_with_in_ty(
-            |_value: Value| (),
+            |_value: &Value| (),
             ["value"],
             "Takes a first-class function that performs a read effect, and fake call it.",
             Type::function_type(FnType::new(
@@ -494,6 +564,10 @@ thread_local! {
 
 pub fn set_array_property_value(value: Array) {
     INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = value);
+}
+
+fn set_array_property_value_ref(value: &Array) {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = value.clone());
 }
 
 pub fn get_array_property_value() -> Array {
@@ -532,8 +606,8 @@ fn test_property_module(module_id: ModuleId) -> Module {
     );
     module.add_function(
         "@set my_scope.my_array".into(),
-        UnaryNativeFnNN::description_with_in_ty(
-            set_array_property_value,
+        UnaryNativeFnRN::description_with_in_ty(
+            set_array_property_value_ref,
             ["value"],
             "Sets the value of my_scope.my_array.",
             array_type(int_type()),

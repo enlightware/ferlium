@@ -76,6 +76,7 @@ fn map_arg_code(code: &str, index: usize) -> (syn::Type, bool) {
     let generic = format_ident!("A{}", index);
     match code {
         "N" => (syn::parse_quote! { NatVal<#generic> }, false),
+        "R" => (syn::parse_quote! { NatRef<#generic> }, false),
         "M" => (syn::parse_quote! { NatMut<#generic> }, false),
         "V" => (syn::parse_quote! { Value }, false),
         "W" => (syn::parse_quote! { &'a mut Value }, true),
@@ -97,7 +98,7 @@ fn map_output_code(code: &str) -> syn::Type {
 pub(crate) fn generate_generic_params(arg_codes: &[&str], output_code: &str) -> Vec<syn::Ident> {
     let mut params = vec![];
     for (i, &code) in arg_codes.iter().enumerate() {
-        if code == "N" || code == "M" {
+        if code == "N" || code == "R" || code == "M" {
             params.push(format_ident!("A{}", i));
         }
     }

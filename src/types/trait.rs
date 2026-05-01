@@ -74,6 +74,12 @@ pub struct TraitSpans {
 }
 
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraitImplPolicy {
+    UserImplementable,
+    NativeOnly,
+}
+
 #[derive(Debug, Clone)]
 pub struct Trait {
     /// Module where this trait is defined, when known.
@@ -93,6 +99,8 @@ pub struct Trait {
     pub functions: Vec<(Ustr, FunctionDefinition)>,
     /// The trait derivers
     pub derivers: Vec<Box<dyn Deriver>>,
+    /// Whether Ferlium source code is allowed to implement this trait.
+    pub impl_policy: TraitImplPolicy,
     /// If the trait is from code, this contains the source spans of the definition.
     pub spans: Option<TraitSpans>,
 }
@@ -414,6 +422,7 @@ impl TraitRef {
             constraints: Vec::new(),
             functions,
             derivers: Vec::new(),
+            impl_policy: TraitImplPolicy::UserImplementable,
             spans: None,
         };
         Self::from_trait_data(trait_data).unwrap()
@@ -455,6 +464,7 @@ impl TraitRef {
             constraints: constraints.into(),
             functions,
             derivers: Vec::new(),
+            impl_policy: TraitImplPolicy::UserImplementable,
             spans: None,
         };
         Self::from_trait_data(trait_data).unwrap()
@@ -497,6 +507,15 @@ impl TraitRef {
         Arc::get_mut(&mut self.0)
             .expect("trait module id must be assigned before sharing the trait reference")
             .module_id = Some(module_id);
+        self
+    }
+
+    pub fn with_native_impl_only(mut self) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect(
+                "trait implementation policy must be assigned before sharing the trait reference",
+            )
+            .impl_policy = TraitImplPolicy::NativeOnly;
         self
     }
 
