@@ -264,8 +264,6 @@ impl Callable for ScriptFunction {
         locals_arg: &[LocalDecl],
     ) -> EvalControlFlowResult {
         let arg_count = args.len();
-        let old_frame_base = ctx.frame_base;
-        ctx.frame_base = ctx.environment.len();
         #[cfg(debug_assertions)]
         if args.len() != self.arg_names.len() {
             eprintln!(
@@ -277,29 +275,46 @@ impl Callable for ScriptFunction {
             );
         }
         assert_eq!(args.len(), self.arg_names.len());
-        ctx.environment.extend(args);
-        #[cfg(debug_assertions)]
-        ctx.environment_names.extend(self.arg_names.iter().copied());
-        ctx.recursion += 1;
         let arena = &ctx
             .compiler_session()
             .expect_fresh_module(ctx.module_id)
             .ir_arena;
-        if ctx.recursion >= ctx.recursion_limit {
+        if ctx.call_depth.saturating_add(1) >= ctx.call_depth_limit {
             return Err(RuntimeError::new(
-                RuntimeErrorKind::RecursionLimitExceeded {
-                    limit: ctx.recursion_limit,
+                RuntimeErrorKind::CallDepthLimitExceeded {
+                    limit: ctx.call_depth_limit,
                 },
                 Some(arena[self.entry_node_id].span),
             ));
         }
-        let ret = eval_node_with_ctx(arena, self.entry_node_id, ctx, locals_arg)?;
-        ctx.recursion -= 1;
-        assert_eq!(ctx.environment.len(), ctx.frame_base + arg_count);
+        if ctx.environment.len().saturating_add(arg_count) > ctx.stack_limit {
+            return Err(RuntimeError::new(
+                RuntimeErrorKind::StackLimitExceeded {
+                    limit: ctx.stack_limit,
+                },
+                Some(arena[self.entry_node_id].span),
+            ));
+        }
+
+        let old_frame_base = ctx.frame_base;
+        ctx.frame_base = ctx.environment.len();
+        ctx.environment.extend(args);
+        #[cfg(debug_assertions)]
+        ctx.environment_names.extend(self.arg_names.iter().copied());
+        ctx.call_depth += 1;
+
+        let ret = eval_node_with_ctx(arena, self.entry_node_id, ctx, locals_arg);
+
+        ctx.call_depth -= 1;
+        if ret.is_ok() {
+            assert_eq!(ctx.environment.len(), ctx.frame_base + arg_count);
+        }
         ctx.environment.truncate(ctx.frame_base);
         #[cfg(debug_assertions)]
         ctx.environment_names.truncate(ctx.frame_base);
         ctx.frame_base = old_frame_base;
+
+        let ret = ret?;
         // Convert Return to Continue at function boundary
         // (return statements should only escape the current function, not propagate to callers)
         Ok(ControlFlow::Continue(ret.into_value()))

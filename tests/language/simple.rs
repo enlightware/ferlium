@@ -18,6 +18,7 @@ use ferlium::{
     compiler::error::{
         CompilationErrorImpl, DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeErrorKind,
     },
+    eval::{EvalCtx, eval_node_with_ctx},
     hir::value::Value,
     std::{
         array::{Array, array_type_generic},
@@ -1766,10 +1767,39 @@ fn execution_errors() {
         session.fail_run("let i = || -3; let mut a = [1, 2]; a[i()] = 0"),
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
+    assert_val_eq!(
+        session.run("fn down(n) { if n == 0 { 0 } else { down(n - 1) } } down(128)"),
+        int(0)
+    );
     assert_eq!(
         session.fail_run("fn rf() { rf() } rf() + 0"),
-        RecursionLimitExceeded { limit: 50 }
+        CallDepthLimitExceeded { limit: 192 }
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn stack_limit_exceeded() {
+    let mut session = TestSession::new();
+    let module_and_expr = session.compile("fn f() { let a = 1; let b = 2; b } f()");
+    let expr = module_and_expr
+        .expr
+        .expect("test source should have an expr");
+    let module = session
+        .session()
+        .expect_fresh_module(module_and_expr.module_id);
+    let mut ctx = EvalCtx::new(module_and_expr.module_id, session.session());
+    ctx.stack_limit = 1;
+
+    let error = eval_node_with_ctx(&module.ir_arena, expr.expr, &mut ctx, &expr.locals)
+        .expect_err("evaluation should exceed the stack limit");
+
+    assert_eq!(
+        error.kind(),
+        RuntimeErrorKind::StackLimitExceeded { limit: 1 }
+    );
+    assert_eq!(ctx.environment.len(), 0);
+    assert_eq!(ctx.call_depth, 0);
 }
 
 #[test]

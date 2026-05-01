@@ -25,7 +25,8 @@ pub enum RuntimeErrorKind {
     RemainderByZero,
     InvalidArgument(Ustr),
     ArrayAccessOutOfBounds { index: isize, len: usize },
-    RecursionLimitExceeded { limit: usize },
+    CallDepthLimitExceeded { limit: usize },
+    StackLimitExceeded { limit: usize },
     // TODO: add execution duration limit exhausted
 }
 
@@ -46,8 +47,11 @@ impl Display for RuntimeErrorKind {
                     "Array access out of bounds: index {index} for length {len}"
                 )
             }
-            RecursionLimitExceeded { limit } => {
-                write!(f, "Recursion limit exceeded: limit is {limit}")
+            CallDepthLimitExceeded { limit } => {
+                write!(f, "Call depth limit exceeded: limit is {limit}")
+            }
+            StackLimitExceeded { limit } => {
+                write!(f, "Stack limit exceeded: limit is {limit}")
             }
         }
     }
