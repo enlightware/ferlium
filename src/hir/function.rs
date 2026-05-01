@@ -179,7 +179,7 @@ pub trait Callable: DynClone {
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
-    fn argument_passing(&self) -> Option<Vec<NativeArgPassing>> {
+    fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
         None
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
@@ -383,28 +383,28 @@ pub fn extract_trivial_native_input<T: TrivialCopy>(
     arg: &ValOrMut,
     ctx: &mut CallCtx,
 ) -> Result<T, RuntimeErrorKind> {
-    let arg2 = arg.clone();
-    Ok(arg.as_primitive::<T>(ctx)?.copied().unwrap_or_else(|| {
-        panic!(
+    match arg.as_primitive::<T>(ctx)? {
+        Some(value) => Ok(*value),
+        None => panic!(
             "Expected a primitive of type {}, found {}",
             std::any::type_name::<T>(),
-            arg2.format_with(ctx)
-        )
-    }))
+            arg.format_with(ctx)
+        ),
+    }
 }
 
 pub fn extract_native_ref<'m, T: 'static>(
     arg: &'m ValOrMut,
     ctx: &'m mut CallCtx,
 ) -> Result<&'m T, RuntimeErrorKind> {
-    let arg2 = arg.clone();
-    Ok(arg.as_primitive::<T>(ctx)?.unwrap_or_else(|| {
-        panic!(
+    match arg.as_primitive::<T>(ctx)? {
+        Some(value) => Ok(value),
+        None => panic!(
             "Expected a primitive of type {}, found {}",
             std::any::type_name::<T>(),
-            arg2.format_with(ctx)
-        )
-    }))
+            arg.format_with(ctx)
+        ),
+    }
 }
 
 /// A trait that can extract an argument from a `ValOrMut` and a `CallCtx`.
@@ -482,7 +482,7 @@ impl<T: Clone + 'static> ArgExtractor for NatMut<T> {
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
     ) -> Result<Self::Output<'m>, RuntimeErrorKind> {
-        Ok(arg.clone().as_mut_primitive::<T>(ctx)?.unwrap())
+        Ok(arg.as_mut_primitive::<T>(ctx)?.unwrap())
     }
     fn default_ty() -> Type {
         Type::primitive::<T>()
@@ -658,8 +658,8 @@ macro_rules! n_ary_native_fn {
             }
             }
 
-            fn argument_passing(&self) -> Option<Vec<NativeArgPassing>> {
-                Some(vec![$($arg::PASSING),*])
+            fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
+                Some(&[$($arg::PASSING),*])
             }
 
             fn format_ind(

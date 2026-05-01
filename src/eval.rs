@@ -56,7 +56,7 @@ impl ValOrMut {
     }
 
     pub fn as_mut_primitive<'a, 'b, T: 'static>(
-        self,
+        &self,
         ctx: &'a mut EvalCtx<'b>,
     ) -> Result<Option<&'a mut T>, RuntimeErrorKind> {
         Ok(match self {
@@ -264,7 +264,7 @@ impl<'a> EvalCtx<'a> {
         &self,
         local_id: LocalFunctionId,
         module_id: ModuleId,
-    ) -> Option<Vec<NativeArgPassing>> {
+    ) -> Option<&'static [NativeArgPassing]> {
         self.get_module_function(local_id, module_id)
             .code
             .argument_passing()
@@ -273,7 +273,7 @@ impl<'a> EvalCtx<'a> {
     pub fn function_id_argument_passing(
         &self,
         function_id: FunctionId,
-    ) -> Option<Vec<NativeArgPassing>> {
+    ) -> Option<&'static [NativeArgPassing]> {
         let (local_id, module_id) = self.get_function_local_id(function_id);
         self.function_argument_passing(local_id, module_id)
     }
@@ -281,13 +281,10 @@ impl<'a> EvalCtx<'a> {
     pub fn function_value_argument_passing(
         &self,
         function_value: &FunctionValue,
-    ) -> Option<Vec<NativeArgPassing>> {
-        let mut passing =
+    ) -> Option<&'static [NativeArgPassing]> {
+        let passing =
             self.function_argument_passing(function_value.function, function_value.module)?;
-        if !function_value.captured.is_empty() {
-            passing.drain(0..function_value.captured.len());
-        }
-        Some(passing)
+        Some(&passing[function_value.captured.len()..])
     }
 
     /// Get the dictionary value for a ImplId at runtime using module.
@@ -741,7 +738,7 @@ pub fn eval_node_with_ctx(
                 arena,
                 &app.arguments,
                 &args_ty,
-                arg_passing.as_deref(),
+                arg_passing,
                 ctx,
                 locals
             ));
@@ -753,7 +750,7 @@ pub fn eval_node_with_ctx(
                 arena,
                 &app.arguments,
                 &app.ty.args,
-                arg_passing.as_deref(),
+                arg_passing,
                 ctx,
                 locals
             ));
@@ -929,47 +926,10 @@ pub fn resolve_node_place(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Place>, RuntimeError> {
-    fn resolve_node(
-        arena: &NodeArena,
-        id: NodeId,
-        ctx: &mut EvalCtx,
-        locals: &[LocalDecl],
-    ) -> Result<ControlFlow<Place>, RuntimeError> {
-        let node = &arena[id];
-        use NodeKind::*;
-        Ok(ControlFlow::Continue(match &node.kind {
-            Project(node, index) => {
-                let mut place = eval_or_return!(resolve_node(arena, *node, ctx, locals));
-                place.path.push(*index as isize);
-                place
-            }
-            ProjectAt(node, index) => {
-                let mut place = eval_or_return!(resolve_node(arena, *node, ctx, locals));
-                let index = ctx.frame_base + *index;
-                let index_value = ctx.environment[index]
-                    .as_value(ctx)
-                    .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?;
-                let index = index_value.into_primitive_ty::<isize>().unwrap();
-                place.path.push(index);
-                place
-            }
-            Index(array, index) => {
-                let mut place = eval_or_return!(resolve_node(arena, *array, ctx, locals));
-                let index_value = eval_or_return!(eval_node_with_ctx(arena, *index, ctx, locals));
-                let index = index_value.into_primitive_ty::<isize>().unwrap();
-                place.path.push(index);
-                place
-            }
-            EnvLoad(node) => Place {
-                // By using frame_base here, we allow to access parent frames
-                // when the ResolvedPlace is used in a child function.
-                target: ctx.frame_base + node.index as usize,
-                path: Vec::new(),
-            },
-            _ => panic!("Cannot resolve a non-place node"),
-        }))
+    match eval_or_return!(try_resolve_node_place(arena, id, ctx, locals)) {
+        Some(place) => Ok(ControlFlow::Continue(place)),
+        None => panic!("Cannot resolve a non-place node"),
     }
-    resolve_node(arena, id, ctx, locals)
 }
 
 fn eval_nodes(
@@ -1004,14 +964,20 @@ fn eval_args(
             .as_resolved()
             .expect("Unresolved mutability variable found during execution")
             .is_mutable();
-        let borrow_as_place = arg_passing
+        let borrow_as_shared_ref = arg_passing
             .and_then(|passing| passing.get(index))
-            .is_some_and(|passing| *passing == NativeArgPassing::SharedRef)
-            && can_resolve_node_place(arena, *arg);
-        results.push(if is_mutable || borrow_as_place {
+            .is_some_and(|passing| *passing == NativeArgPassing::SharedRef);
+        results.push(if is_mutable {
             ValOrMut::Mut(eval_or_return!(resolve_node_place(
                 arena, *arg, ctx, locals
             )))
+        } else if borrow_as_shared_ref {
+            match eval_or_return!(try_resolve_node_place(arena, *arg, ctx, locals)) {
+                Some(place) => ValOrMut::Mut(place),
+                None => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
+                    arena, *arg, ctx, locals
+                ))),
+            }
         } else {
             ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
                 arena, *arg, ctx, locals
@@ -1021,12 +987,55 @@ fn eval_args(
     Ok(ControlFlow::Continue(results))
 }
 
-fn can_resolve_node_place(arena: &NodeArena, id: NodeId) -> bool {
-    match &arena[id].kind {
-        NodeKind::EnvLoad(_) => true,
-        NodeKind::Project(node, _) | NodeKind::ProjectAt(node, _) | NodeKind::Index(node, _) => {
-            can_resolve_node_place(arena, *node)
+fn try_resolve_node_place(
+    arena: &NodeArena,
+    id: NodeId,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<Option<Place>>, RuntimeError> {
+    let node = &arena[id];
+    use NodeKind::*;
+    Ok(ControlFlow::Continue(Some(match &node.kind {
+        Project(node, index) => {
+            let Some(mut place) =
+                eval_or_return!(try_resolve_node_place(arena, *node, ctx, locals))
+            else {
+                return Ok(ControlFlow::Continue(None));
+            };
+            place.path.push(*index as isize);
+            place
         }
-        _ => false,
-    }
+        ProjectAt(node, index) => {
+            let Some(mut place) =
+                eval_or_return!(try_resolve_node_place(arena, *node, ctx, locals))
+            else {
+                return Ok(ControlFlow::Continue(None));
+            };
+            let index = ctx.frame_base + *index;
+            let index_value = ctx.environment[index]
+                .as_value(ctx)
+                .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?;
+            let index = index_value.into_primitive_ty::<isize>().unwrap();
+            place.path.push(index);
+            place
+        }
+        Index(array, index) => {
+            let Some(mut place) =
+                eval_or_return!(try_resolve_node_place(arena, *array, ctx, locals))
+            else {
+                return Ok(ControlFlow::Continue(None));
+            };
+            let index_value = eval_or_return!(eval_node_with_ctx(arena, *index, ctx, locals));
+            let index = index_value.into_primitive_ty::<isize>().unwrap();
+            place.path.push(index);
+            place
+        }
+        EnvLoad(node) => Place {
+            // By using frame_base here, we allow to access parent frames
+            // when the ResolvedPlace is used in a child function.
+            target: ctx.frame_base + node.index as usize,
+            path: Vec::new(),
+        },
+        _ => return Ok(ControlFlow::Continue(None)),
+    })))
 }
