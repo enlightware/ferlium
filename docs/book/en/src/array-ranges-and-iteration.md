@@ -38,6 +38,14 @@ let first = xs[0];
 let second = xs[1];
 ```
 
+Use indexed assignment to update an element through a mutable array binding:
+
+```ferlium
+let mut xs = [10, 20, 30];
+xs[1] = 25;
+xs
+```
+
 Negative indices count from the end:
 
 ```ferlium
