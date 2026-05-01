@@ -91,6 +91,30 @@ match true {
 }
 ```
 
+## Early return
+
+A function normally returns the value of its body block. Use `return` when you need to leave the function early:
+
+```ferlium
+fn clamp_non_negative(x: int) -> int {
+    if x < 0 { return 0 };
+    x
+}
+
+clamp_non_negative(-3)
+```
+
+The returned expression must have the function's return type. A `return` exits the current function or lambda, even when it appears inside a nested block, `if`, or `match` arm.
+
+```ferlium
+let f = |x| {
+    if x { return 1 };
+    2
+};
+
+f(true)
+```
+
 ## What comes next
 
 Later chapters expand pattern matching to structured data and more powerful patterns. For now, you can use literals and `_` to write clear, type-safe control flow.
