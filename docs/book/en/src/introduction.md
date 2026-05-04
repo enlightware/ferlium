@@ -1,10 +1,15 @@
 # Introduction
 
-Ferlium is a small, [statically-typed](https://en.wikipedia.org/wiki/Type_system#Static_type_checking) programming language designed for education and embedding. It aims to combine the expressiveness of Haskell with a syntax inspired by [Rust](https://www.rust-lang.org/) and other [C-style languages](https://en.wikipedia.org/wiki/List_of_C-family_programming_languages), while remaining approachable like [JavaScript](https://en.wikipedia.org/wiki/JavaScript) and [Python](https://www.python.org/). Ferlium is expression-based, uses [Hindley–Milner](https://en.wikipedia.org/wiki/Hindley%E2%80%93Milner_type_system) style type inference, and supports pattern matching and mutable value semantics.
+Ferlium is a small, [statically-typed](https://en.wikipedia.org/wiki/Type_system#Static_type_checking) programming language designed to be embedded in larger applications.
+The host application loads Ferlium code, type-checks and compiles it, and runs it in a controlled environment.
+The language itself has no built-in I/O, no filesystem access, and no network, so every effect a script can have on the outside world goes through a function the host has explicitly registered.
+Programs can range from a single expression to several [modules](./modules.md) that reference one another in an acyclic dependency graph.
+The language combines [Hindley–Milner](https://en.wikipedia.org/wiki/Hindley%E2%80%93Milner_type_system) style type inference with a syntax inspired by [Rust](https://www.rust-lang.org/) and other [C-style languages](https://en.wikipedia.org/wiki/List_of_C-family_programming_languages), aiming to feel approachable to readers familiar with [JavaScript](https://en.wikipedia.org/wiki/JavaScript) or [Python](https://www.python.org/).
+It supports pattern matching and uses a simple mutable value semantics in the spirit of Rust ownership.
 
 This book introduces the Ferlium language and its features. It is intended for both new users who want to learn the language and experienced programmers who want to understand its design and capabilities.
 
-This introduction provides a brief overview of Ferlium's syntax and core concepts; later chapters explore the language in more depth, covering the core language, structured data and abstraction, the type system, and effects and mutability.
+This introduction provides a brief overview of Ferlium's syntax and core concepts; later chapters explore the language in more depth, covering the core language, structured data and abstraction, the type system, programs and modules, and effects and mutability.
 
 
 ## A first taste

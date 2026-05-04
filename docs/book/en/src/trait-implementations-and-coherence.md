@@ -193,4 +193,4 @@ User code still cannot:
 
 ## What comes next
 
-The next chapter moves into the standard library and shows how sequence-processing functions such as `map`, `filter`, `collect`, and common reductions work over collections and iterators.
+The next chapter introduces Ferlium's module system — how items in different modules refer to one another with `::` paths, how `use` declarations bring names into scope, and the role the host application plays in deciding what modules exist.

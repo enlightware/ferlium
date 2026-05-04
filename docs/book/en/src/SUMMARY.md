@@ -23,6 +23,10 @@
 - [Explicit Types](./explicit-types.md)
 - [Trait Implementations and Coherence](./trait-implementations-and-coherence.md)
 
+# Programs and Modules
+
+- [Modules and Program Structure](./modules.md)
+
 # Standard Library
 
 - [Sequence Processing](./sequence-processing.md)
