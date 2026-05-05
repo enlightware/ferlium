@@ -579,33 +579,67 @@ fn derive_structural_value_impl(
     arena: &mut NodeArena,
     solver: &mut TraitSolver,
 ) -> Result<Option<TraitImplId>, InternalCompilationError> {
+    let ty_data = input_types[0].data();
+    let can_derive = matches!(
+        &*ty_data,
+        TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_) | TypeKind::Named(_)
+    );
+    drop(ty_data);
+    if !can_derive {
+        return Ok(None);
+    }
+
+    let snapshot = solver.snapshot_derived_impl_state();
+    let impl_id = solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[]);
+
     let Some((eq_root, eq_locals)) =
-        derive_value_eq_body(trait_ref, input_types, span, arena, solver)?
+        (match derive_value_eq_body(trait_ref, input_types, span, arena, solver) {
+            Ok(value) => value,
+            Err(err) => {
+                solver.rollback_derived_impl_state(snapshot);
+                return Err(err);
+            }
+        })
     else {
+        solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
     let Some((to_string_root, to_string_locals)) =
-        derive_value_to_string_body(trait_ref, input_types, span, arena, solver)?
+        (match derive_value_to_string_body(trait_ref, input_types, span, arena, solver) {
+            Ok(value) => value,
+            Err(err) => {
+                solver.rollback_derived_impl_state(snapshot);
+                return Err(err);
+            }
+        })
     else {
+        solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
     let Some((hash_root, hash_locals)) =
-        derive_value_hash_body(trait_ref, input_types, span, arena, solver)?
+        (match derive_value_hash_body(trait_ref, input_types, span, arena, solver) {
+            Ok(value) => value,
+            Err(err) => {
+                solver.rollback_derived_impl_state(snapshot);
+                return Err(err);
+            }
+        })
     else {
+        solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
-    Ok(Some(TraitImplId::Local(
-        solver.add_concrete_impl_from_code_entries(
-            [
-                (eq_root, eq_locals),
-                (to_string_root, to_string_locals),
-                (hash_root, hash_locals),
-            ],
-            trait_ref,
-            input_types,
-            [],
-        ),
-    )))
+    solver.replace_concrete_impl_code_entries(
+        impl_id,
+        trait_ref,
+        input_types,
+        &[],
+        [
+            (eq_root, eq_locals),
+            (to_string_root, to_string_locals),
+            (hash_root, hash_locals),
+        ],
+    );
+    Ok(Some(TraitImplId::Local(impl_id)))
 }
 
 /// A deriver for the `Value` trait that auto-derives the full impl for algebraic types.

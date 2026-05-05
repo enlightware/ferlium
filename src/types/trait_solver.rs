@@ -19,14 +19,14 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::b,
-    hir::function::{Function, ScriptFunction},
+    hir::function::{Function, ScriptFunction, VoidFunction},
     hir::hir_syn::{get_dictionary, load, static_apply},
     hir::value::{Value, build_dictionary_value},
     hir::{self, Node, NodeArena},
     internal_compilation_error,
     module::{
-        self, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind, DefTable,
-        FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
+        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind,
+        DefTable, FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitImpl,
         TraitImplId, TraitImpls, TraitKey, id::Id,
@@ -302,6 +302,13 @@ struct ResolvedTraitConstraint {
     index: usize,
     trait_ref: TraitRef,
     input_tys: Vec<Type>,
+}
+
+pub(crate) struct DerivedImplSnapshot {
+    concrete_key_to_id: FxHashMap<ConcreteTraitImplKey, LocalImplId>,
+    blanket_key_to_id: BlanketImpls,
+    impl_data_len: usize,
+    new_function_len: usize,
 }
 
 /// Whether a visible impl candidate is compatible with the current partially known trait application.
@@ -899,6 +906,87 @@ impl<'a> TraitSolver<'a> {
         )
     }
 
+    pub(crate) fn snapshot_derived_impl_state(&self) -> DerivedImplSnapshot {
+        DerivedImplSnapshot {
+            concrete_key_to_id: self.impls.concrete_key_to_id.clone(),
+            blanket_key_to_id: self.impls.blanket_key_to_id.clone(),
+            impl_data_len: self.impls.data.len(),
+            new_function_len: self.fn_collector.new_elements.len(),
+        }
+    }
+
+    pub(crate) fn rollback_derived_impl_state(&mut self, snapshot: DerivedImplSnapshot) {
+        self.impls.concrete_key_to_id = snapshot.concrete_key_to_id;
+        self.impls.blanket_key_to_id = snapshot.blanket_key_to_id;
+        self.impls.data.truncate(snapshot.impl_data_len);
+        self.fn_collector
+            .new_elements
+            .truncate(snapshot.new_function_len);
+    }
+
+    pub(crate) fn reserve_concrete_impl_from_code_entries(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_types: &[Type],
+        output_types: &[Type],
+    ) -> LocalImplId {
+        let definitions = trait_ref.instantiate_for_tys(input_types, output_types);
+        let mut methods = Vec::with_capacity(definitions.len());
+        let mut tys = Vec::with_capacity(definitions.len());
+
+        for (method_index, definition) in definitions.into_iter().enumerate() {
+            let id = self.fn_collector.next_id();
+            let ty = Type::function_type(definition.ty_scheme.ty.clone());
+            let name = trait_ref
+                .qualified_method_name(method_index, input_types)
+                .into();
+            self.fn_collector.push(
+                name,
+                ModuleFunction::new(definition, b(VoidFunction) as Function, None, Vec::new()),
+            );
+            methods.push(id);
+            tys.push(ty);
+        }
+
+        let dictionary_ty = Type::tuple(tys);
+        let dictionary_value = build_dictionary_value(&methods, self.impls.module_id);
+        let imp = TraitImpl::new(
+            output_types.to_vec(),
+            methods,
+            dictionary_value,
+            dictionary_ty,
+            false,
+            None,
+        );
+        let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_types.to_vec());
+        self.impls.add_concrete_struct(key, imp)
+    }
+
+    pub(crate) fn replace_concrete_impl_code_entries(
+        &mut self,
+        impl_id: LocalImplId,
+        trait_ref: &TraitRef,
+        input_types: &[Type],
+        output_types: &[Type],
+        code_entries: impl Into<Vec<(hir::NodeId, Vec<LocalDecl>)>>,
+    ) {
+        let methods = self.impls.data[impl_id.as_index()].methods.clone();
+        let definitions = trait_ref.instantiate_for_tys(input_types, output_types);
+
+        for ((method_id, definition), (code_entry, locals)) in methods
+            .into_iter()
+            .zip(definitions.into_iter())
+            .zip(code_entries.into())
+        {
+            let arg_names = definition.arg_names.clone();
+            let function = b(ScriptFunction::new(code_entry, arg_names)) as Function;
+            self.fn_collector.replace(
+                method_id,
+                ModuleFunction::new(definition, function, None, locals),
+            );
+        }
+    }
+
     /// Check if a concrete trait implementation exists, without performing any solving.
     /// This searches in current module first, then in other modules.
     /// Only public implementations from other modules are considered.
@@ -1003,6 +1091,10 @@ impl<'a> TraitSolver<'a> {
 
         // Cycle detection
         let key = (trait_ref.clone(), input_tys.to_vec());
+        let concrete_key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+        if let Some(imp) = self.get_concrete_impl(&concrete_key) {
+            return Ok(imp);
+        }
         if self.solving_stack.contains(&key) {
             return Err(internal_compilation_error!(TraitSolverCycleDetected {
                 trait_ref: trait_ref.clone(),

@@ -181,6 +181,14 @@ impl FunctionCollector {
         self.new_elements.push((name, function));
     }
 
+    pub(crate) fn replace(&mut self, id: LocalFunctionId, function: ModuleFunction) {
+        let index = id
+            .as_index()
+            .checked_sub(self.initial_count)
+            .expect("cannot replace an already committed function");
+        self.new_elements[index].1 = function;
+    }
+
     pub fn get_function(&self, name: Ustr) -> Option<LocalFunctionId> {
         self.new_elements
             .iter()

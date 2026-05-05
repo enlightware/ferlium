@@ -77,22 +77,34 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             ))
         };
 
-        // helper to create the concrete trait implementation for sequences
-        let build_serialize_to_seq =
-            |arena: &mut NodeArena, nodes, tag, locals, solver: &mut TraitSolver| {
-                let array_ty = array_type(variant_type());
-                let array_node = n(arena, array(nodes), array_ty);
-                let payload_ty = tuple_type([array_ty]);
-                let payload = n(arena, tuple([array_node]), payload_ty);
-                let root = n(arena, variant(ustr(tag), payload), variant_type());
-                TraitImplId::Local(solver.add_concrete_impl_from_code(
-                    root,
-                    locals,
-                    trait_ref,
-                    input_types,
-                    [],
-                ))
-            };
+        // helper to create a serialized sequence variant.
+        let build_serialize_to_seq = |arena: &mut NodeArena, nodes, tag| {
+            let array_ty = array_type(variant_type());
+            let array_node = n(arena, array(nodes), array_ty);
+            let payload_ty = tuple_type([array_ty]);
+            let payload = n(arena, tuple([array_node]), payload_ty);
+            n(arena, variant(ustr(tag), payload), variant_type())
+        };
+
+        let ty_data = ty.data().clone();
+        if let TypeKind::Named(named) = ty_data {
+            let inner_ty = named.instantiated_shape();
+            // serialize the inner type
+            return Ok(Some(solver.solve_impl(
+                trait_ref,
+                &[inner_ty],
+                span,
+                arena,
+            )?));
+        }
+        if !matches!(
+            ty_data,
+            TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_)
+        ) {
+            return Ok(None);
+        }
+        let snapshot = solver.snapshot_derived_impl_state();
+        let impl_id = solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[]);
 
         let locals = vec![local("self", ty)];
         let l_self_id = LocalDeclId::from_index(0);
@@ -114,8 +126,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         };
 
         // derive tuple, record, variant serialization
-        let ty_data = ty.data().clone();
-        if let TypeKind::Tuple(tys) = ty_data {
+        let root = if let TypeKind::Tuple(tys) = ty_data {
             /*
             Example source code for serialization of a tuple:
             impl Serialize {
@@ -145,9 +156,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     build_serialize_i(arena, index, ty_i)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Ok(Some(build_serialize_to_seq(
-                arena, nodes, "Array", locals, solver,
-            )))
+            Some(build_serialize_to_seq(arena, nodes, "Array"))
         } else if let TypeKind::Record(fields) = ty_data {
             /*
             Example source code for serialization of a record:
@@ -191,9 +200,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     Ok(entry)
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
-            Ok(Some(build_serialize_to_seq(
-                arena, nodes, "Object", locals, solver,
-            )))
+            Some(build_serialize_to_seq(arena, nodes, "Object"))
         } else if let TypeKind::Variant(variants) = ty_data {
             // default to adjacently tagged into an object, with tag = "type", content = "data"
             /*
@@ -259,42 +266,22 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 case_from_complete_alternatives(extract_tag_node, alternatives),
                 variant_type(),
             );
-            let local_impl_id =
-                solver.add_concrete_impl_from_code(root, locals, trait_ref, input_types, []);
-            Ok(Some(TraitImplId::Local(local_impl_id)))
-        } else if let TypeKind::Named(named) = ty_data {
-            let inner_ty = named.instantiated_shape();
-            // serialize the inner type
-            Ok(Some(solver.solve_impl(
-                trait_ref,
-                &[inner_ty],
-                span,
-                arena,
-            )?))
-            /*
-            if let Some(variant) = ty_def.shape.data().as_variant() {
-                // default to adjacently tagged, with tag = "type", content = "data"
-                // enum like, todo
-                Err(internal_compilation_error!( Unsupported {
-                    reason: "Serialization of enum-like named types is not yet supported.".to_string(),
-                    span,
-                }))
-            } else {
-                // struct-like, serialize the inner type
-                /*
-                Example source code for serialization of a struct-like named type:
-                impl Serialize {
-                    fn serialize(s: S) {
-                        serialize(s)
-                    }
-                }
-                */
-                Ok(Some(solver.get_impl(trait_ref, &[ty_def.shape], span)?))
-            }
-            */
+            Some(root)
         } else {
-            Ok(None)
-        }
+            None
+        };
+        let Some(root) = root else {
+            solver.rollback_derived_impl_state(snapshot);
+            return Ok(None);
+        };
+        solver.replace_concrete_impl_code_entries(
+            impl_id,
+            trait_ref,
+            input_types,
+            &[],
+            [(root, locals)],
+        );
+        Ok(Some(TraitImplId::Local(impl_id)))
     }
 }
 
@@ -342,10 +329,29 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 ))
             };
 
-        // derive tuple, record, variant serialization
+        // derive tuple, record, variant deserialization
+        let ty_data = ty.data().clone();
+        if let TypeKind::Named(named) = ty_data {
+            let inner_ty = named.instantiated_shape();
+            // deserialize the inner type
+            return Ok(Some(solver.solve_impl(
+                trait_ref,
+                &[inner_ty],
+                span,
+                arena,
+            )?));
+        }
+        if !matches!(
+            ty_data,
+            TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_)
+        ) {
+            return Ok(None);
+        }
+        let snapshot = solver.snapshot_derived_impl_state();
+        let impl_id = solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[]);
+
         let mut locals = vec![local("variant", variant_type())];
         let l_variant_id = LocalDeclId::from_index(0);
-        let ty_data = ty.data().clone();
         let load_variant = n(arena, load(0, l_variant_id), variant_type());
         let node = if let TypeKind::Tuple(tys) = ty_data {
             /*
@@ -510,27 +516,21 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let match_type = n(arena, case(get_string_type, variant_cases, panic_node), ty);
             // assemble the final node
             Some(n(arena, block([store_object, match_type]), ty))
-        } else if let TypeKind::Named(named) = ty_data {
-            let inner_ty = named.instantiated_shape();
-            // deserialize the inner type
-            return Ok(Some(solver.solve_impl(
-                trait_ref,
-                &[inner_ty],
-                span,
-                arena,
-            )?));
         } else {
             None // deserialization of rest not yet supported
         };
-        Ok(node.map(|root| {
-            TraitImplId::Local(solver.add_concrete_impl_from_code(
-                root,
-                locals,
-                trait_ref,
-                input_types,
-                [],
-            ))
-        }))
+        let Some(root) = node else {
+            solver.rollback_derived_impl_state(snapshot);
+            return Ok(None);
+        };
+        solver.replace_concrete_impl_code_entries(
+            impl_id,
+            trait_ref,
+            input_types,
+            &[],
+            [(root, locals)],
+        );
+        Ok(Some(TraitImplId::Local(impl_id)))
     }
 }
 
