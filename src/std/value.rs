@@ -590,7 +590,7 @@ fn derive_structural_value_impl(
     }
 
     let snapshot = solver.snapshot_derived_impl_state();
-    let impl_id = solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[]);
+    let impl_id = solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[], []);
 
     let Some((eq_root, eq_locals)) =
         (match derive_value_eq_body(trait_ref, input_types, span, arena, solver) {

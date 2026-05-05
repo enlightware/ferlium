@@ -67,7 +67,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_trait(REPR_TRAIT.clone());
     to.add_trait(TRIVIAL_COPY_TRAIT.clone());
 
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         VALUE_TRAIT.clone(),
         [Type::unit()],
         [],
@@ -77,13 +77,13 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnNMN::new(unit_hash)) as Function,
         ],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         DEFAULT_TRAIT.clone(),
         [Type::unit()],
         [],
         [b(NullaryNativeFnN::new(|| ())) as Function],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         TRIVIAL_COPY_TRAIT.clone(),
         [Type::unit()],
         [],

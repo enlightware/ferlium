@@ -9,11 +9,16 @@
 
 use test_log::test;
 
-use ferlium::compiler::error::{CompilationErrorImpl, InvalidTraitDefinitionKind};
-use ferlium::types::r#type::TypeVar;
 use ferlium::{
+    compiler::error::{CompilationErrorImpl, InvalidTraitDefinitionKind},
     format::FormatWith,
-    types::effects::{PrimitiveEffect, effect},
+    hir::function::Function,
+    module::{FunctionCollector, LocalDecl, ModuleId, TraitImpls},
+    types::{
+        effects::{PrimitiveEffect, effect},
+        r#trait::{TraitAssociatedConst, TraitRef},
+        r#type::{Type, TypeVar},
+    },
 };
 use indoc::indoc;
 use ustr::ustr;
@@ -156,6 +161,39 @@ fn user_defined_traits_store_outputs_constraints_and_effects() {
         rendered.contains("fn project_via_trait<A, B>(value: A) -> B ! fallible"),
         "expected rendered trait method signature in module output, got:\n{rendered}"
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn concrete_impl_stores_associated_const_values() {
+    let trait_ref = TraitRef::new_with_self_input_type(
+        "Layout",
+        "Compiler-only layout metadata.",
+        Vec::<&str>::new(),
+        Vec::<(&str, ferlium::hir::function::FunctionDefinition)>::new(),
+    )
+    .with_associated_consts([
+        TraitAssociatedConst::new("SIZE", "Size in bytes."),
+        TraitAssociatedConst::new("ALIGN", "Alignment in bytes."),
+    ]);
+    let mut impls = TraitImpls::new(ModuleId(0));
+    let mut fn_collector = FunctionCollector::new(0);
+
+    let impl_id = impls.add_concrete_raw(
+        trait_ref.clone(),
+        [Type::unit()],
+        [],
+        [0, 1],
+        Vec::<(Function, Vec<LocalDecl>)>::new(),
+        &mut fn_collector,
+    );
+    let imp = impls.get_impl_by_local_id(impl_id);
+
+    assert_eq!(trait_ref.associated_const_index(ustr("SIZE")), Some(0));
+    assert_eq!(trait_ref.associated_const_index(ustr("ALIGN")), Some(1));
+    assert_eq!(imp.associated_const_value(0), Some(0));
+    assert_eq!(imp.associated_const_value(1), Some(1));
+    assert!(fn_collector.new_elements.is_empty());
 }
 
 #[test]

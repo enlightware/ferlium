@@ -104,7 +104,8 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             return Ok(None);
         }
         let snapshot = solver.snapshot_derived_impl_state();
-        let impl_id = solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[]);
+        let impl_id =
+            solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[], []);
 
         let locals = vec![local("self", ty)];
         let l_self_id = LocalDeclId::from_index(0);
@@ -348,7 +349,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             return Ok(None);
         }
         let snapshot = solver.snapshot_derived_impl_state();
-        let impl_id = solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[]);
+        let impl_id =
+            solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[], []);
 
         let mut locals = vec![local("variant", variant_type())];
         let l_variant_id = LocalDeclId::from_index(0);

@@ -80,7 +80,7 @@ pub fn add_to_module(to: &mut Module) {
     // Operations on booleans
     use BinaryNativeFnNNN as BinaryFn;
     use UnaryNativeFnNN as UnaryFn;
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         VALUE_TRAIT.clone(),
         [bool_type()],
         [],
@@ -91,7 +91,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         bits_trait,
         [bool_type()],
         [],
@@ -112,13 +112,13 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(test_bit)) as Function,
         ],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         DEFAULT_TRAIT.clone(),
         [bool_type()],
         [],
         [b(NullaryNativeFnN::new(|| false)) as Function],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         TRIVIAL_COPY_TRAIT.clone(),
         [bool_type()],
         [],

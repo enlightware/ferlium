@@ -872,6 +872,7 @@ impl<'a> TraitSolver<'a> {
             trait_ref.clone(),
             input_types.into(),
             output_types.into(),
+            [],
             [(function, locals)],
             &mut self.fn_collector,
         )
@@ -901,6 +902,7 @@ impl<'a> TraitSolver<'a> {
             trait_ref.clone(),
             input_types.into(),
             output_types.into(),
+            [],
             functions,
             &mut self.fn_collector,
         )
@@ -929,7 +931,15 @@ impl<'a> TraitSolver<'a> {
         trait_ref: &TraitRef,
         input_types: &[Type],
         output_types: &[Type],
+        associated_const_values: impl Into<Vec<isize>>,
     ) -> LocalImplId {
+        let associated_const_values = associated_const_values.into();
+        trait_ref.validate_impl_shape(
+            input_types,
+            output_types,
+            associated_const_values.len(),
+            trait_ref.functions.len(),
+        );
         let definitions = trait_ref.instantiate_for_tys(input_types, output_types);
         let mut methods = Vec::with_capacity(definitions.len());
         let mut tys = Vec::with_capacity(definitions.len());
@@ -957,7 +967,8 @@ impl<'a> TraitSolver<'a> {
             dictionary_ty,
             false,
             None,
-        );
+        )
+        .with_associated_const_values(associated_const_values);
         let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_types.to_vec());
         self.impls.add_concrete_struct(key, imp)
     }
@@ -1149,6 +1160,7 @@ impl<'a> TraitSolver<'a> {
             } else {
                 let imp = TraitImpl {
                     output_tys: vec![output_ty],
+                    associated_const_values: vec![],
                     methods: vec![],
                     dictionary_value: Value::empty_tuple(),
                     dictionary_ty: Type::tuple([]),
@@ -1457,6 +1469,32 @@ impl<'a> TraitSolver<'a> {
     ) -> Result<Vec<Type>, InternalCompilationError> {
         let impl_id = self.solve_impl(trait_ref, input_tys, fn_span, arena)?;
         Ok(self.get_impl_data_by_id(impl_id).output_tys.clone())
+    }
+
+    pub fn solve_associated_const(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        associated_const_index: usize,
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<isize, InternalCompilationError> {
+        assert!(
+            associated_const_index < trait_ref.associated_const_count(),
+            "associated const index {} out of bounds for trait {}",
+            associated_const_index,
+            trait_ref.name
+        );
+        let impl_id = self.solve_impl(trait_ref, input_tys, fn_span, arena)?;
+        Ok(self
+            .get_impl_data_by_id(impl_id)
+            .associated_const_value(associated_const_index)
+            .unwrap_or_else(|| {
+                panic!(
+                    "implementation of trait {} is missing associated const #{}",
+                    trait_ref.name, associated_const_index
+                )
+            }))
     }
 
     /// Get a specific trait implementation data by its id.

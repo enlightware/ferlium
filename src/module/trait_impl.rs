@@ -153,6 +153,9 @@ impl TraitKey {
 pub struct TraitImpl {
     /// The output types of the trait.
     pub output_tys: Vec<Type>,
+    /// Values for compiler-defined associated consts, in trait declaration order.
+    #[new(default)]
+    pub associated_const_values: Vec<isize>,
     /// The implemented methods in the module.
     pub methods: Vec<LocalFunctionId>,
     /// The implemented methods, in a tuple of first-class functions of the proper types.
@@ -164,6 +167,20 @@ pub struct TraitImpl {
     pub public: bool,
     /// Location of the source implementation when it comes from Ferlium code.
     pub source_span: Option<Location>,
+}
+
+impl TraitImpl {
+    pub fn with_associated_const_values(
+        mut self,
+        associated_const_values: impl Into<Vec<isize>>,
+    ) -> Self {
+        self.associated_const_values = associated_const_values.into();
+        self
+    }
+
+    pub fn associated_const_value(&self, index: usize) -> Option<isize> {
+        self.associated_const_values.get(index).copied()
+    }
 }
 
 /// Collects new local functions to be added to a module when adding trait implementations.
@@ -232,11 +249,13 @@ impl TraitImpls {
         trait_ref: TraitRef,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
+        associated_const_values: impl Into<Vec<isize>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let input_tys = input_tys.into();
         let output_tys = output_tys.into();
+        let associated_const_values = associated_const_values.into();
 
         // Recover the definitions from the trait reference by instantiating the trait method definitions with the given types.
         let definitions = trait_ref.instantiate_for_tys(&input_tys, &output_tys);
@@ -249,7 +268,14 @@ impl TraitImpls {
             .collect();
 
         // Add the impl, collecting new functions.
-        self.add_concrete(trait_ref, input_tys, output_tys, functions, fn_collector)
+        self.add_concrete(
+            trait_ref,
+            input_tys,
+            output_tys,
+            associated_const_values,
+            functions,
+            fn_collector,
+        )
     }
 
     /// Add a concrete trait implementation, with module functions.
@@ -260,11 +286,18 @@ impl TraitImpls {
         trait_ref: TraitRef,
         input_tys: Vec<Type>,
         output_tys: Vec<Type>,
+        associated_const_values: impl Into<Vec<isize>>,
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
+        let associated_const_values = associated_const_values.into();
         // Minimal validation
-        trait_ref.validate_impl_size(&input_tys, &output_tys, functions.len());
+        trait_ref.validate_impl_shape(
+            &input_tys,
+            &output_tys,
+            associated_const_values.len(),
+            functions.len(),
+        );
 
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {
@@ -284,7 +317,8 @@ impl TraitImpls {
             dictionary_type,
             true,
             None,
-        );
+        )
+        .with_associated_const_values(associated_const_values);
         let key = ConcreteTraitImplKey::new(trait_ref, input_tys);
         self.add_concrete_struct(key, imp)
     }
@@ -306,10 +340,12 @@ impl TraitImpls {
         trait_ref: TraitRef,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
+        associated_const_values: impl Into<Vec<isize>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
         let output_tys = output_tys.into();
+        let associated_const_values = associated_const_values.into();
 
         // Recover the definitions from the trait reference by instantiating the trait method definitions with the given types.
         let definitions = trait_ref.instantiate_for_tys(&sub_key.input_tys, &output_tys);
@@ -322,7 +358,14 @@ impl TraitImpls {
             .collect();
 
         // Add the impl, collecting new functions.
-        self.add_blanket(trait_ref, sub_key, output_tys, functions, fn_collector)
+        self.add_blanket(
+            trait_ref,
+            sub_key,
+            output_tys,
+            associated_const_values,
+            functions,
+            fn_collector,
+        )
     }
 
     pub fn add_blanket(
@@ -330,11 +373,18 @@ impl TraitImpls {
         trait_ref: TraitRef,
         sub_key: BlanketTraitImplSubKey,
         output_tys: Vec<Type>,
+        associated_const_values: impl Into<Vec<isize>>,
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
     ) -> LocalImplId {
+        let associated_const_values = associated_const_values.into();
         // Minimal validation
-        trait_ref.validate_impl_size(&sub_key.input_tys, &output_tys, functions.len());
+        trait_ref.validate_impl_shape(
+            &sub_key.input_tys,
+            &output_tys,
+            associated_const_values.len(),
+            functions.len(),
+        );
 
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {
@@ -354,7 +404,8 @@ impl TraitImpls {
             dictionary_type,
             true,
             None,
-        );
+        )
+        .with_associated_const_values(associated_const_values);
         let key = BlanketTraitImplKey::new(trait_ref, sub_key);
         self.add_blanket_struct(key, imp)
     }

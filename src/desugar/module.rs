@@ -236,6 +236,7 @@ impl ast::TraitDefinition {
             input_type_names,
             output_type_names,
             constraints,
+            associated_consts: vec![],
             functions,
             derivers: vec![],
             impl_policy: crate::types::r#trait::TraitImplPolicy::UserImplementable,

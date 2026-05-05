@@ -392,6 +392,7 @@ fn testing_module(module_id: ModuleId) -> Module {
         test_assoc_trait.clone(),
         [string_type()],
         [int_type()],
+        [],
         [
             Box::new(UnaryNativeFnRN::new(|_: &ferlium::std::string::String| {
                 0isize
@@ -402,6 +403,7 @@ fn testing_module(module_id: ModuleId) -> Module {
         test_assoc_trait.clone(),
         [bool_type()],
         [string_type()],
+        [],
         [Box::new(UnaryNativeFnNN::new(|value: bool| {
             ferlium::std::string::String::new(if value { "true" } else { "false" })
         })) as Function],
@@ -417,6 +419,7 @@ fn testing_module(module_id: ModuleId) -> Module {
             constraints: vec![],
         },
         vec![Type::variable_id(0)],
+        [],
         [Box::new(UnaryNativeFnMV::new(ArrayIterator::next_value)) as Function],
     );
     module.add_blanket_impl_no_locals(
@@ -435,6 +438,7 @@ fn testing_module(module_id: ModuleId) -> Module {
             )],
         },
         vec![Type::variable_id(1)],
+        [],
         [Box::new(UnaryNativeFnVV::new(|_value: &Value| Value::unit())) as Function],
     );
     module.add_function(

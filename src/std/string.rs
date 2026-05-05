@@ -511,7 +511,7 @@ fn compare_string(lhs: &String, rhs: &String) -> Value {
 pub fn add_to_module(to: &mut Module) {
     // Note: string alias is added in core.rs
 
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         VALUE_TRAIT.clone(),
         [string_type()],
         [],
@@ -522,19 +522,19 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         ord_trait,
         [string_type()],
         [],
         [b(BinaryNativeFnRRV::new(compare_string)) as Function],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         DEFAULT_TRAIT.clone(),
         [string_type()],
         [],
         [b(NullaryNativeFnN::new(String::default)) as Function],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         EMPTY_TRAIT.clone(),
         [string_type()],
         [],

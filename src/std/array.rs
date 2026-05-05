@@ -446,7 +446,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(ustr("array_slice"), Array::slice_descr());
     to.add_function(ustr("array_concat"), Array::concat_descr());
     to.add_function(ustr("array_iter"), Array::iter_descr());
-    to.add_blanket_impl_no_locals(
+    to.add_native_blanket_impl(
         DEFAULT_TRAIT.clone(),
         BlanketTraitImplSubKey {
             input_tys: vec![array_type_generic()],
@@ -456,7 +456,7 @@ pub fn add_to_module(to: &mut Module) {
         [],
         [Box::new(NullaryNativeFnN::new(Array::new)) as Function],
     );
-    to.add_blanket_impl_no_locals(
+    to.add_native_blanket_impl(
         EMPTY_TRAIT.clone(),
         BlanketTraitImplSubKey {
             input_tys: vec![array_type_generic()],

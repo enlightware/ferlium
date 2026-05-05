@@ -278,7 +278,7 @@ pub fn add_to_module(to: &mut Module) {
     use std::ops;
 
     // int
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         VALUE_TRAIT.clone(),
         [int_type()],
         [],
@@ -289,7 +289,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     let num_trait = to.get_trait_str(NUM_TRAIT_NAME).unwrap().clone();
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         num_trait.clone(),
         [int_type()],
         [],
@@ -304,7 +304,7 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         bits_trait,
         [int_type()],
         [],
@@ -326,19 +326,19 @@ pub fn add_to_module(to: &mut Module) {
         ],
     );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         ord_trait.clone(),
         [int_type()],
         [],
         [b(BinaryNativeFnNNV::new(compare::<Int>)) as Function],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         DEFAULT_TRAIT.clone(),
         [int_type()],
         [],
         [b(NullaryNativeFnN::new(|| 0isize)) as Function],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         TRIVIAL_COPY_TRAIT.clone(),
         [int_type()],
         [],
@@ -406,7 +406,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // float
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         VALUE_TRAIT.clone(),
         [float_type()],
         [],
@@ -416,7 +416,7 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRMN::new(hash_float)) as Function,
         ],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         num_trait.clone(),
         [float_type()],
         [],
@@ -430,20 +430,20 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryFn::new(isize_to_not_nan)) as Function,
         ],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         ord_trait.clone(),
         [float_type()],
         [],
         [b(BinaryNativeFnRRV::new(compare_float)) as Function],
     );
     let div_trait = to.get_trait_str(DIV_TRAIT_NAME).unwrap().clone();
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         div_trait,
         [float_type()],
         [],
         [b(BinaryNativeFnRRFN::new(div_float)) as Function],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         DEFAULT_TRAIT.clone(),
         [float_type()],
         [],
@@ -460,7 +460,7 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // conversions
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         CAST_TRAIT.clone(),
         [int_type(), float_type()],
         [],
@@ -468,7 +468,7 @@ pub fn add_to_module(to: &mut Module) {
             saturating_cast_int_to_notnan::<Int, f64>,
         )) as Function],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         CAST_TRAIT.clone(),
         [float_type(), int_type()],
         [],

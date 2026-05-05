@@ -194,7 +194,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_type_alias_str("hasher", hasher_type());
     to.add_type_alias_str("unordered_hasher", unordered_hasher_type());
 
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         VALUE_TRAIT.clone(),
         [hash_type()],
         [],
@@ -204,7 +204,7 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRMN::new(hash_hash_value)) as Function,
         ],
     );
-    to.add_concrete_impl_no_locals(
+    to.add_native_concrete_impl(
         CAST_TRAIT.clone(),
         [hash_type(), int_type()],
         [],

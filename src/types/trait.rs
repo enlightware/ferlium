@@ -73,6 +73,26 @@ pub struct TraitSpans {
     pub span: Location,
 }
 
+/// A compiler-defined associated const declaration.
+///
+/// Associated consts are intentionally not parsed from Ferlium source yet.
+/// They are currently restricted to Ferlium `int` values, represented as
+/// `isize` in the compiler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitAssociatedConst {
+    pub name: Ustr,
+    pub doc: Option<String>,
+}
+
+impl TraitAssociatedConst {
+    pub fn new(name: &str, doc: &str) -> Self {
+        Self {
+            name: ustr(name),
+            doc: (!doc.is_empty()).then(|| doc.to_string()),
+        }
+    }
+}
+
 /// A trait, equivalent to a multi-parameter type class in Haskell, with output types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraitImplPolicy {
@@ -95,6 +115,8 @@ pub struct Trait {
     pub output_type_names: Vec<Ustr>,
     /// The constraints on the trait, for example related to the associated types.
     pub constraints: Vec<PubTypeConstraint>,
+    /// Compiler-defined associated consts provided by implementations.
+    pub associated_consts: Vec<TraitAssociatedConst>,
     /// The functions provided by the trait.
     pub functions: Vec<(Ustr, FunctionDefinition)>,
     /// The trait derivers
@@ -139,6 +161,18 @@ impl Trait {
     /// Return the number of type variables in this trait.
     pub fn type_var_count(&self) -> u32 {
         self.input_type_count() + self.output_type_count()
+    }
+
+    /// Return the number of associated consts in this trait.
+    pub fn associated_const_count(&self) -> usize {
+        self.associated_consts.len()
+    }
+
+    /// Return the index of the associated const with the given name, if it exists.
+    pub fn associated_const_index(&self, name: Ustr) -> Option<usize> {
+        self.associated_consts
+            .iter()
+            .position(|associated_const| associated_const.name == name)
     }
 
     /// Return the index of the method with the given name, if it exists.
@@ -420,6 +454,7 @@ impl TraitRef {
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: Vec::new(),
+            associated_consts: Vec::new(),
             functions,
             derivers: Vec::new(),
             impl_policy: TraitImplPolicy::UserImplementable,
@@ -462,6 +497,7 @@ impl TraitRef {
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: constraints.into(),
+            associated_consts: Vec::new(),
             functions,
             derivers: Vec::new(),
             impl_policy: TraitImplPolicy::UserImplementable,
@@ -470,7 +506,28 @@ impl TraitRef {
         Self::from_trait_data(trait_data).unwrap()
     }
 
+    pub fn with_associated_consts(
+        mut self,
+        associated_consts: impl Into<Vec<TraitAssociatedConst>>,
+    ) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("trait associated consts must be assigned before sharing the trait reference")
+            .associated_consts = associated_consts.into();
+        self.validate();
+        self
+    }
+
     pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], fn_count: usize) {
+        self.validate_impl_shape(input_tys, output_tys, 0, fn_count)
+    }
+
+    pub fn validate_impl_shape(
+        &self,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        associated_const_count: usize,
+        fn_count: usize,
+    ) {
         assert_eq!(
             self.input_type_count(),
             input_tys.len() as u32,
@@ -481,6 +538,12 @@ impl TraitRef {
             self.output_type_count(),
             output_tys.len() as u32,
             "Mismatched output type count when implementing trait {}.",
+            self.name,
+        );
+        assert_eq!(
+            self.associated_consts.len(),
+            associated_const_count,
+            "Mismatched associated const count when implementing trait {}.",
             self.name,
         );
         assert_eq!(

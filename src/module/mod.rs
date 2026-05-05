@@ -461,6 +461,17 @@ impl Module {
 
     // Trait implementations
 
+    /// Add a native concrete trait implementation with no associated const values.
+    pub(crate) fn add_native_concrete_impl(
+        &mut self,
+        trait_ref: TraitRef,
+        input_tys: impl Into<Vec<Type>>,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        self.add_concrete_impl_no_locals(trait_ref, input_tys, output_tys, [], functions);
+    }
+
     /// Add a concrete trait implementation to this module, with raw functions and no local variables.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
     /// The caller is responsible to ensure that the input and output types match the trait reference
@@ -470,6 +481,7 @@ impl Module {
         trait_ref: TraitRef,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
+        associated_const_values: impl Into<Vec<isize>>,
         functions: impl Into<Vec<Function>>,
     ) {
         let functions: Vec<_> = functions
@@ -477,7 +489,13 @@ impl Module {
             .into_iter()
             .map(|f| (f, Vec::new()))
             .collect();
-        self.add_concrete_impl(trait_ref, input_tys, output_tys, functions);
+        self.add_concrete_impl(
+            trait_ref,
+            input_tys,
+            output_tys,
+            associated_const_values,
+            functions,
+        );
     }
 
     /// Add a concrete trait implementation to this module, with raw functions.
@@ -489,6 +507,7 @@ impl Module {
         trait_ref: TraitRef,
         input_tys: impl Into<Vec<Type>>,
         output_tys: impl Into<Vec<Type>>,
+        associated_const_values: impl Into<Vec<isize>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         // Add the impl, collecting new functions
@@ -497,10 +516,22 @@ impl Module {
             trait_ref,
             input_tys,
             output_tys,
+            associated_const_values,
             functions,
             &mut fn_collector,
         );
         self.add_collected_functions(fn_collector);
+    }
+
+    /// Add a native blanket trait implementation with no associated const values.
+    pub(crate) fn add_native_blanket_impl(
+        &mut self,
+        trait_ref: TraitRef,
+        sub_key: BlanketTraitImplSubKey,
+        output_tys: impl Into<Vec<Type>>,
+        functions: impl Into<Vec<Function>>,
+    ) {
+        self.add_blanket_impl_no_locals(trait_ref, sub_key, output_tys, [], functions);
     }
 
     /// Add a blanket trait implementation to this module, with raw functions and no local variables.
@@ -512,6 +543,7 @@ impl Module {
         trait_ref: TraitRef,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
+        associated_const_values: impl Into<Vec<isize>>,
         functions: impl Into<Vec<Function>>,
     ) {
         let functions: Vec<_> = functions
@@ -519,7 +551,13 @@ impl Module {
             .into_iter()
             .map(|f| (f, Vec::new()))
             .collect();
-        self.add_blanket_impl(trait_ref, sub_key, output_tys, functions);
+        self.add_blanket_impl(
+            trait_ref,
+            sub_key,
+            output_tys,
+            associated_const_values,
+            functions,
+        );
     }
 
     /// Add a blanket trait implementation to this module, with raw functions.
@@ -531,12 +569,19 @@ impl Module {
         trait_ref: TraitRef,
         sub_key: BlanketTraitImplSubKey,
         output_tys: impl Into<Vec<Type>>,
+        associated_const_values: impl Into<Vec<isize>>,
         functions: impl Into<Vec<(Function, Vec<LocalDecl>)>>,
     ) {
         // Add the impl, collecting new functions
         let mut fn_collector = FunctionCollector::new(self.functions.len());
-        self.impls
-            .add_blanket_raw(trait_ref, sub_key, output_tys, functions, &mut fn_collector);
+        self.impls.add_blanket_raw(
+            trait_ref,
+            sub_key,
+            output_tys,
+            associated_const_values,
+            functions,
+            &mut fn_collector,
+        );
         self.add_collected_functions(fn_collector);
     }
 
