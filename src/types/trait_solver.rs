@@ -986,7 +986,7 @@ impl<'a> TraitSolver<'a> {
 
         for ((method_id, definition), (code_entry, locals)) in methods
             .into_iter()
-            .zip(definitions.into_iter())
+            .zip(definitions)
             .zip(code_entries.into())
         {
             let arg_names = definition.arg_names.clone();
