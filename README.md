@@ -32,7 +32,7 @@ fn classify(n) {
 The `|>` operator pipes the array into `map`.
 `map` lives in the pre-imported `std` module.
 
-Embedding it from a Rust host:
+Embedding it from a Rust host (see [minimal example](examples/minimal.rs)):
 
 ```rust
 use ferlium::{CompilerSession, Path, run_fn_native};
