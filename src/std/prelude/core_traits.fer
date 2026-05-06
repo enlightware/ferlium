@@ -84,8 +84,8 @@ trait Bits<Self> {
 
 /// An iterator that can produce a sequence of values.
 trait Iterator<Self |-> Item> {
-    /// Returns the next item from the iterator, or `None` if the iterator is exhausted.
-    fn next(iterator: &mut Self) -> Option<Item>;
+	/// Returns the next item from the iterator, or `None` if the iterator is exhausted.
+	fn next(iterator: &mut Self) -> Option<Item>;
 }
 
 /// A sequence of elements that can produce an iterator over its elements.
@@ -97,7 +97,10 @@ trait Seq<Self |-> Item, Iter>
 }
 
 /// A collection that can be built from an iterator.
-trait FromIterator<Self, Iter> {
+trait FromIterator<Self, Iter>
+    where
+        Iter: Value
+{
     /// Creates a collection from an iterator.
     fn from_iter(iterator: Iter) -> Self;
 }

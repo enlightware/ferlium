@@ -102,6 +102,7 @@ pub fn store_new(
             value,
             index: index as u32,
             id,
+            clone: None,
         }),
         id,
     )
@@ -113,6 +114,7 @@ pub fn store_to(value: NodeId, index: usize, id: LocalDeclId) -> NodeKind {
         value,
         index: index as u32,
         id,
+        clone: None,
     })
 }
 

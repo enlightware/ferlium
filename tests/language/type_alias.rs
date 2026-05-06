@@ -321,13 +321,12 @@ fn keyword_type_is_acceptable() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn native_generic_type_aliases_in_explicit_typing() {
-    // Native generic type aliases (registered via add_bare_native_type_alias_str) must be
-    // resolvable as types in Ferlium code, including in function signatures, impl headers,
-    // and trait output bindings.
+fn generic_type_aliases_in_explicit_typing() {
+    // Generic type aliases must be resolvable as types in Ferlium code, including in
+    // function signatures, impl headers, and trait output bindings.
     let mut session = TestSession::new();
 
-    // A function that explicitly names a native generic type alias in its signature.
+    // A function that explicitly names a generic type alias in its signature.
     let result = session.run(indoc! { r#"
         fn my_next(iter: &mut array_iterator<int>) -> None | Some(int) {
             array_iterator_next(iter)
@@ -337,7 +336,7 @@ fn native_generic_type_aliases_in_explicit_typing() {
     "# });
     assert_val_eq!(result, some(int(10)));
 
-    // Using a native generic type alias in return type position.
+    // Using a generic type alias in return type position.
     let result = session.run(indoc! { r#"
         fn make_iter(arr: [int]) -> array_iterator<int> {
             iter(arr)
@@ -347,14 +346,14 @@ fn native_generic_type_aliases_in_explicit_typing() {
     "# });
     assert_val_eq!(result, some(int(5)));
 
-    // Using a native generic type alias in a type annotation.
+    // Using a generic type alias in a type annotation.
     let result = session.run(indoc! { r#"
         let mut it = (iter([42]): array_iterator<int>);
         next(it)
     "# });
     assert_val_eq!(result, some(int(42)));
 
-    // Using a native generic type alias in a trait impl method signature.
+    // Using a generic type alias in a trait impl method signature.
     let result = session.run(indoc! { r#"
         struct Wrapper<A> { arr: [A] }
         impl<A> Iterator for <Self = Wrapper<A> |-> Item = A> {

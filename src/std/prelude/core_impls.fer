@@ -101,33 +101,6 @@ impl SizedSeq {
 	}
 }
 
-// Arrays
-
-/// Return the last element of an array, or None if the array is empty.
-fn array_peek_back(array) -> None | Some(_) {
-	let l = array_len(array);
-	if l <= 0 {
-		None
-	} else {
-		Some(array[l - 1])
-	}
-}
-
-impl Concat {
-	fn concat(left, right) {
-		array_concat(left, right)
-	}
-}
-
-impl<F, T> Cast for <From = [F], To = [T]>
-where
-	Cast<From = F, To = T>
-{
-	fn cast(array: [F]) -> [T] {
-		map(array, (|element| cast(element): (F) -> T))
-	}
-}
-
 // Strings
 
 impl Concat {
@@ -293,23 +266,37 @@ impl Iterator for MapIterator<I, T, O> {
 	}
 }
 
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<I, T, O> Value for MapIterator<I, T, O>
+where
+	I: Iterator<Item = T>
+{
+	fn eq(left: MapIterator<I, T, O>, right: MapIterator<I, T, O>) -> bool {
+		false
+	}
+
+	fn to_string(value: MapIterator<I, T, O>) -> string {
+		"MapIterator"
+	}
+
+	fn hash(value: MapIterator<I, T, O>, state: &mut hasher) {
+		hasher_write_string(state, "MapIterator")
+	}
+
+	fn clone(source: MapIterator<I, T, O>, target: &mut MapIterator<I, T, O>) {
+		target = source;
+	}
+
+	fn drop(target: &mut MapIterator<I, T, O>) {}
+}
+
 impl<I, T, O> Map for <Self = I, Mapped = O |-> Item = T, Output = MapIterator<I, T, O>>
 where
 	I: Iterator<Item = T>
 {
 	fn map(value: I, mapper: (T) -> O) -> MapIterator<I, T, O> {
 		MapIterator { iterator: value, mapper }
-	}
-}
-
-impl<A, B, C, I> Map for <Self = [A], Mapped = B |-> Item = A, Output = C>
-where
-	[A]: Seq<Item = A, Iter = I>,
-	RebindItem<Self = [A], Item = B |-> Output = C>,
-	FromIterator<Self = C, Iter = MapIterator<I, A, B>>
-{
-	fn map(value: [A], mapper: (A) -> B) -> C {
-		from_iter(MapIterator { iterator: iter(value), mapper })
 	}
 }
 
@@ -336,23 +323,37 @@ impl Iterator for FilterIterator<I, T> {
 	}
 }
 
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<I, T> Value for FilterIterator<I, T>
+where
+	I: Iterator<Item = T>
+{
+	fn eq(left: FilterIterator<I, T>, right: FilterIterator<I, T>) -> bool {
+		false
+	}
+
+	fn to_string(value: FilterIterator<I, T>) -> string {
+		"FilterIterator"
+	}
+
+	fn hash(value: FilterIterator<I, T>, state: &mut hasher) {
+		hasher_write_string(state, "FilterIterator")
+	}
+
+	fn clone(source: FilterIterator<I, T>, target: &mut FilterIterator<I, T>) {
+		target = source;
+	}
+
+	fn drop(target: &mut FilterIterator<I, T>) {}
+}
+
 impl<I, T> Filter for <Self = I |-> Item = T, Output = FilterIterator<I, T>>
 where
 	I: Iterator<Item = T>
 {
 	fn filter(value: I, predicate: (T) -> bool) -> FilterIterator<I, T> {
 		FilterIterator { iterator: value, filter: predicate }
-	}
-}
-
-impl<A, C, I> Filter for <Self = [A] |-> Item = A, Output = C>
-where
-	[A]: Seq<Item = A, Iter = I>,
-	RebindItem<Self = [A], Item = A |-> Output = C>,
-	FromIterator<Self = C, Iter = FilterIterator<I, A>>
-{
-	fn filter(value: [A], predicate: (A) -> bool) -> C {
-		from_iter(FilterIterator { iterator: iter(value), filter: predicate })
 	}
 }
 
@@ -380,23 +381,37 @@ impl Iterator for FilterMapIterator<I, T, O> {
 	}
 }
 
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<I, T, O> Value for FilterMapIterator<I, T, O>
+where
+	I: Iterator<Item = T>
+{
+	fn eq(left: FilterMapIterator<I, T, O>, right: FilterMapIterator<I, T, O>) -> bool {
+		false
+	}
+
+	fn to_string(value: FilterMapIterator<I, T, O>) -> string {
+		"FilterMapIterator"
+	}
+
+	fn hash(value: FilterMapIterator<I, T, O>, state: &mut hasher) {
+		hasher_write_string(state, "FilterMapIterator")
+	}
+
+	fn clone(source: FilterMapIterator<I, T, O>, target: &mut FilterMapIterator<I, T, O>) {
+		target = source;
+	}
+
+	fn drop(target: &mut FilterMapIterator<I, T, O>) {}
+}
+
 impl<I, T, O> FilterMap for <Self = I, Mapped = O |-> Item = T, Output = FilterMapIterator<I, T, O>>
 where
 	I: Iterator<Item = T>
 {
 	fn filter_map(value: I, mapper: (T) -> None | Some(O)) -> FilterMapIterator<I, T, O> {
 		FilterMapIterator { iterator: value, filter_map: mapper }
-	}
-}
-
-impl<A, B, C, I> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = C>
-where
-	[A]: Seq<Item = A, Iter = I>,
-	RebindItem<Self = [A], Item = B |-> Output = C>,
-	FromIterator<Self = C, Iter = FilterMapIterator<I, A, B>>
-{
-	fn filter_map(value: [A], mapper: (A) -> None | Some(B)) -> C {
-		from_iter(FilterMapIterator { iterator: iter(value), filter_map: mapper })
 	}
 }
 
@@ -419,6 +434,32 @@ impl Iterator for ZipIterator<I, J, A, B> {
 			None => None,
 		}
 	}
+}
+
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<I, J, A, B> Value for ZipIterator<I, J, A, B>
+where
+	I: Iterator<Item = A>,
+	J: Iterator<Item = B>
+{
+	fn eq(left: ZipIterator<I, J, A, B>, right: ZipIterator<I, J, A, B>) -> bool {
+		false
+	}
+
+	fn to_string(value: ZipIterator<I, J, A, B>) -> string {
+		"ZipIterator"
+	}
+
+	fn hash(value: ZipIterator<I, J, A, B>, state: &mut hasher) {
+		hasher_write_string(state, "ZipIterator")
+	}
+
+	fn clone(source: ZipIterator<I, J, A, B>, target: &mut ZipIterator<I, J, A, B>) {
+		target = source;
+	}
+
+	fn drop(target: &mut ZipIterator<I, J, A, B>) {}
 }
 
 /// Zips two sequences together, yielding pairs of their items. Stops at the shorter sequence.
@@ -445,6 +486,31 @@ impl Iterator for EnumerateIterator<I, T> {
 			None => None,
 		}
 	}
+}
+
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<I, T> Value for EnumerateIterator<I, T>
+where
+	I: Iterator<Item = T>
+{
+	fn eq(left: EnumerateIterator<I, T>, right: EnumerateIterator<I, T>) -> bool {
+		false
+	}
+
+	fn to_string(value: EnumerateIterator<I, T>) -> string {
+		"EnumerateIterator"
+	}
+
+	fn hash(value: EnumerateIterator<I, T>, state: &mut hasher) {
+		hasher_write_string(state, "EnumerateIterator")
+	}
+
+	fn clone(source: EnumerateIterator<I, T>, target: &mut EnumerateIterator<I, T>) {
+		target = source;
+	}
+
+	fn drop(target: &mut EnumerateIterator<I, T>) {}
 }
 
 /// Enumerates a sequence, yielding (index, item) pairs starting from 0.
@@ -476,6 +542,31 @@ impl Iterator for TakeIterator<I, T> {
 	}
 }
 
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<I, T> Value for TakeIterator<I, T>
+where
+	I: Iterator<Item = T>
+{
+	fn eq(left: TakeIterator<I, T>, right: TakeIterator<I, T>) -> bool {
+		false
+	}
+
+	fn to_string(value: TakeIterator<I, T>) -> string {
+		"TakeIterator"
+	}
+
+	fn hash(value: TakeIterator<I, T>, state: &mut hasher) {
+		hasher_write_string(state, "TakeIterator")
+	}
+
+	fn clone(source: TakeIterator<I, T>, target: &mut TakeIterator<I, T>) {
+		target = source;
+	}
+
+	fn drop(target: &mut TakeIterator<I, T>) {}
+}
+
 /// Returns an iterator that yields at most n items from the sequence.
 fn take(seq, n) {
 	TakeIterator { iterator: iter(seq), remaining: n }
@@ -502,6 +593,31 @@ impl Iterator for SkipIterator<I, T> {
 			}
 		}
 	}
+}
+
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<I, T> Value for SkipIterator<I, T>
+where
+	I: Iterator<Item = T>
+{
+	fn eq(left: SkipIterator<I, T>, right: SkipIterator<I, T>) -> bool {
+		false
+	}
+
+	fn to_string(value: SkipIterator<I, T>) -> string {
+		"SkipIterator"
+	}
+
+	fn hash(value: SkipIterator<I, T>, state: &mut hasher) {
+		hasher_write_string(state, "SkipIterator")
+	}
+
+	fn clone(source: SkipIterator<I, T>, target: &mut SkipIterator<I, T>) {
+		target = source;
+	}
+
+	fn drop(target: &mut SkipIterator<I, T>) {}
 }
 
 /// Returns an iterator that skips the first n items of the sequence.
@@ -535,22 +651,36 @@ impl Iterator for ChainIterator<I, J, T> {
 	}
 }
 
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<I, J, T> Value for ChainIterator<I, J, T>
+where
+	I: Iterator<Item = T>,
+	J: Iterator<Item = T>
+{
+	fn eq(left: ChainIterator<I, J, T>, right: ChainIterator<I, J, T>) -> bool {
+		false
+	}
+
+	fn to_string(value: ChainIterator<I, J, T>) -> string {
+		"ChainIterator"
+	}
+
+	fn hash(value: ChainIterator<I, J, T>, state: &mut hasher) {
+		hasher_write_string(state, "ChainIterator")
+	}
+
+	fn clone(source: ChainIterator<I, J, T>, target: &mut ChainIterator<I, J, T>) {
+		target = source;
+	}
+
+	fn drop(target: &mut ChainIterator<I, J, T>) {}
+}
+
 /// Chains two sequences together, yielding all items from the first then all from the second.
 /// Both sequences must have the same item type.
 fn chain(seq1, seq2) {
 	ChainIterator { first: iter(seq1), second: iter(seq2), first_done: false }
-}
-
-// Compatibility, mark as deprecated when supported
-
-/// Deprecated, use `all` instead.
-fn array_all(array: [_], f) {
-	all(array, f)
-}
-
-/// Deprecated, use `any` instead.
-fn array_any(array: [_], f) {
-	any(array, f)
 }
 
 // Iterator and Seq for string
@@ -568,42 +698,6 @@ impl Seq {
 impl SizedSeq {
 	fn len(s) {
 		string_len(s)
-	}
-}
-
-// Iterator and Seq for array
-impl Iterator {
-	fn next(a) {
-		array_iterator_next(a)
-	}
-}
-impl Seq {
-	fn iter(a) {
-		array_iter(a)
-	}
-}
-impl<A, B> RebindItem for <Self = [A], Item = B |-> Output = [B]> {}
-
-impl<I, T> FromIterator for <Self = [T], Iter = I>
-where
-	I: Iterator<Item = T>
-{
-	fn from_iter(iterator: I) -> [T] {
-		let mut iterator = iterator;
-		let mut result = [];
-		loop {
-			match next(iterator) {
-				Some(item) => {
-					array_append(result, item);
-				},
-				None => return result,
-			}
-		}
-	}
-}
-impl SizedSeq {
-	fn len(a) {
-		array_len(a)
 	}
 }
 
@@ -716,30 +810,5 @@ impl Serialize {
 impl Deserialize {
 	fn deserialize(v) -> string {
 		variant_to_string(v)
-	}
-}
-
-// Serde for arrays
-impl Serialize {
-	fn serialize(a: [_]) {
-		let mut result = array_with_capacity(array_len(a));
-		for value in a {
-			array_append(result, serialize(value));
-		};
-		Array(result)
-	}
-}
-impl Deserialize {
-	fn deserialize(a) {
-		match (a) {
-			Array(a) => {
-				let mut result = array_with_capacity(array_len(a));
-				for i in 0..array_len(a) {
-					array_append(result, deserialize(a[i]));
-				};
-				result
-			},
-			_ => panic("Expected Array variant")
-		}
 	}
 }

@@ -19,7 +19,7 @@ use crate::{
     format::FormatWith,
     hir::function::{Function, FunctionDefinition, ScriptFunction},
     hir::value::{LiteralValue, Value},
-    hir::{self, EnvStore, Immediate, NodeArena, NodeId, NodeKind},
+    hir::{self, EnvStore, EnvStoreClone, Immediate, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
     module::{LocalDecl, LocalDeclId, ModuleEnv, ModuleFunction, TypeDefLookupResult, id::Id},
     parser::location::Location,
@@ -471,6 +471,20 @@ impl TypeInference {
                 let node_id = self.infer_expr_drop_mut(env, data.expr)?;
                 let node_ty = env.ir_arena[node_id].ty;
                 let node_effects = env.ir_arena[node_id].effects.clone();
+                let clone = if mut_val.is_mutable()
+                    && node_ty != Type::never()
+                    && initializer_needs_mut_binding_clone(env.ir_arena, node_id)
+                {
+                    self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                        VALUE_TRAIT.clone(),
+                        vec![node_ty],
+                        vec![],
+                        expr_span,
+                    ));
+                    Some(EnvStoreClone::Required)
+                } else {
+                    None
+                };
                 let local = LocalDecl::new(
                     name,
                     MutType::resolved(mut_val),
@@ -486,6 +500,7 @@ impl TypeInference {
                     value: node_id,
                     index: index as u32,
                     id,
+                    clone,
                 });
                 let ty = if node_ty == Type::never() {
                     Type::never()
@@ -1982,6 +1997,18 @@ fn collect_free_variables(
             collect_free_variables(data.index, arena, bound, free);
         }
         Literal(_, _) | FormattedString(_) | PropertyPath(_) | SoftBreak | Error => {}
+    }
+}
+
+fn initializer_needs_mut_binding_clone(arena: &NodeArena, node_id: NodeId) -> bool {
+    use NodeKind::*;
+
+    match &arena[node_id].kind {
+        EnvLoad(_) => true,
+        Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
+            initializer_needs_mut_binding_clone(arena, *base)
+        }
+        _ => false,
     }
 }
 

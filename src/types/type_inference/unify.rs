@@ -253,6 +253,16 @@ impl UnifiedTypeInference {
 
         // Then, solve other constraints.
         if !remaining_constraints.is_empty() {
+            remaining_constraints = unified_ty_inf
+                .substitute_in_constraints(
+                    &remaining_constraints
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<PubTypeConstraint>>(),
+                )
+                .into_iter()
+                .collect();
+
             loop {
                 // Loop as long as we make progress.
 
@@ -433,9 +443,8 @@ impl UnifiedTypeInference {
                 }
 
                 // Perform unification.
-                let constraints = remaining_constraints.into_iter().collect::<Vec<_>>();
-                let old_constraint_count = constraints.len();
-                let old_constraint_var_count = total_constraints_var_count(constraints.iter());
+                let old_remaining_constraints = remaining_constraints;
+                let constraints = old_remaining_constraints.iter().collect::<Vec<_>>();
                 let is_ty_adt = |ty| {
                     tuples_at_index_is.contains_key(&ty)
                         || records_field_is.contains_key(&ty)
@@ -445,13 +454,18 @@ impl UnifiedTypeInference {
                     .unify_constraint_pass(&constraints, is_ty_adt, trait_solver, arena)?
                     .into_iter()
                     .collect();
-                let new_constraint_var_count =
-                    total_constraints_var_count(remaining_constraints.iter());
+                remaining_constraints = unified_ty_inf
+                    .substitute_in_constraints(
+                        &remaining_constraints
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<PubTypeConstraint>>(),
+                    )
+                    .into_iter()
+                    .collect();
 
                 // Break if no progress was made
-                if remaining_constraints.len() == old_constraint_count
-                    && new_constraint_var_count == old_constraint_var_count
-                {
+                if remaining_constraints == old_remaining_constraints {
                     break;
                 }
             }
@@ -1030,13 +1044,15 @@ impl UnifiedTypeInference {
 
     pub(super) fn unify_constraint_pass(
         &mut self,
-        constraints: &[PubTypeConstraint],
+        constraints: &[&PubTypeConstraint],
         is_ty_adt: impl Fn(Type) -> bool,
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<Vec<PubTypeConstraint>, InternalCompilationError> {
         let mut new_constraints = Vec::with_capacity(constraints.len());
-        for (constraint_index, constraint) in constraints.iter().enumerate() {
+        let mut ordered_constraints = constraints.iter().copied().enumerate().collect::<Vec<_>>();
+        ordered_constraints.sort_by_key(|(_, constraint)| constraint_solve_priority(constraint));
+        for (constraint_index, constraint) in ordered_constraints {
             use PubTypeConstraint::*;
             let unified_constraint = match constraint {
                 TupleAtIndexIs {
@@ -1413,13 +1429,24 @@ impl UnifiedTypeInference {
     }
 }
 
-pub(super) fn total_constraints_var_count<'a>(
-    constraints: impl IntoIterator<Item = &'a PubTypeConstraint>,
-) -> usize {
-    constraints
-        .into_iter()
-        .map(|constraint| constraint.inner_ty_vars().len())
-        .sum()
+fn constraint_solve_priority(constraint: &PubTypeConstraint) -> u8 {
+    match constraint {
+        PubTypeConstraint::TupleAtIndexIs { .. }
+        | PubTypeConstraint::RecordFieldIs { .. }
+        | PubTypeConstraint::TypeHasVariant { .. } => 0,
+        PubTypeConstraint::HaveTrait {
+            trait_ref,
+            output_tys,
+            ..
+        } if trait_ref == &*REPR_TRAIT || !output_tys.is_empty() => 10,
+        PubTypeConstraint::HaveTrait { trait_ref, .. }
+            if trait_ref.name.as_str() == "FromIterator" =>
+        {
+            20
+        }
+        PubTypeConstraint::HaveTrait { trait_ref, .. } if trait_ref.name.as_str() == "Value" => 90,
+        PubTypeConstraint::HaveTrait { .. } => 50,
+    }
 }
 
 fn current_satisfied_by_target(current: &EffType, target: &EffType) -> bool {

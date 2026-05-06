@@ -152,6 +152,19 @@ pub struct EnvStore {
     pub value: NodeId,
     pub index: u32,
     pub id: LocalDeclId,
+    /// If present, initialize this local by cloning `value`; otherwise move `value` into the local.
+    pub clone: Option<EnvStoreClone>,
+}
+
+/// Clone dispatch used when initializing owned mutable-binding storage.
+#[derive(Debug, Clone)]
+pub enum EnvStoreClone {
+    /// Clone dispatch has not yet been resolved to either a concrete function or dictionary slot.
+    Required,
+    /// Call this concrete `Value::clone` implementation.
+    Static(FunctionId),
+    /// Load `Value::clone` from this hidden trait dictionary local.
+    Dictionary(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -447,12 +460,18 @@ impl Node {
             }
             EnvStore(node) => {
                 let name = locals[node.id.as_index()].name.0;
+                let clone_suffix = if node.clone.is_some() {
+                    " with Value::clone"
+                } else {
+                    ""
+                };
                 writeln!(
                     f,
-                    "{indent_str}store {} at {} as \"{}\"",
+                    "{indent_str}store {} at {} as \"{}\"{}",
                     arena[node.value].ty.format_with(env),
                     node.index,
                     name,
+                    clone_suffix,
                 )?;
                 format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
             }

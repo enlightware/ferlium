@@ -854,10 +854,43 @@ fn eval_env_store(
             Some(span),
         ));
     }
-    ctx.environment.push(ValOrMut::Val(value));
-    #[cfg(debug_assertions)]
-    ctx.environment_names
-        .push(locals[node.id.as_index()].name.0);
+    if let Some(clone) = &node.clone {
+        let target_index = ctx.environment.len();
+        ctx.environment.push(ValOrMut::Val(value.clone()));
+        #[cfg(debug_assertions)]
+        ctx.environment_names
+            .push(locals[node.id.as_index()].name.0);
+        let target = Place {
+            target: target_index,
+            path: Vec::new(),
+        };
+        let arguments = vec![ValOrMut::Val(value), ValOrMut::Mut(target)];
+        match clone {
+            hir::EnvStoreClone::Required => {
+                panic!("EnvStoreClone::Required should have been resolved before evaluation")
+            }
+            hir::EnvStoreClone::Static(function) => {
+                ctx.call_function_id(*function, arguments, span)?;
+            }
+            hir::EnvStoreClone::Dictionary(dict_index) => {
+                let function_value = {
+                    let dictionary = ctx.environment[ctx.frame_base + *dict_index]
+                        .as_value_ref(ctx)
+                        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+                    dictionary.as_tuple().unwrap()[crate::std::value::VALUE_CLONE_METHOD_INDEX]
+                        .as_function()
+                        .unwrap()
+                        .clone()
+                };
+                ctx.call_function_value(&function_value, arguments, span)?;
+            }
+        }
+    } else {
+        ctx.environment.push(ValOrMut::Val(value));
+        #[cfg(debug_assertions)]
+        ctx.environment_names
+            .push(locals[node.id.as_index()].name.0);
+    }
     cont(Value::unit())
 }
 

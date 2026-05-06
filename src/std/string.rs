@@ -506,6 +506,41 @@ fn equal_string(lhs: &String, rhs: &String) -> bool {
     lhs == rhs
 }
 
+fn equal_string_iterator(lhs: &StringIterator, rhs: &StringIterator) -> bool {
+    lhs == rhs
+}
+
+fn string_iterator_to_string(value: &StringIterator) -> String {
+    String::new(&format!(
+        "StringIterator on \"{}\" @ {}",
+        value.string, value.position
+    ))
+}
+
+fn hash_string_iterator(value: &StringIterator, state: &mut Hasher) {
+    state.write_bytes(value.string.as_bytes());
+    state.write_isize(value.position as isize);
+}
+
+fn equal_string_split_iterator(lhs: &StringSplitIterator, rhs: &StringSplitIterator) -> bool {
+    lhs == rhs
+}
+
+fn string_split_iterator_to_string(value: &StringSplitIterator) -> String {
+    String::new(&format!(
+        "StringSplitIterator on \"{}\" by \"{}\" @ {}",
+        value.string, value.separator, value.next_start
+    ))
+}
+
+fn hash_string_split_iterator(value: &StringSplitIterator, state: &mut Hasher) {
+    state.write_bytes(value.string.as_bytes());
+    state.write_bytes(value.separator.as_bytes());
+    state.write_isize(value.separator_grapheme_len as isize);
+    state.write_isize(value.next_start as isize);
+    state.write_bool(value.finished);
+}
+
 fn compare_string(lhs: &String, rhs: &String) -> Value {
     compare(lhs, rhs)
 }
@@ -524,6 +559,36 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRMN::new(hash_string)) as Function,
             b(BinaryNativeFnRMN::new(native_value_clone::<String>)) as Function,
             b(UnaryNativeFnMN::new(native_value_drop::<String>)) as Function,
+        ],
+    );
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [string_iter_type()],
+        [],
+        native_layout_associated_consts::<StringIterator>(),
+        [
+            b(BinaryNativeFnRRN::new(equal_string_iterator)) as Function,
+            b(UnaryNativeFnRN::new(string_iterator_to_string)) as Function,
+            b(BinaryNativeFnRMN::new(hash_string_iterator)) as Function,
+            b(BinaryNativeFnRMN::new(native_value_clone::<StringIterator>)) as Function,
+            b(UnaryNativeFnMN::new(native_value_drop::<StringIterator>)) as Function,
+        ],
+    );
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [string_split_iter_type()],
+        [],
+        native_layout_associated_consts::<StringSplitIterator>(),
+        [
+            b(BinaryNativeFnRRN::new(equal_string_split_iterator)) as Function,
+            b(UnaryNativeFnRN::new(string_split_iterator_to_string)) as Function,
+            b(BinaryNativeFnRMN::new(hash_string_split_iterator)) as Function,
+            b(BinaryNativeFnRMN::new(
+                native_value_clone::<StringSplitIterator>,
+            )) as Function,
+            b(UnaryNativeFnMN::new(
+                native_value_drop::<StringSplitIterator>,
+            )) as Function,
         ],
     );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();

@@ -1,54 +1,3 @@
-// Value implementation for arrays
-// (must be after array iter/next are defined)
-
-impl<A> Value for [A] where A: Value {
-	fn eq(left: [A], right: [A]) -> bool {
-		let l = array_len(left);
-		if l != array_len(right) {
-			return false;
-		};
-		let mut it_l = iter(left);
-		let mut it_r = iter(right);
-		loop {
-			match next(it_l) {
-				Some(a) => match next(it_r) {
-					Some(b) => if not eq(a, b) { return false },
-					None    => return false,
-				},
-				None => return true,
-			}
-		}
-	}
-
-	fn to_string(value: [A]) -> string {
-		let mut rendered = "[";
-		let mut first = true;
-		for element in value {
-			if not first {
-				string_push_str(rendered, ", ");
-			} else {
-				first = false;
-			};
-			string_push_str(rendered, to_string(element));
-		};
-		string_push_str(rendered, "]");
-		rendered
-	}
-
-	fn hash(value: [A], state: &mut hasher) {
-		hasher_write_int(state, array_len(value));
-		for element in value {
-			hash(element, state);
-		}
-	}
-
-	fn clone(source: [A], target: &mut [A]) {
-		target = source;
-	}
-
-	fn drop(target: &mut [A]) {}
-}
-
 // Serde derive helper
 
 /// Gets an entry from a Variant Object by name, returning None if not found.
@@ -70,6 +19,37 @@ fn expect_variant_object_entry(entries: [(string, Variant)], name: string) -> Va
 	};
 	panic(f"Object variant key \"{name}\" not found")
 }
+
+// Array adaptors
+
+impl<A, B> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B]>
+where
+	A: Value
+{
+	fn map(value: [A], mapper: ((A) -> B !)) -> [B] {
+		from_iter(MapIterator { iterator: array_iter(value), mapper })
+	}
+}
+
+impl<A> Filter for <Self = [A] |-> Item = A, Output = [A]>
+where
+	A: Value
+{
+	fn filter(value: [A], predicate: ((A) -> bool !)) -> [A] {
+		from_iter(FilterIterator { iterator: array_iter(value), filter: predicate })
+	}
+}
+
+impl<A, B> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B]>
+where
+	A: Value
+{
+	fn filter_map(value: [A], mapper: ((A) -> (None | Some(B)) !)) -> [B] {
+		from_iter(FilterMapIterator { iterator: array_iter(value), filter_map: mapper })
+	}
+}
+
+// Contains implementation
 
 impl Contains {
 	fn contains(seq, element) -> bool {
@@ -151,6 +131,31 @@ where
 	}
 }
 
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<A> Value for ArraySplitElementIterator<A>
+where
+	A: Value
+{
+	fn eq(left: ArraySplitElementIterator<A>, right: ArraySplitElementIterator<A>) -> bool {
+		false
+	}
+
+	fn to_string(value: ArraySplitElementIterator<A>) -> string {
+		"ArraySplitElementIterator"
+	}
+
+	fn hash(value: ArraySplitElementIterator<A>, state: &mut hasher) {
+		hasher_write_string(state, "ArraySplitElementIterator")
+	}
+
+	fn clone(source: ArraySplitElementIterator<A>, target: &mut ArraySplitElementIterator<A>) {
+		target = source;
+	}
+
+	fn drop(target: &mut ArraySplitElementIterator<A>) {}
+}
+
 struct ArraySplitIterator<A>
 	where A: Value
 {
@@ -194,6 +199,31 @@ where
 			}
 		}
 	}
+}
+
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<A> Value for ArraySplitIterator<A>
+where
+	A: Value
+{
+	fn eq(left: ArraySplitIterator<A>, right: ArraySplitIterator<A>) -> bool {
+		false
+	}
+
+	fn to_string(value: ArraySplitIterator<A>) -> string {
+		"ArraySplitIterator"
+	}
+
+	fn hash(value: ArraySplitIterator<A>, state: &mut hasher) {
+		hasher_write_string(state, "ArraySplitIterator")
+	}
+
+	fn clone(source: ArraySplitIterator<A>, target: &mut ArraySplitIterator<A>) {
+		target = source;
+	}
+
+	fn drop(target: &mut ArraySplitIterator<A>) {}
 }
 
 impl Iterator {

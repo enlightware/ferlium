@@ -1,0 +1,211 @@
+// Arrays
+
+/// Return the last element of an array, or None if the array is empty.
+fn array_peek_back(array) -> None | Some(_) {
+	let l = array_len(array);
+	if l <= 0 {
+		None
+	} else {
+		Some(array[l - 1])
+	}
+}
+
+impl Concat {
+	fn concat(left, right) {
+		array_concat(left, right)
+	}
+}
+
+impl<F, T> Cast for <From = [F], To = [T]>
+where
+	Cast<From = F, To = T>
+{
+	fn cast(array: [F]) -> [T] {
+		map(array, (|element| cast(element): (F) -> T))
+	}
+}
+
+// Compatibility, mark as deprecated when supported
+
+/// Deprecated, use `all` instead.
+fn array_all(array: [_], f) {
+	all(array, f)
+}
+
+/// Deprecated, use `any` instead.
+fn array_any(array: [_], f) {
+	any(array, f)
+}
+
+// Iterator and Seq for array
+struct ArrayIterator<A>
+where
+	A: Value
+{
+	array: [A],
+	index: int,
+}
+
+type array_iterator<A> = ArrayIterator<A>;
+
+fn array_iterator_next<A>(it: &mut array_iterator<A>) -> None | Some(A)
+where
+	A: Value
+{
+	if it.index < array_len(it.array) {
+		let index = it.index;
+		it.index += 1;
+		Some(effects_unsafe { it.array[index] })
+	} else {
+		None
+	}
+}
+
+fn array_iter<A>(a: [A]) -> array_iterator<A>
+where
+	A: Value
+{
+	ArrayIterator { array: a, index: 0 }
+}
+
+impl<A> Iterator for <Self = array_iterator<A> |-> Item = A>
+where
+	A: Value
+{
+	fn next(a: &mut array_iterator<A>) -> None | Some(A) {
+		array_iterator_next(a)
+	}
+}
+
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<A> Value for array_iterator<A>
+where
+	A: Value
+{
+	fn eq(left: array_iterator<A>, right: array_iterator<A>) -> bool {
+		false
+	}
+
+	fn to_string(value: array_iterator<A>) -> string {
+		"array_iterator"
+	}
+
+	fn hash(value: array_iterator<A>, state: &mut hasher) {
+		hasher_write_string(state, "array_iterator")
+	}
+
+	fn clone(source: array_iterator<A>, target: &mut array_iterator<A>) {
+		target = source;
+	}
+
+	fn drop(target: &mut array_iterator<A>) {}
+}
+
+impl<A> Seq for <Self = [A] |-> Item = A, Iter = array_iterator<A>>
+where
+	A: Value
+{
+	fn iter(a: [A]) -> array_iterator<A> {
+		array_iter(a)
+	}
+}
+
+impl<A, B> RebindItem for <Self = [A], Item = B |-> Output = [B]> {}
+
+impl<I, T> FromIterator for <Self = [T], Iter = I>
+where
+	I: Iterator<Item = T>,
+	I: Value
+{
+	fn from_iter(iterator: I) -> [T] {
+		let mut iterator = iterator;
+		let mut result = [];
+		loop {
+			match next(iterator) {
+				Some(item) => {
+					array_append(result, item);
+				},
+				None => return result,
+			}
+		}
+	}
+}
+
+impl SizedSeq {
+	fn len(a) {
+		array_len(a)
+	}
+}
+
+impl<A> Value for [A] where A: Value {
+	fn eq(left: [A], right: [A]) -> bool {
+		let l = array_len(left);
+		if l != array_len(right) {
+			return false;
+		};
+		for i in 0..l {
+			if not eq(effects_unsafe { left[i] }, effects_unsafe { right[i] }) {
+				return false;
+			}
+		};
+		true
+	}
+
+	fn to_string(value: [A]) -> string {
+		let mut rendered = "[";
+		for i in 0..array_len(value) {
+			if i > 0 {
+				string_push_str(rendered, ", ");
+			};
+			string_push_str(rendered, to_string(effects_unsafe { value[i] }));
+		};
+		string_push_str(rendered, "]");
+		rendered
+	}
+
+	fn hash(value: [A], state: &mut hasher) {
+		let l = array_len(value);
+		hasher_write_int(state, l);
+		for i in 0..l {
+			hash(effects_unsafe { value[i] }, state);
+		}
+	}
+
+	fn clone(source: [A], target: &mut [A]) {
+		target = source;
+	}
+
+	fn drop(target: &mut [A]) {}
+}
+
+// Serde for arrays
+
+impl<A> Serialize for [A]
+where
+	A: Serialize,
+	A: Value
+{
+	fn serialize(a: [A]) {
+		let mut result = array_with_capacity(array_len(a));
+		for value in a {
+			array_append(result, serialize(value));
+		};
+		Array(result)
+	}
+}
+
+impl Deserialize {
+	fn deserialize(a) {
+		match (a) {
+			Array(a) => {
+				let mut result = array_with_capacity(array_len(a));
+				for i in 0..array_len(a) {
+					array_append(result, deserialize(a[i]));
+				};
+				result
+			},
+			_ => panic("Expected Array variant")
+		}
+	}
+}

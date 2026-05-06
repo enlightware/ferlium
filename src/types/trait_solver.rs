@@ -182,19 +182,22 @@ trait TraitOutputQuery {
 /// nested blanket-impl requirements.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ConstraintAssumptions<'a> {
-    constraints: &'a [PubTypeConstraint],
+    constraints: &'a [&'a PubTypeConstraint],
     skipped_index: Option<usize>,
 }
 
 impl<'a> ConstraintAssumptions<'a> {
-    pub(crate) fn all(constraints: &'a [PubTypeConstraint]) -> Self {
+    pub(crate) fn all(constraints: &'a [&'a PubTypeConstraint]) -> Self {
         Self {
             constraints,
             skipped_index: None,
         }
     }
 
-    pub(crate) fn excluding(constraints: &'a [PubTypeConstraint], skipped_index: usize) -> Self {
+    pub(crate) fn excluding(
+        constraints: &'a [&'a PubTypeConstraint],
+        skipped_index: usize,
+    ) -> Self {
         Self {
             constraints,
             skipped_index: Some(skipped_index),
@@ -206,7 +209,7 @@ impl<'a> ConstraintAssumptions<'a> {
             .iter()
             .enumerate()
             .filter_map(move |(index, constraint)| {
-                (self.skipped_index != Some(index)).then_some(constraint)
+                (self.skipped_index != Some(index)).then_some(*constraint)
             })
     }
 }
@@ -225,8 +228,12 @@ impl<'a> TraitSolverProbe<'a> {
     }
 
     fn from_solver(solver: &TraitSolver<'a>) -> Self {
+        let mut impls = solver.impls.clone();
+        impls
+            .concrete_key_to_id
+            .retain(|_, id| impls.data[id.as_index()].public);
         Self {
-            impls: solver.impls.clone(),
+            impls,
             current_functions: solver.current_functions.clone(),
             import_fn_slots: solver.import_fn_slots.clone(),
             import_impl_slots: solver.import_impl_slots.clone(),
@@ -389,6 +396,9 @@ impl<'a> TraitSolver<'a> {
         for (key, id) in &self.impls.concrete_key_to_id {
             if &key.trait_ref == trait_ref {
                 let imp = &self.impls.data[id.as_index()];
+                if !imp.public {
+                    continue;
+                }
                 candidates.push(TraitImprovementCandidate::Concrete {
                     input_tys: key.input_tys.clone(),
                     output_tys: imp.output_tys.clone(),
@@ -508,12 +518,57 @@ impl<'a> TraitSolver<'a> {
         }
     }
 
+    fn improve_trait_application_with_candidate_head(
+        ty_inf: &mut UnifiedTypeInference,
+        candidate: &TraitImprovementCandidate,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        fn_span: Location,
+    ) -> Result<(), InternalCompilationError> {
+        match candidate {
+            TraitImprovementCandidate::Concrete {
+                input_tys: candidate_inputs,
+                output_tys: candidate_outputs,
+            } => {
+                for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
+                    ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
+                }
+                for (candidate_output, output_ty) in candidate_outputs.iter().zip(output_tys.iter())
+                {
+                    ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                }
+            }
+            TraitImprovementCandidate::Blanket {
+                input_tys: candidate_inputs,
+                output_tys: candidate_outputs,
+                ty_var_count,
+                ..
+            } => {
+                let inst_subst = (
+                    ty_inf.fresh_type_var_subst(*ty_var_count),
+                    FxHashMap::default(),
+                );
+                let candidate_inputs = instantiate_types(candidate_inputs, &inst_subst);
+                let candidate_outputs = instantiate_types(candidate_outputs, &inst_subst);
+                for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
+                    ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
+                }
+                for (candidate_output, output_ty) in candidate_outputs.iter().zip(output_tys.iter())
+                {
+                    ty_inf.unify_same_type(*candidate_output, fn_span, *output_ty, fn_span)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Try to improve a deferred trait application from its partially known
     /// inputs and outputs.
     ///
-    /// The algorithm probes every visible impl under snapshots of the current
-    /// unifier. It only commits the improvement when there is exactly one
-    /// matching candidate and no other candidate remains merely `Unknown`.
+    /// The algorithm probes every visible impl in a fresh scratch solver under
+    /// a snapshot of the current unifier. If exactly one candidate remains
+    /// compatible, it commits the visible equalities learned by that probe,
+    /// even when some nested blanket constraints are still unresolved.
     #[allow(clippy::too_many_arguments)]
     fn improve_trait_application_match(
         &mut self,
@@ -558,12 +613,21 @@ impl<'a> TraitSolver<'a> {
         arena: &mut NodeArena,
     ) -> Result<TraitImprovementMatch, InternalCompilationError> {
         let candidates = self.improvement_candidates(trait_ref);
-        let mut probe = TraitSolverProbe::from_solver(self);
-        let mut unique_candidate: Option<TraitImprovementCandidate> = None;
-        let mut found_unknown_candidate = false;
-        let mut found_multiple_yes_candidates = false;
+        let original_vars = input_tys
+            .iter()
+            .chain(output_tys.iter())
+            .flat_map(TypeLike::inner_ty_vars)
+            .collect::<FxHashSet<_>>();
+        let mut unique_candidate: Option<(
+            TraitImprovementCandidate,
+            TraitImprovementMatch,
+            Vec<Type>,
+            Vec<Type>,
+        )> = None;
+        let mut found_multiple_candidates = false;
 
         for candidate in candidates {
+            let mut probe = TraitSolverProbe::from_solver(self);
             let snapshot = ty_inf.snapshot();
             let matched = Self::improvement_candidate_matches(
                 &mut probe,
@@ -575,49 +639,88 @@ impl<'a> TraitSolver<'a> {
                 fn_span,
                 arena,
             )?;
+            let improved_input_tys = ty_inf.substitute_in_types(input_tys);
+            let improved_output_tys = ty_inf.substitute_in_types(output_tys);
             ty_inf.rollback_to(snapshot);
             use TraitImprovementMatch::*;
             match matched {
                 No => {}
-                Unknown => {
-                    found_unknown_candidate = true;
-                }
-                Yes => {
+                Unknown | Yes => {
                     if unique_candidate.is_some() {
-                        found_multiple_yes_candidates = true;
+                        found_multiple_candidates = true;
                         unique_candidate = None;
                         continue;
                     }
-                    unique_candidate = Some(candidate);
+                    unique_candidate =
+                        Some((candidate, matched, improved_input_tys, improved_output_tys));
                 }
             }
         }
 
-        if found_unknown_candidate || found_multiple_yes_candidates {
+        if found_multiple_candidates {
             return Ok(TraitImprovementMatch::Unknown);
         }
-        let Some(candidate) = unique_candidate else {
+        let Some((candidate, matched, improved_input_tys, improved_output_tys)) = unique_candidate
+        else {
+            // A deriver may become applicable once the remaining variables are
+            // fixed, so absence of a visible impl head is not a definite miss.
+            if !trait_ref.derivers.is_empty() && !input_tys.iter().all(Type::is_constant) {
+                return Ok(TraitImprovementMatch::Unknown);
+            }
             return Ok(TraitImprovementMatch::No);
         };
 
-        Self::improvement_candidate_matches(
-            self,
-            ty_inf,
-            &candidate,
-            input_tys,
-            output_tys,
-            assumptions,
-            fn_span,
-            arena,
-        )
+        match matched {
+            TraitImprovementMatch::No => unreachable!(),
+            TraitImprovementMatch::Unknown => {
+                let improved_vars = improved_input_tys
+                    .iter()
+                    .chain(improved_output_tys.iter())
+                    .flat_map(TypeLike::inner_ty_vars)
+                    .collect::<FxHashSet<_>>();
+                if improved_vars.is_subset(&original_vars) {
+                    for (input_ty, improved_input_ty) in
+                        input_tys.iter().zip(improved_input_tys.iter())
+                    {
+                        ty_inf.unify_same_type(*input_ty, fn_span, *improved_input_ty, fn_span)?;
+                    }
+                    for (output_ty, improved_output_ty) in
+                        output_tys.iter().zip(improved_output_tys.iter())
+                    {
+                        ty_inf.unify_same_type(
+                            *output_ty,
+                            fn_span,
+                            *improved_output_ty,
+                            fn_span,
+                        )?;
+                    }
+                } else {
+                    Self::improve_trait_application_with_candidate_head(
+                        ty_inf, &candidate, input_tys, output_tys, fn_span,
+                    )?;
+                }
+                Ok(TraitImprovementMatch::Unknown)
+            }
+            TraitImprovementMatch::Yes => Self::improvement_candidate_matches(
+                self,
+                ty_inf,
+                &candidate,
+                input_tys,
+                output_tys,
+                assumptions,
+                fn_span,
+                arena,
+            ),
+        }
     }
 
     /// Try to improve a deferred trait application from its partially known
     /// inputs and outputs.
     ///
-    /// The algorithm probes every visible impl under snapshots of the current
-    /// unifier. It only commits the improvement when there is exactly one
-    /// matching candidate and no other candidate remains merely `Unknown`.
+    /// The algorithm probes every visible impl in a fresh scratch solver under
+    /// a snapshot of the current unifier. If exactly one candidate remains
+    /// compatible, it commits the visible equalities learned by that probe,
+    /// even when some nested blanket constraints are still unresolved.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_improve_trait_application(
         &mut self,
@@ -690,6 +793,16 @@ impl<'a> TraitSolver<'a> {
         })
     }
 
+    fn normalize_blanket_remaining_constraints<'c>(
+        ty_inf: &mut UnifiedTypeInference,
+        constraints: impl IntoIterator<Item = (usize, &'c PubTypeConstraint)>,
+    ) -> Vec<(usize, PubTypeConstraint)> {
+        constraints
+            .into_iter()
+            .map(|(index, constraint)| (index, ty_inf.substitute_in_constraint(constraint)))
+            .collect()
+    }
+
     #[cfg(debug_assertions)]
     fn assert_blanket_impl_is_well_formed(
         imp_input_tys: &[Type],
@@ -747,7 +860,7 @@ impl<'a> TraitSolver<'a> {
         );
         let imp_input_tys = instantiate_types(imp_input_tys, &inst_subst);
         let imp_output_tys = instantiate_types(imp_output_tys, &inst_subst);
-        let mut remaining = instantiate_types(imp_constraints, &inst_subst)
+        let remaining = instantiate_types(imp_constraints, &inst_subst)
             .into_iter()
             .enumerate()
             .collect::<Vec<_>>();
@@ -774,15 +887,21 @@ impl<'a> TraitSolver<'a> {
             }
         }
 
+        let mut remaining = Self::normalize_blanket_remaining_constraints(
+            ty_inf,
+            remaining
+                .iter()
+                .map(|(index, constraint)| (*index, constraint)),
+        );
         loop {
-            let initial_count = remaining.len();
+            let old_remaining = mem::take(&mut remaining);
             let mut still_remaining = Vec::new();
 
-            for (constraint_index, constraint) in remaining {
+            for (constraint_index, constraint) in old_remaining.iter() {
                 // Re-substitute the constraint on every pass because earlier
                 // solved constraints may have refined the type variables it uses.
                 let (trait_ref, constraint_inputs, constraint_outputs, _span) = ty_inf
-                    .substitute_in_constraint(&constraint)
+                    .substitute_in_constraint(constraint)
                     .into_have_trait()
                     .expect("Non trait constraint in blanket impl");
                 if Self::match_assumption(
@@ -813,7 +932,7 @@ impl<'a> TraitSolver<'a> {
                             TraitImprovementMatch::Yes => {}
                         }
                     }
-                    still_remaining.push((constraint_index, constraint));
+                    still_remaining.push((*constraint_index, constraint));
                     continue;
                 }
                 let solved_outputs = match query.solve_output_types_query(
@@ -836,7 +955,7 @@ impl<'a> TraitSolver<'a> {
                     }
                 }
                 resolved_constraints.push(ResolvedTraitConstraint {
-                    index: constraint_index,
+                    index: *constraint_index,
                     trait_ref,
                     input_tys: constraint_inputs,
                 });
@@ -848,7 +967,9 @@ impl<'a> TraitSolver<'a> {
                 break;
             }
 
-            if still_remaining.len() == initial_count {
+            let still_remaining =
+                Self::normalize_blanket_remaining_constraints(ty_inf, still_remaining);
+            if still_remaining == old_remaining {
                 return Ok(match mode {
                     BlanketConstraintMode::RequireAllResolved => BlanketImplMatch::No,
                     BlanketConstraintMode::AllowUnknown => BlanketImplMatch::Unknown,

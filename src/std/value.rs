@@ -13,7 +13,7 @@ use crate::{
     FxHashSet, Location,
     compiler::error::InternalCompilationError,
     hir::function::FunctionDefinition,
-    hir::value::{LiteralValue, ustr_to_isize},
+    hir::value::{FunctionValue, LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
     internal_compilation_error,
     module::{self, LocalDecl, LocalDeclId, Module, TraitImplId, id::Id},
@@ -194,7 +194,8 @@ fn layout_for_value_type(
             active.remove(&ty);
             return Ok(layout);
         }
-        Variable(_) | Function(_) | Never => {
+        Function(_) => ValueLayout::native::<FunctionValue>(),
+        Variable(_) | Never => {
             drop(ty_data);
             active.remove(&ty);
             return Err(internal_compilation_error!(Internal {
@@ -410,6 +411,10 @@ fn derive_value_to_string_body(
                 locals,
             ))
         }
+        Function(_) => {
+            drop(ty_data);
+            Some((string_lit(arena, "<function>"), locals))
+        }
         _ => {
             drop(ty_data);
             None
@@ -574,6 +579,10 @@ fn derive_value_eq_body(
                 ),
                 bool_ty,
             ))
+        }
+        Function(_) => {
+            drop(ty_data);
+            Some(n(arena, native(false), bool_ty))
         }
         _ => {
             drop(ty_data);
@@ -740,6 +749,14 @@ fn derive_value_hash_body(
             let load_self = n(arena, load(0, l_self_id), shape_ty);
             Some((build_hash_value(arena, load_self, shape_ty)?, locals))
         }
+        Function(_) => {
+            drop(ty_data);
+            let statements = vec![
+                build_write_string(arena, "<function>"),
+                n(arena, native(()), unit_ty),
+            ];
+            Some((n(arena, block(statements), unit_ty), locals))
+        }
         _ => {
             drop(ty_data);
             None
@@ -831,7 +848,11 @@ fn derive_structural_value_impl(
     let ty_data = input_types[0].data();
     let can_derive = matches!(
         &*ty_data,
-        TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_) | TypeKind::Named(_)
+        TypeKind::Tuple(_)
+            | TypeKind::Record(_)
+            | TypeKind::Variant(_)
+            | TypeKind::Function(_)
+            | TypeKind::Named(_)
     );
     drop(ty_data);
     if !can_derive {

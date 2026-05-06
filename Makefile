@@ -16,6 +16,9 @@ bench:
 repl:
 	RUST_BACKTRACE=1 RUST_LOG=ferlium=debug cargo run --example ferlium
 
+print-std:
+	cargo run --example ferlium -- --print-std
+
 book-devel:
 	cargo install mdbook
 	mdbook serve --open docs/book/en

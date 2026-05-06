@@ -13,18 +13,17 @@ use ferlium::{
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     hir::emit_ir::{CompiledExpr, emit_expr_unsafe},
     hir::function::{
-        BinaryNativeFnNNV, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMV,
-        UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
+        BinaryNativeFnNNV, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN,
+        UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{NativeDisplay, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
     parse_module_and_expr,
     std::{
-        array::{Array, ArrayIterator, array_iter_type_generic, array_type},
+        array::{Array, array_type},
         logic::bool_type,
         math::int_type,
         new_module_using_std,
-        option::option_type,
         string::string_type,
     },
     types::effects::{PrimitiveEffect, effect, effects, no_effects},
@@ -237,26 +236,6 @@ fn test_assoc_trait() -> TraitRef {
     )
 }
 
-fn test_iterator_trait() -> TraitRef {
-    TraitRef::new_with_self_input_type(
-        "TestIterator",
-        "Test-only iterator trait with one associated item type.",
-        ["Item"],
-        [(
-            "test_next",
-            FunctionDefinition::new_infer_quantifiers(
-                FnType::new_mut_resolved(
-                    [(Type::variable_id(0), true)],
-                    option_type(Type::variable_id(1)),
-                    no_effects(),
-                ),
-                ["iterator"],
-                "Gets the next item from a test-only iterator.",
-            ),
-        )],
-    )
-}
-
 fn test_witnessed_project_trait() -> TraitRef {
     TraitRef::new_with_self_input_type(
         "TestWitnessedProject",
@@ -293,7 +272,7 @@ fn option_type_def() -> TypeDefRef {
     })
 }
 
-fn map_iterator_type_def(test_iterator_trait: TraitRef) -> TypeDefRef {
+fn map_iterator_type_def(iterator_trait: TraitRef) -> TypeDefRef {
     TypeDefRef::new(TypeDef {
         name: ustr("MapIterator"),
         doc: None,
@@ -309,7 +288,7 @@ fn map_iterator_type_def(test_iterator_trait: TraitRef) -> TypeDefRef {
                 ),
             ]),
             constraints: vec![PubTypeConstraint::new_have_trait(
-                test_iterator_trait,
+                iterator_trait,
                 vec![Type::variable_id(0)],
                 vec![Type::variable_id(1)],
                 Location::new_synthesized(),
@@ -377,16 +356,14 @@ fn clone_tracked_clone_count() -> isize {
     TRACKED_CLONES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-fn testing_module(module_id: ModuleId) -> Module {
+fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
     let mut module = Module::new(module_id);
     let test_assoc_trait = test_assoc_trait().with_module_id(module_id);
-    let test_iterator_trait = test_iterator_trait().with_module_id(module_id);
     let test_witnessed_project_trait = test_witnessed_project_trait().with_module_id(module_id);
     let option_type_def = option_type_def();
-    let map_iterator_type_def = map_iterator_type_def(test_iterator_trait.clone());
+    let map_iterator_type_def = map_iterator_type_def(iterator_trait);
     let witnessed_type_def = witnessed_type_def(test_assoc_trait.clone());
     module.add_trait(test_assoc_trait.clone());
-    module.add_trait(test_iterator_trait.clone());
     module.add_trait(test_witnessed_project_trait.clone());
     module.add_concrete_impl_no_locals(
         test_assoc_trait.clone(),
@@ -411,17 +388,6 @@ fn testing_module(module_id: ModuleId) -> Module {
     module.add_type_def(option_type_def.name, option_type_def.clone());
     module.add_type_def(map_iterator_type_def.name, map_iterator_type_def.clone());
     module.add_type_def(witnessed_type_def.name, witnessed_type_def.clone());
-    module.add_blanket_impl_no_locals(
-        test_iterator_trait,
-        BlanketTraitImplSubKey {
-            input_tys: vec![array_iter_type_generic()],
-            ty_var_count: 1,
-            constraints: vec![],
-        },
-        vec![Type::variable_id(0)],
-        [],
-        [Box::new(UnaryNativeFnMV::new(ArrayIterator::next_value)) as Function],
-    );
     module.add_blanket_impl_no_locals(
         test_witnessed_project_trait,
         BlanketTraitImplSubKey {
@@ -646,9 +612,14 @@ impl TestSession {
     /// Create a new test session with std, testing, effects and props modules registered.
     pub fn new() -> Self {
         let mut compiler_session = CompilerSession::new();
+        let std_iterator_trait = compiler_session
+            .std_module()
+            .get_trait_str("Iterator")
+            .expect("std Iterator trait should be registered")
+            .clone();
         compiler_session.register_module(
             Path::single_str("testing"),
-            testing_module(compiler_session.modules().next_id()),
+            testing_module(compiler_session.modules().next_id(), std_iterator_trait),
         );
         compiler_session.register_module(
             Path::single_str("effects"),

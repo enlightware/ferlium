@@ -323,6 +323,7 @@ impl TypeInference {
                                         value: project_inner_id,
                                         index: (alt_start_env_size + i) as u32,
                                         id: l_bindings[i],
+                                        clone: None,
                                     }),
                                     Type::unit(),
                                     no_effects(),

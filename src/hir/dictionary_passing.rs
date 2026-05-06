@@ -30,8 +30,11 @@ use ustr::Ustr;
 use crate::{
     containers::b,
     hir::value::Value,
-    hir::{self, Node, NodeArena, NodeId, NodeKind},
-    std::math::int_type,
+    hir::{self, EnvStoreClone, Node, NodeArena, NodeId, NodeKind},
+    std::{
+        math::int_type,
+        value::{VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT},
+    },
     types::effects::no_effects,
     types::mutability::MutType,
     types::r#type::{FnArgType, Type, TypeKind},
@@ -707,6 +710,25 @@ impl Node {
             EnvStore(store) => {
                 store.index += ctx.dicts.len() as u32;
                 elaborate_dictionaries(arena, store.value, ctx, local_count)?;
+                if matches!(store.clone, Some(EnvStoreClone::Required)) {
+                    let value_ty = arena[store.value].ty;
+                    store.clone = Some(if value_ty.is_constant() {
+                        EnvStoreClone::Static(ctx.trait_solver.solve_impl_method(
+                            &VALUE_TRAIT,
+                            &[value_ty],
+                            VALUE_CLONE_METHOD_INDEX,
+                            node_span,
+                            arena,
+                        )?)
+                    } else {
+                        let dict_index =
+                            find_trait_impl_dict_index(ctx.dicts, &VALUE_TRAIT, &[value_ty])
+                                .expect(
+                                    "Value dictionary for mutable let binding not found, type inference should have failed",
+                                );
+                        EnvStoreClone::Dictionary(dict_index)
+                    });
+                }
             }
             EnvLoad(load) => {
                 load.index += ctx.dicts.len() as u32;

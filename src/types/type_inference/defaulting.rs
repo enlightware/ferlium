@@ -17,10 +17,7 @@ use crate::{
     },
 };
 
-use super::{
-    substitution::InstSubstitution,
-    unify::{UnifiedTypeInference, total_constraints_var_count},
-};
+use super::{substitution::InstSubstitution, unify::UnifiedTypeInference};
 
 /// A transitive boundary over public constraints, defined by seed type variables.
 #[derive(Debug, Clone, Default)]
@@ -200,12 +197,16 @@ impl UnifiedTypeInference {
         loop {
             self.normalize_remaining_constraints();
             let constraints = mem::take(&mut self.remaining_ty_constraints);
-            let old_count = constraints.len();
-            let old_var_count = total_constraints_var_count(constraints.iter());
+            let old_remaining_constraints = constraints.iter().collect::<FxHashSet<_>>();
+            let constraint_refs = constraints.iter().collect::<Vec<_>>();
             self.remaining_ty_constraints =
-                self.unify_constraint_pass(&constraints, |_| false, trait_solver, arena)?;
-            let new_var_count = total_constraints_var_count(self.remaining_ty_constraints.iter());
-            if self.remaining_ty_constraints.len() == old_count && new_var_count == old_var_count {
+                self.unify_constraint_pass(&constraint_refs, |_| false, trait_solver, arena)?;
+            self.normalize_remaining_constraints();
+            let new_remaining_constraints = self
+                .remaining_ty_constraints
+                .iter()
+                .collect::<FxHashSet<_>>();
+            if new_remaining_constraints == old_remaining_constraints {
                 break;
             }
         }

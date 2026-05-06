@@ -126,6 +126,44 @@ fn immutable_native_inputs_borrow_places_without_cloning() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_let_initialization_uses_value_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            struct Probe(int)
+
+            impl Value for Probe {
+                fn eq(left: Probe, right: Probe) -> bool {
+                    left.0 == right.0
+                }
+
+                fn to_string(value: Probe) -> string {
+                    to_string(value.0)
+                }
+
+                fn hash(value: Probe, state: &mut hasher) {
+                    hash(value.0, state)
+                }
+
+                fn clone(source: Probe, target: &mut Probe) {
+                    target = Probe(source.0 + 10);
+                }
+
+                fn drop(target: &mut Probe) {}
+            }
+
+            let original = Probe(32);
+            let mut cloned = original;
+            (original.0, cloned.0)
+            "#
+        ),
+        tuple!(int(32), int(42))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trivial_copy_cannot_be_implemented_from_ferlium_source() {
     let mut session = TestSession::new();
     let err = session.fail_compilation(
@@ -1172,11 +1210,7 @@ fn contains_and_contains_substring() {
     // arrays
     assert_val_eq!(session.run("contains([1, 2, 3], 2)"), bool(true));
     assert_val_eq!(session.run("contains([1, 2, 3], 4)"), bool(false));
-    session
-        .fail_compilation("contains([], 1)")
-        .into_inner()
-        .into_unresolved_constraints()
-        .unwrap();
+    assert_val_eq!(session.run("contains([], 1)"), bool(false));
     assert_val_eq!(session.run("contains([-3.0], 1.0)"), bool(false));
     assert_val_eq!(session.run("contains([-3.0, 3.0, 1.0], 1.0)"), bool(true));
 }

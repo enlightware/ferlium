@@ -39,8 +39,10 @@ pub fn add_impls(mut to: Module, source_table: &mut SourceTable, module_id: Modu
     let codes = [
         // First compiles basic comparison functions.
         prelude!("comparison.fer"),
-        // Then most of the core traits.
+        // Then most of the core traits and generic iterator adaptors.
         prelude!("core_impls.fer"),
+        // Array implementations depend on the generic iterator adaptors and are used by later chunks.
+        prelude!("array.fer"),
         // These functions depend on array iterator being available.
         prelude!("core_impls_dependent.fer"),
         // Keep hash-based containers isolated so they can be toggled during step-by-step debugging.

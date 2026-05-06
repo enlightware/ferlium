@@ -92,6 +92,31 @@ where
 	}
 }
 
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<V> Value for HashSetIterator<V>
+where
+	V: Value
+{
+	fn eq(left: HashSetIterator<V>, right: HashSetIterator<V>) -> bool {
+		false
+	}
+
+	fn to_string(value: HashSetIterator<V>) -> string {
+		"HashSetIterator"
+	}
+
+	fn hash(value: HashSetIterator<V>, state: &mut hasher) {
+		hasher_write_string(state, "HashSetIterator")
+	}
+
+	fn clone(source: HashSetIterator<V>, target: &mut HashSetIterator<V>) {
+		target = source;
+	}
+
+	fn drop(target: &mut HashSetIterator<V>) {}
+}
+
 impl<V> Seq for <Self = HashSet<V> |-> Item = V, Iter = HashSetIterator<V>>
 where
 	V: Value
@@ -134,7 +159,8 @@ where
 impl<V, I> FromIterator for <Self = HashSet<V>, Iter = I>
 where
 	V: Value,
-	I: Iterator<Item = V>
+	I: Iterator<Item = V>,
+	I: Value
 {
 	fn from_iter(iterator: I) -> HashSet<V> {
 		let mut iterator = iterator;
@@ -349,6 +375,32 @@ where
 	}
 }
 
+// Temporary hack: this should be derived as a blanket Value impl for this
+// generic product type once the Value deriver can synthesize blanket impls.
+impl<K, V> Value for HashMapIterator<K, V>
+where
+	K: Value,
+	V: Value
+{
+	fn eq(left: HashMapIterator<K, V>, right: HashMapIterator<K, V>) -> bool {
+		false
+	}
+
+	fn to_string(value: HashMapIterator<K, V>) -> string {
+		"HashMapIterator"
+	}
+
+	fn hash(value: HashMapIterator<K, V>, state: &mut hasher) {
+		hasher_write_string(state, "HashMapIterator")
+	}
+
+	fn clone(source: HashMapIterator<K, V>, target: &mut HashMapIterator<K, V>) {
+		target = source;
+	}
+
+	fn drop(target: &mut HashMapIterator<K, V>) {}
+}
+
 impl<K, V> Seq for <Self = HashMap<K, V> |-> Item = (K, V), Iter = HashMapIterator<K, V>>
 where
 	K: Value,
@@ -396,7 +448,8 @@ impl<K, V, I> FromIterator for <Self = HashMap<K, V>, Iter = I>
 where
 	K: Value,
 	V: Value,
-	I: Iterator<Item = (K, V)>
+	I: Iterator<Item = (K, V)>,
+	I: Value
 {
 	fn from_iter(iterator: I) -> HashMap<K, V> {
 		let mut iterator = iterator;

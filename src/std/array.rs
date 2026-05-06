@@ -260,28 +260,6 @@ impl Array {
         )
     }
 
-    pub fn iter(&self) -> ArrayIterator {
-        ArrayIterator {
-            array: self.0.clone(),
-            index: 0,
-        }
-    }
-
-    fn iter_descr() -> ModuleFunction {
-        let array = array_type_generic();
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_by_val(
-            [array],
-            array_iter_type_generic(),
-            no_effects(),
-        ));
-        UnaryNativeFnRN::description_with_ty_scheme(
-            Self::iter,
-            ["array"],
-            "Creates an iterator over the array.",
-            ty_scheme,
-        )
-    }
-
     pub fn slice(&self, start: isize, end: isize) -> Self {
         let len = self.len();
         let start = self.to_unsigned_index(start).min(len);
@@ -344,72 +322,6 @@ impl<V: NativeValue + 'static> FromIterator<V> for Array {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ArrayIterator {
-    array: Rc<VecDeque<Value>>,
-    index: usize,
-}
-
-impl ArrayIterator {
-    pub fn next_value(&mut self) -> Value {
-        match self.next() {
-            Some(value) => some(value),
-            None => none(),
-        }
-    }
-
-    fn next_value_descr() -> ModuleFunction {
-        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-            [(array_iter_type_generic(), true)],
-            option_type_generic(),
-            no_effects(),
-        ));
-        UnaryNativeFnMV::description_with_ty_scheme(
-            Self::next_value,
-            ["iterator"],
-            "Gets the next value of the array.",
-            ty_scheme,
-        )
-    }
-}
-
-impl Iterator for ArrayIterator {
-    type Item = Value;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.array.len() {
-            let item = &self.array[self.index];
-            self.index += 1;
-            Some(item.clone())
-        } else {
-            None
-        }
-    }
-}
-
-impl NativeDisplay for ArrayIterator {
-    fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ArrayIterator on [")?;
-        write_with_separator_and_format_fn(
-            self.array.iter(),
-            ", ",
-            Value::format_as_string_repr,
-            f,
-        )?;
-        write!(f, "] @ {}", self.index)
-    }
-    fn fmt_pretty(&self, f: &mut fmt::Formatter, ty: &NativeType) -> fmt::Result {
-        write!(f, "ArrayIterator on [")?;
-        let inner_ty = ty.arguments[0];
-        write_with_separator(
-            self.array.iter().map(|item| item.display_pretty(&inner_ty)),
-            ", ",
-            f,
-        )?;
-        write!(f, "] @ {}", self.index)
-    }
-}
-
 pub fn array_type(element_ty: Type) -> Type {
     Type::native::<Array>([element_ty])
 }
@@ -422,18 +334,9 @@ pub fn array_type_generic() -> Type {
     cached_ty!(|| array_type(Type::variable_id(0)))
 }
 
-pub fn array_iter_type(element_ty: Type) -> Type {
-    Type::native::<ArrayIterator>([element_ty])
-}
-
-pub fn array_iter_type_generic() -> Type {
-    cached_ty!(|| array_iter_type(Type::variable_id(0)))
-}
-
 pub fn add_to_module(to: &mut Module) {
     // Types
     to.add_bare_native_type_alias_str("array", bare_native_type::<Array>());
-    to.add_bare_native_type_alias_str("array_iterator", bare_native_type::<ArrayIterator>());
 
     // TODO: use type classes to get rid of the array prefix
     // to.add_local_function(ustr("array_from_iterator"), Array::from_iterator_descr());
@@ -445,7 +348,6 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(ustr("array_with_capacity"), Array::with_capacity_descr());
     to.add_function(ustr("array_slice"), Array::slice_descr());
     to.add_function(ustr("array_concat"), Array::concat_descr());
-    to.add_function(ustr("array_iter"), Array::iter_descr());
     to.add_native_blanket_impl(
         DEFAULT_TRAIT.clone(),
         BlanketTraitImplSubKey {
@@ -465,10 +367,5 @@ pub fn add_to_module(to: &mut Module) {
         },
         [],
         [Box::new(NullaryNativeFnN::new(Array::new)) as Function],
-    );
-
-    to.add_function(
-        ustr("array_iterator_next"),
-        ArrayIterator::next_value_descr(),
     );
 }
