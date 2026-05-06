@@ -665,6 +665,42 @@ impl Node {
                     );
                 }
             }
+            GetTraitAssociatedConst(get_const) => {
+                let resolved = get_const.input_tys.iter().all(Type::is_constant);
+                if resolved {
+                    let value = ctx.trait_solver.solve_associated_const(
+                        &get_const.trait_ref,
+                        &get_const.input_tys,
+                        get_const.associated_const_index,
+                        get_const.associated_const_span,
+                        arena,
+                    )?;
+                    kind = hir::hir_syn::native(value);
+                } else {
+                    let dict_index = find_trait_impl_dict_index(
+                        ctx.dicts,
+                        &get_const.trait_ref,
+                        &get_const.input_tys,
+                    )
+                    .expect(
+                        "Dictionary for trait impl not found, type inference should have failed",
+                    );
+                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
+                    let load_id = LocalDeclId::from_index(local_count + dict_index);
+                    let load_dict_id = arena.alloc(Node::new(
+                        hir::hir_syn::load(dict_index, load_id),
+                        dict_ty,
+                        no_effects(),
+                        get_const.associated_const_span,
+                    ));
+                    kind = Project(
+                        load_dict_id,
+                        get_const
+                            .trait_ref
+                            .dictionary_associated_const_index(get_const.associated_const_index),
+                    );
+                }
+            }
             GetDictionary(_) => {
                 // nothing to do
             }
@@ -770,5 +806,146 @@ impl Node {
 
         arena[node_id].kind = kind;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{
+        FxHashMap, Location, Modules,
+        containers::b,
+        hir::GetTraitAssociatedConst,
+        hir::function::Function,
+        module::{FunctionCollector, LocalDecl, ModuleId, TraitImpls, id::Id},
+        types::{
+            r#trait::{TraitAssociatedConst, TraitRef},
+            trait_solver::TraitSolver,
+            r#type::Type,
+        },
+    };
+
+    fn layout_trait() -> TraitRef {
+        TraitRef::new_with_self_input_type(
+            "Layout",
+            "Compiler-only layout metadata.",
+            Vec::<&str>::new(),
+            Vec::<(&str, crate::hir::function::FunctionDefinition)>::new(),
+        )
+        .with_associated_consts([
+            TraitAssociatedConst::new("SIZE", "Size in bytes."),
+            TraitAssociatedConst::new("ALIGN", "Alignment in bytes."),
+        ])
+    }
+
+    fn get_associated_const_node(
+        trait_ref: TraitRef,
+        associated_const_index: usize,
+        input_tys: Vec<Type>,
+    ) -> NodeKind {
+        NodeKind::GetTraitAssociatedConst(b(GetTraitAssociatedConst {
+            associated_const_name: trait_ref.associated_consts[associated_const_index].name,
+            associated_const_span: Location::new_synthesized(),
+            trait_ref,
+            associated_const_index,
+            input_tys,
+            output_tys: vec![],
+        }))
+    }
+
+    #[test]
+    fn concrete_associated_const_elaborates_to_immediate() {
+        let trait_ref = layout_trait();
+        let mut arena = NodeArena::default();
+        let span = Location::new_synthesized();
+        let node = arena.alloc(Node::new(
+            get_associated_const_node(trait_ref.clone(), 0, vec![Type::unit()]),
+            int_type(),
+            no_effects(),
+            span,
+        ));
+
+        let mut impls = TraitImpls::new(ModuleId(0));
+        let mut fn_collector = FunctionCollector::new(0);
+        impls.add_concrete_raw(
+            trait_ref,
+            [Type::unit()],
+            [],
+            [8, 4],
+            Vec::<(Function, Vec<LocalDecl>)>::new(),
+            &mut fn_collector,
+        );
+        let modules = Modules::new();
+        let mut import_fn_slots = Vec::new();
+        let mut import_impl_slots = Vec::new();
+        let mut solver = TraitSolver::new(
+            &mut impls,
+            FxHashMap::default(),
+            &mut import_fn_slots,
+            &mut import_impl_slots,
+            FunctionCollector::new(0),
+            &modules,
+        );
+        let dicts = ExtraParameters {
+            requirements: vec![],
+            repr_map: FxHashMap::default(),
+        };
+        let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+
+        elaborate_dictionaries(&mut arena, node, &mut ctx, 0).unwrap();
+
+        let NodeKind::Immediate(immediate) = &arena[node].kind else {
+            panic!("expected associated const to elaborate to an immediate");
+        };
+        assert_eq!(immediate.value.as_primitive_ty::<isize>(), Some(&8));
+    }
+
+    #[test]
+    fn generic_associated_const_elaborates_to_dictionary_projection() {
+        let trait_ref = layout_trait();
+        let input_ty = Type::variable_id(0);
+        let mut arena = NodeArena::default();
+        let span = Location::new_synthesized();
+        let node = arena.alloc(Node::new(
+            get_associated_const_node(trait_ref.clone(), 1, vec![input_ty]),
+            int_type(),
+            no_effects(),
+            span,
+        ));
+
+        let mut impls = TraitImpls::new(ModuleId(0));
+        let modules = Modules::new();
+        let mut import_fn_slots = Vec::new();
+        let mut import_impl_slots = Vec::new();
+        let mut solver = TraitSolver::new(
+            &mut impls,
+            FxHashMap::default(),
+            &mut import_fn_slots,
+            &mut import_impl_slots,
+            FunctionCollector::new(0),
+            &modules,
+        );
+        let dicts = ExtraParameters {
+            requirements: vec![DictionaryReq::new_trait_impl(
+                trait_ref,
+                vec![input_ty],
+                vec![],
+            )],
+            repr_map: FxHashMap::default(),
+        };
+        let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
+
+        elaborate_dictionaries(&mut arena, node, &mut ctx, 3).unwrap();
+
+        let NodeKind::Project(dictionary_node, index) = arena[node].kind else {
+            panic!("expected associated const to elaborate to a dictionary projection");
+        };
+        assert_eq!(index, 1);
+        let NodeKind::EnvLoad(load) = &arena[dictionary_node].kind else {
+            panic!("expected dictionary projection source to load a dictionary");
+        };
+        assert_eq!(load.index, 0);
+        assert_eq!(load.id.as_index(), 3);
     }
 }

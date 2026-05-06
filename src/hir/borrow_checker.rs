@@ -175,6 +175,7 @@ impl Node {
             }
             GetFunction(_) => {}
             GetTraitFunction(_) => {}
+            GetTraitAssociatedConst(_) => {}
             GetDictionary(_) => {}
             EnvStore(node) => {
                 check_borrows(arena, node.value)?;

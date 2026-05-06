@@ -193,6 +193,16 @@ pub struct GetTraitFunction {
 }
 
 #[derive(Debug, Clone)]
+pub struct GetTraitAssociatedConst {
+    pub trait_ref: TraitRef,
+    pub associated_const_index: usize,
+    pub associated_const_name: Ustr,
+    pub associated_const_span: Location,
+    pub input_tys: Vec<Type>,
+    pub output_tys: Vec<Type>,
+}
+
+#[derive(Debug, Clone)]
 pub struct GetDictionary {
     pub dictionary: TraitImplId,
 }
@@ -209,6 +219,8 @@ pub enum NodeKind {
     GetFunction(B<GetFunction>),
     /// Note: this should only exist transiently in the IR and never be executed
     GetTraitFunction(B<GetTraitFunction>),
+    /// Note: this should only exist transiently in the IR and never be executed
+    GetTraitAssociatedConst(B<GetTraitAssociatedConst>),
     GetDictionary(GetDictionary),
     EnvStore(EnvStore),
     EnvLoad(EnvLoad),
@@ -239,8 +251,14 @@ impl NodeKind {
         use NodeKind::*;
         use smallvec::smallvec;
         match self {
-            Immediate(_) | GetFunction(_) | GetTraitFunction(_) | GetDictionary(_) | EnvLoad(_)
-            | SoftBreak | Unimplemented => smallvec![],
+            Immediate(_)
+            | GetFunction(_)
+            | GetTraitFunction(_)
+            | GetTraitAssociatedConst(_)
+            | GetDictionary(_)
+            | EnvLoad(_)
+            | SoftBreak
+            | Unimplemented => smallvec![],
             BuildClosure(bc) => {
                 let mut v: SVec4<NodeId> = smallvec![bc.function];
                 v.extend_from_slice(&bc.captures);
@@ -411,6 +429,14 @@ impl Node {
                 let fn_name = get_fn.trait_ref.functions[get_fn.function_index].0;
                 let trait_name = get_fn.trait_ref.name;
                 writeln!(f, "{indent_str}get trait fn {fn_name} (from {trait_name})")?;
+            }
+            GetTraitAssociatedConst(get_const) => {
+                let trait_name = get_const.trait_ref.name;
+                let const_name = get_const.associated_const_name;
+                writeln!(
+                    f,
+                    "{indent_str}get trait associated const {const_name} (from {trait_name})"
+                )?;
             }
             GetDictionary(get_dict) => {
                 writeln!(
@@ -592,6 +618,9 @@ impl Node {
             GetTraitFunction(_) => {
                 // GetTraitFunction nodes don't contain child expressions with types
             }
+            GetTraitAssociatedConst(_) => {
+                // GetTraitAssociatedConst nodes don't contain child expressions with types
+            }
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
             }
@@ -737,6 +766,14 @@ impl Node {
                 // no need to look into the value's type as it is already in this node's type
             }
             GetTraitFunction(_) => {}
+            GetTraitAssociatedConst(get_const) => {
+                for ty in &get_const.input_tys {
+                    self.unbound_ty_vars_in_ty(ty, result, ignore);
+                }
+                for ty in &get_const.output_tys {
+                    self.unbound_ty_vars_in_ty(ty, result, ignore);
+                }
+            }
             GetDictionary(_) => {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
@@ -838,6 +875,18 @@ pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitut
                 .map(|ty| ty.instantiate(subst))
                 .collect();
             get_fn.inst_data.instantiate(subst);
+        }
+        GetTraitAssociatedConst(get_const) => {
+            get_const.input_tys = get_const
+                .input_tys
+                .iter()
+                .map(|ty| ty.instantiate(subst))
+                .collect();
+            get_const.output_tys = get_const
+                .output_tys
+                .iter()
+                .map(|ty| ty.instantiate(subst))
+                .collect();
         }
         _ => {}
     }

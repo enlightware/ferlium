@@ -728,6 +728,11 @@ pub fn eval_node_with_ctx(
                 "Trait function value should not be executed, but transformed to a function value"
             );
         }
+        GetTraitAssociatedConst(_) => {
+            panic!(
+                "Trait associated const should not be executed, but transformed to an immediate or dictionary projection"
+            );
+        }
         GetFunction(get_fn) => {
             let (function, module_id) = ctx.get_function_local_id(get_fn.function);
             cont(Value::function(function, module_id))

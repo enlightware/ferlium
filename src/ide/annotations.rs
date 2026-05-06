@@ -297,6 +297,9 @@ fn node_variable_type_annotations(
         GetTraitFunction(_) => {
             // There is no GetTraitFunction left in the final IR.
         }
+        GetTraitAssociatedConst(_) => {
+            // There is no GetTraitAssociatedConst left in the final IR.
+        }
         GetDictionary(_) => {}
         EnvStore(node) => {
             // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.

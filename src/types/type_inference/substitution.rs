@@ -155,6 +155,10 @@ impl UnifiedTypeInference {
                 get_fn.output_tys = self.substitute_in_types(&get_fn.output_tys);
                 self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
             }
+            GetTraitAssociatedConst(get_const) => {
+                get_const.input_tys = self.substitute_in_types(&get_const.input_tys);
+                get_const.output_tys = self.substitute_in_types(&get_const.output_tys);
+            }
             _ => {}
         }
     }
