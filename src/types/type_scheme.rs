@@ -1101,7 +1101,7 @@ pub(crate) fn extra_parameters_from_constraints(
                         "Type scheme with trait having only non-variable input types in constraints"
                     )
                 }
-                if trait_ref.functions.is_empty() {
+                if !trait_ref.has_runtime_dictionary_entries() {
                     None // Marker traits have no runtime dictionary entries.
                 } else {
                     Some(DictionaryReq::new_trait_impl(

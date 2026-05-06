@@ -153,14 +153,14 @@ impl TraitKey {
 pub struct TraitImpl {
     /// The output types of the trait.
     pub output_tys: Vec<Type>,
+    /// The implemented methods in the module.
+    pub methods: Vec<LocalFunctionId>,
     /// Values for compiler-defined associated consts, in trait declaration order.
     #[new(default)]
     pub associated_const_values: Vec<isize>,
-    /// The implemented methods in the module.
-    pub methods: Vec<LocalFunctionId>,
-    /// The implemented methods, in a tuple of first-class functions of the proper types.
+    /// The runtime dictionary, with methods first and associated const values after them.
     pub dictionary_value: Value,
-    /// The type of the dictionary, a tuple of function types.
+    /// The type of the runtime dictionary.
     /// If the implementation is a blanket one, the key contains the rest of the type scheme.
     pub dictionary_ty: Type,
     /// Visibility, hand-written implementations are public, derived ones are private.
@@ -305,11 +305,12 @@ impl TraitImpls {
                 .qualified_method_name(method_index, &input_tys)
                 .into()
         };
-        let (methods, dictionary_type) =
-            Self::bundle_module_functions(functions, fn_collector, namer);
+        let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
-        let dictionary_value = build_dictionary_value(&methods, self.module_id);
+        let dictionary_type = Self::dictionary_ty(method_tys, associated_const_values.len());
+        let dictionary_value =
+            build_dictionary_value(&methods, &associated_const_values, self.module_id);
         let imp = TraitImpl::new(
             output_tys,
             methods,
@@ -392,11 +393,12 @@ impl TraitImpls {
                 .qualified_method_name(method_index, &sub_key.input_tys)
                 .into()
         };
-        let (methods, dictionary_type) =
-            Self::bundle_module_functions(functions, fn_collector, namer);
+        let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
 
         // Build and insert the implementation.
-        let dictionary_value = build_dictionary_value(&methods, self.module_id);
+        let dictionary_type = Self::dictionary_ty(method_tys, associated_const_values.len());
+        let dictionary_value =
+            build_dictionary_value(&methods, &associated_const_values, self.module_id);
         let imp = TraitImpl::new(
             output_tys,
             methods,
@@ -427,7 +429,7 @@ impl TraitImpls {
         functions: Vec<ModuleFunction>,
         fn_collector: &mut FunctionCollector,
         namer: impl Fn(usize) -> Ustr,
-    ) -> (Vec<LocalFunctionId>, Type) {
+    ) -> (Vec<LocalFunctionId>, Vec<Type>) {
         let (methods, tys): (Vec<_>, Vec<_>) = functions
             .into_iter()
             .enumerate()
@@ -438,8 +440,16 @@ impl TraitImpls {
                 (id, fn_ty)
             })
             .multiunzip();
-        let dictionary_ty = Type::tuple(tys);
-        (methods, dictionary_ty)
+        (methods, tys)
+    }
+
+    pub fn dictionary_ty(method_tys: Vec<Type>, associated_const_count: usize) -> Type {
+        Type::tuple(
+            method_tys
+                .into_iter()
+                .chain((0..associated_const_count).map(|_| Type::primitive::<isize>()))
+                .collect::<Vec<_>>(),
+        )
     }
 
     pub fn concrete(&self) -> &ConcreteImpls {

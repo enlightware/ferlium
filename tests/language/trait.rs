@@ -12,12 +12,15 @@ use test_log::test;
 use ferlium::{
     compiler::error::{CompilationErrorImpl, InvalidTraitDefinitionKind},
     format::FormatWith,
-    hir::function::Function,
+    hir::{
+        function::{Function, FunctionDefinition, VoidFunction},
+        value::Value,
+    },
     module::{FunctionCollector, LocalDecl, ModuleId, TraitImpls},
     types::{
-        effects::{PrimitiveEffect, effect},
+        effects::{PrimitiveEffect, effect, no_effects},
         r#trait::{TraitAssociatedConst, TraitRef},
-        r#type::{Type, TypeVar},
+        r#type::{FnType, Type, TypeVar},
     },
 };
 use indoc::indoc;
@@ -166,11 +169,16 @@ fn user_defined_traits_store_outputs_constraints_and_effects() {
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concrete_impl_stores_associated_const_values() {
+    let method = FunctionDefinition::new_infer_quantifiers(
+        FnType::new_by_val([Type::variable_id(0)], Type::variable_id(0), no_effects()),
+        ["value"],
+        "Returns the value.",
+    );
     let trait_ref = TraitRef::new_with_self_input_type(
         "Layout",
         "Compiler-only layout metadata.",
         Vec::<&str>::new(),
-        Vec::<(&str, ferlium::hir::function::FunctionDefinition)>::new(),
+        [("identity", method)],
     )
     .with_associated_consts([
         TraitAssociatedConst::new("SIZE", "Size in bytes."),
@@ -184,16 +192,33 @@ fn concrete_impl_stores_associated_const_values() {
         [Type::unit()],
         [],
         [0, 1],
-        Vec::<(Function, Vec<LocalDecl>)>::new(),
+        [(Box::new(VoidFunction) as Function, Vec::<LocalDecl>::new())],
         &mut fn_collector,
     );
     let imp = impls.get_impl_by_local_id(impl_id);
 
+    assert_eq!(trait_ref.dictionary_method_index(0), 0);
     assert_eq!(trait_ref.associated_const_index(ustr("SIZE")), Some(0));
     assert_eq!(trait_ref.associated_const_index(ustr("ALIGN")), Some(1));
+    assert_eq!(trait_ref.dictionary_associated_const_index(0), 1);
+    assert_eq!(trait_ref.dictionary_associated_const_index(1), 2);
     assert_eq!(imp.associated_const_value(0), Some(0));
     assert_eq!(imp.associated_const_value(1), Some(1));
-    assert!(fn_collector.new_elements.is_empty());
+    assert_eq!(fn_collector.new_elements.len(), 1);
+
+    let Value::Tuple(dictionary_entries) = &imp.dictionary_value else {
+        panic!("expected dictionary value to be a tuple");
+    };
+    assert!(dictionary_entries[0].as_function().is_some());
+    assert_eq!(dictionary_entries[1].as_primitive_ty::<isize>(), Some(&0));
+    assert_eq!(dictionary_entries[2].as_primitive_ty::<isize>(), Some(&1));
+
+    let int_ty = Type::primitive::<isize>();
+    let dictionary_ty_data = imp.dictionary_ty.data();
+    let dictionary_tys = dictionary_ty_data.as_tuple().unwrap();
+    assert!(dictionary_tys[0].data().as_function().is_some());
+    assert_eq!(dictionary_tys[1], int_ty);
+    assert_eq!(dictionary_tys[2], int_ty);
 }
 
 #[test]

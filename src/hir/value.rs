@@ -469,10 +469,15 @@ impl Display for LiteralValue {
     }
 }
 
-pub fn build_dictionary_value(methods: &[LocalFunctionId], module_id: ModuleId) -> Value {
+pub fn build_dictionary_value(
+    methods: &[LocalFunctionId],
+    associated_const_values: &[isize],
+    module_id: ModuleId,
+) -> Value {
     let values: Vec<_> = methods
         .iter()
         .map(|&fn_id| Value::function(fn_id, module_id))
+        .chain(associated_const_values.iter().copied().map(Value::native))
         .collect();
     Value::tuple(values)
 }

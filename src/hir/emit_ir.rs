@@ -217,8 +217,8 @@ pub fn emit_module(
                 method_ids.push(output.add_function_anonymous(module_fn));
             }
             // Build the trait impl and fill it with placeholders.
-            let dictionary_value = build_dictionary_value(&method_ids, output.impls.module_id);
-            let dictionary_ty = output.computer_dictionary_ty(&method_ids);
+            let dictionary_value = build_dictionary_value(&method_ids, &[], output.impls.module_id);
+            let dictionary_ty = output.computer_dictionary_ty(&method_ids, 0);
             let stub = TraitImpl::new(
                 output_tys,
                 method_ids.clone(),
@@ -346,7 +346,7 @@ pub fn emit_module(
                 &emit_output.functions,
                 &output.impls.data[stub_data.id.as_index()].methods
             );
-            let new_dictionary_ty = output.computer_dictionary_ty(&emit_output.functions);
+            let new_dictionary_ty = output.computer_dictionary_ty(&emit_output.functions, 0);
             let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
             assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
             stub_data.id

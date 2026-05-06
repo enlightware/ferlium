@@ -522,8 +522,8 @@ impl Node {
                         inst_data: hir::FnInstData::none(),
                     }));
                 } else {
-                    // Not fully resolved, use the dictionary to look up the trait functions tuple...
-                    let fns_tuple_index = find_trait_impl_dict_index(
+                    // Not fully resolved, use the dictionary to look up the trait method.
+                    let dict_index = find_trait_impl_dict_index(
                         ctx.dicts,
                         &app.trait_ref,
                         &app.input_tys,
@@ -531,26 +531,25 @@ impl Node {
                     .expect(
                         "Dictionary for trait impl not found, type inference should have failed",
                     );
-                    // Build a tuple type where the app.function_index_th element is the function pointer
-                    // and the rest never;
-                    let fns_tuple_ty = ctx.dicts.requirements[fns_tuple_index].to_dict_type();
+                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
                     let function_span = app.function_span;
-                    let function_index = app.function_index;
-                    // Load that tuple from the correct local variable...
-                    let load_id = LocalDeclId::from_index(local_count + fns_tuple_index);
-                    let load_fns_tuple_id = arena.alloc(Node::new(
-                        hir::hir_syn::load(fns_tuple_index, load_id),
-                        fns_tuple_ty,
+                    let dictionary_entry_index =
+                        app.trait_ref.dictionary_method_index(app.function_index);
+                    // Load that dictionary from the correct local variable.
+                    let load_id = LocalDeclId::from_index(local_count + dict_index);
+                    let load_dict_id = arena.alloc(Node::new(
+                        hir::hir_syn::load(dict_index, load_id),
+                        dict_ty,
                         no_effects(),
                         function_span,
                     ));
                     // ...and from it the function pointer.
-                    let fn_ty = fns_tuple_ty
+                    let fn_ty = dict_ty
                         .data()
                         .as_tuple()
-                        .expect("Trait impl dict should be a tuple type")[function_index];
+                        .expect("Trait impl dict should be a tuple type")[dictionary_entry_index];
                     let project_fn_id = arena.alloc(Node::new(
-                        Project(load_fns_tuple_id, function_index),
+                        Project(load_dict_id, dictionary_entry_index),
                         fn_ty,
                         no_effects(),
                         function_span,
@@ -642,7 +641,7 @@ impl Node {
                         inst_data: hir::FnInstData::none(),
                     }));
                 } else {
-                    let fns_tuple_index = find_trait_impl_dict_index(
+                    let dict_index = find_trait_impl_dict_index(
                         ctx.dicts,
                         &get_fn.trait_ref,
                         &get_fn.input_tys,
@@ -650,15 +649,20 @@ impl Node {
                     .expect(
                         "Dictionary for trait impl not found, type inference should have failed",
                     );
-                    let fns_tuple_ty = ctx.dicts.requirements[fns_tuple_index].to_dict_type();
-                    let load_id = LocalDeclId::from_index(local_count + fns_tuple_index);
-                    let load_fns_tuple_id = arena.alloc(Node::new(
-                        hir::hir_syn::load(fns_tuple_index, load_id),
-                        fns_tuple_ty,
+                    let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
+                    let load_id = LocalDeclId::from_index(local_count + dict_index);
+                    let load_dict_id = arena.alloc(Node::new(
+                        hir::hir_syn::load(dict_index, load_id),
+                        dict_ty,
                         no_effects(),
                         get_fn.function_span,
                     ));
-                    kind = Project(load_fns_tuple_id, get_fn.function_index);
+                    kind = Project(
+                        load_dict_id,
+                        get_fn
+                            .trait_ref
+                            .dictionary_method_index(get_fn.function_index),
+                    );
                 }
             }
             GetDictionary(_) => {

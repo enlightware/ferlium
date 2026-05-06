@@ -958,8 +958,9 @@ impl<'a> TraitSolver<'a> {
             tys.push(ty);
         }
 
-        let dictionary_ty = Type::tuple(tys);
-        let dictionary_value = build_dictionary_value(&methods, self.impls.module_id);
+        let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_values.len());
+        let dictionary_value =
+            build_dictionary_value(&methods, &associated_const_values, self.impls.module_id);
         let imp = TraitImpl::new(
             output_types.to_vec(),
             methods,
@@ -1160,8 +1161,8 @@ impl<'a> TraitSolver<'a> {
             } else {
                 let imp = TraitImpl {
                     output_tys: vec![output_ty],
-                    associated_const_values: vec![],
                     methods: vec![],
+                    associated_const_values: vec![],
                     dictionary_value: Value::empty_tuple(),
                     dictionary_ty: Type::tuple([]),
                     public: false,
@@ -1242,7 +1243,10 @@ impl<'a> TraitSolver<'a> {
                 let mut constraint_dict_ids = Vec::with_capacity(resolved_constraints.len());
                 for resolved_constraint in resolved_constraints {
                     // Marker traits have no runtime dictionary entries.
-                    if resolved_constraint.trait_ref.functions.is_empty() {
+                    if !resolved_constraint
+                        .trait_ref
+                        .has_runtime_dictionary_entries()
+                    {
                         continue;
                     }
                     let dict_id = match self.solve_impl(
@@ -1272,6 +1276,7 @@ impl<'a> TraitSolver<'a> {
                     &self.impls
                 };
                 let imp = &impls.data[impl_id.as_index()];
+                let associated_const_values = imp.associated_const_values.clone();
 
                 // Then collect constraint dictionary info for building thunk nodes later.
                 // Each thunk gets its own arena, so we store (NodeKind, Type) pairs to re-create them.
@@ -1385,8 +1390,12 @@ impl<'a> TraitSolver<'a> {
                     .multiunzip();
 
                 // Build and insert the implementation.
-                let dictionary_ty = Type::tuple(tys);
-                let dictionary_value = build_dictionary_value(&methods, self.impls.module_id);
+                let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_values.len());
+                let dictionary_value = build_dictionary_value(
+                    &methods,
+                    &associated_const_values,
+                    self.impls.module_id,
+                );
                 let imp = TraitImpl::new(
                     output_tys,
                     methods,
@@ -1394,7 +1403,8 @@ impl<'a> TraitSolver<'a> {
                     dictionary_ty,
                     false,
                     None,
-                );
+                )
+                .with_associated_const_values(associated_const_values);
                 let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
                 let local_impl_id = self.impls.add_concrete_struct(key, imp);
 

@@ -592,8 +592,9 @@ impl Module {
         emit_output: EmitTraitOutput,
         source_span: Option<Location>,
     ) -> LocalImplId {
-        let dictionary_ty = self.computer_dictionary_ty(&emit_output.functions);
-        let dictionary_value = build_dictionary_value(&emit_output.functions, self.impls.module_id);
+        let dictionary_ty = self.computer_dictionary_ty(&emit_output.functions, 0);
+        let dictionary_value =
+            build_dictionary_value(&emit_output.functions, &[], self.impls.module_id);
         let imp = TraitImpl::new(
             emit_output.output_tys,
             emit_output.functions,
@@ -873,7 +874,11 @@ impl Module {
     }
     */
 
-    pub(crate) fn computer_dictionary_ty(&self, function_ids: &[LocalFunctionId]) -> Type {
+    pub(crate) fn computer_dictionary_ty(
+        &self,
+        function_ids: &[LocalFunctionId],
+        associated_const_count: usize,
+    ) -> Type {
         let tys: Vec<_> = function_ids
             .iter()
             .map(|id| {
@@ -884,7 +889,7 @@ impl Module {
                 Type::function_type(function.definition.ty_scheme.ty.clone())
             })
             .collect();
-        Type::tuple(tys)
+        TraitImpls::dictionary_ty(tys, associated_const_count)
     }
 
     fn format_with_modules(

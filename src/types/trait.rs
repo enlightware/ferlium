@@ -115,10 +115,10 @@ pub struct Trait {
     pub output_type_names: Vec<Ustr>,
     /// The constraints on the trait, for example related to the associated types.
     pub constraints: Vec<PubTypeConstraint>,
-    /// Compiler-defined associated consts provided by implementations.
-    pub associated_consts: Vec<TraitAssociatedConst>,
     /// The functions provided by the trait.
     pub functions: Vec<(Ustr, FunctionDefinition)>,
+    /// Compiler-defined associated consts provided by implementations.
+    pub associated_consts: Vec<TraitAssociatedConst>,
     /// The trait derivers
     pub derivers: Vec<Box<dyn Deriver>>,
     /// Whether Ferlium source code is allowed to implement this trait.
@@ -163,9 +163,36 @@ impl Trait {
         self.input_type_count() + self.output_type_count()
     }
 
+    /// Return the number of methods in this trait.
+    pub fn method_count(&self) -> usize {
+        self.functions.len()
+    }
+
     /// Return the number of associated consts in this trait.
     pub fn associated_const_count(&self) -> usize {
         self.associated_consts.len()
+    }
+
+    /// Return the number of runtime dictionary entries for this trait.
+    pub fn runtime_dictionary_entry_count(&self) -> usize {
+        self.method_count() + self.associated_const_count()
+    }
+
+    /// Return whether this trait needs a runtime dictionary.
+    pub fn has_runtime_dictionary_entries(&self) -> bool {
+        self.runtime_dictionary_entry_count() > 0
+    }
+
+    /// Return the runtime dictionary index for a method.
+    pub fn dictionary_method_index(&self, method_index: usize) -> usize {
+        assert!(method_index < self.method_count());
+        method_index
+    }
+
+    /// Return the runtime dictionary index for an associated const.
+    pub fn dictionary_associated_const_index(&self, associated_const_index: usize) -> usize {
+        assert!(associated_const_index < self.associated_const_count());
+        self.method_count() + associated_const_index
     }
 
     /// Return the index of the associated const with the given name, if it exists.
@@ -328,6 +355,11 @@ impl Trait {
             self.functions
                 .iter()
                 .map(|(_, def)| Type::function_type(def.ty_scheme.ty.instantiate(&inst_subst)))
+                .chain(
+                    self.associated_consts
+                        .iter()
+                        .map(|_| Type::primitive::<isize>()),
+                )
                 .collect::<Vec<_>>(),
         )
     }
@@ -454,8 +486,8 @@ impl TraitRef {
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: Vec::new(),
-            associated_consts: Vec::new(),
             functions,
+            associated_consts: Vec::new(),
             derivers: Vec::new(),
             impl_policy: TraitImplPolicy::UserImplementable,
             spans: None,
@@ -497,8 +529,8 @@ impl TraitRef {
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: constraints.into(),
-            associated_consts: Vec::new(),
             functions,
+            associated_consts: Vec::new(),
             derivers: Vec::new(),
             impl_policy: TraitImplPolicy::UserImplementable,
             spans: None,
