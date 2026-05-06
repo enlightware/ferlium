@@ -319,11 +319,7 @@ pub fn emit_module(
         // Check that all functions in the impl are part of the trait.
         let mut extra_spans = vec![];
         for func in imp.functions.iter() {
-            if !trait_ref
-                .functions
-                .iter()
-                .any(|(trait_func_name, _)| *trait_func_name == func.name.0)
-            {
+            if trait_ref.method_index(func.name.0).is_none() {
                 extra_spans.push(func.name.1);
             }
         }

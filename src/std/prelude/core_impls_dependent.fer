@@ -41,6 +41,12 @@ impl<A> Value for [A] where A: Value {
 			hash(element, state);
 		}
 	}
+
+	fn clone(source: [A], target: &mut [A]) {
+		target = source;
+	}
+
+	fn drop(target: &mut [A]) {}
 }
 
 // Serde derive helper

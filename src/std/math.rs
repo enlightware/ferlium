@@ -19,7 +19,7 @@ use crate::{
     hir::function::{
         BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV,
         BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN, BinaryNativeFnRRV, Function,
-        NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnRN,
+        NullaryNativeFnN, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnRN,
     },
     hir::value::{NativeDisplay, Value},
     module::Module,
@@ -31,7 +31,10 @@ use crate::{
         hash::Hasher,
         ordering::compare,
         string::String,
-        value::{VALUE_TRAIT, equal, native_layout_associated_consts},
+        value::{
+            VALUE_TRAIT, equal, native_layout_associated_consts, native_value_clone,
+            native_value_drop,
+        },
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
     types::r#type::Type,
@@ -287,6 +290,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(equal::<Int>)) as Function,
             b(UnaryFn::new(|value: Int| String::new(&value.to_string()))) as Function,
             b(BinaryNativeFnNMN::new(hash_int)) as Function,
+            b(BinaryNativeFnRMN::new(native_value_clone::<Int>)) as Function,
+            b(UnaryNativeFnMN::new(native_value_drop::<Int>)) as Function,
         ],
     );
     let num_trait = to.get_trait_str(NUM_TRAIT_NAME).unwrap().clone();
@@ -416,6 +421,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRRN::new(equal_float)) as Function,
             b(UnaryNativeFnRN::new(float_to_string)) as Function,
             b(BinaryNativeFnRMN::new(hash_float)) as Function,
+            b(BinaryNativeFnRMN::new(native_value_clone::<Float>)) as Function,
+            b(UnaryNativeFnMN::new(native_value_drop::<Float>)) as Function,
         ],
     );
     to.add_native_concrete_impl(

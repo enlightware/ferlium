@@ -90,6 +90,24 @@ fn blanket_value_impls_materialize_layout_associated_consts() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn value_clone_and_drop_cannot_be_called_explicitly() {
+    let mut session = TestSession::new();
+
+    for source in ["drop(1)", "let f = clone; f"] {
+        match session.fail_compilation(source).into_inner() {
+            CompilationErrorImpl::Unsupported { reason, .. } => {
+                assert!(
+                    reason.contains("reserved for compiler-generated code"),
+                    "unexpected error reason: {reason}"
+                );
+            }
+            other => panic!("expected Unsupported error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn immutable_native_inputs_borrow_places_without_cloning() {
     let mut session = TestSession::new();
     assert_val_eq!(

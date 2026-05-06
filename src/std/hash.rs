@@ -14,7 +14,7 @@ use crate::{
     containers::b,
     hir::function::{
         BinaryNativeFnMNN, BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRN, Function,
-        NullaryNativeFnN, UnaryNativeFnRN,
+        NullaryNativeFnN, UnaryNativeFnMN, UnaryNativeFnRN,
     },
     hir::value::NativeDisplay,
     module::Module,
@@ -22,7 +22,9 @@ use crate::{
         cast::CAST_TRAIT,
         math::int_type,
         string::String,
-        value::{VALUE_TRAIT, native_layout_associated_consts},
+        value::{
+            VALUE_TRAIT, native_layout_associated_consts, native_value_clone, native_value_drop,
+        },
     },
     types::effects::no_effects,
     types::r#type::Type,
@@ -208,6 +210,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRRN::new(equal_hash_value)) as Function,
             b(UnaryNativeFnRN::new(hash_value_to_string)) as Function,
             b(BinaryNativeFnRMN::new(hash_hash_value)) as Function,
+            b(BinaryNativeFnRMN::new(native_value_clone::<HashValue>)) as Function,
+            b(UnaryNativeFnMN::new(native_value_drop::<HashValue>)) as Function,
         ],
     );
     to.add_native_concrete_impl(

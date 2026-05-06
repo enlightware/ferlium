@@ -24,7 +24,7 @@ use crate::{
     hir::function::{
         BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN,
         BinaryNativeFnRRV, Function, NullaryNativeFnN, TernaryNativeFnRNNN, TernaryNativeFnRRRN,
-        UnaryNativeFnMV, UnaryNativeFnRN, UnaryNativeFnRV,
+        UnaryNativeFnMN, UnaryNativeFnMV, UnaryNativeFnRN, UnaryNativeFnRV,
     },
     hir::value::{NativeDisplay, Value},
     module::{Module, ModuleFunction},
@@ -36,7 +36,9 @@ use crate::{
         logic::bool_type,
         math::{float_type, float_value, int_type, int_value},
         ordering::compare,
-        value::{VALUE_TRAIT, native_layout_associated_consts},
+        value::{
+            VALUE_TRAIT, native_layout_associated_consts, native_value_clone, native_value_drop,
+        },
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
     types::r#type::{FnType, Type},
@@ -520,6 +522,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRRN::new(equal_string)) as Function,
             b(UnaryNativeFnRN::new(String::clone)) as Function,
             b(BinaryNativeFnRMN::new(hash_string)) as Function,
+            b(BinaryNativeFnRMN::new(native_value_clone::<String>)) as Function,
+            b(UnaryNativeFnMN::new(native_value_drop::<String>)) as Function,
         ],
     );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();

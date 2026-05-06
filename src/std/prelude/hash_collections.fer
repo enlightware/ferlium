@@ -165,6 +165,12 @@ where
 	fn hash(value: HashSet<V>, state: &mut hasher) {
 	    hash_collection_hash(value, "hash_set", state)
 	}
+
+	fn clone(source: HashSet<V>, target: &mut HashSet<V>) {
+		target = source;
+	}
+
+	fn drop(target: &mut HashSet<V>) {}
 }
 
 // Hash maps
@@ -200,6 +206,12 @@ where
 		hash(value.key, state);
 		hash(value.value, state);
 	}
+
+	fn clone(source: HashMapEntry<K, V>, target: &mut HashMapEntry<K, V>) {
+		target = source;
+	}
+
+	fn drop(target: &mut HashMapEntry<K, V>) {}
 }
 
 /// A map storing unique, unordered key-value pairs of types `K` and `V`.
@@ -416,6 +428,12 @@ where
 	fn hash(value: HashMap<K, V>, state: &mut hasher) {
 	    hash_collection_hash(value, "hash_map", state)
 	}
+
+	fn clone(source: HashMap<K, V>, target: &mut HashMap<K, V>) {
+		target = source;
+	}
+
+	fn drop(target: &mut HashMap<K, V>) {}
 }
 
 // Common hash collection machinery functions

@@ -38,6 +38,8 @@ where
 const VALUE_EQ_METHOD_INDEX: usize = 0;
 const VALUE_TO_STRING_METHOD_INDEX: usize = 1;
 const VALUE_HASH_METHOD_INDEX: usize = 2;
+pub(crate) const VALUE_CLONE_METHOD_INDEX: usize = 3;
+pub(crate) const VALUE_DROP_METHOD_INDEX: usize = 4;
 pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: usize = 0;
 pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: usize = 1;
 
@@ -47,6 +49,12 @@ pub(crate) fn native_layout_associated_consts<T>() -> [isize; 2] {
     values[VALUE_ALIGN_ASSOC_CONST_INDEX] = mem::align_of::<T>() as isize;
     values
 }
+
+pub(crate) fn native_value_clone<T: Clone>(source: &T, target: &mut T) {
+    target.clone_from(source);
+}
+
+pub(crate) fn native_value_drop<T>(_target: &mut T) {}
 
 #[derive(Debug, Clone, Copy)]
 struct ValueLayout {
@@ -741,6 +749,78 @@ fn derive_value_hash_body(
     Ok(root)
 }
 
+// Temporary placeholder: this only fills the Value dictionary slot until real
+// Ferlium-owned clone derivation is implemented.
+fn derive_value_clone_body(
+    input_types: &[Type],
+    arena: &mut NodeArena,
+) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
+    use hir::hir_syn::*;
+
+    assert!(input_types.len() == 1);
+    let ty = input_types[0];
+    assert!(ty.is_constant());
+
+    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+        arena.alloc(hir::Node::new(
+            kind,
+            ty,
+            EffType::empty(),
+            Location::new_synthesized(),
+        ))
+    };
+
+    let source_id = LocalDeclId::from_index(0);
+    let target_id = LocalDeclId::from_index(1);
+    let locals = vec![
+        local("source", ty),
+        LocalDecl::new(
+            (crate::ustr("target"), Location::new_synthesized()),
+            MutType::mutable(),
+            ty,
+            None,
+            Location::new_synthesized(),
+        ),
+    ];
+    let target = n(arena, load(1, target_id), ty);
+    let source = n(arena, load(0, source_id), ty);
+    let root = n(
+        arena,
+        hir::NodeKind::Assign(hir::Assignment {
+            place: target,
+            value: source,
+        }),
+        Type::unit(),
+    );
+
+    Ok(Some((root, locals)))
+}
+
+// Temporary placeholder: this only fills the Value dictionary slot until real
+// Ferlium-owned drop derivation is implemented.
+fn derive_value_drop_body(input_types: &[Type], arena: &mut NodeArena) -> (NodeId, Vec<LocalDecl>) {
+    use hir::hir_syn::*;
+
+    assert!(input_types.len() == 1);
+    let ty = input_types[0];
+    assert!(ty.is_constant());
+
+    let root = arena.alloc(hir::Node::new(
+        native(()),
+        Type::unit(),
+        EffType::empty(),
+        Location::new_synthesized(),
+    ));
+    let locals = vec![LocalDecl::new(
+        (crate::ustr("target"), Location::new_synthesized()),
+        MutType::mutable(),
+        ty,
+        None,
+        Location::new_synthesized(),
+    )];
+    (root, locals)
+}
+
 fn derive_structural_value_impl(
     trait_ref: &TraitRef,
     input_types: &[Type],
@@ -803,6 +883,11 @@ fn derive_structural_value_impl(
         solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
+    let Some((clone_root, clone_locals)) = derive_value_clone_body(input_types, arena)? else {
+        solver.rollback_derived_impl_state(snapshot);
+        return Ok(None);
+    };
+    let (drop_root, drop_locals) = derive_value_drop_body(input_types, arena);
     solver.replace_concrete_impl_code_entries(
         impl_id,
         trait_ref,
@@ -812,6 +897,8 @@ fn derive_structural_value_impl(
             (eq_root, eq_locals),
             (to_string_root, to_string_locals),
             (hash_root, hash_locals),
+            (clone_root, clone_locals),
+            (drop_root, drop_locals),
         ],
     );
     Ok(Some(TraitImplId::Local(impl_id)))
@@ -850,6 +937,19 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
         Type::unit(),
         EffType::empty(),
     );
+    let clone_ty = FnType::new(
+        vec![
+            FnArgType::new_by_val(var_ty),
+            FnArgType::new(var_ty, MutType::mutable()),
+        ],
+        Type::unit(),
+        EffType::empty(),
+    );
+    let drop_ty = FnType::new(
+        vec![FnArgType::new(var_ty, MutType::mutable())],
+        Type::unit(),
+        EffType::empty(),
+    );
     let trait_ref = TraitRef::new_with_self_input_type(
         "Value",
         "A type that supports semantic equality, string conversion, hashing, and layout metadata.",
@@ -877,6 +977,22 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                     binary_hash_ty,
                     ["value", "state"],
                     "Writes the hash of `value` into `state`.",
+                ),
+            ),
+            (
+                "clone",
+                Def::new_infer_quantifiers(
+                    clone_ty,
+                    ["source", "target"],
+                    "Compiler-owned method that clones `source` into already allocated `target` storage.",
+                ),
+            ),
+            (
+                "drop",
+                Def::new_infer_quantifiers(
+                    drop_ty,
+                    ["target"],
+                    "Compiler-owned method that drops `target` in place.",
                 ),
             ),
         ],

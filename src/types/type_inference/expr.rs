@@ -23,13 +23,20 @@ use crate::{
     internal_compilation_error,
     module::{LocalDecl, LocalDeclId, ModuleEnv, ModuleFunction, TypeDefLookupResult, id::Id},
     parser::location::Location,
-    std::{STD_MODULE_ID, array::array_type, core::REPR_TRAIT, math::int_type},
+    std::{
+        STD_MODULE_ID,
+        array::array_type,
+        core::REPR_TRAIT,
+        math::int_type,
+        value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT},
+    },
     types::{
         effects::{
             EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution, PrimitiveEffect, effect,
             no_effects,
         },
         mutability::{MutType, MutVar, MutVarKey},
+        r#trait::TraitRef,
         trait_solver::TraitSolver,
         r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
         type_like::TypeLike,
@@ -43,6 +50,15 @@ use super::{
     constraints::{EffectConstraint, MutConstraint, TypeConstraint},
     unify::UnifiedTypeInference,
 };
+
+/// Returns whether a trait method may only be called by compiler-generated HIR.
+fn is_compiler_callable_only_method(trait_ref: &TraitRef, method_index: usize) -> bool {
+    trait_ref == &*VALUE_TRAIT
+        && matches!(
+            method_index,
+            VALUE_CLONE_METHOD_INDEX | VALUE_DROP_METHOD_INDEX
+        )
+}
 
 /// The type inference status, containing the unification table and the constraints
 #[derive(Default, Debug)]
@@ -337,6 +353,15 @@ impl TypeInference {
                     env.module_env.get_trait_function(path)?
                 {
                     let (trait_ref, function_index, definition) = trait_descr;
+                    if is_compiler_callable_only_method(&trait_ref, function_index) {
+                        return Err(internal_compilation_error!(Unsupported {
+                            span: expr_span,
+                            reason: format!(
+                                "Explicit use of `{}::{}` is reserved for compiler-generated code.",
+                                trait_ref.name, trait_ref.functions[function_index].0
+                            ),
+                        }));
+                    }
                     let (inst_fn_ty, inst_data, subst) =
                         definition.ty_scheme.instantiate_with_fresh_vars(
                             self,
@@ -1123,6 +1148,15 @@ impl TypeInference {
         Ok(
             if let Some((_module_name, trait_descr)) = env.module_env.get_trait_function(path)? {
                 let (trait_ref, function_index, definition) = trait_descr;
+                if is_compiler_callable_only_method(&trait_ref, function_index) {
+                    return Err(internal_compilation_error!(Unsupported {
+                        span: path_span,
+                        reason: format!(
+                            "Explicit use of `{}::{}` is reserved for compiler-generated code.",
+                            trait_ref.name, trait_ref.functions[function_index].0
+                        ),
+                    }));
+                }
                 // Validate the number of arguments
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
