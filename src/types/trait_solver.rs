@@ -31,7 +31,11 @@ use crate::{
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitImpl,
         TraitImplId, TraitImpls, TraitKey, id::Id,
     },
-    std::{core::REPR_TRAIT, new_module_using_std},
+    std::{
+        core::REPR_TRAIT,
+        new_module_using_std,
+        value::{VALUE_TRAIT, value_layout_associated_const_values},
+    },
     types::effects::EffType,
     types::mutability::MutType,
     types::r#trait::TraitRef,
@@ -71,6 +75,32 @@ pub struct TraitSolver<'a> {
 }
 
 const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
+
+fn materialized_associated_const_values(
+    trait_ref: &TraitRef,
+    input_tys: &[Type],
+    template_values: &[isize],
+    span: Location,
+) -> Result<Vec<isize>, InternalCompilationError> {
+    if trait_ref.associated_const_count() == 0 {
+        return Ok(Vec::new());
+    }
+    if template_values.len() == trait_ref.associated_const_count() {
+        return Ok(template_values.to_vec());
+    }
+    // Temporary special case: blanket impls cannot yet store associated const
+    // formulas, so materialized Value dictionaries synthesize layout metadata.
+    if trait_ref == &*VALUE_TRAIT {
+        return Ok(value_layout_associated_const_values(input_tys[0], span)?.into());
+    }
+    Err(internal_compilation_error!(Internal {
+        error: format!(
+            "cannot materialize compiler-defined associated consts for trait {}",
+            trait_ref.name
+        ),
+        span,
+    }))
+}
 
 /// Macro to create a trait solver from a module and a program.
 /// This cannot be a function because of lifetime issues, as we must
@@ -1276,7 +1306,12 @@ impl<'a> TraitSolver<'a> {
                     &self.impls
                 };
                 let imp = &impls.data[impl_id.as_index()];
-                let associated_const_values = imp.associated_const_values.clone();
+                let associated_const_values = materialized_associated_const_values(
+                    trait_ref,
+                    input_tys,
+                    &imp.associated_const_values,
+                    fn_span,
+                )?;
 
                 // Then collect constraint dictionary info for building thunk nodes later.
                 // Each thunk gets its own arena, so we store (NodeKind, Type) pairs to re-create them.

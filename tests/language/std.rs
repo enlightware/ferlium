@@ -15,9 +15,15 @@ use crate::harness::{
     TestSession, assert_some_value_eq, bool, float, int, string, unit, variant_0, variant_t1,
 };
 use ferlium::{
+    SourceTable,
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     hir::value::Value,
-    std::option::{none, some},
+    module::{ConcreteTraitImplKey, Module},
+    std::{
+        option::{none, some},
+        std_module,
+        value::VALUE_TRAIT,
+    },
     types::effects::{PrimitiveEffect, effect, no_effects},
 };
 
@@ -29,6 +35,58 @@ use ferlium::types::r#type::{Type, tuple_type};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+fn assert_std_value_layout<T>(module: &Module, ty: Type) {
+    let size_index = VALUE_TRAIT.associated_const_index(ustr("SIZE")).unwrap();
+    let align_index = VALUE_TRAIT.associated_const_index(ustr("ALIGN")).unwrap();
+    let key = ConcreteTraitImplKey::new(VALUE_TRAIT.clone(), vec![ty]);
+    let impl_id = *module
+        .get_concrete_impl_by_key(&key)
+        .expect("expected std Value impl");
+    let imp = module.get_impl_data(impl_id).unwrap();
+    let size = std::mem::size_of::<T>() as isize;
+    let align = std::mem::align_of::<T>() as isize;
+
+    assert_eq!(imp.associated_const_value(size_index), Some(size));
+    assert_eq!(imp.associated_const_value(align_index), Some(align));
+
+    let Value::Tuple(dictionary_entries) = &imp.dictionary_value else {
+        panic!("expected Value dictionary to be a tuple");
+    };
+    assert_eq!(
+        dictionary_entries[VALUE_TRAIT.dictionary_associated_const_index(size_index)]
+            .as_primitive_ty::<isize>(),
+        Some(&size)
+    );
+    assert_eq!(
+        dictionary_entries[VALUE_TRAIT.dictionary_associated_const_index(align_index)]
+            .as_primitive_ty::<isize>(),
+        Some(&align)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn std_value_impls_store_layout_associated_consts() {
+    let mut source_table = SourceTable::default();
+    let module = std_module(&mut source_table);
+
+    assert_std_value_layout::<()>(&module, Type::unit());
+    assert_std_value_layout::<bool>(&module, bool_type());
+    assert_std_value_layout::<isize>(&module, int_type());
+    assert_std_value_layout::<ferlium::std::math::Float>(&module, float_type());
+    assert_std_value_layout::<ferlium::std::string::String>(&module, string_type());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn blanket_value_impls_materialize_layout_associated_consts() {
+    let mut session = TestSession::new();
+    let output = session.compile("[1] == [1]");
+    let module = session.session().expect_fresh_module(output.module_id);
+
+    assert_std_value_layout::<Array>(module, array_type(int_type()));
+}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

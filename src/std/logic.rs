@@ -25,7 +25,7 @@ use crate::{
         hash::Hasher,
         math::Int,
         string::String,
-        value::{VALUE_TRAIT, equal},
+        value::{VALUE_TRAIT, equal, native_layout_associated_consts},
     },
     types::effects::no_effects,
     types::r#type::Type,
@@ -80,10 +80,11 @@ pub fn add_to_module(to: &mut Module) {
     // Operations on booleans
     use BinaryNativeFnNNN as BinaryFn;
     use UnaryNativeFnNN as UnaryFn;
-    to.add_native_concrete_impl(
+    to.add_concrete_impl_no_locals(
         VALUE_TRAIT.clone(),
         [bool_type()],
         [],
+        native_layout_associated_consts::<bool>(),
         [
             b(BinaryFn::new(equal::<bool>)) as Function,
             b(UnaryFn::new(|value: bool| String::new(&value.to_string()))) as Function,

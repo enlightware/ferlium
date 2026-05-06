@@ -22,7 +22,7 @@ use crate::{
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
-        value::VALUE_TRAIT,
+        value::{VALUE_TRAIT, native_layout_associated_consts},
     },
     types::r#trait::TraitRef,
     types::r#type::Type,
@@ -67,10 +67,11 @@ pub fn add_to_module(to: &mut Module) {
     to.add_trait(REPR_TRAIT.clone());
     to.add_trait(TRIVIAL_COPY_TRAIT.clone());
 
-    to.add_native_concrete_impl(
+    to.add_concrete_impl_no_locals(
         VALUE_TRAIT.clone(),
         [Type::unit()],
         [],
+        native_layout_associated_consts::<()>(),
         [
             b(BinaryNativeFnNNN::new(|_: (), _: ()| true)) as Function,
             b(UnaryNativeFnNN::new(unit_to_string)) as Function,

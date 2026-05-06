@@ -119,6 +119,8 @@ pub trait BareNativeType: DynClone + DynEq + Send + Sync {
     fn type_name(&self) -> &'static str {
         type_name::<Self>()
     }
+    fn value_size(&self) -> usize;
+    fn value_align(&self) -> usize;
 }
 
 impl FormatWith<ModuleEnv<'_>> for BareNativeTypeB {
@@ -190,6 +192,13 @@ impl<T: 'static> BareNativeType for BareNativeTypeImpl<T> {
     // fn type_name(&self) -> &'static str {
     //     type_name::<T>()
     // }
+    fn value_size(&self) -> usize {
+        std::mem::size_of::<T>()
+    }
+
+    fn value_align(&self) -> usize {
+        std::mem::align_of::<T>()
+    }
 }
 
 impl Debug for dyn BareNativeType {

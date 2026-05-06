@@ -39,7 +39,10 @@ use crate::{
         ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module,
         ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl, id::Id,
     },
-    std::new_module_using_std,
+    std::{
+        new_module_using_std,
+        value::{VALUE_TRAIT, value_layout_associated_const_values},
+    },
     types::coherence::check_trait_impl,
     types::effects::EffType,
     types::mutability::MutType,
@@ -74,6 +77,34 @@ fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompila
         }
     }
     Ok(())
+}
+
+fn emitted_associated_const_values(
+    trait_ref: &TraitRef,
+    input_tys: &[Type],
+    ty_var_count: u32,
+    span: Location,
+) -> Result<Vec<isize>, InternalCompilationError> {
+    if trait_ref.associated_const_count() == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Temporary special case: generic source impls cannot yet store associated
+    // const formulas, so only Value has compiler-owned layout synthesis here.
+    if trait_ref == &*VALUE_TRAIT {
+        if ty_var_count != 0 {
+            return Ok(Vec::new());
+        }
+        return Ok(value_layout_associated_const_values(input_tys[0], span)?.into());
+    }
+
+    Err(internal_compilation_error!(Internal {
+        error: format!(
+            "cannot emit compiler-defined associated consts for source impl of trait {}",
+            trait_ref.name
+        ),
+        span,
+    }))
 }
 
 /// Data for a pre-registered stub implementation for `impl Trait for ConcreteType`.
@@ -217,8 +248,15 @@ pub fn emit_module(
                 method_ids.push(output.add_function_anonymous(module_fn));
             }
             // Build the trait impl and fill it with placeholders.
-            let dictionary_value = build_dictionary_value(&method_ids, &[], output.impls.module_id);
-            let dictionary_ty = output.computer_dictionary_ty(&method_ids, 0);
+            let associated_const_values =
+                emitted_associated_const_values(&trait_ref, &input_tys, 0, imp.span)?;
+            let dictionary_value = build_dictionary_value(
+                &method_ids,
+                &associated_const_values,
+                output.impls.module_id,
+            );
+            let dictionary_ty =
+                output.computer_dictionary_ty(&method_ids, associated_const_values.len());
             let stub = TraitImpl::new(
                 output_tys,
                 method_ids.clone(),
@@ -226,7 +264,8 @@ pub fn emit_module(
                 dictionary_ty,
                 true,
                 Some(imp.span),
-            );
+            )
+            .with_associated_const_values(associated_const_values);
             let key = ConcreteTraitImplKey::new(trait_ref, input_tys.clone());
             let id = output.impls.add_concrete_struct(key, stub);
             concrete_impl_stubs.insert(
@@ -346,7 +385,11 @@ pub fn emit_module(
                 &emit_output.functions,
                 &output.impls.data[stub_data.id.as_index()].methods
             );
-            let new_dictionary_ty = output.computer_dictionary_ty(&emit_output.functions, 0);
+            let associated_const_count = output.impls.data[stub_data.id.as_index()]
+                .associated_const_values
+                .len();
+            let new_dictionary_ty =
+                output.computer_dictionary_ty(&emit_output.functions, associated_const_count);
             let impl_data = output.impls.data.get_mut(stub_data.id.as_index()).unwrap();
             assert_eq!(new_dictionary_ty, impl_data.dictionary_ty);
             stub_data.id
@@ -361,7 +404,18 @@ pub fn emit_module(
                 &emit_output.constraints,
                 imp.span,
             )?;
-            output.add_emitted_impl(trait_ref, emit_output, Some(imp.span))
+            let associated_const_values = emitted_associated_const_values(
+                &trait_ref,
+                &emit_output.input_tys,
+                emit_output.ty_var_count,
+                imp.span,
+            )?;
+            output.add_emitted_impl(
+                trait_ref,
+                emit_output,
+                associated_const_values,
+                Some(imp.span),
+            )
         };
         let module_env = ModuleEnv::new(&output, others);
         let header = output

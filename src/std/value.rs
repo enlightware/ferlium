@@ -7,21 +7,22 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::sync::LazyLock;
+use std::{mem, sync::LazyLock};
 
 use crate::{
-    Location,
+    FxHashSet, Location,
     compiler::error::InternalCompilationError,
     hir::function::FunctionDefinition,
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
+    internal_compilation_error,
     module::{self, LocalDecl, LocalDeclId, Module, TraitImplId, id::Id},
     std::{
         STD_MODULE_ID, hash::hasher_type, logic::bool_type, math::int_type, string::string_type,
     },
     types::effects::EffType,
     types::mutability::{MutType, MutVal},
-    types::r#trait::{Deriver, TraitRef},
+    types::r#trait::{Deriver, TraitAssociatedConst, TraitRef},
     types::trait_solver::TraitSolver,
     types::r#type::{FnArgType, FnType, Type, TypeKind},
     types::type_like::TypeLike,
@@ -37,6 +38,174 @@ where
 const VALUE_EQ_METHOD_INDEX: usize = 0;
 const VALUE_TO_STRING_METHOD_INDEX: usize = 1;
 const VALUE_HASH_METHOD_INDEX: usize = 2;
+pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: usize = 0;
+pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: usize = 1;
+
+pub(crate) fn native_layout_associated_consts<T>() -> [isize; 2] {
+    let mut values = [0; 2];
+    values[VALUE_SIZE_ASSOC_CONST_INDEX] = mem::size_of::<T>() as isize;
+    values[VALUE_ALIGN_ASSOC_CONST_INDEX] = mem::align_of::<T>() as isize;
+    values
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValueLayout {
+    size: usize,
+    align: usize,
+}
+
+impl ValueLayout {
+    fn new(size: usize, align: usize) -> Self {
+        assert!(align > 0, "type alignment must be non-zero");
+        Self { size, align }
+    }
+
+    fn native<T>() -> Self {
+        Self::new(mem::size_of::<T>(), mem::align_of::<T>())
+    }
+
+    fn associated_const_values(
+        self,
+        span: Location,
+    ) -> Result<[isize; 2], InternalCompilationError> {
+        let mut values = [0; 2];
+        values[VALUE_SIZE_ASSOC_CONST_INDEX] = isize::try_from(self.size).map_err(|_| {
+            internal_compilation_error!(Internal {
+                error: format!("Value size {} does not fit in int", self.size),
+                span,
+            })
+        })?;
+        values[VALUE_ALIGN_ASSOC_CONST_INDEX] = isize::try_from(self.align).map_err(|_| {
+            internal_compilation_error!(Internal {
+                error: format!("Value alignment {} does not fit in int", self.align),
+                span,
+            })
+        })?;
+        Ok(values)
+    }
+
+    fn product(fields: impl IntoIterator<Item = ValueLayout>) -> Self {
+        let mut size = 0;
+        let mut align = 1;
+        for field in fields {
+            size = align_to(size, field.align);
+            size += field.size;
+            align = align.max(field.align);
+        }
+        Self::new(align_to(size, align), align)
+    }
+
+    fn union(fields: impl IntoIterator<Item = ValueLayout>) -> Self {
+        let mut size = 0;
+        let mut align = 1;
+        for field in fields {
+            size = size.max(field.size);
+            align = align.max(field.align);
+        }
+        Self::new(align_to(size, align), align)
+    }
+
+    fn variant(payloads: impl IntoIterator<Item = ValueLayout>) -> Self {
+        let tag = Self::native::<isize>();
+        let payload = Self::union(payloads);
+        let align = tag.align.max(payload.align);
+        let payload_offset = align_to(tag.size, payload.align);
+        Self::new(align_to(payload_offset + payload.size, align), align)
+    }
+}
+
+fn align_to(offset: usize, align: usize) -> usize {
+    debug_assert!(align > 0);
+    let rem = offset % align;
+    if rem == 0 {
+        offset
+    } else {
+        offset + (align - rem)
+    }
+}
+
+fn layout_for_value_type(
+    ty: Type,
+    span: Location,
+    active: &mut FxHashSet<Type>,
+) -> Result<ValueLayout, InternalCompilationError> {
+    if !active.insert(ty) {
+        return Err(internal_compilation_error!(Internal {
+            error: format!("recursive Value layout for type {ty:?} is not supported"),
+            span,
+        }));
+    }
+
+    let ty_data = ty.data();
+    use TypeKind::*;
+    let layout = match &*ty_data {
+        Native(native) => {
+            ValueLayout::new(native.bare_ty.value_size(), native.bare_ty.value_align())
+        }
+        Tuple(member_tys) => {
+            let member_tys = member_tys.clone();
+            drop(ty_data);
+            let fields = member_tys
+                .into_iter()
+                .map(|member_ty| layout_for_value_type(member_ty, span, active))
+                .collect::<Result<Vec<_>, _>>()?;
+            active.remove(&ty);
+            return Ok(ValueLayout::product(fields));
+        }
+        Record(fields) => {
+            let field_tys = fields
+                .iter()
+                .map(|(_, field_ty)| *field_ty)
+                .collect::<Vec<_>>();
+            drop(ty_data);
+            let fields = field_tys
+                .into_iter()
+                .map(|field_ty| layout_for_value_type(field_ty, span, active))
+                .collect::<Result<Vec<_>, _>>()?;
+            active.remove(&ty);
+            return Ok(ValueLayout::product(fields));
+        }
+        Variant(variants) => {
+            let payload_tys = variants
+                .iter()
+                .map(|(_, payload_ty)| *payload_ty)
+                .collect::<Vec<_>>();
+            drop(ty_data);
+            let payloads = payload_tys
+                .into_iter()
+                .map(|payload_ty| layout_for_value_type(payload_ty, span, active))
+                .collect::<Result<Vec<_>, _>>()?;
+            active.remove(&ty);
+            return Ok(ValueLayout::variant(payloads));
+        }
+        Named(named) => {
+            let named = named.clone();
+            drop(ty_data);
+            let shape_ty = named.instantiated_shape();
+            let layout = layout_for_value_type(shape_ty, span, active)?;
+            active.remove(&ty);
+            return Ok(layout);
+        }
+        Variable(_) | Function(_) | Never => {
+            drop(ty_data);
+            active.remove(&ty);
+            return Err(internal_compilation_error!(Internal {
+                error: format!("cannot compute Value layout for type {ty:?}"),
+                span,
+            }));
+        }
+    };
+    drop(ty_data);
+    active.remove(&ty);
+    Ok(layout)
+}
+
+pub(crate) fn value_layout_associated_const_values(
+    ty: Type,
+    span: Location,
+) -> Result<[isize; 2], InternalCompilationError> {
+    layout_for_value_type(ty, span, &mut FxHashSet::default())?.associated_const_values(span)
+}
 
 use FunctionDefinition as Def;
 
@@ -589,8 +758,14 @@ fn derive_structural_value_impl(
         return Ok(None);
     }
 
+    let associated_const_values = value_layout_associated_const_values(input_types[0], span)?;
     let snapshot = solver.snapshot_derived_impl_state();
-    let impl_id = solver.reserve_concrete_impl_from_code_entries(trait_ref, input_types, &[], []);
+    let impl_id = solver.reserve_concrete_impl_from_code_entries(
+        trait_ref,
+        input_types,
+        &[],
+        associated_const_values,
+    );
 
     let Some((eq_root, eq_locals)) =
         (match derive_value_eq_body(trait_ref, input_types, span, arena, solver) {
@@ -677,7 +852,7 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
     );
     let trait_ref = TraitRef::new_with_self_input_type(
         "Value",
-        "A type that supports semantic equality, string conversion, and hashing.",
+        "A type that supports semantic equality, string conversion, hashing, and layout metadata.",
         [],
         [
             (
@@ -705,7 +880,11 @@ pub static VALUE_TRAIT: LazyLock<TraitRef> = LazyLock::new(|| {
                 ),
             ),
         ],
-    );
+    )
+    .with_associated_consts([
+        TraitAssociatedConst::new("SIZE", "Size in bytes."),
+        TraitAssociatedConst::new("ALIGN", "Alignment in bytes."),
+    ]);
     trait_ref.with_module_id_and_deriver(STD_MODULE_ID, ValueDeriver)
 });
 

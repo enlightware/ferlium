@@ -590,11 +590,17 @@ impl Module {
         &mut self,
         trait_ref: TraitRef,
         emit_output: EmitTraitOutput,
+        associated_const_values: impl Into<Vec<isize>>,
         source_span: Option<Location>,
     ) -> LocalImplId {
-        let dictionary_ty = self.computer_dictionary_ty(&emit_output.functions, 0);
-        let dictionary_value =
-            build_dictionary_value(&emit_output.functions, &[], self.impls.module_id);
+        let associated_const_values = associated_const_values.into();
+        let dictionary_ty =
+            self.computer_dictionary_ty(&emit_output.functions, associated_const_values.len());
+        let dictionary_value = build_dictionary_value(
+            &emit_output.functions,
+            &associated_const_values,
+            self.impls.module_id,
+        );
         let imp = TraitImpl::new(
             emit_output.output_tys,
             emit_output.functions,
@@ -602,7 +608,8 @@ impl Module {
             dictionary_ty,
             true,
             source_span,
-        );
+        )
+        .with_associated_const_values(associated_const_values);
         if emit_output.ty_var_count == 0 {
             let key = ConcreteTraitImplKey::new(trait_ref, emit_output.input_tys);
             self.impls.add_concrete_struct(key, imp)

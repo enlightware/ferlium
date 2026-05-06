@@ -18,7 +18,12 @@ use crate::{
     },
     hir::value::NativeDisplay,
     module::Module,
-    std::{cast::CAST_TRAIT, math::int_type, string::String, value::VALUE_TRAIT},
+    std::{
+        cast::CAST_TRAIT,
+        math::int_type,
+        string::String,
+        value::{VALUE_TRAIT, native_layout_associated_consts},
+    },
     types::effects::no_effects,
     types::r#type::Type,
 };
@@ -194,10 +199,11 @@ pub fn add_to_module(to: &mut Module) {
     to.add_type_alias_str("hasher", hasher_type());
     to.add_type_alias_str("unordered_hasher", unordered_hasher_type());
 
-    to.add_native_concrete_impl(
+    to.add_concrete_impl_no_locals(
         VALUE_TRAIT.clone(),
         [hash_type()],
         [],
+        native_layout_associated_consts::<HashValue>(),
         [
             b(BinaryNativeFnRRN::new(equal_hash_value)) as Function,
             b(UnaryNativeFnRN::new(hash_value_to_string)) as Function,

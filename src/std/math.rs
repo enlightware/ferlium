@@ -31,7 +31,7 @@ use crate::{
         hash::Hasher,
         ordering::compare,
         string::String,
-        value::{VALUE_TRAIT, equal},
+        value::{VALUE_TRAIT, equal, native_layout_associated_consts},
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
     types::r#type::Type,
@@ -278,10 +278,11 @@ pub fn add_to_module(to: &mut Module) {
     use std::ops;
 
     // int
-    to.add_native_concrete_impl(
+    to.add_concrete_impl_no_locals(
         VALUE_TRAIT.clone(),
         [int_type()],
         [],
+        native_layout_associated_consts::<Int>(),
         [
             b(BinaryFn::new(equal::<Int>)) as Function,
             b(UnaryFn::new(|value: Int| String::new(&value.to_string()))) as Function,
@@ -406,10 +407,11 @@ pub fn add_to_module(to: &mut Module) {
     );
 
     // float
-    to.add_native_concrete_impl(
+    to.add_concrete_impl_no_locals(
         VALUE_TRAIT.clone(),
         [float_type()],
         [],
+        native_layout_associated_consts::<Float>(),
         [
             b(BinaryNativeFnRRN::new(equal_float)) as Function,
             b(UnaryNativeFnRN::new(float_to_string)) as Function,

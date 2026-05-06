@@ -36,7 +36,7 @@ use crate::{
         logic::bool_type,
         math::{float_type, float_value, int_type, int_value},
         ordering::compare,
-        value::VALUE_TRAIT,
+        value::{VALUE_TRAIT, native_layout_associated_consts},
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
     types::r#type::{FnType, Type},
@@ -511,10 +511,11 @@ fn compare_string(lhs: &String, rhs: &String) -> Value {
 pub fn add_to_module(to: &mut Module) {
     // Note: string alias is added in core.rs
 
-    to.add_native_concrete_impl(
+    to.add_concrete_impl_no_locals(
         VALUE_TRAIT.clone(),
         [string_type()],
         [],
+        native_layout_associated_consts::<String>(),
         [
             b(BinaryNativeFnRRN::new(equal_string)) as Function,
             b(UnaryNativeFnRN::new(String::clone)) as Function,
