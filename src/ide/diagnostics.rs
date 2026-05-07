@@ -615,6 +615,16 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        CompilerOnlyTraitMethodUse {
+            trait_ref,
+            method_name,
+            span,
+        } => vec![error_data_from_location(
+            span,
+            format!(
+                "Method `{trait_ref}::{method_name}` is compiler-only and cannot be used in Ferlium source"
+            ),
+        )],
         IdentifierBoundMoreThanOnceInAPattern {
             first_occurrence,
             second_occurrence,

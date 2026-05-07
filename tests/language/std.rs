@@ -93,15 +93,17 @@ fn blanket_value_impls_materialize_layout_associated_consts() {
 fn value_clone_and_drop_cannot_be_called_explicitly() {
     let mut session = TestSession::new();
 
-    for source in ["drop(1)", "let f = clone; f"] {
+    for (source, expected_method) in [("drop(1)", "drop"), ("let f = clone; f", "clone")] {
         match session.fail_compilation(source).into_inner() {
-            CompilationErrorImpl::Unsupported { reason, .. } => {
-                assert!(
-                    reason.contains("reserved for compiler-generated code"),
-                    "unexpected error reason: {reason}"
-                );
+            CompilationErrorImpl::CompilerOnlyTraitMethodUse {
+                trait_ref,
+                method_name,
+                ..
+            } => {
+                assert_eq!(trait_ref, "Value");
+                assert_eq!(method_name, ustr(expected_method));
             }
-            other => panic!("expected Unsupported error, got {other:?}"),
+            other => panic!("expected CompilerOnlyTraitMethodUse error, got {other:?}"),
         }
     }
 }

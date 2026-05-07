@@ -668,6 +668,11 @@ pub enum CompilationErrorImpl<S: Scope> {
         got: EffType,
         span: Location,
     },
+    CompilerOnlyTraitMethodUse {
+        trait_ref: S::TraitRef,
+        method_name: Ustr,
+        span: Location,
+    },
     IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Location,
         second_occurrence: Location,
@@ -1368,6 +1373,19 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(span)
                 )
             }
+            CompilerOnlyTraitMethodUse {
+                trait_ref,
+                method_name,
+                span,
+            } => {
+                write!(
+                    f,
+                    "Method `{}::{}` is compiler-only and cannot be used in Ferlium source in {}",
+                    trait_ref,
+                    method_name,
+                    fmt_span(span)
+                )
+            }
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 pattern_span,
@@ -1930,6 +1948,15 @@ impl CompilationError {
                 method_name,
                 expected,
                 got,
+                span,
+            }),
+            CompilerOnlyTraitMethodUse {
+                trait_ref,
+                method_name,
+                span,
+            } => compilation_error!(CompilerOnlyTraitMethodUse {
+                trait_ref: trait_ref.name.to_string(),
+                method_name,
                 span,
             }),
             IdentifierBoundMoreThanOnceInAPattern {

@@ -60,6 +60,18 @@ fn is_compiler_callable_only_method(trait_ref: &TraitRef, method_index: usize) -
         )
 }
 
+fn compiler_only_trait_method_use_error(
+    trait_ref: &TraitRef,
+    method_index: usize,
+    span: Location,
+) -> InternalCompilationError {
+    internal_compilation_error!(CompilerOnlyTraitMethodUse {
+        trait_ref: trait_ref.clone(),
+        method_name: trait_ref.functions[method_index].0,
+        span,
+    })
+}
+
 /// The type inference status, containing the unification table and the constraints
 #[derive(Default, Debug)]
 pub struct TypeInference {
@@ -354,13 +366,11 @@ impl TypeInference {
                 {
                     let (trait_ref, function_index, definition) = trait_descr;
                     if is_compiler_callable_only_method(&trait_ref, function_index) {
-                        return Err(internal_compilation_error!(Unsupported {
-                            span: expr_span,
-                            reason: format!(
-                                "Explicit use of `{}::{}` is reserved for compiler-generated code.",
-                                trait_ref.name, trait_ref.functions[function_index].0
-                            ),
-                        }));
+                        return Err(compiler_only_trait_method_use_error(
+                            &trait_ref,
+                            function_index,
+                            expr_span,
+                        ));
                     }
                     let (inst_fn_ty, inst_data, subst) =
                         definition.ty_scheme.instantiate_with_fresh_vars(
@@ -1164,13 +1174,11 @@ impl TypeInference {
             if let Some((_module_name, trait_descr)) = env.module_env.get_trait_function(path)? {
                 let (trait_ref, function_index, definition) = trait_descr;
                 if is_compiler_callable_only_method(&trait_ref, function_index) {
-                    return Err(internal_compilation_error!(Unsupported {
-                        span: path_span,
-                        reason: format!(
-                            "Explicit use of `{}::{}` is reserved for compiler-generated code.",
-                            trait_ref.name, trait_ref.functions[function_index].0
-                        ),
-                    }));
+                    return Err(compiler_only_trait_method_use_error(
+                        &trait_ref,
+                        function_index,
+                        path_span,
+                    ));
                 }
                 // Validate the number of arguments
                 if definition.ty_scheme.ty.args.len() != args.len() {

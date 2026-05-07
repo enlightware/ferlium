@@ -241,6 +241,10 @@ pub(crate) fn diagnostics_from_error(
             span: instantiation_span,
             ..
         }
+        | CompilerOnlyTraitMethodUse {
+            span: instantiation_span,
+            ..
+        }
         | UnknownProperty {
             span: instantiation_span,
             ..
