@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ::std::{cell::RefCell, mem};
+use ::std::{cell::RefCell, mem, sync::LazyLock};
 use derive_new::new;
 use itertools::Itertools;
 
@@ -57,6 +57,11 @@ static FIRST_USER_MODULE_ID: ModuleId = ModuleId(2);
 thread_local! {
     static EMPTY_COMPILER_SESSION_CACHE: RefCell<Option<CompilerSession>> = const { RefCell::new(None) };
 }
+
+static DEFINED_TYPE_PARSER: LazyLock<parser::DefinedTypeParser> =
+    LazyLock::new(parser::DefinedTypeParser::new);
+static HOLED_TYPE_PARSER: LazyLock<parser::HoledTypeParser> =
+    LazyLock::new(parser::HoledTypeParser::new);
 
 define_id_type!(
     /// Source version of a source-backed module within a compiler session.
@@ -669,7 +674,7 @@ impl CompilerSession {
         let source_id = self
             .source_table
             .add_source(name.to_string(), src.to_string());
-        let ty = parser::DefinedTypeParser::new()
+        let ty = DEFINED_TYPE_PARSER
             .parse(source_id, &mut errors, &mut arena, src)
             .map_err(|e| describe_parse_error(e, source_id))?;
         Ok((ty, source_id))
@@ -703,7 +708,7 @@ impl CompilerSession {
         let source_id = self
             .source_table
             .add_source(name.to_string(), src.to_string());
-        let ty = parser::HoledTypeParser::new()
+        let ty = HOLED_TYPE_PARSER
             .parse(source_id, &mut errors, &mut arena, src)
             .map_err(|e| describe_parse_error(e, source_id))?;
         Ok((ty, source_id))

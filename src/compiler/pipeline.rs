@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::mem;
+use std::{mem, sync::LazyLock};
 
 use lalrpop_util::ErrorRecovery;
 
@@ -45,6 +45,10 @@ impl ModuleRef {
         }
     }
 }
+
+static MODULE_PARSER: LazyLock<parser::ModuleParser> = LazyLock::new(parser::ModuleParser::new);
+static MODULE_AND_BLOCK_CONTENT_PARSER: LazyLock<parser::ModuleAndBlockContentParser> =
+    LazyLock::new(parser::ModuleAndBlockContentParser::new);
 
 /// Core compilation function, called once the source text has already been
 /// registered in the [`SourceTable`]. Accepts a [`SourceId`] instead of raw
@@ -355,7 +359,7 @@ fn parse_module(
 ) -> Result<(ast::PModule, ast::PExprArena), Vec<LocatedError>> {
     let mut errors = Vec::new();
     let mut arena = new_ast_arena_sized_from_source(src);
-    let module = parser::ModuleParser::new()
+    let module = MODULE_PARSER
         .parse(source_id, &mut errors, &mut arena, src)
         .map_err(|error| vec![describe_parse_error(error, source_id)])?;
     describe_recovered_errors(errors, source_id)?;
@@ -374,7 +378,7 @@ pub fn parse_module_and_expr(
 ) -> Result<(ast::PModule, Option<ast::PExprId>, ast::PExprArena), Vec<LocatedError>> {
     let mut errors = Vec::new();
     let mut arena = new_ast_arena_sized_from_source(src);
-    let module_and_expr = parser::ModuleAndBlockContentParser::new()
+    let module_and_expr = MODULE_AND_BLOCK_CONTENT_PARSER
         .parse(source_id, &mut errors, &mut arena, src)
         .map_err(|error| vec![describe_parse_error(error, source_id)])?;
     describe_recovered_errors(errors, source_id)?;
