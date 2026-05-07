@@ -131,31 +131,6 @@ where
 	}
 }
 
-// Temporary hack: this should be derived as a blanket Value impl for this
-// generic product type once the Value deriver can synthesize blanket impls.
-impl<A> Value for ArraySplitElementIterator<A>
-where
-	A: Value
-{
-	fn eq(left: ArraySplitElementIterator<A>, right: ArraySplitElementIterator<A>) -> bool {
-		false
-	}
-
-	fn to_string(value: ArraySplitElementIterator<A>) -> string {
-		"ArraySplitElementIterator"
-	}
-
-	fn hash(value: ArraySplitElementIterator<A>, state: &mut hasher) {
-		hasher_write_string(state, "ArraySplitElementIterator")
-	}
-
-	fn clone(source: ArraySplitElementIterator<A>, target: &mut ArraySplitElementIterator<A>) {
-		target = source;
-	}
-
-	fn drop(target: &mut ArraySplitElementIterator<A>) {}
-}
-
 struct ArraySplitIterator<A>
 	where A: Value
 {
@@ -199,31 +174,6 @@ where
 			}
 		}
 	}
-}
-
-// Temporary hack: this should be derived as a blanket Value impl for this
-// generic product type once the Value deriver can synthesize blanket impls.
-impl<A> Value for ArraySplitIterator<A>
-where
-	A: Value
-{
-	fn eq(left: ArraySplitIterator<A>, right: ArraySplitIterator<A>) -> bool {
-		false
-	}
-
-	fn to_string(value: ArraySplitIterator<A>) -> string {
-		"ArraySplitIterator"
-	}
-
-	fn hash(value: ArraySplitIterator<A>, state: &mut hasher) {
-		hasher_write_string(state, "ArraySplitIterator")
-	}
-
-	fn clone(source: ArraySplitIterator<A>, target: &mut ArraySplitIterator<A>) {
-		target = source;
-	}
-
-	fn drop(target: &mut ArraySplitIterator<A>) {}
 }
 
 impl Iterator {

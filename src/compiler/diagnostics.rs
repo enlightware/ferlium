@@ -106,6 +106,9 @@ pub(crate) fn diagnostics_from_error(
         | EmptyMatchBody { span }
         | NonExhaustivePattern { span, .. }
         | TypeValuesCannotBeEnumerated { span, .. }
+        | TraitImplForAnonymousStructuralType {
+            impl_span: span, ..
+        }
         | Unsupported { span, .. }
         | ReturnOutsideFunction { span }
         | CircularImportDependency { span, .. }

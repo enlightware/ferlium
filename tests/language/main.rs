@@ -23,3 +23,4 @@ mod r#trait;
 mod r#type;
 mod type_alias;
 mod type_defs;
+mod value;

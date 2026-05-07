@@ -77,31 +77,6 @@ where
 	}
 }
 
-// Temporary hack: this should be derived as a blanket Value impl for this
-// generic product type once the Value deriver can synthesize blanket impls.
-impl<A> Value for array_iterator<A>
-where
-	A: Value
-{
-	fn eq(left: array_iterator<A>, right: array_iterator<A>) -> bool {
-		false
-	}
-
-	fn to_string(value: array_iterator<A>) -> string {
-		"array_iterator"
-	}
-
-	fn hash(value: array_iterator<A>, state: &mut hasher) {
-		hasher_write_string(state, "array_iterator")
-	}
-
-	fn clone(source: array_iterator<A>, target: &mut array_iterator<A>) {
-		target = source;
-	}
-
-	fn drop(target: &mut array_iterator<A>) {}
-}
-
 impl<A> Seq for <Self = [A] |-> Item = A, Iter = array_iterator<A>>
 where
 	A: Value

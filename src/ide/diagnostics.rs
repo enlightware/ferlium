@@ -527,6 +527,17 @@ pub(super) fn compilation_error_to_data(
                 ),
             )]
         }
+        TraitImplForAnonymousStructuralType {
+            input_ty,
+            impl_span,
+        } => {
+            vec![error_data_from_location(
+                impl_span,
+                format!(
+                    "Trait implementations for anonymous structural type `{input_ty}` are not allowed; define a named type and implement the trait for it instead",
+                ),
+            )]
+        }
         TraitImplNativeOnly {
             trait_ref,
             impl_span,

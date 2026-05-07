@@ -16,6 +16,7 @@ use crate::{
         BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, Module, ModuleId,
         TraitImpl, TraitKey,
     },
+    std::value::VALUE_TRAIT,
     types::r#trait::{TraitImplPolicy, TraitRef},
     types::trait_solver::TraitSolverProbe,
     types::r#type::{Type, TypeVar},
@@ -88,6 +89,34 @@ pub(crate) fn check_trait_impl(
         }));
     }
 
+    if let Some(&input_ty) = input_tys
+        .iter()
+        .find(|&&ty| has_anonymous_structural_head(ty))
+    {
+        return Err(internal_compilation_error!(
+            TraitImplForAnonymousStructuralType {
+                input_ty,
+                impl_span: span,
+            }
+        ));
+    }
+
+    if trait_ref == &*VALUE_TRAIT
+        && current.module_id()
+            != VALUE_TRAIT
+                .module_id()
+                .expect("Value trait must have a module")
+        && !input_tys
+            .iter()
+            .any(|&ty| has_local_named_head(current, ty))
+    {
+        return Err(internal_compilation_error!(TraitImplOrphanRuleViolation {
+            trait_ref: trait_ref.clone(),
+            input_tys: input_tys.to_vec(),
+            impl_span: span,
+        }));
+    }
+
     if !trait_is_local
         && !input_tys
             .iter()
@@ -135,6 +164,17 @@ fn has_local_named_head(current: &Module, ty: Type) -> bool {
     ty_data
         .as_named()
         .is_some_and(|named| current.owns_type_def(&named.def))
+}
+
+fn has_anonymous_structural_head(ty: Type) -> bool {
+    let ty_data = ty.data();
+    matches!(
+        &*ty_data,
+        crate::types::r#type::TypeKind::Tuple(_)
+            | crate::types::r#type::TypeKind::Record(_)
+            | crate::types::r#type::TypeKind::Variant(_)
+            | crate::types::r#type::TypeKind::Function(_)
+    )
 }
 
 fn iter_visible_impls<'a>(

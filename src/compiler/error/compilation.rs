@@ -638,6 +638,10 @@ pub enum CompilationErrorImpl<S: Scope> {
         input_tys: Vec<S::Type>,
         impl_span: Location,
     },
+    TraitImplForAnonymousStructuralType {
+        input_ty: S::Type,
+        impl_span: Location,
+    },
     TraitImplNativeOnly {
         trait_ref: S::TraitRef,
         impl_span: Location,
@@ -1283,6 +1287,17 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(impl_span)
                 )
             }
+            TraitImplForAnonymousStructuralType {
+                input_ty,
+                impl_span,
+            } => {
+                write!(
+                    f,
+                    "Trait implementations for anonymous structural type `{}` are not allowed in {}; define a named type and implement the trait for it instead",
+                    input_ty,
+                    fmt_span(impl_span)
+                )
+            }
             TraitImplNativeOnly {
                 trait_ref,
                 impl_span,
@@ -1852,6 +1867,13 @@ impl CompilationError {
                     .zip(trait_ref.input_type_names.iter())
                     .map(|(ty, name)| format!("{name} = {}", ty.format_with(env)))
                     .collect(),
+                impl_span,
+            }),
+            TraitImplForAnonymousStructuralType {
+                input_ty,
+                impl_span,
+            } => compilation_error!(TraitImplForAnonymousStructuralType {
+                input_ty: input_ty.format_with(env).to_string(),
                 impl_span,
             }),
             TraitImplNativeOnly {

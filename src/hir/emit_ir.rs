@@ -23,6 +23,8 @@ use itertools::Itertools;
 use log::log_enabled;
 use ustr::Ustr;
 
+use super::emit_value_impl::emit_auto_value_impls;
+
 use crate::{
     Location,
     ast::{self, *},
@@ -79,7 +81,7 @@ fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompila
     Ok(())
 }
 
-fn emitted_associated_const_values(
+pub(super) fn emitted_associated_const_values(
     trait_ref: &TraitRef,
     input_tys: &[Type],
     ty_var_count: u32,
@@ -282,6 +284,8 @@ pub fn emit_module(
     // Take the module's HIR node arena out for compilation so it can be passed separately
     // from the module borrow, then put it back at the end.
     let mut ir_arena = std::mem::take(&mut output.ir_arena);
+
+    emit_auto_value_impls(&mut output, &mut ir_arena, others, &source.impls)?;
 
     // Process each functions' SCC one by one.
     for mut scc in sorted_sccs.into_iter().rev() {

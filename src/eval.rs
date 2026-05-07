@@ -447,6 +447,7 @@ impl Place {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get_mut(index as usize).unwrap(),
+                Variant(variant) if index == 0 => &mut variant.value,
                 Native(primitive) => {
                     // iif the primitive is our standard Array, we can access its elements
                     let array = primitive
@@ -461,6 +462,7 @@ impl Place {
                         }
                     }
                 }
+                Variant(_) => panic!("Cannot access a variant payload with a non-zero index"),
                 _ => panic!("Cannot access a non-compound value"),
             };
         }
@@ -475,6 +477,7 @@ impl Place {
             use Value::*;
             target = match target {
                 Tuple(tuple) => tuple.get(index as usize).unwrap(),
+                Variant(variant) if index == 0 => &variant.value,
                 Native(primitive) => {
                     // iif the primitive is our standard Array, we can access its elements
                     let array = NativeValue::as_any(&**primitive)
@@ -488,6 +491,7 @@ impl Place {
                         }
                     }
                 }
+                Variant(_) => panic!("Cannot access a variant payload with a non-zero index"),
                 _ => panic!("Cannot access a non-compound value"),
             };
         }

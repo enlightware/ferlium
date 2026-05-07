@@ -288,10 +288,18 @@ fn trait_impl_effect_must_have_at_least_def_effects() {
 	    }
     "# };
     let module = session.compile_and_get_module(mod_src);
-    let fn_id = module
-        .get_impl_data(LocalImplId::from_index(0))
-        .unwrap()
-        .methods[0];
+    let deserialize_impl = (0..module.impl_count())
+        .map(LocalImplId::from_index)
+        .find(|&id| {
+            module
+                .get_impl_trait_key_by_id(id)
+                .unwrap()
+                .trait_ref()
+                .name
+                == ustr("Deserialize")
+        })
+        .unwrap();
+    let fn_id = module.get_impl_data(deserialize_impl).unwrap().methods[0];
     let effects = &module
         .get_function_by_id(fn_id)
         .unwrap()

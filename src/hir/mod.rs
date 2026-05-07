@@ -9,6 +9,7 @@
 pub(crate) mod borrow_checker;
 pub(crate) mod dictionary_passing;
 pub mod emit_ir;
+pub(crate) mod emit_value_impl;
 pub mod function;
 pub(crate) mod hir_syn;
 pub(crate) mod r#match;

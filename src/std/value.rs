@@ -11,12 +11,13 @@ use std::{mem, sync::LazyLock};
 
 use crate::{
     FxHashSet, Location,
+    ast::{Path, UnnamedArg},
     compiler::error::InternalCompilationError,
     hir::function::FunctionDefinition,
     hir::value::{FunctionValue, LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
     internal_compilation_error,
-    module::{self, LocalDecl, LocalDeclId, Module, TraitImplId, id::Id},
+    module::{self, FunctionId, LocalDecl, LocalDeclId, Module, TraitImplId, id::Id},
     std::{
         STD_MODULE_ID, hash::hasher_type, logic::bool_type, math::int_type, string::string_type,
     },
@@ -35,9 +36,9 @@ where
     lhs == rhs
 }
 
-const VALUE_EQ_METHOD_INDEX: usize = 0;
-const VALUE_TO_STRING_METHOD_INDEX: usize = 1;
-const VALUE_HASH_METHOD_INDEX: usize = 2;
+pub(crate) const VALUE_EQ_METHOD_INDEX: usize = 0;
+pub(crate) const VALUE_TO_STRING_METHOD_INDEX: usize = 1;
+pub(crate) const VALUE_HASH_METHOD_INDEX: usize = 2;
 pub(crate) const VALUE_CLONE_METHOD_INDEX: usize = 3;
 pub(crate) const VALUE_DROP_METHOD_INDEX: usize = 4;
 pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: usize = 0;
@@ -195,7 +196,8 @@ fn layout_for_value_type(
             return Ok(layout);
         }
         Function(_) => ValueLayout::native::<FunctionValue>(),
-        Variable(_) | Never => {
+        Never => ValueLayout::product([]),
+        Variable(_) => {
             drop(ty_data);
             active.remove(&ty);
             return Err(internal_compilation_error!(Internal {
@@ -218,18 +220,113 @@ pub(crate) fn value_layout_associated_const_values(
 
 use FunctionDefinition as Def;
 
+pub(crate) type ValueCodeEntries = Vec<(NodeId, Vec<LocalDecl>)>;
+
+struct ValueBodyCtx<'s, 'm> {
+    solver: &'s mut TraitSolver<'m>,
+    emit_generic_trait_calls: bool,
+}
+
+impl<'s, 'm> ValueBodyCtx<'s, 'm> {
+    fn concrete(solver: &'s mut TraitSolver<'m>) -> Self {
+        Self {
+            solver,
+            emit_generic_trait_calls: false,
+        }
+    }
+
+    pub(crate) fn generic(solver: &'s mut TraitSolver<'m>) -> Self {
+        Self {
+            solver,
+            emit_generic_trait_calls: true,
+        }
+    }
+
+    fn get_local_or_import_function(
+        &mut self,
+        span: Location,
+        module_path: &module::Path,
+        function_name: ustr::Ustr,
+    ) -> Result<FunctionId, InternalCompilationError> {
+        self.solver
+            .get_local_or_import_function(span, module_path, function_name)
+    }
+
+    fn value_method_call(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_ty: Type,
+        method_index: usize,
+        span: Location,
+        arena: &mut NodeArena,
+        arguments: Vec<NodeId>,
+    ) -> Result<(hir::NodeKind, Type), InternalCompilationError> {
+        let definition = trait_ref
+            .instantiate_for_tys(&[input_ty], &[])
+            .into_iter()
+            .nth(method_index)
+            .expect("Value method index out of bounds");
+        let fn_ty = definition.ty_scheme.ty;
+        let ret_ty = fn_ty.ret;
+
+        if self.emit_generic_trait_calls && !input_ty.is_constant() {
+            return Ok((
+                hir::NodeKind::TraitFnApply(crate::containers::b(hir::TraitFnApplication {
+                    trait_ref: trait_ref.clone(),
+                    function_index: method_index,
+                    function_path: Path::single(trait_ref.functions[method_index].0, span),
+                    function_span: span,
+                    arguments,
+                    arguments_unnamed: UnnamedArg::All,
+                    ty: fn_ty,
+                    input_tys: vec![input_ty],
+                    inst_data: hir::FnInstData::none(),
+                })),
+                ret_ty,
+            ));
+        }
+
+        let function =
+            self.solver
+                .solve_impl_method(trait_ref, &[input_ty], method_index, span, arena)?;
+        Ok((
+            hir::hir_syn::static_apply(function, fn_ty, arguments, span),
+            ret_ty,
+        ))
+    }
+}
+
+fn value_method_call_node(
+    ctx: &mut ValueBodyCtx<'_, '_>,
+    trait_ref: &TraitRef,
+    input_ty: Type,
+    method_index: usize,
+    span: Location,
+    arena: &mut NodeArena,
+    arguments: Vec<NodeId>,
+) -> Result<NodeId, InternalCompilationError> {
+    let (kind, ty) =
+        ctx.value_method_call(trait_ref, input_ty, method_index, span, arena, arguments)?;
+    Ok(arena.alloc(hir::Node::new(
+        kind,
+        ty,
+        EffType::empty(),
+        Location::new_synthesized(),
+    )))
+}
+
 fn derive_value_to_string_body(
     trait_ref: &TraitRef,
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
-    solver: &mut TraitSolver,
+    ctx: &mut ValueBodyCtx<'_, '_>,
 ) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
     use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ty.is_constant());
+    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
     let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
         arena.alloc(hir::Node::new(
@@ -240,7 +337,7 @@ fn derive_value_to_string_body(
         ))
     };
 
-    let string_push_str = solver.get_local_or_import_function(
+    let string_push_str = ctx.get_local_or_import_function(
         span,
         &module::Path::single_str("std"),
         crate::ustr("string_push_str"),
@@ -256,18 +353,15 @@ fn derive_value_to_string_body(
         EffType::empty(),
     );
     let mut build_to_string = |arena: &mut NodeArena, value: NodeId, value_ty: Type| {
-        let function = solver.solve_impl_method(
+        value_method_call_node(
+            ctx,
             trait_ref,
-            &[value_ty],
+            value_ty,
             VALUE_TO_STRING_METHOD_INDEX,
             span,
             arena,
-        )?;
-        Ok(n(
-            arena,
-            static_apply_pure(function, [(value, value_ty)], string_type(), span),
-            string_type(),
-        ))
+            vec![value],
+        )
     };
     let build_string_block = |arena: &mut NodeArena,
                               locals: &mut Vec<crate::module::LocalDecl>,
@@ -397,19 +491,97 @@ fn derive_value_to_string_body(
             let named = named.clone();
             drop(ty_data);
             let shape_ty = named.instantiated_shape();
-            let load_self = n(arena, load(0, l_self_id), shape_ty);
-            let payload_str = build_to_string(arena, load_self, shape_ty)?;
+            let load_self = n(arena, load(0, l_self_id), ty);
             let mut locals = locals;
-            let separator = if named.def.is_enum() { "::" } else { " " };
-            Some((
-                build_string_block(
-                    arena,
-                    &mut locals,
-                    &format!("{}{}", named.def.name, separator),
-                    vec![payload_str],
-                ),
-                locals,
-            ))
+            let shape_data = shape_ty.data();
+            let root = match &*shape_data {
+                Tuple(member_tys) => {
+                    let member_tys = member_tys.clone();
+                    drop(shape_data);
+                    let mut pieces = Vec::with_capacity(member_tys.len() * 2 + 1);
+                    for (index, member_ty) in member_tys.into_iter().enumerate() {
+                        if index > 0 {
+                            pieces.push(string_lit(arena, ", "));
+                        }
+                        let member = n(arena, project(load_self, index), member_ty);
+                        pieces.push(build_to_string(arena, member, member_ty)?);
+                    }
+                    pieces.push(string_lit(arena, ")"));
+                    build_string_block(arena, &mut locals, &format!("{} (", named.def.name), pieces)
+                }
+                Record(fields) => {
+                    let fields = fields.clone();
+                    drop(shape_data);
+                    let mut pieces = Vec::with_capacity(fields.len() * 4 + 1);
+                    for (index, (name, member_ty)) in fields.into_iter().enumerate() {
+                        if index > 0 {
+                            pieces.push(string_lit(arena, ", "));
+                        }
+                        pieces.push(string_lit(arena, name.as_str()));
+                        pieces.push(string_lit(arena, ": "));
+                        let member = n(arena, project(load_self, index), member_ty);
+                        pieces.push(build_to_string(arena, member, member_ty)?);
+                    }
+                    pieces.push(string_lit(arena, " }"));
+                    build_string_block(
+                        arena,
+                        &mut locals,
+                        &format!("{} {{ ", named.def.name),
+                        pieces,
+                    )
+                }
+                Variant(variants) => {
+                    let variants = variants.clone();
+                    drop(shape_data);
+                    let self_tag = n(arena, extract_tag(load_self), int_type());
+                    let mut alternatives = Vec::with_capacity(variants.len());
+                    for (tag, payload_ty) in variants {
+                        let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                        let rendered = if payload_ty == Type::unit() {
+                            string_lit(arena, &format!("{}::{}", named.def.name, tag))
+                        } else {
+                            let self_value = n(arena, load(0, l_self_id), ty);
+                            let payload = n(arena, project(self_value, 0), payload_ty);
+                            let payload_str = build_to_string(arena, payload, payload_ty)?;
+                            if payload_ty.data().is_tuple() {
+                                build_string_block(
+                                    arena,
+                                    &mut locals,
+                                    &format!("{}::{} ", named.def.name, tag),
+                                    vec![payload_str],
+                                )
+                            } else {
+                                let close = string_lit(arena, ")");
+                                build_string_block(
+                                    arena,
+                                    &mut locals,
+                                    &format!("{}::{}(", named.def.name, tag),
+                                    vec![payload_str, close],
+                                )
+                            }
+                        };
+                        alternatives.push((tag_val, rendered));
+                    }
+                    let default = string_lit(arena, "");
+                    n(arena, case(self_tag, alternatives, default), string_type())
+                }
+                Never => {
+                    drop(shape_data);
+                    string_lit(arena, &format!("{}::<empty>", named.def.name))
+                }
+                _ => {
+                    drop(shape_data);
+                    let load_self = n(arena, load(0, l_self_id), shape_ty);
+                    let payload_str = build_to_string(arena, load_self, shape_ty)?;
+                    build_string_block(
+                        arena,
+                        &mut locals,
+                        &format!("{} ", named.def.name),
+                        vec![payload_str],
+                    )
+                }
+            };
+            Some((root, locals))
         }
         Function(_) => {
             drop(ty_data);
@@ -429,13 +601,13 @@ fn derive_value_eq_body(
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
-    solver: &mut TraitSolver,
+    ctx: &mut ValueBodyCtx<'_, '_>,
 ) -> Result<Option<(NodeId, Vec<crate::module::LocalDecl>)>, InternalCompilationError> {
     use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ty.is_constant());
+    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
     let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
         arena.alloc(hir::Node::new(
@@ -451,46 +623,75 @@ fn derive_value_eq_body(
     let l_left_id = LocalDeclId::from_index(0);
     let l_right_id = LocalDeclId::from_index(1);
 
-    let build_product_eq = |arena: &mut NodeArena,
-                            solver: &mut TraitSolver,
-                            member_tys: Vec<Type>|
-     -> Result<NodeId, InternalCompilationError> {
-        let mut eq_pairs: Vec<NodeId> = Vec::new();
-        for (index, member_ty) in member_tys.into_iter().enumerate() {
-            let load_left_i = n(arena, load(0, l_left_id), ty);
-            let left_i = n(arena, project(load_left_i, index), member_ty);
-            let load_right_i = n(arena, load(1, l_right_id), ty);
-            let right_i = n(arena, project(load_right_i, index), member_ty);
-            let function = solver.solve_impl_method(
-                trait_ref,
-                &[member_ty],
-                VALUE_EQ_METHOD_INDEX,
-                span,
-                arena,
-            )?;
-            let eq_i = n(
-                arena,
-                static_apply_pure(
-                    function,
-                    [(left_i, member_ty), (right_i, member_ty)],
-                    bool_ty,
+    macro_rules! build_product_eq {
+        ($arena:expr, $member_tys:expr) => {{
+            let mut eq_pairs: Vec<NodeId> = Vec::new();
+            for (index, member_ty) in $member_tys.into_iter().enumerate() {
+                let load_left_i = n($arena, load(0, l_left_id), ty);
+                let left_i = n($arena, project(load_left_i, index), member_ty);
+                let load_right_i = n($arena, load(1, l_right_id), ty);
+                let right_i = n($arena, project(load_right_i, index), member_ty);
+                let eq_i = value_method_call_node(
+                    ctx,
+                    trait_ref,
+                    member_ty,
+                    VALUE_EQ_METHOD_INDEX,
                     span,
-                ),
-                bool_ty,
-            );
-            eq_pairs.push(eq_i);
-        }
-        let mut root = n(arena, native(true), bool_ty);
-        for eq_i in eq_pairs.into_iter().rev() {
-            let false_n = n(arena, native(false), bool_ty);
-            root = n(
-                arena,
-                case(eq_i, vec![(LiteralValue::new_native(true), root)], false_n),
-                bool_ty,
-            );
-        }
-        Ok(root)
-    };
+                    $arena,
+                    vec![left_i, right_i],
+                )?;
+                eq_pairs.push(eq_i);
+            }
+            let mut root = n($arena, native(true), bool_ty);
+            for eq_i in eq_pairs.into_iter().rev() {
+                let false_n = n($arena, native(false), bool_ty);
+                root = n(
+                    $arena,
+                    case(eq_i, vec![(LiteralValue::new_native(true), root)], false_n),
+                    bool_ty,
+                );
+            }
+            root
+        }};
+    }
+    macro_rules! build_variant_eq {
+        ($arena:expr, $variants:expr) => {{
+            let mut alternatives: Vec<(LiteralValue, NodeId)> = Vec::new();
+            for (tag, payload_ty) in $variants {
+                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let load_right_outer = n($arena, load(1, l_right_id), ty);
+                let right_tag = n($arena, extract_tag(load_right_outer), int_type());
+                let inner_body = if payload_ty == Type::unit() {
+                    n($arena, native(true), bool_ty)
+                } else {
+                    let load_left_v = n($arena, load(0, l_left_id), ty);
+                    let left_payload = n($arena, project(load_left_v, 0), payload_ty);
+                    let load_right_v = n($arena, load(1, l_right_id), ty);
+                    let right_payload = n($arena, project(load_right_v, 0), payload_ty);
+                    value_method_call_node(
+                        ctx,
+                        trait_ref,
+                        payload_ty,
+                        VALUE_EQ_METHOD_INDEX,
+                        span,
+                        $arena,
+                        vec![left_payload, right_payload],
+                    )?
+                };
+                let false_imm = n($arena, native(false), bool_ty);
+                let inner_case = n(
+                    $arena,
+                    case(right_tag, vec![(tag_val.clone(), inner_body)], false_imm),
+                    bool_ty,
+                );
+                alternatives.push((tag_val, inner_case));
+            }
+            let load_left_outer = n($arena, load(0, l_left_id), ty);
+            let left_tag = n($arena, extract_tag(load_left_outer), int_type());
+            let false_default = n($arena, native(false), bool_ty);
+            n($arena, case(left_tag, alternatives, false_default), bool_ty)
+        }};
+    }
 
     let ty_data = ty.data();
     use TypeKind::*;
@@ -498,87 +699,58 @@ fn derive_value_eq_body(
         Tuple(member_tys) => {
             let member_tys = member_tys.clone();
             drop(ty_data);
-            Some(build_product_eq(arena, solver, member_tys)?)
+            Some(build_product_eq!(arena, member_tys))
         }
         Record(fields) => {
             let member_tys: Vec<Type> = fields.iter().map(|(_, ty)| *ty).collect();
             drop(ty_data);
-            Some(build_product_eq(arena, solver, member_tys)?)
+            Some(build_product_eq!(arena, member_tys))
         }
         Variant(variants) => {
             let variants = variants.clone();
             drop(ty_data);
-
-            let mut alternatives: Vec<(LiteralValue, NodeId)> = Vec::new();
-            for (tag, payload_ty) in variants {
-                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
-                let load_right_outer = n(arena, load(1, l_right_id), ty);
-                let right_tag = n(arena, extract_tag(load_right_outer), int_type());
-                let inner_body = if payload_ty == Type::unit() {
-                    n(arena, native(true), bool_ty)
-                } else {
-                    let load_left_v = n(arena, load(0, l_left_id), ty);
-                    let left_payload = n(arena, project(load_left_v, 0), payload_ty);
-                    let load_right_v = n(arena, load(1, l_right_id), ty);
-                    let right_payload = n(arena, project(load_right_v, 0), payload_ty);
-                    let function = solver.solve_impl_method(
-                        trait_ref,
-                        &[payload_ty],
-                        VALUE_EQ_METHOD_INDEX,
-                        span,
-                        arena,
-                    )?;
-                    n(
-                        arena,
-                        static_apply_pure(
-                            function,
-                            [(left_payload, payload_ty), (right_payload, payload_ty)],
-                            bool_ty,
-                            span,
-                        ),
-                        bool_ty,
-                    )
-                };
-                let false_imm = n(arena, native(false), bool_ty);
-                let inner_case = n(
-                    arena,
-                    case(right_tag, vec![(tag_val.clone(), inner_body)], false_imm),
-                    bool_ty,
-                );
-                alternatives.push((tag_val, inner_case));
-            }
-            let load_left_outer = n(arena, load(0, l_left_id), ty);
-            let left_tag = n(arena, extract_tag(load_left_outer), int_type());
-            let false_default = n(arena, native(false), bool_ty);
-            Some(n(
-                arena,
-                case(left_tag, alternatives, false_default),
-                bool_ty,
-            ))
+            Some(build_variant_eq!(arena, variants))
         }
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
             let shape_ty = named.instantiated_shape();
-            let load_left = n(arena, load(0, l_left_id), shape_ty);
-            let load_right = n(arena, load(1, l_right_id), shape_ty);
-            let function = solver.solve_impl_method(
-                trait_ref,
-                &[shape_ty],
-                VALUE_EQ_METHOD_INDEX,
-                span,
-                arena,
-            )?;
-            Some(n(
-                arena,
-                static_apply_pure(
-                    function,
-                    [(load_left, shape_ty), (load_right, shape_ty)],
-                    bool_ty,
-                    span,
-                ),
-                bool_ty,
-            ))
+            let shape_data = shape_ty.data();
+            match &*shape_data {
+                Tuple(member_tys) => {
+                    let member_tys = member_tys.clone();
+                    drop(shape_data);
+                    Some(build_product_eq!(arena, member_tys))
+                }
+                Record(fields) => {
+                    let member_tys: Vec<Type> = fields.iter().map(|(_, ty)| *ty).collect();
+                    drop(shape_data);
+                    Some(build_product_eq!(arena, member_tys))
+                }
+                Variant(variants) => {
+                    let variants = variants.clone();
+                    drop(shape_data);
+                    Some(build_variant_eq!(arena, variants))
+                }
+                Never => {
+                    drop(shape_data);
+                    Some(n(arena, native(true), bool_ty))
+                }
+                _ => {
+                    drop(shape_data);
+                    let load_left = n(arena, load(0, l_left_id), shape_ty);
+                    let load_right = n(arena, load(1, l_right_id), shape_ty);
+                    Some(value_method_call_node(
+                        ctx,
+                        trait_ref,
+                        shape_ty,
+                        VALUE_EQ_METHOD_INDEX,
+                        span,
+                        arena,
+                        vec![load_left, load_right],
+                    )?)
+                }
+            }
         }
         Function(_) => {
             drop(ty_data);
@@ -598,13 +770,13 @@ fn derive_value_hash_body(
     input_types: &[Type],
     span: Location,
     arena: &mut NodeArena,
-    solver: &mut TraitSolver,
+    ctx: &mut ValueBodyCtx<'_, '_>,
 ) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
     use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ty.is_constant());
+    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
     let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
         arena.alloc(hir::Node::new(
@@ -617,7 +789,7 @@ fn derive_value_hash_body(
 
     let unit_ty = Type::unit();
     let hasher_ty = hasher_type();
-    let hasher_write_string = solver.get_local_or_import_function(
+    let hasher_write_string = ctx.get_local_or_import_function(
         span,
         &module::Path::single_str("std"),
         crate::ustr("hasher_write_string"),
@@ -636,16 +808,6 @@ fn derive_value_hash_body(
     let l_self_id = LocalDeclId::from_index(0);
     let l_state_id = LocalDeclId::from_index(1);
 
-    let value_hash_fn_ty = |value_ty| {
-        FnType::new(
-            vec![
-                FnArgType::new_by_val(value_ty),
-                FnArgType::new(hasher_ty, MutType::mutable()),
-            ],
-            unit_ty,
-            EffType::empty(),
-        )
-    };
     let hasher_write_string_ty = FnType::new(
         vec![
             FnArgType::new(hasher_ty, MutType::mutable()),
@@ -673,20 +835,54 @@ fn derive_value_hash_body(
                                 value: NodeId,
                                 value_ty: Type|
      -> Result<NodeId, InternalCompilationError> {
-        let function = solver.solve_impl_method(
+        let state = n(arena, load(1, l_state_id), hasher_ty);
+        value_method_call_node(
+            ctx,
             trait_ref,
-            &[value_ty],
+            value_ty,
             VALUE_HASH_METHOD_INDEX,
             span,
             arena,
-        )?;
-        let state = n(arena, load(1, l_state_id), hasher_ty);
-        Ok(n(
-            arena,
-            static_apply(function, value_hash_fn_ty(value_ty), [value, state], span),
-            unit_ty,
-        ))
+            vec![value, state],
+        )
     };
+
+    macro_rules! build_product_hash {
+        ($arena:expr, $member_tys:expr) => {{
+            let load_self = n($arena, load(0, l_self_id), ty);
+            let mut statements = Vec::with_capacity($member_tys.len() + 1);
+            for (index, member_ty) in $member_tys.into_iter().enumerate() {
+                let member = n($arena, project(load_self, index), member_ty);
+                statements.push(build_hash_value($arena, member, member_ty)?);
+            }
+            statements.push(n($arena, native(()), unit_ty));
+            n($arena, block(statements), unit_ty)
+        }};
+    }
+
+    macro_rules! build_variant_hash {
+        ($arena:expr, $variants:expr) => {{
+            let self_value = n($arena, load(0, l_self_id), ty);
+            let self_tag = n($arena, extract_tag(self_value), int_type());
+            let mut alternatives = Vec::with_capacity($variants.len());
+
+            for (tag, payload_ty) in $variants.into_iter() {
+                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let mut statements = vec![build_write_string($arena, tag.as_str())];
+                if payload_ty != Type::unit() {
+                    let self_value = n($arena, load(0, l_self_id), ty);
+                    let payload = n($arena, project(self_value, 0), payload_ty);
+                    statements.push(build_hash_value($arena, payload, payload_ty)?);
+                }
+                statements.push(n($arena, native(()), unit_ty));
+                let branch = n($arena, block(statements), unit_ty);
+                alternatives.push((tag_val, branch));
+            }
+
+            let default = n($arena, native(()), unit_ty);
+            n($arena, case(self_tag, alternatives, default), unit_ty)
+        }};
+    }
 
     let ty_data = ty.data();
     use TypeKind::*;
@@ -694,60 +890,50 @@ fn derive_value_hash_body(
         Tuple(member_tys) => {
             let member_tys = member_tys.clone();
             drop(ty_data);
-            let load_self = n(arena, load(0, l_self_id), ty);
-            let mut statements = Vec::with_capacity(member_tys.len() + 1);
-            for (index, member_ty) in member_tys.into_iter().enumerate() {
-                let member = n(arena, project(load_self, index), member_ty);
-                statements.push(build_hash_value(arena, member, member_ty)?);
-            }
-            statements.push(n(arena, native(()), unit_ty));
-            Some((n(arena, block(statements), unit_ty), locals))
+            Some((build_product_hash!(arena, member_tys), locals))
         }
         Record(fields) => {
             let fields = fields.clone();
             drop(ty_data);
-            let load_self = n(arena, load(0, l_self_id), ty);
-            let mut statements = Vec::with_capacity(fields.len() + 1);
-            for (index, (_, member_ty)) in fields.into_iter().enumerate() {
-                let member = n(arena, project(load_self, index), member_ty);
-                statements.push(build_hash_value(arena, member, member_ty)?);
-            }
-            statements.push(n(arena, native(()), unit_ty));
-            Some((n(arena, block(statements), unit_ty), locals))
+            let member_tys: Vec<Type> = fields.into_iter().map(|(_, ty)| ty).collect();
+            Some((build_product_hash!(arena, member_tys), locals))
         }
         Variant(variants) => {
             let variants = variants.clone();
             drop(ty_data);
-
-            let self_value = n(arena, load(0, l_self_id), ty);
-            let self_tag = n(arena, extract_tag(self_value), int_type());
-            let mut alternatives = Vec::with_capacity(variants.len());
-
-            for (tag, payload_ty) in variants.into_iter() {
-                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
-                let mut statements = vec![build_write_string(arena, tag.as_str())];
-                if payload_ty != Type::unit() {
-                    let self_value = n(arena, load(0, l_self_id), ty);
-                    let payload = n(arena, project(self_value, 0), payload_ty);
-                    statements.push(build_hash_value(arena, payload, payload_ty)?);
-                }
-                statements.push(n(arena, native(()), unit_ty));
-                let branch = n(arena, block(statements), unit_ty);
-                alternatives.push((tag_val, branch));
-            }
-
-            let default = n(arena, native(()), unit_ty);
-            Some((
-                n(arena, case(self_tag, alternatives, default), unit_ty),
-                locals,
-            ))
+            Some((build_variant_hash!(arena, variants), locals))
         }
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
             let shape_ty = named.instantiated_shape();
-            let load_self = n(arena, load(0, l_self_id), shape_ty);
-            Some((build_hash_value(arena, load_self, shape_ty)?, locals))
+            let shape_data = shape_ty.data();
+            match &*shape_data {
+                Tuple(member_tys) => {
+                    let member_tys = member_tys.clone();
+                    drop(shape_data);
+                    Some((build_product_hash!(arena, member_tys), locals))
+                }
+                Record(fields) => {
+                    let member_tys: Vec<Type> = fields.iter().map(|(_, ty)| *ty).collect();
+                    drop(shape_data);
+                    Some((build_product_hash!(arena, member_tys), locals))
+                }
+                Variant(variants) => {
+                    let variants = variants.clone();
+                    drop(shape_data);
+                    Some((build_variant_hash!(arena, variants), locals))
+                }
+                Never => {
+                    drop(shape_data);
+                    Some((n(arena, native(()), unit_ty), locals))
+                }
+                _ => {
+                    drop(shape_data);
+                    let load_self = n(arena, load(0, l_self_id), shape_ty);
+                    Some((build_hash_value(arena, load_self, shape_ty)?, locals))
+                }
+            }
         }
         Function(_) => {
             drop(ty_data);
@@ -766,17 +952,17 @@ fn derive_value_hash_body(
     Ok(root)
 }
 
-// Temporary placeholder: this only fills the Value dictionary slot until real
-// Ferlium-owned clone derivation is implemented.
 fn derive_value_clone_body(
+    trait_ref: &TraitRef,
     input_types: &[Type],
     arena: &mut NodeArena,
+    ctx: &mut ValueBodyCtx<'_, '_>,
 ) -> Result<Option<(NodeId, Vec<LocalDecl>)>, InternalCompilationError> {
     use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ty.is_constant());
+    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
     let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
         arena.alloc(hir::Node::new(
@@ -799,35 +985,154 @@ fn derive_value_clone_body(
             Location::new_synthesized(),
         ),
     ];
-    let target = n(arena, load(1, target_id), ty);
-    let source = n(arena, load(0, source_id), ty);
-    let root = n(
-        arena,
-        hir::NodeKind::Assign(hir::Assignment {
-            place: target,
-            value: source,
-        }),
-        Type::unit(),
-    );
+    let build_assign_whole = |arena: &mut NodeArena| {
+        let target = n(arena, load(1, target_id), ty);
+        let source = n(arena, load(0, source_id), ty);
+        n(
+            arena,
+            hir::NodeKind::Assign(hir::Assignment {
+                place: target,
+                value: source,
+            }),
+            Type::unit(),
+        )
+    };
+    macro_rules! build_product_clone {
+        ($arena:expr, $member_tys:expr) => {{
+            let mut statements = Vec::with_capacity($member_tys.len() + 1);
+            for (index, member_ty) in $member_tys.into_iter().enumerate() {
+                let source = n($arena, load(0, source_id), ty);
+                let source_member = n($arena, project(source, index), member_ty);
+                let target = n($arena, load(1, target_id), ty);
+                let target_member = n($arena, project(target, index), member_ty);
+                statements.push(value_method_call_node(
+                    ctx,
+                    trait_ref,
+                    member_ty,
+                    VALUE_CLONE_METHOD_INDEX,
+                    Location::new_synthesized(),
+                    $arena,
+                    vec![source_member, target_member],
+                )?);
+            }
+            statements.push(n($arena, native(()), Type::unit()));
+            n($arena, block(statements), Type::unit())
+        }};
+    }
+    macro_rules! build_variant_clone {
+        ($arena:expr, $variants:expr) => {{
+            let source = n($arena, load(0, source_id), ty);
+            let source_tag = n($arena, extract_tag(source), int_type());
+            let mut alternatives = Vec::with_capacity($variants.len());
+            for (tag, payload_ty) in $variants {
+                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let branch = if payload_ty == Type::unit() {
+                    n($arena, native(()), Type::unit())
+                } else {
+                    let source = n($arena, load(0, source_id), ty);
+                    let source_payload = n($arena, project(source, 0), payload_ty);
+                    let target = n($arena, load(1, target_id), ty);
+                    let target_payload = n($arena, project(target, 0), payload_ty);
+                    value_method_call_node(
+                        ctx,
+                        trait_ref,
+                        payload_ty,
+                        VALUE_CLONE_METHOD_INDEX,
+                        Location::new_synthesized(),
+                        $arena,
+                        vec![source_payload, target_payload],
+                    )?
+                };
+                alternatives.push((tag_val, branch));
+            }
+            let default = n($arena, native(()), Type::unit());
+            n(
+                $arena,
+                case(source_tag, alternatives, default),
+                Type::unit(),
+            )
+        }};
+    }
+
+    let ty_data = ty.data();
+    use TypeKind::*;
+    let root = match &*ty_data {
+        Tuple(member_tys) => {
+            let member_tys = member_tys.clone();
+            drop(ty_data);
+            build_product_clone!(arena, member_tys)
+        }
+        Record(fields) => {
+            let member_tys: Vec<Type> = fields.iter().map(|(_, ty)| *ty).collect();
+            drop(ty_data);
+            build_product_clone!(arena, member_tys)
+        }
+        Variant(variants) => {
+            let variants = variants.clone();
+            drop(ty_data);
+            build_variant_clone!(arena, variants)
+        }
+        Named(named) => {
+            let named = named.clone();
+            drop(ty_data);
+            let shape_ty = named.instantiated_shape();
+            let shape_data = shape_ty.data();
+            match &*shape_data {
+                Tuple(member_tys) => {
+                    let member_tys = member_tys.clone();
+                    drop(shape_data);
+                    build_product_clone!(arena, member_tys)
+                }
+                Record(fields) => {
+                    let member_tys: Vec<Type> = fields.iter().map(|(_, ty)| *ty).collect();
+                    drop(shape_data);
+                    build_product_clone!(arena, member_tys)
+                }
+                Variant(variants) => {
+                    let variants = variants.clone();
+                    drop(shape_data);
+                    build_variant_clone!(arena, variants)
+                }
+                Never => {
+                    drop(shape_data);
+                    n(arena, native(()), Type::unit())
+                }
+                _ => {
+                    drop(shape_data);
+                    build_assign_whole(arena)
+                }
+            }
+        }
+        _ => {
+            drop(ty_data);
+            build_assign_whole(arena)
+        }
+    };
 
     Ok(Some((root, locals)))
 }
 
-// Temporary placeholder: this only fills the Value dictionary slot until real
-// Ferlium-owned drop derivation is implemented.
-fn derive_value_drop_body(input_types: &[Type], arena: &mut NodeArena) -> (NodeId, Vec<LocalDecl>) {
+fn derive_value_drop_body(
+    trait_ref: &TraitRef,
+    input_types: &[Type],
+    arena: &mut NodeArena,
+    ctx: &mut ValueBodyCtx<'_, '_>,
+) -> Result<(NodeId, Vec<LocalDecl>), InternalCompilationError> {
     use hir::hir_syn::*;
 
     assert!(input_types.len() == 1);
     let ty = input_types[0];
-    assert!(ty.is_constant());
+    assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
-    let root = arena.alloc(hir::Node::new(
-        native(()),
-        Type::unit(),
-        EffType::empty(),
-        Location::new_synthesized(),
-    ));
+    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
+        arena.alloc(hir::Node::new(
+            kind,
+            ty,
+            EffType::empty(),
+            Location::new_synthesized(),
+        ))
+    };
+    let target_id = LocalDeclId::from_index(0);
     let locals = vec![LocalDecl::new(
         (crate::ustr("target"), Location::new_synthesized()),
         MutType::mutable(),
@@ -835,7 +1140,115 @@ fn derive_value_drop_body(input_types: &[Type], arena: &mut NodeArena) -> (NodeI
         None,
         Location::new_synthesized(),
     )];
-    (root, locals)
+    let build_unit = |arena: &mut NodeArena| n(arena, native(()), Type::unit());
+    macro_rules! build_product_drop {
+        ($arena:expr, $member_tys:expr) => {{
+            let mut statements = Vec::with_capacity($member_tys.len() + 1);
+            for (index, member_ty) in $member_tys.into_iter().enumerate() {
+                let target = n($arena, load(0, target_id), ty);
+                let target_member = n($arena, project(target, index), member_ty);
+                statements.push(value_method_call_node(
+                    ctx,
+                    trait_ref,
+                    member_ty,
+                    VALUE_DROP_METHOD_INDEX,
+                    Location::new_synthesized(),
+                    $arena,
+                    vec![target_member],
+                )?);
+            }
+            statements.push(n($arena, native(()), Type::unit()));
+            n($arena, block(statements), Type::unit())
+        }};
+    }
+    macro_rules! build_variant_drop {
+        ($arena:expr, $variants:expr) => {{
+            let target = n($arena, load(0, target_id), ty);
+            let target_tag = n($arena, extract_tag(target), int_type());
+            let mut alternatives = Vec::with_capacity($variants.len());
+            for (tag, payload_ty) in $variants {
+                let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
+                let branch = if payload_ty == Type::unit() {
+                    n($arena, native(()), Type::unit())
+                } else {
+                    let target = n($arena, load(0, target_id), ty);
+                    let target_payload = n($arena, project(target, 0), payload_ty);
+                    value_method_call_node(
+                        ctx,
+                        trait_ref,
+                        payload_ty,
+                        VALUE_DROP_METHOD_INDEX,
+                        Location::new_synthesized(),
+                        $arena,
+                        vec![target_payload],
+                    )?
+                };
+                alternatives.push((tag_val, branch));
+            }
+            let default = n($arena, native(()), Type::unit());
+            n(
+                $arena,
+                case(target_tag, alternatives, default),
+                Type::unit(),
+            )
+        }};
+    }
+
+    let ty_data = ty.data();
+    use TypeKind::*;
+    let root = match &*ty_data {
+        Tuple(member_tys) => {
+            let member_tys = member_tys.clone();
+            drop(ty_data);
+            build_product_drop!(arena, member_tys)
+        }
+        Record(fields) => {
+            let member_tys: Vec<Type> = fields.iter().map(|(_, ty)| *ty).collect();
+            drop(ty_data);
+            build_product_drop!(arena, member_tys)
+        }
+        Variant(variants) => {
+            let variants = variants.clone();
+            drop(ty_data);
+            build_variant_drop!(arena, variants)
+        }
+        Named(named) => {
+            let named = named.clone();
+            drop(ty_data);
+            let shape_ty = named.instantiated_shape();
+            let shape_data = shape_ty.data();
+            match &*shape_data {
+                Tuple(member_tys) => {
+                    let member_tys = member_tys.clone();
+                    drop(shape_data);
+                    build_product_drop!(arena, member_tys)
+                }
+                Record(fields) => {
+                    let member_tys: Vec<Type> = fields.iter().map(|(_, ty)| *ty).collect();
+                    drop(shape_data);
+                    build_product_drop!(arena, member_tys)
+                }
+                Variant(variants) => {
+                    let variants = variants.clone();
+                    drop(shape_data);
+                    build_variant_drop!(arena, variants)
+                }
+                Never => {
+                    drop(shape_data);
+                    build_unit(arena)
+                }
+                _ => {
+                    drop(shape_data);
+                    build_unit(arena)
+                }
+            }
+        }
+        _ => {
+            drop(ty_data);
+            build_unit(arena)
+        }
+    };
+    Ok((root, locals))
 }
 
 fn derive_structural_value_impl(
@@ -867,49 +1280,52 @@ fn derive_structural_value_impl(
         &[],
         associated_const_values,
     );
+    let mut ctx = ValueBodyCtx::concrete(solver);
 
     let Some((eq_root, eq_locals)) =
-        (match derive_value_eq_body(trait_ref, input_types, span, arena, solver) {
+        (match derive_value_eq_body(trait_ref, input_types, span, arena, &mut ctx) {
             Ok(value) => value,
             Err(err) => {
-                solver.rollback_derived_impl_state(snapshot);
+                ctx.solver.rollback_derived_impl_state(snapshot);
                 return Err(err);
             }
         })
     else {
-        solver.rollback_derived_impl_state(snapshot);
+        ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
     let Some((to_string_root, to_string_locals)) =
-        (match derive_value_to_string_body(trait_ref, input_types, span, arena, solver) {
+        (match derive_value_to_string_body(trait_ref, input_types, span, arena, &mut ctx) {
             Ok(value) => value,
             Err(err) => {
-                solver.rollback_derived_impl_state(snapshot);
+                ctx.solver.rollback_derived_impl_state(snapshot);
                 return Err(err);
             }
         })
     else {
-        solver.rollback_derived_impl_state(snapshot);
+        ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
     let Some((hash_root, hash_locals)) =
-        (match derive_value_hash_body(trait_ref, input_types, span, arena, solver) {
+        (match derive_value_hash_body(trait_ref, input_types, span, arena, &mut ctx) {
             Ok(value) => value,
             Err(err) => {
-                solver.rollback_derived_impl_state(snapshot);
+                ctx.solver.rollback_derived_impl_state(snapshot);
                 return Err(err);
             }
         })
     else {
-        solver.rollback_derived_impl_state(snapshot);
+        ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
-    let Some((clone_root, clone_locals)) = derive_value_clone_body(input_types, arena)? else {
-        solver.rollback_derived_impl_state(snapshot);
+    let Some((clone_root, clone_locals)) =
+        derive_value_clone_body(trait_ref, input_types, arena, &mut ctx)?
+    else {
+        ctx.solver.rollback_derived_impl_state(snapshot);
         return Ok(None);
     };
-    let (drop_root, drop_locals) = derive_value_drop_body(input_types, arena);
-    solver.replace_concrete_impl_code_entries(
+    let (drop_root, drop_locals) = derive_value_drop_body(trait_ref, input_types, arena, &mut ctx)?;
+    ctx.solver.replace_concrete_impl_code_entries(
         impl_id,
         trait_ref,
         input_types,
@@ -923,6 +1339,33 @@ fn derive_structural_value_impl(
         ],
     );
     Ok(Some(TraitImplId::Local(impl_id)))
+}
+
+pub(crate) fn derive_generic_value_code_entries(
+    trait_ref: &TraitRef,
+    input_types: &[Type],
+    span: Location,
+    arena: &mut NodeArena,
+    solver: &mut TraitSolver,
+) -> Result<Option<ValueCodeEntries>, InternalCompilationError> {
+    let mut ctx = ValueBodyCtx::generic(solver);
+
+    let Some(eq) = derive_value_eq_body(trait_ref, input_types, span, arena, &mut ctx)? else {
+        return Ok(None);
+    };
+    let Some(to_string) =
+        derive_value_to_string_body(trait_ref, input_types, span, arena, &mut ctx)?
+    else {
+        return Ok(None);
+    };
+    let Some(hash) = derive_value_hash_body(trait_ref, input_types, span, arena, &mut ctx)? else {
+        return Ok(None);
+    };
+    let Some(clone) = derive_value_clone_body(trait_ref, input_types, arena, &mut ctx)? else {
+        return Ok(None);
+    };
+    let drop = derive_value_drop_body(trait_ref, input_types, arena, &mut ctx)?;
+    Ok(Some(vec![eq, to_string, hash, clone, drop]))
 }
 
 /// A deriver for the `Value` trait that auto-derives the full impl for algebraic types.

@@ -415,6 +415,10 @@ impl Module {
         self.type_defs.iter().any(|local| local == type_def)
     }
 
+    pub(crate) fn type_defs(&self) -> &[TypeDefRef] {
+        &self.type_defs
+    }
+
     // Trait definitions and implementations
 
     /// Add a trait definition to this module, returning its ID.
