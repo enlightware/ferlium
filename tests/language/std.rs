@@ -820,6 +820,18 @@ fn reverse() {
         session.run("let values = [1, 2, 3]; (values, reversed(values))"),
         tuple!(int_a![1, 2, 3], int_a![3, 2, 1])
     );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { let mut values = [3, 1, 2]; reverse(values) }",
+        "f",
+        no_effects(),
+    );
+    test_mod_for_effects(
+        &mut session,
+        "fn f() { reversed([3, 1, 2]) }",
+        "f",
+        no_effects(),
+    );
 }
 
 #[test]
@@ -865,19 +877,19 @@ fn sort() {
         &mut session,
         "fn f() { let mut values = [3, 1, 2]; sort(values) }",
         "f",
-        effect(Fallible),
+        no_effects(),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { let mut values = [3, 1, 2]; sort_by(values, |left, right| cmp(left, right)) }",
         "f",
-        effect(Fallible),
+        no_effects(),
     );
     test_mod_for_effects(
         &mut session,
         "fn f() { sorted([3, 1, 2]) }",
         "f",
-        effect(Fallible),
+        no_effects(),
     );
     session
         .fail_compilation(

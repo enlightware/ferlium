@@ -161,11 +161,11 @@ trait Contains<Self |-> Element> {
 /// A container whose elements can be reversed in place.
 trait Reverse<Self> {
     /// Reverses the elements of `value` in place.
-    fn reverse(value: &mut Self) -> () ! fallible;
+    fn reverse(value: &mut Self) -> ();
 }
 
 /// A container that can be sorted in place with a custom comparator.
 trait SortBy<Self |-> Item> {
     /// Sorts `value` in place using `compare`.
-    fn sort_by(self: &mut Self, comparator: (Item, Item) -> Ordering) ! fallible;
+    fn sort_by(self: &mut Self, comparator: (Item, Item) -> Ordering);
 }

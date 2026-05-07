@@ -246,9 +246,9 @@ impl<A> Reverse for <Self = [A]> {
 			if left >= right {
 				return ()
 			};
-			let temp = value[left];
-			value[left] = value[right];
-			value[right] = temp;
+			let temp = effects_unsafe { value[left] };
+			effects_unsafe { value[left] = value[right] };
+			effects_unsafe { value[right] = temp };
 			left += 1;
 		}
 	}
@@ -273,18 +273,21 @@ fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, midd
 	for index in start..end {
 		if left < middle {
 			if right >= end {
-				target[index] = source[left];
+				effects_unsafe { target[index] = source[left] };
 				left += 1;
-			} else if compare(source[left], source[right]) != Greater {
+			} else if compare(
+				effects_unsafe { source[left] },
+				effects_unsafe { source[right] },
+			) != Greater {
 				// Keep equal elements from the left run first to preserve stability.
-				target[index] = source[left];
+				effects_unsafe { target[index] = source[left] };
 				left += 1;
 			} else {
-				target[index] = source[right];
+				effects_unsafe { target[index] = source[right] };
 				right += 1;
 			}
 		} else {
-			target[index] = source[right];
+			effects_unsafe { target[index] = source[right] };
 			right += 1;
 		}
 	};
