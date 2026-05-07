@@ -44,6 +44,32 @@ fn bench_quicksort_compile() {
     compile_quicksort();
 }
 
+fn setup_compiler_session() -> CompilerSession {
+    CompilerSession::new()
+}
+
+#[library_benchmark(setup = setup_compiler_session)]
+fn bench_quicksort_bank_account_compile_without_std_startup(mut session: CompilerSession) {
+    let quicksort = session
+        .compile(
+            include_str!("../tests/modules/quicksort.fer"),
+            "quicksort.fer",
+            Path::single_str("quicksort"),
+        )
+        .unwrap()
+        .module_id;
+    let account = session
+        .compile(
+            include_str!("../tests/modules/bank_account.fer"),
+            "bank_account.fer",
+            Path::single_str("account"),
+        )
+        .unwrap()
+        .module_id;
+
+    black_box((quicksort, account));
+}
+
 fn setup_quicksort() -> (CompilerSession, ModuleId, Vec<isize>) {
     let (session, module_id) = compile_quicksort();
     let random_data = lcg_seq(300, 42);
@@ -198,6 +224,7 @@ library_benchmark_group!(
     benchmarks = [
         bench_new_session,
         bench_quicksort_compile,
+        bench_quicksort_bank_account_compile_without_std_startup,
         bench_bank_account_compile
     ]
 );
