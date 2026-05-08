@@ -19,7 +19,10 @@ use ferlium::{
     module::{FunctionCollector, LocalDecl, ModuleId, TraitImpls},
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
-        r#trait::{TraitAssociatedConst, TraitRef},
+        r#trait::{
+            TraitAssociatedConst, TraitAssociatedConstIndex, TraitDictionaryEntryIndex,
+            TraitMethodIndex, TraitRef,
+        },
         r#type::{FnType, Type, TypeVar},
     },
 };
@@ -197,13 +200,34 @@ fn concrete_impl_stores_associated_const_values() {
     );
     let imp = impls.get_impl_by_local_id(impl_id);
 
-    assert_eq!(trait_ref.dictionary_method_index(0), 0);
-    assert_eq!(trait_ref.associated_const_index(ustr("SIZE")), Some(0));
-    assert_eq!(trait_ref.associated_const_index(ustr("ALIGN")), Some(1));
-    assert_eq!(trait_ref.dictionary_associated_const_index(0), 1);
-    assert_eq!(trait_ref.dictionary_associated_const_index(1), 2);
-    assert_eq!(imp.associated_const_value(0), Some(0));
-    assert_eq!(imp.associated_const_value(1), Some(1));
+    assert_eq!(
+        trait_ref.dictionary_method_index(TraitMethodIndex(0)),
+        TraitDictionaryEntryIndex(0)
+    );
+    assert_eq!(
+        trait_ref.associated_const_index(ustr("SIZE")),
+        Some(TraitAssociatedConstIndex(0))
+    );
+    assert_eq!(
+        trait_ref.associated_const_index(ustr("ALIGN")),
+        Some(TraitAssociatedConstIndex(1))
+    );
+    assert_eq!(
+        trait_ref.dictionary_associated_const_index(TraitAssociatedConstIndex(0)),
+        TraitDictionaryEntryIndex(1)
+    );
+    assert_eq!(
+        trait_ref.dictionary_associated_const_index(TraitAssociatedConstIndex(1)),
+        TraitDictionaryEntryIndex(2)
+    );
+    assert_eq!(
+        imp.associated_const_value(TraitAssociatedConstIndex(0)),
+        Some(0)
+    );
+    assert_eq!(
+        imp.associated_const_value(TraitAssociatedConstIndex(1)),
+        Some(1)
+    );
     assert_eq!(fn_collector.new_elements.len(), 1);
 
     let Value::Tuple(dictionary_entries) = &imp.dictionary_value else {

@@ -23,7 +23,7 @@ use crate::{
     hir::value::{Value, build_dictionary_value},
     module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id},
     parser::location::Location,
-    types::r#trait::TraitRef,
+    types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
     types::r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     types::type_inference::substitution::InstSubstitution,
     types::type_like::TypeLike,
@@ -178,8 +178,10 @@ impl TraitImpl {
         self
     }
 
-    pub fn associated_const_value(&self, index: usize) -> Option<isize> {
-        self.associated_const_values.get(index).copied()
+    pub fn associated_const_value(&self, index: TraitAssociatedConstIndex) -> Option<isize> {
+        self.associated_const_values
+            .get(usize::from(index))
+            .copied()
     }
 }
 
@@ -302,7 +304,7 @@ impl TraitImpls {
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {
             trait_ref
-                .qualified_method_name(method_index, &input_tys)
+                .qualified_method_name(TraitMethodIndex::from_index(method_index), &input_tys)
                 .into()
         };
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);
@@ -390,7 +392,10 @@ impl TraitImpls {
         // Add to local functions, collect their IDs and build the overall interface hash.
         let namer = |method_index: usize| {
             trait_ref
-                .qualified_method_name(method_index, &sub_key.input_tys)
+                .qualified_method_name(
+                    TraitMethodIndex::from_index(method_index),
+                    &sub_key.input_tys,
+                )
                 .into()
         };
         let (methods, method_tys) = Self::bundle_module_functions(functions, fn_collector, namer);

@@ -28,7 +28,7 @@ use crate::{
     },
     types::effects::{EffType, PrimitiveEffect},
     types::mutability::MutVal,
-    types::r#trait::{Deriver, TraitRef},
+    types::r#trait::{Deriver, TraitMethodIndex, TraitRef},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type, TypeKind, tuple_type},
     types::type_like::TypeLike,
@@ -117,7 +117,8 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
             // project the i-th element
             let project_node = n(arena, project(load_node, index), ty);
             // serialize the i-th element
-            let function = solver.solve_impl_method(trait_ref, &[ty], 0, span, arena)?;
+            let function =
+                solver.solve_impl_method(trait_ref, &[ty], TraitMethodIndex(0), span, arena)?;
             let apply = n(
                 arena,
                 static_apply_pure(function, [(project_node, ty)], variant_type(), span),
@@ -317,7 +318,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
         // build the deserialization of a variant into a value of type `ty`
         let build_deserialize =
             |arena: &mut NodeArena, solver: &mut TraitSolver, variant: NodeId, ty: Type| {
-                let function = solver.solve_impl_method(trait_ref, &[ty], 0, span, arena)?;
+                let function =
+                    solver.solve_impl_method(trait_ref, &[ty], TraitMethodIndex(0), span, arena)?;
                 Ok(n(
                     arena,
                     static_apply_pure(
@@ -435,7 +437,13 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     let get_entry =
                         build_expect_variant_object_entry(arena, solver, load_object, &name)?;
                     // deserialize the name-th element
-                    let function = solver.solve_impl_method(trait_ref, &[ty], 0, span, arena)?;
+                    let function = solver.solve_impl_method(
+                        trait_ref,
+                        &[ty],
+                        TraitMethodIndex(0),
+                        span,
+                        arena,
+                    )?;
                     Ok(n(
                         arena,
                         static_apply_pure(

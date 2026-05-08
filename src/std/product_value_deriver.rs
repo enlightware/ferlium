@@ -14,7 +14,7 @@ use crate::{
     hir::{self, NodeArena, NodeId},
     module::TraitImplId,
     types::effects::EffType,
-    types::r#trait::{Deriver, TraitRef},
+    types::r#trait::{Deriver, TraitMethodIndex, TraitRef},
     types::trait_solver::TraitSolver,
     types::r#type::{Type, TypeKind},
     types::type_like::TypeLike,
@@ -63,7 +63,13 @@ impl Deriver for ProductValueDeriver {
         };
 
         let mut build_member_value = |arena: &mut NodeArena, member_ty| {
-            let function = solver.solve_impl_method(trait_ref, &[member_ty], 0, span, arena)?;
+            let function = solver.solve_impl_method(
+                trait_ref,
+                &[member_ty],
+                TraitMethodIndex(0),
+                span,
+                arena,
+            )?;
             Ok(n(
                 arena,
                 static_apply_pure(function, std::iter::empty(), member_ty, span),

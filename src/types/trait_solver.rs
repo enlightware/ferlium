@@ -37,7 +37,7 @@ use crate::{
     },
     types::effects::EffType,
     types::mutability::MutType,
-    types::r#trait::TraitRef,
+    types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
     types::r#type::{FnArgType, Type},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
@@ -1127,6 +1127,7 @@ impl<'a> TraitSolver<'a> {
         let mut tys = Vec::with_capacity(definitions.len());
 
         for (method_index, definition) in definitions.into_iter().enumerate() {
+            let method_index = TraitMethodIndex::from_index(method_index);
             let id = self.fn_collector.next_id();
             let ty = Type::function_type(definition.ty_scheme.ty.clone());
             let name = trait_ref
@@ -1495,6 +1496,7 @@ impl<'a> TraitSolver<'a> {
                     for (method_index, (fn_id, def)) in
                         gen_functions.iter().zip(definitions).enumerate()
                     {
+                        let method_index = TraitMethodIndex::from_index(method_index);
                         // Build the concrete function type and hash its signature.
                         let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
 
@@ -1509,7 +1511,7 @@ impl<'a> TraitSolver<'a> {
                                     let slot_id = self.import_impl_method(
                                         module_id,
                                         trait_key.clone(),
-                                        method_index as u32,
+                                        method_index,
                                     );
                                     FunctionId::Import(slot_id)
                                 }
@@ -1698,12 +1700,13 @@ impl<'a> TraitSolver<'a> {
                     .zip(definitions)
                     .enumerate()
                     .map(|(method_index, (fn_id, def))| {
+                        let method_index = TraitMethodIndex::from_index(method_index);
                         let function_id = match imp_module_id {
                             Some(module_id) => {
                                 let slot_id = self.import_impl_method(
                                     module_id,
                                     trait_key.clone(),
-                                    method_index as u32,
+                                    method_index,
                                 );
                                 FunctionId::Import(slot_id)
                             }
@@ -1814,20 +1817,22 @@ impl<'a> TraitSolver<'a> {
         &mut self,
         trait_ref: &TraitRef,
         input_tys: &[Type],
-        index: usize,
+        index: TraitMethodIndex,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<FunctionId, InternalCompilationError> {
         let impl_id = self.solve_impl(trait_ref, input_tys, fn_span, arena)?;
         use TraitImplId::*;
         Ok(match impl_id {
-            Local(id) => FunctionId::Local(self.impls.data[id.as_index()].methods[index]),
+            Local(id) => {
+                FunctionId::Local(self.impls.data[id.as_index()].methods[index.as_index()])
+            }
             Import(slot_id) => {
                 let slot = &self.import_impl_slots[slot_id.as_index()];
                 let module_id = slot.module;
                 let key = slot.key.as_concrete().unwrap();
                 let key = TraitKey::Concrete(key.clone());
-                FunctionId::Import(self.import_impl_method(module_id, key, index as u32))
+                FunctionId::Import(self.import_impl_method(module_id, key, index))
             }
         })
     }
@@ -1852,12 +1857,12 @@ impl<'a> TraitSolver<'a> {
         &mut self,
         trait_ref: &TraitRef,
         input_tys: &[Type],
-        associated_const_index: usize,
+        associated_const_index: TraitAssociatedConstIndex,
         fn_span: Location,
         arena: &mut NodeArena,
     ) -> Result<isize, InternalCompilationError> {
         assert!(
-            associated_const_index < trait_ref.associated_const_count(),
+            associated_const_index.as_index() < trait_ref.associated_const_count(),
             "associated const index {} out of bounds for trait {}",
             associated_const_index,
             trait_ref.name
@@ -1977,7 +1982,7 @@ impl<'a> TraitSolver<'a> {
         &mut self,
         module_id: ModuleId,
         key: TraitKey,
-        method_index: u32,
+        method_index: TraitMethodIndex,
     ) -> ImportFunctionSlotId {
         self.import_fn_slots
             .iter()

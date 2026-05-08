@@ -21,7 +21,7 @@ use crate::{
         id::Id,
     },
     parser::helpers::EMPTY_USTR,
-    types::r#trait::TraitRef,
+    types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef},
     types::trait_solver::TraitSolver,
     types::r#type::TypeVar,
     types::type_like::TypeLike,
@@ -241,7 +241,7 @@ fn value_dictionary_node_kind_from_methods(
     input_tys: &[Type],
     span: Location,
     methods: &[LocalFunctionId],
-    mut method_name: impl FnMut(usize) -> Ustr,
+    mut method_name: impl FnMut(TraitMethodIndex) -> Ustr,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     // This builds compiler-generated `Value` dictionaries. The associated
     // consts are layout metadata, so they are computed from the concrete HIR
@@ -251,10 +251,11 @@ fn value_dictionary_node_kind_from_methods(
     let mut entries =
         Vec::with_capacity(trait_ref.functions.len() + trait_ref.associated_const_count());
     for (method_index, definition) in definitions.into_iter().enumerate() {
+        let method_index = TraitMethodIndex::from_index(method_index);
         let method_ty = Type::function_type(definition.ty_scheme.ty);
         entries.push(arena.alloc(Node::new(
             NodeKind::GetFunction(b(hir::GetFunction {
-                function: FunctionId::Local(methods[method_index]),
+                function: FunctionId::Local(methods[usize::from(method_index)]),
                 function_path: Path::single(method_name(method_index), span),
                 function_span: span,
                 inst_data: hir::FnInstData::none(),
@@ -286,6 +287,7 @@ fn function_value_dictionary_node_kind(
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     let methods = (0..trait_ref.functions.len())
+        .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(ctx.trait_solver, method_index, span, arena))
         .collect::<Result<Vec<_>, _>>()?;
     value_dictionary_node_kind_from_methods(
@@ -315,7 +317,7 @@ fn generic_derived_value_dictionary_node_kind(
         input_tys,
         span,
         &methods,
-        |method_index| trait_ref.functions[method_index].0,
+        |method_index| trait_ref.function(method_index).0,
     )
 }
 
@@ -352,17 +354,16 @@ fn trait_dictionary_node_kind(
 }
 
 /// Return the method slot and callable type from an already-instantiated dictionary type.
-/// Currently the returned untry_index is the same as function_index.
 fn dictionary_method_projection_data(
     trait_ref: &TraitRef,
     dictionary_ty: Type,
-    function_index: usize,
-) -> (usize, Type) {
-    let entry_index = trait_ref.dictionary_method_index(function_index);
+    method_index: TraitMethodIndex,
+) -> (TraitDictionaryEntryIndex, Type) {
+    let entry_index = trait_ref.dictionary_method_index(method_index);
     let function_ty = dictionary_ty
         .data()
         .as_tuple()
-        .expect("Trait impl dict should be a tuple type")[entry_index];
+        .expect("Trait impl dict should be a tuple type")[usize::from(entry_index)];
     (entry_index, function_ty)
 }
 
@@ -372,13 +373,13 @@ fn alloc_dictionary_method_projection(
     dictionary_id: NodeId,
     dictionary_ty: Type,
     trait_ref: &TraitRef,
-    function_index: usize,
+    method_index: TraitMethodIndex,
     span: Location,
 ) -> NodeId {
     let (entry_index, function_ty) =
-        dictionary_method_projection_data(trait_ref, dictionary_ty, function_index);
+        dictionary_method_projection_data(trait_ref, dictionary_ty, method_index);
     arena.alloc(Node::new(
-        NodeKind::Project(dictionary_id, entry_index),
+        NodeKind::Project(dictionary_id, usize::from(entry_index)),
         function_ty,
         no_effects(),
         span,
@@ -584,7 +585,7 @@ fn resolve_local_value_dispatch(
     arena: &mut NodeArena,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
     ty: Type,
-    method_index: usize,
+    method_index: TraitMethodIndex,
     span: Location,
     missing_dictionary_msg: &str,
 ) -> Result<LocalValueDispatch, InternalCompilationError> {
@@ -597,7 +598,7 @@ fn resolve_local_value_dispatch(
         let methods =
             generic_value_methods_for_type(ctx.trait_solver, &VALUE_TRAIT, &[ty], span, arena)?;
         return Ok(LocalValueDispatch::Static(FunctionId::Local(
-            methods[method_index],
+            methods[usize::from(method_index)],
         )));
     }
     if ty.is_constant() {
@@ -777,7 +778,7 @@ impl Node {
                         app.function_span,
                         arena,
                     )?);
-                    let definition = &app.trait_ref.functions[app.function_index].1;
+                    let definition = &app.trait_ref.function(app.function_index).1;
                     let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
                     let function_path = Some(app.function_path.clone());
                     let function_span = app.function_span;
@@ -801,7 +802,7 @@ impl Node {
                         app.function_span,
                         arena,
                     )?;
-                    let definition = &app.trait_ref.functions[app.function_index].1;
+                    let definition = &app.trait_ref.function(app.function_index).1;
                     let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
                     let function_path = Some(app.function_path.clone());
                     let function_span = app.function_span;
@@ -1008,7 +1009,7 @@ impl Node {
                         dict_ty,
                         get_fn.function_index,
                     );
-                    kind = Project(dict_id, entry_index);
+                    kind = Project(dict_id, usize::from(entry_index));
                 }
             }
             GetTraitAssociatedConst(get_const) => {
@@ -1024,7 +1025,7 @@ impl Node {
                 ) {
                     let values =
                         value_layout_associated_const_values(get_const.input_tys[0], node_span)?;
-                    let value = values[get_const.associated_const_index];
+                    let value = values[usize::from(get_const.associated_const_index)];
                     kind = hir::hir_syn::native(value);
                 } else if resolved {
                     let value = ctx.trait_solver.solve_associated_const(
@@ -1052,12 +1053,13 @@ impl Node {
                         no_effects(),
                         get_const.associated_const_span,
                     ));
-                    kind = Project(
-                        load_dict_id,
-                        get_const
-                            .trait_ref
-                            .dictionary_associated_const_index(get_const.associated_const_index),
-                    );
+                    kind =
+                        Project(
+                            load_dict_id,
+                            usize::from(get_const.trait_ref.dictionary_associated_const_index(
+                                get_const.associated_const_index,
+                            )),
+                        );
                 }
             }
             GetTraitDictionary(get_dict) => {
@@ -1197,7 +1199,7 @@ mod tests {
         hir::function::Function,
         module::{FunctionCollector, LocalDecl, ModuleId, TraitImpls, id::Id},
         types::{
-            r#trait::{TraitAssociatedConst, TraitRef},
+            r#trait::{TraitAssociatedConst, TraitAssociatedConstIndex, TraitRef},
             trait_solver::TraitSolver,
             r#type::Type,
         },
@@ -1218,11 +1220,11 @@ mod tests {
 
     fn get_associated_const_node(
         trait_ref: TraitRef,
-        associated_const_index: usize,
+        associated_const_index: TraitAssociatedConstIndex,
         input_tys: Vec<Type>,
     ) -> NodeKind {
         NodeKind::GetTraitAssociatedConst(b(GetTraitAssociatedConst {
-            associated_const_name: trait_ref.associated_consts[associated_const_index].name,
+            associated_const_name: trait_ref.associated_const(associated_const_index).name,
             associated_const_span: Location::new_synthesized(),
             trait_ref,
             associated_const_index,
@@ -1237,7 +1239,11 @@ mod tests {
         let mut arena = NodeArena::default();
         let span = Location::new_synthesized();
         let node = arena.alloc(Node::new(
-            get_associated_const_node(trait_ref.clone(), 0, vec![Type::unit()]),
+            get_associated_const_node(
+                trait_ref.clone(),
+                TraitAssociatedConstIndex::from_index(0),
+                vec![Type::unit()],
+            ),
             int_type(),
             no_effects(),
             span,
@@ -1285,7 +1291,11 @@ mod tests {
         let mut arena = NodeArena::default();
         let span = Location::new_synthesized();
         let node = arena.alloc(Node::new(
-            get_associated_const_node(trait_ref.clone(), 1, vec![input_ty]),
+            get_associated_const_node(
+                trait_ref.clone(),
+                TraitAssociatedConstIndex::from_index(1),
+                vec![input_ty],
+            ),
             int_type(),
             no_effects(),
             span,

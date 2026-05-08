@@ -18,14 +18,14 @@ use crate::{
         function::ScriptFunction,
     },
     internal_compilation_error,
-    module::{LocalFunctionId, Module, ModuleFunction},
+    module::{LocalFunctionId, Module, ModuleFunction, id::Id},
     std::value::{
         VALUE_TRAIT, derive_generic_value_code_entries, function_value_method_function,
         function_value_method_name, is_function_surface_only_value_type,
     },
     types::{
         coherence::check_trait_impl,
-        r#trait::TraitRef,
+        r#trait::{TraitMethodIndex, TraitRef},
         trait_solver::{TraitSolver, trait_solver_from_module},
         r#type::{Type, TypeDefRef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
@@ -39,7 +39,7 @@ use ustr::Ustr;
 /// Return or lazily emit one compiler-provided `Value` method for function values.
 pub(crate) fn function_value_method(
     solver: &mut TraitSolver<'_>,
-    method_index: usize,
+    method_index: TraitMethodIndex,
     span: Location,
     arena: &mut NodeArena,
 ) -> Result<LocalFunctionId, InternalCompilationError> {
@@ -80,6 +80,7 @@ pub(crate) fn generic_value_methods_for_type(
     for (method_index, (definition, (code_entry, locals))) in
         definitions.into_iter().zip(code_entries).enumerate()
     {
+        let method_index = TraitMethodIndex::from_index(method_index);
         let name = Ustr::from(&format!(
             "{}-generic",
             trait_ref.qualified_method_name(method_index, input_tys)
@@ -269,6 +270,7 @@ pub(super) fn emit_auto_value_impls(
         for (method_index, (definition, (root, locals))) in
             definitions.into_iter().zip(code_entries).enumerate()
         {
+            let method_index = TraitMethodIndex::from_index(method_index);
             let mut definition = definition;
             definition.ty_scheme.ty_quantifiers = quantifiers.clone();
             definition.ty_scheme.constraints = constraints.clone();

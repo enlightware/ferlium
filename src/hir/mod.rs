@@ -20,7 +20,7 @@ use crate::{
     ast::{self, UnnamedArg},
     format::FormatWith,
     module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
-    types::r#trait::TraitRef,
+    types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
     types::type_like::{CastableToType, TypeLike},
 };
 use derive_new::new;
@@ -148,7 +148,7 @@ pub struct StaticApplication {
 #[derive(Debug, Clone)]
 pub struct TraitFnApplication {
     pub trait_ref: TraitRef,
-    pub function_index: usize,
+    pub function_index: TraitMethodIndex,
     pub function_path: ast::Path,
     pub function_span: Location,
     pub arguments: Vec<NodeId>,
@@ -159,7 +159,7 @@ pub struct TraitFnApplication {
 }
 impl TraitFnApplication {
     pub fn argument_names(&self) -> &[Ustr] {
-        &self.trait_ref.functions[self.function_index].1.arg_names
+        &self.trait_ref.function(self.function_index).1.arg_names
     }
 }
 
@@ -212,7 +212,7 @@ pub struct GetFunction {
 #[derive(Debug, Clone)]
 pub struct GetTraitFunction {
     pub trait_ref: TraitRef,
-    pub function_index: usize,
+    pub function_index: TraitMethodIndex,
     pub function_path: ast::Path,
     pub function_span: Location,
     pub input_tys: Vec<Type>,
@@ -223,7 +223,7 @@ pub struct GetTraitFunction {
 #[derive(Debug, Clone)]
 pub struct GetTraitAssociatedConst {
     pub trait_ref: TraitRef,
-    pub associated_const_index: usize,
+    pub associated_const_index: TraitAssociatedConstIndex,
     pub associated_const_name: Ustr,
     pub associated_const_span: Location,
     pub input_tys: Vec<Type>,
@@ -474,7 +474,7 @@ impl Node {
                 }
             }
             TraitFnApply(app) => {
-                let fn_data = &app.trait_ref.functions[app.function_index];
+                let fn_data = app.trait_ref.function(app.function_index);
                 let fn_name = fn_data.0;
                 let fn_def = &fn_data.1;
                 let trait_name = app.trait_ref.name;
@@ -497,7 +497,7 @@ impl Node {
                 writeln!(f, "{indent_str}get {}", get_fn.function.format_with(env))?;
             }
             GetTraitFunction(get_fn) => {
-                let fn_name = get_fn.trait_ref.functions[get_fn.function_index].0;
+                let fn_name = get_fn.trait_ref.function(get_fn.function_index).0;
                 let trait_name = get_fn.trait_ref.name;
                 writeln!(f, "{indent_str}get trait fn {fn_name} (from {trait_name})")?;
             }

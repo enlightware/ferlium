@@ -39,7 +39,7 @@ use crate::{
             no_effects,
         },
         mutability::{MutType, MutVar, MutVarKey},
-        r#trait::TraitRef,
+        r#trait::{TraitMethodIndex, TraitRef},
         trait_solver::TraitSolver,
         r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
         type_like::TypeLike,
@@ -55,7 +55,7 @@ use super::{
 };
 
 /// Returns whether a trait method may only be called by compiler-generated HIR.
-fn is_compiler_callable_only_method(trait_ref: &TraitRef, method_index: usize) -> bool {
+fn is_compiler_callable_only_method(trait_ref: &TraitRef, method_index: TraitMethodIndex) -> bool {
     trait_ref == &*VALUE_TRAIT
         && matches!(
             method_index,
@@ -65,12 +65,12 @@ fn is_compiler_callable_only_method(trait_ref: &TraitRef, method_index: usize) -
 
 fn compiler_only_trait_method_use_error(
     trait_ref: &TraitRef,
-    method_index: usize,
+    method_index: TraitMethodIndex,
     span: Location,
 ) -> InternalCompilationError {
     internal_compilation_error!(CompilerOnlyTraitMethodUse {
         trait_ref: trait_ref.clone(),
-        method_name: trait_ref.functions[method_index].0,
+        method_name: trait_ref.function(method_index).0,
         span,
     })
 }

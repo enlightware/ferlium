@@ -28,7 +28,9 @@ use crate::{
     },
     types::effects::EffType,
     types::mutability::{MutType, MutVal},
-    types::r#trait::{Deriver, TraitAssociatedConst, TraitRef},
+    types::r#trait::{
+        Deriver, TraitAssociatedConst, TraitAssociatedConstIndex, TraitMethodIndex, TraitRef,
+    },
     types::trait_solver::TraitSolver,
     types::r#type::{FnArgType, FnType, Type, TypeKind},
     types::type_like::TypeLike,
@@ -41,18 +43,20 @@ where
     lhs == rhs
 }
 
-pub(crate) const VALUE_EQ_METHOD_INDEX: usize = 0;
-pub(crate) const VALUE_TO_STRING_METHOD_INDEX: usize = 1;
-pub(crate) const VALUE_HASH_METHOD_INDEX: usize = 2;
-pub(crate) const VALUE_CLONE_METHOD_INDEX: usize = 3;
-pub(crate) const VALUE_DROP_METHOD_INDEX: usize = 4;
-pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: usize = 0;
-pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: usize = 1;
+pub(crate) const VALUE_EQ_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(0);
+pub(crate) const VALUE_TO_STRING_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(1);
+pub(crate) const VALUE_HASH_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(2);
+pub(crate) const VALUE_CLONE_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(3);
+pub(crate) const VALUE_DROP_METHOD_INDEX: TraitMethodIndex = TraitMethodIndex(4);
+pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
+    TraitAssociatedConstIndex(0);
+pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
+    TraitAssociatedConstIndex(1);
 
 pub(crate) fn native_layout_associated_consts<T>() -> [isize; 2] {
     let mut values = [0; 2];
-    values[VALUE_SIZE_ASSOC_CONST_INDEX] = mem::size_of::<T>() as isize;
-    values[VALUE_ALIGN_ASSOC_CONST_INDEX] = mem::align_of::<T>() as isize;
+    values[usize::from(VALUE_SIZE_ASSOC_CONST_INDEX)] = mem::size_of::<T>() as isize;
+    values[usize::from(VALUE_ALIGN_ASSOC_CONST_INDEX)] = mem::align_of::<T>() as isize;
     values
 }
 
@@ -83,18 +87,20 @@ impl ValueLayout {
         span: Location,
     ) -> Result<[isize; 2], InternalCompilationError> {
         let mut values = [0; 2];
-        values[VALUE_SIZE_ASSOC_CONST_INDEX] = isize::try_from(self.size).map_err(|_| {
-            internal_compilation_error!(Internal {
-                error: format!("Value size {} does not fit in int", self.size),
-                span,
-            })
-        })?;
-        values[VALUE_ALIGN_ASSOC_CONST_INDEX] = isize::try_from(self.align).map_err(|_| {
-            internal_compilation_error!(Internal {
-                error: format!("Value alignment {} does not fit in int", self.align),
-                span,
-            })
-        })?;
+        values[usize::from(VALUE_SIZE_ASSOC_CONST_INDEX)] =
+            isize::try_from(self.size).map_err(|_| {
+                internal_compilation_error!(Internal {
+                    error: format!("Value size {} does not fit in int", self.size),
+                    span,
+                })
+            })?;
+        values[usize::from(VALUE_ALIGN_ASSOC_CONST_INDEX)] =
+            isize::try_from(self.align).map_err(|_| {
+                internal_compilation_error!(Internal {
+                    error: format!("Value alignment {} does not fit in int", self.align),
+                    span,
+                })
+            })?;
         Ok(values)
     }
 
@@ -362,7 +368,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         &mut self,
         trait_ref: &TraitRef,
         input_ty: Type,
-        method_index: usize,
+        method_index: TraitMethodIndex,
         span: Location,
         arena: &mut NodeArena,
         arguments: Vec<NodeId>,
@@ -370,7 +376,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         let definition = trait_ref
             .instantiate_for_tys(&[input_ty], &[])
             .into_iter()
-            .nth(method_index)
+            .nth(method_index.as_index())
             .expect("Value method index out of bounds");
         let fn_ty = definition.ty_scheme.ty;
         let ret_ty = fn_ty.ret;
@@ -393,7 +399,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                 hir::NodeKind::TraitFnApply(crate::containers::b(hir::TraitFnApplication {
                     trait_ref: trait_ref.clone(),
                     function_index: method_index,
-                    function_path: Path::single(trait_ref.functions[method_index].0, span),
+                    function_path: Path::single(trait_ref.function(method_index).0, span),
                     function_span: span,
                     arguments,
                     arguments_unnamed: UnnamedArg::All,
@@ -419,7 +425,7 @@ fn value_method_call_node(
     ctx: &mut ValueBodyCtx<'_, '_>,
     trait_ref: &TraitRef,
     input_ty: Type,
-    method_index: usize,
+    method_index: TraitMethodIndex,
     span: Location,
     arena: &mut NodeArena,
     arguments: Vec<NodeId>,
@@ -442,8 +448,8 @@ const FUNCTION_VALUE_METHOD_NAMES: [&str; 5] = [
     "$_ferlium_function_value_drop",
 ];
 
-pub(crate) fn function_value_method_name(method_index: usize) -> ustr::Ustr {
-    ustr::Ustr::from(FUNCTION_VALUE_METHOD_NAMES[method_index])
+pub(crate) fn function_value_method_name(method_index: TraitMethodIndex) -> ustr::Ustr {
+    ustr::Ustr::from(FUNCTION_VALUE_METHOD_NAMES[usize::from(method_index)])
 }
 
 fn alloc_synth_node(arena: &mut NodeArena, kind: hir::NodeKind, ty: Type) -> NodeId {
@@ -516,7 +522,7 @@ fn function_value_drop_body(ty: Type, arena: &mut NodeArena) -> (NodeId, Vec<Loc
 }
 
 pub(crate) fn function_value_method_function(
-    method_index: usize,
+    method_index: TraitMethodIndex,
     span: Location,
     arena: &mut NodeArena,
     solver: &mut TraitSolver<'_>,
@@ -1555,6 +1561,7 @@ fn derive_function_value_impl(
 ) -> Result<TraitImplId, InternalCompilationError> {
     let associated_const_values = value_layout_associated_const_values(input_types[0], span)?;
     let methods = (0..trait_ref.functions.len())
+        .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(solver, method_index, span, arena))
         .collect::<Result<Vec<_>, _>>()?;
     let definitions = trait_ref.instantiate_for_tys(input_types, &[]);

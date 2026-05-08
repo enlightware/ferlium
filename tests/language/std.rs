@@ -54,12 +54,12 @@ fn assert_std_value_layout<T>(module: &Module, ty: Type) {
         panic!("expected Value dictionary to be a tuple");
     };
     assert_eq!(
-        dictionary_entries[VALUE_TRAIT.dictionary_associated_const_index(size_index)]
+        dictionary_entries[usize::from(VALUE_TRAIT.dictionary_associated_const_index(size_index))]
             .as_primitive_ty::<isize>(),
         Some(&size)
     );
     assert_eq!(
-        dictionary_entries[VALUE_TRAIT.dictionary_associated_const_index(align_index)]
+        dictionary_entries[usize::from(VALUE_TRAIT.dictionary_associated_const_index(align_index))]
             .as_primitive_ty::<isize>(),
         Some(&align)
     );

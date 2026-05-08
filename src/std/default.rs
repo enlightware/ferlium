@@ -18,7 +18,7 @@ use crate::{
     module::{Module, TraitImplId},
     std::{STD_MODULE_ID, product_value_deriver::ProductValueDeriver},
     types::effects::EffType,
-    types::r#trait::{Deriver, TraitRef},
+    types::r#trait::{Deriver, TraitMethodIndex, TraitRef},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type, TypeKind},
     types::type_like::TypeLike,
@@ -78,7 +78,13 @@ impl Deriver for EnumDefaultDeriver {
         let root = if payload_ty == Type::unit() {
             n(arena, unit_variant(default_variant), ty)
         } else {
-            let function = solver.solve_impl_method(trait_ref, &[payload_ty], 0, span, arena)?;
+            let function = solver.solve_impl_method(
+                trait_ref,
+                &[payload_ty],
+                TraitMethodIndex(0),
+                span,
+                arena,
+            )?;
             let payload = n(
                 arena,
                 static_apply_pure(function, std::iter::empty(), payload_ty, span),

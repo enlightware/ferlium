@@ -10,11 +10,11 @@ use crate::{
     ast::{self, UstrSpan},
     compiler::error::InternalCompilationError,
     module::{
-        Module, ModuleFunction, ModuleId, Modules, path::Path,
+        Module, ModuleFunction, ModuleId, Modules, id::Id, path::Path,
         type_alias_name::find_generic_alias_name,
     },
     std::STD_MODULE_ID,
-    types::r#trait::TraitRef,
+    types::r#trait::{TraitMethodIndex, TraitRef},
     types::r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDefRef},
     types::typing_env::TraitFunctionDescription,
 };
@@ -251,7 +251,7 @@ impl<'m> ModuleEnv<'m> {
         })
     }
 
-    /// Get a trait function from the current module, or other ones, return the ID of the module if other.
+    /// Get a trait method from the current module, or other ones, return the ID of the module if other.
     pub fn get_trait_function(
         &'m self,
         path: &'m ast::Path,
@@ -265,7 +265,11 @@ impl<'m> ModuleEnv<'m> {
                     .enumerate()
                     .find_map(|(index, function)| {
                         if function.0 == name {
-                            Some((trait_ref.clone(), index, &function.1))
+                            Some((
+                                trait_ref.clone(),
+                                TraitMethodIndex::from_index(index),
+                                &function.1,
+                            ))
                         } else {
                             None
                         }

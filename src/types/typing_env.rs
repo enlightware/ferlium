@@ -20,15 +20,15 @@ use crate::{
         TypeDefLookupResult, id::Id,
     },
     std::STD_MODULE_ID,
-    types::r#trait::TraitRef,
+    types::r#trait::{TraitMethodIndex, TraitRef},
     types::r#type::{Type, TypeSubstitution, TypeVar},
 };
 
 use derive_new::new;
 
-/// A trait function description as result of a lookup in the typing environment.
-/// The tuple contains the trait reference, the index of the function in the trait, and the function definition.
-pub type TraitFunctionDescription<'a> = (TraitRef, usize, &'a FunctionDefinition);
+/// A trait method description as result of a lookup in the typing environment.
+/// The tuple contains the trait reference, the method index in the trait, and the method definition.
+pub type TraitFunctionDescription<'a> = (TraitRef, TraitMethodIndex, &'a FunctionDefinition);
 
 // /// A local variable within a typing environment.
 // #[derive(Clone, Debug, new)]

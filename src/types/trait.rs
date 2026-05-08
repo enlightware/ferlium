@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{FxHashMap, FxHashSet};
+use crate::{FxHashMap, FxHashSet, define_id_type};
 
 use dyn_clone::DynClone;
 use itertools::Itertools;
@@ -27,7 +27,7 @@ use crate::{
     },
     format::{FormatWith, write_with_separator_and_format_fn},
     hir::function::FunctionDefinition,
-    module::{ModuleEnv, ModuleId, TraitImplId},
+    module::{ModuleEnv, ModuleId, TraitImplId, id::Id},
     types::trait_solver::TraitSolver,
     types::r#type::{Type, TypeSubstitution, TypeVar},
     types::type_like::TypeLike,
@@ -52,6 +52,21 @@ dyn_clone::clone_trait_object!(Deriver);
 
 /// A trait method argument span, storing the spans of the argument name and its type.
 pub type TraitFunctionArgSpan = (Location, Location);
+
+define_id_type!(
+    /// Index into a trait's method list.
+    TraitMethodIndex
+);
+
+define_id_type!(
+    /// Index into a trait's associated const list.
+    TraitAssociatedConstIndex
+);
+
+define_id_type!(
+    /// Index into a runtime trait dictionary tuple.
+    TraitDictionaryEntryIndex
+);
 
 /// If the trait method is from code, this struct contains the spans of the method.
 #[derive(Debug, Clone)]
@@ -184,34 +199,54 @@ impl Trait {
     }
 
     /// Return the runtime dictionary index for a method.
-    pub fn dictionary_method_index(&self, method_index: usize) -> usize {
-        assert!(method_index < self.method_count());
-        method_index
+    pub fn dictionary_method_index(
+        &self,
+        method_index: TraitMethodIndex,
+    ) -> TraitDictionaryEntryIndex {
+        assert!(method_index.as_index() < self.method_count());
+        TraitDictionaryEntryIndex::from_index(method_index.as_index())
     }
 
     /// Return the runtime dictionary index for an associated const.
-    pub fn dictionary_associated_const_index(&self, associated_const_index: usize) -> usize {
-        assert!(associated_const_index < self.associated_const_count());
-        self.method_count() + associated_const_index
+    pub fn dictionary_associated_const_index(
+        &self,
+        associated_const_index: TraitAssociatedConstIndex,
+    ) -> TraitDictionaryEntryIndex {
+        assert!(associated_const_index.as_index() < self.associated_const_count());
+        TraitDictionaryEntryIndex::from_index(
+            self.method_count() + associated_const_index.as_index(),
+        )
     }
 
     /// Return the index of the associated const with the given name, if it exists.
-    pub fn associated_const_index(&self, name: Ustr) -> Option<usize> {
+    pub fn associated_const_index(&self, name: Ustr) -> Option<TraitAssociatedConstIndex> {
         self.associated_consts
             .iter()
             .position(|associated_const| associated_const.name == name)
+            .map(TraitAssociatedConstIndex::from_index)
     }
 
     /// Return the index of the method with the given name, if it exists.
-    pub fn method_index(&self, name: Ustr) -> Option<usize> {
+    pub fn method_index(&self, name: Ustr) -> Option<TraitMethodIndex> {
         self.functions
             .iter()
             .position(|(fn_name, _)| *fn_name == name)
+            .map(TraitMethodIndex::from_index)
+    }
+
+    /// Return the method at the given trait method index.
+    pub fn function(&self, index: TraitMethodIndex) -> &(Ustr, FunctionDefinition) {
+        &self.functions[index.as_index()]
+    }
+
+    /// Return the associated const at the given trait associated const index.
+    pub fn associated_const(&self, index: TraitAssociatedConstIndex) -> &TraitAssociatedConst {
+        &self.associated_consts[index.as_index()]
     }
 
     /// Return the qualified method name for the given method index, e.g., "TraitName<…>::method_name"
     /// using the interned indices of the provided types.
-    pub fn qualified_method_name(&self, index: usize, input_tys: &[Type]) -> String {
+    pub fn qualified_method_name(&self, index: TraitMethodIndex, input_tys: &[Type]) -> String {
         let mut s = format!("{}<", self.name);
         for (i, ty) in input_tys.iter().enumerate() {
             if i > 0 {
@@ -222,7 +257,7 @@ impl Trait {
             }
             s.push_str(format!("{}", ty.index()).as_str());
         }
-        s.push_str(&format!(">::{}", self.functions[index].0));
+        s.push_str(&format!(">::{}", self.function(index).0));
         s
     }
 

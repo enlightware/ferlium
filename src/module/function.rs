@@ -24,6 +24,7 @@ use crate::{
     hir::{NodeArena, NodeId},
     module::{ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
     types::mutability::MutType,
+    types::r#trait::TraitMethodIndex,
     types::r#type::{FnArgType, Type},
 };
 
@@ -66,7 +67,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                 write!(f, "imported function {module_name}::")?;
                 let function_name = match &slot.target {
                     ImportFunctionTarget::TraitImplMethod { key, index } => {
-                        let name = key.trait_ref().functions[*index as usize].0;
+                        let name = key.trait_ref().function(*index).0;
                         let imp = env
                             .modules
                             .get(module_id)
@@ -99,7 +100,7 @@ pub enum ImportFunctionTarget {
         /// The concrete trait implementation key
         key: TraitKey,
         /// Index of the method in the trait
-        index: u32,
+        index: TraitMethodIndex,
     },
 }
 

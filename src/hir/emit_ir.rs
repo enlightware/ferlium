@@ -16,6 +16,7 @@ use crate::{
         function::VoidFunction,
     },
     module::Uses,
+    types::r#trait::TraitMethodIndex,
 };
 
 use indexmap::IndexMap;
@@ -678,12 +679,13 @@ where
         // If we are emitting a trait implementation, make sure this function conforms to it.
         if let Some(trait_ctx) = &trait_ctx {
             let index = trait_ctx.trait_ref.method_index(name.0).unwrap();
-            let (fn_name, raw_fn_def) = &trait_ctx.trait_ref.functions[index];
-            let instantiated_fn_def = &instantiated_trait_fn_defs.as_ref().unwrap()[index];
+            let (fn_name, raw_fn_def) = trait_ctx.trait_ref.function(index);
+            let instantiated_fn_def =
+                &instantiated_trait_fn_defs.as_ref().unwrap()[index.as_index()];
             if args.len() != raw_fn_def.ty_scheme.ty.args.len() {
                 return Err(internal_compilation_error!(TraitMethodArgCountMismatch {
                     trait_ref: trait_ctx.trait_ref.clone(),
-                    method_index: index,
+                    method_index: index.as_index(),
                     method_name: *fn_name,
                     expected: raw_fn_def.ty_scheme.ty.args.len(),
                     got: args.len(),
@@ -948,8 +950,9 @@ where
         // This ensures ABI consistency: the calling convention is determined by the trait definition.
         let trait_ref = &trait_ctx.unwrap().trait_ref;
         for (i, id) in local_fns.iter().enumerate() {
+            let i = TraitMethodIndex::from_index(i);
             let descr = &mut output.functions[id.as_index()];
-            let (method_name, trait_fn_def) = &trait_ref.functions[i];
+            let (method_name, trait_fn_def) = trait_ref.function(i);
             let trait_effects = &trait_fn_def.ty_scheme.ty.effects;
             let impl_effects = &descr.definition.ty_scheme.ty.effects;
 
@@ -1053,7 +1056,8 @@ where
             .into_iter()
             .map(|c| c.instantiate(&subst))
             .collect();
-        for (function_index, id) in local_fns.iter().enumerate() {
+        for (method_index, id) in local_fns.iter().enumerate() {
+            let method_index = TraitMethodIndex::from_index(method_index);
             apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                 let descr = &mut output.functions[id.as_index()];
                 descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.instantiate(&subst);
@@ -1067,7 +1071,7 @@ where
 
             // Name the function
             let name = trait_ref
-                .qualified_method_name(function_index, &trait_output.input_tys)
+                .qualified_method_name(method_index, &trait_output.input_tys)
                 .into();
             output.name_function(*id, name);
         }

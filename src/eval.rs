@@ -27,7 +27,7 @@ use crate::{
         TraitImplId,
     },
     std::array,
-    types::r#type::FnArgType,
+    types::{r#trait::TraitDictionaryEntryIndex, r#type::FnArgType},
 };
 use crate::{
     Modules,
@@ -242,7 +242,7 @@ impl<'a> EvalCtx<'a> {
                                 key, module_id
                             )
                         });
-                        imp.methods[*index as usize]
+                        imp.methods[index.as_index()]
                     }
                     &NamedFunction(fn_name) => {
                         module.get_local_function_id(fn_name).unwrap_or_else(|| {
@@ -578,7 +578,7 @@ impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
                         write!(
                             f,
                             "{}",
-                            trait_ref.qualified_method_name(*index as usize, key.input_tys())
+                            trait_ref.qualified_method_name(*index, key.input_tys())
                         )?
                     }
                     NamedFunction(fn_name) => write!(f, "{module_path}::{fn_name}")?,
@@ -825,11 +825,11 @@ fn eval_build_closure(
 fn call_dictionary_method(
     ctx: &mut EvalCtx,
     dictionary: &Value,
-    method_index: usize,
+    entry_index: TraitDictionaryEntryIndex,
     arguments: Vec<ValOrMut>,
     span: Location,
 ) -> EvalControlFlowResult {
-    let function_value = dictionary.as_tuple().unwrap()[method_index]
+    let function_value = dictionary.as_tuple().unwrap()[usize::from(entry_index)]
         .as_function()
         .unwrap()
         .clone();
@@ -854,7 +854,8 @@ fn call_value_clone_for_temp(
     call_dictionary_method(
         ctx,
         dictionary,
-        crate::std::value::VALUE_CLONE_METHOD_INDEX,
+        crate::std::value::VALUE_TRAIT
+            .dictionary_method_index(crate::std::value::VALUE_CLONE_METHOD_INDEX),
         vec![ValOrMut::Val(source), ValOrMut::Mut(target)],
         span,
     )?;
@@ -881,7 +882,8 @@ fn call_value_drop_for_temp(
     let result = call_dictionary_method(
         ctx,
         dictionary,
-        crate::std::value::VALUE_DROP_METHOD_INDEX,
+        crate::std::value::VALUE_TRAIT
+            .dictionary_method_index(crate::std::value::VALUE_DROP_METHOD_INDEX),
         vec![ValOrMut::Mut(target)],
         span,
     );
@@ -1050,10 +1052,13 @@ fn eval_env_store(
                     let dictionary = ctx.environment[ctx.frame_base + *dict_index]
                         .as_value_ref(ctx)
                         .map_err(|err| RuntimeError::new(err, Some(span)))?;
-                    dictionary.as_tuple().unwrap()[crate::std::value::VALUE_CLONE_METHOD_INDEX]
-                        .as_function()
-                        .unwrap()
-                        .clone()
+                    dictionary.as_tuple().unwrap()[usize::from(
+                        crate::std::value::VALUE_TRAIT
+                            .dictionary_method_index(crate::std::value::VALUE_CLONE_METHOD_INDEX),
+                    )]
+                    .as_function()
+                    .unwrap()
+                    .clone()
                 };
                 ctx.call_function_value(&function_value, arguments, span)?;
             }
@@ -1094,10 +1099,13 @@ fn eval_env_drop(
                 let dictionary = ctx.environment[ctx.frame_base + *dict_index]
                     .as_value_ref(ctx)
                     .map_err(|err| RuntimeError::new(err, Some(span)))?;
-                dictionary.as_tuple().unwrap()[crate::std::value::VALUE_DROP_METHOD_INDEX]
-                    .as_function()
-                    .unwrap()
-                    .clone()
+                dictionary.as_tuple().unwrap()[usize::from(
+                    crate::std::value::VALUE_TRAIT
+                        .dictionary_method_index(crate::std::value::VALUE_DROP_METHOD_INDEX),
+                )]
+                .as_function()
+                .unwrap()
+                .clone()
             };
             ctx.call_function_value(&function_value, arguments, span)?;
         }
