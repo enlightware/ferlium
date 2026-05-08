@@ -1,6 +1,6 @@
 # Ferlium ABI Specification
 
-This document is draft of Felium ABI for future Ferlium-WASM (and native) interoperability.
+This document is a draft of the Ferlium ABI for future Ferlium-WASM (and native) interoperability.
 It specifies the binary representation of Ferlium values independently of the execution backend.
 Ferlium’s ABI is parametric over backend profiles, which define:
 
@@ -55,39 +55,66 @@ Scalars follow the same C/Rust alignment rules across mainstream platforms.
 
 # Calling conventions
 
-## Wasm
+Ferlium source has mutable value semantics: a parameter written as `T` is conceptually passed by value, while a parameter written as `&mut T` is conceptually passed by mutable reference.
+The ABI is allowed to implement a conceptual by-value parameter as a shared reference to caller-owned storage when that avoids an implicit copy.
+The callee must treat such storage as read-only; if it needs an owned mutable local, it must explicitly clone through `Value::clone`.
 
-### Parameters
+Physical argument passing is derived from the lowered parameter type:
 
-Parameters are passed to Wasm functions in the order of their definitions.
-Scalars are passed directly, while other types are passed as pointers to their data.
+| Source parameter | Physical ABI form |
+|------------------|-------------------|
+| `&mut T` | Mutable reference/pointer to caller storage |
+| Generic `T` | Shared reference/pointer to caller storage |
+| Concrete non-`TrivialCopy` `T` | Shared reference/pointer to caller storage |
+| Concrete `TrivialCopy` `T` whose size is at most the backend pointer size | Direct value, copied by the ABI |
+| Concrete `TrivialCopy` `T` larger than the backend pointer size | Shared reference/pointer to caller storage |
 
-### Return values and panic
+Generic parameters are always passed by shared reference, even if they have a `T: TrivialCopy` constraint.
+This gives every generic function one stable ABI independent of later concrete instantiations.
 
+The phrase "direct value" above means a concrete `TrivialCopy` value that fits in one pointer-sized ABI slot for the target profile.
+For example, `int` is direct on ABI-32 and ABI-64. `float` has the representation of `f64`, so it is not a direct ABI-32 value; on ABI-32 it is passed by reference and returned through an out-pointer.
+On ABI-64 it may be direct if it is classified as `TrivialCopy`.
+
+Implementation note: native callables already expose per-argument physical passing requests.
+Ferlium script functions should follow the rule above as part of lowering.
+
+## Return value
+
+Return passing is derived from the lowered return type and the function effects.
 Each function can have effects, which might be polymorphic and represented by effect variables.
-There are two cases:
+There are two effect cases:
 
-- **No panic**: function’s effects contain no `Fallible` and no effect variables
-- **May panic**: function’s effects contain `Fallible` or some effect variables
+- **No panic**: the function's effects contain no `Fallible` and no effect variables
+- **May panic**: the function's effects contain `Fallible` or effect variables
 
-Also, functions can return different kinds of values:
+There are three return value classes:
 
 - **No value**: `()`
-- **Scalar value**: e.g., `Int`, `Float`
-- **Caller-allocated value**: bigger types, polymorphic result
+- **Direct value**: concrete pointer-sized `TrivialCopy` values
+- **Caller-allocated value**: bigger types, polymorphic results
 
-The calling convention for return values depends both on the effects and on the representation of the result type:
+The calling convention for return values is:
 
-| May panic? | Return value kind          | ABI return form                                                    | Out-pointer needed? |
-| ---------- | -------------------------- | ------------------------------------------------------------------ | ------------------- |
-| ❌ **No**  | **No value**               | Returns **`()`** (no wasm result)                                  | ❌ No               |
-| ❌ **No**  | **Scalar value**           | Returns the **scalar** directly as a wasm result                   | ❌ No               |
-| ❌ **No**  | **Caller-allocated value** | Returns **`()`**; callee **writes result to out-ptr**              | ✔️ Yes              |
-| ✔️ **Yes** | **No value**               | Returns **status**                                                 | ❌ No               |
-| ✔️ **Yes** | **Scalar value**           | Returns **(status, scalar)** via multi-value                       | ❌ No               |
-| ✔️ **Yes** | **Caller-allocated value** | Returns **status**; callee **writes result to out-ptr** on success | ✔️ Yes              |
+| May panic? | Return value kind          | ABI return form                                                | Out-pointer needed? |
+|------------|----------------------------|----------------------------------------------------------------|---------------------|
+| No         | No value                   | Returns `()`                                                   | No                  |
+| No         | Direct value               | Returns the value directly                                     | No                  |
+| No         | Caller-allocated value     | Returns `()`; callee writes result to out-pointer              | Yes                 |
+| Yes        | No value                   | Returns status                                                 | No                  |
+| Yes        | Direct value               | Returns status plus the direct value                           | No                  |
+| Yes        | Caller-allocated value     | Returns status; callee writes result to out-pointer on success | Yes                 |
 
-When a function may panic, success is 0 on success, and non-zero on panic, and holds the error code.
+When a function may panic, status is 0 on success and non-zero on panic.
+
+## Wasm
+
+The Wasm backend maps direct values and status values to Wasm value results.
+Shared references, mutable references, and caller-allocated result pointers are represented as pointers in linear memory using the selected backend profile.
+
+Parameters are passed to Wasm functions in the order of their definitions.
+Caller-allocated return pointers, when needed, are passed before source-level parameters.
+For fallible direct-value returns, Wasm uses multi-value results for `(status, value)`.
 
 ## Native
 
@@ -119,6 +146,9 @@ Type equality ignores field order.
 ## Canonical field order
 
 Fields are canonicalised to produce a stable layout:
+
+> Status: this is the intended long-term ABI layout optimization.
+> The current interpreter representation does not yet reorder record fields this way.
 
 1. Compute each field’s alignment (per backend profile).
 2. Sort fields by:
