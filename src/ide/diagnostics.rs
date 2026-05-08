@@ -625,6 +625,10 @@ pub(super) fn compilation_error_to_data(
                 "Method `{trait_ref}::{method_name}` is compiler-only and cannot be used in Ferlium source"
             ),
         )],
+        UnsafeFeatureUseNotAllowed { feature, span } => vec![error_data_from_location(
+            span,
+            format!("Unsafe feature `{feature}` cannot be used in this context"),
+        )],
         IdentifierBoundMoreThanOnceInAPattern {
             first_occurrence,
             second_occurrence,

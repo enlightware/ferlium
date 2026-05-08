@@ -12,7 +12,7 @@ use crate::{
         PatternKind, PatternVar, PropertyAccess, RecordField, RecordFields, UnnamedArg,
     },
     compiler::error::{
-        DuplicatedFieldContext, InternalCompilationError, WhatIsNotAProductType,
+        DuplicatedFieldContext, InternalCompilationError, UnsafeFeature, WhatIsNotAProductType,
         WhichProductTypeIsNot,
     },
     containers::{SVec2, b, continuous_hashmap_to_vec},
@@ -438,7 +438,7 @@ impl TypeInference {
                     )
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((definition, function, _module_name)) = env.get_function(path)? {
+                else if let Some((definition, function, _module_id)) = env.get_function(path)? {
                     let (fn_ty, inst_data, _subst) = definition
                         .ty_scheme
                         .instantiate_with_fresh_vars(self, expr_span, None);
@@ -1087,11 +1087,12 @@ impl TypeInference {
             }
             EffectsUnsafe(expr) => {
                 if env.current_module_id() != STD_MODULE_ID {
-                    return Err(internal_compilation_error!(Unsupported {
-                        span: expr_span,
-                        reason: "`effects_unsafe` is only available while compiling the standard library"
-                            .to_string(),
-                    }));
+                    return Err(
+                        InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                            UnsafeFeature::EffectsUnsafe,
+                            expr_span,
+                        ),
+                    );
                 }
 
                 let (inner_node_id, inner_mut_ty) = self.infer_expr(env, *expr)?;
@@ -1397,7 +1398,7 @@ impl TypeInference {
                     }));
                     (node, ret_ty, MutType::constant(), combined_effects)
                 }
-            } else if let Some((definition, function, _module_name)) = env.get_function(path)? {
+            } else if let Some((definition, function, _module_id)) = env.get_function(path)? {
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: definition.ty_scheme.ty.args.len(),

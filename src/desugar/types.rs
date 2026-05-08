@@ -1,4 +1,5 @@
 use super::*;
+use crate::compiler::error::UnsafeFeature;
 use crate::types::r#type::{BareNativeTypeB, TypeAliasEntry};
 
 fn desugar_type_constraint(
@@ -789,6 +790,15 @@ fn resolve_type_path(
         return Ok(Some(ResolvedTypePath::TypeDef(type_def)));
     }
     if let Some((module_id, bare)) = env.bare_native_type_alias_with_module(path)? {
+        let type_name = path.segments.last().unwrap().0;
+        if env.is_unsafe_item_unavailable_in_current_context(module_id, type_name) {
+            return Err(
+                InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                    UnsafeFeature::TypeAlias(type_name),
+                    path.span().unwrap_or(Location::new_synthesized()),
+                ),
+            );
+        }
         record_module_use(module_id, modules_used);
         return Ok(Some(ResolvedTypePath::BareNative(bare)));
     }

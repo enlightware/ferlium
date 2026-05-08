@@ -103,6 +103,9 @@ pub struct Module {
     /// All symbols defined in this module
     pub(crate) def_table: DefTable,
 
+    /// Names of unsafe implementation details. Access policy is enforced during lookup.
+    unsafe_items: FxHashSet<Ustr>,
+
     // Functions, including methods of trait implementations.
     pub(crate) functions: Vec<ModuleFunction>,
 
@@ -125,6 +128,7 @@ impl Module {
             type_deps: FxHashSet::default(),
             uses: Uses::default(),
             def_table: DefTable::new(),
+            unsafe_items: FxHashSet::default(),
             functions: Vec::new(),
             type_aliases: TypeAliases::default(),
             type_defs: Vec::new(),
@@ -142,6 +146,7 @@ impl Module {
             type_deps: FxHashSet::default(),
             uses,
             def_table: DefTable::new(),
+            unsafe_items: FxHashSet::default(),
             functions: Vec::new(),
             type_aliases: TypeAliases::default(),
             type_defs: Vec::new(),
@@ -218,6 +223,17 @@ impl Module {
         let id = LocalFunctionId::from_index(self.functions.len());
         self.functions.push(function);
         self.def_table.insert(name, DefKind::Function(id));
+        id
+    }
+
+    /// Add an unsafe function whose use is controlled by compiler policy.
+    pub(crate) fn add_unsafe_function(
+        &mut self,
+        name: Ustr,
+        function: ModuleFunction,
+    ) -> LocalFunctionId {
+        let id = self.add_function(name, function);
+        self.unsafe_items.insert(name);
         id
     }
 
@@ -383,6 +399,16 @@ impl Module {
         self.add_bare_native_type_alias(ustr(name), native)
     }
 
+    /// Add an unsafe bare native type alias whose use is controlled by compiler policy.
+    pub(crate) fn add_unsafe_bare_native_type_alias_str(
+        &mut self,
+        name: &str,
+        native: Box<dyn crate::types::r#type::BareNativeType>,
+    ) {
+        self.add_bare_native_type_alias_str(name, native);
+        self.unsafe_items.insert(ustr(name));
+    }
+
     /// Add a bare native type alias to this module.
     pub(crate) fn add_bare_native_type_alias(
         &mut self,
@@ -390,6 +416,11 @@ impl Module {
         native: Box<dyn crate::types::r#type::BareNativeType>,
     ) {
         self.type_aliases.set_bare_native(name, native);
+    }
+
+    /// Return whether a named item is an unsafe implementation detail.
+    pub fn is_unsafe_item(&self, name: Ustr) -> bool {
+        self.unsafe_items.contains(&name)
     }
 
     // Type definitions

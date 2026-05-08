@@ -13,6 +13,7 @@ use ustr::ustr;
 
 use crate::harness::TestSession;
 use ferlium::{
+    compiler::error::{CompilationErrorImpl, UnsafeFeature},
     hir::emit_ir::emit_expr_unsafe,
     module::{LocalImplId, id::Id},
     parse_module_and_expr,
@@ -214,13 +215,15 @@ fn array_access_must_be_fallible() {
 fn effects_unsafe_is_rejected_in_user_code() {
     let mut session = TestSession::new();
 
-    let error = session.fail_compilation("effects_unsafe { [1][0] }");
-    let error_text = format!("{error:?}");
-    assert!(
-        error_text
-            .contains("`effects_unsafe` is only available while compiling the standard library"),
-        "unexpected error: {error_text}"
-    );
+    match session
+        .fail_compilation("effects_unsafe { [1][0] }")
+        .into_inner()
+    {
+        CompilationErrorImpl::UnsafeFeatureUseNotAllowed { feature, .. } => {
+            assert_eq!(feature, UnsafeFeature::EffectsUnsafe);
+        }
+        other => panic!("expected UnsafeFeatureUseNotAllowed error, got {other:?}"),
+    }
 }
 
 #[test]

@@ -16,7 +16,7 @@ use crate::harness::{
 };
 use ferlium::{
     SourceTable,
-    compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
+    compiler::error::{CompilationErrorImpl, RuntimeErrorKind, UnsafeFeature},
     hir::value::Value,
     module::{ConcreteTraitImplKey, Module},
     std::{
@@ -104,6 +104,59 @@ fn value_clone_and_drop_cannot_be_called_explicitly() {
                 assert_eq!(method_name, ustr(expected_method));
             }
             other => panic!("expected CompilerOnlyTraitMethodUse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn std_only_pointer_primitives_cannot_be_used_in_user_code() {
+    let mut session = TestSession::new();
+
+    for (source, expected_feature) in [
+        (
+            "let f = ptr_clone; f",
+            UnsafeFeature::Function(ustr("ptr_clone")),
+        ),
+        ("ptr_drop(())", UnsafeFeature::Function(ustr("ptr_drop"))),
+        (
+            "value_clone_to_mut_ptr(())",
+            UnsafeFeature::Function(ustr("value_clone_to_mut_ptr")),
+        ),
+        (
+            "array_element_ptr([1], 0)",
+            UnsafeFeature::Function(ustr("array_element_ptr")),
+        ),
+        (
+            "array_element_mut_ptr([1], 0)",
+            UnsafeFeature::Function(ustr("array_element_mut_ptr")),
+        ),
+        (
+            "array_push_uninit_back([])",
+            UnsafeFeature::Function(ustr("array_push_uninit_back")),
+        ),
+        (
+            "array_push_uninit_front([])",
+            UnsafeFeature::Function(ustr("array_push_uninit_front")),
+        ),
+        (
+            "array_pop_back_uninit([])",
+            UnsafeFeature::Function(ustr("array_pop_back_uninit")),
+        ),
+        (
+            "type UserPtr = Ptr<int>;",
+            UnsafeFeature::TypeAlias(ustr("Ptr")),
+        ),
+        (
+            "type UserMutPtr = MutPtr<int>;",
+            UnsafeFeature::TypeAlias(ustr("MutPtr")),
+        ),
+    ] {
+        match session.fail_compilation(source).into_inner() {
+            CompilationErrorImpl::UnsafeFeatureUseNotAllowed { feature, .. } => {
+                assert_eq!(feature, expected_feature);
+            }
+            other => panic!("expected UnsafeFeatureUseNotAllowed for `{source}`, got {other:?}"),
         }
     }
 }

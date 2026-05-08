@@ -447,6 +447,23 @@ pub struct ImportSite {
 /// Compilation error implementation.
 /// Uses the tree-that-grows pattern to be generic over
 /// the scope of error message use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsafeFeature {
+    EffectsUnsafe,
+    Function(Ustr),
+    TypeAlias(Ustr),
+}
+
+impl Display for UnsafeFeature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UnsafeFeature::EffectsUnsafe => write!(f, "`effects_unsafe`"),
+            UnsafeFeature::Function(name) => write!(f, "function `{name}`"),
+            UnsafeFeature::TypeAlias(name) => write!(f, "type alias `{name}`"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum CompilationErrorImpl<S: Scope> {
     ParsingFailed(Vec<LocatedError>),
@@ -673,6 +690,10 @@ pub enum CompilationErrorImpl<S: Scope> {
         method_name: Ustr,
         span: Location,
     },
+    UnsafeFeatureUseNotAllowed {
+        feature: UnsafeFeature,
+        span: Location,
+    },
     IdentifierBoundMoreThanOnceInAPattern {
         first_occurrence: Location,
         second_occurrence: Location,
@@ -772,6 +793,10 @@ macro_rules! internal_compilation_error {
 }
 
 impl InternalCompilationError {
+    pub fn new_unsafe_feature_use_not_allowed(feature: UnsafeFeature, span: Location) -> Self {
+        internal_compilation_error!(UnsafeFeatureUseNotAllowed { feature, span })
+    }
+
     pub fn new_inconsistent_adt(
         mut a_type: ADTAccessType,
         mut a_span: Location,
@@ -1386,6 +1411,14 @@ impl FormatWith<SourceTable> for CompilationError {
                     fmt_span(span)
                 )
             }
+            UnsafeFeatureUseNotAllowed { feature, span } => {
+                write!(
+                    f,
+                    "Unsafe feature {} cannot be used in this context in {}",
+                    feature,
+                    fmt_span(span)
+                )
+            }
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 pattern_span,
@@ -1959,6 +1992,9 @@ impl CompilationError {
                 method_name,
                 span,
             }),
+            UnsafeFeatureUseNotAllowed { feature, span } => {
+                compilation_error!(UnsafeFeatureUseNotAllowed { feature, span })
+            }
             IdentifierBoundMoreThanOnceInAPattern {
                 first_occurrence,
                 second_occurrence,

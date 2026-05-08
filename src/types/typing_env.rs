@@ -11,7 +11,7 @@ use ustr::{Ustr, ustr};
 use crate::{
     FxHashSet, Location,
     ast::{self, DExprArena},
-    compiler::error::InternalCompilationError,
+    compiler::error::{InternalCompilationError, UnsafeFeature},
     hir::NodeArena,
     hir::function::FunctionDefinition,
     module::{
@@ -202,16 +202,29 @@ impl<'m> TypingEnv<'m> {
             Some(k) => k,
             None => return Ok(None),
         };
+        if self
+            .module_env
+            .is_unsafe_item_unavailable_in_current_context(module_id_opt, function_name)
+        {
+            return Err(
+                InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                    UnsafeFeature::Function(function_name),
+                    path.span().unwrap_or_else(Location::new_synthesized),
+                ),
+            );
+        }
+
         Ok(if let Some(module_id) = module_id_opt {
             let id = self.import_function(module_id, function_name);
-            let definition = &self
+            let source_module = self
                 .module_env
                 .modules
                 .get(module_id)
                 .unwrap()
                 .module
                 .as_ref()
-                .unwrap()
+                .unwrap();
+            let definition = &source_module
                 .get_function(function_name)
                 .unwrap()
                 .definition;

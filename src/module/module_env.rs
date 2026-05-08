@@ -135,6 +135,29 @@ impl<'m> ModuleEnv<'m> {
         })
     }
 
+    /// Return whether an unsafe item is unavailable from the module currently being compiled.
+    pub fn is_unsafe_item_unavailable_in_current_context(
+        &self,
+        module_id: Option<ModuleId>,
+        name: Ustr,
+    ) -> bool {
+        if self.current.module_id() == STD_MODULE_ID {
+            return false;
+        }
+
+        let Some(module_id) = module_id else {
+            return false;
+        };
+        if module_id != STD_MODULE_ID {
+            return false;
+        }
+
+        self.modules
+            .get(module_id)
+            .and_then(|entry| entry.module())
+            .is_some_and(|module| module.is_unsafe_item(name))
+    }
+
     pub fn type_def_with_module(
         &self,
         path: &ast::Path,

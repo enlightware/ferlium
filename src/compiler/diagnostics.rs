@@ -109,6 +109,7 @@ pub(crate) fn diagnostics_from_error(
         | TraitImplForAnonymousStructuralType {
             impl_span: span, ..
         }
+        | UnsafeFeatureUseNotAllowed { span, .. }
         | Unsupported { span, .. }
         | ReturnOutsideFunction { span }
         | CircularImportDependency { span, .. }

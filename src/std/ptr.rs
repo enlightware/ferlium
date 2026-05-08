@@ -17,6 +17,7 @@ use crate::{
         EvalControlFlowResult, EvalCtx, Place, RuntimeError, ValOrMut, call_value_clone_to_target,
         call_value_drop_for_temp,
     },
+    format::write_with_separator_and_format_fn,
     hir::{
         function::{ArgPassing, Callable, ContextNativeFn, FunctionDefinition},
         value::{NativeDisplay, Value},
@@ -59,15 +60,21 @@ impl MutPtr {
     }
 }
 
+fn fmt_place(kind: &str, place: &Place, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "<{kind}:{}/", place.target)?;
+    write_with_separator_and_format_fn(place.path.iter(), ".", |index, f| write!(f, "{index}"), f)?;
+    write!(f, ">")
+}
+
 impl NativeDisplay for Ptr {
     fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<ptr>")
+        fmt_place("ptr", &self.0, f)
     }
 }
 
 impl NativeDisplay for MutPtr {
     fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<mut-ptr>")
+        fmt_place("mut", &self.0, f)
     }
 }
 
@@ -126,64 +133,7 @@ fn dictionary_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<Value, Ru
     }
 }
 
-fn clone_value_to_mut_ptr_descr() -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    native_function(
-        FnType::new_by_val([gen0, mut_ptr_type(gen0)], Type::unit(), no_effects()),
-        value_constraint(gen0),
-        ["source", "target"],
-        "Clones a value into std-only mutable pointer storage.",
-        ContextNativeFn::new(
-            "value_clone_to_mut_ptr",
-            &[
-                ArgPassing::SharedRef,
-                ArgPassing::SharedRef,
-                ArgPassing::OwnedValue,
-            ],
-            value_clone_to_mut_ptr,
-        ),
-    )
-}
-
-fn clone_ptr_descr() -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    native_function(
-        FnType::new_by_val(
-            [ptr_type(gen0), mut_ptr_type(gen0)],
-            Type::unit(),
-            no_effects(),
-        ),
-        value_constraint(gen0),
-        ["source", "target"],
-        "Clones from a std-only pointer into std-only mutable pointer storage.",
-        ContextNativeFn::new(
-            "ptr_clone",
-            &[
-                ArgPassing::SharedRef,
-                ArgPassing::OwnedValue,
-                ArgPassing::OwnedValue,
-            ],
-            ptr_clone,
-        ),
-    )
-}
-
-fn drop_ptr_descr() -> ModuleFunction {
-    let gen0 = Type::variable_id(0);
-    native_function(
-        FnType::new_by_val([mut_ptr_type(gen0)], Type::unit(), no_effects()),
-        value_constraint(gen0),
-        ["target"],
-        "Drops the value stored at a std-only mutable pointer.",
-        ContextNativeFn::new(
-            "ptr_drop",
-            &[ArgPassing::SharedRef, ArgPassing::OwnedValue],
-            ptr_drop,
-        ),
-    )
-}
-
-fn value_clone_to_mut_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn clone_value_to_mut_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut args = args.into_iter();
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let source = args.next().unwrap();
@@ -201,7 +151,26 @@ fn value_clone_to_mut_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControl
     )
 }
 
-fn ptr_clone(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn clone_value_to_mut_ptr_descr() -> ModuleFunction {
+    let gen0 = Type::variable_id(0);
+    native_function(
+        FnType::new_by_val([gen0, mut_ptr_type(gen0)], Type::unit(), no_effects()),
+        value_constraint(gen0),
+        ["source", "target"],
+        "Clones a value into a mutable pointer storage.",
+        ContextNativeFn::new(
+            "value_clone_to_mut_ptr",
+            &[
+                ArgPassing::SharedRef,
+                ArgPassing::SharedRef,
+                ArgPassing::OwnedValue,
+            ],
+            clone_value_to_mut_ptr,
+        ),
+    )
+}
+
+fn clone_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut args = args.into_iter();
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let source = args
@@ -223,7 +192,30 @@ fn ptr_clone(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     )
 }
 
-fn ptr_drop(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn clone_ptr_descr() -> ModuleFunction {
+    let gen0 = Type::variable_id(0);
+    native_function(
+        FnType::new_by_val(
+            [ptr_type(gen0), mut_ptr_type(gen0)],
+            Type::unit(),
+            no_effects(),
+        ),
+        value_constraint(gen0),
+        ["source", "target"],
+        "Clones from a pointer into a mutable pointer storage.",
+        ContextNativeFn::new(
+            "ptr_clone",
+            &[
+                ArgPassing::SharedRef,
+                ArgPassing::OwnedValue,
+                ArgPassing::OwnedValue,
+            ],
+            clone_ptr,
+        ),
+    )
+}
+
+fn drop_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut args = args.into_iter();
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let target = args
@@ -239,14 +231,29 @@ fn ptr_drop(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     )
 }
 
-pub fn add_to_module(to: &mut Module) {
-    to.add_bare_native_type_alias_str("Ptr", bare_native_type::<Ptr>());
-    to.add_bare_native_type_alias_str("MutPtr", bare_native_type::<MutPtr>());
+fn drop_ptr_descr() -> ModuleFunction {
+    let gen0 = Type::variable_id(0);
+    native_function(
+        FnType::new_by_val([mut_ptr_type(gen0)], Type::unit(), no_effects()),
+        value_constraint(gen0),
+        ["target"],
+        "Drops the value stored at a mutable pointer.",
+        ContextNativeFn::new(
+            "ptr_drop",
+            &[ArgPassing::SharedRef, ArgPassing::OwnedValue],
+            drop_ptr,
+        ),
+    )
+}
 
-    to.add_function(
+pub fn add_to_module(to: &mut Module) {
+    to.add_unsafe_bare_native_type_alias_str("Ptr", bare_native_type::<Ptr>());
+    to.add_unsafe_bare_native_type_alias_str("MutPtr", bare_native_type::<MutPtr>());
+
+    to.add_unsafe_function(
         ustr("value_clone_to_mut_ptr"),
         clone_value_to_mut_ptr_descr(),
     );
-    to.add_function(ustr("ptr_clone"), clone_ptr_descr());
-    to.add_function(ustr("ptr_drop"), drop_ptr_descr());
+    to.add_unsafe_function(ustr("ptr_clone"), clone_ptr_descr());
+    to.add_unsafe_function(ustr("ptr_drop"), drop_ptr_descr());
 }

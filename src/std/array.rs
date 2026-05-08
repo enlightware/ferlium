@@ -439,20 +439,20 @@ pub fn add_to_module(to: &mut Module) {
     to.add_function(ustr("array_pop_front"), Array::pop_front_desc());
     to.add_function(ustr("array_len"), Array::len_descr());
     to.add_function(ustr("array_with_capacity"), Array::with_capacity_descr());
-    to.add_function(ustr("array_element_ptr"), Array::element_ptr_descr());
-    to.add_function(
+    to.add_unsafe_function(ustr("array_element_ptr"), Array::element_ptr_descr());
+    to.add_unsafe_function(
         ustr("array_element_mut_ptr"),
         Array::element_mut_ptr_descr(),
     );
-    to.add_function(
+    to.add_unsafe_function(
         ustr("array_push_uninit_back"),
         Array::push_uninit_back_descr(),
     );
-    to.add_function(
+    to.add_unsafe_function(
         ustr("array_push_uninit_front"),
         Array::push_uninit_front_descr(),
     );
-    to.add_function(
+    to.add_unsafe_function(
         ustr("array_pop_back_uninit"),
         Array::pop_back_uninit_descr(),
     );
