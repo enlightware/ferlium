@@ -184,6 +184,116 @@ fn mutable_let_clone_does_not_preclone_target_storage() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_uses_value_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            let array = [value];
+            testing::reset_clone_tracked_clones();
+            let item = array[0];
+            testing::clone_tracked_payload(item) * 10 + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(71)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_append_and_concat_use_value_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            let mut array = [];
+            testing::reset_clone_tracked_clones();
+            array_append(array, value);
+            testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(1)
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            let array = [value];
+            testing::reset_clone_tracked_clones();
+            let combined = array_concat(array, array);
+            array_len(combined) * 10 + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(22)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_value_clone_uses_element_value_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            let array = [value];
+            let mut cloned = [];
+            testing::reset_clone_tracked_clones();
+            array_value_clone(array, cloned);
+            array_len(cloned) * 10 + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(11)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_drop_drops_elements() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            struct Probe(int)
+
+            impl Value for Probe {
+                fn eq(left: Probe, right: Probe) -> bool {
+                    left.0 == right.0
+                }
+
+                fn to_string(value: Probe) -> string {
+                    to_string(value.0)
+                }
+
+                fn hash(value: Probe, state: &mut hasher) {
+                    hash(value.0, state)
+                }
+
+                fn clone(source: Probe, target: &mut Probe) {
+                    target = Probe(source.0);
+                }
+
+                fn drop(target: &mut Probe) {
+                    testing::record_tracked_drop(target.0);
+                }
+            }
+
+            testing::reset_tracked_drops();
+            {
+                let values = [Probe(1), Probe(2)];
+                ();
+            };
+            testing::tracked_drop_log()
+            "#
+        ),
+        int(21)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trivial_copy_cannot_be_implemented_from_ferlium_source() {
     let mut session = TestSession::new();
     let err = session.fail_compilation(
@@ -353,9 +463,7 @@ fn array_slice() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_concat() {
     let mut session = TestSession::new();
-    session
-        .fail_compilation("array_concat([], [])")
-        .expect_unbound_ty_var();
+    assert_val_eq!(session.run("array_concat([], [])"), int_a![]);
     assert_val_eq!(session.run("array_concat([1], [])"), int_a![1]);
     assert_val_eq!(session.run("array_concat([], [1])"), int_a![1]);
     assert_val_eq!(session.run("array_concat([1], [2])"), int_a![1, 2]);

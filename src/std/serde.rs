@@ -18,12 +18,13 @@ use crate::{
     hir::function::FunctionDefinition,
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
-    module::{self, LocalDeclId, Module, TraitImplId, id::Id},
+    module::{self, LocalClone, LocalDeclId, Module, TraitImplId, id::Id},
     std::{
         STD_MODULE_ID,
         array::array_type,
         math::int_type,
         string::{string_type, string_value},
+        value::{VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT},
         variant::variant_object_entry_type,
     },
     types::effects::{EffType, PrimitiveEffect},
@@ -372,7 +373,15 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             */
             // extract the array payload of the array variant
             let get_array = build_variant_to_array(arena, solver, load_variant)?;
-            let array_ty = array_type(variant_type());
+            let variant_ty = variant_type();
+            let array_ty = array_type(variant_ty);
+            let variant_clone = LocalClone::Static(solver.solve_impl_method(
+                &VALUE_TRAIT,
+                &[variant_ty],
+                VALUE_CLONE_METHOD_INDEX,
+                span,
+                arena,
+            )?);
             // store it at 1
             let (store_array, l_array_id) = store_new(
                 get_array,
@@ -391,8 +400,9 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     // get the array payload of the array variant
                     let get_array = n(arena, load(1, l_array_id), array_ty);
                     // get the i-th element
-                    let index_kind = index_immediate(arena, get_array, i as isize);
-                    let index_node = n(arena, index_kind, variant_type());
+                    let index_kind =
+                        index_immediate(arena, get_array, i as isize, variant_clone.clone());
+                    let index_node = n(arena, index_kind, variant_ty);
                     // deserialize the i-th element
                     build_deserialize(arena, solver, index_node, ty_i)
                 })

@@ -11,7 +11,7 @@ use crate::{
     containers::{IntoSVec2, b},
     hir::value::{LiteralValue, NativeValue, Value},
     hir::{self, NodeArena, NodeId},
-    module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
+    module::{FunctionId, LocalClone, LocalDecl, LocalDeclId, TraitImplId, id::Id},
     std::{math::int_type, string::string_value},
     types::effects::EffType,
     types::mutability::{MutType, MutVal},
@@ -131,7 +131,16 @@ pub fn project(tuple: NodeId, index: usize) -> NodeKind {
     K::Project(tuple, index)
 }
 
-pub fn index_immediate(arena: &mut NodeArena, array: NodeId, index: isize) -> NodeKind {
+/// Build an owned array indexing node for generated HIR.
+///
+/// Generated HIR bypasses expression type inference, so callers must provide the
+/// `Value::clone` dispatch that materializes the indexed element.
+pub fn index_immediate(
+    arena: &mut NodeArena,
+    array: NodeId,
+    index: isize,
+    clone: LocalClone,
+) -> NodeKind {
     let array_span = arena[array].span;
     let index_node = arena.alloc(hir::Node::new(
         immediate(Value::native(index)),
@@ -139,7 +148,11 @@ pub fn index_immediate(arena: &mut NodeArena, array: NodeId, index: isize) -> No
         EffType::empty(),
         array_span,
     ));
-    K::Index(array, index_node)
+    K::Index(b(hir::ArrayIndex {
+        array,
+        index: index_node,
+        clone: Some(clone),
+    }))
 }
 
 pub fn extract_tag(variant: NodeId) -> NodeKind {

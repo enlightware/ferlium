@@ -45,9 +45,9 @@ impl Path {
                 path.parts.push(PathPart::FieldAccess(*field));
                 path
             }
-            Index(array, index) => {
-                let mut path = Self::from_node(arena, *array);
-                if let NodeKind::Immediate(immediate) = &arena[*index].kind {
+            Index(index) => {
+                let mut path = Self::from_node(arena, index.array);
+                if let NodeKind::Immediate(immediate) = &arena[index.index].kind {
                     let index = *immediate.value.as_primitive_ty::<isize>().unwrap();
                     if index >= 0 {
                         path.parts.push(PathPart::IndexStatic(index as usize));
@@ -239,9 +239,9 @@ impl Node {
                     check_borrows(arena, node_id)?;
                 }
             }
-            Index(array, index) => {
-                check_borrows(arena, *array)?;
-                check_borrows(arena, *index)?;
+            Index(index) => {
+                check_borrows(arena, index.array)?;
+                check_borrows(arena, index.index)?;
             }
             Case(case) => {
                 check_borrows(arena, case.value)?;

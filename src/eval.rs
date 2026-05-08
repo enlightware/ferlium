@@ -791,7 +791,7 @@ pub fn eval_node_with_ctx(
         Variant(tag, payload) => eval_variant(arena, *tag, *payload, ctx, locals),
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
         Array(nodes) => eval_array(arena, nodes, ctx, locals),
-        Index(array, index) => eval_index(arena, id, *array, *index, ctx, locals),
+        Index(index) => eval_index(arena, id, index, ctx, locals),
         Case(case) => eval_case(arena, case, ctx, locals),
         Loop(body) => eval_loop(arena, *body, ctx, locals),
         SoftBreak => {
@@ -851,11 +851,11 @@ fn call_dictionary_method(
     ctx.call_function_value(&function_value, arguments, span)
 }
 
-fn call_value_clone_for_temp(
+fn call_value_clone_with(
     ctx: &mut EvalCtx,
-    dictionary: &Value,
-    source: Value,
-    span: Location,
+    source: ValOrMut,
+    _span: Location,
+    call: impl FnOnce(&mut EvalCtx, Vec<ValOrMut>) -> EvalControlFlowResult,
 ) -> Result<Value, RuntimeError> {
     let target_index = ctx.environment.len();
     ctx.environment.push(ValOrMut::Val(Value::uninit()));
@@ -865,49 +865,100 @@ fn call_value_clone_for_temp(
         target: target_index,
         path: Vec::new(),
     };
-    call_dictionary_method(
-        ctx,
-        dictionary,
-        crate::std::value::VALUE_TRAIT
-            .dictionary_method_index(crate::std::value::VALUE_CLONE_METHOD_INDEX),
-        vec![ValOrMut::Val(source), ValOrMut::Mut(target)],
-        span,
-    )?;
+    let result = call(ctx, vec![source, ValOrMut::Mut(target)]);
     #[cfg(debug_assertions)]
     ctx.environment_names.pop();
     let target = ctx.environment.pop().unwrap().into_val().unwrap();
+    result?;
     if matches!(target, Value::Uninit) {
         panic!("Value::clone returned without initializing its target");
     }
     Ok(target)
 }
 
-fn call_value_drop_for_temp(
+pub(crate) fn call_value_clone_for_temp(
     ctx: &mut EvalCtx,
     dictionary: &Value,
-    target_value: Value,
+    source: ValOrMut,
+    span: Location,
+) -> Result<Value, RuntimeError> {
+    call_value_clone_with(ctx, source, span, |ctx, arguments| {
+        call_dictionary_method(
+            ctx,
+            dictionary,
+            crate::std::value::VALUE_TRAIT
+                .dictionary_method_index(crate::std::value::VALUE_CLONE_METHOD_INDEX),
+            arguments,
+            span,
+        )
+    })
+}
+
+fn call_value_clone_dispatch_for_temp(
+    ctx: &mut EvalCtx,
+    clone: &LocalClone,
+    source: ValOrMut,
+    span: Location,
+) -> Result<Value, RuntimeError> {
+    call_value_clone_with(ctx, source, span, |ctx, arguments| match clone {
+        LocalClone::Required => {
+            panic!("LocalClone::Required should have been resolved before evaluation")
+        }
+        LocalClone::Static(function) => ctx.call_function_id(*function, arguments, span),
+        LocalClone::Dictionary(dict_index) => {
+            let function_value = {
+                let dictionary = ctx.environment[ctx.frame_base + *dict_index]
+                    .as_value_ref(ctx)
+                    .map_err(|err| RuntimeError::new(err, Some(span)))?;
+                dictionary.as_tuple().unwrap()[usize::from(
+                    crate::std::value::VALUE_TRAIT
+                        .dictionary_method_index(crate::std::value::VALUE_CLONE_METHOD_INDEX),
+                )]
+                .as_function()
+                .unwrap()
+                .clone()
+            };
+            ctx.call_function_value(&function_value, arguments, span)
+        }
+    })
+}
+
+pub(crate) fn call_value_drop_for_temp(
+    ctx: &mut EvalCtx,
+    dictionary: &Value,
+    target: ValOrMut,
     span: Location,
 ) -> EvalControlFlowResult {
-    let target_index = ctx.environment.len();
-    ctx.environment.push(ValOrMut::Val(target_value));
-    #[cfg(debug_assertions)]
-    ctx.environment_names.push(ustr("$function_drop_target"));
-    let target = Place {
-        target: target_index,
-        path: Vec::new(),
+    let mut temp_target = None;
+    let target = match target {
+        ValOrMut::Mut(place) => ValOrMut::Mut(place),
+        ValOrMut::Val(value) => {
+            let target_index = ctx.environment.len();
+            ctx.environment.push(ValOrMut::Val(value));
+            #[cfg(debug_assertions)]
+            ctx.environment_names.push(ustr("$function_drop_target"));
+            temp_target = Some(target_index);
+            ValOrMut::Mut(Place {
+                target: target_index,
+                path: Vec::new(),
+            })
+        }
     };
     let result = call_dictionary_method(
         ctx,
         dictionary,
         crate::std::value::VALUE_TRAIT
             .dictionary_method_index(crate::std::value::VALUE_DROP_METHOD_INDEX),
-        vec![ValOrMut::Mut(target)],
+        vec![target.clone()],
         span,
     );
-    #[cfg(debug_assertions)]
-    ctx.environment_names.pop();
-    ctx.environment.pop();
-    result
+    if temp_target.is_some() {
+        #[cfg(debug_assertions)]
+        ctx.environment_names.pop();
+        ctx.environment.pop();
+    }
+    result?;
+    cont(Value::unit())
 }
 
 #[inline(never)]
@@ -924,7 +975,7 @@ fn eval_function_clone(
     let closure_env = mem::replace(&mut target_function.closure_env, Value::unit());
     target_function.closure_env =
         if let Some(dictionary) = &target_function.closure_env_value_dictionary {
-            call_value_clone_for_temp(ctx, dictionary, closure_env, span)?
+            call_value_clone_for_temp(ctx, dictionary, ValOrMut::Val(closure_env), span)?
         } else {
             Value::unit()
         };
@@ -963,7 +1014,7 @@ fn eval_function_drop(
     }) else {
         return cont(Value::unit());
     };
-    call_value_drop_for_temp(ctx, &dictionary, captures, span)
+    call_value_drop_for_temp(ctx, &dictionary, ValOrMut::Val(captures), span)
 }
 
 #[inline(never)]
@@ -1026,7 +1077,6 @@ fn eval_env_store(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
     if ctx.environment.len() >= ctx.stack_limit {
         return Err(RuntimeError::new(
             RuntimeErrorKind::StackLimitExceeded {
@@ -1045,7 +1095,13 @@ fn eval_env_store(
             target: target_index,
             path: Vec::new(),
         };
-        let arguments = vec![ValOrMut::Val(value), ValOrMut::Mut(target)];
+        let source = match eval_or_return!(try_resolve_node_place(arena, node.value, ctx, locals)) {
+            Some(place) => ValOrMut::Mut(place),
+            None => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
+                arena, node.value, ctx, locals
+            ))),
+        };
+        let arguments = vec![source, ValOrMut::Mut(target)];
         match clone {
             LocalClone::Required => {
                 panic!("LocalClone::Required should have been resolved before evaluation")
@@ -1073,6 +1129,7 @@ fn eval_env_store(
             panic!("Value::clone returned without initializing local storage");
         }
     } else {
+        let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
         ctx.environment.push(ValOrMut::Val(value));
         #[cfg(debug_assertions)]
         ctx.environment_names
@@ -1295,28 +1352,49 @@ fn eval_array(
 fn eval_index(
     arena: &NodeArena,
     id: NodeId,
-    array: NodeId,
-    index: NodeId,
+    index: &hir::ArrayIndex,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     // Evaluate left-to-right: array first, then index (matches Rust semantics).
-    let mut array = eval_or_return!(eval_node_with_ctx(arena, array, ctx, locals))
-        .into_primitive_ty::<array::Array>()
-        .unwrap();
-    let index = eval_or_return!(eval_node_with_ctx(arena, index, ctx, locals))
+    let mut array_place = eval_or_return!(try_resolve_node_place(arena, index.array, ctx, locals));
+    let mut temp_array_index = None;
+    if array_place.is_none() {
+        let array = eval_or_return!(eval_node_with_ctx(arena, index.array, ctx, locals));
+        let target = ctx.environment.len();
+        ctx.environment.push(ValOrMut::Val(array));
+        #[cfg(debug_assertions)]
+        ctx.environment_names.push(ustr("$array_index_source"));
+        temp_array_index = Some(target);
+        array_place = Some(Place {
+            target,
+            path: Vec::new(),
+        });
+    }
+    let mut element_place = array_place.unwrap();
+    let index_value = eval_or_return!(eval_node_with_ctx(arena, index.index, ctx, locals))
         .into_primitive_ty::<isize>()
         .unwrap();
-    match array.get_mut_signed(index) {
-        Some(value) => cont(value.clone()),
-        None => {
-            let len = array.len();
-            Err(RuntimeError::new(
-                RuntimeErrorKind::ArrayAccessOutOfBounds { index, len },
-                Some(arena[id].span),
-            ))
-        }
+    element_place.path.push(index_value);
+
+    let clone = index
+        .clone
+        .as_ref()
+        .expect("ArrayIndex clone dispatch should have been resolved before evaluation");
+    let result = call_value_clone_dispatch_for_temp(
+        ctx,
+        clone,
+        ValOrMut::Mut(element_place.clone()),
+        arena[id].span,
+    );
+
+    if temp_array_index.is_some() {
+        #[cfg(debug_assertions)]
+        ctx.environment_names.pop();
+        ctx.environment.pop();
     }
+
+    result.map(ControlFlow::Continue)
 }
 
 #[inline(never)]
@@ -1457,13 +1535,13 @@ fn try_resolve_node_place(
             place.path.push(index);
             place
         }
-        Index(array, index) => {
+        Index(index) => {
             let Some(mut place) =
-                eval_or_return!(try_resolve_node_place(arena, *array, ctx, locals))
+                eval_or_return!(try_resolve_node_place(arena, index.array, ctx, locals))
             else {
                 return Ok(ControlFlow::Continue(None));
             };
-            let index_value = eval_or_return!(eval_node_with_ctx(arena, *index, ctx, locals));
+            let index_value = eval_or_return!(eval_node_with_ctx(arena, index.index, ctx, locals));
             let index = index_value.into_primitive_ty::<isize>().unwrap();
             place.path.push(index);
             place

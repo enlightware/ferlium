@@ -19,7 +19,7 @@ use crate::{
     Location,
     ast::{self, UnnamedArg},
     format::FormatWith,
-    module::{FunctionId, LocalDecl, LocalDeclId, TraitImplId, id::Id},
+    module::{FunctionId, LocalClone, LocalDecl, LocalDeclId, TraitImplId, id::Id},
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
     types::type_like::{CastableToType, TypeLike},
 };
@@ -195,6 +195,15 @@ pub struct Assignment {
 }
 
 #[derive(Debug, Clone)]
+pub struct ArrayIndex {
+    pub array: NodeId,
+    pub index: NodeId,
+    /// Dispatch used to clone the indexed element into the owned result.
+    /// `None` is only valid before dictionary passing.
+    pub clone: Option<LocalClone>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Case {
     pub value: NodeId,
     pub alternatives: Vec<(LiteralValue, NodeId)>,
@@ -280,7 +289,7 @@ pub enum NodeKind {
     /// Extract the tag of a variant as an isize, by casting the pointer to the string
     ExtractTag(NodeId),
     Array(B<SVec2<NodeId>>),
-    Index(NodeId, NodeId),
+    Index(B<ArrayIndex>),
     Case(B<Case>),
     Loop(NodeId),
     SoftBreak,
@@ -330,7 +339,7 @@ impl NodeKind {
             Project(n, _) | ProjectAt(n, _) => smallvec![*n],
             FieldAccess(fa, _) => smallvec![*fa],
             Variant(_, n) => smallvec![*n],
-            Index(a, b) => smallvec![*a, *b],
+            Index(index) => smallvec![index.array, index.index],
             Case(case) => {
                 let mut v: SVec4<NodeId> = SVec4::with_capacity(2 + case.alternatives.len());
                 v.push(case.value);
@@ -635,10 +644,10 @@ impl Node {
                 }
                 writeln!(f, "{indent_str}]")?;
             }
-            Index(array, index) => {
+            Index(index) => {
                 writeln!(f, "{indent_str}index")?;
-                format_ind(arena, *array, f, locals, env, spacing, indent + 1)?;
-                format_ind(arena, *index, f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, index.array, f, locals, env, spacing, indent + 1)?;
+                format_ind(arena, index.index, f, locals, env, spacing, indent + 1)?;
             }
             Case(case) => {
                 writeln!(f, "{indent_str}match")?;
@@ -812,11 +821,11 @@ impl Node {
                     }
                 }
             }
-            Index(array, index) => {
-                if let Some(ty) = type_at(arena, *array, pos) {
+            Index(index) => {
+                if let Some(ty) = type_at(arena, index.array, pos) {
                     return Some(ty);
                 }
-                if let Some(ty) = type_at(arena, *index, pos) {
+                if let Some(ty) = type_at(arena, index.index, pos) {
                     return Some(ty);
                 }
             }
@@ -934,9 +943,9 @@ impl Node {
             Array(nodes) => nodes
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
-            Index(array, index) => {
-                unbound_ty_vars(arena, *array, result, ignore);
-                unbound_ty_vars(arena, *index, result, ignore);
+            Index(index) => {
+                unbound_ty_vars(arena, index.array, result, ignore);
+                unbound_ty_vars(arena, index.index, result, ignore);
             }
             Case(case) => {
                 unbound_ty_vars(arena, case.value, result, ignore);

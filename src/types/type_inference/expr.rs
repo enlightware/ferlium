@@ -1070,7 +1070,17 @@ impl TypeInference {
                             &array_effects,
                             &index_effects,
                         ]);
-                        let node = K::Index(array_node_id, index_node_id);
+                        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                            VALUE_TRAIT.clone(),
+                            vec![element_ty],
+                            vec![],
+                            sp(data.array),
+                        ));
+                        let node = K::Index(b(hir::ArrayIndex {
+                            array: array_node_id,
+                            index: index_node_id,
+                            clone: Some(LocalClone::Required),
+                        }));
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
                 }

@@ -359,9 +359,9 @@ fn node_variable_type_annotations(
         Array(nodes) => nodes
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-        Index(array, index) => {
-            variable_type_annotations(arena, *array, result, locals, env);
-            variable_type_annotations(arena, *index, result, locals, env);
+        Index(index) => {
+            variable_type_annotations(arena, index.array, result, locals, env);
+            variable_type_annotations(arena, index.index, result, locals, env);
         }
         Case(case) => {
             variable_type_annotations(arena, case.value, result, locals, env);

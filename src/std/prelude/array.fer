@@ -148,8 +148,10 @@ impl<A> Value for [A] where A: Value {
 	}
 
 	fn clone(source: [A], target: &mut [A]) {
-		target = source;
+		array_value_clone(source, target);
 	}
 
-	fn drop(target: &mut [A]) {}
+	fn drop(target: &mut [A]) {
+		array_value_drop(target);
+	}
 }

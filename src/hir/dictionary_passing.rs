@@ -1166,9 +1166,25 @@ impl Node {
                     elaborate_dictionaries(arena, node_id, ctx, local_count)?;
                 }
             }
-            Index(array_id, index_id) => {
-                elaborate_dictionaries(arena, *array_id, ctx, local_count)?;
-                elaborate_dictionaries(arena, *index_id, ctx, local_count)?;
+            Index(index) => {
+                elaborate_dictionaries(arena, index.array, ctx, local_count)?;
+                elaborate_dictionaries(arena, index.index, ctx, local_count)?;
+                if !matches!(
+                    index.clone,
+                    Some(LocalClone::Static(_)) | Some(LocalClone::Dictionary(_))
+                ) {
+                    index.clone = Some(
+                        resolve_local_value_dispatch(
+                            arena,
+                            ctx,
+                            node_ty,
+                            VALUE_CLONE_METHOD_INDEX,
+                            node_span,
+                            "Value dictionary for array indexing not found, type inference should have failed",
+                        )?
+                        .into_clone(),
+                    );
+                }
             }
             Case(case) => {
                 elaborate_dictionaries(arena, case.value, ctx, local_count)?;
