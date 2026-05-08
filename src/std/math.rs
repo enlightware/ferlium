@@ -19,7 +19,7 @@ use crate::{
     hir::function::{
         BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV,
         BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN, BinaryNativeFnRRV, Function,
-        NullaryNativeFnN, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnRN,
+        NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnRN,
     },
     hir::value::{NativeDisplay, Value},
     module::Module,
@@ -32,8 +32,8 @@ use crate::{
         ordering::compare,
         string::String,
         value::{
-            VALUE_TRAIT, equal, native_layout_associated_consts, native_value_clone,
-            native_value_drop,
+            VALUE_TRAIT, equal, native_layout_associated_consts, native_value_clone_function,
+            native_value_drop_function,
         },
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
@@ -290,8 +290,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(equal::<Int>)) as Function,
             b(UnaryFn::new(|value: Int| String::new(&value.to_string()))) as Function,
             b(BinaryNativeFnNMN::new(hash_int)) as Function,
-            b(BinaryNativeFnRMN::new(native_value_clone::<Int>)) as Function,
-            b(UnaryNativeFnMN::new(native_value_drop::<Int>)) as Function,
+            native_value_clone_function::<Int>(),
+            native_value_drop_function::<Int>(),
         ],
     );
     let num_trait = to.get_trait_str(NUM_TRAIT_NAME).unwrap().clone();
@@ -421,8 +421,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRRN::new(equal_float)) as Function,
             b(UnaryNativeFnRN::new(float_to_string)) as Function,
             b(BinaryNativeFnRMN::new(hash_float)) as Function,
-            b(BinaryNativeFnRMN::new(native_value_clone::<Float>)) as Function,
-            b(UnaryNativeFnMN::new(native_value_drop::<Float>)) as Function,
+            native_value_clone_function::<Float>(),
+            native_value_drop_function::<Float>(),
         ],
     );
     to.add_native_concrete_impl(

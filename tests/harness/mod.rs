@@ -13,9 +13,9 @@ use ferlium::{
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     hir::emit_ir::{CompiledExpr, emit_expr_unsafe},
     hir::function::{
-        BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Function, FunctionDefinition,
-        NullaryNativeFnN, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnRN,
-        UnaryNativeFnVN, UnaryNativeFnVV,
+        BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Function,
+        FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnNV,
+        UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{NativeDisplay, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
@@ -378,11 +378,19 @@ fn hash_clone_tracked(value: &CloneTrackedNative, state: &mut ferlium::std::hash
     state.write_isize(value.0);
 }
 
-fn clone_clone_tracked(source: &CloneTrackedNative, target: &mut CloneTrackedNative) {
-    target.clone_from(source);
+fn clone_clone_tracked(source: &CloneTrackedNative, target: &mut Value) {
+    *target = Value::native(source.clone());
 }
 
 fn drop_clone_tracked(_target: &mut CloneTrackedNative) {}
+
+fn clone_tracked_value_clone_function() -> Function {
+    Box::new(BinaryNativeFnRWN::new(clone_clone_tracked)) as Function
+}
+
+fn clone_tracked_value_drop_function() -> Function {
+    Box::new(UnaryNativeFnMN::new(drop_clone_tracked)) as Function
+}
 
 fn record_tracked_drop(value: isize) {
     TRACKED_DROPS
@@ -465,8 +473,8 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
             Box::new(BinaryNativeFnRRN::new(equal_clone_tracked)) as Function,
             Box::new(UnaryNativeFnRN::new(clone_tracked_to_string)) as Function,
             Box::new(BinaryNativeFnRMN::new(hash_clone_tracked)) as Function,
-            Box::new(BinaryNativeFnRMN::new(clone_clone_tracked)) as Function,
-            Box::new(UnaryNativeFnMN::new(drop_clone_tracked)) as Function,
+            clone_tracked_value_clone_function(),
+            clone_tracked_value_drop_function(),
         ],
     );
     module.add_function(

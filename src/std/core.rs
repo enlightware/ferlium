@@ -12,8 +12,7 @@ use std::sync::LazyLock;
 use crate::{
     containers::b,
     hir::function::{
-        BinaryNativeFnNMN, BinaryNativeFnNNN, BinaryNativeFnRMN, Function, NullaryNativeFnN,
-        UnaryNativeFnMN, UnaryNativeFnNN,
+        BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN,
     },
     module::Module,
     std::{
@@ -24,7 +23,8 @@ use crate::{
         math::{float_type, int_type},
         string::string_type,
         value::{
-            VALUE_TRAIT, native_layout_associated_consts, native_value_clone, native_value_drop,
+            VALUE_TRAIT, native_layout_associated_consts, native_value_clone_function,
+            native_value_drop_function,
         },
     },
     types::r#trait::TraitRef,
@@ -79,8 +79,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnNNN::new(|_: (), _: ()| true)) as Function,
             b(UnaryNativeFnNN::new(unit_to_string)) as Function,
             b(BinaryNativeFnNMN::new(unit_hash)) as Function,
-            b(BinaryNativeFnRMN::new(native_value_clone::<()>)) as Function,
-            b(UnaryNativeFnMN::new(native_value_drop::<()>)) as Function,
+            native_value_clone_function::<()>(),
+            native_value_drop_function::<()>(),
         ],
     );
     to.add_native_concrete_impl(

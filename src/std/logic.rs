@@ -14,8 +14,7 @@ use crate::{
     cached_primitive_ty,
     containers::b,
     hir::function::{
-        BinaryNativeFnNMN, BinaryNativeFnNNN, BinaryNativeFnRMN, Function, NullaryNativeFnN,
-        UnaryNativeFnMN, UnaryNativeFnNN,
+        BinaryNativeFnNMN, BinaryNativeFnNNN, Function, NullaryNativeFnN, UnaryNativeFnNN,
     },
     hir::value::NativeDisplay,
     module::Module,
@@ -27,8 +26,8 @@ use crate::{
         math::Int,
         string::String,
         value::{
-            VALUE_TRAIT, equal, native_layout_associated_consts, native_value_clone,
-            native_value_drop,
+            VALUE_TRAIT, equal, native_layout_associated_consts, native_value_clone_function,
+            native_value_drop_function,
         },
     },
     types::effects::no_effects,
@@ -93,8 +92,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryFn::new(equal::<bool>)) as Function,
             b(UnaryFn::new(|value: bool| String::new(&value.to_string()))) as Function,
             b(BinaryNativeFnNMN::new(hash_bool)) as Function,
-            b(BinaryNativeFnRMN::new(native_value_clone::<bool>)) as Function,
-            b(UnaryNativeFnMN::new(native_value_drop::<bool>)) as Function,
+            native_value_clone_function::<bool>(),
+            native_value_drop_function::<bool>(),
         ],
     );
     let bits_trait = to.get_trait_str(BITS_TRAIT_NAME).unwrap().clone();

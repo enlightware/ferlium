@@ -24,7 +24,7 @@ use crate::{
     hir::function::{
         BinaryNativeFnMRN, BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN,
         BinaryNativeFnRRV, Function, NullaryNativeFnN, TernaryNativeFnRNNN, TernaryNativeFnRRRN,
-        UnaryNativeFnMN, UnaryNativeFnMV, UnaryNativeFnRN, UnaryNativeFnRV,
+        UnaryNativeFnMV, UnaryNativeFnRN, UnaryNativeFnRV,
     },
     hir::value::{NativeDisplay, Value},
     module::{Module, ModuleFunction},
@@ -37,7 +37,8 @@ use crate::{
         math::{float_type, float_value, int_type, int_value},
         ordering::compare,
         value::{
-            VALUE_TRAIT, native_layout_associated_consts, native_value_clone, native_value_drop,
+            VALUE_TRAIT, native_layout_associated_consts, native_value_clone_function,
+            native_value_drop_function,
         },
     },
     types::effects::{PrimitiveEffect, effect, no_effects},
@@ -557,8 +558,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRRN::new(equal_string)) as Function,
             b(UnaryNativeFnRN::new(String::clone)) as Function,
             b(BinaryNativeFnRMN::new(hash_string)) as Function,
-            b(BinaryNativeFnRMN::new(native_value_clone::<String>)) as Function,
-            b(UnaryNativeFnMN::new(native_value_drop::<String>)) as Function,
+            native_value_clone_function::<String>(),
+            native_value_drop_function::<String>(),
         ],
     );
     to.add_concrete_impl_no_locals(
@@ -570,8 +571,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRRN::new(equal_string_iterator)) as Function,
             b(UnaryNativeFnRN::new(string_iterator_to_string)) as Function,
             b(BinaryNativeFnRMN::new(hash_string_iterator)) as Function,
-            b(BinaryNativeFnRMN::new(native_value_clone::<StringIterator>)) as Function,
-            b(UnaryNativeFnMN::new(native_value_drop::<StringIterator>)) as Function,
+            native_value_clone_function::<StringIterator>(),
+            native_value_drop_function::<StringIterator>(),
         ],
     );
     to.add_concrete_impl_no_locals(
@@ -583,12 +584,8 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRRN::new(equal_string_split_iterator)) as Function,
             b(UnaryNativeFnRN::new(string_split_iterator_to_string)) as Function,
             b(BinaryNativeFnRMN::new(hash_string_split_iterator)) as Function,
-            b(BinaryNativeFnRMN::new(
-                native_value_clone::<StringSplitIterator>,
-            )) as Function,
-            b(UnaryNativeFnMN::new(
-                native_value_drop::<StringSplitIterator>,
-            )) as Function,
+            native_value_clone_function::<StringSplitIterator>(),
+            native_value_drop_function::<StringSplitIterator>(),
         ],
     );
     let ord_trait = to.get_trait_str(ORD_TRAIT_NAME).unwrap().clone();

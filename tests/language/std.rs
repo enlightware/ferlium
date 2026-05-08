@@ -166,6 +166,24 @@ fn mutable_let_initialization_uses_value_clone() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_let_clone_does_not_preclone_target_storage() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let original = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            let mut cloned = original;
+            testing::clone_tracked_payload(cloned) == 7
+                and testing::clone_tracked_clone_count() < 3
+            "#
+        ),
+        bool(true)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn trivial_copy_cannot_be_implemented_from_ferlium_source() {
     let mut session = TestSession::new();
     let err = session.fail_compilation(

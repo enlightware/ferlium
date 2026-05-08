@@ -80,14 +80,24 @@ impl ValOrMut {
 
     pub fn as_value_ref<'a>(&'a self, ctx: &'a EvalCtx<'_>) -> Result<&'a Value, RuntimeErrorKind> {
         Ok(match self {
-            ValOrMut::Val(value) => value,
+            ValOrMut::Val(value) => {
+                if matches!(value, Value::Uninit) {
+                    panic!("attempted to read an uninitialized value");
+                }
+                value
+            }
             ValOrMut::Mut(place) => place.target_ref(ctx)?,
         })
     }
 
     pub fn as_value(&self, ctx: &EvalCtx<'_>) -> Result<Value, RuntimeErrorKind> {
         Ok(match self {
-            ValOrMut::Val(value) => value.clone(),
+            ValOrMut::Val(value) => {
+                if matches!(value, Value::Uninit) {
+                    panic!("attempted to read an uninitialized value");
+                }
+                value.clone()
+            }
             ValOrMut::Mut(place) => place.target_ref(ctx)?.clone(),
         })
     }
@@ -470,6 +480,7 @@ impl Place {
                         }
                     }
                 }
+                Uninit => panic!("cannot access a field of an uninitialized value"),
                 Variant(_) => panic!("Cannot access a variant payload with a non-zero index"),
                 _ => panic!("Cannot access a non-compound value"),
             };
@@ -499,9 +510,13 @@ impl Place {
                         }
                     }
                 }
+                Uninit => panic!("cannot read a field of an uninitialized value"),
                 Variant(_) => panic!("Cannot access a variant payload with a non-zero index"),
                 _ => panic!("Cannot access a non-compound value"),
             };
+        }
+        if matches!(target, Value::Uninit) {
+            panic!("attempted to read an uninitialized value");
         }
         Ok(target)
     }
@@ -840,11 +855,10 @@ fn call_value_clone_for_temp(
     ctx: &mut EvalCtx,
     dictionary: &Value,
     source: Value,
-    target_placeholder: Value,
     span: Location,
 ) -> Result<Value, RuntimeError> {
     let target_index = ctx.environment.len();
-    ctx.environment.push(ValOrMut::Val(target_placeholder));
+    ctx.environment.push(ValOrMut::Val(Value::uninit()));
     #[cfg(debug_assertions)]
     ctx.environment_names.push(ustr("$function_clone_target"));
     let target = Place {
@@ -862,6 +876,9 @@ fn call_value_clone_for_temp(
     #[cfg(debug_assertions)]
     ctx.environment_names.pop();
     let target = ctx.environment.pop().unwrap().into_val().unwrap();
+    if matches!(target, Value::Uninit) {
+        panic!("Value::clone returned without initializing its target");
+    }
     Ok(target)
 }
 
@@ -903,25 +920,14 @@ fn eval_function_clone(
 ) -> EvalControlFlowResult {
     let source = eval_or_return!(eval_node_with_ctx(arena, node.source, ctx, locals));
     let source = source.into_function().unwrap();
-    let cloned_captures = if let Some(dictionary) = &source.closure_env_value_dictionary {
-        call_value_clone_for_temp(
-            ctx,
-            dictionary,
-            source.closure_env.clone(),
-            source.closure_env.clone(),
-            span,
-        )?
-    } else {
-        Value::unit()
-    };
-    let target_function = FunctionValue {
-        function_id: source.function_id,
-        module_id: source.module_id,
-        hidden_dictionary_args: source.hidden_dictionary_args.clone(),
-        closure_env: cloned_captures,
-        closure_env_len: source.closure_env_len,
-        closure_env_value_dictionary: source.closure_env_value_dictionary.clone(),
-    };
+    let mut target_function = *source;
+    let closure_env = mem::replace(&mut target_function.closure_env, Value::unit());
+    target_function.closure_env =
+        if let Some(dictionary) = &target_function.closure_env_value_dictionary {
+            call_value_clone_for_temp(ctx, dictionary, closure_env, span)?
+        } else {
+            Value::unit()
+        };
     let target = eval_or_return!(resolve_node_place(arena, node.target, ctx, locals));
     *target
         .target_mut(ctx)
@@ -1031,7 +1037,7 @@ fn eval_env_store(
     }
     if let Some(clone) = &locals[node.id.as_index()].clone {
         let target_index = ctx.environment.len();
-        ctx.environment.push(ValOrMut::Val(value.clone()));
+        ctx.environment.push(ValOrMut::Val(Value::uninit()));
         #[cfg(debug_assertions)]
         ctx.environment_names
             .push(locals[node.id.as_index()].name.0);
@@ -1062,6 +1068,9 @@ fn eval_env_store(
                 };
                 ctx.call_function_value(&function_value, arguments, span)?;
             }
+        }
+        if matches!(&ctx.environment[target_index], ValOrMut::Val(Value::Uninit)) {
+            panic!("Value::clone returned without initializing local storage");
         }
     } else {
         ctx.environment.push(ValOrMut::Val(value));
@@ -1116,7 +1125,7 @@ fn eval_env_drop(
 #[inline(never)]
 fn eval_env_move(node: &hir::EnvMove, _span: Location, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let index = ctx.frame_base + node.index as usize;
-    match mem::replace(&mut ctx.environment[index], ValOrMut::Val(Value::unit())) {
+    match mem::replace(&mut ctx.environment[index], ValOrMut::Val(Value::uninit())) {
         ValOrMut::Val(value) => cont(value),
         ValOrMut::Mut(_) => panic!("cannot move out of a mutable reference local"),
     }

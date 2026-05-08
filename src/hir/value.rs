@@ -175,6 +175,8 @@ impl FunctionValue {
 /// A value in the system
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum Value {
+    /// Internal uninitialized storage used while `Value::clone` writes into a target.
+    Uninit,
     /// A native value, a pointer to the underlying Rust value
     Native(B<dyn NativeValue>),
     /// A variant with its tag and payload
@@ -186,6 +188,10 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn uninit() -> Self {
+        Self::Uninit
+    }
+
     pub fn unit() -> Self {
         Self::native::<()>(())
     }
@@ -217,7 +223,7 @@ impl Value {
                     .map(Value::to_literal_value)
                     .collect::<Option<Vec<_>>>()?,
             )),
-            Self::Variant(_) | Self::Function(_) => None,
+            Self::Uninit | Self::Variant(_) | Self::Function(_) => None,
         }
     }
 
@@ -255,6 +261,7 @@ impl Value {
     pub fn into_primitive_ty<T: 'static>(self) -> Option<T> {
         use Value::*;
         match self {
+            Uninit => panic!("attempted to read an uninitialized value"),
             Native(value) => Some(*value.into_any().downcast::<T>().ok()?),
             _ => None,
         }
@@ -262,6 +269,7 @@ impl Value {
 
     pub fn as_primitive_ty<T: 'static>(&self) -> Option<&T> {
         match self {
+            Self::Uninit => panic!("attempted to read an uninitialized value"),
             Self::Native(value) => NativeValue::as_any(value.as_ref()).downcast_ref::<T>(),
             _ => None,
         }
@@ -269,6 +277,7 @@ impl Value {
 
     pub fn as_primitive_ty_mut<T: 'static>(&mut self) -> Option<&mut T> {
         match self {
+            Self::Uninit => panic!("attempted to mutably read an uninitialized value"),
             Self::Native(value) => value.as_mut().as_mut_any().downcast_mut::<T>(),
             _ => None,
         }
@@ -277,6 +286,7 @@ impl Value {
     pub fn format_as_string_repr(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Value::*;
         match self {
+            Uninit => write!(f, "<uninitialized>"),
             Native(value) => value.fmt_in_to_string(f),
             Variant(variant) => {
                 if variant.value.is_tuple() {
@@ -345,6 +355,7 @@ impl Value {
         let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
         use Value::*;
         match self {
+            Uninit => writeln!(f, "{indent_str}<uninitialized>"),
             Native(value) => {
                 write!(f, "{indent_str}")?;
                 value.fmt_repr(f)?;
@@ -397,6 +408,10 @@ impl Value {
     }
 
     fn fmt_pretty(&self, f: &mut std::fmt::Formatter<'_>, ty: Type) -> std::fmt::Result {
+        if matches!(self, Value::Uninit) {
+            panic!("attempted to pretty-print an uninitialized value");
+        }
+
         use TypeKind::*;
         let ty_data = ty.data();
         match &*ty_data {

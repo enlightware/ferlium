@@ -699,7 +699,7 @@ macro_rules! n_ary_native_fn {
 // - N: Val<T> (native value)
 // - M: Mut<T> (native mutable reference)
 // - V: Value (generic value)
-// - W: &mut Value (mutable reference to generic value)
+// - W: &mut Value (mutable reference to a runtime value slot)
 // outputs:
 // - N: native
 // - V: value
