@@ -1048,7 +1048,7 @@ impl<'a> TraitSolver<'a> {
         input_types: impl Into<Vec<Type>>,
         output_types: impl Into<Vec<Type>>,
     ) -> LocalImplId {
-        let arg_names = trait_ref.functions[0].1.arg_names.clone();
+        let arg_names = trait_ref.methods[0].1.arg_names.clone();
         let function: Function = b(ScriptFunction::new(code_entry, arg_names));
         self.impls.add_concrete_raw(
             trait_ref.clone(),
@@ -1069,7 +1069,7 @@ impl<'a> TraitSolver<'a> {
         output_types: impl Into<Vec<Type>>,
     ) -> LocalImplId {
         let functions = trait_ref
-            .functions
+            .methods
             .iter()
             .zip(code_entries.into())
             .map(|((_, definition), (code_entry, locals))| {
@@ -1120,7 +1120,7 @@ impl<'a> TraitSolver<'a> {
             input_types,
             output_types,
             associated_const_values.len(),
-            trait_ref.functions.len(),
+            trait_ref.methods.len(),
         );
         let definitions = trait_ref.instantiate_for_tys(input_types, output_types);
         let mut methods = Vec::with_capacity(definitions.len());

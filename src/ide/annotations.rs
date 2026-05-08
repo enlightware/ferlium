@@ -297,12 +297,12 @@ fn node_variable_type_annotations(
                 }
             }
         }
-        TraitFnApply(_) => {
-            // There is no TraitFnApply left in the final HIR.
+        TraitMethodApply(_) => {
+            // There is no TraitMethodApply left in the final HIR.
         }
         GetFunction(_) => {}
-        GetTraitFunction(_) => {
-            // There is no GetTraitFunction left in the final IR.
+        GetTraitMethod(_) => {
+            // There is no GetTraitMethod left in the final IR.
         }
         GetTraitAssociatedConst(_) => {
             // There is no GetTraitAssociatedConst left in the final IR.

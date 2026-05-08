@@ -16,7 +16,7 @@ use crate::{
     std::STD_MODULE_ID,
     types::r#trait::{TraitMethodIndex, TraitRef},
     types::r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDefRef},
-    types::typing_env::TraitFunctionDescription,
+    types::typing_env::TraitMethodDescription,
 };
 use derive_new::new;
 use ustr::{Ustr, ustr};
@@ -252,15 +252,15 @@ impl<'m> ModuleEnv<'m> {
     }
 
     /// Get a trait method from the current module, or other ones, return the ID of the module if other.
-    pub fn get_trait_function(
+    pub fn get_trait_method(
         &'m self,
         path: &'m ast::Path,
-    ) -> Result<Option<(Option<ModuleId>, TraitFunctionDescription<'m>)>, InternalCompilationError>
+    ) -> Result<Option<(Option<ModuleId>, TraitMethodDescription<'m>)>, InternalCompilationError>
     {
         self.get_module_member(&path.segments, &|name, module| {
             module.trait_iter().find_map(|trait_ref| {
                 trait_ref
-                    .functions
+                    .methods
                     .iter()
                     .enumerate()
                     .find_map(|(index, function)| {

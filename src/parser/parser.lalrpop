@@ -1,5 +1,5 @@
 use crate::{SourceId, Location, LocatedError};
-use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitDefinition as TraitDefinition, TraitFunction, TraitFunctionArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
+use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpan as MutTypeTypeSpan, PExpr as Expr, PExprKind as ExprKind, Pattern, PatternKind as PatK, PatternVar, PLetPattern as LetPattern, LetPatternKind as LetPatK, LetRecordPatternField, MapLiteralEntry, PModuleFunctionArg as ModuleFunctionArg, PModule as Module, PModuleFunction as ModuleFunction, PTraitDefinition as TraitDefinition, TraitMethod, TraitMethodArg, PTraitImpl as TraitImpl, PTraitImplFor as TraitImplForHeader, PTypeConstraint as TypeConstraint, PTypeConstraintInput as TypeConstraintInput, PTypeConstraintOutput as TypeConstraintOutput, PTypeDef as TypeDef, TypeAlias, PType as Type, PFnType as FnType, PFnEffects, PFnArgType as FnArgType, PMutType as MutType, Attribute, MetaItem, UnnamedArg, PExprArena, PExprId};
 use crate::types::effects::PrimitiveEffect;
 use crate::hir::value::LiteralValue;
 use crate::types::r#type::Type as IrType;
@@ -67,13 +67,13 @@ ModuleTraitImpl: Module = {
 }
 
 TraitDefinition: TraitDefinition = {
-    <doc:DOC_COMMENT*> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <where_clause:WhereClause?> "{" <functions:TraitFunction*> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <where_clause:WhereClause?> "{" <methods:TraitMethod*> "}" <r:@R> => {
         TraitDefinition {
             name,
             input_type_names: header.0,
             output_type_names: header.1,
             where_clause: where_clause.unwrap_or_default(),
-            functions,
+            methods,
             span: span(l, r, source_id),
             doc: parse_doc_comments(doc),
         }
@@ -184,9 +184,9 @@ Function: ModuleFunction = {
         ),
 }
 
-TraitFunction: TraitFunction = {
-    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> "(" <args:TraitFunctionArgs> ")" <ret:SpFnRet<"">?> <effects:FnEffectsAnnotation?> ";" <r:@R> =>
-        TraitFunction {
+TraitMethod: TraitMethod = {
+    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> "(" <args:TraitMethodArgs> ")" <ret:SpFnRet<"">?> <effects:FnEffectsAnnotation?> ";" <r:@R> =>
+        TraitMethod {
             name,
             args,
             ret_ty: ret,
@@ -202,12 +202,12 @@ ModuleFunctionArgs: Vec<ModuleFunctionArg> = {
     }).collect(),
 }
 
-TraitFunctionArgs: Vec<TraitFunctionArg> = {
-    Sep<TraitFunctionArg, ",">,
+TraitMethodArgs: Vec<TraitMethodArg> = {
+    Sep<TraitMethodArg, ",">,
 }
 
-TraitFunctionArg: TraitFunctionArg = {
-    <name:Sp<UIdentifier>> ":" <ty:ArgType<"", "">> => TraitFunctionArg { name, ty },
+TraitMethodArg: TraitMethodArg = {
+    <name:Sp<UIdentifier>> ":" <ty:ArgType<"", "">> => TraitMethodArg { name, ty },
 }
 
 // Type

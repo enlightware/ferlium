@@ -51,7 +51,7 @@ pub trait Deriver: Debug + DynClone + Sync + Send {
 dyn_clone::clone_trait_object!(Deriver);
 
 /// A trait method argument span, storing the spans of the argument name and its type.
-pub type TraitFunctionArgSpan = (Location, Location);
+pub type TraitMethodArgSpan = (Location, Location);
 
 define_id_type!(
     /// Index into a trait's method list.
@@ -70,9 +70,9 @@ define_id_type!(
 
 /// If the trait method is from code, this struct contains the spans of the method.
 #[derive(Debug, Clone)]
-pub struct TraitFunctionSpans {
+pub struct TraitMethodSpans {
     pub name: Location,
-    pub args: Vec<TraitFunctionArgSpan>,
+    pub args: Vec<TraitMethodArgSpan>,
     pub ret_ty: Option<Location>,
     pub span: Location,
 }
@@ -84,7 +84,7 @@ pub struct TraitSpans {
     pub input_type_names: Vec<Location>,
     pub output_type_names: Vec<Location>,
     pub constraints: Vec<Location>,
-    pub functions: Vec<TraitFunctionSpans>,
+    pub methods: Vec<TraitMethodSpans>,
     pub span: Location,
 }
 
@@ -130,8 +130,8 @@ pub struct Trait {
     pub output_type_names: Vec<Ustr>,
     /// The constraints on the trait, for example related to the associated types.
     pub constraints: Vec<PubTypeConstraint>,
-    /// The functions provided by the trait.
-    pub functions: Vec<(Ustr, FunctionDefinition)>,
+    /// The methods provided by the trait.
+    pub methods: Vec<(Ustr, FunctionDefinition)>,
     /// Compiler-defined associated consts provided by implementations.
     pub associated_consts: Vec<TraitAssociatedConst>,
     /// The trait derivers
@@ -180,7 +180,7 @@ impl Trait {
 
     /// Return the number of methods in this trait.
     pub fn method_count(&self) -> usize {
-        self.functions.len()
+        self.methods.len()
     }
 
     /// Return the number of associated consts in this trait.
@@ -228,15 +228,15 @@ impl Trait {
 
     /// Return the index of the method with the given name, if it exists.
     pub fn method_index(&self, name: Ustr) -> Option<TraitMethodIndex> {
-        self.functions
+        self.methods
             .iter()
             .position(|(fn_name, _)| *fn_name == name)
             .map(TraitMethodIndex::from_index)
     }
 
     /// Return the method at the given trait method index.
-    pub fn function(&self, index: TraitMethodIndex) -> &(Ustr, FunctionDefinition) {
-        &self.functions[index.as_index()]
+    pub fn method(&self, index: TraitMethodIndex) -> &(Ustr, FunctionDefinition) {
+        &self.methods[index.as_index()]
     }
 
     /// Return the associated const at the given trait associated const index.
@@ -257,11 +257,11 @@ impl Trait {
             }
             s.push_str(format!("{}", ty.index()).as_str());
         }
-        s.push_str(&format!(">::{}", self.function(index).0));
+        s.push_str(&format!(">::{}", self.method(index).0));
         s
     }
 
-    /// Validate the trait, ensuring that its function signatures adhere to the limitations of the current implementation.
+    /// Validate the trait, ensuring that its method signatures adhere to the limitations of the current implementation.
     pub fn validate(&self) {
         self.try_validate()
             .unwrap_or_else(|error| panic!("{}", error.message()));
@@ -282,9 +282,9 @@ impl Trait {
             }
         }
 
-        // Make sure that all function definitions are valid and refer to the correct type variables.
-        for (name, function) in &self.functions {
-            for quantifier in &function.ty_scheme.ty_quantifiers {
+        // Make sure that all method definitions are valid and refer to the correct type variables.
+        for (name, method) in &self.methods {
+            for quantifier in &method.ty_scheme.ty_quantifiers {
                 if quantifier.name() >= trait_type_count {
                     return Err(TraitValidationError::Unsupported {
                         trait_name: self.name,
@@ -295,12 +295,12 @@ impl Trait {
                     });
                 }
             }
-            if !function.ty_scheme.eff_quantifiers.is_empty() {
+            if !method.ty_scheme.eff_quantifiers.is_empty() {
                 return Err(TraitValidationError::Unsupported {
                     trait_name: self.name,
                     kind: UnsupportedTraitDefinitionKind::GenericEffect {
                         method_name: *name,
-                        effect_vars: function
+                        effect_vars: method
                             .ty_scheme
                             .eff_quantifiers
                             .iter()
@@ -310,18 +310,18 @@ impl Trait {
                     },
                 });
             }
-            if !function.ty_scheme.constraints.is_empty() {
+            if !method.ty_scheme.constraints.is_empty() {
                 return Err(TraitValidationError::Unsupported {
                     trait_name: self.name,
                     kind: UnsupportedTraitDefinitionKind::GenericConstraints {
                         method_name: *name,
-                        constraint_count: function.ty_scheme.constraints.len(),
+                        constraint_count: method.ty_scheme.constraints.len(),
                     },
                 });
             }
             for input_ty_var in 0..self.input_type_count() {
                 let ty_var = TypeVar::new(input_ty_var);
-                if !function.ty_scheme.ty_quantifiers.contains(&ty_var) {
+                if !method.ty_scheme.ty_quantifiers.contains(&ty_var) {
                     return Err(TraitValidationError::Invalid {
                         trait_name: self.name,
                         kind: InvalidTraitDefinitionKind::MissingInputTypeVarInMethod {
@@ -332,11 +332,11 @@ impl Trait {
                 }
             }
             // Make sure that all constraints have their input type variables reachable from
-            // the function type, in a single pass.
+            // the method type, in a single pass.
             // The single pass is important because in TraitImpls::get_impl()
             // we assume that we can get all output type variables in a single pass over the constraints.
             let mut quantifiers: FxHashSet<_> =
-                function.ty_scheme.ty_quantifiers.iter().copied().collect();
+                method.ty_scheme.ty_quantifiers.iter().copied().collect();
             for (i, constraint) in self.constraints.iter().enumerate() {
                 let (_, input_tys, output_tys, _) = constraint
                     .as_have_trait()
@@ -363,7 +363,7 @@ impl Trait {
         Ok(())
     }
 
-    /// Instantiate all function definitions of this trait for the given input and output types.
+    /// Instantiate all method definitions of this trait for the given input and output types.
     pub fn instantiate_for_tys(
         &self,
         input_tys: &[Type],
@@ -371,7 +371,7 @@ impl Trait {
     ) -> Vec<FunctionDefinition> {
         let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
         let inst_subst = (ty_subst, FxHashMap::default());
-        self.functions
+        self.methods
             .iter()
             .map(|(_, def)| {
                 let mut def = def.instantiate(&inst_subst);
@@ -387,7 +387,7 @@ impl Trait {
         let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
         let inst_subst = (ty_subst, FxHashMap::default());
         Type::tuple(
-            self.functions
+            self.methods
                 .iter()
                 .map(|(_, def)| Type::function_type(def.ty_scheme.ty.instantiate(&inst_subst)))
                 .chain(
@@ -468,7 +468,7 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
             writeln!(f, "\n{{")?;
         }
         let mut first = true;
-        for (name, def) in &self.functions {
+        for (name, def) in &self.methods {
             if first {
                 first = false;
             } else {
@@ -502,14 +502,14 @@ impl TraitRef {
         doc: &str,
         input_type_names: impl Into<Vec<&'a str>>,
         output_type_names: impl Into<Vec<&'a str>>,
-        functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
     ) -> Self {
         let input_type_names = input_type_names.into();
         assert!(
             !input_type_names.is_empty(),
             "A trait must have at least one input type."
         );
-        let functions = functions
+        let methods = methods
             .into()
             .into_iter()
             .map(|(name, def)| (ustr(name), def))
@@ -521,7 +521,7 @@ impl TraitRef {
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: Vec::new(),
-            functions,
+            methods,
             associated_consts: Vec::new(),
             derivers: Vec::new(),
             impl_policy: TraitImplPolicy::UserImplementable,
@@ -534,9 +534,9 @@ impl TraitRef {
         name: &str,
         doc: &str,
         output_type_names: impl Into<Vec<&'a str>>,
-        functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
     ) -> Self {
-        Self::new(name, doc, ["Self"], output_type_names, functions)
+        Self::new(name, doc, ["Self"], output_type_names, methods)
     }
 
     pub fn new_with_constraints<'a>(
@@ -545,14 +545,14 @@ impl TraitRef {
         input_type_names: impl Into<Vec<&'a str>>,
         output_type_names: impl Into<Vec<&'a str>>,
         constraints: impl Into<Vec<PubTypeConstraint>>,
-        functions: impl Into<Vec<(&'a str, FunctionDefinition)>>,
+        methods: impl Into<Vec<(&'a str, FunctionDefinition)>>,
     ) -> Self {
         let input_type_names = input_type_names.into();
         assert!(
             !input_type_names.is_empty(),
             "A trait must have at least one input type."
         );
-        let functions = functions
+        let methods = methods
             .into()
             .into_iter()
             .map(|(name, def)| (ustr(name), def))
@@ -564,7 +564,7 @@ impl TraitRef {
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
             constraints: constraints.into(),
-            functions,
+            methods,
             associated_consts: Vec::new(),
             derivers: Vec::new(),
             impl_policy: TraitImplPolicy::UserImplementable,
@@ -584,8 +584,8 @@ impl TraitRef {
         self
     }
 
-    pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], fn_count: usize) {
-        self.validate_impl_shape(input_tys, output_tys, 0, fn_count)
+    pub fn validate_impl_size(&self, input_tys: &[Type], output_tys: &[Type], method_count: usize) {
+        self.validate_impl_shape(input_tys, output_tys, 0, method_count)
     }
 
     pub fn validate_impl_shape(
@@ -593,7 +593,7 @@ impl TraitRef {
         input_tys: &[Type],
         output_tys: &[Type],
         associated_const_count: usize,
-        fn_count: usize,
+        method_count: usize,
     ) {
         assert_eq!(
             self.input_type_count(),
@@ -614,9 +614,9 @@ impl TraitRef {
             self.name,
         );
         assert_eq!(
-            self.functions.len(),
-            fn_count,
-            "Mismatched function count when implementing trait {}.",
+            self.methods.len(),
+            method_count,
+            "Mismatched method count when implementing trait {}.",
             self.name,
         );
     }
@@ -727,7 +727,7 @@ mod tests {
     //             FunctionDefinition::new_infer_quantifiers(
     //                 fn_ty,
     //                 &["lhs", "rhs"],
-    //                 "test trait function add",
+    //                 "test trait method add",
     //             ),
     //         )],
     //     )

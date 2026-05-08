@@ -28,7 +28,7 @@ use derive_new::new;
 
 /// A trait method description as result of a lookup in the typing environment.
 /// The tuple contains the trait reference, the method index in the trait, and the method definition.
-pub type TraitFunctionDescription<'a> = (TraitRef, TraitMethodIndex, &'a FunctionDefinition);
+pub type TraitMethodDescription<'a> = (TraitRef, TraitMethodIndex, &'a FunctionDefinition);
 
 // /// A local variable within a typing environment.
 // #[derive(Clone, Debug, new)]

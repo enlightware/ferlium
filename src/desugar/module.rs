@@ -1,8 +1,6 @@
 use crate::desugar::types::{desugar_type_constraints, extend_generic_ty_params};
 use crate::hir::function::FunctionDefinition;
-use crate::types::r#trait::{
-    Trait, TraitFunctionSpans, TraitRef, TraitSpans, TraitValidationError,
-};
+use crate::types::r#trait::{Trait, TraitMethodSpans, TraitRef, TraitSpans, TraitValidationError};
 
 use super::expr::desugar;
 use super::*;
@@ -215,16 +213,16 @@ impl ast::TraitDefinition {
         )?;
         let constraints =
             desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
-        let function_spans = self
-            .functions
+        let method_spans = self
+            .methods
             .iter()
             .map(|function| function.spans())
             .collect();
-        let spans = self.spans(function_spans);
+        let spans = self.spans(method_spans);
         let input_type_names = self.iter_input_type_names().collect();
         let output_type_names = self.iter_output_type_names().collect();
-        let functions = self
-            .functions
+        let methods = self
+            .methods
             .into_iter()
             .map(|function| function.desugar(env, &generic_ty_params, modules_used))
             .collect::<Result<Vec<_>, _>>()?;
@@ -236,7 +234,7 @@ impl ast::TraitDefinition {
             input_type_names,
             output_type_names,
             constraints,
-            functions,
+            methods,
             associated_consts: vec![],
             derivers: vec![],
             impl_policy: crate::types::r#trait::TraitImplPolicy::UserImplementable,
@@ -261,9 +259,9 @@ impl ast::TraitDefinition {
     }
 }
 
-impl ast::TraitFunction {
-    fn spans(&self) -> TraitFunctionSpans {
-        TraitFunctionSpans {
+impl ast::TraitMethod {
+    fn spans(&self) -> TraitMethodSpans {
+        TraitMethodSpans {
             name: self.name.1,
             args: self
                 .args
@@ -314,7 +312,7 @@ impl ast::TraitFunction {
 }
 
 impl ast::TraitDefinition {
-    fn spans(&self, functions: Vec<TraitFunctionSpans>) -> TraitSpans {
+    fn spans(&self, methods: Vec<TraitMethodSpans>) -> TraitSpans {
         TraitSpans {
             name: self.name.1,
             input_type_names: self
@@ -332,7 +330,7 @@ impl ast::TraitDefinition {
                 .iter()
                 .map(|constraint| constraint.span)
                 .collect(),
-            functions,
+            methods,
             span: self.span,
         }
     }

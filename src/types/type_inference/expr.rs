@@ -70,7 +70,7 @@ fn compiler_only_trait_method_use_error(
 ) -> InternalCompilationError {
     internal_compilation_error!(CompilerOnlyTraitMethodUse {
         trait_ref: trait_ref.clone(),
-        method_name: trait_ref.function(method_index).0,
+        method_name: trait_ref.method(method_index).0,
         span,
     })
 }
@@ -386,13 +386,13 @@ impl TypeInference {
                 }
                 // Retrieve the trait method from the environment, if it exists
                 else if let Some((_module_name, trait_descr)) =
-                    env.module_env.get_trait_function(path)?
+                    env.module_env.get_trait_method(path)?
                 {
-                    let (trait_ref, function_index, definition) = trait_descr;
-                    if is_compiler_callable_only_method(&trait_ref, function_index) {
+                    let (trait_ref, method_index, definition) = trait_descr;
+                    if is_compiler_callable_only_method(&trait_ref, method_index) {
                         return Err(compiler_only_trait_method_use_error(
                             &trait_ref,
-                            function_index,
+                            method_index,
                             expr_span,
                         ));
                     }
@@ -404,7 +404,7 @@ impl TypeInference {
                         );
                     assert!(
                         inst_data.dicts_req.is_empty(),
-                        "Instantiation data for trait function is not supported yet."
+                        "Instantiation data for trait method is not supported yet."
                     );
                     trait_ref.constraints.iter().for_each(|constraint| {
                         let mut constraint = constraint.instantiate(&subst);
@@ -421,11 +421,11 @@ impl TypeInference {
                         output_tys.clone(),
                         expr_span,
                     ));
-                    let node = K::GetTraitFunction(b(hir::GetTraitFunction {
+                    let node = K::GetTraitMethod(b(hir::GetTraitMethod {
                         trait_ref,
-                        function_index,
-                        function_path: path.clone(),
-                        function_span: expr_span,
+                        method_index,
+                        method_path: path.clone(),
+                        method_span: expr_span,
                         input_tys,
                         output_tys,
                         inst_data,
@@ -1322,12 +1322,12 @@ impl TypeInference {
             || Location::fuse(args.iter().map(|arg| env.ast_arena[*arg].span)).unwrap_or(path_span);
         // Get the function and its type from the environment.
         Ok(
-            if let Some((_module_name, trait_descr)) = env.module_env.get_trait_function(path)? {
-                let (trait_ref, function_index, definition) = trait_descr;
-                if is_compiler_callable_only_method(&trait_ref, function_index) {
+            if let Some((_module_name, trait_descr)) = env.module_env.get_trait_method(path)? {
+                let (trait_ref, method_index, definition) = trait_descr;
+                if is_compiler_callable_only_method(&trait_ref, method_index) {
                     return Err(compiler_only_trait_method_use_error(
                         &trait_ref,
-                        function_index,
+                        method_index,
                         path_span,
                     ));
                 }
@@ -1346,7 +1346,7 @@ impl TypeInference {
                     .instantiate_with_fresh_vars(self, path_span, Some(trait_ref.type_var_count()));
                 assert!(
                     inst_data.dicts_req.is_empty(),
-                    "Instantiation data for trait function is not supported yet."
+                    "Instantiation data for trait method is not supported yet."
                 );
                 // Instantiate the constraints and add them to our list.
                 trait_ref.constraints.iter().for_each(|constraint| {
@@ -1370,15 +1370,15 @@ impl TypeInference {
                         output_tys,
                         path_span,
                     ));
-                    // Build and return the trait function node
+                    // Build and return the trait method node
                     let ret_ty = inst_fn_ty.ret;
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                    let node = K::TraitFnApply(b(hir::TraitFnApplication {
+                    let node = K::TraitMethodApply(b(hir::TraitMethodApplication {
                         trait_ref,
-                        function_index,
-                        function_path: path.clone(),
-                        function_span: path_span,
+                        method_index,
+                        method_path: path.clone(),
+                        method_span: path_span,
                         arguments: args_node_ids,
                         arguments_unnamed,
                         ty: inst_fn_ty,

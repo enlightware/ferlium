@@ -142,7 +142,7 @@ impl UnifiedTypeInference {
                 app.ty = self.substitute_in_fn_type(&app.ty);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
-            TraitFnApply(app) => {
+            TraitMethodApply(app) => {
                 app.ty = self.substitute_in_fn_type(&app.ty);
                 app.input_tys = self.substitute_in_types(&app.input_tys);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
@@ -150,10 +150,10 @@ impl UnifiedTypeInference {
             GetFunction(get_fn) => {
                 self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
             }
-            GetTraitFunction(get_fn) => {
-                get_fn.input_tys = self.substitute_in_types(&get_fn.input_tys);
-                get_fn.output_tys = self.substitute_in_types(&get_fn.output_tys);
-                self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
+            GetTraitMethod(get_method) => {
+                get_method.input_tys = self.substitute_in_types(&get_method.input_tys);
+                get_method.output_tys = self.substitute_in_types(&get_method.output_tys);
+                self.substitute_in_fn_inst_data(&mut get_method.inst_data);
             }
             GetTraitAssociatedConst(get_const) => {
                 get_const.input_tys = self.substitute_in_types(&get_const.input_tys);

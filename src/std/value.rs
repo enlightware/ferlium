@@ -396,17 +396,19 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
 
         if self.emit_generic_trait_calls && !input_ty.is_constant() {
             return Ok((
-                hir::NodeKind::TraitFnApply(crate::containers::b(hir::TraitFnApplication {
-                    trait_ref: trait_ref.clone(),
-                    function_index: method_index,
-                    function_path: Path::single(trait_ref.function(method_index).0, span),
-                    function_span: span,
-                    arguments,
-                    arguments_unnamed: UnnamedArg::All,
-                    ty: fn_ty,
-                    input_tys: vec![input_ty],
-                    inst_data: hir::FnInstData::none(),
-                })),
+                hir::NodeKind::TraitMethodApply(crate::containers::b(
+                    hir::TraitMethodApplication {
+                        trait_ref: trait_ref.clone(),
+                        method_index,
+                        method_path: Path::single(trait_ref.method(method_index).0, span),
+                        method_span: span,
+                        arguments,
+                        arguments_unnamed: UnnamedArg::All,
+                        ty: fn_ty,
+                        input_tys: vec![input_ty],
+                        inst_data: hir::FnInstData::none(),
+                    },
+                )),
                 ret_ty,
             ));
         }
@@ -1560,7 +1562,7 @@ fn derive_function_value_impl(
     solver: &mut TraitSolver<'_>,
 ) -> Result<TraitImplId, InternalCompilationError> {
     let associated_const_values = value_layout_associated_const_values(input_types[0], span)?;
-    let methods = (0..trait_ref.functions.len())
+    let methods = (0..trait_ref.methods.len())
         .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(solver, method_index, span, arena))
         .collect::<Result<Vec<_>, _>>()?;

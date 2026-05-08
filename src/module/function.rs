@@ -67,7 +67,7 @@ impl FormatWith<ModuleEnv<'_>> for FunctionId {
                 write!(f, "imported function {module_name}::")?;
                 let function_name = match &slot.target {
                     ImportFunctionTarget::TraitImplMethod { key, index } => {
-                        let name = key.trait_ref().function(*index).0;
+                        let name = key.trait_ref().method(*index).0;
                         let imp = env
                             .modules
                             .get(module_id)

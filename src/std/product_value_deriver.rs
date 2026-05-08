@@ -42,8 +42,8 @@ impl Deriver for ProductValueDeriver {
         assert!(trait_ref.input_type_count() == 1);
         assert!(trait_ref.output_type_count() == 0);
         assert!(trait_ref.constraints.is_empty());
-        assert!(trait_ref.functions.len() == 1);
-        let constructor = &trait_ref.functions[0].1;
+        assert!(trait_ref.methods.len() == 1);
+        let constructor = &trait_ref.methods[0].1;
         assert!(constructor.ty_scheme.constraints.is_empty());
         assert!(constructor.ty_scheme.ty.args.is_empty());
         assert!(constructor.ty_scheme.ty.ret == Type::variable_id(0));

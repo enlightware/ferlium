@@ -764,7 +764,7 @@ fn format_impl_fns(
         let function = env.current.get_function_by_id(id).unwrap();
         (function, id)
     });
-    for ((name, _), (function, id)) in trait_ref.functions.iter().zip(impl_functions) {
+    for ((name, _), (function, id)) in trait_ref.methods.iter().zip(impl_functions) {
         format_impl_fn(*name, function, id, &subst, show_code, f, env)?;
     }
     writeln!(f, "}}")

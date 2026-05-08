@@ -242,9 +242,9 @@ pub fn emit_module(
                 imp.span,
             )?;
             // Pre-allocate placeholder functions for each trait method.
-            let fn_defs = trait_ref.instantiate_for_tys(&input_tys, &output_tys);
-            let mut method_ids = Vec::with_capacity(fn_defs.len());
-            for def in fn_defs {
+            let method_defs = trait_ref.instantiate_for_tys(&input_tys, &output_tys);
+            let mut method_ids = Vec::with_capacity(method_defs.len());
+            for def in method_defs {
                 // Placeholder ModuleFunction that will be replaced later.
                 let placeholder = b(VoidFunction);
                 let module_fn = ModuleFunction::new_without_spans_nor_locals(def, placeholder);
@@ -321,7 +321,7 @@ pub fn emit_module(
             .trait_ref_with_module(&Path::single_tuple(imp.trait_name))?
             .ok_or_else(|| internal_compilation_error!(TraitNotFound(imp.trait_name.1)))?;
 
-        // Check that all functions in the impl are part of the trait.
+        // Check that all methods in the impl are part of the trait.
         let mut extra_spans = vec![];
         for func in imp.functions.iter() {
             if trait_ref.method_index(func.name.0).is_none() {
@@ -338,7 +338,7 @@ pub fn emit_module(
         // Collect references to functions in the impl, in the order of the trait methods.
         let mut missings = vec![];
         let functions: Vec<_> = trait_ref
-            .functions
+            .methods
             .iter()
             .filter_map(|(name, _)| {
                 imp.functions
@@ -359,7 +359,7 @@ pub fn emit_module(
         }
 
         // Emit the functions.
-        debug_assert_eq!(functions.len(), trait_ref.functions.len());
+        debug_assert_eq!(functions.len(), trait_ref.methods.len());
         let functions = || functions.iter().copied();
         let trait_ctx = EmitTraitCtx {
             trait_ref: trait_ref.clone(),
@@ -581,7 +581,7 @@ where
     } else {
         None
     };
-    let instantiated_trait_fn_defs = match (&trait_ctx, &trait_output) {
+    let instantiated_trait_method_defs = match (&trait_ctx, &trait_output) {
         (Some(trait_ctx), Some(trait_output)) => Some(
             trait_ctx
                 .trait_ref
@@ -679,15 +679,15 @@ where
         // If we are emitting a trait implementation, make sure this function conforms to it.
         if let Some(trait_ctx) = &trait_ctx {
             let index = trait_ctx.trait_ref.method_index(name.0).unwrap();
-            let (fn_name, raw_fn_def) = trait_ctx.trait_ref.function(index);
-            let instantiated_fn_def =
-                &instantiated_trait_fn_defs.as_ref().unwrap()[index.as_index()];
-            if args.len() != raw_fn_def.ty_scheme.ty.args.len() {
+            let (method_name, raw_method_def) = trait_ctx.trait_ref.method(index);
+            let instantiated_method_def =
+                &instantiated_trait_method_defs.as_ref().unwrap()[index.as_index()];
+            if args.len() != raw_method_def.ty_scheme.ty.args.len() {
                 return Err(internal_compilation_error!(TraitMethodArgCountMismatch {
                     trait_ref: trait_ctx.trait_ref.clone(),
                     method_index: index.as_index(),
-                    method_name: *fn_name,
-                    expected: raw_fn_def.ty_scheme.ty.args.len(),
+                    method_name: *method_name,
+                    expected: raw_method_def.ty_scheme.ty.args.len(),
                     got: args.len(),
                     args_span: *args_span,
                 }));
@@ -698,7 +698,7 @@ where
             ty_inf.add_same_fn_type_constraint_without_effects(
                 &fn_type,
                 *span,
-                &instantiated_fn_def.ty_scheme.ty,
+                &instantiated_method_def.ty_scheme.ty,
                 *span,
             );
         }
@@ -952,8 +952,8 @@ where
         for (i, id) in local_fns.iter().enumerate() {
             let i = TraitMethodIndex::from_index(i);
             let descr = &mut output.functions[id.as_index()];
-            let (method_name, trait_fn_def) = trait_ref.function(i);
-            let trait_effects = &trait_fn_def.ty_scheme.ty.effects;
+            let (method_name, trait_method_def) = trait_ref.method(i);
+            let trait_effects = &trait_method_def.ty_scheme.ty.effects;
             let impl_effects = &descr.definition.ty_scheme.ty.effects;
 
             // Check that impl effects are a subset of trait effects.

@@ -246,10 +246,10 @@ fn value_dictionary_node_kind_from_methods(
     // This builds compiler-generated `Value` dictionaries. The associated
     // consts are layout metadata, so they are computed from the concrete HIR
     // type rather than read from a source impl.
-    assert_eq!(methods.len(), trait_ref.functions.len());
+    assert_eq!(methods.len(), trait_ref.methods.len());
     let definitions = trait_ref.instantiate_for_tys(input_tys, &[]);
     let mut entries =
-        Vec::with_capacity(trait_ref.functions.len() + trait_ref.associated_const_count());
+        Vec::with_capacity(trait_ref.methods.len() + trait_ref.associated_const_count());
     for (method_index, definition) in definitions.into_iter().enumerate() {
         let method_index = TraitMethodIndex::from_index(method_index);
         let method_ty = Type::function_type(definition.ty_scheme.ty);
@@ -286,7 +286,7 @@ fn function_value_dictionary_node_kind(
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
-    let methods = (0..trait_ref.functions.len())
+    let methods = (0..trait_ref.methods.len())
         .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(ctx.trait_solver, method_index, span, arena))
         .collect::<Result<Vec<_>, _>>()?;
@@ -317,7 +317,7 @@ fn generic_derived_value_dictionary_node_kind(
         input_tys,
         span,
         &methods,
-        |method_index| trait_ref.function(method_index).0,
+        |method_index| trait_ref.method(method_index).0,
     )
 }
 
@@ -762,26 +762,26 @@ impl Node {
                     }
                 }
             }
-            TraitFnApply(app) => {
+            TraitMethodApply(app) => {
                 for &arg_id in &app.arguments {
                     elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
                 }
                 assert!(
                     app.inst_data.dicts_req.is_empty(),
-                    "Instantiation data for trait function is not supported yet."
+                    "Instantiation data for trait method is not supported yet."
                 );
                 let resolved = app.input_tys.iter().all(Type::is_constant);
                 if is_value_trait_for_function_type(&app.trait_ref, &app.input_tys, &[]) {
                     let function = FunctionId::Local(function_value_method(
                         ctx.trait_solver,
-                        app.function_index,
-                        app.function_span,
+                        app.method_index,
+                        app.method_span,
                         arena,
                     )?);
-                    let definition = &app.trait_ref.function(app.function_index).1;
+                    let definition = &app.trait_ref.method(app.method_index).1;
                     let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
-                    let function_path = Some(app.function_path.clone());
-                    let function_span = app.function_span;
+                    let function_path = Some(app.method_path.clone());
+                    let function_span = app.method_span;
                     let ty = app.ty.clone();
                     let arguments = mem::take(&mut app.arguments);
                     kind = StaticApply(b(hir::StaticApplication {
@@ -798,14 +798,14 @@ impl Node {
                     let function = ctx.trait_solver.solve_impl_method(
                         &app.trait_ref,
                         &app.input_tys,
-                        app.function_index,
-                        app.function_span,
+                        app.method_index,
+                        app.method_span,
                         arena,
                     )?;
-                    let definition = &app.trait_ref.function(app.function_index).1;
+                    let definition = &app.trait_ref.method(app.method_index).1;
                     let argument_names = app.arguments_unnamed.filter_args(&definition.arg_names);
-                    let function_path = Some(app.function_path.clone());
-                    let function_span = app.function_span;
+                    let function_path = Some(app.method_path.clone());
+                    let function_span = app.method_span;
                     let ty = app.ty.clone();
                     let arguments = mem::take(&mut app.arguments);
                     kind = StaticApply(b(hir::StaticApplication {
@@ -822,7 +822,7 @@ impl Node {
                     &app.input_tys,
                     &[],
                 ) {
-                    let function_span = app.function_span;
+                    let function_span = app.method_span;
                     let dict_ty = app
                         .trait_ref
                         .get_dictionary_type_for_tys(&app.input_tys, &[]);
@@ -842,7 +842,7 @@ impl Node {
                         dict_id,
                         dict_ty,
                         &app.trait_ref,
-                        app.function_index,
+                        app.method_index,
                         function_span,
                     );
                     let arguments = mem::take(&mut app.arguments);
@@ -861,7 +861,7 @@ impl Node {
                         "Dictionary for trait impl not found, type inference should have failed",
                     );
                     let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
-                    let function_span = app.function_span;
+                    let function_span = app.method_span;
                     // Load that dictionary from the correct local variable.
                     let load_id = LocalDeclId::from_index(local_count + dict_index);
                     let load_dict_id = arena.alloc(Node::new(
@@ -875,7 +875,7 @@ impl Node {
                         load_dict_id,
                         dict_ty,
                         &app.trait_ref,
-                        app.function_index,
+                        app.method_index,
                         function_span,
                     );
                     // Finally use the function pointer to call the function.
@@ -948,53 +948,53 @@ impl Node {
                     }));
                 }
             }
-            GetTraitFunction(get_fn) => {
+            GetTraitMethod(get_method) => {
                 assert!(
-                    get_fn.inst_data.dicts_req.is_empty(),
-                    "Instantiation data for trait function is not supported yet."
+                    get_method.inst_data.dicts_req.is_empty(),
+                    "Instantiation data for trait method is not supported yet."
                 );
-                let resolved = get_fn.input_tys.iter().all(Type::is_constant);
+                let resolved = get_method.input_tys.iter().all(Type::is_constant);
                 if is_value_trait_for_function_type(
-                    &get_fn.trait_ref,
-                    &get_fn.input_tys,
-                    &get_fn.output_tys,
+                    &get_method.trait_ref,
+                    &get_method.input_tys,
+                    &get_method.output_tys,
                 ) {
                     let function = FunctionId::Local(function_value_method(
                         ctx.trait_solver,
-                        get_fn.function_index,
-                        get_fn.function_span,
+                        get_method.method_index,
+                        get_method.method_span,
                         arena,
                     )?);
                     kind = GetFunction(b(hir::GetFunction {
                         function,
-                        function_path: get_fn.function_path.clone(),
-                        function_span: get_fn.function_span,
+                        function_path: get_method.method_path.clone(),
+                        function_span: get_method.method_span,
                         inst_data: hir::FnInstData::none(),
                     }));
                 } else if resolved {
                     let function = ctx.trait_solver.solve_impl_method(
-                        &get_fn.trait_ref,
-                        &get_fn.input_tys,
-                        get_fn.function_index,
-                        get_fn.function_span,
+                        &get_method.trait_ref,
+                        &get_method.input_tys,
+                        get_method.method_index,
+                        get_method.method_span,
                         arena,
                     )?;
                     kind = GetFunction(b(hir::GetFunction {
                         function,
-                        function_path: get_fn.function_path.clone(),
-                        function_span: get_fn.function_span,
+                        function_path: get_method.method_path.clone(),
+                        function_span: get_method.method_span,
                         inst_data: hir::FnInstData::none(),
                     }));
                 } else {
-                    let dict_ty = get_fn
+                    let dict_ty = get_method
                         .trait_ref
-                        .get_dictionary_type_for_tys(&get_fn.input_tys, &get_fn.output_tys);
+                        .get_dictionary_type_for_tys(&get_method.input_tys, &get_method.output_tys);
                     let (dict_kind, _) = trait_dictionary_node_kind(
                         arena,
-                        &get_fn.trait_ref,
-                        &get_fn.input_tys,
-                        &get_fn.output_tys,
-                        get_fn.function_span,
+                        &get_method.trait_ref,
+                        &get_method.input_tys,
+                        &get_method.output_tys,
+                        get_method.method_span,
                         ctx,
                         local_count,
                     )?;
@@ -1002,12 +1002,12 @@ impl Node {
                         dict_kind,
                         dict_ty,
                         no_effects(),
-                        get_fn.function_span,
+                        get_method.method_span,
                     ));
                     let (entry_index, _) = dictionary_method_projection_data(
-                        &get_fn.trait_ref,
+                        &get_method.trait_ref,
                         dict_ty,
-                        get_fn.function_index,
+                        get_method.method_index,
                     );
                     kind = Project(dict_id, usize::from(entry_index));
                 }

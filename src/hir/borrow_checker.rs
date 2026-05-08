@@ -180,14 +180,14 @@ impl Node {
                 }
                 check_arguments(&app.ty.args, &app.arguments, arena, app.function_span)?;
             }
-            TraitFnApply(app) => {
+            TraitMethodApply(app) => {
                 for &arg in &app.arguments {
                     check_borrows(arena, arg)?;
                 }
-                check_arguments(&app.ty.args, &app.arguments, arena, app.function_span)?;
+                check_arguments(&app.ty.args, &app.arguments, arena, app.method_span)?;
             }
             GetFunction(_) => {}
-            GetTraitFunction(_) => {}
+            GetTraitMethod(_) => {}
             GetTraitAssociatedConst(_) => {}
             GetTraitDictionary(_) => {}
             GetDictionary(_) => {}

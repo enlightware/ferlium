@@ -51,7 +51,7 @@ modelItem {
 }
 
 TraitDef {
-    kw<'trait'> Identifier traitTypeParams whereClause? '{' TraitFunction* '}'
+    kw<'trait'> Identifier traitTypeParams whereClause? '{' TraitMethod* '}'
 }
 
 traitTypeParams {
@@ -66,8 +66,8 @@ Function {
     kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
 }
 
-TraitFunction {
-    kw<'fn'> Identifier '(' traitFunctionArgs ')' fnRet? fnEffects? ';'
+TraitMethod {
+    kw<'fn'> Identifier '(' traitMethodArgs ')' fnRet? fnEffects? ';'
 }
 
 TraitImpl {
@@ -524,11 +524,11 @@ identifierWithOptTypeArg {
     kw<'mut'>? Identifier RefMutTypeAscription?
 }
 
-traitFunctionArgs {
-    (traitFunctionArg ',')* traitFunctionArg?
+traitMethodArgs {
+    (traitMethodArg ',')* traitMethodArg?
 }
 
-traitFunctionArg {
+traitMethodArg {
     Identifier ':' argTypeNoRecord
 }
 

@@ -141,7 +141,7 @@ fn user_defined_traits_store_outputs_constraints_and_effects() {
     assert_eq!(project_trait.output_type_names, vec![ustr("Output")]);
     assert_eq!(project_trait.constraints.len(), 1);
     assert_eq!(
-        project_trait.functions[0].1.ty_scheme.ty.effects,
+        project_trait.methods[0].1.ty_scheme.ty.effects,
         effect(PrimitiveEffect::Fallible)
     );
     let spans = project_trait
@@ -153,10 +153,10 @@ fn user_defined_traits_store_outputs_constraints_and_effects() {
     assert_eq!(spans.input_type_names.len(), 1);
     assert_eq!(spans.output_type_names.len(), 1);
     assert_eq!(spans.constraints.len(), 1);
-    assert_eq!(spans.functions.len(), 1);
-    assert!(!spans.functions[0].name.is_synthesized());
-    assert_eq!(spans.functions[0].args.len(), 1);
-    assert!(spans.functions[0].ret_ty.is_some());
+    assert_eq!(spans.methods.len(), 1);
+    assert!(!spans.methods[0].name.is_synthesized());
+    assert_eq!(spans.methods[0].args.len(), 1);
+    assert!(spans.methods[0].ret_ty.is_some());
 
     let rendered = module.format_with(session.session().modules()).to_string();
     assert!(

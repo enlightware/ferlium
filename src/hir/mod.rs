@@ -105,7 +105,7 @@ impl Immediate {
     }
 }
 
-// TODO: add TraitFnImmediate for trait functions
+// TODO: add TraitMethodImmediate for trait methods
 
 #[derive(Debug, Clone)]
 pub struct BuildClosure {
@@ -146,20 +146,20 @@ pub struct StaticApplication {
 }
 
 #[derive(Debug, Clone)]
-pub struct TraitFnApplication {
+pub struct TraitMethodApplication {
     pub trait_ref: TraitRef,
-    pub function_index: TraitMethodIndex,
-    pub function_path: ast::Path,
-    pub function_span: Location,
+    pub method_index: TraitMethodIndex,
+    pub method_path: ast::Path,
+    pub method_span: Location,
     pub arguments: Vec<NodeId>,
     pub arguments_unnamed: UnnamedArg,
     pub ty: FnType,
     pub input_tys: Vec<Type>,
     pub inst_data: FnInstData,
 }
-impl TraitFnApplication {
+impl TraitMethodApplication {
     pub fn argument_names(&self) -> &[Ustr] {
-        &self.trait_ref.function(self.function_index).1.arg_names
+        &self.trait_ref.method(self.method_index).1.arg_names
     }
 }
 
@@ -210,11 +210,11 @@ pub struct GetFunction {
 }
 
 #[derive(Debug, Clone)]
-pub struct GetTraitFunction {
+pub struct GetTraitMethod {
     pub trait_ref: TraitRef,
-    pub function_index: TraitMethodIndex,
-    pub function_path: ast::Path,
-    pub function_span: Location,
+    pub method_index: TraitMethodIndex,
+    pub method_path: ast::Path,
+    pub method_span: Location,
     pub input_tys: Vec<Type>,
     pub output_tys: Vec<Type>,
     pub inst_data: FnInstData,
@@ -252,10 +252,10 @@ pub enum NodeKind {
     FunctionDrop(B<FunctionDrop>),
     StaticApply(B<StaticApplication>),
     /// Note: this should only exist transiently in the HIR and never be executed
-    TraitFnApply(B<TraitFnApplication>),
+    TraitMethodApply(B<TraitMethodApplication>),
     GetFunction(B<GetFunction>),
     /// Note: this should only exist transiently in the IR and never be executed
-    GetTraitFunction(B<GetTraitFunction>),
+    GetTraitMethod(B<GetTraitMethod>),
     /// Note: this should only exist transiently in the IR and never be executed
     GetTraitAssociatedConst(B<GetTraitAssociatedConst>),
     /// Note: this should only exist transiently in the IR and never be executed
@@ -294,7 +294,7 @@ impl NodeKind {
         match self {
             Immediate(_)
             | GetFunction(_)
-            | GetTraitFunction(_)
+            | GetTraitMethod(_)
             | GetTraitAssociatedConst(_)
             | GetTraitDictionary(_)
             | GetDictionary(_)
@@ -320,7 +320,7 @@ impl NodeKind {
             FunctionClone(node) => smallvec![node.source, node.target],
             FunctionDrop(node) => smallvec![node.target],
             StaticApply(app) => app.arguments.iter().copied().collect(),
-            TraitFnApply(app) => app.arguments.iter().copied().collect(),
+            TraitMethodApply(app) => app.arguments.iter().copied().collect(),
             EnvStore(store) => smallvec![store.value],
             Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
             Block(nodes) | Tuple(nodes) | Record(nodes) | Array(nodes) => {
@@ -473,20 +473,20 @@ impl Node {
                     writeln!(f, "{indent_str})")?;
                 }
             }
-            TraitFnApply(app) => {
-                let fn_data = app.trait_ref.function(app.function_index);
-                let fn_name = fn_data.0;
-                let fn_def = &fn_data.1;
+            TraitMethodApply(app) => {
+                let method_data = app.trait_ref.method(app.method_index);
+                let method_name = method_data.0;
+                let method_def = &method_data.1;
                 let trait_name = app.trait_ref.name;
                 writeln!(
                     f,
-                    "{indent_str}trait fn apply {fn_name} (from {trait_name})"
+                    "{indent_str}trait method apply {method_name} (from {trait_name})"
                 )?;
                 if app.arguments.is_empty() {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for (name, &arg) in fn_def.arg_names.iter().zip(app.arguments.iter()) {
+                    for (name, &arg) in method_def.arg_names.iter().zip(app.arguments.iter()) {
                         writeln!(f, "{indent_str}  {name}:")?;
                         format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
                     }
@@ -496,10 +496,13 @@ impl Node {
             GetFunction(get_fn) => {
                 writeln!(f, "{indent_str}get {}", get_fn.function.format_with(env))?;
             }
-            GetTraitFunction(get_fn) => {
-                let fn_name = get_fn.trait_ref.function(get_fn.function_index).0;
-                let trait_name = get_fn.trait_ref.name;
-                writeln!(f, "{indent_str}get trait fn {fn_name} (from {trait_name})")?;
+            GetTraitMethod(get_method) => {
+                let method_name = get_method.trait_ref.method(get_method.method_index).0;
+                let trait_name = get_method.trait_ref.name;
+                writeln!(
+                    f,
+                    "{indent_str}get trait method {method_name} (from {trait_name})"
+                )?;
             }
             GetTraitAssociatedConst(get_const) => {
                 let trait_name = get_const.trait_ref.name;
@@ -713,7 +716,7 @@ impl Node {
                     }
                 }
             }
-            TraitFnApply(app) => {
+            TraitMethodApply(app) => {
                 for &arg in &app.arguments {
                     if let Some(ty) = type_at(arena, arg, pos) {
                         return Some(ty);
@@ -723,8 +726,8 @@ impl Node {
             GetFunction(_) => {
                 // GetFunction nodes don't contain child expressions with types
             }
-            GetTraitFunction(_) => {
-                // GetTraitFunction nodes don't contain child expressions with types
+            GetTraitMethod(_) => {
+                // GetTraitMethod nodes don't contain child expressions with types
             }
             GetTraitAssociatedConst(_) => {
                 // GetTraitAssociatedConst nodes don't contain child expressions with types
@@ -874,7 +877,7 @@ impl Node {
                     unbound_ty_vars(arena, arg, result, ignore);
                 }
             }
-            TraitFnApply(app) => {
+            TraitMethodApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for &arg in &app.arguments {
                     unbound_ty_vars(arena, arg, result, ignore);
@@ -883,7 +886,7 @@ impl Node {
             GetFunction(_) => {
                 // no need to look into the value's type as it is already in this node's type
             }
-            GetTraitFunction(_) => {}
+            GetTraitMethod(_) => {}
             GetTraitAssociatedConst(get_const) => {
                 for ty in &get_const.input_tys {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
@@ -979,7 +982,7 @@ pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitut
             app.ty = app.ty.instantiate(subst);
             app.inst_data.instantiate(subst);
         }
-        TraitFnApply(app) => {
+        TraitMethodApply(app) => {
             app.ty = app.ty.instantiate(subst);
             app.input_tys = app
                 .input_tys
@@ -991,18 +994,18 @@ pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitut
         GetFunction(get_fn) => {
             get_fn.inst_data.instantiate(subst);
         }
-        GetTraitFunction(get_fn) => {
-            get_fn.input_tys = get_fn
+        GetTraitMethod(get_method) => {
+            get_method.input_tys = get_method
                 .input_tys
                 .iter()
                 .map(|ty| ty.instantiate(subst))
                 .collect();
-            get_fn.output_tys = get_fn
+            get_method.output_tys = get_method
                 .output_tys
                 .iter()
                 .map(|ty| ty.instantiate(subst))
                 .collect();
-            get_fn.inst_data.instantiate(subst);
+            get_method.inst_data.instantiate(subst);
         }
         GetTraitAssociatedConst(get_const) => {
             get_const.input_tys = get_const

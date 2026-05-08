@@ -75,21 +75,21 @@ pub type PModuleFunction = ModuleFunction<Parsed>;
 pub type DModuleFunction = ModuleFunction<Desugared>;
 
 #[derive(Debug, Clone)]
-pub struct TraitFunctionArg {
+pub struct TraitMethodArg {
     pub name: UstrSpan,
     pub ty: PFnArgType,
 }
 
-impl FormatWith<ModuleEnv<'_>> for TraitFunctionArg {
+impl FormatWith<ModuleEnv<'_>> for TraitMethodArg {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.name.0, self.ty.format_with(env))
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct TraitFunction {
+pub struct TraitMethod {
     pub name: UstrSpan,
-    pub args: Vec<TraitFunctionArg>,
+    pub args: Vec<TraitMethodArg>,
     pub ret_ty: Option<PTypeSpan>,
     pub effects: PFnEffects,
     pub span: Location,
@@ -102,7 +102,7 @@ pub struct TraitDefinition {
     pub input_type_names: Vec<UstrSpan>,
     pub output_type_names: Vec<UstrSpan>,
     pub where_clause: Vec<PTypeConstraint>,
-    pub functions: Vec<TraitFunction>,
+    pub methods: Vec<TraitMethod>,
     pub span: Location,
     pub doc: Option<String>,
 }
@@ -322,24 +322,24 @@ pub struct ModuleDisplay<'a, P: Phase> {
     pub arena: &'a ExprArena<P>,
 }
 
-fn fmt_trait_function(
+fn fmt_trait_method(
     f: &mut fmt::Formatter<'_>,
     env: &ModuleEnv<'_>,
-    function: &TraitFunction,
+    method: &TraitMethod,
     doc_prefix: &str,
 ) -> fmt::Result {
-    if let Some(doc) = &function.doc {
+    if let Some(doc) = &method.doc {
         for line in doc.split("\n") {
             writeln!(f, "{doc_prefix}/// {line}")?;
         }
     }
-    write!(f, "{doc_prefix}fn {}(", function.name.0)?;
-    write_with_separator_and_format_fn(&function.args, ", ", |arg, f| arg.fmt_with(f, env), f)?;
+    write!(f, "{doc_prefix}fn {}(", method.name.0)?;
+    write_with_separator_and_format_fn(&method.args, ", ", |arg, f| arg.fmt_with(f, env), f)?;
     write!(f, ")")?;
-    if let Some((ret_ty, _)) = &function.ret_ty {
+    if let Some((ret_ty, _)) = &method.ret_ty {
         write!(f, " → {}", ret_ty.format_with(env))?;
     }
-    if let PFnEffects::Explicit(effects) = &function.effects {
+    if let PFnEffects::Explicit(effects) = &method.effects {
         write!(f, " !")?;
         if !effects.is_empty() {
             write!(f, " ")?;
@@ -448,8 +448,8 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
                     )?;
                 }
                 writeln!(f, " {{")?;
-                for function in &trait_def.functions {
-                    fmt_trait_function(f, env, function, "    ")?;
+                for method in &trait_def.methods {
+                    fmt_trait_method(f, env, method, "    ")?;
                 }
                 writeln!(f, "  }}")?;
             }

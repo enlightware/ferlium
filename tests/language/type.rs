@@ -837,7 +837,7 @@ fn recursive_variant_value_derivation() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn trait_fn_circular_deps() {
+fn trait_method_circular_deps() {
     let mut session = TestSession::new();
     session.compile(indoc! { r#"
         struct S(string)

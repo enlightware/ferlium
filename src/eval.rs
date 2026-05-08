@@ -732,12 +732,12 @@ pub fn eval_node_with_ctx(
         FunctionClone(node) => eval_function_clone(arena, node, arena[id].span, ctx, locals),
         FunctionDrop(node) => eval_function_drop(arena, node, arena[id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
-        TraitFnApply(_) => {
+        TraitMethodApply(_) => {
             panic!(
                 "Trait function application should not be executed, but transformed to StaticApply"
             );
         }
-        GetTraitFunction(_) => {
+        GetTraitMethod(_) => {
             panic!(
                 "Trait function value should not be executed, but transformed to a function value"
             );
