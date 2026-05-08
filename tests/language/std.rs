@@ -128,6 +128,45 @@ fn immutable_native_inputs_borrow_places_without_cloning() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ferlium_function_inputs_follow_interpreter_calling_convention() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn payload_wrapper(value) {
+                testing::clone_tracked_payload(value)
+            }
+
+            let value = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            payload_wrapper(value) * 10 + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(70)
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn append_wrapper<A>(array: &mut [A], value: A)
+            where
+                A: Value
+            {
+                array_append(array, value);
+            }
+
+            let value = testing::make_clone_tracked();
+            let mut array = [];
+            testing::reset_clone_tracked_clones();
+            append_wrapper(array, value);
+            testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(1)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn mutable_let_initialization_uses_value_clone() {
     let mut session = TestSession::new();
     assert_val_eq!(

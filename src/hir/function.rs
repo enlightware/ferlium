@@ -179,7 +179,7 @@ pub trait Callable: DynClone {
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
-    fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
+    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
         None
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
@@ -212,7 +212,7 @@ pub type Function = Box<dyn Callable>;
 
 /// How a callable expects an argument to be prepared at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeArgPassing {
+pub enum ArgPassing {
     /// Evaluate the source expression to an owned value.
     OwnedValue,
     /// Keep a place as a shared borrow when possible, falling back to a temporary owned value.
@@ -426,7 +426,7 @@ pub fn extract_native_ref<'m, T: 'static>(
 /// This is necessary due to the lack of specialization in stable Rust.
 pub trait ArgExtractor {
     type Output<'a>;
-    const PASSING: NativeArgPassing;
+    const PASSING: ArgPassing;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -436,7 +436,7 @@ pub trait ArgExtractor {
 
 impl ArgExtractor for Value {
     type Output<'a> = &'a Value;
-    const PASSING: NativeArgPassing = NativeArgPassing::SharedRef;
+    const PASSING: ArgPassing = ArgPassing::SharedRef;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -450,7 +450,7 @@ impl ArgExtractor for Value {
 
 impl ArgExtractor for &'_ mut Value {
     type Output<'a> = &'a mut Value;
-    const PASSING: NativeArgPassing = NativeArgPassing::MutableRef;
+    const PASSING: ArgPassing = ArgPassing::MutableRef;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -464,7 +464,7 @@ impl ArgExtractor for &'_ mut Value {
 
 impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
-    const PASSING: NativeArgPassing = NativeArgPassing::OwnedValue;
+    const PASSING: ArgPassing = ArgPassing::OwnedValue;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -478,7 +478,7 @@ impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
 
 impl<T: Clone + 'static> ArgExtractor for NatRef<T> {
     type Output<'a> = &'a T;
-    const PASSING: NativeArgPassing = NativeArgPassing::SharedRef;
+    const PASSING: ArgPassing = ArgPassing::SharedRef;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -492,7 +492,7 @@ impl<T: Clone + 'static> ArgExtractor for NatRef<T> {
 
 impl<T: Clone + 'static> ArgExtractor for NatMut<T> {
     type Output<'a> = &'a mut T;
-    const PASSING: NativeArgPassing = NativeArgPassing::MutableRef;
+    const PASSING: ArgPassing = ArgPassing::MutableRef;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -629,7 +629,7 @@ macro_rules! n_ary_native_fn {
             #[allow(clippy::too_many_arguments)]
             pub fn description_with_ty(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-                    [$(([<$arg:lower _ty>], $arg::PASSING == NativeArgPassing::MutableRef)), *],
+                    [$(([<$arg:lower _ty>], $arg::PASSING == ArgPassing::MutableRef)), *],
                     o_ty,
                     effects,
                 ));
@@ -673,7 +673,7 @@ macro_rules! n_ary_native_fn {
             }
             }
 
-            fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
+            fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
                 Some(&[$($arg::PASSING),*])
             }
 

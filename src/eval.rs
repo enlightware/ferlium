@@ -20,14 +20,17 @@ use crate::{
     compiler::error::RuntimeErrorKind,
     containers::b,
     format::{FormatWith, write_with_separator},
-    hir::function::NativeArgPassing,
+    hir::function::ArgPassing,
     hir::value::{FunctionValue, NativeValue, Value},
     module::{
         FunctionId, LocalClone, LocalDecl, LocalDrop, LocalFunctionId, ModuleFunction, ModuleId,
         TraitImplId,
     },
-    std::array,
-    types::{r#trait::TraitDictionaryEntryIndex, r#type::FnArgType},
+    std::{array, logic::bool_type, math::int_type},
+    types::{
+        r#trait::TraitDictionaryEntryIndex,
+        r#type::{FnArgType, Type},
+    },
 };
 use crate::{
     Modules,
@@ -282,7 +285,7 @@ impl<'a> EvalCtx<'a> {
         &self,
         local_id: LocalFunctionId,
         module_id: ModuleId,
-    ) -> Option<&'static [NativeArgPassing]> {
+    ) -> Option<&'static [ArgPassing]> {
         self.get_module_function(local_id, module_id)
             .code
             .argument_passing()
@@ -291,7 +294,7 @@ impl<'a> EvalCtx<'a> {
     pub fn function_id_argument_passing(
         &self,
         function_id: FunctionId,
-    ) -> Option<&'static [NativeArgPassing]> {
+    ) -> Option<&'static [ArgPassing]> {
         let (local_id, module_id) = self.get_function_local_id(function_id);
         self.function_argument_passing(local_id, module_id)
     }
@@ -299,7 +302,7 @@ impl<'a> EvalCtx<'a> {
     pub fn function_value_argument_passing(
         &self,
         function_value: &FunctionValue,
-    ) -> Option<&'static [NativeArgPassing]> {
+    ) -> Option<&'static [ArgPassing]> {
         let passing =
             self.function_argument_passing(function_value.function_id, function_value.module_id)?;
         Some(
@@ -1467,7 +1470,7 @@ fn eval_args(
     arena: &NodeArena,
     args: &[NodeId],
     args_ty: &[FnArgType],
-    arg_passing: Option<&[NativeArgPassing]>,
+    arg_passing: Option<&[ArgPassing]>,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<ValOrMut>>, RuntimeError> {
@@ -1475,32 +1478,46 @@ fn eval_args(
     let mut results = Vec::with_capacity(args.len());
     assert_eq!(args.len(), args_ty.len());
     for (index, (arg, ty)) in args.iter().zip(args_ty).enumerate() {
-        let is_mutable = ty
-            .mut_ty
-            .as_resolved()
-            .expect("Unresolved mutability variable found during execution")
-            .is_mutable();
-        let borrow_as_shared_ref = arg_passing
-            .and_then(|passing| passing.get(index))
-            .is_some_and(|passing| *passing == NativeArgPassing::SharedRef);
-        results.push(if is_mutable {
-            ValOrMut::Mut(eval_or_return!(resolve_node_place(
+        let passing = arg_passing
+            .and_then(|passing| passing.get(index).copied())
+            .unwrap_or_else(|| default_argument_passing(ty));
+        results.push(match passing {
+            ArgPassing::MutableRef => ValOrMut::Mut(eval_or_return!(resolve_node_place(
                 arena, *arg, ctx, locals
-            )))
-        } else if borrow_as_shared_ref {
-            match eval_or_return!(try_resolve_node_place(arena, *arg, ctx, locals)) {
-                Some(place) => ValOrMut::Mut(place),
-                None => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
-                    arena, *arg, ctx, locals
-                ))),
+            ))),
+            ArgPassing::SharedRef => {
+                match eval_or_return!(try_resolve_node_place(arena, *arg, ctx, locals)) {
+                    Some(place) => ValOrMut::Mut(place),
+                    None => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
+                        arena, *arg, ctx, locals
+                    ))),
+                }
             }
-        } else {
-            ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
+            ArgPassing::OwnedValue => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
                 arena, *arg, ctx, locals
-            )))
+            ))),
         });
     }
     Ok(ControlFlow::Continue(results))
+}
+
+fn default_argument_passing(arg: &FnArgType) -> ArgPassing {
+    if arg
+        .mut_ty
+        .as_resolved()
+        .expect("Unresolved mutability variable found during execution")
+        .is_mutable()
+    {
+        ArgPassing::MutableRef
+    } else if is_direct_interpreter_argument(arg.ty) {
+        ArgPassing::OwnedValue
+    } else {
+        ArgPassing::SharedRef
+    }
+}
+
+fn is_direct_interpreter_argument(ty: Type) -> bool {
+    ty == Type::unit() || ty == bool_type() || ty == int_type()
 }
 
 fn try_resolve_node_place(

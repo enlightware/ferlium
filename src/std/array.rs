@@ -19,8 +19,8 @@ use crate::{
     },
     format::{write_with_separator, write_with_separator_and_format_fn},
     hir::function::{
-        Callable, Function, FunctionDefinition, NativeArgPassing, NullaryNativeFnN,
-        UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnRN,
+        ArgPassing, Callable, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMV,
+        UnaryNativeFnNN, UnaryNativeFnRN,
     },
     hir::value::{NativeDisplay, NativeValue, Value},
     module::{BlanketTraitImplSubKey, LocalDecl, Module, ModuleEnv, ModuleFunction},
@@ -433,11 +433,11 @@ impl Callable for ArrayAppendFunction {
         cont(Value::unit())
     }
 
-    fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
+    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
         Some(&[
-            NativeArgPassing::SharedRef,
-            NativeArgPassing::MutableRef,
-            NativeArgPassing::SharedRef,
+            ArgPassing::SharedRef,
+            ArgPassing::MutableRef,
+            ArgPassing::SharedRef,
         ])
     }
 
@@ -474,11 +474,11 @@ impl Callable for ArrayConcatFunction {
         cont(Value::native(Array::from_deque(output)))
     }
 
-    fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
+    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
         Some(&[
-            NativeArgPassing::SharedRef,
-            NativeArgPassing::SharedRef,
-            NativeArgPassing::SharedRef,
+            ArgPassing::SharedRef,
+            ArgPassing::SharedRef,
+            ArgPassing::SharedRef,
         ])
     }
 
@@ -541,12 +541,12 @@ impl Callable for ArraySliceFunction {
         cont(outcome?)
     }
 
-    fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
+    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
         Some(&[
-            NativeArgPassing::SharedRef,
-            NativeArgPassing::SharedRef,
-            NativeArgPassing::OwnedValue,
-            NativeArgPassing::OwnedValue,
+            ArgPassing::SharedRef,
+            ArgPassing::SharedRef,
+            ArgPassing::OwnedValue,
+            ArgPassing::OwnedValue,
         ])
     }
 
@@ -584,11 +584,11 @@ impl Callable for ArrayCloneFunction {
         cont(Value::unit())
     }
 
-    fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
+    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
         Some(&[
-            NativeArgPassing::SharedRef,
-            NativeArgPassing::SharedRef,
-            NativeArgPassing::MutableRef,
+            ArgPassing::SharedRef,
+            ArgPassing::SharedRef,
+            ArgPassing::MutableRef,
         ])
     }
 
@@ -637,8 +637,8 @@ impl Callable for ArrayDropFunction {
         cont(Value::unit())
     }
 
-    fn argument_passing(&self) -> Option<&'static [NativeArgPassing]> {
-        Some(&[NativeArgPassing::SharedRef, NativeArgPassing::MutableRef])
+    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
+        Some(&[ArgPassing::SharedRef, ArgPassing::MutableRef])
     }
 
     fn format_ind(
