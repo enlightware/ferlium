@@ -353,6 +353,55 @@ impl PartialEq for Box<ScriptFunction> {
 
 impl Eq for Box<ScriptFunction> {}
 
+/// Native callable wrapper for primitives that need direct access to the evaluation context.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextNativeFn {
+    name: &'static str,
+    argument_passing: &'static [ArgPassing],
+    function: for<'a> fn(Vec<ValOrMut>, &mut CallCtx<'a>) -> EvalControlFlowResult,
+}
+
+impl ContextNativeFn {
+    pub fn new(
+        name: &'static str,
+        argument_passing: &'static [ArgPassing],
+        function: for<'a> fn(Vec<ValOrMut>, &mut CallCtx<'a>) -> EvalControlFlowResult,
+    ) -> Self {
+        Self {
+            name,
+            argument_passing,
+            function,
+        }
+    }
+}
+
+impl Callable for ContextNativeFn {
+    fn call(
+        &self,
+        args: Vec<ValOrMut>,
+        ctx: &mut CallCtx,
+        _locals: &[LocalDecl],
+    ) -> EvalControlFlowResult {
+        (self.function)(args, ctx)
+    }
+
+    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
+        Some(self.argument_passing)
+    }
+
+    fn format_ind(
+        &self,
+        f: &mut std::fmt::Formatter,
+        _locals: &[LocalDecl],
+        _env: &ModuleEnv<'_>,
+        spacing: usize,
+        indent: usize,
+    ) -> std::fmt::Result {
+        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
+        write!(f, "{}{} @ {:p}", indent_str, self.name, self.function)
+    }
+}
+
 // Helper traits and structs for defining native functions
 
 /// A trait that must be satisfied by the output of a native function.

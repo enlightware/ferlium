@@ -278,9 +278,8 @@ fn array_value_clone_uses_element_value_clone() {
             r#"
             let value = testing::make_clone_tracked();
             let array = [value];
-            let mut cloned = [];
             testing::reset_clone_tracked_clones();
-            array_value_clone(array, cloned);
+            let mut cloned = array;
             array_len(cloned) * 10 + testing::clone_tracked_clone_count()
             "#
         ),

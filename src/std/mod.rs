@@ -29,6 +29,7 @@ pub mod option;
 pub mod ordering;
 mod prelude;
 mod product_value_deriver;
+pub mod ptr;
 pub mod serde;
 pub mod string;
 pub mod value;
@@ -50,6 +51,7 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);
     math::add_to_module(&mut module);
+    ptr::add_to_module(&mut module);
     array::add_to_module(&mut module);
     io::add_to_module(&mut module);
     string::add_to_module(&mut module);

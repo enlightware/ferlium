@@ -15,6 +15,7 @@ use ustr::Ustr;
 use ustr::ustr;
 
 use crate::module::id::Id;
+use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT};
 use crate::{
     CompilerSession, Location, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
@@ -889,12 +890,34 @@ pub(crate) fn call_value_clone_for_temp(
         call_dictionary_method(
             ctx,
             dictionary,
-            crate::std::value::VALUE_TRAIT
-                .dictionary_method_index(crate::std::value::VALUE_CLONE_METHOD_INDEX),
+            VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX),
             arguments,
             span,
         )
     })
+}
+
+pub(crate) fn call_value_clone_to_target(
+    ctx: &mut EvalCtx,
+    dictionary: &Value,
+    source: ValOrMut,
+    target: Place,
+    span: Location,
+) -> EvalControlFlowResult {
+    call_dictionary_method(
+        ctx,
+        dictionary,
+        VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX),
+        vec![source, ValOrMut::Mut(target.clone())],
+        span,
+    )?;
+    let target_value = target
+        .target_mut(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+    if matches!(target_value, Value::Uninit) {
+        panic!("Value::clone returned without initializing its target");
+    }
+    cont(Value::unit())
 }
 
 fn call_value_clone_dispatch_for_temp(
@@ -913,10 +936,8 @@ fn call_value_clone_dispatch_for_temp(
                 let dictionary = ctx.environment[ctx.frame_base + *dict_index]
                     .as_value_ref(ctx)
                     .map_err(|err| RuntimeError::new(err, Some(span)))?;
-                dictionary.as_tuple().unwrap()[usize::from(
-                    crate::std::value::VALUE_TRAIT
-                        .dictionary_method_index(crate::std::value::VALUE_CLONE_METHOD_INDEX),
-                )]
+                dictionary.as_tuple().unwrap()
+                    [usize::from(VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX))]
                 .as_function()
                 .unwrap()
                 .clone()
@@ -950,8 +971,7 @@ pub(crate) fn call_value_drop_for_temp(
     let result = call_dictionary_method(
         ctx,
         dictionary,
-        crate::std::value::VALUE_TRAIT
-            .dictionary_method_index(crate::std::value::VALUE_DROP_METHOD_INDEX),
+        VALUE_TRAIT.dictionary_method_index(VALUE_DROP_METHOD_INDEX),
         vec![target.clone()],
         span,
     );
@@ -1117,10 +1137,8 @@ fn eval_env_store(
                     let dictionary = ctx.environment[ctx.frame_base + *dict_index]
                         .as_value_ref(ctx)
                         .map_err(|err| RuntimeError::new(err, Some(span)))?;
-                    dictionary.as_tuple().unwrap()[usize::from(
-                        crate::std::value::VALUE_TRAIT
-                            .dictionary_method_index(crate::std::value::VALUE_CLONE_METHOD_INDEX),
-                    )]
+                    dictionary.as_tuple().unwrap()
+                        [usize::from(VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX))]
                     .as_function()
                     .unwrap()
                     .clone()
@@ -1168,10 +1186,8 @@ fn eval_env_drop(
                 let dictionary = ctx.environment[ctx.frame_base + *dict_index]
                     .as_value_ref(ctx)
                     .map_err(|err| RuntimeError::new(err, Some(span)))?;
-                dictionary.as_tuple().unwrap()[usize::from(
-                    crate::std::value::VALUE_TRAIT
-                        .dictionary_method_index(crate::std::value::VALUE_DROP_METHOD_INDEX),
-                )]
+                dictionary.as_tuple().unwrap()
+                    [usize::from(VALUE_TRAIT.dictionary_method_index(VALUE_DROP_METHOD_INDEX))]
                 .as_function()
                 .unwrap()
                 .clone()

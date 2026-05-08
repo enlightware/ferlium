@@ -10,6 +10,67 @@ fn array_peek_back(array) -> None | Some(_) {
 	}
 }
 
+fn array_append<A>(array: &mut [A], value: A)
+where
+	A: Value
+{
+	value_clone_to_mut_ptr(value, array_push_uninit_back(array))
+}
+
+fn array_prepend<A>(array: &mut [A], value: A)
+where
+	A: Value
+{
+	value_clone_to_mut_ptr(value, array_push_uninit_front(array))
+}
+
+fn array_concat<A>(left: [A], right: [A]) -> [A]
+where
+	A: Value
+{
+	let left_len = array_len(left);
+	let right_len = array_len(right);
+	let mut result = array_with_capacity(left_len + right_len);
+	for i in 0..left_len {
+		ptr_clone(array_element_ptr(left, i), array_push_uninit_back(result));
+	};
+	for i in 0..right_len {
+		ptr_clone(array_element_ptr(right, i), array_push_uninit_back(result));
+	};
+	result
+}
+
+fn array_slice_bound(len: int, index: int) -> int {
+	let resolved = if index < 0 {
+		len + index
+	} else {
+		index
+	};
+	if resolved < 0 {
+		len
+	} else if resolved > len {
+		len
+	} else {
+		resolved
+	}
+}
+
+fn array_slice<A>(array: [A], start: int, end: int) -> [A]
+where
+	A: Value
+{
+	let len = array_len(array);
+	let start = array_slice_bound(len, start);
+	let end = array_slice_bound(len, end);
+	let mut result = array_with_capacity(end - start);
+	if end > start {
+		for i in start..end {
+			ptr_clone(array_element_ptr(array, i), array_push_uninit_back(result));
+		};
+	};
+	result
+}
+
 impl Concat {
 	fn concat(left, right) {
 		array_concat(left, right)
@@ -148,10 +209,22 @@ impl<A> Value for [A] where A: Value {
 	}
 
 	fn clone(source: [A], target: &mut [A]) {
-		array_value_clone(source, target);
+		let len = array_len(source);
+		target = array_with_capacity(len);
+		for i in 0..len {
+			ptr_clone(array_element_ptr(source, i), array_push_uninit_back(target));
+		};
 	}
 
 	fn drop(target: &mut [A]) {
-		array_value_drop(target);
+		loop {
+			let len = array_len(target);
+			if len <= 0 {
+				return ();
+			};
+			let index = len - 1;
+			ptr_drop(array_element_mut_ptr(target, index));
+			array_pop_back_uninit(target);
+		}
 	}
 }

@@ -13,17 +13,14 @@ use ustr::ustr;
 use crate::{
     Location, cached_ty,
     compiler::error::RuntimeErrorKind,
-    eval::{
-        EvalControlFlowResult, EvalCtx, Place, RuntimeError, ValOrMut, call_value_clone_for_temp,
-        call_value_drop_for_temp, cont,
-    },
+    eval::{EvalControlFlowResult, EvalCtx, Place, RuntimeError, ValOrMut, cont},
     format::{write_with_separator, write_with_separator_and_format_fn},
     hir::function::{
-        ArgPassing, Callable, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMV,
-        UnaryNativeFnNN, UnaryNativeFnRN,
+        ArgPassing, Callable, ContextNativeFn, Function, FunctionDefinition, NullaryNativeFnN,
+        UnaryNativeFnMN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnRN,
     },
     hir::value::{NativeDisplay, NativeValue, Value},
-    module::{BlanketTraitImplSubKey, LocalDecl, Module, ModuleEnv, ModuleFunction},
+    module::{BlanketTraitImplSubKey, Module, ModuleFunction},
     types::effects::no_effects,
     types::r#type::{FnType, NativeType, Type, bare_native_type},
     types::type_scheme::{PubTypeConstraint, TypeScheme},
@@ -34,7 +31,7 @@ use super::{
     empty::EMPTY_TRAIT,
     math::int_type,
     option::{none, option_type_generic, some},
-    value::VALUE_TRAIT,
+    ptr::{self, MutPtr, Ptr, mut_ptr_type, ptr_type},
 };
 
 #[derive(Debug, Clone)]
@@ -99,38 +96,6 @@ impl Array {
         } else {
             index as usize
         }
-    }
-
-    fn append_descr() -> ModuleFunction {
-        let unit = Type::unit();
-        let gen0 = Type::variable_id(0);
-        array_native_function(
-            FnType::new_mut_resolved(
-                [(array_type(gen0), true), (gen0, false)],
-                unit,
-                no_effects(),
-            ),
-            value_constraint(gen0),
-            ["array", "value"],
-            "Appends an element to the back of the array.",
-            ArrayAppendFunction { front: false },
-        )
-    }
-
-    fn prepend_descr() -> ModuleFunction {
-        let unit = Type::unit();
-        let gen0 = Type::variable_id(0);
-        array_native_function(
-            FnType::new_mut_resolved(
-                [(array_type(gen0), true), (gen0, false)],
-                unit,
-                no_effects(),
-            ),
-            value_constraint(gen0),
-            ["array", "value"],
-            "Prepends an element to the front of the array.",
-            ArrayAppendFunction { front: true },
-        )
     }
 
     pub fn pop_back(&mut self) -> Value {
@@ -217,78 +182,96 @@ impl Array {
         )
     }
 
-    fn concat_descr() -> ModuleFunction {
+    fn element_ptr_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
-        let array_ty = array_type(gen0);
-        array_native_function(
+        native_function(
+            FnType::new_by_val([array_type(gen0), int_type()], ptr_type(gen0), no_effects()),
+            [],
+            ["array", "index"],
+            "Returns a std-only pointer to an array element.",
+            ContextNativeFn::new(
+                "array_element_ptr",
+                &[ArgPassing::SharedRef, ArgPassing::OwnedValue],
+                array_element_ptr,
+            ),
+        )
+    }
+
+    fn element_mut_ptr_descr() -> ModuleFunction {
+        let gen0 = Type::variable_id(0);
+        native_function(
             FnType::new_mut_resolved(
-                [(array_ty, false), (array_ty, false)],
-                array_ty,
+                [(array_type(gen0), true), (int_type(), false)],
+                mut_ptr_type(gen0),
                 no_effects(),
             ),
-            value_constraint(gen0),
-            ["left", "right"],
-            "Concatenates two arrays and returns the result.",
-            ArrayConcatFunction,
+            [],
+            ["array", "index"],
+            "Returns a std-only mutable pointer to an array element.",
+            ContextNativeFn::new(
+                "array_element_mut_ptr",
+                &[ArgPassing::MutableRef, ArgPassing::OwnedValue],
+                array_element_mut_ptr,
+            ),
         )
     }
 
-    fn slice_descr() -> ModuleFunction {
+    fn push_uninit_back_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
-        let array = array_type(gen0);
-        array_native_function(
-            FnType::new_by_val([array, int_type(), int_type()], array, no_effects()),
-            value_constraint(gen0),
-            ["array", "start", "end"],
-            "Returns the slice of `array` from index `start` to index `end`. Negative indices count from the end.",
-            ArraySliceFunction,
+        native_function(
+            FnType::new_mut_resolved([(array_type(gen0), true)], mut_ptr_type(gen0), no_effects()),
+            [],
+            ["array"],
+            "Appends uninitialized storage and returns a std-only mutable pointer to it.",
+            ContextNativeFn::new(
+                "array_push_uninit_back",
+                &[ArgPassing::MutableRef],
+                array_push_uninit_back,
+            ),
         )
     }
 
-    fn value_clone_descr() -> ModuleFunction {
+    fn push_uninit_front_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
-        let array = array_type(gen0);
-        array_native_function(
-            FnType::new_mut_resolved([(array, false), (array, true)], Type::unit(), no_effects()),
-            value_constraint(gen0),
-            ["source", "target"],
-            "Clones an array through its element Value dictionary.",
-            ArrayCloneFunction,
+        native_function(
+            FnType::new_mut_resolved([(array_type(gen0), true)], mut_ptr_type(gen0), no_effects()),
+            [],
+            ["array"],
+            "Prepends uninitialized storage and returns a std-only mutable pointer to it.",
+            ContextNativeFn::new(
+                "array_push_uninit_front",
+                &[ArgPassing::MutableRef],
+                array_push_uninit_front,
+            ),
         )
     }
 
-    fn value_drop_descr() -> ModuleFunction {
+    fn pop_back_uninit_descr() -> ModuleFunction {
         let gen0 = Type::variable_id(0);
-        let array = array_type(gen0);
-        array_native_function(
-            FnType::new_mut_resolved([(array, true)], Type::unit(), no_effects()),
-            value_constraint(gen0),
-            ["target"],
-            "Drops an array through its element Value dictionary.",
-            ArrayDropFunction,
+        let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
+            [(array_type(gen0), true)],
+            Type::unit(),
+            no_effects(),
+        ));
+        UnaryNativeFnMN::description_with_ty_scheme(
+            array_pop_back_uninit,
+            ["array"],
+            "Removes the last array slot without running element drop.",
+            ty_scheme,
         )
     }
 }
 
-fn value_constraint(ty: Type) -> Vec<PubTypeConstraint> {
-    vec![PubTypeConstraint::new_have_trait(
-        VALUE_TRAIT.clone(),
-        vec![ty],
-        vec![],
-        Location::new_synthesized(),
-    )]
-}
-
-fn array_native_function(
+fn native_function(
     ty: FnType,
-    constraints: Vec<PubTypeConstraint>,
+    constraints: impl Into<Vec<PubTypeConstraint>>,
     arg_names: impl IntoIterator<Item = &'static str>,
     doc: &'static str,
     code: impl Callable + Clone + 'static,
 ) -> ModuleFunction {
     ModuleFunction {
         definition: FunctionDefinition::new(
-            TypeScheme::new_infer_quantifiers_with_constraints(ty, constraints),
+            TypeScheme::new_infer_quantifiers_with_constraints(ty, constraints.into()),
             arg_names.into_iter().map(ustr::Ustr::from).collect(),
             Some(String::from(doc)),
         ),
@@ -298,360 +281,110 @@ fn array_native_function(
     }
 }
 
-fn dictionary_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<Value, RuntimeError> {
-    match arg {
-        ValOrMut::Val(value) => Ok(value),
-        ValOrMut::Mut(place) => place
-            .target_ref(ctx)
-            .cloned()
-            .map_err(RuntimeError::new_native),
-    }
-}
-
-fn signed_index_for_len(len: usize, index: isize) -> usize {
-    if index < 0 {
-        (len as isize + index) as usize
-    } else {
-        index as usize
-    }
-}
-
-struct ArraySource {
-    place: Place,
-    temp: bool,
-}
-
-impl ArraySource {
-    fn new(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<Self, RuntimeError> {
-        match arg {
-            ValOrMut::Mut(place) => Ok(Self { place, temp: false }),
-            ValOrMut::Val(value) => {
-                let target = ctx.environment.len();
-                ctx.environment.push(ValOrMut::Val(value));
-                #[cfg(debug_assertions)]
-                ctx.environment_names.push(ustr("$array_source"));
-                Ok(Self {
-                    place: Place {
-                        target,
-                        path: Vec::new(),
-                    },
-                    temp: true,
-                })
-            }
-        }
-    }
-
-    fn len(&self, ctx: &EvalCtx<'_>) -> Result<usize, RuntimeError> {
-        let value = self
-            .place
-            .target_ref(ctx)
-            .map_err(RuntimeError::new_native)?;
-        Ok(value.as_primitive_ty::<Array>().unwrap().len())
-    }
-
-    fn element(&self, index: usize) -> ValOrMut {
-        let mut place = self.place.clone();
-        place.path.push(index as isize);
-        ValOrMut::Mut(place)
-    }
-
-    fn finish(self, ctx: &mut EvalCtx<'_>) {
-        if self.temp {
-            #[cfg(debug_assertions)]
-            ctx.environment_names.pop();
-            ctx.environment.pop();
-        }
-    }
-}
-
-fn clone_array_range_into(
-    ctx: &mut EvalCtx<'_>,
-    dictionary: &Value,
-    source: ValOrMut,
-    start: usize,
-    end: usize,
-    output: &mut VecDeque<Value>,
-) -> Result<(), RuntimeError> {
-    let source = ArraySource::new(source, ctx)?;
-    let outcome = (|| {
-        let len = source.len(ctx)?;
-        let end = end.min(len);
-        if end <= start {
-            return Ok(());
-        }
-        for index in start..end {
-            let value = call_value_clone_for_temp(
-                ctx,
-                dictionary,
-                source.element(index),
-                Location::new_synthesized(),
-            )?;
-            output.push_back(value);
-        }
-        Ok(())
-    })();
-    source.finish(ctx);
-    outcome
+fn array_len_from_place(
+    place: &Place,
+    ctx: &EvalCtx<'_>,
+    span: Location,
+) -> Result<usize, RuntimeError> {
+    let value = place
+        .target_ref(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+    Ok(value.as_primitive_ty::<Array>().unwrap().len())
 }
 
 fn array_arg_as_mut<'a>(
-    arg: &'a ValOrMut,
+    arg: ValOrMut,
     ctx: &'a mut EvalCtx<'_>,
 ) -> Result<&'a mut Array, RuntimeError> {
-    arg.as_mut_primitive::<Array>(ctx)
+    match arg {
+        ValOrMut::Mut(place) => place
+            .target_mut(ctx)
+            .map_err(RuntimeError::new_native)?
+            .as_primitive_ty_mut::<Array>()
+            .ok_or_else(|| {
+                RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(ustr("array")))
+            }),
+        ValOrMut::Val(_) => Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
+            ustr("array"),
+        ))),
+    }
+}
+
+fn array_element_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+    let mut args = args.into_iter();
+    let mut place = ptr::place_from_arg(args.next().unwrap())?;
+    let index = args
+        .next()
+        .unwrap()
+        .into_primitive::<isize>()
+        .expect("array pointer index should be an int");
+    let len = array_len_from_place(&place, ctx, Location::new_synthesized())?;
+    if place
+        .target_ref(ctx)
         .map_err(RuntimeError::new_native)?
-        .ok_or_else(|| RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(ustr("array"))))
+        .as_primitive_ty::<Array>()
+        .unwrap()
+        .get_signed(index)
+        .is_none()
+    {
+        return Err(RuntimeError::new_native(
+            RuntimeErrorKind::ArrayAccessOutOfBounds { index, len },
+        ));
+    }
+    place.path.push(index);
+    cont(Value::native(Ptr::new(place)))
 }
 
-// These custom callables are an interpreter bridge: they let native array storage call
-// Ferlium `Value` clone/drop today. Long term, array storage should expose smaller
-// slot-oriented primitives so these loops can move back into Ferlium std source.
-#[derive(Debug, Clone, Copy)]
-struct ArrayAppendFunction {
-    front: bool,
+fn array_element_mut_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+    let mut args = args.into_iter();
+    let mut place = ptr::place_from_arg(args.next().unwrap())?;
+    let index = args
+        .next()
+        .unwrap()
+        .into_primitive::<isize>()
+        .expect("array mutable pointer index should be an int");
+    let len = array_len_from_place(&place, ctx, Location::new_synthesized())?;
+    if place
+        .target_ref(ctx)
+        .map_err(RuntimeError::new_native)?
+        .as_primitive_ty::<Array>()
+        .unwrap()
+        .get_signed(index)
+        .is_none()
+    {
+        return Err(RuntimeError::new_native(
+            RuntimeErrorKind::ArrayAccessOutOfBounds { index, len },
+        ));
+    }
+    place.path.push(index);
+    cont(Value::native(MutPtr::new(place)))
 }
 
-impl Callable for ArrayAppendFunction {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut EvalCtx,
-        _locals: &[LocalDecl],
-    ) -> EvalControlFlowResult {
-        let mut args = args.into_iter();
-        let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
-        let array_arg = args.next().unwrap();
-        let value_arg = args.next().unwrap();
-        let value =
-            call_value_clone_for_temp(ctx, &dictionary, value_arg, Location::new_synthesized())?;
-        let array = array_arg_as_mut(&array_arg, ctx)?;
-        if self.front {
-            array.push_front(value);
-        } else {
-            array.push_back(value);
-        }
-        cont(Value::unit())
-    }
-
-    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
-        Some(&[
-            ArgPassing::SharedRef,
-            ArgPassing::MutableRef,
-            ArgPassing::SharedRef,
-        ])
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut fmt::Formatter,
-        _locals: &[LocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{indent_str}ArrayAppendFunction")
-    }
+fn array_push_uninit_back(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+    array_push_uninit(args, ctx, false)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ArrayConcatFunction;
-
-impl Callable for ArrayConcatFunction {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut EvalCtx,
-        _locals: &[LocalDecl],
-    ) -> EvalControlFlowResult {
-        let mut args = args.into_iter();
-        let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
-        let left = args.next().unwrap();
-        let right = args.next().unwrap();
-        let mut output = VecDeque::new();
-        clone_array_range_into(ctx, &dictionary, left, 0, usize::MAX, &mut output)?;
-        clone_array_range_into(ctx, &dictionary, right, 0, usize::MAX, &mut output)?;
-        cont(Value::native(Array::from_deque(output)))
-    }
-
-    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
-        Some(&[
-            ArgPassing::SharedRef,
-            ArgPassing::SharedRef,
-            ArgPassing::SharedRef,
-        ])
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut fmt::Formatter,
-        _locals: &[LocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{indent_str}ArrayConcatFunction")
-    }
+fn array_push_uninit_front(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+    array_push_uninit(args, ctx, true)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ArraySliceFunction;
-
-impl Callable for ArraySliceFunction {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut EvalCtx,
-        _locals: &[LocalDecl],
-    ) -> EvalControlFlowResult {
-        let mut args = args.into_iter();
-        let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
-        let array = args.next().unwrap();
-        let start = args
-            .next()
-            .unwrap()
-            .into_primitive::<isize>()
-            .expect("array slice start index should be an int");
-        let end = args
-            .next()
-            .unwrap()
-            .into_primitive::<isize>()
-            .expect("array slice end index should be an int");
-        let source = ArraySource::new(array, ctx)?;
-        let outcome = (|| {
-            let len = source.len(ctx)?;
-            let start = signed_index_for_len(len, start).min(len);
-            let end = signed_index_for_len(len, end).min(len);
-            let mut output = VecDeque::new();
-            if end > start {
-                for index in start..end {
-                    let value = call_value_clone_for_temp(
-                        ctx,
-                        &dictionary,
-                        source.element(index),
-                        Location::new_synthesized(),
-                    )?;
-                    output.push_back(value);
-                }
-            }
-            Ok(Value::native(Array::from_deque(output)))
-        })();
-        source.finish(ctx);
-        cont(outcome?)
+fn array_push_uninit(args: Vec<ValOrMut>, ctx: &mut EvalCtx, front: bool) -> EvalControlFlowResult {
+    let mut args = args.into_iter();
+    let array_arg = args.next().unwrap();
+    let array = array_arg_as_mut(array_arg.clone(), ctx)?;
+    let index = if front { 0 } else { array.len() };
+    if front {
+        array.push_front(Value::uninit());
+    } else {
+        array.push_back(Value::uninit());
     }
-
-    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
-        Some(&[
-            ArgPassing::SharedRef,
-            ArgPassing::SharedRef,
-            ArgPassing::OwnedValue,
-            ArgPassing::OwnedValue,
-        ])
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut fmt::Formatter,
-        _locals: &[LocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{indent_str}ArraySliceFunction")
-    }
+    let mut place = array_arg.as_place().clone();
+    place.path.push(index as isize);
+    cont(Value::native(MutPtr::new(place)))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ArrayCloneFunction;
-
-impl Callable for ArrayCloneFunction {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut EvalCtx,
-        _locals: &[LocalDecl],
-    ) -> EvalControlFlowResult {
-        let mut args = args.into_iter();
-        let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
-        let source = args.next().unwrap();
-        let target = args.next().unwrap().as_place().clone();
-        let mut output = VecDeque::new();
-        clone_array_range_into(ctx, &dictionary, source, 0, usize::MAX, &mut output)?;
-        *target.target_mut(ctx).map_err(RuntimeError::new_native)? =
-            Value::native(Array::from_deque(output));
-        cont(Value::unit())
-    }
-
-    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
-        Some(&[
-            ArgPassing::SharedRef,
-            ArgPassing::SharedRef,
-            ArgPassing::MutableRef,
-        ])
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut fmt::Formatter,
-        _locals: &[LocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{indent_str}ArrayCloneFunction")
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ArrayDropFunction;
-
-impl Callable for ArrayDropFunction {
-    fn call(
-        &self,
-        args: Vec<ValOrMut>,
-        ctx: &mut EvalCtx,
-        _locals: &[LocalDecl],
-    ) -> EvalControlFlowResult {
-        let mut args = args.into_iter();
-        let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
-        let target = args.next().unwrap().as_place().clone();
-        loop {
-            let value = {
-                let target_value = target.target_mut(ctx).map_err(RuntimeError::new_native)?;
-                let array = target_value.as_primitive_ty_mut::<Array>().unwrap();
-                array.pop_back_raw()
-            };
-            let Some(value) = value else {
-                break;
-            };
-            call_value_drop_for_temp(
-                ctx,
-                &dictionary,
-                ValOrMut::Val(value),
-                Location::new_synthesized(),
-            )?;
-        }
-        cont(Value::unit())
-    }
-
-    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
-        Some(&[ArgPassing::SharedRef, ArgPassing::MutableRef])
-    }
-
-    fn format_ind(
-        &self,
-        f: &mut fmt::Formatter,
-        _locals: &[LocalDecl],
-        _env: &ModuleEnv<'_>,
-        spacing: usize,
-        indent: usize,
-    ) -> fmt::Result {
-        let indent_str = format!("{}{}", "  ".repeat(spacing), "⎸ ".repeat(indent));
-        write!(f, "{indent_str}ArrayDropFunction")
-    }
+fn array_pop_back_uninit(array: &mut Array) {
+    array.pop_back_raw();
 }
 
 impl Default for Array {
@@ -702,16 +435,27 @@ pub fn add_to_module(to: &mut Module) {
 
     // TODO: use type classes to get rid of the array prefix
     // to.add_local_function(ustr("array_from_iterator"), Array::from_iterator_descr());
-    to.add_function(ustr("array_append"), Array::append_descr());
-    to.add_function(ustr("array_prepend"), Array::prepend_descr());
     to.add_function(ustr("array_pop_back"), Array::pop_back_desc());
     to.add_function(ustr("array_pop_front"), Array::pop_front_desc());
     to.add_function(ustr("array_len"), Array::len_descr());
     to.add_function(ustr("array_with_capacity"), Array::with_capacity_descr());
-    to.add_function(ustr("array_slice"), Array::slice_descr());
-    to.add_function(ustr("array_concat"), Array::concat_descr());
-    to.add_function(ustr("array_value_clone"), Array::value_clone_descr());
-    to.add_function(ustr("array_value_drop"), Array::value_drop_descr());
+    to.add_function(ustr("array_element_ptr"), Array::element_ptr_descr());
+    to.add_function(
+        ustr("array_element_mut_ptr"),
+        Array::element_mut_ptr_descr(),
+    );
+    to.add_function(
+        ustr("array_push_uninit_back"),
+        Array::push_uninit_back_descr(),
+    );
+    to.add_function(
+        ustr("array_push_uninit_front"),
+        Array::push_uninit_front_descr(),
+    );
+    to.add_function(
+        ustr("array_pop_back_uninit"),
+        Array::pop_back_uninit_descr(),
+    );
     to.add_native_blanket_impl(
         DEFAULT_TRAIT.clone(),
         BlanketTraitImplSubKey {
