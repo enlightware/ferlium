@@ -12,7 +12,6 @@ use std::{iter::repeat, mem};
 use crate::{FxHashMap, FxHashSet, Modules, types::type_scheme::PubTypeConstraint};
 
 use derive_new::new;
-use itertools::MultiUnzip;
 use ustr::Ustr;
 
 use crate::{
@@ -339,6 +338,7 @@ struct ResolvedTraitConstraint {
     index: usize,
     trait_ref: TraitRef,
     input_tys: Vec<Type>,
+    output_tys: Vec<Type>,
 }
 
 pub(crate) struct DerivedImplSnapshot {
@@ -368,6 +368,10 @@ enum BlanketConstraintMode {
     /// A partially resolved fixed point is reported back as `Unknown` instead
     /// of being treated as a definite mismatch.
     AllowUnknown,
+    /// Matching may succeed with concrete nested constraints that cannot be
+    /// materialized until after reserving the concrete impl. Currently used for
+    /// recursive `Value` materialization.
+    DeferConcreteObligations,
 }
 
 /// Result of matching a blanket impl against a requested trait application.
@@ -942,6 +946,10 @@ impl<'a> TraitSolver<'a> {
                     arena,
                 ) {
                     Ok(outputs) => outputs,
+                    Err(_) if matches!(mode, BlanketConstraintMode::DeferConcreteObligations) => {
+                        still_remaining.push((*constraint_index, constraint));
+                        continue;
+                    }
                     Err(_) => return Ok(BlanketImplMatch::No),
                 };
                 for (solved_output, constraint_output) in
@@ -958,6 +966,7 @@ impl<'a> TraitSolver<'a> {
                     index: *constraint_index,
                     trait_ref,
                     input_tys: constraint_inputs,
+                    output_tys: constraint_outputs,
                 });
             }
 
@@ -970,10 +979,32 @@ impl<'a> TraitSolver<'a> {
             let still_remaining =
                 Self::normalize_blanket_remaining_constraints(ty_inf, still_remaining);
             if still_remaining == old_remaining {
-                return Ok(match mode {
-                    BlanketConstraintMode::RequireAllResolved => BlanketImplMatch::No,
-                    BlanketConstraintMode::AllowUnknown => BlanketImplMatch::Unknown,
-                });
+                match mode {
+                    BlanketConstraintMode::RequireAllResolved => {
+                        return Ok(BlanketImplMatch::No);
+                    }
+                    BlanketConstraintMode::AllowUnknown => {
+                        return Ok(BlanketImplMatch::Unknown);
+                    }
+                    BlanketConstraintMode::DeferConcreteObligations => {
+                        for (constraint_index, constraint) in still_remaining {
+                            let (trait_ref, constraint_inputs, constraint_outputs, _span) = ty_inf
+                                .substitute_in_constraint(&constraint)
+                                .into_have_trait()
+                                .expect("Non trait constraint in blanket impl");
+                            if !constraint_inputs.iter().all(Type::is_constant) {
+                                return Ok(BlanketImplMatch::No);
+                            }
+                            resolved_constraints.push(ResolvedTraitConstraint {
+                                index: constraint_index,
+                                trait_ref,
+                                input_tys: constraint_inputs,
+                                output_tys: constraint_outputs,
+                            });
+                        }
+                        break;
+                    }
+                }
             }
 
             remaining = still_remaining;
@@ -1369,6 +1400,11 @@ impl<'a> TraitSolver<'a> {
                 // Match the blanket implementation and resolve the blanket constraints to a
                 // fixed point before materializing the concrete implementation.
                 let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(imp_ty_var_count);
+                let blanket_constraint_mode = if trait_ref == &*VALUE_TRAIT {
+                    BlanketConstraintMode::DeferConcreteObligations
+                } else {
+                    BlanketConstraintMode::RequireAllResolved
+                };
                 let blanket_match = Self::match_blanket_impl(
                     self,
                     &mut ty_inf,
@@ -1381,7 +1417,7 @@ impl<'a> TraitSolver<'a> {
                     ConstraintAssumptions::all(&[]),
                     fn_span,
                     arena,
-                    BlanketConstraintMode::RequireAllResolved,
+                    blanket_constraint_mode,
                 )?;
                 let BlanketImplMatch::Yes {
                     output_tys,
@@ -1391,70 +1427,74 @@ impl<'a> TraitSolver<'a> {
                     continue 'impl_loop;
                 };
 
-                let mut constraint_dict_ids = Vec::with_capacity(resolved_constraints.len());
-                for resolved_constraint in resolved_constraints {
-                    // Marker traits have no runtime dictionary entries.
-                    if !resolved_constraint
-                        .trait_ref
-                        .has_runtime_dictionary_entries()
-                    {
-                        continue;
+                // Non-Value blanket impls can materialize all constraint dictionaries up front.
+                if trait_ref != &*VALUE_TRAIT {
+                    let mut constraint_dict_ids = Vec::with_capacity(resolved_constraints.len());
+                    for resolved_constraint in resolved_constraints {
+                        // Marker traits have no runtime dictionary entries.
+                        if !resolved_constraint
+                            .trait_ref
+                            .has_runtime_dictionary_entries()
+                        {
+                            continue;
+                        }
+                        let dict_id = match self.solve_impl(
+                            &resolved_constraint.trait_ref,
+                            &resolved_constraint.input_tys,
+                            fn_span,
+                            arena,
+                        ) {
+                            Ok(functions) => functions,
+                            Err(_) => continue 'impl_loop,
+                        };
+                        constraint_dict_ids.push(dict_id);
                     }
-                    let dict_id = match self.solve_impl(
-                        &resolved_constraint.trait_ref,
-                        &resolved_constraint.input_tys,
-                        fn_span,
-                        arena,
-                    ) {
-                        Ok(functions) => functions,
-                        Err(_) => continue 'impl_loop,
+
+                    // Succeeded? First get the blanket implementation data and compute the output types.
+                    let impls = if let Some(module_id) = imp_module_id {
+                        &self
+                            .others
+                            .get(module_id)
+                            .unwrap()
+                            .module
+                            .as_ref()
+                            .unwrap()
+                            .impls
+                    } else {
+                        #[allow(clippy::needless_borrow)] // clippy has a bug here as of Rust 1.90
+                        &self.impls
                     };
-                    constraint_dict_ids.push(dict_id);
-                }
+                    let imp = &impls.data[impl_id.as_index()];
+                    let associated_const_values = materialized_associated_const_values(
+                        trait_ref,
+                        input_tys,
+                        &imp.associated_const_values,
+                        fn_span,
+                    )?;
 
-                // Succeeded? First get the blanket implementation data and compute the output types.
-                let impls = if let Some(module_id) = imp_module_id {
-                    &self
-                        .others
-                        .get(module_id)
-                        .unwrap()
-                        .module
-                        .as_ref()
-                        .unwrap()
-                        .impls
-                } else {
-                    #[allow(clippy::needless_borrow)] // clippy has a bug here as of Rust 1.90
-                    &self.impls
-                };
-                let imp = &impls.data[impl_id.as_index()];
-                let associated_const_values = materialized_associated_const_values(
-                    trait_ref,
-                    input_tys,
-                    &imp.associated_const_values,
-                    fn_span,
-                )?;
+                    // Then collect constraint dictionary info for building thunk nodes later.
+                    // Each thunk gets its own arena, so we store (NodeKind, Type) pairs to re-create them.
+                    let constraint_dict_infos = constraint_dict_ids
+                        .into_iter()
+                        .map(|dict_id| {
+                            let ty = self.get_impl_data_by_id(dict_id).dictionary_ty;
+                            (get_dictionary(dict_id), ty)
+                        })
+                        .collect::<Vec<_>>();
 
-                // Then collect constraint dictionary info for building thunk nodes later.
-                // Each thunk gets its own arena, so we store (NodeKind, Type) pairs to re-create them.
-                let constraint_dict_infos = constraint_dict_ids
-                    .into_iter()
-                    .map(|dict_id| {
-                        let ty = self.get_impl_data_by_id(dict_id).dictionary_ty;
-                        (get_dictionary(dict_id), ty)
-                    })
-                    .collect::<Vec<_>>();
-
-                // Then, for every function in the blanket implementation, if needed create a thunk function
-                // importing it and closing over the constraint dictionaries.
-                let trait_key =
-                    TraitKey::Blanket(BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone()));
-                let definitions = trait_ref.instantiate_for_tys(input_tys, &output_tys);
-                let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
-                let (methods, tys): (Vec<_>, Vec<_>) = gen_functions
-                    .iter()
-                    .zip(definitions)
-                    .enumerate()
-                    .map(|(method_index, (fn_id, def))| {
+                    // Then, for every function in the blanket implementation, if needed create a thunk function
+                    // importing it and closing over the constraint dictionaries.
+                    let trait_key = TraitKey::Blanket(BlanketTraitImplKey::new(
+                        trait_ref.clone(),
+                        sub_key.clone(),
+                    ));
+                    let definitions = trait_ref.instantiate_for_tys(input_tys, &output_tys);
+                    let gen_functions = imp.methods.clone(); // clone to avoid borrowing issues
+                    let mut methods = Vec::with_capacity(gen_functions.len());
+                    let mut tys = Vec::with_capacity(gen_functions.len());
+                    for (method_index, (fn_id, def)) in
+                        gen_functions.iter().zip(definitions).enumerate()
+                    {
                         // Build the concrete function type and hash its signature.
                         let fn_ty = Type::function_type(def.ty_scheme.ty.clone());
 
@@ -1541,28 +1581,199 @@ impl<'a> TraitSolver<'a> {
                             id
                         };
 
-                        (id, fn_ty)
-                    })
-                    .multiunzip();
+                        methods.push(id);
+                        tys.push(fn_ty);
+                    }
 
-                // Build and insert the implementation.
-                let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_values.len());
-                let dictionary_value = build_dictionary_value(
-                    &methods,
-                    &associated_const_values,
-                    self.impls.module_id,
+                    // Build and insert the implementation.
+                    let dictionary_ty =
+                        TraitImpls::dictionary_ty(tys, associated_const_values.len());
+                    let dictionary_value = build_dictionary_value(
+                        &methods,
+                        &associated_const_values,
+                        self.impls.module_id,
+                    );
+                    let imp = TraitImpl::new(
+                        output_tys,
+                        methods,
+                        dictionary_value,
+                        dictionary_ty,
+                        false,
+                        None,
+                    )
+                    .with_associated_const_values(associated_const_values);
+                    let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+                    let local_impl_id = self.impls.add_concrete_struct(key, imp);
+
+                    return Ok(TraitImplId::Local(local_impl_id));
+                }
+
+                // Value blanket impls may be recursive, so reserve the concrete impl before
+                // materializing any deferred constraint dictionaries.
+                let (imp_associated_const_values, gen_functions) =
+                    if let Some(module_id) = imp_module_id {
+                        let imp = &self
+                            .others
+                            .get(module_id)
+                            .unwrap()
+                            .module
+                            .as_ref()
+                            .unwrap()
+                            .impls
+                            .data[impl_id.as_index()];
+                        (imp.associated_const_values.clone(), imp.methods.clone())
+                    } else {
+                        let imp = &self.impls.data[impl_id.as_index()];
+                        (imp.associated_const_values.clone(), imp.methods.clone())
+                    };
+                let associated_const_values = materialized_associated_const_values(
+                    trait_ref,
+                    input_tys,
+                    &imp_associated_const_values,
+                    fn_span,
+                )?;
+                let materialization_snapshot = self.snapshot_derived_impl_state();
+                let local_impl_id = self.reserve_concrete_impl_from_code_entries(
+                    trait_ref,
+                    input_tys,
+                    &output_tys,
+                    associated_const_values,
                 );
-                let imp = TraitImpl::new(
-                    output_tys,
-                    methods,
-                    dictionary_value,
-                    dictionary_ty,
-                    false,
-                    None,
-                )
-                .with_associated_const_values(associated_const_values);
-                let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
-                let local_impl_id = self.impls.add_concrete_struct(key, imp);
+
+                // Now that recursive self-references can resolve to the reserved impl,
+                // materialize the deferred constraint dictionaries.
+                let mut constraint_dict_ids = Vec::with_capacity(resolved_constraints.len());
+                for resolved_constraint in resolved_constraints {
+                    // Marker traits have no runtime dictionary entries.
+                    if !resolved_constraint
+                        .trait_ref
+                        .has_runtime_dictionary_entries()
+                    {
+                        continue;
+                    }
+                    let dict_id = match self.solve_impl(
+                        &resolved_constraint.trait_ref,
+                        &resolved_constraint.input_tys,
+                        fn_span,
+                        arena,
+                    ) {
+                        Ok(functions) => functions,
+                        Err(err) => {
+                            log::debug!(
+                                "Blanket impl constraint failed while solving {} for {:?}: {:?}",
+                                resolved_constraint.trait_ref.name,
+                                resolved_constraint.input_tys,
+                                err
+                            );
+                            self.rollback_derived_impl_state(materialization_snapshot);
+                            continue 'impl_loop;
+                        }
+                    };
+                    if self.get_impl_data_by_id(dict_id).output_tys
+                        != resolved_constraint.output_tys
+                    {
+                        self.rollback_derived_impl_state(materialization_snapshot);
+                        continue 'impl_loop;
+                    }
+                    constraint_dict_ids.push(dict_id);
+                }
+
+                // Then collect constraint dictionary info for building thunk nodes later.
+                // Each thunk gets its own arena, so we store (NodeKind, Type) pairs to re-create them.
+                let constraint_dict_infos = constraint_dict_ids
+                    .into_iter()
+                    .map(|dict_id| {
+                        let ty = self.get_impl_data_by_id(dict_id).dictionary_ty;
+                        (get_dictionary(dict_id), ty)
+                    })
+                    .collect::<Vec<_>>();
+
+                // Then, for every function in the blanket implementation, if needed create a thunk function
+                // importing it and closing over the constraint dictionaries.
+                let trait_key =
+                    TraitKey::Blanket(BlanketTraitImplKey::new(trait_ref.clone(), sub_key.clone()));
+                let definitions = trait_ref.instantiate_for_tys(input_tys, &output_tys);
+                let code_entries = gen_functions
+                    .iter()
+                    .zip(definitions)
+                    .enumerate()
+                    .map(|(method_index, (fn_id, def))| {
+                        let function_id = match imp_module_id {
+                            Some(module_id) => {
+                                let slot_id = self.import_impl_method(
+                                    module_id,
+                                    trait_key.clone(),
+                                    method_index as u32,
+                                );
+                                FunctionId::Import(slot_id)
+                            }
+                            None => FunctionId::Local(*fn_id),
+                        };
+
+                        // Build the locals
+                        let locals = def.gen_locals_no_bounds(
+                            repeat(Location::new_synthesized()),
+                            Location::new_synthesized(),
+                        );
+
+                        // Allocate constraint dictionary nodes into the module arena.
+                        let constraint_dict_nodes: Vec<_> = constraint_dict_infos
+                            .iter()
+                            .map(|(kind, ty)| {
+                                arena.alloc(Node::new(
+                                    kind.clone(),
+                                    *ty,
+                                    EffType::empty(),
+                                    Location::new_synthesized(),
+                                ))
+                            })
+                            .collect();
+
+                        // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
+                        let arguments: Vec<_> = constraint_dict_nodes
+                            .iter()
+                            .copied()
+                            .chain(def.ty_scheme.ty.args.iter().enumerate().map(
+                                |(arg_i, arg_ty)| {
+                                    let id = LocalDeclId::from_index(arg_i);
+                                    arena.alloc(Node::new(
+                                        load(arg_i, id),
+                                        arg_ty.ty,
+                                        EffType::empty(),
+                                        fn_span,
+                                    ))
+                                },
+                            ))
+                            .collect();
+
+                        // Build the function type with added constraint dictionary arguments.
+                        let mut ext_fn_ty = def.ty_scheme.ty.clone();
+                        ext_fn_ty.args.splice(
+                            0..0,
+                            constraint_dict_infos
+                                .iter()
+                                .map(|(_, ty)| FnArgType::new(*ty, MutType::constant())),
+                        );
+
+                        // Build the application node.
+                        let apply = static_apply(function_id, ext_fn_ty, arguments, fn_span);
+                        let apply_id = arena.alloc(Node::new(
+                            apply,
+                            def.ty_scheme.ty.ret,
+                            EffType::empty(),
+                            fn_span,
+                        ));
+                        (apply_id, locals)
+                    })
+                    .collect::<Vec<_>>();
+
+                self.replace_concrete_impl_code_entries(
+                    local_impl_id,
+                    trait_ref,
+                    input_tys,
+                    &output_tys,
+                    code_entries,
+                );
 
                 return Ok(TraitImplId::Local(local_impl_id));
             }

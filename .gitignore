@@ -1,6 +1,7 @@
 /target
 /scratch
 Cargo.lock
+.codex
 ferlium_history.txt
 /playground/node_modules/
 /playground/pnpm-lock.yaml

@@ -187,6 +187,35 @@ fn hash_hash_value(value: &HashValue, state: &mut Hasher) {
     state.write_hash(value);
 }
 
+fn equal_hasher(lhs: &Hasher, rhs: &Hasher) -> bool {
+    lhs.state == rhs.state
+}
+
+fn hasher_to_string(value: &Hasher) -> String {
+    String::new(&format!("hasher {{ state = {} }}", value.state))
+}
+
+fn hash_hasher(value: &Hasher, state: &mut Hasher) {
+    state.write_u64(value.state);
+}
+
+fn equal_unordered_hasher(lhs: &UnorderedHasher, rhs: &UnorderedHasher) -> bool {
+    lhs.sum == rhs.sum && lhs.xor == rhs.xor && lhs.count == rhs.count
+}
+
+fn unordered_hasher_to_string(value: &UnorderedHasher) -> String {
+    String::new(&format!(
+        "UnorderedHasher {{ sum: {}, xor: {}, count: {} }}",
+        value.sum, value.xor, value.count
+    ))
+}
+
+fn hash_unordered_hasher(value: &UnorderedHasher, state: &mut Hasher) {
+    state.write_u64(value.sum);
+    state.write_u64(value.xor);
+    state.write_u64(value.count);
+}
+
 fn hash_to_int(value: &HashValue) -> isize {
     value.0 as isize
 }
@@ -212,6 +241,34 @@ pub fn add_to_module(to: &mut Module) {
             b(BinaryNativeFnRMN::new(hash_hash_value)) as Function,
             b(BinaryNativeFnRMN::new(native_value_clone::<HashValue>)) as Function,
             b(UnaryNativeFnMN::new(native_value_drop::<HashValue>)) as Function,
+        ],
+    );
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [hasher_type()],
+        [],
+        native_layout_associated_consts::<Hasher>(),
+        [
+            b(BinaryNativeFnRRN::new(equal_hasher)) as Function,
+            b(UnaryNativeFnRN::new(hasher_to_string)) as Function,
+            b(BinaryNativeFnRMN::new(hash_hasher)) as Function,
+            b(BinaryNativeFnRMN::new(native_value_clone::<Hasher>)) as Function,
+            b(UnaryNativeFnMN::new(native_value_drop::<Hasher>)) as Function,
+        ],
+    );
+    to.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [unordered_hasher_type()],
+        [],
+        native_layout_associated_consts::<UnorderedHasher>(),
+        [
+            b(BinaryNativeFnRRN::new(equal_unordered_hasher)) as Function,
+            b(UnaryNativeFnRN::new(unordered_hasher_to_string)) as Function,
+            b(BinaryNativeFnRMN::new(hash_unordered_hasher)) as Function,
+            b(BinaryNativeFnRMN::new(
+                native_value_clone::<UnorderedHasher>,
+            )) as Function,
+            b(UnaryNativeFnMN::new(native_value_drop::<UnorderedHasher>)) as Function,
         ],
     );
     to.add_native_concrete_impl(

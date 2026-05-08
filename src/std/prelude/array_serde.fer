@@ -1,0 +1,30 @@
+// Serde for arrays
+
+impl<A> Serialize for [A]
+where
+	A: Serialize,
+	A: Value
+{
+	fn serialize(a: [A]) {
+		let mut result = array_with_capacity(array_len(a));
+		for value in a {
+			array_append(result, serialize(value));
+		};
+		Array(result)
+	}
+}
+
+impl Deserialize {
+	fn deserialize(a) {
+		match (a) {
+			Array(a) => {
+				let mut result = array_with_capacity(array_len(a));
+				for i in 0..array_len(a) {
+					array_append(result, deserialize(a[i]));
+				};
+				result
+			},
+			_ => panic("Expected Array variant")
+		}
+	}
+}

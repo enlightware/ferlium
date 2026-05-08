@@ -538,6 +538,10 @@ impl Type {
         self.world.is_some_and(|w| w.get() > 0)
     }
 
+    pub fn is_function(self) -> bool {
+        matches!(&*self.data(), TypeKind::Function(_))
+    }
+
     pub fn data<'t>(self) -> TypeDataRef<'t> {
         let guard = types().read().unwrap();
         TypeDataRef { ty: self, guard }

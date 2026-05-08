@@ -20,7 +20,12 @@ use crate::{
     format::{FormatWith, write_with_separator_and_format_fn},
     hir::dictionary_passing::ExtraParameters,
     parser::location::InstantiableLocation,
-    std::core::REPR_TRAIT,
+    std::{
+        core::REPR_TRAIT,
+        value::{
+            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
+        },
+    },
     types::r#trait::TraitRef,
     types::trait_solver::TraitSolver,
     types::type_inference::unify::UnifiedTypeInference,
@@ -259,6 +264,15 @@ impl PubTypeConstraint {
                 output_tys,
                 span,
             } => {
+                // Function-related `Value` constraints are compiler-provided, so they
+                // do not need normal trait solving to remain in the scheme.
+                if is_value_trait_for_function_type(trait_ref, input_tys, output_tys)
+                    || is_function_surface_only_value_trait_application(
+                        trait_ref, input_tys, output_tys,
+                    )
+                {
+                    return Ok(None);
+                }
                 if input_tys.iter().all(Type::is_constant) {
                     let got_output_tys = trait_solver.solve_output_types(
                         trait_ref,
@@ -1096,6 +1110,15 @@ pub(crate) fn extra_parameters_from_constraints(
                 output_tys,
                 ..
             } => {
+                // Function-related `Value` dictionaries are synthesized by
+                // dictionary passing instead of being passed as hidden args.
+                if is_value_trait_for_function_type(trait_ref, input_tys, output_tys)
+                    || is_function_surface_only_value_trait_application(
+                        trait_ref, input_tys, output_tys,
+                    )
+                {
+                    return None;
+                }
                 if input_tys.iter().all(Type::is_constant) {
                     panic!(
                         "Type scheme with trait having only non-variable input types in constraints"

@@ -14,7 +14,6 @@ use ustr::Ustr;
 #[cfg(debug_assertions)]
 use ustr::ustr;
 
-#[cfg(debug_assertions)]
 use crate::module::id::Id;
 use crate::{
     CompilerSession, Location, SourceId, SourceTable,
@@ -23,7 +22,10 @@ use crate::{
     format::{FormatWith, write_with_separator},
     hir::function::NativeArgPassing,
     hir::value::{FunctionValue, NativeValue, Value},
-    module::{FunctionId, LocalDecl, LocalFunctionId, ModuleFunction, ModuleId, TraitImplId},
+    module::{
+        FunctionId, LocalClone, LocalDecl, LocalDrop, LocalFunctionId, ModuleFunction, ModuleId,
+        TraitImplId,
+    },
     std::array,
     types::r#type::FnArgType,
 };
@@ -289,8 +291,11 @@ impl<'a> EvalCtx<'a> {
         function_value: &FunctionValue,
     ) -> Option<&'static [NativeArgPassing]> {
         let passing =
-            self.function_argument_passing(function_value.function, function_value.module)?;
-        Some(&passing[function_value.captured.len()..])
+            self.function_argument_passing(function_value.function_id, function_value.module_id)?;
+        Some(
+            &passing
+                [function_value.hidden_dictionary_args.len() + function_value.closure_env_len..],
+        )
     }
 
     /// Get the dictionary value for a ImplId at runtime using module.
@@ -318,20 +323,23 @@ impl<'a> EvalCtx<'a> {
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
-        let local_id = function_value.function;
-        let module_id = function_value.module;
+        let local_id = function_value.function_id;
+        let module_id = function_value.module_id;
 
         #[cfg(debug_assertions)]
         self.stack_trace
             .push(StackEntry::new(local_id, module_id, self.environment.len()));
 
-        let arguments = if function_value.captured.is_empty() {
+        let arguments = if function_value.hidden_dictionary_args.is_empty()
+            && function_value.closure_env_len == 0
+        {
             arguments
         } else {
             function_value
-                .captured
-                .clone()
-                .into_iter()
+                .hidden_dictionary_args
+                .iter()
+                .chain(function_value.closure_env_values())
+                .cloned()
                 .map(ValOrMut::Val)
                 .chain(arguments)
                 .collect()
@@ -721,6 +729,8 @@ pub fn eval_node_with_ctx(
         Immediate(immediate) => cont(immediate.value.clone()),
         BuildClosure(build_closure) => eval_build_closure(arena, build_closure, ctx, locals),
         Apply(app) => eval_apply(arena, app, node.span, ctx, locals),
+        FunctionClone(node) => eval_function_clone(arena, node, arena[id].span, ctx, locals),
+        FunctionDrop(node) => eval_function_drop(arena, node, arena[id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
         TraitFnApply(_) => {
             panic!(
@@ -737,6 +747,11 @@ pub fn eval_node_with_ctx(
                 "Trait associated const should not be executed, but transformed to an immediate or dictionary projection"
             );
         }
+        GetTraitDictionary(_) => {
+            panic!(
+                "Trait dictionary should not be executed, but transformed to a concrete dictionary or dictionary load"
+            );
+        }
         GetFunction(get_fn) => {
             let (function, module_id) = ctx.get_function_local_id(get_fn.function);
             cont(Value::function(function, module_id))
@@ -746,6 +761,8 @@ pub fn eval_node_with_ctx(
             cont(value)
         }
         EnvStore(node) => eval_env_store(arena, node, arena[id].span, ctx, locals),
+        EnvDrop(node) => eval_env_drop(node, arena[id].span, ctx, locals),
+        EnvMove(node) => eval_env_move(node, arena[id].span, ctx),
         EnvLoad(node) => eval_env_load(arena, id, node, ctx),
         Return(node) => eval_return(arena, *node, ctx, locals),
         Block(nodes) => eval_block(arena, nodes, ctx, locals),
@@ -779,14 +796,166 @@ fn eval_build_closure(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let captured = eval_or_return!(eval_nodes(arena, &build_closure.captures, ctx, locals));
+    let dictionary_captures = eval_or_return!(eval_nodes(
+        arena,
+        &build_closure.dictionary_captures,
+        ctx,
+        locals
+    ));
+    let captures = eval_or_return!(eval_nodes(arena, &build_closure.captures, ctx, locals));
+    let captures_value_dictionary = build_closure
+        .captures_value_dictionary
+        .map(|dict| eval_node_with_ctx(arena, dict, ctx, locals))
+        .transpose()?
+        .map(ControlFlow::into_value);
     // Note: function should be GetFunction or similar immediate - returns not allowed here.
     let function_value =
         eval_node_with_ctx(arena, build_closure.function, ctx, locals)?.into_value();
     let function_value = function_value.into_function().unwrap();
-    let function_value =
-        FunctionValue::new(function_value.function, function_value.module, captured);
+    let function_value = FunctionValue::closure(
+        function_value.function_id,
+        function_value.module_id,
+        dictionary_captures,
+        captures,
+        captures_value_dictionary,
+    );
     cont(Value::Function(b(function_value)))
+}
+
+fn call_dictionary_method(
+    ctx: &mut EvalCtx,
+    dictionary: &Value,
+    method_index: usize,
+    arguments: Vec<ValOrMut>,
+    span: Location,
+) -> EvalControlFlowResult {
+    let function_value = dictionary.as_tuple().unwrap()[method_index]
+        .as_function()
+        .unwrap()
+        .clone();
+    ctx.call_function_value(&function_value, arguments, span)
+}
+
+fn call_value_clone_for_temp(
+    ctx: &mut EvalCtx,
+    dictionary: &Value,
+    source: Value,
+    target_placeholder: Value,
+    span: Location,
+) -> Result<Value, RuntimeError> {
+    let target_index = ctx.environment.len();
+    ctx.environment.push(ValOrMut::Val(target_placeholder));
+    #[cfg(debug_assertions)]
+    ctx.environment_names.push(ustr("$function_clone_target"));
+    let target = Place {
+        target: target_index,
+        path: Vec::new(),
+    };
+    call_dictionary_method(
+        ctx,
+        dictionary,
+        crate::std::value::VALUE_CLONE_METHOD_INDEX,
+        vec![ValOrMut::Val(source), ValOrMut::Mut(target)],
+        span,
+    )?;
+    #[cfg(debug_assertions)]
+    ctx.environment_names.pop();
+    let target = ctx.environment.pop().unwrap().into_val().unwrap();
+    Ok(target)
+}
+
+fn call_value_drop_for_temp(
+    ctx: &mut EvalCtx,
+    dictionary: &Value,
+    target_value: Value,
+    span: Location,
+) -> EvalControlFlowResult {
+    let target_index = ctx.environment.len();
+    ctx.environment.push(ValOrMut::Val(target_value));
+    #[cfg(debug_assertions)]
+    ctx.environment_names.push(ustr("$function_drop_target"));
+    let target = Place {
+        target: target_index,
+        path: Vec::new(),
+    };
+    let result = call_dictionary_method(
+        ctx,
+        dictionary,
+        crate::std::value::VALUE_DROP_METHOD_INDEX,
+        vec![ValOrMut::Mut(target)],
+        span,
+    );
+    #[cfg(debug_assertions)]
+    ctx.environment_names.pop();
+    ctx.environment.pop();
+    result
+}
+
+#[inline(never)]
+fn eval_function_clone(
+    arena: &NodeArena,
+    node: &hir::FunctionClone,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let source = eval_or_return!(eval_node_with_ctx(arena, node.source, ctx, locals));
+    let source = source.into_function().unwrap();
+    let cloned_captures = if let Some(dictionary) = &source.closure_env_value_dictionary {
+        call_value_clone_for_temp(
+            ctx,
+            dictionary,
+            source.closure_env.clone(),
+            source.closure_env.clone(),
+            span,
+        )?
+    } else {
+        Value::unit()
+    };
+    let target_function = FunctionValue {
+        function_id: source.function_id,
+        module_id: source.module_id,
+        hidden_dictionary_args: source.hidden_dictionary_args.clone(),
+        closure_env: cloned_captures,
+        closure_env_len: source.closure_env_len,
+        closure_env_value_dictionary: source.closure_env_value_dictionary.clone(),
+    };
+    let target = eval_or_return!(resolve_node_place(arena, node.target, ctx, locals));
+    *target
+        .target_mut(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(span)))? = Value::Function(b(target_function));
+    cont(Value::unit())
+}
+
+#[inline(never)]
+fn eval_function_drop(
+    arena: &NodeArena,
+    node: &hir::FunctionDrop,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let target = eval_or_return!(resolve_node_place(arena, node.target, ctx, locals));
+    let Some((dictionary, captures)) = ({
+        let target = target
+            .target_mut(ctx)
+            .map_err(|err| RuntimeError::new(err, Some(span)))?;
+        let function = target.as_function_mut().unwrap();
+        function
+            .closure_env_value_dictionary
+            .clone()
+            .map(|dictionary| {
+                function.closure_env_len = 0;
+                function.closure_env_value_dictionary = None;
+                (
+                    dictionary,
+                    mem::replace(&mut function.closure_env, Value::unit()),
+                )
+            })
+    }) else {
+        return cont(Value::unit());
+    };
+    call_value_drop_for_temp(ctx, &dictionary, captures, span)
 }
 
 #[inline(never)]
@@ -858,7 +1027,7 @@ fn eval_env_store(
             Some(span),
         ));
     }
-    if let Some(clone) = &node.clone {
+    if let Some(clone) = &locals[node.id.as_index()].clone {
         let target_index = ctx.environment.len();
         ctx.environment.push(ValOrMut::Val(value.clone()));
         #[cfg(debug_assertions)]
@@ -870,13 +1039,13 @@ fn eval_env_store(
         };
         let arguments = vec![ValOrMut::Val(value), ValOrMut::Mut(target)];
         match clone {
-            hir::EnvStoreClone::Required => {
-                panic!("EnvStoreClone::Required should have been resolved before evaluation")
+            LocalClone::Required => {
+                panic!("LocalClone::Required should have been resolved before evaluation")
             }
-            hir::EnvStoreClone::Static(function) => {
+            LocalClone::Static(function) => {
                 ctx.call_function_id(*function, arguments, span)?;
             }
-            hir::EnvStoreClone::Dictionary(dict_index) => {
+            LocalClone::Dictionary(dict_index) => {
                 let function_value = {
                     let dictionary = ctx.environment[ctx.frame_base + *dict_index]
                         .as_value_ref(ctx)
@@ -896,6 +1065,53 @@ fn eval_env_store(
             .push(locals[node.id.as_index()].name.0);
     }
     cont(Value::unit())
+}
+
+#[inline(never)]
+fn eval_env_drop(
+    node: &hir::EnvDrop,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let Some(drop) = &locals[node.id.as_index()].drop else {
+        return cont(Value::unit());
+    };
+    let target = Place {
+        target: ctx.frame_base + node.index as usize,
+        path: Vec::new(),
+    };
+    let arguments = vec![ValOrMut::Mut(target)];
+    match drop {
+        LocalDrop::Required => {
+            panic!("LocalDrop::Required should have been resolved before evaluation")
+        }
+        LocalDrop::Static(function) => {
+            ctx.call_function_id(*function, arguments, span)?;
+        }
+        LocalDrop::Dictionary(dict_index) => {
+            let function_value = {
+                let dictionary = ctx.environment[ctx.frame_base + *dict_index]
+                    .as_value_ref(ctx)
+                    .map_err(|err| RuntimeError::new(err, Some(span)))?;
+                dictionary.as_tuple().unwrap()[crate::std::value::VALUE_DROP_METHOD_INDEX]
+                    .as_function()
+                    .unwrap()
+                    .clone()
+            };
+            ctx.call_function_value(&function_value, arguments, span)?;
+        }
+    }
+    cont(Value::unit())
+}
+
+#[inline(never)]
+fn eval_env_move(node: &hir::EnvMove, _span: Location, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+    let index = ctx.frame_base + node.index as usize;
+    match mem::replace(&mut ctx.environment[index], ValOrMut::Val(Value::unit())) {
+        ValOrMut::Val(value) => cont(value),
+        ValOrMut::Mut(_) => panic!("cannot move out of a mutable reference local"),
+    }
 }
 
 #[inline(never)]
@@ -942,7 +1158,9 @@ fn eval_block(
                 return Ok(ControlFlow::Return(val));
             }
             ControlFlow::Continue(val) => {
-                last_value = val;
+                if !matches!(arena[*node].kind, NodeKind::EnvDrop(_)) {
+                    last_value = val;
+                }
             }
         }
     }

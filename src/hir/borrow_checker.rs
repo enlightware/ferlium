@@ -143,8 +143,14 @@ impl Node {
             Immediate(_) => {}
             BuildClosure(build_closure) => {
                 check_borrows(arena, build_closure.function)?;
+                for &capture in &build_closure.dictionary_captures {
+                    check_borrows(arena, capture)?;
+                }
                 for &capture in &build_closure.captures {
                     check_borrows(arena, capture)?;
+                }
+                if let Some(dict) = build_closure.captures_value_dictionary {
+                    check_borrows(arena, dict)?;
                 }
             }
             Apply(app) => {
@@ -161,6 +167,13 @@ impl Node {
                     arena[app.function].span,
                 )?;
             }
+            FunctionClone(node) => {
+                check_borrows(arena, node.source)?;
+                check_borrows(arena, node.target)?;
+            }
+            FunctionDrop(node) => {
+                check_borrows(arena, node.target)?;
+            }
             StaticApply(app) => {
                 for &arg in &app.arguments {
                     check_borrows(arena, arg)?;
@@ -176,10 +189,13 @@ impl Node {
             GetFunction(_) => {}
             GetTraitFunction(_) => {}
             GetTraitAssociatedConst(_) => {}
+            GetTraitDictionary(_) => {}
             GetDictionary(_) => {}
             EnvStore(node) => {
                 check_borrows(arena, node.value)?;
             }
+            EnvDrop(_) => {}
+            EnvMove(_) => {}
             EnvLoad(_) => {}
             Return(node_id) => {
                 check_borrows(arena, *node_id)?;

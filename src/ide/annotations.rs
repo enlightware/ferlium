@@ -278,6 +278,13 @@ fn node_variable_type_annotations(
                 variable_type_annotations(arena, arg, result, locals, env);
             }
         }
+        FunctionClone(node) => {
+            variable_type_annotations(arena, node.source, result, locals, env);
+            variable_type_annotations(arena, node.target, result, locals, env);
+        }
+        FunctionDrop(node) => {
+            variable_type_annotations(arena, node.target, result, locals, env);
+        }
         StaticApply(app) => {
             let arity = app.argument_names.len();
             let is_synthesized = app.function_span.is_empty();
@@ -299,6 +306,9 @@ fn node_variable_type_annotations(
         }
         GetTraitAssociatedConst(_) => {
             // There is no GetTraitAssociatedConst left in the final IR.
+        }
+        GetTraitDictionary(_) => {
+            // There is no GetTraitDictionary left in the final IR.
         }
         GetDictionary(_) => {}
         EnvStore(node) => {
@@ -324,6 +334,8 @@ fn node_variable_type_annotations(
             }
             variable_type_annotations(arena, node.value, result, locals, env);
         }
+        EnvDrop(_) => {}
+        EnvMove(_) => {}
         EnvLoad(_) => {}
         Return(node) => variable_type_annotations(arena, *node, result, locals, env),
         Block(nodes) => nodes

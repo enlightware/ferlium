@@ -13,11 +13,16 @@ use crate::{
     FxHashSet, Location,
     ast::{Path, UnnamedArg},
     compiler::error::InternalCompilationError,
-    hir::function::FunctionDefinition,
+    containers::b,
+    hir::emit_value_impl::function_value_method,
+    hir::function::{Function, FunctionDefinition, ScriptFunction},
     hir::value::{FunctionValue, LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
     internal_compilation_error,
-    module::{self, FunctionId, LocalDecl, LocalDeclId, Module, TraitImplId, id::Id},
+    module::{
+        self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module, ModuleFunction,
+        TraitImpl, TraitImplId, TraitImpls, id::Id,
+    },
     std::{
         STD_MODULE_ID, hash::hasher_type, logic::bool_type, math::int_type, string::string_type,
     },
@@ -139,10 +144,9 @@ fn layout_for_value_type(
     active: &mut FxHashSet<Type>,
 ) -> Result<ValueLayout, InternalCompilationError> {
     if !active.insert(ty) {
-        return Err(internal_compilation_error!(Internal {
-            error: format!("recursive Value layout for type {ty:?} is not supported"),
-            span,
-        }));
+        // Recursive occurrences are represented indirectly at runtime, so their
+        // inline layout is a value slot rather than another full copy.
+        return Ok(ValueLayout::native::<usize>());
     }
 
     let ty_data = ty.data();
@@ -218,6 +222,108 @@ pub(crate) fn value_layout_associated_const_values(
     layout_for_value_type(ty, span, &mut FxHashSet::default())?.associated_const_values(span)
 }
 
+/// Return whether all unresolved variables in `ty` appear only in function types.
+/// `active` is the current recursion stack used to stop on recursive types.
+fn value_type_is_resolved_ignoring_function_surface(
+    ty: Type,
+    active: &mut FxHashSet<Type>,
+) -> bool {
+    if ty.is_constant() {
+        return true;
+    }
+    if !active.insert(ty) {
+        return true;
+    }
+
+    let ty_data = ty.data();
+    use TypeKind::*;
+    let resolved = match &*ty_data {
+        Function(_) => true,
+        Tuple(member_tys) => {
+            let member_tys = member_tys.clone();
+            drop(ty_data);
+            let resolved = member_tys.into_iter().all(|member_ty| {
+                value_type_is_resolved_ignoring_function_surface(member_ty, active)
+            });
+            active.remove(&ty);
+            return resolved;
+        }
+        Record(fields) => {
+            let field_tys = fields
+                .iter()
+                .map(|(_, field_ty)| *field_ty)
+                .collect::<Vec<_>>();
+            drop(ty_data);
+            let resolved = field_tys
+                .into_iter()
+                .all(|field_ty| value_type_is_resolved_ignoring_function_surface(field_ty, active));
+            active.remove(&ty);
+            return resolved;
+        }
+        Variant(variants) => {
+            let payload_tys = variants
+                .iter()
+                .map(|(_, payload_ty)| *payload_ty)
+                .collect::<Vec<_>>();
+            drop(ty_data);
+            let resolved = payload_tys.into_iter().all(|payload_ty| {
+                value_type_is_resolved_ignoring_function_surface(payload_ty, active)
+            });
+            active.remove(&ty);
+            return resolved;
+        }
+        Named(named) => {
+            let named = named.clone();
+            drop(ty_data);
+            let resolved = value_type_is_resolved_ignoring_function_surface(
+                named.instantiated_shape(),
+                active,
+            );
+            active.remove(&ty);
+            return resolved;
+        }
+        Native(_) => false,
+        Never => true,
+        Variable(_) => false,
+    };
+    drop(ty_data);
+    active.remove(&ty);
+    resolved
+}
+
+/// True when every unresolved part of `ty` appears under a function type.
+/// Function `Value` impls are compiler-provided from their hidden closure env,
+/// so these types can use generated structural `Value` code without requiring a
+/// user-visible dictionary for the function surface.
+pub(crate) fn is_function_surface_only_value_type(ty: Type) -> bool {
+    !ty.is_constant()
+        && value_type_is_resolved_ignoring_function_surface(ty, &mut FxHashSet::default())
+}
+
+/// Return whether this is `Value` for a type whose unresolved variables occur only inside function types.
+pub(crate) fn is_function_surface_only_value_trait_application(
+    trait_ref: &TraitRef,
+    input_tys: &[Type],
+    output_tys: &[Type],
+) -> bool {
+    trait_ref == &*VALUE_TRAIT
+        && input_tys.len() == 1
+        && output_tys.is_empty()
+        && is_function_surface_only_value_type(input_tys[0])
+}
+
+/// Return whether this trait application is `Value` for a function type.
+pub(crate) fn is_value_trait_for_function_type(
+    trait_ref: &TraitRef,
+    input_tys: &[Type],
+    output_tys: &[Type],
+) -> bool {
+    trait_ref == &*VALUE_TRAIT
+        && input_tys.len() == 1
+        && output_tys.is_empty()
+        && input_tys[0].is_function()
+}
+
 use FunctionDefinition as Def;
 
 pub(crate) type ValueCodeEntries = Vec<(NodeId, Vec<LocalDecl>)>;
@@ -269,6 +375,19 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         let fn_ty = definition.ty_scheme.ty;
         let ret_ty = fn_ty.ret;
 
+        if is_value_trait_for_function_type(trait_ref, &[input_ty], &[]) {
+            let function = FunctionId::Local(function_value_method(
+                self.solver,
+                method_index,
+                span,
+                arena,
+            )?);
+            return Ok((
+                hir::hir_syn::static_apply(function, fn_ty, arguments, span),
+                ret_ty,
+            ));
+        }
+
         if self.emit_generic_trait_calls && !input_ty.is_constant() {
             return Ok((
                 hir::NodeKind::TraitFnApply(crate::containers::b(hir::TraitFnApplication {
@@ -315,6 +434,209 @@ fn value_method_call_node(
     )))
 }
 
+const FUNCTION_VALUE_METHOD_NAMES: [&str; 5] = [
+    "$_ferlium_function_value_eq",
+    "$_ferlium_function_value_to_string",
+    "$_ferlium_function_value_hash",
+    "$_ferlium_function_value_clone",
+    "$_ferlium_function_value_drop",
+];
+
+pub(crate) fn function_value_method_name(method_index: usize) -> ustr::Ustr {
+    ustr::Ustr::from(FUNCTION_VALUE_METHOD_NAMES[method_index])
+}
+
+fn alloc_synth_node(arena: &mut NodeArena, kind: hir::NodeKind, ty: Type) -> NodeId {
+    arena.alloc(hir::Node::new(
+        kind,
+        ty,
+        EffType::empty(),
+        Location::new_synthesized(),
+    ))
+}
+
+fn function_value_clone_root(
+    ty: Type,
+    source_id: LocalDeclId,
+    target_id: LocalDeclId,
+    arena: &mut NodeArena,
+) -> NodeId {
+    use hir::hir_syn::*;
+
+    let source = alloc_synth_node(arena, load(source_id.as_index(), source_id), ty);
+    let target = alloc_synth_node(arena, load(target_id.as_index(), target_id), ty);
+    alloc_synth_node(
+        arena,
+        hir::NodeKind::FunctionClone(b(hir::FunctionClone { source, target })),
+        Type::unit(),
+    )
+}
+
+fn function_value_clone_body(ty: Type, arena: &mut NodeArena) -> (NodeId, Vec<LocalDecl>) {
+    use hir::hir_syn::*;
+
+    let source_id = LocalDeclId::from_index(0);
+    let target_id = LocalDeclId::from_index(1);
+    let locals = vec![
+        local("source", ty),
+        LocalDecl::new(
+            (crate::ustr("target"), Location::new_synthesized()),
+            MutType::mutable(),
+            ty,
+            None,
+            Location::new_synthesized(),
+        ),
+    ];
+    let root = function_value_clone_root(ty, source_id, target_id, arena);
+    (root, locals)
+}
+
+fn function_value_drop_root(ty: Type, target_id: LocalDeclId, arena: &mut NodeArena) -> NodeId {
+    use hir::hir_syn::*;
+
+    let target = alloc_synth_node(arena, load(target_id.as_index(), target_id), ty);
+    alloc_synth_node(
+        arena,
+        hir::NodeKind::FunctionDrop(b(hir::FunctionDrop { target })),
+        Type::unit(),
+    )
+}
+
+fn function_value_drop_body(ty: Type, arena: &mut NodeArena) -> (NodeId, Vec<LocalDecl>) {
+    let target_id = LocalDeclId::from_index(0);
+    let locals = vec![LocalDecl::new(
+        (crate::ustr("target"), Location::new_synthesized()),
+        MutType::mutable(),
+        ty,
+        None,
+        Location::new_synthesized(),
+    )];
+    let root = function_value_drop_root(ty, target_id, arena);
+    (root, locals)
+}
+
+pub(crate) fn function_value_method_function(
+    method_index: usize,
+    span: Location,
+    arena: &mut NodeArena,
+    solver: &mut TraitSolver<'_>,
+) -> Result<ModuleFunction, InternalCompilationError> {
+    use hir::hir_syn::*;
+
+    let ty = Type::variable_id(0);
+    let unit_ty = Type::unit();
+    let (definition, root, locals) = match method_index {
+        VALUE_EQ_METHOD_INDEX => {
+            let fn_ty = FnType::new_by_val([ty, ty], bool_type(), EffType::empty());
+            let definition = Def::new_infer_quantifiers(
+                fn_ty,
+                ["left", "right"],
+                "Compiler-generated function Value equality.",
+            );
+            let locals = vec![local("left", ty), local("right", ty)];
+            let root = alloc_synth_node(arena, native(false), bool_type());
+            (definition, root, locals)
+        }
+        VALUE_TO_STRING_METHOD_INDEX => {
+            let fn_ty = FnType::new_by_val([ty], string_type(), EffType::empty());
+            let definition = Def::new_infer_quantifiers(
+                fn_ty,
+                ["self"],
+                "Compiler-generated function Value string conversion.",
+            );
+            let locals = vec![local("self", ty)];
+            let root = alloc_synth_node(arena, native_str("<function>"), string_type());
+            (definition, root, locals)
+        }
+        VALUE_HASH_METHOD_INDEX => {
+            let hasher_ty = hasher_type();
+            let hasher_write_string = solver.get_local_or_import_function(
+                span,
+                &module::Path::single_str("std"),
+                crate::ustr("hasher_write_string"),
+            )?;
+            let fn_ty = FnType::new(
+                vec![
+                    FnArgType::new_by_val(ty),
+                    FnArgType::new(hasher_ty, MutType::mutable()),
+                ],
+                unit_ty,
+                EffType::empty(),
+            );
+            let definition = Def::new_infer_quantifiers(
+                fn_ty,
+                ["self", "state"],
+                "Compiler-generated function Value hashing.",
+            );
+            let state_id = LocalDeclId::from_index(1);
+            let locals = vec![
+                local("self", ty),
+                LocalDecl::new(
+                    (crate::ustr("state"), Location::new_synthesized()),
+                    MutType::mutable(),
+                    hasher_ty,
+                    None,
+                    Location::new_synthesized(),
+                ),
+            ];
+            let state = alloc_synth_node(arena, load(1, state_id), hasher_ty);
+            let marker = alloc_synth_node(arena, native_str("<function>"), string_type());
+            let write_ty = FnType::new(
+                vec![
+                    FnArgType::new(hasher_ty, MutType::mutable()),
+                    FnArgType::new_by_val(string_type()),
+                ],
+                unit_ty,
+                EffType::empty(),
+            );
+            let write = alloc_synth_node(
+                arena,
+                static_apply(hasher_write_string, write_ty, [state, marker], span),
+                unit_ty,
+            );
+            let unit = alloc_synth_node(arena, native(()), unit_ty);
+            let root = alloc_synth_node(arena, block([write, unit]), unit_ty);
+            (definition, root, locals)
+        }
+        VALUE_CLONE_METHOD_INDEX => {
+            let fn_ty = FnType::new(
+                vec![
+                    FnArgType::new_by_val(ty),
+                    FnArgType::new(ty, MutType::mutable()),
+                ],
+                unit_ty,
+                EffType::empty(),
+            );
+            let definition = Def::new_infer_quantifiers(
+                fn_ty,
+                ["source", "target"],
+                "Compiler-generated function Value clone.",
+            );
+            let (root, locals) = function_value_clone_body(ty, arena);
+            (definition, root, locals)
+        }
+        VALUE_DROP_METHOD_INDEX => {
+            let fn_ty = FnType::new(
+                vec![FnArgType::new(ty, MutType::mutable())],
+                unit_ty,
+                EffType::empty(),
+            );
+            let definition = Def::new_infer_quantifiers(
+                fn_ty,
+                ["target"],
+                "Compiler-generated function Value drop.",
+            );
+            let (root, locals) = function_value_drop_body(ty, arena);
+            (definition, root, locals)
+        }
+        _ => panic!("function Value method index out of bounds"),
+    };
+
+    let arg_names = definition.arg_names.clone();
+    let code = b(ScriptFunction::new(root, arg_names)) as Function;
+    Ok(ModuleFunction::new(definition, code, None, locals))
+}
+
 fn derive_value_to_string_body(
     trait_ref: &TraitRef,
     input_types: &[Type],
@@ -328,14 +650,7 @@ fn derive_value_to_string_body(
     let ty = input_types[0];
     assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
-    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
-        arena.alloc(hir::Node::new(
-            kind,
-            ty,
-            EffType::empty(),
-            Location::new_synthesized(),
-        ))
-    };
+    let n = alloc_synth_node;
 
     let string_push_str = ctx.get_local_or_import_function(
         span,
@@ -609,14 +924,7 @@ fn derive_value_eq_body(
     let ty = input_types[0];
     assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
-    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
-        arena.alloc(hir::Node::new(
-            kind,
-            ty,
-            EffType::empty(),
-            Location::new_synthesized(),
-        ))
-    };
+    let n = alloc_synth_node;
 
     let bool_ty = bool_type();
     let locals = vec![local("left", ty), local("right", ty)];
@@ -778,14 +1086,7 @@ fn derive_value_hash_body(
     let ty = input_types[0];
     assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
-    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
-        arena.alloc(hir::Node::new(
-            kind,
-            ty,
-            EffType::empty(),
-            Location::new_synthesized(),
-        ))
-    };
+    let n = alloc_synth_node;
 
     let unit_ty = Type::unit();
     let hasher_ty = hasher_type();
@@ -964,14 +1265,7 @@ fn derive_value_clone_body(
     let ty = input_types[0];
     assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
-    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
-        arena.alloc(hir::Node::new(
-            kind,
-            ty,
-            EffType::empty(),
-            Location::new_synthesized(),
-        ))
-    };
+    let n = alloc_synth_node;
 
     let source_id = LocalDeclId::from_index(0);
     let target_id = LocalDeclId::from_index(1);
@@ -1072,6 +1366,10 @@ fn derive_value_clone_body(
             drop(ty_data);
             build_variant_clone!(arena, variants)
         }
+        Function(_) => {
+            drop(ty_data);
+            function_value_clone_root(ty, source_id, target_id, arena)
+        }
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
@@ -1124,14 +1422,7 @@ fn derive_value_drop_body(
     let ty = input_types[0];
     assert!(ctx.emit_generic_trait_calls || ty.is_constant());
 
-    let n = |arena: &mut NodeArena, kind: hir::NodeKind, ty: Type| -> NodeId {
-        arena.alloc(hir::Node::new(
-            kind,
-            ty,
-            EffType::empty(),
-            Location::new_synthesized(),
-        ))
-    };
+    let n = alloc_synth_node;
     let target_id = LocalDeclId::from_index(0);
     let locals = vec![LocalDecl::new(
         (crate::ustr("target"), Location::new_synthesized()),
@@ -1212,6 +1503,10 @@ fn derive_value_drop_body(
             drop(ty_data);
             build_variant_drop!(arena, variants)
         }
+        Function(_) => {
+            drop(ty_data);
+            function_value_drop_root(ty, target_id, arena)
+        }
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
@@ -1251,6 +1546,43 @@ fn derive_value_drop_body(
     Ok((root, locals))
 }
 
+fn derive_function_value_impl(
+    trait_ref: &TraitRef,
+    input_types: &[Type],
+    span: Location,
+    arena: &mut NodeArena,
+    solver: &mut TraitSolver<'_>,
+) -> Result<TraitImplId, InternalCompilationError> {
+    let associated_const_values = value_layout_associated_const_values(input_types[0], span)?;
+    let methods = (0..trait_ref.functions.len())
+        .map(|method_index| function_value_method(solver, method_index, span, arena))
+        .collect::<Result<Vec<_>, _>>()?;
+    let definitions = trait_ref.instantiate_for_tys(input_types, &[]);
+    let tys = definitions
+        .into_iter()
+        .map(|definition| Type::function_type(definition.ty_scheme.ty))
+        .collect::<Vec<_>>();
+    let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_values.len());
+    let dictionary_value = hir::value::build_dictionary_value(
+        &methods,
+        &associated_const_values,
+        solver.impls.module_id,
+    );
+    let imp = TraitImpl::new(
+        Vec::new(),
+        methods,
+        dictionary_value,
+        dictionary_ty,
+        false,
+        None,
+    )
+    .with_associated_const_values(associated_const_values);
+    let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_types.to_vec());
+    Ok(TraitImplId::Local(
+        solver.impls.add_concrete_struct(key, imp),
+    ))
+}
+
 fn derive_structural_value_impl(
     trait_ref: &TraitRef,
     input_types: &[Type],
@@ -1270,6 +1602,16 @@ fn derive_structural_value_impl(
     drop(ty_data);
     if !can_derive {
         return Ok(None);
+    }
+
+    if input_types[0].is_function() {
+        return Ok(Some(derive_function_value_impl(
+            trait_ref,
+            input_types,
+            span,
+            arena,
+            solver,
+        )?));
     }
 
     let associated_const_values = value_layout_associated_const_values(input_types[0], span)?;

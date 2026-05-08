@@ -6,7 +6,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use derive_new::new;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use dyn_hash::DynHash;
@@ -109,11 +108,68 @@ impl VariantValue {
     }
 }
 
-#[derive(Debug, Clone, new)]
+/// Runtime representation of a first-class function.
+///
+/// Function values carry a code identity plus two hidden argument groups:
+/// dictionaries captured while instantiating generic functions, and the owned
+/// source-level closure environment. Only the closure environment is managed by
+/// `Value::clone`/`Value::drop`; dictionary arguments are call metadata.
+#[derive(Debug, Clone)]
 pub struct FunctionValue {
-    pub function: LocalFunctionId,
-    pub module: ModuleId,
-    pub captured: Vec<Value>,
+    pub function_id: LocalFunctionId,
+    pub module_id: ModuleId,
+    /// Hidden dictionary arguments prepended when calling the function.
+    pub hidden_dictionary_args: Vec<Value>,
+    /// Owned source-level closure environment, stored as a tuple value.
+    pub closure_env: Value,
+    pub closure_env_len: usize,
+    /// Runtime `Value` dictionary for cloning/dropping `closure_env`.
+    /// `None` means `closure_env_len == 0`.
+    pub closure_env_value_dictionary: Option<Value>,
+}
+
+impl FunctionValue {
+    pub fn bare(function_id: LocalFunctionId, module_id: ModuleId) -> Self {
+        Self {
+            function_id,
+            module_id,
+            hidden_dictionary_args: Vec::new(),
+            closure_env: Value::unit(),
+            closure_env_len: 0,
+            closure_env_value_dictionary: None,
+        }
+    }
+
+    pub fn closure(
+        function_id: LocalFunctionId,
+        module_id: ModuleId,
+        hidden_dictionary_args: Vec<Value>,
+        captures: Vec<Value>,
+        closure_env_value_dictionary: Option<Value>,
+    ) -> Self {
+        let closure_env_len = captures.len();
+        debug_assert_eq!(closure_env_value_dictionary.is_some(), closure_env_len > 0);
+        Self {
+            function_id,
+            module_id,
+            hidden_dictionary_args,
+            closure_env: if captures.is_empty() {
+                Value::unit()
+            } else {
+                Value::tuple(captures)
+            },
+            closure_env_len,
+            closure_env_value_dictionary,
+        }
+    }
+
+    pub fn closure_env_values(&self) -> &[Value] {
+        if self.closure_env_len == 0 {
+            &[]
+        } else {
+            self.closure_env.as_tuple().unwrap()
+        }
+    }
 }
 
 /// A value in the system
@@ -193,7 +249,7 @@ impl Value {
     }
 
     pub fn function(function: LocalFunctionId, module: ModuleId) -> Self {
-        Self::Function(b(FunctionValue::new(function, module, vec![])))
+        Self::Function(b(FunctionValue::bare(function, module)))
     }
 
     pub fn into_primitive_ty<T: 'static>(self) -> Option<T> {
@@ -243,16 +299,18 @@ impl Value {
                 write!(f, ")")
             }
             Function(fv) => {
-                if fv.captured.is_empty() {
-                    write!(f, "function {} in {}", fv.function, fv.module)
+                if fv.hidden_dictionary_args.is_empty() && fv.closure_env_len == 0 {
+                    write!(f, "function {} in {}", fv.function_id, fv.module_id)
                 } else {
                     write!(
                         f,
                         "closure of function {} in {} with captured values [",
-                        fv.function, fv.module
+                        fv.function_id, fv.module_id
                     )?;
                     write_with_separator_and_format_fn(
-                        fv.captured.iter(),
+                        fv.hidden_dictionary_args
+                            .iter()
+                            .chain(fv.closure_env_values()),
                         ", ",
                         Value::format_as_string_repr,
                         f,
@@ -308,15 +366,19 @@ impl Value {
                 writeln!(f, "{indent_str})")
             }
             Function(fv) => {
-                if fv.captured.is_empty() {
-                    writeln!(f, "function {} in {}", fv.function, fv.module)
+                if fv.hidden_dictionary_args.is_empty() && fv.closure_env_len == 0 {
+                    writeln!(f, "function {} in {}", fv.function_id, fv.module_id)
                 } else {
                     writeln!(
                         f,
                         "closure of function {} in {} with captured values [",
-                        fv.function, fv.module
+                        fv.function_id, fv.module_id
                     )?;
-                    for captured in &fv.captured {
+                    for captured in fv
+                        .hidden_dictionary_args
+                        .iter()
+                        .chain(fv.closure_env_values())
+                    {
                         captured.format_ind_repr(f, _env, spacing + 1, indent + 1)?;
                     }
                     writeln!(f, "{indent_str}]")

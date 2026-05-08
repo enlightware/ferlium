@@ -8,7 +8,7 @@
 //
 
 use crate::{
-    FxHashSet, Modules, ast,
+    FxHashSet, Location, Modules, ast,
     compiler::error::InternalCompilationError,
     containers::b,
     hir::{
@@ -17,10 +17,15 @@ use crate::{
         emit_ir::{EmitTraitOutput, emitted_associated_const_values},
         function::ScriptFunction,
     },
-    module::{Module, ModuleFunction},
-    std::value::{VALUE_TRAIT, derive_generic_value_code_entries},
+    internal_compilation_error,
+    module::{LocalFunctionId, Module, ModuleFunction},
+    std::value::{
+        VALUE_TRAIT, derive_generic_value_code_entries, function_value_method_function,
+        function_value_method_name, is_function_surface_only_value_type,
+    },
     types::{
         coherence::check_trait_impl,
+        r#trait::TraitRef,
         trait_solver::{TraitSolver, trait_solver_from_module},
         r#type::{Type, TypeDefRef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
@@ -29,6 +34,74 @@ use crate::{
     },
 };
 use indexmap::IndexSet;
+use ustr::Ustr;
+
+/// Return or lazily emit one compiler-provided `Value` method for function values.
+pub(crate) fn function_value_method(
+    solver: &mut TraitSolver<'_>,
+    method_index: usize,
+    span: Location,
+    arena: &mut NodeArena,
+) -> Result<LocalFunctionId, InternalCompilationError> {
+    let name = function_value_method_name(method_index);
+    if let Some(local_id) = solver.current_functions.get(&name).copied() {
+        return Ok(local_id);
+    }
+    if let Some(local_id) = solver.fn_collector.get_function(name) {
+        return Ok(local_id);
+    }
+
+    let local_id = solver.fn_collector.next_id();
+    let function = function_value_method_function(method_index, span, arena, solver)?;
+    solver.fn_collector.push(name, function);
+    Ok(local_id)
+}
+
+/// Emit generated structural `Value` methods for a non-concrete type shape.
+pub(crate) fn generic_value_methods_for_type(
+    solver: &mut TraitSolver<'_>,
+    trait_ref: &TraitRef,
+    input_tys: &[Type],
+    span: Location,
+    arena: &mut NodeArena,
+) -> Result<Vec<LocalFunctionId>, InternalCompilationError> {
+    let Some(code_entries) =
+        derive_generic_value_code_entries(trait_ref, input_tys, span, arena, solver)?
+    else {
+        return Err(internal_compilation_error!(TraitImplNotFound {
+            trait_ref: trait_ref.clone(),
+            input_tys: input_tys.to_vec(),
+            fn_span: span,
+        }));
+    };
+
+    let definitions = trait_ref.instantiate_for_tys(input_tys, &[]);
+    let mut methods = Vec::with_capacity(code_entries.len());
+    for (method_index, (definition, (code_entry, locals))) in
+        definitions.into_iter().zip(code_entries).enumerate()
+    {
+        let name = Ustr::from(&format!(
+            "{}-generic",
+            trait_ref.qualified_method_name(method_index, input_tys)
+        ));
+        if let Some(local_id) = solver.current_functions.get(&name).copied() {
+            methods.push(local_id);
+            continue;
+        }
+        if let Some(local_id) = solver.fn_collector.get_function(name) {
+            methods.push(local_id);
+            continue;
+        }
+
+        let arg_names = definition.arg_names.clone();
+        let code: hir::function::Function = b(ScriptFunction::new(code_entry, arg_names));
+        let function = ModuleFunction::new(definition, code, None, locals);
+        let id = solver.fn_collector.next_id();
+        solver.fn_collector.push(name, function);
+        methods.push(id);
+    }
+    Ok(methods)
+}
 
 fn type_has_any_ty_var(ty: Type, vars: &[TypeVar]) -> bool {
     let vars = vars.iter().copied().collect::<FxHashSet<_>>();
@@ -37,6 +110,8 @@ fn type_has_any_ty_var(ty: Type, vars: &[TypeVar]) -> bool {
         .any(|var| vars.contains(&var))
 }
 
+/// Return the fields/payloads whose `Value` impls are called directly by the
+/// generated `Value` impl for `ty`.
 fn auto_value_direct_member_tys(ty: Type) -> Vec<Type> {
     let ty_data = ty.data();
     match &*ty_data {
@@ -53,6 +128,11 @@ fn auto_value_direct_member_tys(ty: Type) -> Vec<Type> {
     }
 }
 
+/// Build the where-clause for an auto-emitted generic `Value` impl.
+///
+/// Function-typed members are skipped because their `Value` impl is
+/// compiler-provided from the hidden closure environment, not from a
+/// user-visible dictionary requirement.
 fn auto_value_constraints(type_def: &TypeDefRef, input_ty: Type) -> Vec<PubTypeConstraint> {
     let span = type_def.span;
     let params = &type_def.shape.ty_quantifiers;
@@ -63,7 +143,11 @@ fn auto_value_constraints(type_def: &TypeDefRef, input_ty: Type) -> Vec<PubTypeC
     }
 
     for member_ty in auto_value_direct_member_tys(input_ty) {
-        if member_ty == Type::unit() || !type_has_any_ty_var(member_ty, params) {
+        if member_ty == Type::unit()
+            || member_ty.is_function()
+            || is_function_surface_only_value_type(member_ty)
+            || !type_has_any_ty_var(member_ty, params)
+        {
             continue;
         }
         let constraint =

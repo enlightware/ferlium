@@ -32,7 +32,7 @@ use crate::{
     containers::{b, iterable_to_string},
     desugar::desugar_expr_with_empty_ctx,
     format::FormatWith,
-    hir::dictionary_passing::DictElaborationCtx,
+    hir::dictionary_passing::{DictElaborationCtx, elaborate_local_value_dispatches},
     hir::function::{FunctionDefinition, ScriptFunction},
     hir::value::build_dictionary_value,
     hir::{self, NodeArena},
@@ -1572,6 +1572,7 @@ fn emit_expr_unsafe_inner(
     let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
     check_borrows(ir_arena, node_id)?;
     let local_count = locals.len();
+    elaborate_local_value_dispatches(ir_arena, &mut locals, &mut ctx)?;
     elaborate_dictionaries(ir_arena, node_id, &mut ctx, local_count)?;
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
@@ -1607,6 +1608,13 @@ pub fn emit_expr(
             span,
         }));
     }
+    if let Some((ty_var, ty, span)) = first_unbound_type_in_constraints(&ty.constraints) {
+        return Err(internal_compilation_error!(UnboundTypeVar {
+            ty_var,
+            ty,
+            span
+        }));
+    }
     if !ty.constraints.is_empty() {
         return Err(internal_compilation_error!(UnresolvedConstraints {
             constraints: ty.constraints.clone(),
@@ -1614,6 +1622,68 @@ pub fn emit_expr(
         }));
     }
     Ok(CompiledExpr { ty, expr, locals })
+}
+
+fn first_unbound_type_in_constraints(
+    constraints: &[PubTypeConstraint],
+) -> Option<(TypeVar, Type, Location)> {
+    fn in_type(ty: Type, span: Location) -> Option<(TypeVar, Type, Location)> {
+        ty.inner_ty_vars().first().map(|ty_var| (*ty_var, ty, span))
+    }
+
+    for constraint in constraints {
+        let span = constraint.use_site();
+        match constraint {
+            PubTypeConstraint::TupleAtIndexIs {
+                tuple_ty,
+                element_ty,
+                ..
+            } => {
+                if let Some(unbound) = in_type(*tuple_ty, span) {
+                    return Some(unbound);
+                }
+                if let Some(unbound) = in_type(*element_ty, span) {
+                    return Some(unbound);
+                }
+            }
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                element_ty,
+                ..
+            } => {
+                if let Some(unbound) = in_type(*record_ty, span) {
+                    return Some(unbound);
+                }
+                if let Some(unbound) = in_type(*element_ty, span) {
+                    return Some(unbound);
+                }
+            }
+            PubTypeConstraint::TypeHasVariant {
+                variant_ty,
+                payload_ty,
+                ..
+            } => {
+                if let Some(unbound) = in_type(*variant_ty, span) {
+                    return Some(unbound);
+                }
+                if let Some(unbound) = in_type(*payload_ty, span) {
+                    return Some(unbound);
+                }
+            }
+            PubTypeConstraint::HaveTrait {
+                input_tys,
+                output_tys,
+                ..
+            } => {
+                for ty in input_tys.iter().chain(output_tys) {
+                    if let Some(unbound) = in_type(*ty, span) {
+                        return Some(unbound);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 type PubTypeConstraintPtr = *const PubTypeConstraint;

@@ -159,6 +159,10 @@ impl UnifiedTypeInference {
                 get_const.input_tys = self.substitute_in_types(&get_const.input_tys);
                 get_const.output_tys = self.substitute_in_types(&get_const.output_tys);
             }
+            GetTraitDictionary(get_dict) => {
+                get_dict.input_tys = self.substitute_in_types(&get_dict.input_tys);
+                get_dict.output_tys = self.substitute_in_types(&get_dict.output_tys);
+            }
             _ => {}
         }
     }

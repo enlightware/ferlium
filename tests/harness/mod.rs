@@ -13,8 +13,9 @@ use ferlium::{
     eval::{ControlFlow, EvalResult, RuntimeError, eval_node},
     hir::emit_ir::{CompiledExpr, emit_expr_unsafe},
     hir::function::{
-        BinaryNativeFnNNV, Function, FunctionDefinition, NullaryNativeFnN, UnaryNativeFnNN,
-        UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
+        BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, Function, FunctionDefinition,
+        NullaryNativeFnN, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnNV, UnaryNativeFnRN,
+        UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{NativeDisplay, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
@@ -25,6 +26,7 @@ use ferlium::{
         math::int_type,
         new_module_using_std,
         string::string_type,
+        value::VALUE_TRAIT,
     },
     types::effects::{PrimitiveEffect, effect, effects, no_effects},
     types::r#trait::TraitRef,
@@ -147,30 +149,37 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
             Ok(())
         }
         (Value::Function(actual), Value::Function(expected)) => {
-            if actual.function != expected.function {
+            if actual.function_id != expected.function_id {
                 return Err(format!(
                     "{path}: expected function id {}, got {}",
-                    expected.function, actual.function
+                    expected.function_id, actual.function_id
                 ));
             }
-            if actual.module != expected.module {
+            if actual.module_id != expected.module_id {
                 return Err(format!(
                     "{path}: expected module {}, got {}",
-                    expected.module, actual.module
+                    expected.module_id, actual.module_id
                 ));
             }
-            if actual.captured.len() != expected.captured.len() {
+            let actual_captures = actual
+                .hidden_dictionary_args
+                .iter()
+                .chain(actual.closure_env_values())
+                .collect::<Vec<_>>();
+            let expected_captures = expected
+                .hidden_dictionary_args
+                .iter()
+                .chain(expected.closure_env_values())
+                .collect::<Vec<_>>();
+            if actual_captures.len() != expected_captures.len() {
                 return Err(format!(
                     "{path}: expected {} captured values, got {}",
-                    expected.captured.len(),
-                    actual.captured.len()
+                    expected_captures.len(),
+                    actual_captures.len()
                 ));
             }
-            for (index, (actual, expected)) in actual
-                .captured
-                .iter()
-                .zip(expected.captured.iter())
-                .enumerate()
+            for (index, (actual, expected)) in
+                actual_captures.iter().zip(expected_captures).enumerate()
             {
                 compare_values(actual, expected, &format!("{path}.captured[{index}]"))?;
             }
@@ -323,6 +332,7 @@ fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDefRef {
 }
 
 static TRACKED_CLONES: AtomicIsize = AtomicIsize::new(0);
+static TRACKED_DROPS: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Debug)]
 pub struct CloneTrackedNative(isize);
@@ -354,6 +364,42 @@ fn reset_clone_tracked_clones() {
 
 fn clone_tracked_clone_count() -> isize {
     TRACKED_CLONES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn equal_clone_tracked(left: &CloneTrackedNative, right: &CloneTrackedNative) -> bool {
+    left.0 == right.0
+}
+
+fn clone_tracked_to_string(value: &CloneTrackedNative) -> ferlium::std::string::String {
+    ferlium::std::string::String::new(&format!("clone_tracked({})", value.0))
+}
+
+fn hash_clone_tracked(value: &CloneTrackedNative, state: &mut ferlium::std::hash::Hasher) {
+    state.write_isize(value.0);
+}
+
+fn clone_clone_tracked(source: &CloneTrackedNative, target: &mut CloneTrackedNative) {
+    target.clone_from(source);
+}
+
+fn drop_clone_tracked(_target: &mut CloneTrackedNative) {}
+
+fn record_tracked_drop(value: isize) {
+    TRACKED_DROPS
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |old| Some(old * 10 + value),
+        )
+        .unwrap();
+}
+
+fn reset_tracked_drops() {
+    TRACKED_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn tracked_drop_log() -> isize {
+    TRACKED_DROPS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
@@ -406,6 +452,22 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
         vec![Type::variable_id(1)],
         [],
         [Box::new(UnaryNativeFnVV::new(|_value: &Value| Value::unit())) as Function],
+    );
+    module.add_concrete_impl_no_locals(
+        VALUE_TRAIT.clone(),
+        [Type::primitive::<CloneTrackedNative>()],
+        [],
+        [
+            std::mem::size_of::<CloneTrackedNative>() as isize,
+            std::mem::align_of::<CloneTrackedNative>() as isize,
+        ],
+        [
+            Box::new(BinaryNativeFnRRN::new(equal_clone_tracked)) as Function,
+            Box::new(UnaryNativeFnRN::new(clone_tracked_to_string)) as Function,
+            Box::new(BinaryNativeFnRMN::new(hash_clone_tracked)) as Function,
+            Box::new(BinaryNativeFnRMN::new(clone_clone_tracked)) as Function,
+            Box::new(UnaryNativeFnMN::new(drop_clone_tracked)) as Function,
+        ],
     );
     module.add_function(
         "some_int".into(),
@@ -466,6 +528,33 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
             clone_tracked_clone_count,
             [],
             "Returns the clone counter for clone-counting native test values.",
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "record_tracked_drop".into(),
+        UnaryNativeFnNN::description_with_default_ty(
+            record_tracked_drop,
+            ["value"],
+            "Records a dropped test value in the drop log.",
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "reset_tracked_drops".into(),
+        NullaryNativeFnN::description_with_default_ty(
+            reset_tracked_drops,
+            [],
+            "Resets the tracked drop log.",
+            no_effects(),
+        ),
+    );
+    module.add_function(
+        "tracked_drop_log".into(),
+        NullaryNativeFnN::description_with_default_ty(
+            tracked_drop_log,
+            [],
+            "Returns the tracked drop log.",
             no_effects(),
         ),
     );

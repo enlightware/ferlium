@@ -206,14 +206,8 @@ fn equalities() {
         session.run("Some(\"melon\") == Some(\"apple\")"),
         bool(false)
     );
-    session
-        .fail_compilation("[] == []")
-        .as_unresolved_constraints()
-        .unwrap();
-    session
-        .fail_compilation("[] != []")
-        .as_unresolved_constraints()
-        .unwrap();
+    session.fail_compilation("[] == []").expect_unbound_ty_var();
+    session.fail_compilation("[] != []").expect_unbound_ty_var();
     assert_val_eq!(session.run("[] == [1]"), bool(false));
     assert_val_eq!(session.run("[] != [1]"), bool(true));
     assert_val_eq!(session.run("[1] == [1]"), bool(true));

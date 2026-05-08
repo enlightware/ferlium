@@ -17,7 +17,9 @@ use crate::{
     define_id_type,
     format::FormatWith,
     hir::borrow_checker::check_borrows,
-    hir::dictionary_passing::{DictElaborationCtx, elaborate_dictionaries},
+    hir::dictionary_passing::{
+        DictElaborationCtx, elaborate_dictionaries, elaborate_local_value_dispatches,
+    },
     hir::function::{Function, FunctionDefinition},
     hir::{NodeArena, NodeId},
     module::{ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
@@ -132,11 +134,42 @@ pub struct LocalDecl {
     /// Span of the type ascription (only for let), if any, and whether it is complete (i.e. not an inferred type)
     pub ty_span: Option<(Location, bool)>,
     pub scope: Location,
+    /// Whether this local owns storage that may be moved from or explicitly dropped by generated HIR.
+    #[new(default)]
+    pub owns_storage: bool,
+    /// Clone dispatch used when initializing owned mutable-binding storage.
+    #[new(default)]
+    pub clone: Option<LocalClone>,
+    /// Drop dispatch used when releasing owned local storage at lexical scope exit.
+    #[new(default)]
+    pub drop: Option<LocalDrop>,
 }
 impl LocalDecl {
     pub fn as_fn_arg_type(&self) -> FnArgType {
         FnArgType::new(self.ty, self.mut_ty)
     }
+}
+
+/// How generated HIR clones into an owned mutable local.
+#[derive(Debug, Clone)]
+pub enum LocalClone {
+    /// Clone dispatch has not yet been resolved to either a concrete function or dictionary slot.
+    Required,
+    /// Call this concrete `Value::clone` implementation.
+    Static(FunctionId),
+    /// Load `Value::clone` from this hidden trait dictionary local.
+    Dictionary(usize),
+}
+
+/// How generated HIR drops an owned local at lexical scope exit.
+#[derive(Debug, Clone)]
+pub enum LocalDrop {
+    /// Drop dispatch has not yet been resolved to either a concrete function or dictionary slot.
+    Required,
+    /// Call this concrete `Value::drop` implementation.
+    Static(FunctionId),
+    /// Load `Value::drop` from this hidden trait dictionary local.
+    Dictionary(usize),
 }
 
 define_id_type!(
@@ -229,6 +262,7 @@ impl ModuleFunction {
                     scope,
                 )
             }));
+        elaborate_local_value_dispatches(arena, &mut self.locals, ctx)?;
         elaborate_dictionaries(arena, root, ctx, local_count)
     }
 

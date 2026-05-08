@@ -110,13 +110,28 @@ impl Immediate {
 #[derive(Debug, Clone)]
 pub struct BuildClosure {
     pub function: NodeId,
+    pub dictionary_captures: Vec<NodeId>,
     pub captures: Vec<NodeId>,
+    pub captures_value_dictionary: Option<NodeId>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Application {
     pub function: NodeId,
     pub arguments: Vec<NodeId>,
+}
+
+/// Clone the closure environment of `source` into already allocated `target` storage.
+#[derive(Debug, Clone)]
+pub struct FunctionClone {
+    pub source: NodeId,
+    pub target: NodeId,
+}
+
+/// Drop the owned closure environment stored in `target`.
+#[derive(Debug, Clone)]
+pub struct FunctionDrop {
+    pub target: NodeId,
 }
 
 #[derive(Debug, Clone)]
@@ -153,19 +168,18 @@ pub struct EnvStore {
     pub value: NodeId,
     pub index: u32,
     pub id: LocalDeclId,
-    /// If present, initialize this local by cloning `value`; otherwise move `value` into the local.
-    pub clone: Option<EnvStoreClone>,
 }
 
-/// Clone dispatch used when initializing owned mutable-binding storage.
 #[derive(Debug, Clone)]
-pub enum EnvStoreClone {
-    /// Clone dispatch has not yet been resolved to either a concrete function or dictionary slot.
-    Required,
-    /// Call this concrete `Value::clone` implementation.
-    Static(FunctionId),
-    /// Load `Value::clone` from this hidden trait dictionary local.
-    Dictionary(usize),
+pub struct EnvDrop {
+    pub index: u32,
+    pub id: LocalDeclId,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvMove {
+    pub index: u32,
+    pub id: LocalDeclId,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +231,13 @@ pub struct GetTraitAssociatedConst {
 }
 
 #[derive(Debug, Clone)]
+pub struct GetTraitDictionary {
+    pub trait_ref: TraitRef,
+    pub input_tys: Vec<Type>,
+    pub output_tys: Vec<Type>,
+}
+
+#[derive(Debug, Clone)]
 pub struct GetDictionary {
     pub dictionary: TraitImplId,
 }
@@ -227,6 +248,8 @@ pub enum NodeKind {
     Immediate(B<Immediate>),
     BuildClosure(B<BuildClosure>),
     Apply(B<Application>),
+    FunctionClone(B<FunctionClone>),
+    FunctionDrop(B<FunctionDrop>),
     StaticApply(B<StaticApplication>),
     /// Note: this should only exist transiently in the HIR and never be executed
     TraitFnApply(B<TraitFnApplication>),
@@ -235,8 +258,12 @@ pub enum NodeKind {
     GetTraitFunction(B<GetTraitFunction>),
     /// Note: this should only exist transiently in the IR and never be executed
     GetTraitAssociatedConst(B<GetTraitAssociatedConst>),
+    /// Note: this should only exist transiently in the IR and never be executed
+    GetTraitDictionary(B<GetTraitDictionary>),
     GetDictionary(GetDictionary),
     EnvStore(EnvStore),
+    EnvDrop(EnvDrop),
+    EnvMove(EnvMove),
     EnvLoad(EnvLoad),
     Return(NodeId),
     Block(B<SVec2<NodeId>>),
@@ -269,13 +296,20 @@ impl NodeKind {
             | GetFunction(_)
             | GetTraitFunction(_)
             | GetTraitAssociatedConst(_)
+            | GetTraitDictionary(_)
             | GetDictionary(_)
+            | EnvDrop(_)
+            | EnvMove(_)
             | EnvLoad(_)
             | SoftBreak
             | Unimplemented => smallvec![],
             BuildClosure(bc) => {
                 let mut v: SVec4<NodeId> = smallvec![bc.function];
+                v.extend_from_slice(&bc.dictionary_captures);
                 v.extend_from_slice(&bc.captures);
+                if let Some(dict) = bc.captures_value_dictionary {
+                    v.push(dict);
+                }
                 v
             }
             Apply(app) => {
@@ -283,6 +317,8 @@ impl NodeKind {
                 v.extend_from_slice(&app.arguments);
                 v
             }
+            FunctionClone(node) => smallvec![node.source, node.target],
+            FunctionDrop(node) => smallvec![node.target],
             StaticApply(app) => app.arguments.iter().copied().collect(),
             TraitFnApply(app) => app.arguments.iter().copied().collect(),
             EnvStore(store) => smallvec![store.value],
@@ -380,11 +416,22 @@ impl Node {
                     spacing,
                     indent + 1,
                 )?;
+                if !build_closure.dictionary_captures.is_empty() {
+                    writeln!(f, "{indent_str}with dictionary captures [")?;
+                    for &capture in &build_closure.dictionary_captures {
+                        format_ind(arena, capture, f, locals, env, spacing, indent + 1)?;
+                    }
+                    writeln!(f, "{indent_str}]")?;
+                }
                 writeln!(f, "{indent_str}by capturing [")?;
                 for &capture in &build_closure.captures {
                     format_ind(arena, capture, f, locals, env, spacing, indent + 1)?;
                 }
                 writeln!(f, "{indent_str}]")?;
+                if let Some(dict) = build_closure.captures_value_dictionary {
+                    writeln!(f, "{indent_str}using capture Value dictionary")?;
+                    format_ind(arena, dict, f, locals, env, spacing, indent + 1)?;
+                }
             }
             Apply(app) => {
                 writeln!(f, "{indent_str}eval")?;
@@ -398,6 +445,16 @@ impl Node {
                     }
                     writeln!(f, "{indent_str})")?;
                 }
+            }
+            FunctionClone(node) => {
+                writeln!(f, "{indent_str}function clone")?;
+                format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
+                writeln!(f, "{indent_str}into")?;
+                format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
+            }
+            FunctionDrop(node) => {
+                writeln!(f, "{indent_str}function drop")?;
+                format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
             }
             StaticApply(app) => {
                 writeln!(f, "{indent_str}static apply")?;
@@ -452,6 +509,10 @@ impl Node {
                     "{indent_str}get trait associated const {const_name} (from {trait_name})"
                 )?;
             }
+            GetTraitDictionary(get_dict) => {
+                let trait_name = get_dict.trait_ref.name;
+                writeln!(f, "{indent_str}get trait dictionary (from {trait_name})")?;
+            }
             GetDictionary(get_dict) => {
                 writeln!(
                     f,
@@ -461,7 +522,7 @@ impl Node {
             }
             EnvStore(node) => {
                 let name = locals[node.id.as_index()].name.0;
-                let clone_suffix = if node.clone.is_some() {
+                let clone_suffix = if locals[node.id.as_index()].clone.is_some() {
                     " with Value::clone"
                 } else {
                     ""
@@ -475,6 +536,20 @@ impl Node {
                     clone_suffix,
                 )?;
                 format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
+            }
+            EnvDrop(node) => {
+                let name = locals[node.id.as_index()].name.0;
+                writeln!(
+                    f,
+                    "{indent_str}drop {} at {} as \"{}\"",
+                    locals[node.id.as_index()].ty.format_with(env),
+                    node.index,
+                    name,
+                )?;
+            }
+            EnvMove(node) => {
+                let name = locals[node.id.as_index()].name.0;
+                writeln!(f, "{indent_str}move {} as \"{}\"", node.index, name)?;
             }
             EnvLoad(node) => {
                 let name = locals[node.id.as_index()].name.0;
@@ -618,6 +693,19 @@ impl Node {
                     }
                 }
             }
+            FunctionClone(node) => {
+                if let Some(ty) = type_at(arena, node.source, pos) {
+                    return Some(ty);
+                }
+                if let Some(ty) = type_at(arena, node.target, pos) {
+                    return Some(ty);
+                }
+            }
+            FunctionDrop(node) => {
+                if let Some(ty) = type_at(arena, node.target, pos) {
+                    return Some(ty);
+                }
+            }
             StaticApply(app) => {
                 for &arg in &app.arguments {
                     if let Some(ty) = type_at(arena, arg, pos) {
@@ -641,6 +729,9 @@ impl Node {
             GetTraitAssociatedConst(_) => {
                 // GetTraitAssociatedConst nodes don't contain child expressions with types
             }
+            GetTraitDictionary(_) => {
+                // GetTraitDictionary nodes don't contain child expressions with types
+            }
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
             }
@@ -649,6 +740,8 @@ impl Node {
                     return Some(ty);
                 }
             }
+            EnvDrop(_) => {}
+            EnvMove(_) => {}
             EnvLoad(_) => {}
             Return(node) => {
                 if let Some(ty) = type_at(arena, *node, pos) {
@@ -770,6 +863,11 @@ impl Node {
                     unbound_ty_vars(arena, arg, result, ignore);
                 }
             }
+            FunctionClone(node) => {
+                unbound_ty_vars(arena, node.source, result, ignore);
+                unbound_ty_vars(arena, node.target, result, ignore);
+            }
+            FunctionDrop(node) => unbound_ty_vars(arena, node.target, result, ignore),
             StaticApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for &arg in &app.arguments {
@@ -794,10 +892,20 @@ impl Node {
                     self.unbound_ty_vars_in_ty(ty, result, ignore);
                 }
             }
+            GetTraitDictionary(get_dict) => {
+                for ty in &get_dict.input_tys {
+                    self.unbound_ty_vars_in_ty(ty, result, ignore);
+                }
+                for ty in &get_dict.output_tys {
+                    self.unbound_ty_vars_in_ty(ty, result, ignore);
+                }
+            }
             GetDictionary(_) => {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
             EnvStore(node) => unbound_ty_vars(arena, node.value, result, ignore),
+            EnvDrop(_) => {}
+            EnvMove(_) => {}
             EnvLoad(_) => {}
             Return(node) => unbound_ty_vars(arena, *node, result, ignore),
             Block(nodes) => nodes
@@ -903,6 +1011,18 @@ pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitut
                 .map(|ty| ty.instantiate(subst))
                 .collect();
             get_const.output_tys = get_const
+                .output_tys
+                .iter()
+                .map(|ty| ty.instantiate(subst))
+                .collect();
+        }
+        GetTraitDictionary(get_dict) => {
+            get_dict.input_tys = get_dict
+                .input_tys
+                .iter()
+                .map(|ty| ty.instantiate(subst))
+                .collect();
+            get_dict.output_tys = get_dict
                 .output_tys
                 .iter()
                 .map(|ty| ty.instantiate(subst))
