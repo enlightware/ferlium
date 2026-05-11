@@ -29,7 +29,7 @@ use crate::{
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
     types::r#type::Type,
-    types::type_inference::expr::TypeInference,
+    types::type_inference::expr::{TypeInference, node_is_place_reference},
     types::type_scheme::PubTypeConstraint,
     types::typing_env::TypingEnv,
 };
@@ -215,6 +215,8 @@ impl TypeInference {
                 pattern_ty,
                 env.all_locals,
             );
+            env.all_locals[l_match_condition.as_index()].owns_storage =
+                !node_is_place_reference(env.ir_arena, condition_node_id);
             let store_variant_node_id = env.ir_arena.alloc(N::new(
                 store_variant,
                 Type::unit(),
@@ -281,6 +283,7 @@ impl TypeInference {
                             MutType::constant(),
                             match_span,
                         )?;
+                        node_id = self.materialize_owned_value(env, node_id, match_span);
 
                         // Generate the variable binding code
                         if !bind_var_names.is_empty() {
@@ -318,6 +321,8 @@ impl TypeInference {
                                     no_effects(),
                                     sp(*expr),
                                 ));
+                                env.all_locals[l_bindings[i].as_index()].owns_storage =
+                                    !node_is_place_reference(env.ir_arena, project_inner_id);
                                 let store_projected_inner_id = env.ir_arena.alloc(N::new(
                                     K::EnvStore(EnvStore {
                                         value: project_inner_id,
@@ -371,7 +376,9 @@ impl TypeInference {
                 }
 
                 // Generate the default code node
-                self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?
+                let default_id =
+                    self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
+                self.materialize_owned_value(env, default_id, match_span)
             } else {
                 // No default, compute a full variant type.
                 let variant_inner_tys: Vec<_> =
@@ -423,6 +430,7 @@ impl TypeInference {
             let (alternatives, default_id, effects) = if let Some(default) = default {
                 let default_id =
                     self.check_expr(env, *default, return_ty, MutType::constant(), match_span)?;
+                let default_id = self.materialize_owned_value(env, default_id, match_span);
                 let (alternatives, alt_eff) = self.check_literal_patterns(
                     env,
                     alternatives,
@@ -516,6 +524,7 @@ impl TypeInference {
                         MutType::constant(),
                         expected_return_span,
                     )?;
+                    let node_id = self.materialize_owned_value(env, node_id, expected_return_span);
                     let effects = env.ir_arena[node_id].effects.clone();
                     Ok(((literal.clone(), node_id), effects))
                 } else {

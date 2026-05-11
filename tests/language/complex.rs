@@ -12,8 +12,13 @@ use indoc::indoc;
 
 use crate::harness::{TestSession, bool, float, int, unit};
 use ferlium::{
-    compiler::error::MutabilityMustBeWhat, hir::value::Value,
-    std::core_traits_names::NUM_TRAIT_NAME, types::type_scheme::PubTypeConstraint,
+    compiler::error::MutabilityMustBeWhat,
+    hir::value::Value,
+    std::{
+        core_traits_names::{NUM_TRAIT_NAME, ORD_TRAIT_NAME},
+        value::VALUE_TRAIT,
+    },
+    types::type_scheme::PubTypeConstraint,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -238,7 +243,25 @@ fn explicit_generic_module_functions() {
         "keep",
     );
     assert_eq!(keep.ty_scheme.ty_quantifiers.len(), 1);
-    assert!(keep.ty_scheme.constraints.is_empty());
+    assert_eq!(keep.ty_scheme.constraints.len(), 1);
+    let keep_ret_ty = keep.ty_scheme.ty().ret;
+    assert!(
+        keep.ty_scheme
+            .constraints
+            .iter()
+            .any(|constraint| match constraint {
+                PubTypeConstraint::HaveTrait {
+                    trait_ref,
+                    input_tys,
+                    output_tys,
+                    ..
+                } =>
+                    trait_ref == &*VALUE_TRAIT
+                        && input_tys.as_slice() == &[keep_ret_ty]
+                        && output_tys.is_empty(),
+                _ => false,
+            })
+    );
 }
 
 #[test]
@@ -271,7 +294,30 @@ fn function_where_clauses_are_enforced() {
         "keep_ord",
     );
     assert_eq!(keep_ord.ty_scheme.ty_quantifiers.len(), 1);
-    assert_eq!(keep_ord.ty_scheme.constraints.len(), 1);
+    assert_eq!(keep_ord.ty_scheme.constraints.len(), 2);
+    let keep_ord_ret_ty = keep_ord.ty_scheme.ty().ret;
+    let ord_trait = session.std_trait(ORD_TRAIT_NAME);
+    let has_unary_constraint_on_ret = |expected_trait| {
+        keep_ord
+            .ty_scheme
+            .constraints
+            .iter()
+            .any(|constraint| match constraint {
+                PubTypeConstraint::HaveTrait {
+                    trait_ref,
+                    input_tys,
+                    output_tys,
+                    ..
+                } => {
+                    trait_ref == expected_trait
+                        && input_tys.as_slice() == &[keep_ord_ret_ty]
+                        && output_tys.is_empty()
+                }
+                _ => false,
+            })
+    };
+    assert!(has_unary_constraint_on_ret(&ord_trait));
+    assert!(has_unary_constraint_on_ret(&*VALUE_TRAIT));
 
     session.fail_compilation(indoc! { r#"
         fn keep_ord<T>(value: T) -> T

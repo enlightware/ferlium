@@ -168,7 +168,10 @@ where
 	}
 
 	fn clone(source: HashSet<V>, target: &mut HashSet<V>) {
-		target = source;
+		target = HashSet {
+			buckets: source.buckets,
+			len: source.len,
+		};
 	}
 
 	fn drop(target: &mut HashSet<V>) {}
@@ -209,7 +212,11 @@ where
 	}
 
 	fn clone(source: HashMapEntry<K, V>, target: &mut HashMapEntry<K, V>) {
-		target = source;
+		target = HashMapEntry {
+			hash: source.hash,
+			key: source.key,
+			value: source.value,
+		};
 	}
 
 	fn drop(target: &mut HashMapEntry<K, V>) {}
@@ -432,7 +439,10 @@ where
 	}
 
 	fn clone(source: HashMap<K, V>, target: &mut HashMap<K, V>) {
-		target = source;
+		target = HashMap {
+			buckets: source.buckets,
+			len: source.len,
+		};
 	}
 
 	fn drop(target: &mut HashMap<K, V>) {}

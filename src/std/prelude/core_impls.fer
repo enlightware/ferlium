@@ -545,21 +545,6 @@ fn variant_to_string(v: Variant) {
 		_ => panic("Expected String variant")
 	}
 }
-/// Downcasts a variant to an array, panicking if the variant is not an array.
-fn variant_to_array(v: Variant) {
-	match (v) {
-		Array(a) => a,
-		_ => panic("Expected Array variant")
-	}
-}
-/// Downcasts a variant to an object payload, panicking if the variant is not an object.
-fn variant_to_object(v: Variant) {
-	match (v) {
-		Object(o) => o,
-		_ => panic("Expected Object variant")
-	}
-}
-
 impl Serialize {
 	fn serialize(v: ()) {
 		None

@@ -89,9 +89,9 @@ pub(crate) fn mut_ptr_type(element_ty: Type) -> Type {
 pub(crate) fn place_from_arg(arg: ValOrMut) -> Result<Place, RuntimeError> {
     match arg {
         ValOrMut::Mut(place) => Ok(place),
-        ValOrMut::Val(_) => Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-            ustr("place"),
-        ))),
+        ValOrMut::Val(_) | ValOrMut::Ref(_) => Err(RuntimeError::new_native(
+            RuntimeErrorKind::InvalidArgument(ustr("place")),
+        )),
     }
 }
 
@@ -126,9 +126,16 @@ fn native_function(
 fn dictionary_from_arg(arg: ValOrMut, ctx: &mut EvalCtx<'_>) -> Result<Value, RuntimeError> {
     match arg {
         ValOrMut::Val(value) => Ok(value),
+        ValOrMut::Ref(value) => {
+            // SAFETY: see `ValOrMut::as_primitive`.
+            Ok(unsafe { &*value }
+                .host_clone(crate::hir::value::HostValueCloneReason::DictionaryMetadata))
+        }
         ValOrMut::Mut(place) => place
             .target_ref(ctx)
-            .cloned()
+            .map(|value| {
+                value.host_clone(crate::hir::value::HostValueCloneReason::DictionaryMetadata)
+            })
             .map_err(RuntimeError::new_native),
     }
 }

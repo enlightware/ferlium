@@ -1,5 +1,21 @@
 // Serde derive helper
 
+/// Downcasts a variant to an array, panicking if the variant is not an array.
+fn variant_to_array(v: Variant) {
+	match (v) {
+		Array(a) => a,
+		_ => panic("Expected Array variant")
+	}
+}
+
+/// Downcasts a variant to an object payload, panicking if the variant is not an object.
+fn variant_to_object(v: Variant) {
+	match (v) {
+		Object(o) => o,
+		_ => panic("Expected Object variant")
+	}
+}
+
 /// Gets an entry from a Variant Object by name, returning None if not found.
 fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Some(Variant) | None {
 	for entry in entries {

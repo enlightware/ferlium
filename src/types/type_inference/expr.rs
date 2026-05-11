@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, iter::once};
+use std::borrow::Borrow;
 
 use derive_new::new;
 use ena::unify::InPlaceUnificationTable;
@@ -29,7 +29,7 @@ use crate::{
     std::{
         STD_MODULE_ID,
         array::array_type,
-        core::REPR_TRAIT,
+        core::{REPR_TRAIT, TRIVIAL_COPY_TRAIT},
         math::int_type,
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT},
     },
@@ -40,7 +40,7 @@ use crate::{
         },
         mutability::{MutType, MutVar, MutVarKey},
         r#trait::{TraitMethodIndex, TraitRef},
-        trait_solver::TraitSolver,
+        trait_solver::{TraitSolver, TraitSolverProbe},
         r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
         type_like::TypeLike,
         type_mapper::TypeMapper,
@@ -285,13 +285,17 @@ impl TypeInference {
         );
 
         // 5. Infer the body's type.
-        let code_id = self.check_expr(
+        let mut code_id = self.check_expr(
             &mut inner_env,
             body,
             ret_ty,
             MutType::constant(),
             env.ast_arena[body].span,
         )?;
+        if inner_env.ir_arena[code_id].ty != Type::never() {
+            code_id =
+                self.materialize_owned_value(&mut inner_env, code_id, env.ast_arena[body].span);
+        }
 
         let code = &inner_env.ir_arena[code_id];
         let effects = code.effects.clone();
@@ -318,6 +322,7 @@ impl TypeInference {
             span,
         ));
 
+        let capture_node_ids = self.materialize_owned_values(env, capture_node_ids, span);
         let node_id = if capture_node_ids.is_empty() {
             fn_node_id
         } else {
@@ -504,11 +509,14 @@ impl TypeInference {
                 let mut_val = data.pattern.kind.mut_val;
                 let node_id = self.infer_expr_drop_mut(env, data.expr)?;
                 let node_ty = env.ir_arena[node_id].ty;
-                let node_effects = env.ir_arena[node_id].effects.clone();
                 let initializer_is_borrow =
                     initializer_needs_mut_binding_clone(env.ir_arena, node_id);
-                let needs_mut_clone =
-                    mut_val.is_mutable() && node_ty != Type::never() && initializer_is_borrow;
+                let initializer_is_known_trivial_copy =
+                    type_has_known_trivial_copy_impl(env, node_ty, expr_span);
+                let needs_mut_clone = mut_val.is_mutable()
+                    && node_ty != Type::never()
+                    && initializer_is_borrow
+                    && !initializer_is_known_trivial_copy;
                 if needs_mut_clone {
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                         VALUE_TRAIT.clone(),
@@ -517,8 +525,10 @@ impl TypeInference {
                         expr_span,
                     ));
                 }
-                let owns_storage =
-                    node_ty != Type::never() && (needs_mut_clone || !initializer_is_borrow);
+                let owns_storage = node_ty != Type::never()
+                    && (needs_mut_clone
+                        || !initializer_is_borrow
+                        || initializer_is_known_trivial_copy);
                 let mut local = LocalDecl::new(
                     name,
                     MutType::resolved(mut_val),
@@ -530,12 +540,21 @@ impl TypeInference {
                 if needs_mut_clone {
                     local.clone = Some(LocalClone::Required);
                 }
+                let value_id = if node_ty != Type::never()
+                    && initializer_is_borrow
+                    && initializer_is_known_trivial_copy
+                {
+                    self.trivial_copy_value(env, node_id, expr_span)
+                } else {
+                    node_id
+                };
+                let node_effects = env.ir_arena[value_id].effects.clone();
                 let index = env.cur_locals.len();
                 let id = LocalDeclId::from_index(env.all_locals.len());
                 env.all_locals.push(local);
                 env.cur_locals.push(id);
                 let node = K::EnvStore(EnvStore {
-                    value: node_id,
+                    value: value_id,
                     index: index as u32,
                     id,
                 });
@@ -592,6 +611,11 @@ impl TypeInference {
                 let effects = env.ir_arena[node_id].effects.clone();
                 let (node_id, moved_local) =
                     self.move_owned_local_result(env, node_id, 0, expr_span);
+                let node_id = if moved_local.is_some() {
+                    node_id
+                } else {
+                    self.materialize_owned_value(env, node_id, expr_span)
+                };
                 let return_value = self.wrap_value_with_scope_drops(
                     env,
                     node_id,
@@ -640,7 +664,14 @@ impl TypeInference {
                     let (args_nodes, args_tys, args_effects, args_diverge) =
                         self.infer_exprs_ret_arg_ty_until_never(env, &data.args)?;
                     if args_diverge {
-                        let nodes = once(func_node_id).chain(args_nodes).collect::<Vec<_>>();
+                        let nodes =
+                            self.value_evaluation_prefix_nodes(env.ir_arena, func_node_id)
+                                .into_iter()
+                                .chain(self.value_evaluation_prefix_nodes_for_many(
+                                    env.ir_arena,
+                                    args_nodes,
+                                ))
+                                .collect::<Vec<_>>();
                         let effects = self.make_dependent_effect([&func_effects, &args_effects]);
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
@@ -680,11 +711,17 @@ impl TypeInference {
                 let (mut nodes, types, effects, diverges) =
                     self.infer_exprs_drop_mut_until_never(env, exprs)?;
                 if !diverges {
+                    let last_index = nodes.len().saturating_sub(1);
+                    for node in nodes.iter_mut().take(last_index) {
+                        *node = self.discard_unused_value(env, *node, expr_span);
+                    }
                     let moved_local = nodes.last_mut().and_then(|last| {
                         let (moved_node, moved_local) =
                             self.move_owned_local_result(env, *last, env_size, expr_span);
                         if moved_local.is_some() {
                             *last = moved_node;
+                        } else {
+                            *last = self.materialize_owned_value(env, *last, expr_span);
                         }
                         moved_local
                     });
@@ -746,9 +783,12 @@ impl TypeInference {
                     self.add_sub_type_constraint(value_ty, value_span, place_ty, place_span);
                     let value_effects = env.ir_arena[value_id].effects.clone();
                     if value_ty == Type::never() {
+                        let mut nodes = self.place_evaluation_prefix_nodes(env.ir_arena, place_id);
+                        nodes.push(value_id);
                         let effects = self.make_dependent_effect([&place_effects, &value_effects]);
-                        Self::diverging_prefix_result([place_id, value_id], effects)
+                        Self::diverging_prefix_result(nodes, effects)
                     } else {
+                        let value_id = self.materialize_owned_value(env, value_id, expr_span);
                         let combined_effects =
                             self.make_dependent_effect([&value_effects, &place_effects]);
                         let node = K::Assign(hir::Assignment {
@@ -765,6 +805,7 @@ impl TypeInference {
                 if diverges {
                     Self::diverging_prefix_result(nodes, effects)
                 } else {
+                    let nodes = self.materialize_owned_values(env, nodes, expr_span);
                     let ty = Type::tuple(types);
                     let node = if let Some(values) = nodes_as_bare_immediate(env.ir_arena, &nodes) {
                         K::Immediate(Immediate::new(Value::tuple(values)))
@@ -892,6 +933,7 @@ impl TypeInference {
                     if diverges {
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
+                        let nodes = self.materialize_owned_values(env, nodes, expr_span);
                         // But the value of the node is the underlying record.
                         // If all nodes can be resolved to bare immediates, we can create an immediate value.
                         let resolved_nodes_value =
@@ -1007,6 +1049,7 @@ impl TypeInference {
                     if diverges {
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
+                        let nodes = self.materialize_owned_values(env, nodes, expr_span);
                         // The element type is the first element's type
                         // All elements must be of the first element's type
                         let element_ty = types[0];
@@ -1062,8 +1105,11 @@ impl TypeInference {
                     // Build the index node and return it
                     let index_effects = env.ir_arena[index_node_id].effects.clone();
                     if env.ir_arena[index_node_id].ty == Type::never() {
+                        let mut nodes =
+                            self.place_evaluation_prefix_nodes(env.ir_arena, array_node_id);
+                        nodes.push(index_node_id);
                         let effects = self.make_dependent_effect([&array_effects, &index_effects]);
-                        Self::diverging_prefix_result([array_node_id, index_node_id], effects)
+                        Self::diverging_prefix_result(nodes, effects)
                     } else {
                         let combined_effects = self.make_dependent_effect([
                             &effect(PrimitiveEffect::Fallible),
@@ -1302,6 +1348,131 @@ impl TypeInference {
         (move_node, Some(id))
     }
 
+    pub(crate) fn materialize_owned_value(
+        &mut self,
+        env: &mut TypingEnv,
+        value: NodeId,
+        span: Location,
+    ) -> NodeId {
+        if !node_is_place_reference(env.ir_arena, value) {
+            return value;
+        }
+
+        let ty = env.ir_arena[value].ty;
+        if type_has_known_trivial_copy_impl(env, ty, span) {
+            return self.trivial_copy_value(env, value, span);
+        }
+
+        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+            VALUE_TRAIT.clone(),
+            vec![ty],
+            vec![],
+            span,
+        ));
+        let effects = env.ir_arena[value].effects.clone();
+        env.ir_arena.alloc(hir::Node::new(
+            NodeKind::ValueClone(b(hir::ValueClone {
+                source: value,
+                clone: Some(LocalClone::Required),
+            })),
+            ty,
+            effects,
+            span,
+        ))
+    }
+
+    fn trivial_copy_value(&mut self, env: &mut TypingEnv, value: NodeId, span: Location) -> NodeId {
+        let ty = env.ir_arena[value].ty;
+        let effects = env.ir_arena[value].effects.clone();
+        env.ir_arena.alloc(hir::Node::new(
+            NodeKind::TrivialCopy(b(hir::TrivialCopy { source: value })),
+            ty,
+            effects,
+            span,
+        ))
+    }
+
+    fn materialize_owned_values(
+        &mut self,
+        env: &mut TypingEnv,
+        values: impl IntoIterator<Item = NodeId>,
+        span: Location,
+    ) -> Vec<NodeId> {
+        values
+            .into_iter()
+            .map(|value| self.materialize_owned_value(env, value, span))
+            .collect()
+    }
+
+    fn value_evaluation_prefix_nodes(&self, arena: &NodeArena, node_id: NodeId) -> Vec<NodeId> {
+        if node_is_place_reference(arena, node_id) {
+            self.place_evaluation_prefix_nodes(arena, node_id)
+        } else {
+            vec![node_id]
+        }
+    }
+
+    fn value_evaluation_prefix_nodes_for_many(
+        &self,
+        arena: &NodeArena,
+        node_ids: impl IntoIterator<Item = NodeId>,
+    ) -> Vec<NodeId> {
+        node_ids
+            .into_iter()
+            .flat_map(|node_id| self.value_evaluation_prefix_nodes(arena, node_id))
+            .collect()
+    }
+
+    fn place_evaluation_prefix_nodes(&self, arena: &NodeArena, node_id: NodeId) -> Vec<NodeId> {
+        match &arena[node_id].kind {
+            NodeKind::EnvLoad(_) => Vec::new(),
+            NodeKind::Project(base, _)
+            | NodeKind::FieldAccess(base, _)
+            | NodeKind::ProjectAt(base, _) => self.place_evaluation_prefix_nodes(arena, *base),
+            NodeKind::Index(index) => {
+                let mut nodes = self.place_evaluation_prefix_nodes(arena, index.array);
+                nodes.extend(self.value_evaluation_prefix_nodes(arena, index.index));
+                nodes
+            }
+            _ => vec![node_id],
+        }
+    }
+
+    fn discard_unused_value(
+        &mut self,
+        env: &mut TypingEnv,
+        value: NodeId,
+        span: Location,
+    ) -> NodeId {
+        if !node_is_place_reference(env.ir_arena, value) {
+            return value;
+        }
+
+        let prefix = self.value_evaluation_prefix_nodes(env.ir_arena, value);
+        match prefix.len() {
+            0 => env.ir_arena.alloc(hir::Node::new(
+                NodeKind::Immediate(Immediate::new(Value::unit())),
+                Type::unit(),
+                no_effects(),
+                span,
+            )),
+            1 => prefix[0],
+            _ => {
+                let prefix_effects = prefix
+                    .iter()
+                    .map(|node| &env.ir_arena[*node].effects)
+                    .collect::<Vec<_>>();
+                let effects = self.make_dependent_effect(prefix_effects);
+                env.ir_arena.alloc(hir::Node::new(
+                    NodeKind::Block(b(SVec2::from_vec(prefix))),
+                    Type::unit(),
+                    effects,
+                    span,
+                ))
+            }
+        }
+    }
+
     pub(crate) fn diverging_prefix_node(node_ids: impl IntoIterator<Item = NodeId>) -> NodeKind {
         NodeKind::Block(b(SVec2::from_vec(node_ids.into_iter().collect())))
     }
@@ -1369,7 +1540,9 @@ impl TypeInference {
                 let (args_node_ids, args_effects, args_diverge) =
                     self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
                 if args_diverge {
-                    Self::diverging_prefix_result(args_node_ids, args_effects)
+                    let nodes =
+                        self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
+                    Self::diverging_prefix_result(nodes, args_effects)
                 } else {
                     let mut trait_tys = continuous_hashmap_to_vec(subst.0).unwrap();
                     assert_eq!(trait_tys.len(), trait_ref.type_var_count() as usize);
@@ -1417,7 +1590,9 @@ impl TypeInference {
                 let (args_node_ids, args_effects, args_diverge) =
                     self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
                 if args_diverge {
-                    Self::diverging_prefix_result(args_node_ids, args_effects)
+                    let nodes =
+                        self.value_evaluation_prefix_nodes_for_many(env.ir_arena, args_node_ids);
+                    Self::diverging_prefix_result(nodes, args_effects)
                 } else {
                     // Build and return the function node
                     let ret_ty = inst_fn_ty.ret;
@@ -1476,6 +1651,7 @@ impl TypeInference {
                 if diverges {
                     Self::diverging_prefix_result(node_ids, effects)
                 } else {
+                    let node_ids = self.materialize_owned_values(env, node_ids, expr_span);
                     // But the value of the node is the underlying tuple.
                     // If all nodes can be resolved to bare immediates, we can create an immediate value.
                     let resolved_nodes_value =
@@ -1511,6 +1687,8 @@ impl TypeInference {
                 if diverges {
                     Self::diverging_prefix_result(payload_node_ids, effects)
                 } else {
+                    let payload_node_ids =
+                        self.materialize_owned_values(env, payload_node_ids, expr_span);
                     let (payload_ty, payload_node_id) = match payload_node_ids.len() {
                         0 => (
                             Type::unit(),
@@ -1608,6 +1786,9 @@ impl TypeInference {
             let payload_node = Self::diverging_prefix_node(node_ids);
             Ok((payload_node, Type::never(), effects))
         } else {
+            let span = Location::fuse(fields.iter().map(|(_, expr)| env.ast_arena[*expr].span))
+                .unwrap_or_else(Location::new_synthesized);
+            let node_ids = self.materialize_owned_values(env, node_ids, span);
             let payload_ty = fields_to_record_type(fields, types);
             let payload_node =
                 if let Some(values) = nodes_as_bare_immediate(env.ir_arena, &node_ids) {
@@ -2171,15 +2352,32 @@ fn collect_free_variables(
 }
 
 fn initializer_needs_mut_binding_clone(arena: &NodeArena, node_id: NodeId) -> bool {
+    node_is_place_reference(arena, node_id)
+}
+
+pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> bool {
     use NodeKind::*;
 
     match &arena[node_id].kind {
         EnvLoad(_) => true,
+        GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
         Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
             initializer_needs_mut_binding_clone(arena, *base)
         }
         _ => false,
     }
+}
+
+fn type_has_known_trivial_copy_impl(env: &mut TypingEnv<'_>, ty: Type, span: Location) -> bool {
+    if !ty.is_constant() {
+        return false;
+    }
+
+    let mut trait_solver =
+        TraitSolverProbe::from_module(env.module_env.current, env.module_env.modules);
+    trait_solver
+        .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, env.ir_arena)
+        .is_ok()
 }
 
 fn collect_pattern_vars(pattern: &Pattern, bound: &mut FxHashSet<ustr::Ustr>) {

@@ -144,7 +144,7 @@ impl Compiler {
                         "to_string(value)",
                         module_id,
                         vec![local("value", expr.ty.ty)],
-                        vec![ValOrMut::Val(value.clone())],
+                        vec![ValOrMut::Val(value)],
                     ) {
                         Ok(rendered) => {
                             let rendered = rendered

@@ -12,14 +12,19 @@ use std::sync::LazyLock;
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
+    containers::b,
     hir,
     hir::function::FunctionDefinition,
-    module::{LocalDeclId, Module, TraitImplId, id::Id},
-    std::STD_MODULE_ID,
+    module::{LocalClone, LocalDeclId, Module, TraitImplId, id::Id},
+    std::{
+        STD_MODULE_ID,
+        value::{VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT},
+    },
     types::effects::EffType,
     types::r#trait::{Deriver, TraitRef},
     types::trait_solver::TraitSolver,
     types::r#type::{FnType, Type},
+    types::type_like::TypeLike,
 };
 
 use FunctionDefinition as Def;
@@ -41,11 +46,31 @@ impl Deriver for SelfCastDeriver {
         if from_ty != to_ty {
             return Ok(None);
         }
+        if !from_ty.is_constant() {
+            return Ok(None);
+        }
 
-        // No-op implementation
-        let locals = vec![local("self", from_ty)];
+        // Identity implementation: clone from borrowed argument storage into
+        // the returned value.
+        let locals = vec![local("value", from_ty)];
         let id = LocalDeclId::from_index(0);
-        let code_id = arena.alloc(hir::Node::new(load(0, id), from_ty, EffType::empty(), span));
+        let source_id = arena.alloc(hir::Node::new(load(0, id), from_ty, EffType::empty(), span));
+        let clone = solver.solve_impl_method(
+            &VALUE_TRAIT,
+            &[from_ty],
+            VALUE_CLONE_METHOD_INDEX,
+            span,
+            arena,
+        )?;
+        let code_id = arena.alloc(hir::Node::new(
+            hir::NodeKind::ValueClone(b(hir::ValueClone {
+                source: source_id,
+                clone: Some(LocalClone::Static(clone)),
+            })),
+            from_ty,
+            EffType::empty(),
+            span,
+        ));
         let local_impl_id =
             solver.add_concrete_impl_from_code(code_id, locals, trait_ref, input_types, []);
         Ok(Some(TraitImplId::Local(local_impl_id)))

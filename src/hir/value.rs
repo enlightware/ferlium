@@ -170,9 +170,21 @@ impl FunctionValue {
             self.closure_env.as_tuple().unwrap()
         }
     }
+
+    /// Host-side clone for function call metadata extracted from dictionaries.
+    ///
+    /// This is not Ferlium `Value::clone`; it only keeps current interpreter
+    /// call setup independent from Rust borrow lifetimes.
+    pub(crate) fn host_clone_for_call_metadata(&self) -> Self {
+        self.clone()
+    }
 }
 
 /// A value in the system
+///
+/// Rust `Clone` is still implemented for compiler/literal bookkeeping. Runtime
+/// code must go through explicit `host_clone` reasons, or through generated
+/// Ferlium `Value::clone` dispatch when cloning user values semantically.
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum Value {
     /// Internal uninitialized storage used while `Value::clone` writes into a target.
@@ -187,7 +199,20 @@ pub enum Value {
     Function(B<FunctionValue>),
 }
 
+/// Why the interpreter is still allowed to duplicate a `Value` with Rust `Clone`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostValueCloneReason {
+    /// Reusing an immutable HIR immediate value.
+    LiteralReuse,
+    /// Copying runtime dictionary metadata, not source-level owned data.
+    DictionaryMetadata,
+}
+
 impl Value {
+    pub(crate) fn host_clone(&self, _reason: HostValueCloneReason) -> Self {
+        self.clone()
+    }
+
     pub fn uninit() -> Self {
         Self::Uninit
     }

@@ -285,6 +285,12 @@ fn node_variable_type_annotations(
         FunctionDrop(node) => {
             variable_type_annotations(arena, node.target, result, locals, env);
         }
+        ValueClone(node) => {
+            variable_type_annotations(arena, node.source, result, locals, env);
+        }
+        TrivialCopy(node) => {
+            variable_type_annotations(arena, node.source, result, locals, env);
+        }
         StaticApply(app) => {
             let arity = app.argument_names.len();
             let is_synthesized = app.function_span.is_empty();

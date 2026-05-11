@@ -436,6 +436,17 @@ fn trait_constraint_may_be_satisfiable(
     input_tys: &[Type],
     output_tys: &[Type],
 ) -> Result<bool, InternalCompilationError> {
+    if !trait_ref.derivers.is_empty() && !input_tys.iter().all(Type::is_constant) {
+        return constraints_may_be_satisfiable(
+            current,
+            others,
+            ty_inf,
+            pending,
+            next_ty_var_index,
+            stack,
+        );
+    }
+
     let query = (trait_ref.clone(), input_tys.to_vec(), output_tys.to_vec());
     if !stack.insert(query.clone()) {
         return Ok(true);
@@ -481,7 +492,11 @@ fn trait_constraint_may_be_satisfiable(
     }
 
     stack.remove(&query);
-    Ok(!trait_ref.derivers.is_empty())
+    if trait_ref.derivers.is_empty() {
+        Ok(false)
+    } else {
+        constraints_may_be_satisfiable(current, others, ty_inf, pending, next_ty_var_index, stack)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

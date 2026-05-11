@@ -292,24 +292,6 @@ fn array_len_from_place(
     Ok(value.as_primitive_ty::<Array>().unwrap().len())
 }
 
-fn array_arg_as_mut<'a>(
-    arg: ValOrMut,
-    ctx: &'a mut EvalCtx<'_>,
-) -> Result<&'a mut Array, RuntimeError> {
-    match arg {
-        ValOrMut::Mut(place) => place
-            .target_mut(ctx)
-            .map_err(RuntimeError::new_native)?
-            .as_primitive_ty_mut::<Array>()
-            .ok_or_else(|| {
-                RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(ustr("array")))
-            }),
-        ValOrMut::Val(_) => Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-            ustr("array"),
-        ))),
-    }
-}
-
 fn array_element_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut args = args.into_iter();
     let mut place = ptr::place_from_arg(args.next().unwrap())?;
@@ -370,15 +352,23 @@ fn array_push_uninit_front(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalContro
 
 fn array_push_uninit(args: Vec<ValOrMut>, ctx: &mut EvalCtx, front: bool) -> EvalControlFlowResult {
     let mut args = args.into_iter();
-    let array_arg = args.next().unwrap();
-    let array = array_arg_as_mut(array_arg.clone(), ctx)?;
-    let index = if front { 0 } else { array.len() };
-    if front {
-        array.push_front(Value::uninit());
-    } else {
-        array.push_back(Value::uninit());
-    }
-    let mut place = array_arg.as_place().clone();
+    let mut place = ptr::place_from_arg(args.next().unwrap())?;
+    let index = {
+        let array = place
+            .target_mut(ctx)
+            .map_err(RuntimeError::new_native)?
+            .as_primitive_ty_mut::<Array>()
+            .ok_or_else(|| {
+                RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(ustr("array")))
+            })?;
+        let index = if front { 0 } else { array.len() };
+        if front {
+            array.push_front(Value::uninit());
+        } else {
+            array.push_back(Value::uninit());
+        }
+        index
+    };
     place.path.push(index as isize);
     cont(Value::native(MutPtr::new(place)))
 }

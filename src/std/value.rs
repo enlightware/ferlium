@@ -731,7 +731,7 @@ fn derive_value_to_string_body(
         }
         let rendered = n(
             arena,
-            load(l_rendered_id.as_index(), l_rendered_id),
+            move_local(l_rendered_id.as_index(), l_rendered_id),
             string_type(),
         );
         statements.push(rendered);

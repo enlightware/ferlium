@@ -723,6 +723,28 @@ impl Node {
             FunctionDrop(node) => {
                 elaborate_dictionaries(arena, node.target, ctx, local_count)?;
             }
+            ValueClone(node) => {
+                elaborate_dictionaries(arena, node.source, ctx, local_count)?;
+                if !matches!(
+                    node.clone,
+                    Some(LocalClone::Static(_)) | Some(LocalClone::Dictionary(_))
+                ) {
+                    node.clone = Some(
+                        resolve_local_value_dispatch(
+                            arena,
+                            ctx,
+                            node_ty,
+                            VALUE_CLONE_METHOD_INDEX,
+                            node_span,
+                            "Value dictionary for owned value materialization not found, type inference should have failed",
+                        )?
+                        .into_clone(),
+                    );
+                }
+            }
+            TrivialCopy(node) => {
+                elaborate_dictionaries(arena, node.source, ctx, local_count)?;
+            }
             StaticApply(app) => {
                 for &arg_id in &app.arguments {
                     elaborate_dictionaries(arena, arg_id, ctx, local_count)?;

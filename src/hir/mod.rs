@@ -134,6 +134,21 @@ pub struct FunctionDrop {
     pub target: NodeId,
 }
 
+/// Clone from place storage source into an owned result using `Value::clone`.
+#[derive(Debug, Clone)]
+pub struct ValueClone {
+    pub source: NodeId,
+    /// Dispatch used to clone the source into an owned result.
+    /// `None` is only valid before dictionary passing.
+    pub clone: Option<LocalClone>,
+}
+
+/// Copy a concrete `TrivialCopy` value from place storage into an owned result.
+#[derive(Debug, Clone)]
+pub struct TrivialCopy {
+    pub source: NodeId,
+}
+
 #[derive(Debug, Clone)]
 pub struct StaticApplication {
     pub function: FunctionId,
@@ -259,6 +274,8 @@ pub enum NodeKind {
     Apply(B<Application>),
     FunctionClone(B<FunctionClone>),
     FunctionDrop(B<FunctionDrop>),
+    ValueClone(B<ValueClone>),
+    TrivialCopy(B<TrivialCopy>),
     StaticApply(B<StaticApplication>),
     /// Note: this should only exist transiently in the HIR and never be executed
     TraitMethodApply(B<TraitMethodApplication>),
@@ -328,6 +345,8 @@ impl NodeKind {
             }
             FunctionClone(node) => smallvec![node.source, node.target],
             FunctionDrop(node) => smallvec![node.target],
+            ValueClone(node) => smallvec![node.source],
+            TrivialCopy(node) => smallvec![node.source],
             StaticApply(app) => app.arguments.iter().copied().collect(),
             TraitMethodApply(app) => app.arguments.iter().copied().collect(),
             EnvStore(store) => smallvec![store.value],
@@ -464,6 +483,14 @@ impl Node {
             FunctionDrop(node) => {
                 writeln!(f, "{indent_str}function drop")?;
                 format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
+            }
+            ValueClone(node) => {
+                writeln!(f, "{indent_str}value clone")?;
+                format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
+            }
+            TrivialCopy(node) => {
+                writeln!(f, "{indent_str}trivial copy")?;
+                format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
             }
             StaticApply(app) => {
                 writeln!(f, "{indent_str}static apply")?;
@@ -718,6 +745,16 @@ impl Node {
                     return Some(ty);
                 }
             }
+            ValueClone(node) => {
+                if let Some(ty) = type_at(arena, node.source, pos) {
+                    return Some(ty);
+                }
+            }
+            TrivialCopy(node) => {
+                if let Some(ty) = type_at(arena, node.source, pos) {
+                    return Some(ty);
+                }
+            }
             StaticApply(app) => {
                 for &arg in &app.arguments {
                     if let Some(ty) = type_at(arena, arg, pos) {
@@ -880,6 +917,8 @@ impl Node {
                 unbound_ty_vars(arena, node.target, result, ignore);
             }
             FunctionDrop(node) => unbound_ty_vars(arena, node.target, result, ignore),
+            ValueClone(node) => unbound_ty_vars(arena, node.source, result, ignore),
+            TrivialCopy(node) => unbound_ty_vars(arena, node.source, result, ignore),
             StaticApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for &arg in &app.arguments {

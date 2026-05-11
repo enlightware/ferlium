@@ -89,13 +89,14 @@ pub fn store_new(
     locals: &mut Vec<LocalDecl>,
 ) -> (NodeKind, LocalDeclId) {
     let id = LocalDeclId::from_index(locals.len());
-    let local = LocalDecl::new(
+    let mut local = LocalDecl::new(
         (ustr(name), Location::new_synthesized()),
         MutType::resolved(mutable),
         ty,
         None,
         Location::new_synthesized(),
     );
+    local.owns_storage = true;
     locals.push(local);
     (
         K::EnvStore(hir::EnvStore {
@@ -122,6 +123,13 @@ pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
 
 pub fn load(index: usize, id: LocalDeclId) -> NodeKind {
     K::EnvLoad(hir::EnvLoad {
+        index: index as u32,
+        id,
+    })
+}
+
+pub fn move_local(index: usize, id: LocalDeclId) -> NodeKind {
+    K::EnvMove(hir::EnvMove {
         index: index as u32,
         id,
     })
