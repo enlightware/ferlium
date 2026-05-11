@@ -349,6 +349,32 @@ fn named_generic_enum_auto_derives_value() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn auto_derived_nested_value_drop_uses_member_drop() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        struct Wrapper<T>(T)
+
+        enum Boxed<T> {{
+            Empty,
+            Item(Wrapper<T>),
+        }}
+
+        testing::reset_tracked_drops();
+        {{
+            let boxed = Boxed::Item(Wrapper(Probe(6)));
+            ();
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(6));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn explicit_concrete_value_impl_suppresses_auto_blanket_impl() {
     let mut session = TestSession::new();
     assert_val_eq!(

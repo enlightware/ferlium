@@ -10,6 +10,9 @@ test-wasm:
 
 test: test-local test-wasm
 
+test-miri:
+	cargo +nightly miri test hir::value::tests::discard_storage_recursively_reclaims_runtime_payloads --lib
+
 bench:
 	cargo bench
 

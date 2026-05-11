@@ -572,7 +572,7 @@ pub trait OutputBuilder {
 impl<O: NativeOutput> OutputBuilder for NatVal<O> {
     type Input = O;
     fn build(result: Self::Input) -> EvalControlFlowResult {
-        cont(Value::Native(Box::new(result)))
+        cont(Value::native(result))
     }
     fn default_ty() -> Type {
         Type::primitive::<O>()
@@ -582,9 +582,7 @@ impl<O: NativeOutput> OutputBuilder for NatVal<O> {
 impl<O: NativeOutput> OutputBuilder for Fallible<NatVal<O>> {
     type Input = Result<O, RuntimeErrorKind>;
     fn build(result: Self::Input) -> EvalControlFlowResult {
-        cont(Value::Native(Box::new(
-            result.map_err(RuntimeError::new_native)?,
-        )))
+        cont(Value::native(result.map_err(RuntimeError::new_native)?))
     }
     fn default_ty() -> Type {
         Type::primitive::<O>()

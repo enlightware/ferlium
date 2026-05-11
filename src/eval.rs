@@ -19,7 +19,6 @@ use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE
 use crate::{
     CompilerSession, Location, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
-    containers::b,
     format::{FormatWith, write_with_separator},
     hir::function::ArgPassing,
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
@@ -572,6 +571,7 @@ impl Place {
                 Native(primitive) => {
                     // iif the primitive is our standard Array, we can access its elements
                     let array = primitive
+                        .as_mut()
                         .as_mut_any()
                         .downcast_mut::<array::Array>()
                         .unwrap();
@@ -620,7 +620,7 @@ impl Place {
                 Variant(variant) if index == 0 => &variant.value,
                 Native(primitive) => {
                     // iif the primitive is our standard Array, we can access its elements
-                    let array = NativeValue::as_any(&**primitive)
+                    let array = NativeValue::as_any(primitive.as_ref())
                         .downcast_ref::<array::Array>()
                         .unwrap();
                     let len = array.len();
@@ -960,7 +960,7 @@ fn eval_build_closure(
         captures,
         captures_value_dictionary,
     );
-    cont(Value::Function(b(function_value)))
+    cont(Value::function_value(function_value))
 }
 
 fn eval_function_hidden_arg_node(
@@ -1177,8 +1177,12 @@ pub(crate) fn call_value_drop_for_temp(
     span: Location,
 ) -> EvalControlFlowResult {
     let mut temp_target = None;
+    let mut target_place = None;
     let target = match target {
-        ValOrMut::Mut(place) => ValOrMut::Mut(place),
+        ValOrMut::Mut(place) => {
+            target_place = Some(place.clone());
+            ValOrMut::Mut(place)
+        }
         ValOrMut::Ref(_) => panic!("cannot drop shared reference storage"),
         ValOrMut::Dictionary(_) => panic!("cannot drop trait dictionary metadata as a Value"),
         ValOrMut::Val(value) => {
@@ -1187,6 +1191,10 @@ pub(crate) fn call_value_drop_for_temp(
             #[cfg(debug_assertions)]
             ctx.environment_names.push(ustr("$function_drop_target"));
             temp_target = Some(target_index);
+            target_place = Some(Place {
+                target: target_index,
+                path: Vec::new(),
+            });
             ValOrMut::Mut(Place {
                 target: target_index,
                 path: Vec::new(),
@@ -1200,13 +1208,33 @@ pub(crate) fn call_value_drop_for_temp(
         vec![target],
         span,
     );
-    if temp_target.is_some() {
+    if result.is_ok() {
+        if let Some(place) = &target_place {
+            discard_value_storage_at_place(ctx, place, span)?;
+        }
+    }
+    if let Some(target_index) = temp_target {
         #[cfg(debug_assertions)]
         ctx.environment_names.pop();
-        ctx.environment.pop();
+        let value = ctx.environment.pop().unwrap();
+        debug_assert_eq!(target_index, ctx.environment.len());
+        debug_assert!(matches!(value, ValOrMut::Val(Value::Uninit)));
     }
     result?;
     cont(Value::unit())
+}
+
+fn discard_value_storage_at_place(
+    ctx: &mut EvalCtx,
+    place: &Place,
+    span: Location,
+) -> Result<(), RuntimeError> {
+    let target = place
+        .target_mut(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+    let value = mem::replace(target, Value::uninit());
+    value.discard_storage();
+    Ok(())
 }
 
 #[inline(never)]
@@ -1263,7 +1291,8 @@ fn eval_function_clone(
     let target = eval_or_return!(resolve_node_place(arena, node.target, ctx, locals));
     *target
         .target_mut(ctx)
-        .map_err(|err| RuntimeError::new(err, Some(span)))? = Value::Function(b(target_function));
+        .map_err(|err| RuntimeError::new(err, Some(span)))? =
+        Value::function_value(target_function);
     cont(Value::unit())
 }
 
@@ -1287,7 +1316,7 @@ fn eval_function_drop(
             function.closure_env_value_dictionary = None;
             (
                 dictionary,
-                mem::replace(&mut function.closure_env, Value::unit()),
+                mem::replace(&mut function.closure_env, Value::uninit()),
             )
         })
     }) else {
@@ -1540,7 +1569,7 @@ fn eval_env_drop(
         target: ctx.frame_base + node.index as usize,
         path: Vec::new(),
     };
-    let arguments = vec![ValOrMut::Mut(target)];
+    let arguments = vec![ValOrMut::Mut(target.clone())];
     match drop {
         LocalDrop::Required => {
             panic!("LocalDrop::Required should have been resolved before evaluation")
@@ -1559,6 +1588,7 @@ fn eval_env_drop(
             )?;
         }
     }
+    discard_value_storage_at_place(ctx, &target, span)?;
     cont(Value::unit())
 }
 
@@ -1737,7 +1767,7 @@ fn eval_tuple(
 ) -> EvalControlFlowResult {
     // Note: record values are stored as tuples.
     let values = eval_or_return!(eval_nodes(arena, nodes, ctx, locals));
-    cont(Value::Tuple(b(values.into())))
+    cont(Value::tuple(values))
 }
 
 #[inline(never)]
@@ -1776,11 +1806,11 @@ fn eval_project(
         ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, data, ctx, locals));
-    cont(match value {
-        Value::Tuple(tuple) => tuple.into_iter().nth(index).unwrap(),
-        Value::Variant(variant) => variant.value,
-        _ => panic!("Cannot project from a non-compound value"),
-    })
+    cont(
+        value
+            .into_projected_value(index)
+            .unwrap_or_else(|| panic!("Cannot project from a non-compound value")),
+    )
 }
 
 #[inline(never)]
@@ -1834,10 +1864,11 @@ fn eval_project_at(
         .as_primitive::<isize>(ctx)
         .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
         .unwrap();
-    cont(match value {
-        Value::Tuple(tuple) => tuple.into_iter().nth(index as usize).unwrap(),
-        _ => panic!("Cannot access field from a non-compound value"),
-    })
+    cont(
+        value
+            .into_tuple_element(index as usize)
+            .unwrap_or_else(|| panic!("Cannot access field from a non-compound value")),
+    )
 }
 
 fn should_evaluate_projection_data_as_value(

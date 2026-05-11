@@ -14,6 +14,7 @@ use std::{
     any::Any,
     fmt::{self, Display},
     hash::Hash,
+    mem::ManuallyDrop,
 };
 use ustr::Ustr;
 
@@ -144,7 +145,7 @@ impl FunctionValue {
             function_id,
             module_id,
             hidden_args: Vec::new(),
-            closure_env: Value::unit(),
+            closure_env: Value::uninit(),
             closure_env_len: 0,
             closure_env_value_dictionary: None,
         }
@@ -164,7 +165,7 @@ impl FunctionValue {
             module_id,
             hidden_args,
             closure_env: if captures.is_empty() {
-                Value::unit()
+                Value::uninit()
             } else {
                 Value::tuple(captures)
             },
@@ -187,18 +188,18 @@ impl FunctionValue {
 /// Runtime duplication must go through generated Ferlium `Value::clone`
 /// dispatch, while literals use [`LiteralValue`] and are converted into fresh
 /// runtime values when evaluated.
-#[derive(Debug, EnumAsInner)]
+#[derive(Debug)]
 pub enum Value {
     /// Internal uninitialized storage used while `Value::clone` writes into a target.
     Uninit,
     /// A native value, a pointer to the underlying Rust value
-    Native(B<dyn NativeValue>),
+    Native(ManuallyDrop<B<dyn NativeValue>>),
     /// A variant with its tag and payload
-    Variant(B<VariantValue>),
+    Variant(ManuallyDrop<B<VariantValue>>),
     /// A tuple of values, or the data of a record
-    Tuple(B<SVec2<Value>>),
+    Tuple(ManuallyDrop<B<SVec2<Value>>>),
     /// A first-class function
-    Function(B<FunctionValue>),
+    Function(ManuallyDrop<B<FunctionValue>>),
 }
 
 impl Value {
@@ -242,7 +243,11 @@ impl Value {
     }
 
     pub fn native<T: NativeValue + 'static>(value: T) -> Self {
-        Self::Native(b(value))
+        Self::Native(ManuallyDrop::new(b(value)))
+    }
+
+    pub fn native_box(value: B<dyn NativeValue>) -> Self {
+        Self::Native(ManuallyDrop::new(value))
     }
 
     pub fn tuple_variant(tag: Ustr, values: impl IntoSVec2<Value>) -> Self {
@@ -250,33 +255,167 @@ impl Value {
     }
 
     pub fn raw_variant(tag: Ustr, value: Value) -> Self {
-        Self::Variant(b(VariantValue { tag, value }))
+        Self::Variant(ManuallyDrop::new(b(VariantValue { tag, value })))
     }
 
     pub fn unit_variant(tag: Ustr) -> Self {
-        Self::Variant(b(VariantValue {
-            tag,
-            value: Self::unit(),
-        }))
+        Self::raw_variant(tag, Self::unit())
     }
 
     pub fn tuple(values: impl IntoSVec2<Value>) -> Self {
-        Self::Tuple(b(values.into_svec2()))
+        Self::Tuple(ManuallyDrop::new(b(values.into_svec2())))
     }
 
     pub fn empty_tuple() -> Self {
-        Self::Tuple(b(SVec2::new()))
+        Self::tuple(Vec::<Value>::new())
     }
 
     pub fn function(function: LocalFunctionId, module: ModuleId) -> Self {
-        Self::Function(b(FunctionValue::bare(function, module)))
+        Self::function_value(FunctionValue::bare(function, module))
+    }
+
+    pub fn function_value(function: FunctionValue) -> Self {
+        Self::Function(ManuallyDrop::new(b(function)))
+    }
+
+    pub fn is_tuple(&self) -> bool {
+        matches!(self, Self::Tuple(_))
+    }
+
+    pub fn as_native(&self) -> Option<&B<dyn NativeValue>> {
+        match self {
+            Self::Native(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_native_mut(&mut self) -> Option<&mut B<dyn NativeValue>> {
+        match self {
+            Self::Native(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn into_native(self) -> Option<B<dyn NativeValue>> {
+        match self {
+            Self::Native(value) => Some(ManuallyDrop::into_inner(value)),
+            _ => None,
+        }
+    }
+
+    pub fn as_variant(&self) -> Option<&B<VariantValue>> {
+        match self {
+            Self::Variant(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_variant_mut(&mut self) -> Option<&mut B<VariantValue>> {
+        match self {
+            Self::Variant(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn into_variant(self) -> Option<B<VariantValue>> {
+        match self {
+            Self::Variant(value) => Some(ManuallyDrop::into_inner(value)),
+            _ => None,
+        }
+    }
+
+    pub fn as_tuple(&self) -> Option<&B<SVec2<Value>>> {
+        match self {
+            Self::Tuple(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_tuple_mut(&mut self) -> Option<&mut B<SVec2<Value>>> {
+        match self {
+            Self::Tuple(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn into_tuple(self) -> Option<B<SVec2<Value>>> {
+        match self {
+            Self::Tuple(value) => Some(ManuallyDrop::into_inner(value)),
+            _ => None,
+        }
+    }
+
+    pub fn into_tuple_element(self, index: usize) -> Option<Value> {
+        match self {
+            Self::Tuple(value) => ManuallyDrop::into_inner(value).into_iter().nth(index),
+            _ => None,
+        }
+    }
+
+    pub fn into_projected_value(self, index: usize) -> Option<Value> {
+        match self {
+            Self::Tuple(value) => ManuallyDrop::into_inner(value).into_iter().nth(index),
+            Self::Variant(value) if index == 0 => Some(ManuallyDrop::into_inner(value).value),
+            _ => None,
+        }
+    }
+
+    pub fn as_function(&self) -> Option<&B<FunctionValue>> {
+        match self {
+            Self::Function(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_function_mut(&mut self) -> Option<&mut B<FunctionValue>> {
+        match self {
+            Self::Function(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn into_function(self) -> Option<B<FunctionValue>> {
+        match self {
+            Self::Function(value) => Some(ManuallyDrop::into_inner(value)),
+            _ => None,
+        }
+    }
+
+    /// Reclaim the boxed interpreter storage for a value whose logical
+    /// Ferlium-level drop has already run, without invoking `Value::drop` again.
+    pub fn discard_storage(self) {
+        match self {
+            Self::Uninit => {}
+            Self::Native(value) => drop(ManuallyDrop::into_inner(value)),
+            Self::Variant(value) => {
+                let mut value = ManuallyDrop::into_inner(value);
+                let payload = std::mem::replace(&mut value.value, Value::uninit());
+                payload.discard_storage();
+            }
+            Self::Tuple(values) => {
+                let values = ManuallyDrop::into_inner(values);
+                for value in *values {
+                    value.discard_storage();
+                }
+            }
+            Self::Function(value) => {
+                let mut value = ManuallyDrop::into_inner(value);
+                let closure_env = std::mem::replace(&mut value.closure_env, Value::uninit());
+                closure_env.discard_storage();
+            }
+        }
     }
 
     pub fn into_primitive_ty<T: 'static>(self) -> Option<T> {
         use Value::*;
         match self {
             Uninit => panic!("attempted to read an uninitialized value"),
-            Native(value) => Some(*value.into_any().downcast::<T>().ok()?),
+            Native(value) => Some(
+                *ManuallyDrop::into_inner(value)
+                    .into_any()
+                    .downcast::<T>()
+                    .ok()?,
+            ),
             _ => None,
         }
     }
@@ -538,7 +677,7 @@ impl LiteralValue {
     pub fn into_value(self) -> Value {
         use LiteralValue::*;
         match self {
-            Native(value) => Value::Native(value.into_native_value()),
+            Native(value) => Value::native_box(value.into_native_value()),
             Tuple(args) => Value::tuple(args.into_iter().map(Self::into_value).collect::<Vec<_>>()),
         }
     }
@@ -568,6 +707,34 @@ impl Display for LiteralValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::{LocalImplId, id::Id};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use ustr::ustr;
+
+    static RUST_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug)]
+    struct RustDropTracked;
+
+    impl Drop for RustDropTracked {
+        fn drop(&mut self) {
+            RUST_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl NativeDisplay for RustDropTracked {
+        fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "<rust-drop-tracked>")
+        }
+    }
+
+    fn reset_rust_drop_count() {
+        RUST_DROP_COUNT.store(0, Ordering::Relaxed);
+    }
+
+    fn rust_drop_count() -> usize {
+        RUST_DROP_COUNT.load(Ordering::Relaxed)
+    }
 
     #[test]
     fn value_as_primitive_ty_mut() {
@@ -575,5 +742,37 @@ mod tests {
         let mut a = Value::native(v);
         let mut b = v;
         assert_eq!(a.as_primitive_ty_mut::<isize>(), Some(&mut b));
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn rust_drop_does_not_own_value_payload_lifetime() {
+        reset_rust_drop_count();
+        drop(Value::native(RustDropTracked));
+        assert_eq!(rust_drop_count(), 0);
+    }
+
+    #[test]
+    fn discard_storage_recursively_reclaims_runtime_payloads() {
+        reset_rust_drop_count();
+        let dictionary = TraitDictionaryId {
+            module_id: ModuleId::from_index(0),
+            impl_id: LocalImplId::from_index(0),
+        };
+        let value = Value::tuple([
+            Value::native(RustDropTracked),
+            Value::raw_variant(ustr("Payload"), Value::native(RustDropTracked)),
+            Value::function_value(FunctionValue::closure(
+                LocalFunctionId::from_index(0),
+                ModuleId::from_index(0),
+                Vec::new(),
+                vec![Value::native(RustDropTracked)],
+                Some(dictionary),
+            )),
+        ]);
+
+        assert_eq!(rust_drop_count(), 0);
+        value.discard_storage();
+        assert_eq!(rust_drop_count(), 3);
     }
 }
