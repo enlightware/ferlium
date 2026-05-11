@@ -12,11 +12,8 @@ use test_log::test;
 use ferlium::{
     compiler::error::{CompilationErrorImpl, InvalidTraitDefinitionKind},
     format::FormatWith,
-    hir::{
-        function::{Function, FunctionDefinition, VoidFunction},
-        value::Value,
-    },
-    module::{FunctionCollector, LocalDecl, ModuleId, TraitImpls},
+    hir::function::{Function, FunctionDefinition, VoidFunction},
+    module::{FunctionCollector, LocalDecl, ModuleId, TraitDictionaryEntry, TraitImpls},
     types::{
         effects::{PrimitiveEffect, effect, no_effects},
         r#trait::{
@@ -230,12 +227,18 @@ fn concrete_impl_stores_associated_const_values() {
     );
     assert_eq!(fn_collector.new_elements.len(), 1);
 
-    let Value::Tuple(dictionary_entries) = &imp.dictionary_value else {
-        panic!("expected dictionary value to be a tuple");
-    };
-    assert!(dictionary_entries[0].as_function().is_some());
-    assert_eq!(dictionary_entries[1].as_primitive_ty::<isize>(), Some(&0));
-    assert_eq!(dictionary_entries[2].as_primitive_ty::<isize>(), Some(&1));
+    assert!(matches!(
+        imp.dictionary_value.entry(TraitDictionaryEntryIndex(0)),
+        TraitDictionaryEntry::Method(_)
+    ));
+    assert_eq!(
+        imp.dictionary_value.entry(TraitDictionaryEntryIndex(1)),
+        TraitDictionaryEntry::AssociatedConst(0)
+    );
+    assert_eq!(
+        imp.dictionary_value.entry(TraitDictionaryEntryIndex(2)),
+        TraitDictionaryEntry::AssociatedConst(1)
+    );
 
     let int_ty = Type::primitive::<isize>();
     let dictionary_ty_data = imp.dictionary_ty.data();

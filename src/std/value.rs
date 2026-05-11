@@ -1616,11 +1616,7 @@ fn derive_function_value_impl(
         .map(|definition| Type::function_type(definition.ty_scheme.ty))
         .collect::<Vec<_>>();
     let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_values.len());
-    let dictionary_value = hir::value::build_dictionary_value(
-        &methods,
-        &associated_const_values,
-        solver.impls.module_id,
-    );
+    let dictionary_value = module::build_dictionary_value(&methods, &associated_const_values);
     let imp = TraitImpl::new(
         Vec::new(),
         methods,

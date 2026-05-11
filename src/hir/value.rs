@@ -20,7 +20,7 @@ use ustr::Ustr;
 use crate::{
     containers::{B, IntoSVec2, SVec2, b},
     format::{FormatWithData, write_with_separator, write_with_separator_and_format_fn},
-    module::{LocalFunctionId, ModuleEnv, ModuleId},
+    module::{LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId},
     types::r#type::{NativeType, Type, TypeKind},
 };
 
@@ -108,24 +108,31 @@ impl VariantValue {
     }
 }
 
+/// Hidden compiler metadata captured by first-class generic functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionHiddenArgValue {
+    TraitDictionary(TraitDictionaryId),
+    FieldIndex(isize),
+}
+
 /// Runtime representation of a first-class function.
 ///
 /// Function values carry a code identity plus two hidden argument groups:
-/// dictionaries captured while instantiating generic functions, and the owned
-/// source-level closure environment. Only the closure environment is managed by
-/// `Value::clone`/`Value::drop`; dictionary arguments are call metadata.
+/// compiler metadata captured while instantiating generic functions, and the
+/// owned source-level closure environment. Only the closure environment is
+/// managed by `Value::clone`/`Value::drop`; hidden arguments are call metadata.
 #[derive(Debug, Clone)]
 pub struct FunctionValue {
     pub function_id: LocalFunctionId,
     pub module_id: ModuleId,
-    /// Hidden dictionary arguments prepended when calling the function.
-    pub hidden_dictionary_args: Vec<Value>,
+    /// Hidden compiler metadata arguments prepended when calling the function.
+    pub hidden_args: Vec<FunctionHiddenArgValue>,
     /// Owned source-level closure environment, stored as a tuple value.
     pub closure_env: Value,
     pub closure_env_len: usize,
-    /// Runtime `Value` dictionary for cloning/dropping `closure_env`.
+    /// Runtime `Value` dictionary metadata for cloning/dropping `closure_env`.
     /// `None` means `closure_env_len == 0`.
-    pub closure_env_value_dictionary: Option<Value>,
+    pub closure_env_value_dictionary: Option<TraitDictionaryId>,
 }
 
 impl FunctionValue {
@@ -133,7 +140,7 @@ impl FunctionValue {
         Self {
             function_id,
             module_id,
-            hidden_dictionary_args: Vec::new(),
+            hidden_args: Vec::new(),
             closure_env: Value::unit(),
             closure_env_len: 0,
             closure_env_value_dictionary: None,
@@ -143,16 +150,16 @@ impl FunctionValue {
     pub fn closure(
         function_id: LocalFunctionId,
         module_id: ModuleId,
-        hidden_dictionary_args: Vec<Value>,
+        hidden_args: Vec<FunctionHiddenArgValue>,
         captures: Vec<Value>,
-        closure_env_value_dictionary: Option<Value>,
+        closure_env_value_dictionary: Option<TraitDictionaryId>,
     ) -> Self {
         let closure_env_len = captures.len();
         debug_assert_eq!(closure_env_value_dictionary.is_some(), closure_env_len > 0);
         Self {
             function_id,
             module_id,
-            hidden_dictionary_args,
+            hidden_args,
             closure_env: if captures.is_empty() {
                 Value::unit()
             } else {
@@ -169,14 +176,6 @@ impl FunctionValue {
         } else {
             self.closure_env.as_tuple().unwrap()
         }
-    }
-
-    /// Host-side clone for function call metadata extracted from dictionaries.
-    ///
-    /// This is not Ferlium `Value::clone`; it only keeps current interpreter
-    /// call setup independent from Rust borrow lifetimes.
-    pub(crate) fn host_clone_for_call_metadata(&self) -> Self {
-        self.clone()
     }
 }
 
@@ -204,8 +203,6 @@ pub enum Value {
 pub(crate) enum HostValueCloneReason {
     /// Reusing an immutable HIR immediate value.
     LiteralReuse,
-    /// Copying runtime dictionary metadata, not source-level owned data.
-    DictionaryMetadata,
 }
 
 impl Value {
@@ -334,18 +331,18 @@ impl Value {
                 write!(f, ")")
             }
             Function(fv) => {
-                if fv.hidden_dictionary_args.is_empty() && fv.closure_env_len == 0 {
+                if fv.hidden_args.is_empty() && fv.closure_env_len == 0 {
                     write!(f, "function {} in {}", fv.function_id, fv.module_id)
                 } else {
                     write!(
                         f,
-                        "closure of function {} in {} with captured values [",
-                        fv.function_id, fv.module_id
+                        "closure of function {} in {} with {} dictionary captures and captured values [",
+                        fv.function_id,
+                        fv.module_id,
+                        fv.hidden_args.len()
                     )?;
                     write_with_separator_and_format_fn(
-                        fv.hidden_dictionary_args
-                            .iter()
-                            .chain(fv.closure_env_values()),
+                        fv.closure_env_values(),
                         ", ",
                         Value::format_as_string_repr,
                         f,
@@ -402,19 +399,17 @@ impl Value {
                 writeln!(f, "{indent_str})")
             }
             Function(fv) => {
-                if fv.hidden_dictionary_args.is_empty() && fv.closure_env_len == 0 {
+                if fv.hidden_args.is_empty() && fv.closure_env_len == 0 {
                     writeln!(f, "function {} in {}", fv.function_id, fv.module_id)
                 } else {
                     writeln!(
                         f,
-                        "closure of function {} in {} with captured values [",
-                        fv.function_id, fv.module_id
+                        "closure of function {} in {} with {} dictionary captures and captured values [",
+                        fv.function_id,
+                        fv.module_id,
+                        fv.hidden_args.len()
                     )?;
-                    for captured in fv
-                        .hidden_dictionary_args
-                        .iter()
-                        .chain(fv.closure_env_values())
-                    {
+                    for captured in fv.closure_env_values() {
                         captured.format_ind_repr(f, _env, spacing + 1, indent + 1)?;
                     }
                     writeln!(f, "{indent_str}]")
@@ -569,19 +564,6 @@ impl Display for LiteralValue {
             }
         }
     }
-}
-
-pub fn build_dictionary_value(
-    methods: &[LocalFunctionId],
-    associated_const_values: &[isize],
-    module_id: ModuleId,
-) -> Value {
-    let values: Vec<_> = methods
-        .iter()
-        .map(|&fn_id| Value::function(fn_id, module_id))
-        .chain(associated_const_values.iter().copied().map(Value::native))
-        .collect();
-    Value::tuple(values)
 }
 
 #[cfg(test)]

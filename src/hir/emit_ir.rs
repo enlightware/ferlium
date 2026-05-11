@@ -35,12 +35,12 @@ use crate::{
     format::FormatWith,
     hir::dictionary_passing::{DictElaborationCtx, elaborate_local_value_dispatches},
     hir::function::{FunctionDefinition, ScriptFunction},
-    hir::value::build_dictionary_value,
     hir::{self, NodeArena},
     internal_compilation_error,
     module::{
         ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module,
-        ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl, id::Id,
+        ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl,
+        build_dictionary_value, id::Id,
     },
     std::{
         new_module_using_std,
@@ -253,11 +253,7 @@ pub fn emit_module(
             // Build the trait impl and fill it with placeholders.
             let associated_const_values =
                 emitted_associated_const_values(&trait_ref, &input_tys, 0, imp.span)?;
-            let dictionary_value = build_dictionary_value(
-                &method_ids,
-                &associated_const_values,
-                output.impls.module_id,
-            );
+            let dictionary_value = build_dictionary_value(&method_ids, &associated_const_values);
             let dictionary_ty =
                 output.computer_dictionary_ty(&method_ids, associated_const_values.len());
             let stub = TraitImpl::new(

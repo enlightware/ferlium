@@ -20,10 +20,11 @@ use crate::{
     define_id_type,
     format::{FormatWith, write_with_separator_and_format_fn},
     hir::function::Function,
-    hir::value::{Value, build_dictionary_value},
     module::{LocalDecl, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, id::Id},
     parser::location::Location,
-    types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
+    types::r#trait::{
+        TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef,
+    },
     types::r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
     types::type_inference::substitution::InstSubstitution,
     types::type_like::TypeLike,
@@ -49,15 +50,25 @@ pub enum TraitImplId {
     Import(ImportImplSlotId),
 }
 
+/// Canonical runtime handle to a trait dictionary body owned by a compiled module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TraitDictionaryId {
+    pub module_id: ModuleId,
+    pub impl_id: LocalImplId,
+}
+
 impl FormatWith<ModuleEnv<'_>> for TraitImplId {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
         match *self {
             TraitImplId::Local(id) => {
-                let key = env.current.get_impl_trait_key_by_id(id).unwrap();
                 let imp = env.current.get_impl_data(id).unwrap();
-                write!(f, "local dictionary ")?;
-                format_impl_header_by_key(f, &key, imp, env)?;
-                write!(f, " (#{id})")
+                if let Some(key) = env.current.get_impl_trait_key_by_id(id) {
+                    write!(f, "local dictionary ")?;
+                    format_impl_header_by_key(f, &key, imp, env)?;
+                    write!(f, " (#{id})")
+                } else {
+                    write!(f, "local anonymous dictionary (#{id})")
+                }
             }
             TraitImplId::Import(id) => {
                 let slot = env.current.get_import_impl_slot(id).unwrap();
@@ -148,6 +159,51 @@ impl TraitKey {
     }
 }
 
+/// Runtime metadata for a trait dictionary.
+///
+/// Dictionary bodies are module-owned metadata, not Ferlium values. Runtime
+/// code passes `TraitDictionaryId` handles around; projecting one entry
+/// materializes a normal function value or associated const value.
+#[derive(Debug, Clone)]
+pub struct TraitDictionary {
+    methods: Vec<LocalFunctionId>,
+    associated_const_values: Vec<isize>,
+}
+
+/// A projected entry from a runtime trait dictionary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraitDictionaryEntry {
+    Method(LocalFunctionId),
+    AssociatedConst(isize),
+}
+
+impl TraitDictionary {
+    pub fn new(methods: &[LocalFunctionId], associated_const_values: &[isize]) -> Self {
+        Self {
+            methods: methods.to_vec(),
+            associated_const_values: associated_const_values.to_vec(),
+        }
+    }
+
+    pub fn entry(&self, index: TraitDictionaryEntryIndex) -> TraitDictionaryEntry {
+        let index = index.as_index();
+        if index < self.methods.len() {
+            TraitDictionaryEntry::Method(self.methods[index])
+        } else {
+            TraitDictionaryEntry::AssociatedConst(
+                self.associated_const_values[index - self.methods.len()],
+            )
+        }
+    }
+}
+
+pub fn build_dictionary_value(
+    methods: &[LocalFunctionId],
+    associated_const_values: &[isize],
+) -> TraitDictionary {
+    TraitDictionary::new(methods, associated_const_values)
+}
+
 /// An implementation of a trait.
 #[derive(Debug, Clone, new)]
 pub struct TraitImpl {
@@ -159,7 +215,7 @@ pub struct TraitImpl {
     #[new(default)]
     pub associated_const_values: Vec<isize>,
     /// The runtime dictionary, with methods first and associated const values after them.
-    pub dictionary_value: Value,
+    pub dictionary_value: TraitDictionary,
     /// The type of the runtime dictionary.
     /// If the implementation is a blanket one, the key contains the rest of the type scheme.
     pub dictionary_ty: Type,
@@ -311,8 +367,7 @@ impl TraitImpls {
 
         // Build and insert the implementation.
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_values.len());
-        let dictionary_value =
-            build_dictionary_value(&methods, &associated_const_values, self.module_id);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_tys,
             methods,
@@ -335,6 +390,13 @@ impl TraitImpls {
         let id = LocalImplId::from_index(self.data.len());
         self.data.push(imp);
         self.concrete_key_to_id.insert(key, id);
+        id
+    }
+
+    /// Add a module-owned runtime dictionary that is not a selectable trait impl.
+    pub fn add_anonymous_dictionary_struct(&mut self, imp: TraitImpl) -> LocalImplId {
+        let id = LocalImplId::from_index(self.data.len());
+        self.data.push(imp);
         id
     }
 
@@ -402,8 +464,7 @@ impl TraitImpls {
 
         // Build and insert the implementation.
         let dictionary_type = Self::dictionary_ty(method_tys, associated_const_values.len());
-        let dictionary_value =
-            build_dictionary_value(&methods, &associated_const_values, self.module_id);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_tys,
             methods,
@@ -466,15 +527,20 @@ impl TraitImpls {
     }
 
     pub fn get_impl_by_key(&self, key: &TraitKey) -> Option<&TraitImpl> {
+        self.get_impl_id_by_key(key)
+            .map(|id| self.get_impl_by_local_id(id))
+    }
+
+    pub fn get_impl_id_by_key(&self, key: &TraitKey) -> Option<LocalImplId> {
         use TraitKey::*;
-        let id = match key {
-            Concrete(key) => self.concrete_key_to_id.get(key),
+        match key {
+            Concrete(key) => self.concrete_key_to_id.get(key).copied(),
             Blanket(key) => self
                 .blanket_key_to_id
                 .get(&key.trait_ref)
-                .and_then(|m| m.get(&key.sub_key)),
-        };
-        id.map(|id| self.get_impl_by_local_id(*id))
+                .and_then(|m| m.get(&key.sub_key))
+                .copied(),
+        }
     }
 
     pub fn get_impl_by_local_id(&self, id: LocalImplId) -> &TraitImpl {

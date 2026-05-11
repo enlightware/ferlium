@@ -13,11 +13,11 @@ use crate::FxHashMap;
 
 use crate::{
     Location,
-    ast::Path,
     compiler::error::InternalCompilationError,
     format::FormatWith,
     module::{
-        FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop, LocalFunctionId, ModuleEnv,
+        ConcreteTraitImplKey, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
+        LocalFunctionId, ModuleEnv, TraitImpl, TraitImplId, TraitImpls, build_dictionary_value,
         id::Id,
     },
     parser::helpers::EMPTY_USTR,
@@ -40,9 +40,8 @@ use crate::{
         math::int_type,
         value::{
             VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT,
-            function_value_method_name, is_function_surface_only_value_trait_application,
-            is_function_surface_only_value_type, is_value_trait_for_function_type,
-            value_layout_associated_const_values,
+            is_function_surface_only_value_trait_application, is_function_surface_only_value_type,
+            is_value_trait_for_function_type, value_layout_associated_const_values,
         },
     },
     types::effects::no_effects,
@@ -236,46 +235,50 @@ pub fn find_trait_impl_dict_index(
 
 /// Build the use-site HIR expression for a generated `Value` dictionary.
 fn value_dictionary_node_kind_from_methods(
-    arena: &mut NodeArena,
     trait_ref: &TraitRef,
     input_tys: &[Type],
     span: Location,
     methods: &[LocalFunctionId],
-    mut method_name: impl FnMut(TraitMethodIndex) -> Ustr,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     // This builds compiler-generated `Value` dictionaries. The associated
     // consts are layout metadata, so they are computed from the concrete HIR
     // type rather than read from a source impl.
     assert_eq!(methods.len(), trait_ref.methods.len());
     let definitions = trait_ref.instantiate_for_tys(input_tys, &[]);
-    let mut entries =
-        Vec::with_capacity(trait_ref.methods.len() + trait_ref.associated_const_count());
-    for (method_index, definition) in definitions.into_iter().enumerate() {
-        let method_index = TraitMethodIndex::from_index(method_index);
-        let method_ty = Type::function_type(definition.ty_scheme.ty);
-        entries.push(arena.alloc(Node::new(
-            NodeKind::GetFunction(b(hir::GetFunction {
-                function: FunctionId::Local(methods[usize::from(method_index)]),
-                function_path: Path::single(method_name(method_index), span),
-                function_span: span,
-                inst_data: hir::FnInstData::none(),
-            })),
-            method_ty,
-            no_effects(),
-            span,
-        )));
-    }
+    let method_tys = definitions
+        .into_iter()
+        .map(|definition| Type::function_type(definition.ty_scheme.ty))
+        .collect::<Vec<_>>();
     let associated_const_values = value_layout_associated_const_values(input_tys[0], span)?;
-    for value in associated_const_values {
-        entries.push(arena.alloc(Node::new(
-            hir::hir_syn::native(value),
-            int_type(),
-            no_effects(),
-            span,
-        )));
-    }
     let ty = trait_ref.get_dictionary_type_for_tys(input_tys, &[]);
-    Ok((hir::hir_syn::tuple(entries), ty))
+    let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_values.len());
+    let dictionary_value = build_dictionary_value(methods, &associated_const_values);
+    let imp = TraitImpl::new(
+        Vec::new(),
+        methods.to_vec(),
+        dictionary_value,
+        dictionary_ty,
+        false,
+        None,
+    )
+    .with_associated_const_values(associated_const_values);
+    let impl_id = if input_tys.iter().all(Type::is_constant) {
+        let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
+        if let Some(impl_id) = ctx.trait_solver.impls.concrete().get(&key).copied() {
+            impl_id
+        } else {
+            ctx.trait_solver.impls.add_concrete_struct(key, imp)
+        }
+    } else {
+        ctx.trait_solver.impls.add_anonymous_dictionary_struct(imp)
+    };
+    Ok((
+        NodeKind::GetDictionary(hir::GetDictionary {
+            dictionary: TraitImplId::Local(impl_id),
+        }),
+        ty,
+    ))
 }
 
 /// Build the compiler-provided `Value` dictionary for a concrete function type.
@@ -290,14 +293,7 @@ fn function_value_dictionary_node_kind(
         .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(ctx.trait_solver, method_index, span, arena))
         .collect::<Result<Vec<_>, _>>()?;
-    value_dictionary_node_kind_from_methods(
-        arena,
-        trait_ref,
-        input_tys,
-        span,
-        &methods,
-        function_value_method_name,
-    )
+    value_dictionary_node_kind_from_methods(trait_ref, input_tys, span, &methods, ctx)
 }
 
 /// Build a generated `Value` dictionary for a structural type whose unresolved
@@ -311,14 +307,7 @@ fn generic_derived_value_dictionary_node_kind(
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     let methods =
         generic_value_methods_for_type(ctx.trait_solver, trait_ref, input_tys, span, arena)?;
-    value_dictionary_node_kind_from_methods(
-        arena,
-        trait_ref,
-        input_tys,
-        span,
-        &methods,
-        |method_index| trait_ref.method(method_index).0,
-    )
+    value_dictionary_node_kind_from_methods(trait_ref, input_tys, span, &methods, ctx)
 }
 
 /// Build the HIR expression that provides the runtime dictionary for a trait requirement.

@@ -20,15 +20,14 @@ use crate::{
     containers::b,
     hir::function::{Function, ScriptFunction, VoidFunction},
     hir::hir_syn::{get_dictionary, load, static_apply},
-    hir::value::{Value, build_dictionary_value},
     hir::{self, Node, NodeArena},
     internal_compilation_error,
     module::{
         self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind,
         DefTable, FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
-        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitImpl,
-        TraitImplId, TraitImpls, TraitKey, id::Id,
+        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitDictionary,
+        TraitImpl, TraitImplId, TraitImpls, TraitKey, build_dictionary_value, id::Id,
     },
     std::{
         core::REPR_TRAIT,
@@ -1142,8 +1141,7 @@ impl<'a> TraitSolver<'a> {
         }
 
         let dictionary_ty = TraitImpls::dictionary_ty(tys, associated_const_values.len());
-        let dictionary_value =
-            build_dictionary_value(&methods, &associated_const_values, self.impls.module_id);
+        let dictionary_value = build_dictionary_value(&methods, &associated_const_values);
         let imp = TraitImpl::new(
             output_types.to_vec(),
             methods,
@@ -1346,7 +1344,7 @@ impl<'a> TraitSolver<'a> {
                     output_tys: vec![output_ty],
                     methods: vec![],
                     associated_const_values: vec![],
-                    dictionary_value: Value::empty_tuple(),
+                    dictionary_value: TraitDictionary::new(&[], &[]),
                     dictionary_ty: Type::tuple([]),
                     public: false,
                     source_span: None,
@@ -1590,11 +1588,8 @@ impl<'a> TraitSolver<'a> {
                     // Build and insert the implementation.
                     let dictionary_ty =
                         TraitImpls::dictionary_ty(tys, associated_const_values.len());
-                    let dictionary_value = build_dictionary_value(
-                        &methods,
-                        &associated_const_values,
-                        self.impls.module_id,
-                    );
+                    let dictionary_value =
+                        build_dictionary_value(&methods, &associated_const_values);
                     let imp = TraitImpl::new(
                         output_tys,
                         methods,

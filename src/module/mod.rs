@@ -42,7 +42,6 @@ use crate::{
     format::FormatWith,
     hir::emit_ir::EmitTraitOutput,
     hir::function::Function,
-    hir::value::build_dictionary_value,
     hir::{self, NodeArena},
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
@@ -631,11 +630,8 @@ impl Module {
         let associated_const_values = associated_const_values.into();
         let dictionary_ty =
             self.computer_dictionary_ty(&emit_output.functions, associated_const_values.len());
-        let dictionary_value = build_dictionary_value(
-            &emit_output.functions,
-            &associated_const_values,
-            self.impls.module_id,
-        );
+        let dictionary_value =
+            build_dictionary_value(&emit_output.functions, &associated_const_values);
         let imp = TraitImpl::new(
             emit_output.output_tys,
             emit_output.functions,
@@ -677,6 +673,11 @@ impl Module {
     /// Return a trait implementation's data by trait key.
     pub fn get_impl_data_by_trait_key(&self, key: &TraitKey) -> Option<&TraitImpl> {
         self.impls.get_impl_by_key(key)
+    }
+
+    /// Return a trait implementation's local ID by trait key.
+    pub fn get_impl_id_by_trait_key(&self, key: &TraitKey) -> Option<LocalImplId> {
+        self.impls.get_impl_id_by_key(key)
     }
 
     /// Return a trait trait by implementation ID.

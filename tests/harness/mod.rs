@@ -161,16 +161,15 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
                     expected.module_id, actual.module_id
                 ));
             }
-            let actual_captures = actual
-                .hidden_dictionary_args
-                .iter()
-                .chain(actual.closure_env_values())
-                .collect::<Vec<_>>();
-            let expected_captures = expected
-                .hidden_dictionary_args
-                .iter()
-                .chain(expected.closure_env_values())
-                .collect::<Vec<_>>();
+            if actual.hidden_args.len() != expected.hidden_args.len() {
+                return Err(format!(
+                    "{path}: expected {} hidden metadata values, got {}",
+                    expected.hidden_args.len(),
+                    actual.hidden_args.len()
+                ));
+            }
+            let actual_captures = actual.closure_env_values();
+            let expected_captures = expected.closure_env_values();
             if actual_captures.len() != expected_captures.len() {
                 return Err(format!(
                     "{path}: expected {} captured values, got {}",
@@ -178,8 +177,10 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
                     actual_captures.len()
                 ));
             }
-            for (index, (actual, expected)) in
-                actual_captures.iter().zip(expected_captures).enumerate()
+            for (index, (actual, expected)) in actual_captures
+                .iter()
+                .zip(expected_captures.iter())
+                .enumerate()
             {
                 compare_values(actual, expected, &format!("{path}.captured[{index}]"))?;
             }

@@ -18,7 +18,7 @@ use ferlium::{
     SourceTable,
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind, UnsafeFeature},
     hir::value::Value,
-    module::{ConcreteTraitImplKey, Module},
+    module::{ConcreteTraitImplKey, Module, TraitDictionaryEntry},
     std::{
         option::{none, some},
         std_module,
@@ -50,18 +50,15 @@ fn assert_std_value_layout<T>(module: &Module, ty: Type) {
     assert_eq!(imp.associated_const_value(size_index), Some(size));
     assert_eq!(imp.associated_const_value(align_index), Some(align));
 
-    let Value::Tuple(dictionary_entries) = &imp.dictionary_value else {
-        panic!("expected Value dictionary to be a tuple");
-    };
     assert_eq!(
-        dictionary_entries[usize::from(VALUE_TRAIT.dictionary_associated_const_index(size_index))]
-            .as_primitive_ty::<isize>(),
-        Some(&size)
+        imp.dictionary_value
+            .entry(VALUE_TRAIT.dictionary_associated_const_index(size_index)),
+        TraitDictionaryEntry::AssociatedConst(size)
     );
     assert_eq!(
-        dictionary_entries[usize::from(VALUE_TRAIT.dictionary_associated_const_index(align_index))]
-            .as_primitive_ty::<isize>(),
-        Some(&align)
+        imp.dictionary_value
+            .entry(VALUE_TRAIT.dictionary_associated_const_index(align_index)),
+        TraitDictionaryEntry::AssociatedConst(align)
     );
 }
 
