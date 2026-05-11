@@ -19,14 +19,14 @@ use crate::types::mutability::MutVal;
 use crate::{
     ast::{DExpr as Expr, DExprKind as ExprKind},
     compiler::error::InternalCompilationError,
-    hir::value::Value,
+    hir::value::LiteralValue,
     std::string::string_type,
 };
 
 fn string_literal(string: &str, span: Location, arena: &mut DExprArena) -> DExprId {
     let string = String::from_str(string).unwrap();
     arena.alloc(Expr::new(
-        ExprKind::literal(Value::native(string), string_type()),
+        ExprKind::literal(LiteralValue::new_native(string), string_type()),
         span,
     ))
 }
@@ -65,7 +65,7 @@ pub fn emit_format_string_ast(
 
     // Start with an empty mutable string.
     let empty_string = arena.alloc(Expr::new(
-        ExprKind::literal(Value::native(String::default()), string_type()),
+        ExprKind::literal(LiteralValue::new_native(String::default()), string_type()),
         span,
     ));
     let let_stmt = arena.alloc(Expr::new(

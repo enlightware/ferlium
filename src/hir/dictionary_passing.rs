@@ -34,7 +34,7 @@ use ustr::Ustr;
 use crate::{
     containers::b,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
-    hir::value::Value,
+    hir::value::LiteralValue,
     hir::{self, Node, NodeArena, NodeId, NodeKind},
     std::{
         math::int_type,
@@ -405,7 +405,9 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                             let index = record.iter().position(|field| field.0 == *name).expect(
                                 "Field not found in type, type inference should have failed"
                             );
-                            K::Immediate(hir::Immediate::new(Value::native(index as isize)))
+                            K::Immediate(hir::Immediate::new(LiteralValue::new_native(
+                                index as isize,
+                            )))
                         }
                         Variable(var) => {
                             // Variable, it must be in the input dictionaries, look for it.
@@ -612,48 +614,13 @@ impl Node {
 
         let node_span = arena[node_id].span;
         let node_ty = arena[node_id].ty;
-        // Note: node_effects is cloned lazily only in the two branches that need it
-        // (Immediate and GetFunction), to avoid an unconditional Vec clone on every node.
+        // Note: node_effects is cloned lazily only in the branch that needs it
+        // (GetFunction), to avoid an unconditional Vec clone on every node.
         // Put a placeholder in the arena while we are mutating ourself and adding new nodes.
         let mut kind = mem::replace(&mut arena[node_id].kind, NodeKind::Unimplemented);
 
         match &mut kind {
-            Immediate(immediate) => {
-                if immediate.value.is_function() {
-                    // Build closure to capture the dictionaries of this function, if any.
-                    if !ctx.dicts.is_empty() {
-                        let captures = ctx
-                            .dicts
-                            .requirements
-                            .iter()
-                            .enumerate()
-                            .map(|(index, req)| {
-                                let ty = req.to_dict_type();
-                                let id = LocalDeclId::from_index(local_count + index);
-                                arena.alloc(Node::new(
-                                    EnvLoad(hir::EnvLoad {
-                                        index: index as u32,
-                                        id,
-                                    }),
-                                    ty,
-                                    no_effects(),
-                                    node_span,
-                                ))
-                            })
-                            .collect();
-                        let node_effects = arena[node_id].effects.clone();
-                        let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
-                        let function_id =
-                            arena.alloc(Node::new(original_kind, node_ty, node_effects, node_span));
-                        kind = BuildClosure(b(hir::BuildClosure {
-                            function: function_id,
-                            dictionary_captures: captures,
-                            captures: Vec::new(),
-                            captures_value_dictionary: None,
-                        }));
-                    }
-                }
-            }
+            Immediate(_) | Uninit => {}
             BuildClosure(build_closure) => {
                 // Elaborate hidden dictionary captures first (they are metadata).
                 for &capture_id in &build_closure.dictionary_captures {

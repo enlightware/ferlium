@@ -225,14 +225,9 @@ impl UnifiedTypeInference {
         tys: &mut FxHashSet<Type>,
     ) {
         match &arena[id].kind {
-            NodeKind::Immediate(immediate) => immediate
-                .value
-                .as_variant()
-                .filter(|variant| variant.value.is_unit())
-                .into_iter()
-                .for_each(|_| {
-                    tys.insert(arena[id].ty);
-                }),
+            NodeKind::Variant(_, payload) if arena[*payload].ty == Type::unit() => {
+                tys.insert(arena[id].ty);
+            }
             kind => kind.child_node_ids().into_iter().for_each(|child_id| {
                 Self::collect_unit_variant_seed_types_into(arena, child_id, tys)
             }),

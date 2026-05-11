@@ -76,7 +76,8 @@ impl Deriver for EnumDefaultDeriver {
         };
 
         let root = if payload_ty == Type::unit() {
-            n(arena, unit_variant(default_variant), ty)
+            let payload = n(arena, native(()), Type::unit());
+            n(arena, variant(default_variant, payload), ty)
         } else {
             let function = solver.solve_impl_method(
                 trait_ref,

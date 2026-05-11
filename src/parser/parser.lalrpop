@@ -810,7 +810,7 @@ TupleLiteralPattern: (LiteralValue, IrType) = {
 }
 
 LiteralExpr: ExprKind = {
-    <val:LiteralValue> => ExprKind::literal(val.0.into_value(), val.1),
+    <val:LiteralValue> => ExprKind::literal(val.0, val.1),
 }
 
 LiteralValue = {

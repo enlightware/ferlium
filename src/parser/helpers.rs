@@ -31,7 +31,6 @@ use crate::containers::SVec2;
 use crate::containers::b;
 use crate::hir::value::LiteralValue;
 use crate::hir::value::NativeDisplay;
-use crate::hir::value::Value;
 use crate::parser::escapes::apply_string_escapes;
 use crate::std::math::int_type;
 use crate::std::string::String as MyString;
@@ -81,7 +80,7 @@ where
     T: Any + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
     arena.alloc(PExpr::new(
-        PExprKind::Literal(Value::native(value), Type::primitive::<T>()),
+        PExprKind::Literal(LiteralValue::new_native(value), Type::primitive::<T>()),
         span,
     ))
 }
@@ -89,7 +88,7 @@ where
 /// Make a unit literal and allocate it in the arena
 pub(crate) fn unit_literal_expr(span: Location, arena: &mut PExprArena) -> PExprId {
     arena.alloc(PExpr::new(
-        PExprKind::Literal(Value::native(()), Type::unit()),
+        PExprKind::Literal(LiteralValue::new_native(()), Type::unit()),
         span,
     ))
 }
@@ -178,7 +177,7 @@ where
     F: FromStr + Bounded + Display + Clone + Debug + Eq + Hash + NativeDisplay + 'static,
 {
     match parse_num_value::<F>(s) {
-        Ok((value, ty)) => Ok(ExprKind::literal(value.into_value(), ty)),
+        Ok((value, ty)) => Ok(ExprKind::literal(value, ty)),
         Err(msg) => error(msg, span),
     }
 }
@@ -192,7 +191,7 @@ pub(crate) fn proj_or_float<L, T>(
     use ExprKind::*;
     // Extract the integer literal value without holding a borrow across the match
     let int_val = if let Literal(literal, _ty) = &arena[lhs].kind {
-        literal.clone().into_primitive_ty::<isize>()
+        literal.clone().into_value().into_primitive_ty::<isize>()
     } else {
         None
     };
@@ -279,48 +278,16 @@ pub(crate) fn build_range(
     )
 }
 
-/// If all expressions are literals, create a literal tuple, otherwise create a tuple constructor
+/// Build a tuple constructor. Constant folding belongs in later partial evaluation.
 pub(crate) fn tuple(args: Vec<PExprId>, arena: &PExprArena) -> PExprKind {
-    use ExprKind::*;
-    let mut values_and_tys = Vec::new();
-    for &arg in &args {
-        if let Literal(val, ty) = &arena[arg].kind {
-            values_and_tys.push((val.clone(), *ty));
-        } else {
-            return ExprKind::tuple(args);
-        }
-    }
-    let (values, tys): (SVec2<_>, Vec<_>) = values_and_tys.into_iter().unzip();
-    ExprKind::literal(Value::tuple(values), Type::tuple(tys))
+    let _ = arena;
+    ExprKind::tuple(args)
 }
 
-/// If all record fields are literals, create a literal record, otherwise create a record node.
+/// Build a record constructor. Constant folding belongs in later partial evaluation.
 pub(crate) fn record(fields: Vec<(UstrSpan, PExprId)>, arena: &PExprArena) -> PExprKind {
-    use ExprKind::*;
-
-    let mut values_and_tys = Vec::with_capacity(fields.len());
-    let mut field_names = std::collections::HashSet::with_capacity(fields.len());
-    for ((name, _span), expr) in &fields {
-        if !field_names.insert(*name) {
-            return ExprKind::record(fields);
-        }
-        if let Literal(value, ty) = &arena[*expr].kind {
-            values_and_tys.push((*name, value.clone(), *ty));
-        } else {
-            return ExprKind::record(fields);
-        }
-    }
-
-    values_and_tys.sort_by_key(|(name, _, _)| *name);
-    let values: SVec2<_> = values_and_tys
-        .iter()
-        .map(|(_, value, _)| value.clone())
-        .collect();
-    let tys = values_and_tys
-        .into_iter()
-        .map(|(name, _, ty)| (name, ty))
-        .collect::<Vec<_>>();
-    ExprKind::literal(Value::tuple(values), Type::record(tys))
+    let _ = arena;
+    ExprKind::record(fields)
 }
 
 /// Build a record literal pattern from a list of `(name, (value, type))` pairs.

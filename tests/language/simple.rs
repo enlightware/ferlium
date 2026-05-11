@@ -160,7 +160,7 @@ fn equalities() {
     assert_val_eq!(session.run("() == ()"), bool(true));
     assert_val_eq!(session.run("() != ()"), bool(false));
     session
-        .fail_compilation("() == (1,)")
+        .fail_compilation("() == ((1: int),)")
         .expect_type_mismatch("(int,)", "()");
     assert_val_eq!(session.run("(1,) == (1,)"), bool(true));
     assert_val_eq!(session.run("(1,) != (1,)"), bool(false));

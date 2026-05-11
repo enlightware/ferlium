@@ -526,7 +526,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         n(arena, variant(tag, deserialize), ty)
                     } else {
                         // variant without payload
-                        n(arena, unit_variant(tag), ty)
+                        let payload = n(arena, native(()), Type::unit());
+                        n(arena, variant(tag, payload), ty)
                     };
                     Ok((tag_value, build_variant))
                 })

@@ -18,11 +18,11 @@ use crate::{
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
     hir::function::{Function, FunctionDefinition, ScriptFunction},
-    hir::value::{LiteralValue, Value},
+    hir::value::LiteralValue,
     hir::{self, EnvStore, Immediate, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
     module::{
-        LocalClone, LocalDecl, LocalDeclId, LocalDrop, ModuleEnv, ModuleFunction,
+        FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop, ModuleEnv, ModuleFunction,
         TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
@@ -312,11 +312,14 @@ impl TypeInference {
             spans: None, // FIXME: add spans
             locals: fn_all_locals,
         };
-        // TODO: Maybe consider generating the BuildClosure node here.
         let function_id = env.collect_lambda_module_function(function);
-        let value_fn = Value::function(function_id, env.current_module_id());
         let fn_node_id = env.ir_arena.alloc(N::new(
-            K::Immediate(Immediate::new(value_fn)),
+            K::GetFunction(b(hir::GetFunction {
+                function: FunctionId::Local(function_id),
+                function_path: ast::Path::single(ustr("<lambda>"), span),
+                function_span: span,
+                inst_data: hir::FnInstData::none(),
+            })),
             fn_ty_wrapper,
             no_effects(),
             span,
@@ -473,13 +476,17 @@ impl TypeInference {
                             instantiation_span: expr_span,
                         }));
                     }
-                    // But the value of the node is the underlying data.
-                    let value = if let Some(tag) = tag {
-                        Value::unit_variant(tag)
+                    let node = if let Some(tag) = tag {
+                        let payload = env.ir_arena.alloc(N::new(
+                            K::Immediate(Immediate::new(LiteralValue::new_native(()))),
+                            Type::unit(),
+                            no_effects(),
+                            expr_span,
+                        ));
+                        K::Variant(tag, payload)
                     } else {
-                        Value::unit()
+                        K::Immediate(Immediate::new(LiteralValue::new_native(())))
                     };
-                    let node = K::Immediate(Immediate::new(value));
                     (node, ty, MutType::constant(), EffType::empty())
                 }
                 // Otherwise, the name is neither a known variable or function, assume it to be a variant constructor
@@ -499,8 +506,13 @@ impl TypeInference {
                             variant_ty, expr_span, tag, payload_ty, expr_span,
                         ),
                     ));
-                    // Build the variant value.
-                    let node = K::Immediate(Immediate::new(Value::unit_variant(tag)));
+                    let payload = env.ir_arena.alloc(N::new(
+                        K::Immediate(Immediate::new(LiteralValue::new_native(()))),
+                        Type::unit(),
+                        no_effects(),
+                        expr_span,
+                    ));
+                    let node = K::Variant(tag, payload);
                     (node, variant_ty, MutType::constant(), no_effects())
                 }
             }
@@ -807,11 +819,7 @@ impl TypeInference {
                 } else {
                     let nodes = self.materialize_owned_values(env, nodes, expr_span);
                     let ty = Type::tuple(types);
-                    let node = if let Some(values) = nodes_as_bare_immediate(env.ir_arena, &nodes) {
-                        K::Immediate(Immediate::new(Value::tuple(values)))
-                    } else {
-                        K::Tuple(b(SVec2::from_vec(nodes)))
-                    };
+                    let node = K::Tuple(b(SVec2::from_vec(nodes)));
                     (node, ty, MutType::constant(), effects)
                 }
             }
@@ -934,25 +942,14 @@ impl TypeInference {
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
                         let nodes = self.materialize_owned_values(env, nodes, expr_span);
-                        // But the value of the node is the underlying record.
-                        // If all nodes can be resolved to bare immediates, we can create an immediate value.
-                        let resolved_nodes_value =
-                            nodes_as_bare_immediate(env.ir_arena, &nodes).map(Value::tuple);
                         let node = if let Some(tag) = tag {
-                            if let Some(value) = resolved_nodes_value {
-                                let value = Value::raw_variant(tag, value);
-                                K::Immediate(Immediate::new(value))
-                            } else {
-                                let record_node_id = env.ir_arena.alloc(N::new(
-                                    K::Record(b(SVec2::from_vec(nodes))),
-                                    payload_ty,
-                                    effects.clone(),
-                                    expr_span,
-                                ));
-                                K::Variant(tag, record_node_id)
-                            }
-                        } else if let Some(value) = resolved_nodes_value {
-                            K::Immediate(Immediate::new(value))
+                            let record_node_id = env.ir_arena.alloc(N::new(
+                                K::Record(b(SVec2::from_vec(nodes))),
+                                payload_ty,
+                                effects.clone(),
+                                expr_span,
+                            ));
+                            K::Variant(tag, record_node_id)
                         } else {
                             K::Record(b(SVec2::from_vec(nodes)))
                         };
@@ -987,15 +984,7 @@ impl TypeInference {
                             payload_span,
                         ),
                     ));
-                    // Build the variant construction node.
-                    let node = if let Some(values) =
-                        nodes_as_bare_immediate_ids(env.ir_arena, &[payload_node_id])
-                    {
-                        let value = values.first().unwrap().clone();
-                        K::Immediate(Immediate::new(Value::raw_variant(tag, value)))
-                    } else {
-                        K::Variant(tag, payload_node_id)
-                    };
+                    let node = K::Variant(tag, payload_node_id);
                     (node, variant_ty, MutType::constant(), effects)
                 }
             }
@@ -1031,12 +1020,11 @@ impl TypeInference {
                 }
             }
             Array(exprs) => {
-                use crate::std::array::Array;
                 if exprs.is_empty() {
                     // The element type is a fresh type variable
                     let element_ty = self.fresh_type_var_ty();
                     // Build an empty array node and return it
-                    let node = K::Immediate(Immediate::new(Value::native(Array::new())));
+                    let node = K::Array(b(SVec2::from_vec(Vec::new())));
                     (
                         node,
                         array_type(element_ty),
@@ -1060,15 +1048,7 @@ impl TypeInference {
                         // Build the array node and return it
                         let element_nodes = SVec2::from_vec(nodes);
                         let ty = array_type(element_ty);
-                        // Can we build it as an immediate?
-                        let node = if let Some(values) =
-                            nodes_as_bare_immediate(env.ir_arena, &element_nodes)
-                        {
-                            let value = Value::native(Array::from_vec(values));
-                            K::Immediate(Immediate::new(value))
-                        } else {
-                            K::Array(b(element_nodes))
-                        };
+                        let node = K::Array(b(element_nodes));
                         (node, ty, MutType::constant(), effects)
                     }
                 }
@@ -1451,7 +1431,7 @@ impl TypeInference {
         let prefix = self.value_evaluation_prefix_nodes(env.ir_arena, value);
         match prefix.len() {
             0 => env.ir_arena.alloc(hir::Node::new(
-                NodeKind::Immediate(Immediate::new(Value::unit())),
+                NodeKind::Immediate(Immediate::new(LiteralValue::new_native(()))),
                 Type::unit(),
                 no_effects(),
                 span,
@@ -1652,12 +1632,8 @@ impl TypeInference {
                     Self::diverging_prefix_result(node_ids, effects)
                 } else {
                     let node_ids = self.materialize_owned_values(env, node_ids, expr_span);
-                    // But the value of the node is the underlying tuple.
-                    // If all nodes can be resolved to bare immediates, we can create an immediate value.
-                    let resolved_nodes_value =
-                        nodes_as_bare_immediate(env.ir_arena, &node_ids).map(Value::tuple);
-                    let inner_kind = if let Some(value) = resolved_nodes_value {
-                        K::Immediate(Immediate::new(value))
+                    let inner_kind = if node_ids.is_empty() {
+                        K::Immediate(Immediate::new(LiteralValue::new_native(())))
                     } else {
                         K::Tuple(b(SVec2::from_vec(node_ids)))
                     };
@@ -1693,7 +1669,7 @@ impl TypeInference {
                         0 => (
                             Type::unit(),
                             env.ir_arena.alloc(N::new(
-                                K::Immediate(Immediate::new(Value::unit())),
+                                K::Immediate(Immediate::new(LiteralValue::new_native(()))),
                                 Type::unit(),
                                 no_effects(),
                                 path_span,
@@ -1705,13 +1681,7 @@ impl TypeInference {
                                 payload_node_ids.iter().map(|id| env.ir_arena[*id].span),
                             )
                             .unwrap();
-                            let node = if let Some(values) =
-                                nodes_as_bare_immediate(env.ir_arena, &payload_node_ids)
-                            {
-                                K::Immediate(Immediate::new(Value::tuple(values)))
-                            } else {
-                                K::Tuple(b(SVec2::from_vec(payload_node_ids)))
-                            };
+                            let node = K::Tuple(b(SVec2::from_vec(payload_node_ids)));
                             let payload_node_id = env.ir_arena.alloc(N::new(
                                 node,
                                 payload_ty,
@@ -1734,15 +1704,7 @@ impl TypeInference {
                             payload_span,
                         ),
                     ));
-                    // Build the variant construction node.
-                    let node = if let Some(values) =
-                        nodes_as_bare_immediate_ids(env.ir_arena, &[payload_node_id])
-                    {
-                        let value = values.first().unwrap().clone();
-                        K::Immediate(Immediate::new(Value::raw_variant(tag, value)))
-                    } else {
-                        K::Variant(tag, payload_node_id)
-                    };
+                    let node = K::Variant(tag, payload_node_id);
                     (node, variant_ty, MutType::constant(), effects)
                 }
             },
@@ -1790,12 +1752,7 @@ impl TypeInference {
                 .unwrap_or_else(Location::new_synthesized);
             let node_ids = self.materialize_owned_values(env, node_ids, span);
             let payload_ty = fields_to_record_type(fields, types);
-            let payload_node =
-                if let Some(values) = nodes_as_bare_immediate(env.ir_arena, &node_ids) {
-                    NodeKind::Immediate(Immediate::new(Value::tuple(values)))
-                } else {
-                    NodeKind::Record(b(SVec2::from_vec(node_ids)))
-                };
+            let payload_node = NodeKind::Record(b(SVec2::from_vec(node_ids)));
             Ok((payload_node, payload_ty, effects))
         }
     }
@@ -2425,35 +2382,4 @@ fn fields_to_record_type<P: crate::ast::Phase>(
             .zip(types)
             .collect::<Vec<_>>(),
     )
-}
-
-/// Return a list of cloned values if all nodes (by NodeId) are immediate values and have no effects.
-fn nodes_as_bare_immediate(
-    arena: &NodeArena,
-    node_ids: &[impl Borrow<NodeId>],
-) -> Option<Vec<Value>> {
-    let nodes = node_ids
-        .iter()
-        .map(|id| {
-            let node = &arena[*id.borrow()];
-            match &node.kind {
-                NodeKind::Immediate(immediate) => {
-                    // For now, do not support function values for transformation into composed immediates.
-                    // The reason is that different functions might have different instantiation requirements.
-                    if node.effects.any() || node.ty.data().is_function() {
-                        None
-                    } else {
-                        Some(&immediate.value)
-                    }
-                }
-                _ => None,
-            }
-        })
-        .collect::<Option<Vec<&Value>>>()?;
-    Some(nodes.into_iter().cloned().collect())
-}
-
-/// Same as `nodes_as_bare_immediate` but takes a direct slice of NodeId.
-fn nodes_as_bare_immediate_ids(arena: &NodeArena, node_ids: &[NodeId]) -> Option<Vec<Value>> {
-    nodes_as_bare_immediate(arena, node_ids)
 }

@@ -47,15 +47,13 @@ impl NativeDisplay for () {
     }
 }
 
-pub trait NativeValue: Any + fmt::Debug + DynClone + NativeDisplay + 'static {
+pub trait NativeValue: Any + fmt::Debug + NativeDisplay + 'static {
     fn as_any(&self) -> &dyn Any;
     fn as_mut_any(&mut self) -> &mut dyn Any;
     fn into_any(self: B<Self>) -> B<dyn Any>;
 }
 
-dyn_clone::clone_trait_object!(NativeValue);
-
-impl<T: Any + fmt::Debug + Clone + NativeDisplay> NativeValue for T {
+impl<T: Any + fmt::Debug + NativeDisplay> NativeValue for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -74,10 +72,15 @@ impl<T: Any + fmt::Debug + Clone + NativeDisplay> NativeValue for T {
 pub trait LiteralNativeValue:
     Any + fmt::Debug + DynClone + DynEq + DynHash + NativeDisplay + 'static
 {
+    fn as_any(&self) -> &dyn Any;
     fn into_native_value(self: B<Self>) -> B<dyn NativeValue>;
 }
 
-impl<T: NativeValue + Hash + Eq> LiteralNativeValue for T {
+impl<T: NativeValue + Clone + Hash + Eq> LiteralNativeValue for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn into_native_value(self: B<Self>) -> B<dyn NativeValue> {
         self
     }
@@ -97,7 +100,7 @@ pub fn ustr_to_isize(tag: Ustr) -> isize {
     tag.as_char_ptr() as isize
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VariantValue {
     pub tag: Ustr,
     pub value: Value,
@@ -121,7 +124,7 @@ pub enum FunctionHiddenArgValue {
 /// compiler metadata captured while instantiating generic functions, and the
 /// owned source-level closure environment. Only the closure environment is
 /// managed by `Value::clone`/`Value::drop`; hidden arguments are call metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FunctionValue {
     pub function_id: LocalFunctionId,
     pub module_id: ModuleId,
@@ -179,12 +182,12 @@ impl FunctionValue {
     }
 }
 
-/// A value in the system
+/// A value in the system.
 ///
-/// Rust `Clone` is still implemented for compiler/literal bookkeeping. Runtime
-/// code must go through explicit `host_clone` reasons, or through generated
-/// Ferlium `Value::clone` dispatch when cloning user values semantically.
-#[derive(Debug, Clone, EnumAsInner)]
+/// Runtime duplication must go through generated Ferlium `Value::clone`
+/// dispatch, while literals use [`LiteralValue`] and are converted into fresh
+/// runtime values when evaluated.
+#[derive(Debug, EnumAsInner)]
 pub enum Value {
     /// Internal uninitialized storage used while `Value::clone` writes into a target.
     Uninit,
@@ -198,18 +201,7 @@ pub enum Value {
     Function(B<FunctionValue>),
 }
 
-/// Why the interpreter is still allowed to duplicate a `Value` with Rust `Clone`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostValueCloneReason {
-    /// Reusing an immutable HIR immediate value.
-    LiteralReuse,
-}
-
 impl Value {
-    pub(crate) fn host_clone(&self, _reason: HostValueCloneReason) -> Self {
-        self.clone()
-    }
-
     pub fn uninit() -> Self {
         Self::Uninit
     }
@@ -548,6 +540,13 @@ impl LiteralValue {
         match self {
             Native(value) => Value::Native(value.into_native_value()),
             Tuple(args) => Value::tuple(args.into_iter().map(Self::into_value).collect::<Vec<_>>()),
+        }
+    }
+
+    pub fn as_primitive_ty<T: 'static>(&self) -> Option<&T> {
+        match self {
+            Self::Native(value) => LiteralNativeValue::as_any(value.as_ref()).downcast_ref::<T>(),
+            Self::Tuple(_) => None,
         }
     }
 }

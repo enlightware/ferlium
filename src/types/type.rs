@@ -429,11 +429,11 @@ impl Type {
         cached_primitive_ty!(())
     }
 
-    pub fn primitive<T: Clone + 'static>() -> Self {
+    pub fn primitive<T: 'static>() -> Self {
         Self::native::<T>([])
     }
 
-    pub fn native<T: Clone + 'static>(arguments: impl Into<Vec<Type>>) -> Self {
+    pub fn native<T: 'static>(arguments: impl Into<Vec<Type>>) -> Self {
         let bare_ty = bare_native_type::<T>();
         TypeKind::Native(b(NativeType {
             arguments: arguments.into(),

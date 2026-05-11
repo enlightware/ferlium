@@ -33,7 +33,9 @@ use crate::{
     containers::{b, iterable_to_string},
     desugar::desugar_expr_with_empty_ctx,
     format::FormatWith,
-    hir::dictionary_passing::{DictElaborationCtx, elaborate_local_value_dispatches},
+    hir::dictionary_passing::{
+        DictElaborationCtx, ExtraParameters, elaborate_local_value_dispatches,
+    },
     hir::function::{FunctionDefinition, ScriptFunction},
     hir::{self, NodeArena},
     internal_compilation_error,
@@ -80,6 +82,20 @@ fn validate_name_uniqueness(source: &ast::PModule) -> Result<(), InternalCompila
         }
     }
     Ok(())
+}
+
+fn insert_inst_data_for_function_and_lambdas(
+    module_inst_data: &mut FxHashMap<LocalFunctionId, ExtraParameters>,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    id: LocalFunctionId,
+    dicts: ExtraParameters,
+) {
+    module_inst_data.insert(id, dicts.clone());
+    if let Some(lambda_ids) = associated_lambdas.get(&id) {
+        for lambda_id in lambda_ids {
+            module_inst_data.insert(*lambda_id, dicts.clone());
+        }
+    }
 }
 
 pub(super) fn emitted_associated_const_values(
@@ -740,7 +756,8 @@ where
     }
 
     // Associated lambdas and macro to call and id and its associated lambdas
-    let mut associated_lambdas = FxHashMap::default();
+    let mut associated_lambdas: FxHashMap<LocalFunctionId, Vec<LocalFunctionId>> =
+        FxHashMap::default();
     macro_rules! apply_to_function_and_associated_lambdas {
         ($id:expr, $f:expr) => {
             $f($id);
@@ -803,10 +820,7 @@ where
                 lambda_id,
                 format!("$lambda${}", lambda_id.as_index()).into(),
             );
-            associated_lambdas
-                .entry(*id)
-                .or_insert_with(Vec::new)
-                .push(lambda_id);
+            associated_lambdas.entry(*id).or_default().push(lambda_id);
         });
         let descr = output.get_function_by_id_mut(*id).unwrap();
         descr.definition.ty_scheme.ty.effects = ty_inf.unify_effects(
@@ -1022,9 +1036,7 @@ where
         if !subst.0.is_empty() {
             trait_output.input_tys = instantiate_types(&trait_output.input_tys, &subst);
             trait_output.output_tys = instantiate_types(&trait_output.output_tys, &subst);
-            let mut module_inst_data = FxHashMap::default();
             for id in local_fns.iter() {
-                module_inst_data.insert(*id, dicts.clone());
                 apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                     let descr = &mut output.functions[id.as_index()];
                     descr.definition.ty_scheme.ty =
@@ -1037,7 +1049,12 @@ where
         // Fifth pass, run the borrow checker and elaborate dictionaries.
         let mut module_inst_data = FxHashMap::default();
         for id in local_fns.iter() {
-            module_inst_data.insert(*id, dicts.clone());
+            insert_inst_data_for_function_and_lambdas(
+                &mut module_inst_data,
+                &associated_lambdas,
+                *id,
+                dicts.clone(),
+            );
         }
         for id in local_fns.iter() {
             borrow_check_and_elaborate_dict(output, ir_arena, &dicts, &module_inst_data, id)?;
@@ -1265,7 +1282,12 @@ where
         for id in local_fns.iter() {
             let descr = &output.functions[id.as_index()];
             let dicts = descr.definition.ty_scheme.extra_parameters();
-            module_inst_data.insert(*id, dicts);
+            insert_inst_data_for_function_and_lambdas(
+                &mut module_inst_data,
+                &associated_lambdas,
+                *id,
+                dicts,
+            );
         }
         for id in local_fns.iter() {
             let dicts = module_inst_data.get(id).unwrap();

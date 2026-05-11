@@ -72,7 +72,7 @@ pub(crate) fn native_value_clone_function<T: Clone + NativeValue>() -> Function 
 
 pub(crate) fn native_value_drop<T>(_target: &mut T) {}
 
-pub(crate) fn native_value_drop_function<T: Clone + 'static>() -> Function {
+pub(crate) fn native_value_drop_function<T: 'static>() -> Function {
     b(UnaryNativeFnMN::new(native_value_drop::<T>)) as Function
 }
 
@@ -1316,7 +1316,7 @@ fn derive_value_clone_body(
             let target = n($arena, load(1, target_id), ty);
             let uninit_members = member_tys
                 .iter()
-                .map(|&member_ty| n($arena, immediate(Value::uninit()), member_ty))
+                .map(|&member_ty| n($arena, hir::NodeKind::Uninit, member_ty))
                 .collect::<Vec<_>>();
             let uninit_product = n($arena, tuple(uninit_members), ty);
             statements.push(n(
@@ -1355,9 +1355,10 @@ fn derive_value_clone_body(
                 let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
                 let target = n($arena, load(1, target_id), ty);
                 let target_value = if payload_ty == Type::unit() {
-                    n($arena, unit_variant(tag), ty)
+                    let payload = n($arena, native(()), Type::unit());
+                    n($arena, variant(tag, payload), ty)
                 } else {
-                    let uninit_payload = n($arena, immediate(Value::uninit()), payload_ty);
+                    let uninit_payload = n($arena, hir::NodeKind::Uninit, payload_ty);
                     n($arena, variant(tag, uninit_payload), ty)
                 };
                 let init_target = n(

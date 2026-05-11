@@ -22,7 +22,7 @@ use crate::{
     containers::b,
     format::{FormatWith, write_with_separator},
     hir::function::ArgPassing,
-    hir::value::{FunctionHiddenArgValue, FunctionValue, HostValueCloneReason, NativeValue, Value},
+    hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
         FunctionId, LocalClone, LocalDecl, LocalDrop, LocalFunctionId, ModuleFunction, ModuleId,
         TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
@@ -660,7 +660,7 @@ impl FormatWith<EvalCtx<'_>> for Place {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ControlFlow<V> {
     Continue(V),
     Return(Value),
@@ -862,11 +862,8 @@ pub fn eval_node_with_ctx(
     use NodeKind::*;
     let node = &arena[id];
     match &node.kind {
-        Immediate(immediate) => cont(
-            immediate
-                .value
-                .host_clone(HostValueCloneReason::LiteralReuse),
-        ),
+        Immediate(immediate) => cont(immediate.value.clone().into_value()),
+        Uninit => cont(Value::uninit()),
         BuildClosure(build_closure) => eval_build_closure(arena, build_closure, ctx, locals),
         Apply(app) => eval_apply(arena, app, node.span, ctx, locals),
         FunctionClone(node) => eval_function_clone(arena, node, arena[id].span, ctx, locals),

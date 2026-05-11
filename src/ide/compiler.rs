@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn run_fn_unit_tuple() {
-        let compiler = build("fn main() { (true, 43) }");
+        let compiler = build("fn main() { (true, (43: int)) }");
         let result = compiler
             .run_fn_unit_tuple::<bool, isize>("main")
             .expect("Execution failed");

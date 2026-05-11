@@ -635,11 +635,24 @@ pub fn set_array_property_value(value: Array) {
 }
 
 fn set_array_property_value_ref(value: &Array) {
-    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = value.clone());
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = clone_int_array(value));
 }
 
 pub fn get_array_property_value() -> Array {
-    INT_ARRAY_PROPERTY_VALUE.with(|cell| cell.borrow().clone())
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| clone_int_array(&cell.borrow()))
+}
+
+fn clone_int_array(value: &Array) -> Array {
+    let mut result = Array::with_capacity(value.len());
+    for index in 0..value.len() {
+        let item = *value
+            .get(index)
+            .unwrap()
+            .as_primitive_ty::<isize>()
+            .expect("test property my_array only stores ints");
+        result.push_back(Value::native(item));
+    }
+    result
 }
 
 fn test_property_module(module_id: ModuleId) -> Module {

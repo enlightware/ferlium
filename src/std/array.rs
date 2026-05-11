@@ -34,7 +34,7 @@ use super::{
     ptr::{self, MutPtr, Ptr, mut_ptr_type, ptr_type},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Array(VecDeque<Value>);
 
 impl Array {

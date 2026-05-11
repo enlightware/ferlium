@@ -32,7 +32,7 @@ use ustr::Ustr;
 use crate::{
     containers::{B, SVec2, SVec4, b},
     hir::dictionary_passing::DictionariesReq,
-    hir::value::{LiteralValue, Value},
+    hir::value::LiteralValue,
     module::ModuleEnv,
     types::effects::EffType,
     types::r#type::{FnType, Type, TypeVar},
@@ -97,10 +97,10 @@ pub(crate) type UnboundTyVars = IndexMap<TypeVar, UnboundTyCtxs>;
 
 #[derive(Debug, Clone)]
 pub struct Immediate {
-    pub value: Value,
+    pub value: LiteralValue,
 }
 impl Immediate {
-    pub fn new(value: Value) -> B<Self> {
+    pub fn new(value: LiteralValue) -> B<Self> {
         b(Self { value })
     }
 }
@@ -270,6 +270,8 @@ pub struct GetDictionary {
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind {
     Immediate(B<Immediate>),
+    /// Compiler-only uninitialized storage used while generated `Value::clone` code fills a target.
+    Uninit,
     BuildClosure(B<BuildClosure>),
     Apply(B<Application>),
     FunctionClone(B<FunctionClone>),
@@ -319,6 +321,7 @@ impl NodeKind {
         use smallvec::smallvec;
         match self {
             Immediate(_)
+            | Uninit
             | GetFunction(_)
             | GetTraitMethod(_)
             | GetTraitAssociatedConst(_)
@@ -429,9 +432,10 @@ impl Node {
         match &self.kind {
             Immediate(immediate) => {
                 writeln!(f, "{indent_str}immediate")?;
-                immediate
-                    .value
-                    .format_ind_repr(f, env, spacing, indent + 1)?
+                writeln!(f, "{}⎸ {}", indent_str, immediate.value)?
+            }
+            Uninit => {
+                writeln!(f, "{indent_str}uninitialized")?;
             }
             BuildClosure(build_closure) => {
                 writeln!(f, "{indent_str}build closure of")?;
@@ -715,7 +719,7 @@ impl Node {
         // Look into children.
         use NodeKind::*;
         match &self.kind {
-            Immediate(_) => {}
+            Immediate(_) | Uninit => {}
             BuildClosure(build_closure) => {
                 if let Some(ty) = type_at(arena, build_closure.function, pos) {
                     return Some(ty);
@@ -902,7 +906,7 @@ impl Node {
         self.unbound_ty_vars_in_ty(&self.ty, result, ignore);
         // Recurse.
         match &self.kind {
-            Immediate(_) => {} // no need to look into the value's type as it is already in this node's type
+            Immediate(_) | Uninit => {} // no need to look into the value's type as it is already in this node's type
             BuildClosure(_) => {
                 // no need to look into the value's type as it is already in this node's type
             }

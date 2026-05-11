@@ -267,7 +267,7 @@ fn node_variable_type_annotations(
 ) {
     use NodeKind::*;
     match &node.kind {
-        Immediate(_) => {}
+        Immediate(_) | Uninit => {}
         BuildClosure(build_closure) => {
             variable_type_annotations(arena, build_closure.function, result, locals, env);
             // We do not look into captures as they are generated code.
@@ -493,12 +493,6 @@ fn is_adt_constructor_similar_to_arg_name(
     use NodeKind::*;
     let node = &arena[argument];
     let tag = match &node.kind {
-        Immediate(value) => {
-            if !node.ty.data().is_variant() {
-                return false;
-            }
-            value.value.as_variant().unwrap().tag
-        }
         Variant(tag, _) => *tag,
         _ => return false,
     };

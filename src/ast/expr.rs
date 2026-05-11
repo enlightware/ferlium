@@ -18,7 +18,7 @@ use crate::{
     compiler::error::LocatedError,
     containers::{B, b},
     format::FormatWith,
-    hir::value::Value,
+    hir::value::LiteralValue,
     module::ModuleEnv,
     parser::helpers::EMPTY_USTR,
     types::r#type::Type as IrType,
@@ -242,7 +242,7 @@ pub struct PropertyPathData {
 /// The kind-specific part of an expression as an Abstract Syntax Tree.
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum ExprKind<P: Phase> {
-    Literal(Value, IrType),
+    Literal(LiteralValue, IrType),
     FormattedString(P::FormattedString),
     /// A variable, or a function from the module environment, or a null-ary variant constructor
     Identifier(Path),
@@ -274,7 +274,7 @@ pub enum ExprKind<P: Phase> {
 
 impl<P: Phase> ExprKind<P> {
     /// Construct a [`Literal`](ExprKind::Literal) expression.
-    pub fn literal(value: Value, ty: IrType) -> Self {
+    pub fn literal(value: LiteralValue, ty: IrType) -> Self {
         ExprKind::Literal(value, ty)
     }
 
@@ -454,7 +454,11 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
         let indent_str = "  ".repeat(indent);
         use ExprKind::*;
         match &self.kind {
-            Literal(value, ty) => writeln!(f, "{indent_str}{}", value.display_pretty(ty)),
+            Literal(value, ty) => writeln!(
+                f,
+                "{indent_str}{}",
+                value.clone().into_value().display_pretty(ty)
+            ),
             FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
             Identifier(path) => writeln!(f, "{indent_str}{path}"),
             Let(data) => {

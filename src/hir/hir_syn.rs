@@ -9,29 +9,32 @@
 use crate::{
     Location,
     containers::{IntoSVec2, b},
-    hir::value::{LiteralValue, NativeValue, Value},
+    hir::value::{LiteralNativeValue, LiteralValue},
     hir::{self, NodeArena, NodeId},
     module::{FunctionId, LocalClone, LocalDecl, LocalDeclId, TraitImplId, id::Id},
-    std::{math::int_type, string::string_value},
+    std::{math::int_type, string::String as FerliumString},
     types::effects::EffType,
     types::mutability::{MutType, MutVal},
     types::r#type::{FnType, Type},
 };
+use std::str::FromStr;
 use ustr::{Ustr, ustr};
 
 use NodeKind as K;
 use hir::NodeKind;
 
 #[allow(dead_code)]
-pub fn native<T: NativeValue + 'static>(value: T) -> NodeKind {
-    immediate(Value::native(value))
+pub fn native<T: LiteralNativeValue + 'static>(value: T) -> NodeKind {
+    immediate(LiteralValue::new_native(value))
 }
 
 pub fn native_str(value: &str) -> NodeKind {
-    immediate(string_value(value))
+    immediate(LiteralValue::new_native(
+        FerliumString::from_str(value).unwrap(),
+    ))
 }
 
-pub fn immediate(value: Value) -> NodeKind {
+pub fn immediate(value: LiteralValue) -> NodeKind {
     K::Immediate(hir::Immediate::new(value))
 }
 
@@ -151,7 +154,7 @@ pub fn index_immediate(
 ) -> NodeKind {
     let array_span = arena[array].span;
     let index_node = arena.alloc(hir::Node::new(
-        immediate(Value::native(index)),
+        immediate(LiteralValue::new_native(index)),
         int_type(),
         EffType::empty(),
         array_span,
@@ -169,10 +172,6 @@ pub fn extract_tag(variant: NodeId) -> NodeKind {
 
 pub fn variant(tag: Ustr, payload: NodeId) -> NodeKind {
     K::Variant(tag, payload)
-}
-
-pub fn unit_variant(tag: Ustr) -> NodeKind {
-    immediate(Value::unit_variant(tag))
 }
 
 pub fn tuple(values: impl IntoSVec2<NodeId>) -> NodeKind {

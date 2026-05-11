@@ -140,7 +140,7 @@ impl Node {
     pub fn check_borrows(&self, arena: &NodeArena) -> Result<(), InternalCompilationError> {
         use NodeKind::*;
         match &self.kind {
-            Immediate(_) => {}
+            Immediate(_) | Uninit => {}
             BuildClosure(build_closure) => {
                 check_borrows(arena, build_closure.function)?;
                 for &capture in &build_closure.dictionary_captures {
