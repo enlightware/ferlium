@@ -347,16 +347,42 @@ impl Value {
 
     pub fn into_tuple_element(self, index: usize) -> Option<Value> {
         match self {
-            Self::Tuple(value) => ManuallyDrop::into_inner(value).into_iter().nth(index),
-            _ => None,
+            Self::Tuple(value) => {
+                let mut result = None;
+                for (i, value) in ManuallyDrop::into_inner(value).into_iter().enumerate() {
+                    if i == index && result.is_none() {
+                        result = Some(value);
+                    } else {
+                        value.discard_storage();
+                    }
+                }
+                result
+            }
+            other => {
+                other.discard_storage();
+                None
+            }
         }
     }
 
     pub fn into_projected_value(self, index: usize) -> Option<Value> {
         match self {
-            Self::Tuple(value) => ManuallyDrop::into_inner(value).into_iter().nth(index),
+            Self::Tuple(value) => {
+                let mut result = None;
+                for (i, value) in ManuallyDrop::into_inner(value).into_iter().enumerate() {
+                    if i == index && result.is_none() {
+                        result = Some(value);
+                    } else {
+                        value.discard_storage();
+                    }
+                }
+                result
+            }
             Self::Variant(value) if index == 0 => Some(ManuallyDrop::into_inner(value).value),
-            _ => None,
+            other => {
+                other.discard_storage();
+                None
+            }
         }
     }
 
@@ -773,6 +799,22 @@ mod tests {
 
         assert_eq!(rust_drop_count(), 0);
         value.discard_storage();
+        assert_eq!(rust_drop_count(), 3);
+    }
+
+    #[test]
+    fn owned_projection_discards_unselected_tuple_storage() {
+        reset_rust_drop_count();
+        let value = Value::tuple([
+            Value::native(RustDropTracked),
+            Value::native(RustDropTracked),
+            Value::native(RustDropTracked),
+        ]);
+
+        let selected = value.into_projected_value(1).unwrap();
+
+        assert_eq!(rust_drop_count(), 2);
+        selected.discard_storage();
         assert_eq!(rust_drop_count(), 3);
     }
 }

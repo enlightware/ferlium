@@ -13,6 +13,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     hir::{Node, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
+    module::id::Id,
     types::r#type::FnArgType,
 };
 
@@ -37,7 +38,7 @@ impl Path {
         match &node.kind {
             Project(data, index) => {
                 let mut path = Self::from_node(arena, *data);
-                path.parts.push(PathPart::Projection(*index));
+                path.parts.push(PathPart::Projection(index.as_index()));
                 path
             }
             FieldAccess(data, field) => {
@@ -60,7 +61,7 @@ impl Path {
                 path
             }
             EnvLoad(node) => Path {
-                variable: node.index as usize,
+                variable: node.id.as_index(),
                 parts: Vec::new(),
             },
             _ => panic!("Cannot resolve a non-place node"),

@@ -40,13 +40,17 @@ use crate::{
     hir::{self, NodeArena},
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, LocalDecl, LocalDeclId, LocalFunctionId, LocalImplId, Module,
-        ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl,
+        ConcreteTraitImplKey, LocalAssignmentMode, LocalDecl, LocalDeclId, LocalFunctionId,
+        LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl,
         build_dictionary_value, id::Id,
     },
     std::{
         new_module_using_std,
-        value::{VALUE_TRAIT, value_layout_associated_const_values},
+        value::{
+            VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT,
+            is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
+            value_layout_associated_const_values,
+        },
     },
     types::coherence::check_trait_impl,
     types::effects::EffType,
@@ -792,7 +796,14 @@ where
         let expected_span = descr.spans.as_ref().unwrap().args_span;
         let mut lambda_functions = vec![];
         let mut locals = descr.gen_locals_no_bounds();
+        LocalDecl::assign_sequential_slots(&mut locals);
         let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
+        if let Some(trait_ctx) = &trait_ctx
+            && trait_ctx.trait_ref == *VALUE_TRAIT
+            && trait_ctx.trait_ref.method_index(function.name.0) == Some(VALUE_CLONE_METHOD_INDEX)
+        {
+            locals[1].assignment_mode = LocalAssignmentMode::InitializeStorage;
+        }
         let mut ty_env = TypingEnv::new(
             &mut locals,
             cur_locals,
@@ -929,6 +940,7 @@ where
                 .inaccessible_constraints(ty_inf.remaining_constraints())
                 .into_iter()
                 .filter(|c| !c.is_type_has_variant())
+                .filter(|c| !is_compiler_provided_value_constraint(c))
                 .collect();
             if !remaining_orphans.is_empty() {
                 let fake_current = new_module_using_std(ModuleId(0));
@@ -1146,6 +1158,7 @@ where
                 .inaccessible_constraints(ty_inf.remaining_constraints())
                 .into_iter()
                 .filter(|c| !c.is_type_has_variant())
+                .filter(|c| !is_compiler_provided_value_constraint(c))
                 .collect();
             if !remaining_orphans.is_empty() {
                 let fake_current = new_module_using_std(ModuleId(0));
@@ -1263,7 +1276,11 @@ where
         // Safety check: make sure that there are no unused constraints.
         let unused_constraints = all_constraints
             .iter()
-            .filter(|c| !used_constraints.contains(&constraint_ptr(c)) && !c.is_type_has_variant())
+            .filter(|c| {
+                !used_constraints.contains(&constraint_ptr(c))
+                    && !c.is_type_has_variant()
+                    && !is_compiler_provided_value_constraint(c)
+            })
             .collect::<Vec<_>>();
         if !unused_constraints.is_empty() {
             let module_env = ModuleEnv::new(output, others);
@@ -1389,6 +1406,7 @@ fn emit_expr_unsafe_inner(
     let mut new_import_slots = vec![];
     let mut new_type_deps = FxHashSet::default();
     let mut lambda_functions = vec![];
+    LocalDecl::assign_sequential_slots(&mut locals);
     let cur_locals = (0..locals.len()).map(LocalDeclId::from_index).collect();
     let mut ty_env = TypingEnv::new(
         &mut locals,
@@ -1712,6 +1730,23 @@ type PubTypeConstraintPtr = *const PubTypeConstraint;
 
 fn constraint_ptr(c: &PubTypeConstraint) -> PubTypeConstraintPtr {
     c as *const PubTypeConstraint
+}
+
+fn is_compiler_provided_value_constraint(c: &PubTypeConstraint) -> bool {
+    match c {
+        PubTypeConstraint::HaveTrait {
+            trait_ref,
+            input_tys,
+            output_tys,
+            ..
+        } => {
+            is_value_trait_for_function_type(trait_ref, input_tys, output_tys)
+                || is_function_surface_only_value_trait_application(
+                    trait_ref, input_tys, output_tys,
+                )
+        }
+        _ => false,
+    }
 }
 
 fn log_dropped_constraints_expr(

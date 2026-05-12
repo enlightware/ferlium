@@ -18,7 +18,7 @@ use crate::{
     hir::function::FunctionDefinition,
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
-    module::{self, LocalClone, LocalDeclId, Module, TraitImplId, id::Id},
+    module::{self, LocalClone, LocalDeclId, Module, ProjectionIndex, TraitImplId, id::Id},
     std::{
         STD_MODULE_ID,
         array::array_type,
@@ -114,9 +114,13 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         // helper to build the serialization of a member of a tuple
         let mut build_serialize_i = |arena: &mut NodeArena, index, ty| {
             // load function parameter (that is a tuple in memory)
-            let load_node = n(arena, load(0, l_self_id), ty);
+            let load_node = n(arena, load(l_self_id), ty);
             // project the i-th element
-            let project_node = n(arena, project(load_node, index), ty);
+            let project_node = n(
+                arena,
+                project(load_node, ProjectionIndex::from_index(index)),
+                ty,
+            );
             // serialize the i-th element
             let function =
                 solver.solve_impl_method(trait_ref, &[ty], TraitMethodIndex(0), span, arena)?;
@@ -262,7 +266,7 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             // build the match node
-            let load_node = n(arena, load(0, l_self_id), ty);
+            let load_node = n(arena, load(l_self_id), ty);
             let extract_tag_node = n(arena, extract_tag(load_node), int_type());
             let root = n(
                 arena,
@@ -357,7 +361,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
 
         let mut locals = vec![local("variant", variant_type())];
         let l_variant_id = LocalDeclId::from_index(0);
-        let load_variant = n(arena, load(0, l_variant_id), variant_type());
+        let load_variant = n(arena, load(l_variant_id), variant_type());
         let node = if let TypeKind::Tuple(tys) = ty_data {
             /*
             Example source code for deserialization of a tuple:
@@ -398,7 +402,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 .enumerate()
                 .map(|(i, ty_i)| {
                     // get the array payload of the array variant
-                    let get_array = n(arena, load(1, l_array_id), array_ty);
+                    let get_array = n(arena, load(l_array_id), array_ty);
                     // get the i-th element
                     let index_kind =
                         index_immediate(arena, get_array, i as isize, variant_clone.clone());
@@ -442,7 +446,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 .into_iter()
                 .map(|(name, ty)| {
                     // get the payload of the object variant
-                    let load_object = n(arena, load(1, l_object_id), object_payload_type());
+                    let load_object = n(arena, load(l_object_id), object_payload_type());
                     // get the name-th element out of the object array
                     let get_entry =
                         build_expect_variant_object_entry(arena, solver, load_object, &name)?;
@@ -500,7 +504,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             );
             let store_object = n(arena, store_object, Type::unit());
             // load the object payload from env 1
-            let load_object_id = n(arena, load(1, l_object_id), object_payload_type());
+            let load_object_id = n(arena, load(l_object_id), object_payload_type());
             // build the type string extraction
             let get_type =
                 build_expect_variant_object_entry(arena, solver, load_object_id, "type")?;
@@ -515,7 +519,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     let build_variant = if payload_ty != Type::unit() {
                         // variant with payload
                         let load_object_for_data =
-                            n(arena, load(1, l_object_id), object_payload_type());
+                            n(arena, load(l_object_id), object_payload_type());
                         let get_data = build_expect_variant_object_entry(
                             arena,
                             solver,

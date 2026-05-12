@@ -138,40 +138,81 @@ pub struct LocalDecl {
     /// Whether this local owns storage that may be moved from or explicitly dropped by generated HIR.
     #[new(default)]
     pub owns_storage: bool,
+    ///  Slot offset within this function's lowered frame.
+    #[new(default)]
+    pub slot: u32,
+    /// How assignment through this local should treat the previous destination storage.
+    #[new(default)]
+    pub assignment_mode: LocalAssignmentMode,
     /// Clone dispatch used when initializing owned mutable-binding storage.
     #[new(default)]
     pub clone: Option<LocalClone>,
     /// Drop dispatch used when releasing owned local storage at lexical scope exit.
     #[new(default)]
     pub drop: Option<LocalDrop>,
+    /// Whether releasing this local must run Ferlium `Value::drop` before reclaiming storage.
+    #[new(default)]
+    pub drop_mode: LocalDropMode,
 }
 impl LocalDecl {
     pub fn as_fn_arg_type(&self) -> FnArgType {
         FnArgType::new(self.ty, self.mut_ty)
     }
+
+    pub fn push_with_next_slot(locals: &mut Vec<LocalDecl>, mut local: LocalDecl) -> LocalDeclId {
+        let id = LocalDeclId::from_index(locals.len());
+        local.slot = id.as_index() as u32;
+        locals.push(local);
+        id
+    }
+
+    pub fn assign_sequential_slots(locals: &mut [LocalDecl]) {
+        for (index, local) in locals.iter_mut().enumerate() {
+            local.slot = index as u32;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LocalAssignmentMode {
+    #[default]
+    Overwrite,
+    InitializeStorage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LocalDropMode {
+    #[default]
+    StorageOnly,
+    Value,
+}
+
+define_id_type!(
+    /// Hidden extra parameter ID within a lowered function frame.
+    ExtraParameterId
+);
+
+define_id_type!(
+    /// Known projection index into a tuple-like runtime value.
+    ProjectionIndex
+);
+
+/// How generated HIR dispatches a local `Value` method such as clone or drop.
+#[derive(Debug, Clone)]
+pub enum LocalValueMethodDispatch {
+    /// Dispatch has not yet been resolved to either a concrete function or extra parameter.
+    Required,
+    /// Call this concrete `Value` implementation.
+    Static(FunctionId),
+    /// Load the `Value` method from this hidden trait dictionary extra parameter.
+    Dictionary(ExtraParameterId),
 }
 
 /// How generated HIR clones into an owned mutable local.
-#[derive(Debug, Clone)]
-pub enum LocalClone {
-    /// Clone dispatch has not yet been resolved to either a concrete function or dictionary slot.
-    Required,
-    /// Call this concrete `Value::clone` implementation.
-    Static(FunctionId),
-    /// Load `Value::clone` from this hidden trait dictionary local.
-    Dictionary(usize),
-}
+pub type LocalClone = LocalValueMethodDispatch;
 
 /// How generated HIR drops an owned local at lexical scope exit.
-#[derive(Debug, Clone)]
-pub enum LocalDrop {
-    /// Drop dispatch has not yet been resolved to either a concrete function or dictionary slot.
-    Required,
-    /// Call this concrete `Value::drop` implementation.
-    Static(FunctionId),
-    /// Load `Value::drop` from this hidden trait dictionary local.
-    Dictionary(usize),
-}
+pub type LocalDrop = LocalValueMethodDispatch;
 
 define_id_type!(
     /// Local variable ID within a function
@@ -252,16 +293,23 @@ impl ModuleFunction {
                 .map(|(i, r)| ustr(&r.to_dict_name(i))),
         );
         let scope = self.function_span();
+        LocalDecl::assign_sequential_slots(&mut self.locals);
         let local_count = self.locals.len();
+        let dictionary_count = ctx.dicts.requirements.len() as u32;
+        for local in &mut self.locals {
+            local.slot += dictionary_count;
+        }
         self.locals
             .extend(ctx.dicts.requirements.iter().enumerate().map(|(i, r)| {
-                LocalDecl::new(
+                let mut local = LocalDecl::new(
                     (ustr(&r.to_dict_name(i)), Location::new_synthesized()),
                     MutType::constant(),
                     r.to_dict_type(),
                     None,
                     scope,
-                )
+                );
+                local.slot = i as u32;
+                local
             }));
         elaborate_local_value_dispatches(arena, &mut self.locals, ctx)?;
         elaborate_dictionaries(arena, root, ctx, local_count)

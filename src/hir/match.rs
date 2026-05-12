@@ -12,7 +12,7 @@ use crate::{
     compiler::error::DuplicatedVariantContext,
     hir::hir_syn::store_new,
     internal_compilation_error,
-    module::{LocalDecl, LocalDeclId, id::Id},
+    module::{LocalDecl, LocalDeclId, ProjectionIndex, id::Id},
     std::core::REPR_TRAIT,
     types::mutability::MutVal,
     types::r#type::TypeKind,
@@ -94,6 +94,7 @@ impl TypeInference {
         Ok(if is_variant {
             // Variant patterns
             let initial_env_size = env.cur_locals.len();
+            let match_condition_slot = env.all_locals.len();
 
             // Create a fresh type variable for the inner types, when there is a variable binding.
             let mut seen_tags = FxHashMap::default();
@@ -209,7 +210,7 @@ impl TypeInference {
             // Code to store the variant value in the environment.
             let (store_variant, l_match_condition) = store_new(
                 condition_node_id,
-                initial_env_size,
+                match_condition_slot,
                 "@match_condition",
                 MutVal::constant(),
                 pattern_ty,
@@ -229,7 +230,6 @@ impl TypeInference {
 
             let load_variant_node = N::new(
                 K::EnvLoad(EnvLoad {
-                    index: initial_env_size as u32,
                     id: l_match_condition,
                 }),
                 pattern_ty,
@@ -263,13 +263,15 @@ impl TypeInference {
                             .zip(inner_tys.iter())
                             .map(|(name, inner_ty)| {
                                 let id = LocalDeclId::from_index(env.all_locals.len());
-                                env.all_locals.push(LocalDecl::new(
+                                let mut local = LocalDecl::new(
                                     *name,
                                     MutType::constant(),
                                     *inner_ty,
                                     None,
                                     sp(*expr),
-                                ));
+                                );
+                                local.slot = id.as_index() as u32;
+                                env.all_locals.push(local);
                                 env.cur_locals.push(id);
                                 id
                             })
@@ -292,7 +294,10 @@ impl TypeInference {
                                 let load_variant_id_inner =
                                     env.ir_arena.alloc(load_variant_node.clone());
                                 let project_variant_inner_id = env.ir_arena.alloc(N::new(
-                                    K::Project(load_variant_id_inner, 0),
+                                    K::Project(
+                                        load_variant_id_inner,
+                                        ProjectionIndex::from_index(0),
+                                    ),
                                     *variant_inner_ty,
                                     no_effects(),
                                     sp(*expr),
@@ -311,7 +316,10 @@ impl TypeInference {
                                     None
                                 };
                                 let project_inner_kind = if let Some(index) = project_index {
-                                    K::Project(project_variant_inner_id, index)
+                                    K::Project(
+                                        project_variant_inner_id,
+                                        ProjectionIndex::from_index(index),
+                                    )
                                 } else {
                                     K::FieldAccess(project_variant_inner_id, bind_var_names[i].0)
                                 };
@@ -326,7 +334,6 @@ impl TypeInference {
                                 let store_projected_inner_id = env.ir_arena.alloc(N::new(
                                     K::EnvStore(EnvStore {
                                         value: project_inner_id,
-                                        index: (alt_start_env_size + i) as u32,
                                         id: l_bindings[i],
                                     }),
                                     Type::unit(),

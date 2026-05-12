@@ -13,7 +13,7 @@ use crate::{
     ast::{self, DExprArena},
     compiler::error::{InternalCompilationError, UnsafeFeature},
     hir::NodeArena,
-    hir::function::FunctionDefinition,
+    hir::function::{ArgPassing, FunctionDefinition},
     module::{
         self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget,
         LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
@@ -30,40 +30,12 @@ use derive_new::new;
 /// The tuple contains the trait reference, the method index in the trait, and the method definition.
 pub type TraitMethodDescription<'a> = (TraitRef, TraitMethodIndex, &'a FunctionDefinition);
 
-// /// A local variable within a typing environment.
-// #[derive(Clone, Debug, new)]
-// pub struct Local {
-//     pub name: Ustr,
-//     pub mutable: MutType,
-//     pub ty: Type,
-//     pub span: Location,
-// }
-
-// impl Local {
-//     pub fn new_var(name: Ustr, ty: Type, span: Location) -> Self {
-//         Self {
-//             name,
-//             mutable: MutType::mutable(),
-//             ty,
-//             span,
-//         }
-//     }
-
-//     pub fn new_let(name: Ustr, ty: Type, span: Location) -> Self {
-//         Self {
-//             name,
-//             mutable: MutType::constant(),
-//             ty,
-//             span,
-//         }
-//     }
-
-//     pub fn as_fn_arg_type(&self) -> FnArgType {
-//         FnArgType::new(self.ty, self.mutable)
-//     }
-// }
-
-pub type GetFunctionData<'a> = (&'a FunctionDefinition, FunctionId, Option<ModuleId>);
+pub type GetFunctionData<'a> = (
+    &'a FunctionDefinition,
+    FunctionId,
+    Option<ModuleId>,
+    Option<&'static [ArgPassing]>,
+);
 
 #[derive(Debug, new)]
 pub struct LoopFrame {
@@ -112,6 +84,12 @@ impl<'m> TypingEnv<'m> {
         std::mem::take(self.all_locals)
     }
 
+    pub fn push_local(&mut self, local: LocalDecl) -> LocalDeclId {
+        let id = LocalDecl::push_with_next_slot(self.all_locals, local);
+        self.cur_locals.push(id);
+        id
+    }
+
     pub fn collect_lambda_module_function(&mut self, function: ModuleFunction) -> LocalFunctionId {
         let base_index = self.base_local_function_index;
         let index = base_index + self.lambda_functions.len() as u32;
@@ -125,13 +103,13 @@ impl<'m> TypingEnv<'m> {
             .any(|local| self.all_locals[local.as_index()].name.0 == name)
     }
 
-    pub fn get_variable_index_and_id(&self, name: &str) -> Option<(usize, LocalDeclId)> {
+    pub fn get_variable_id(&self, name: &str) -> Option<LocalDeclId> {
         self.cur_locals
             .iter()
             .rev()
             .position(|local| self.all_locals[local.as_index()].name.0 == name)
             .map(|rev_index| self.cur_locals.len() - 1 - rev_index)
-            .map(|index| (index, self.cur_locals[index]))
+            .map(|index| self.cur_locals[index])
     }
 
     fn import_function(
@@ -224,11 +202,13 @@ impl<'m> TypingEnv<'m> {
                 .module
                 .as_ref()
                 .unwrap();
-            let definition = &source_module
-                .get_function(function_name)
-                .unwrap()
-                .definition;
-            Some((definition, FunctionId::Import(id), Some(module_id)))
+            let function = source_module.get_function(function_name).unwrap();
+            Some((
+                &function.definition,
+                FunctionId::Import(id),
+                Some(module_id),
+                function.code.argument_passing(),
+            ))
         } else {
             let id = self
                 .module_env
@@ -236,7 +216,12 @@ impl<'m> TypingEnv<'m> {
                 .get_local_function_id(function_name)
                 .unwrap();
             let function = self.module_env.current.get_function_by_id(id).unwrap();
-            Some((&function.definition, FunctionId::Local(id), None))
+            Some((
+                &function.definition,
+                FunctionId::Local(id),
+                None,
+                function.code.argument_passing(),
+            ))
         })
     }
 

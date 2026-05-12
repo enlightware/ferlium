@@ -1543,7 +1543,7 @@ impl<'a> TraitSolver<'a> {
                                     |(arg_i, arg_ty)| {
                                         let id = LocalDeclId::from_index(arg_i);
                                         arena.alloc(Node::new(
-                                            load(arg_i, id),
+                                            load(id),
                                             arg_ty.ty,
                                             EffType::empty(),
                                             fn_span,
@@ -1735,7 +1735,7 @@ impl<'a> TraitSolver<'a> {
                                 |(arg_i, arg_ty)| {
                                     let id = LocalDeclId::from_index(arg_i);
                                     arena.alloc(Node::new(
-                                        load(arg_i, id),
+                                        load(id),
                                         arg_ty.ty,
                                         EffType::empty(),
                                         fn_span,

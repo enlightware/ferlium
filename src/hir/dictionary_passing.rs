@@ -16,9 +16,9 @@ use crate::{
     compiler::error::InternalCompilationError,
     format::FormatWith,
     module::{
-        ConcreteTraitImplKey, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        LocalFunctionId, ModuleEnv, TraitImpl, TraitImplId, TraitImpls, build_dictionary_value,
-        id::Id,
+        ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId,
+        LocalDrop, LocalFunctionId, LocalValueMethodDispatch, ModuleEnv, ProjectionIndex,
+        TraitImpl, TraitImplId, TraitImpls, build_dictionary_value, id::Id,
     },
     parser::helpers::EMPTY_USTR,
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef},
@@ -336,7 +336,7 @@ fn trait_dictionary_node_kind(
         let index = find_trait_impl_dict_index(ctx.dicts, trait_ref, input_tys)
             .expect("Dictionary for trait impl not found, type inference should have failed");
         let id = LocalDeclId::from_index(local_count + index);
-        hir::hir_syn::load(index, id)
+        hir::hir_syn::load(id)
     };
     let ty = trait_ref.get_dictionary_type_for_tys(input_tys, output_tys);
     Ok((node_kind, ty))
@@ -368,7 +368,10 @@ fn alloc_dictionary_method_projection(
     let (entry_index, function_ty) =
         dictionary_method_projection_data(trait_ref, dictionary_ty, method_index);
     arena.alloc(Node::new(
-        NodeKind::Project(dictionary_id, usize::from(entry_index)),
+        NodeKind::Project(
+            dictionary_id,
+            ProjectionIndex::from_index(usize::from(entry_index)),
+        ),
         function_ty,
         no_effects(),
         span,
@@ -417,7 +420,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                                 || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                             );
                             let id = LocalDeclId::from_index(local_count + index);
-                            K::EnvLoad(hir::EnvLoad { index: index as u32, id })
+                            K::EnvLoad(hir::EnvLoad { id })
                         }
                         _ => {
                             panic!("FieldIndex dictionary should have a variable or record type");
@@ -468,10 +471,7 @@ fn extra_args_for_module_function(
             let id = LocalDeclId::from_index(local_count + index);
             (
                 arena.alloc(Node::new(
-                    NodeKind::EnvLoad(hir::EnvLoad {
-                        index: index as u32,
-                        id,
-                    }),
+                    NodeKind::EnvLoad(hir::EnvLoad { id }),
                     ty,
                     no_effects(),
                     span,
@@ -519,56 +519,28 @@ pub fn elaborate_local_value_dispatches<'d, 'sr, 'sm>(
 ) -> Result<(), InternalCompilationError> {
     for local in locals {
         if matches!(local.clone, Some(LocalClone::Required)) {
-            local.clone = Some(
-                resolve_local_value_dispatch(
-                    arena,
-                    ctx,
-                    local.ty,
-                    VALUE_CLONE_METHOD_INDEX,
-                    local.scope,
-                    "Value dictionary for mutable let binding not found, type inference should have failed",
-                )?
-                .into_clone(),
-            );
+            local.clone = Some(resolve_local_value_dispatch(
+                arena,
+                ctx,
+                local.ty,
+                VALUE_CLONE_METHOD_INDEX,
+                local.scope,
+                "Value dictionary for mutable let binding not found, type inference should have failed",
+            )?);
         }
 
         if matches!(local.drop, Some(LocalDrop::Required)) {
-            local.drop = Some(
-                resolve_local_value_dispatch(
-                    arena,
-                    ctx,
-                    local.ty,
-                    VALUE_DROP_METHOD_INDEX,
-                    local.scope,
-                    "Value dictionary for local drop not found, type inference should have failed",
-                )?
-                .into_drop(),
-            );
+            local.drop = Some(resolve_local_value_dispatch(
+                arena,
+                ctx,
+                local.ty,
+                VALUE_DROP_METHOD_INDEX,
+                local.scope,
+                "Value dictionary for local drop not found, type inference should have failed",
+            )?);
         }
     }
     Ok(())
-}
-
-/// Shared resolved form for local `Value` clone/drop dispatch.
-enum LocalValueDispatch {
-    Static(FunctionId),
-    Dictionary(usize),
-}
-
-impl LocalValueDispatch {
-    fn into_clone(self) -> LocalClone {
-        match self {
-            Self::Static(function) => LocalClone::Static(function),
-            Self::Dictionary(index) => LocalClone::Dictionary(index),
-        }
-    }
-
-    fn into_drop(self) -> LocalDrop {
-        match self {
-            Self::Static(function) => LocalDrop::Static(function),
-            Self::Dictionary(index) => LocalDrop::Dictionary(index),
-        }
-    }
 }
 
 /// Resolve a required local clone/drop into either a static `Value` method or a runtime dictionary slot.
@@ -579,28 +551,30 @@ fn resolve_local_value_dispatch(
     method_index: TraitMethodIndex,
     span: Location,
     missing_dictionary_msg: &str,
-) -> Result<LocalValueDispatch, InternalCompilationError> {
+) -> Result<LocalValueMethodDispatch, InternalCompilationError> {
     if ty.is_function() {
-        return Ok(LocalValueDispatch::Static(FunctionId::Local(
+        return Ok(LocalValueMethodDispatch::Static(FunctionId::Local(
             function_value_method(ctx.trait_solver, method_index, span, arena)?,
         )));
     }
     if is_function_surface_only_value_type(ty) {
         let methods =
             generic_value_methods_for_type(ctx.trait_solver, &VALUE_TRAIT, &[ty], span, arena)?;
-        return Ok(LocalValueDispatch::Static(FunctionId::Local(
+        return Ok(LocalValueMethodDispatch::Static(FunctionId::Local(
             methods[usize::from(method_index)],
         )));
     }
     if ty.is_constant() {
-        return Ok(LocalValueDispatch::Static(
+        return Ok(LocalValueMethodDispatch::Static(
             ctx.trait_solver
                 .solve_impl_method(&VALUE_TRAIT, &[ty], method_index, span, arena)?,
         ));
     }
     let dict_index =
         find_trait_impl_dict_index(ctx.dicts, &VALUE_TRAIT, &[ty]).expect(missing_dictionary_msg);
-    Ok(LocalValueDispatch::Dictionary(dict_index))
+    Ok(LocalValueMethodDispatch::Dictionary(
+        ExtraParameterId::from_index(dict_index),
+    ))
 }
 
 impl Node {
@@ -685,17 +659,14 @@ impl Node {
                     node.clone,
                     Some(LocalClone::Static(_)) | Some(LocalClone::Dictionary(_))
                 ) {
-                    node.clone = Some(
-                        resolve_local_value_dispatch(
-                            arena,
-                            ctx,
-                            node_ty,
-                            VALUE_CLONE_METHOD_INDEX,
-                            node_span,
-                            "Value dictionary for owned value materialization not found, type inference should have failed",
-                        )?
-                        .into_clone(),
-                    );
+                    node.clone = Some(resolve_local_value_dispatch(
+                        arena,
+                        ctx,
+                        node_ty,
+                        VALUE_CLONE_METHOD_INDEX,
+                        node_span,
+                        "Value dictionary for owned value materialization not found, type inference should have failed",
+                    )?);
                 }
             }
             TrivialCopy(node) => {
@@ -843,7 +814,7 @@ impl Node {
                     // Load that dictionary from the correct local variable.
                     let load_id = LocalDeclId::from_index(local_count + dict_index);
                     let load_dict_id = arena.alloc(Node::new(
-                        hir::hir_syn::load(dict_index, load_id),
+                        hir::hir_syn::load(load_id),
                         dict_ty,
                         no_effects(),
                         function_span,
@@ -987,7 +958,10 @@ impl Node {
                         dict_ty,
                         get_method.method_index,
                     );
-                    kind = Project(dict_id, usize::from(entry_index));
+                    kind = Project(
+                        dict_id,
+                        ProjectionIndex::from_index(usize::from(entry_index)),
+                    );
                 }
             }
             GetTraitAssociatedConst(get_const) => {
@@ -1026,18 +1000,19 @@ impl Node {
                     let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
                     let load_id = LocalDeclId::from_index(local_count + dict_index);
                     let load_dict_id = arena.alloc(Node::new(
-                        hir::hir_syn::load(dict_index, load_id),
+                        hir::hir_syn::load(load_id),
                         dict_ty,
                         no_effects(),
                         get_const.associated_const_span,
                     ));
-                    kind =
-                        Project(
-                            load_dict_id,
-                            usize::from(get_const.trait_ref.dictionary_associated_const_index(
+                    kind = Project(
+                        load_dict_id,
+                        ProjectionIndex::from_index(usize::from(
+                            get_const.trait_ref.dictionary_associated_const_index(
                                 get_const.associated_const_index,
-                            )),
-                        );
+                            ),
+                        )),
+                    );
                 }
             }
             GetTraitDictionary(get_dict) => {
@@ -1056,18 +1031,11 @@ impl Node {
                 // nothing to do
             }
             EnvStore(store) => {
-                store.index += ctx.dicts.len() as u32;
                 elaborate_dictionaries(arena, store.value, ctx, local_count)?;
             }
-            EnvDrop(drop) => {
-                drop.index += ctx.dicts.len() as u32;
-            }
-            EnvMove(load) => {
-                load.index += ctx.dicts.len() as u32;
-            }
-            EnvLoad(load) => {
-                load.index += ctx.dicts.len() as u32;
-            }
+            EnvDrop(_) => {}
+            EnvMove(_) => {}
+            EnvLoad(_) => {}
             Return(node_id) => {
                 elaborate_dictionaries(arena, *node_id, ctx, local_count)?;
             }
@@ -1079,6 +1047,17 @@ impl Node {
             Assign(assignment) => {
                 elaborate_dictionaries(arena, assignment.place, ctx, local_count)?;
                 elaborate_dictionaries(arena, assignment.value, ctx, local_count)?;
+                if matches!(assignment.drop, Some(LocalDrop::Required)) {
+                    let place_ty = arena[assignment.place].ty;
+                    assignment.drop = Some(resolve_local_value_dispatch(
+                        arena,
+                        ctx,
+                        place_ty,
+                        VALUE_DROP_METHOD_INDEX,
+                        node_span,
+                        "Value dictionary for assignment overwrite drop not found, type inference should have failed",
+                    )?);
+                }
             }
             Tuple(nodes) => {
                 for &node_id in nodes.iter() {
@@ -1114,7 +1093,7 @@ impl Node {
                             .iter()
                             .position(|field| field.0 == field_name)
                             .expect("Field not found in type, type inference should have failed");
-                        kind = Project(child_id, index);
+                        kind = Project(child_id, ProjectionIndex::from_index(index));
                     }
                     Variable(var) => {
                         // Variable type, it must be in the type scheme, use the dictionary to lookup local variable.
@@ -1123,7 +1102,7 @@ impl Node {
                         let index = find_field_dict_index(ctx.dicts, var, &field_name).unwrap_or_else(
                             || panic!("Dictionary for field \"{field_name}\" in type variable \"{var}\" not found, type inference should have failed"),
                         );
-                        kind = ProjectAt(child_id, index);
+                        kind = ProjectAt(child_id, ExtraParameterId::from_index(index));
                     }
                     _ => {
                         panic!("FieldAccess should have a record or variable type");
@@ -1151,17 +1130,14 @@ impl Node {
                     index.clone,
                     Some(LocalClone::Static(_)) | Some(LocalClone::Dictionary(_))
                 ) {
-                    index.clone = Some(
-                        resolve_local_value_dispatch(
-                            arena,
-                            ctx,
-                            node_ty,
-                            VALUE_CLONE_METHOD_INDEX,
-                            node_span,
-                            "Value dictionary for array indexing not found, type inference should have failed",
-                        )?
-                        .into_clone(),
-                    );
+                    index.clone = Some(resolve_local_value_dispatch(
+                        arena,
+                        ctx,
+                        node_ty,
+                        VALUE_CLONE_METHOD_INDEX,
+                        node_span,
+                        "Value dictionary for array indexing not found, type inference should have failed",
+                    )?);
                 }
             }
             Case(case) => {
@@ -1322,11 +1298,10 @@ mod tests {
         let NodeKind::Project(dictionary_node, index) = arena[node].kind else {
             panic!("expected associated const to elaborate to a dictionary projection");
         };
-        assert_eq!(index, 1);
+        assert_eq!(index.as_index(), 1);
         let NodeKind::EnvLoad(load) = &arena[dictionary_node].kind else {
             panic!("expected dictionary projection source to load a dictionary");
         };
-        assert_eq!(load.index, 0);
         assert_eq!(load.id.as_index(), 3);
     }
 }

@@ -11,7 +11,9 @@ use crate::{
     containers::{IntoSVec2, b},
     hir::value::{LiteralNativeValue, LiteralValue},
     hir::{self, NodeArena, NodeId},
-    module::{FunctionId, LocalClone, LocalDecl, LocalDeclId, TraitImplId, id::Id},
+    module::{
+        FunctionId, LocalClone, LocalDecl, LocalDeclId, ProjectionIndex, TraitImplId, id::Id,
+    },
     std::{math::int_type, string::String as FerliumString},
     types::effects::EffType,
     types::mutability::{MutType, MutVal},
@@ -100,45 +102,29 @@ pub fn store_new(
         Location::new_synthesized(),
     );
     local.owns_storage = true;
+    local.slot = index as u32;
     locals.push(local);
-    (
-        K::EnvStore(hir::EnvStore {
-            value,
-            index: index as u32,
-            id,
-        }),
-        id,
-    )
+    (K::EnvStore(hir::EnvStore { value, id }), id)
 }
 
 #[allow(dead_code)]
-pub fn store_to(value: NodeId, index: usize, id: LocalDeclId) -> NodeKind {
-    K::EnvStore(hir::EnvStore {
-        value,
-        index: index as u32,
-        id,
-    })
+pub fn store_to(value: NodeId, id: LocalDeclId) -> NodeKind {
+    K::EnvStore(hir::EnvStore { value, id })
 }
 
 pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
     K::GetDictionary(hir::GetDictionary { dictionary })
 }
 
-pub fn load(index: usize, id: LocalDeclId) -> NodeKind {
-    K::EnvLoad(hir::EnvLoad {
-        index: index as u32,
-        id,
-    })
+pub fn load(id: LocalDeclId) -> NodeKind {
+    K::EnvLoad(hir::EnvLoad { id })
 }
 
-pub fn move_local(index: usize, id: LocalDeclId) -> NodeKind {
-    K::EnvMove(hir::EnvMove {
-        index: index as u32,
-        id,
-    })
+pub fn move_local(id: LocalDeclId) -> NodeKind {
+    K::EnvMove(hir::EnvMove { id })
 }
 
-pub fn project(tuple: NodeId, index: usize) -> NodeKind {
+pub fn project(tuple: NodeId, index: ProjectionIndex) -> NodeKind {
     K::Project(tuple, index)
 }
 
@@ -159,11 +145,11 @@ pub fn index_immediate(
         EffType::empty(),
         array_span,
     ));
-    K::Index(b(hir::ArrayIndex {
+    K::Index(hir::ArrayIndex {
         array,
         index: index_node,
         clone: Some(clone),
-    }))
+    })
 }
 
 pub fn extract_tag(variant: NodeId) -> NodeKind {

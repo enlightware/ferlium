@@ -315,10 +315,12 @@ impl FnType {
         &self,
         arg_names: impl Iterator<Item = &'a UstrSpan>,
     ) -> Vec<LocalDecl> {
-        arg_names
+        let mut locals = arg_names
             .zip(self.args.iter())
             .map(|(name, arg)| LocalDecl::new(*name, arg.mut_ty, arg.ty, None, name.1))
-            .collect()
+            .collect::<Vec<_>>();
+        LocalDecl::assign_sequential_slots(&mut locals);
+        locals
     }
 
     pub fn args_ty(&self) -> impl Iterator<Item = Type> + '_ {

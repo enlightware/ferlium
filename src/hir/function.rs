@@ -24,8 +24,8 @@ use crate::{
     Location,
     compiler::error::RuntimeErrorKind,
     eval::{
-        ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, cont,
-        eval_node_with_ctx,
+        ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, ValOrMutArgs, cont,
+        drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
     format::FormatWith,
     hir::value::{NativeDisplay, Value},
@@ -99,13 +99,16 @@ impl FunctionDefinition {
         arg_spans: impl Iterator<Item = Location>,
         scope: Location,
     ) -> Vec<LocalDecl> {
-        self.ty_scheme
+        let mut locals = self
+            .ty_scheme
             .ty
             .args
             .iter()
             .zip(self.arg_names.iter().copied().zip(arg_spans))
             .map(|(arg, name)| LocalDecl::new(name, arg.mut_ty, arg.ty, None, scope))
-            .collect()
+            .collect::<Vec<_>>();
+        LocalDecl::assign_sequential_slots(&mut locals);
+        locals
     }
 
     pub fn fmt_with_name_and_module_env(
@@ -206,6 +209,33 @@ impl Debug for dyn Callable {
 
 dyn_clone::clone_trait_object!(Callable);
 
+/// Owns prepared call arguments until they are borrowed or transferred into a frame.
+struct CallArgsStorageGuard {
+    args: Vec<ValOrMut>,
+}
+
+impl CallArgsStorageGuard {
+    fn new(args: Vec<ValOrMut>) -> Self {
+        Self { args }
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, ValOrMut> {
+        self.args.iter()
+    }
+
+    fn into_vec(mut self) -> Vec<ValOrMut> {
+        std::mem::take(&mut self.args)
+    }
+}
+
+impl Drop for CallArgsStorageGuard {
+    fn drop(&mut self) {
+        for arg in self.args.drain(..) {
+            arg.discard_storage();
+        }
+    }
+}
+
 // Function access types
 
 pub type Function = Box<dyn Callable>;
@@ -263,18 +293,19 @@ impl Callable for ScriptFunction {
         ctx: &mut CallCtx,
         locals_arg: &[LocalDecl],
     ) -> EvalControlFlowResult {
-        let arg_count = args.len();
+        let args = CallArgsStorageGuard::new(args);
+        let arg_count = args.args.len();
         #[cfg(debug_assertions)]
-        if args.len() != self.arg_names.len() {
+        if args.args.len() != self.arg_names.len() {
             eprintln!(
                 "BUG\ngot {} args: {:?}\nexpected {} from names: {:?}",
-                args.len(),
-                args,
+                args.args.len(),
+                args.args,
                 self.arg_names.len(),
                 self.arg_names
             );
         }
-        assert_eq!(args.len(), self.arg_names.len());
+        assert_eq!(args.args.len(), self.arg_names.len());
         let arena = &ctx
             .compiler_session()
             .expect_fresh_module(ctx.module_id)
@@ -298,22 +329,26 @@ impl Callable for ScriptFunction {
 
         let old_frame_base = ctx.frame_base;
         ctx.frame_base = ctx.environment.len();
-        ctx.environment.extend(args);
+        ctx.environment.extend(args.into_vec());
         #[cfg(debug_assertions)]
         ctx.environment_names.extend(self.arg_names.iter().copied());
         ctx.call_depth += 1;
 
         let ret = eval_node_with_ctx(arena, self.entry_node_id, ctx, locals_arg);
+        let cleanup = if ret.is_err() {
+            drop_frame_owned_locals_on_error(ctx, locals_arg, arena[self.entry_node_id].span)
+        } else {
+            Ok(())
+        };
 
         ctx.call_depth -= 1;
         if ret.is_ok() {
             assert_eq!(ctx.environment.len(), ctx.frame_base + arg_count);
         }
-        ctx.environment.truncate(ctx.frame_base);
-        #[cfg(debug_assertions)]
-        ctx.environment_names.truncate(ctx.frame_base);
+        ctx.truncate_environment_storage(ctx.frame_base);
         ctx.frame_base = old_frame_base;
 
+        cleanup?;
         let ret = ret?;
         // Convert Return to Continue at function boundary
         // (return statements should only escape the current function, not propagate to callers)
@@ -354,18 +389,22 @@ impl PartialEq for Box<ScriptFunction> {
 impl Eq for Box<ScriptFunction> {}
 
 /// Native callable wrapper for primitives that need direct access to the evaluation context.
+///
+/// Context-native functions take ownership of their argument vector. Unlike the
+/// generated native wrappers below, they must consume or explicitly discard any
+/// `ValOrMut::Val` they remove from that vector.
 #[derive(Debug, Clone, Copy)]
 pub struct ContextNativeFn {
     name: &'static str,
     argument_passing: &'static [ArgPassing],
-    function: for<'a> fn(Vec<ValOrMut>, &mut CallCtx<'a>) -> EvalControlFlowResult,
+    function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
 }
 
 impl ContextNativeFn {
-    pub fn new(
+    pub(crate) fn new(
         name: &'static str,
         argument_passing: &'static [ArgPassing],
-        function: for<'a> fn(Vec<ValOrMut>, &mut CallCtx<'a>) -> EvalControlFlowResult,
+        function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
     ) -> Self {
         Self {
             name,
@@ -382,7 +421,7 @@ impl Callable for ContextNativeFn {
         ctx: &mut CallCtx,
         _locals: &[LocalDecl],
     ) -> EvalControlFlowResult {
-        (self.function)(args, ctx)
+        (self.function)(ValOrMutArgs::new(args), ctx)
     }
 
     fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
@@ -705,6 +744,7 @@ macro_rules! n_ary_native_fn {
             paste::paste! {
             #[allow(unused_variables)]
             fn call(&self, args: Vec<ValOrMut>, ctx: &mut CallCtx, _locals: &[LocalDecl]) -> EvalControlFlowResult {
+                let args = CallArgsStorageGuard::new(args);
                 // Extract arguments by applying repetition for each ArgExtractor
                 #[allow(unused_variables, unused_mut)]
                 let mut args_iter = args.iter();
@@ -781,3 +821,60 @@ n_ary_native_fn!(QuinaryNativeFn, A0, A1, A2, A3, A4);
 n_ary_native_fn!(SenaryNativeFn, A0, A1, A2, A3, A4, A5);
 n_ary_native_fn!(SeptenaryNativeFn, A0, A1, A2, A3, A4, A5, A6);
 n_ary_native_fn!(OctonaryNativeFn, A0, A1, A2, A3, A4, A5, A6, A7);
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fmt,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::{
+        CompilerSession,
+        eval::ControlFlow,
+        module::{ModuleId, id::Id},
+    };
+
+    use super::*;
+
+    static NATIVE_ARG_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug)]
+    struct NativeArgDropTracked;
+
+    impl Drop for NativeArgDropTracked {
+        fn drop(&mut self) {
+            NATIVE_ARG_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl NativeDisplay for NativeArgDropTracked {
+        fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "<native-arg-drop-tracked>")
+        }
+    }
+
+    fn observe_value(_: &Value) {}
+
+    #[test]
+    fn generated_native_wrapper_discards_owned_argument_storage() {
+        NATIVE_ARG_DROP_COUNT.store(0, Ordering::Relaxed);
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        let function = UnaryNativeFnVN::new(observe_value);
+
+        let result = function
+            .call(
+                vec![ValOrMut::Val(Value::native(NativeArgDropTracked))],
+                &mut ctx,
+                &[],
+            )
+            .unwrap();
+        let ControlFlow::Continue(value) = result else {
+            panic!("native test function should not return early");
+        };
+        value.discard_storage();
+
+        assert_eq!(NATIVE_ARG_DROP_COUNT.load(Ordering::Relaxed), 1);
+    }
+}

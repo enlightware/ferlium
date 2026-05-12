@@ -19,7 +19,10 @@ use crate::{
     Location,
     ast::{self, UnnamedArg},
     format::FormatWith,
-    module::{FunctionId, LocalClone, LocalDecl, LocalDeclId, TraitImplId, id::Id},
+    module::{
+        ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
+        ProjectionIndex, TraitImplId, id::Id,
+    },
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
     types::type_like::{CastableToType, TypeLike},
 };
@@ -181,25 +184,21 @@ impl TraitMethodApplication {
 #[derive(Debug, Clone)]
 pub struct EnvStore {
     pub value: NodeId,
-    pub index: u32,
     pub id: LocalDeclId,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnvDrop {
-    pub index: u32,
     pub id: LocalDeclId,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnvMove {
-    pub index: u32,
     pub id: LocalDeclId,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnvLoad {
-    pub index: u32,
     pub id: LocalDeclId,
 }
 
@@ -207,6 +206,9 @@ pub struct EnvLoad {
 pub struct Assignment {
     pub place: NodeId,
     pub value: NodeId,
+    /// Dispatch used to drop the old destination value before overwriting it.
+    /// `None` is used for uninitialized stores and known trivial-copy values.
+    pub drop: Option<LocalDrop>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,8 +278,8 @@ pub enum NodeKind {
     Apply(B<Application>),
     FunctionClone(B<FunctionClone>),
     FunctionDrop(B<FunctionDrop>),
-    ValueClone(B<ValueClone>),
-    TrivialCopy(B<TrivialCopy>),
+    ValueClone(ValueClone),
+    TrivialCopy(TrivialCopy),
     StaticApply(B<StaticApplication>),
     /// Note: this should only exist transiently in the HIR and never be executed
     TraitMethodApply(B<TraitMethodApplication>),
@@ -297,18 +299,18 @@ pub enum NodeKind {
     Block(B<SVec2<NodeId>>),
     Assign(Assignment),
     Tuple(B<SVec2<NodeId>>),
-    Project(NodeId, usize),
+    Project(NodeId, ProjectionIndex),
     Record(B<SVec2<NodeId>>),
     // Note: this should only exist transiently in the HIR and never be executed
     FieldAccess(NodeId, Ustr),
     /// Access a tuple value using a local variable as index, after dictionary passing phase
-    ProjectAt(NodeId, usize),
+    ProjectAt(NodeId, ExtraParameterId),
     /// Build a variant (tagged union) with a name and a value
     Variant(Ustr, NodeId),
     /// Extract the tag of a variant as an isize, by casting the pointer to the string
     ExtractTag(NodeId),
     Array(B<SVec2<NodeId>>),
-    Index(B<ArrayIndex>),
+    Index(ArrayIndex),
     Case(B<Case>),
     Loop(NodeId),
     SoftBreak,
@@ -564,8 +566,9 @@ impl Node {
                 )?;
             }
             EnvStore(node) => {
-                let name = locals[node.id.as_index()].name.0;
-                let clone_suffix = if locals[node.id.as_index()].clone.is_some() {
+                let local = &locals[node.id.as_index()];
+                let name = local.name.0;
+                let clone_suffix = if local.clone.is_some() {
                     " with Value::clone"
                 } else {
                     ""
@@ -574,29 +577,30 @@ impl Node {
                     f,
                     "{indent_str}store {} at {} as \"{}\"{}",
                     arena[node.value].ty.format_with(env),
-                    node.index,
+                    local.slot,
                     name,
                     clone_suffix,
                 )?;
                 format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
             }
             EnvDrop(node) => {
-                let name = locals[node.id.as_index()].name.0;
+                let local = &locals[node.id.as_index()];
+                let name = local.name.0;
                 writeln!(
                     f,
                     "{indent_str}drop {} at {} as \"{}\"",
-                    locals[node.id.as_index()].ty.format_with(env),
-                    node.index,
+                    local.ty.format_with(env),
+                    local.slot,
                     name,
                 )?;
             }
             EnvMove(node) => {
-                let name = locals[node.id.as_index()].name.0;
-                writeln!(f, "{indent_str}move {} as \"{}\"", node.index, name)?;
+                let local = &locals[node.id.as_index()];
+                writeln!(f, "{indent_str}move {} as \"{}\"", local.slot, local.name.0)?;
             }
             EnvLoad(node) => {
-                let name = locals[node.id.as_index()].name.0;
-                writeln!(f, "{indent_str}load {} as \"{}\"", node.index, name)?;
+                let local = &locals[node.id.as_index()];
+                writeln!(f, "{indent_str}load {} as \"{}\"", local.slot, local.name.0)?;
             }
             Return(node) => {
                 writeln!(f, "{indent_str}return")?;
@@ -624,7 +628,7 @@ impl Node {
             Project(data, index) => {
                 writeln!(f, "{indent_str}project")?;
                 format_ind(arena, *data, f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}at {}", *index)?;
+                writeln!(f, "{indent_str}at {}", index.as_index())?;
             }
             Record(nodes) => {
                 let ty_data = self.ty.data();
@@ -658,7 +662,11 @@ impl Node {
             ProjectAt(data, index) => {
                 writeln!(f, "{indent_str}access")?;
                 format_ind(arena, *data, f, locals, env, spacing, indent + 1)?;
-                writeln!(f, "{indent_str}at field referenced by local {}", *index)?;
+                writeln!(
+                    f,
+                    "{indent_str}at field referenced by extra parameter {}",
+                    index.as_index()
+                )?;
             }
             Variant(tag, payload) => {
                 writeln!(f, "{indent_str}variant with tag: {}", *tag)?;

@@ -13,7 +13,7 @@ use ustr::ustr;
 use crate::{
     Location, cached_ty,
     compiler::error::RuntimeErrorKind,
-    eval::{EvalControlFlowResult, EvalCtx, Place, RuntimeError, ValOrMut, cont},
+    eval::{EvalControlFlowResult, EvalCtx, Place, RuntimeError, ValOrMutArgs, cont},
     format::{write_with_separator, write_with_separator_and_format_fn},
     hir::function::{
         ArgPassing, Callable, ContextNativeFn, Function, FunctionDefinition, NullaryNativeFnN,
@@ -292,8 +292,7 @@ fn array_len_from_place(
     Ok(value.as_primitive_ty::<Array>().unwrap().len())
 }
 
-fn array_element_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let mut args = args.into_iter();
+fn array_element_ptr(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut place = ptr::place_from_arg(args.next().unwrap())?;
     let index = args
         .next()
@@ -317,8 +316,7 @@ fn array_element_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowR
     cont(Value::native(Ptr::new(place)))
 }
 
-fn array_element_mut_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let mut args = args.into_iter();
+fn array_element_mut_ptr(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let mut place = ptr::place_from_arg(args.next().unwrap())?;
     let index = args
         .next()
@@ -342,16 +340,19 @@ fn array_element_mut_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlF
     cont(Value::native(MutPtr::new(place)))
 }
 
-fn array_push_uninit_back(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn array_push_uninit_back(args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     array_push_uninit(args, ctx, false)
 }
 
-fn array_push_uninit_front(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
+fn array_push_uninit_front(args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     array_push_uninit(args, ctx, true)
 }
 
-fn array_push_uninit(args: Vec<ValOrMut>, ctx: &mut EvalCtx, front: bool) -> EvalControlFlowResult {
-    let mut args = args.into_iter();
+fn array_push_uninit(
+    mut args: ValOrMutArgs,
+    ctx: &mut EvalCtx,
+    front: bool,
+) -> EvalControlFlowResult {
     let mut place = ptr::place_from_arg(args.next().unwrap())?;
     let index = {
         let array = place

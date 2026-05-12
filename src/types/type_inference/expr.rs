@@ -17,13 +17,13 @@ use crate::{
     },
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
-    hir::function::{Function, FunctionDefinition, ScriptFunction},
+    hir::function::{ArgPassing, Function, FunctionDefinition, ScriptFunction},
     hir::value::LiteralValue,
     hir::{self, EnvStore, Immediate, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
     module::{
-        FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop, ModuleEnv, ModuleFunction,
-        TypeDefLookupResult, id::Id,
+        FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
+        LocalDropMode, ModuleEnv, ModuleFunction, ProjectionIndex, TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
     std::{
@@ -31,6 +31,7 @@ use crate::{
         array::array_type,
         core::{REPR_TRAIT, TRIVIAL_COPY_TRAIT},
         math::int_type,
+        ptr::is_pointer_type,
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT},
     },
     types::{
@@ -41,7 +42,10 @@ use crate::{
         mutability::{MutType, MutVar, MutVarKey},
         r#trait::{TraitMethodIndex, TraitRef},
         trait_solver::{TraitSolver, TraitSolverProbe},
-        r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
+        r#type::{
+            FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar,
+            bare_native_type,
+        },
         type_like::TypeLike,
         type_mapper::TypeMapper,
         type_scheme::{PubTypeConstraint, TypeScheme},
@@ -202,25 +206,21 @@ impl TypeInference {
 
         let mut fn_all_locals = Vec::new();
         for var_name in sorted_free_vars {
-            let found = env.get_variable_index_and_id(&var_name);
-            if let Some((index, outer_id)) = found {
+            let found = env.get_variable_id(&var_name);
+            if let Some(outer_id) = found {
                 // It is a local variable in the current environment, capture it.
                 let local = &env.all_locals[outer_id.as_index()];
                 let capture_id = env.ir_arena.alloc(N::new(
-                    K::EnvLoad(hir::EnvLoad {
-                        index: index as u32,
-                        id: outer_id,
-                    }),
+                    K::EnvLoad(hir::EnvLoad { id: outer_id }),
                     local.ty,
                     no_effects(),
                     span,
                 ));
                 capture_node_ids.push(capture_id);
                 capture_tys.push(local.ty);
-                let inner_id = LocalDeclId::from_index(fn_all_locals.len());
                 let mut inner_local = local.clone();
                 inner_local.scope = span; // the local's scope is the whole lambda
-                fn_all_locals.push(inner_local);
+                let inner_id = LocalDecl::push_with_next_slot(&mut fn_all_locals, inner_local);
                 capture_args.push(inner_id);
             }
         }
@@ -232,9 +232,8 @@ impl TypeInference {
                 .iter()
                 .zip(&fn_ty.args)
                 .map(|(name, arg_ty)| {
-                    let id = LocalDeclId::from_index(fn_all_locals.len());
-                    fn_all_locals.push(LocalDecl::new(*name, arg_ty.mut_ty, arg_ty.ty, None, span));
-                    id
+                    let local = LocalDecl::new(*name, arg_ty.mut_ty, arg_ty.ty, None, span);
+                    LocalDecl::push_with_next_slot(&mut fn_all_locals, local)
                 })
                 .collect::<Vec<_>>();
             (explicit_locals, fn_ty.ret)
@@ -242,15 +241,14 @@ impl TypeInference {
             let explicit_locals = args
                 .iter()
                 .map(|name| {
-                    let id = LocalDeclId::from_index(fn_all_locals.len());
-                    fn_all_locals.push(LocalDecl::new(
+                    let local = LocalDecl::new(
                         *name,
                         self.fresh_mut_var_ty(),
                         self.fresh_type_var_ty(),
                         None,
                         span,
-                    ));
-                    id
+                    );
+                    LocalDecl::push_with_next_slot(&mut fn_all_locals, local)
                 })
                 .collect::<Vec<_>>();
             (explicit_locals, self.fresh_type_var_ty())
@@ -383,13 +381,10 @@ impl TypeInference {
             Identifier(path) => {
                 // Retrieve the index and the type of the variable from the environment, if it exists
                 if let [(name, _)] = &path.segments[..]
-                    && let Some((index, id)) = env.get_variable_index_and_id(name)
+                    && let Some(id) = env.get_variable_id(name)
                 {
                     let local = &env.all_locals[id.as_index()];
-                    let node = K::EnvLoad(hir::EnvLoad {
-                        index: index as u32,
-                        id,
-                    });
+                    let node = K::EnvLoad(hir::EnvLoad { id });
                     (node, local.ty, local.mut_ty, no_effects())
                 }
                 // Retrieve the trait method from the environment, if it exists
@@ -446,7 +441,9 @@ impl TypeInference {
                     )
                 }
                 // Retrieve the function from the environment, if it exists
-                else if let Some((definition, function, _module_id)) = env.get_function(path)? {
+                else if let Some((definition, function, _module_id, _arg_passing)) =
+                    env.get_function(path)?
+                {
                     let (fn_ty, inst_data, _subst) = definition
                         .ty_scheme
                         .instantiate_with_fresh_vars(self, expr_span, None);
@@ -529,7 +526,7 @@ impl TypeInference {
                     && node_ty != Type::never()
                     && initializer_is_borrow
                     && !initializer_is_known_trivial_copy;
-                if needs_mut_clone {
+                if needs_mut_clone && !node_ty.is_function() {
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                         VALUE_TRAIT.clone(),
                         vec![node_ty],
@@ -549,6 +546,9 @@ impl TypeInference {
                     expr_span,
                 );
                 local.owns_storage = owns_storage;
+                if owns_storage && self.type_needs_semantic_drop(env, node_ty, expr_span) {
+                    local.drop_mode = LocalDropMode::Value;
+                }
                 if needs_mut_clone {
                     local.clone = Some(LocalClone::Required);
                 }
@@ -561,13 +561,9 @@ impl TypeInference {
                     node_id
                 };
                 let node_effects = env.ir_arena[value_id].effects.clone();
-                let index = env.cur_locals.len();
-                let id = LocalDeclId::from_index(env.all_locals.len());
-                env.all_locals.push(local);
-                env.cur_locals.push(id);
+                let id = env.push_local(local);
                 let node = K::EnvStore(EnvStore {
                     value: value_id,
-                    index: index as u32,
                     id,
                 });
                 let ty = if node_ty == Type::never() {
@@ -673,7 +669,7 @@ impl TypeInference {
                     Self::diverging_prefix_result([func_node_id], effects)
                 } else {
                     // Infer the type and mutability of the arguments and collect their code and constraints
-                    let (args_nodes, args_tys, args_effects, args_diverge) =
+                    let (mut args_nodes, args_tys, args_effects, args_diverge) =
                         self.infer_exprs_ret_arg_ty_until_never(env, &data.args)?;
                     if args_diverge {
                         let nodes =
@@ -692,7 +688,7 @@ impl TypeInference {
                         let call_effects = self.fresh_effect_var_ty();
                         // Build the function type
                         let func_ty = Type::function_type(FnType::new(
-                            args_tys,
+                            args_tys.clone(),
                             ret_ty,
                             call_effects.clone(),
                         ));
@@ -708,11 +704,43 @@ impl TypeInference {
                             &args_effects,
                             &call_effects,
                         ]);
+                        // Non-place function values and borrowed arguments are stored in
+                        // explicit temps so the call ABI can pass stable places.
+                        let temp_start_index = env.cur_locals.len();
+                        let mut temp_stores = Vec::new();
+                        let function = if node_is_place_reference(env.ir_arena, func_node_id) {
+                            func_node_id
+                        } else {
+                            let (store, load) = self.store_owned_temp(
+                                env,
+                                func_node_id,
+                                env.ir_arena[func_node_id].ty,
+                                expr_span,
+                                ustr("$function"),
+                            );
+                            temp_stores.push(store);
+                            load
+                        };
+                        temp_stores.extend(self.borrowed_argument_temp_stores(
+                            env,
+                            &mut args_nodes,
+                            &args_tys,
+                            None,
+                            expr_span,
+                        ));
                         // Store and return the result
-                        let node = K::Apply(b(hir::Application {
-                            function: func_node_id,
+                        let call = K::Apply(b(hir::Application {
+                            function,
                             arguments: args_nodes,
                         }));
+                        let call =
+                            hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
+                        let node = self.wrap_call_with_temp_drops(
+                            env,
+                            temp_start_index,
+                            temp_stores,
+                            call,
+                        );
                         (node, ret_ty, MutType::constant(), combined_effects)
                     }
                 }
@@ -720,6 +748,7 @@ impl TypeInference {
             Block(exprs) => {
                 assert!(!exprs.is_empty());
                 let env_size = env.cur_locals.len();
+                let local_decl_count = env.all_locals.len();
                 let (mut nodes, types, effects, diverges) =
                     self.infer_exprs_drop_mut_until_never(env, exprs)?;
                 if !diverges {
@@ -729,7 +758,7 @@ impl TypeInference {
                     }
                     let moved_local = nodes.last_mut().and_then(|last| {
                         let (moved_node, moved_local) =
-                            self.move_owned_local_result(env, *last, env_size, expr_span);
+                            self.move_owned_local_result(env, *last, local_decl_count, expr_span);
                         if moved_local.is_some() {
                             *last = moved_node;
                         } else {
@@ -801,11 +830,29 @@ impl TypeInference {
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
                         let value_id = self.materialize_owned_value(env, value_id, expr_span);
+                        let initializes_storage =
+                            assignment_initializes_storage(env.ir_arena, place_id, env);
+                        let drop = if initializes_storage
+                            || !self.type_needs_semantic_drop(env, place_ty, expr_span)
+                        {
+                            None
+                        } else {
+                            if !place_ty.is_function() {
+                                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                                    VALUE_TRAIT.clone(),
+                                    vec![place_ty],
+                                    vec![],
+                                    expr_span,
+                                ));
+                            }
+                            Some(LocalDrop::Required)
+                        };
                         let combined_effects =
                             self.make_dependent_effect([&value_effects, &place_effects]);
                         let node = K::Assign(hir::Assignment {
                             place: place_id,
                             value: value_id,
+                            drop,
                         });
                         (node, Type::unit(), MutType::constant(), combined_effects)
                     }
@@ -850,7 +897,7 @@ impl TypeInference {
                         index_span,
                         element_ty,
                     ));
-                    let node = K::Project(tuple_node_id, index);
+                    let node = K::Project(tuple_node_id, ProjectionIndex::from_index(index));
                     (node, element_ty, tuple_mut, effects)
                 }
             }
@@ -1102,11 +1149,11 @@ impl TypeInference {
                             vec![],
                             sp(data.array),
                         ));
-                        let node = K::Index(b(hir::ArrayIndex {
+                        let node = K::Index(hir::ArrayIndex {
                             array: array_node_id,
                             index: index_node_id,
                             clone: Some(LocalClone::Required),
-                        }));
+                        });
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
                 }
@@ -1225,6 +1272,82 @@ impl TypeInference {
         Ok(self.infer_expr(env, expr)?.0)
     }
 
+    fn store_owned_temp(
+        &mut self,
+        env: &mut TypingEnv,
+        value: NodeId,
+        ty: Type,
+        span: Location,
+        name: Ustr,
+    ) -> (NodeId, NodeId) {
+        let mut local = LocalDecl::new((name, span), MutType::constant(), ty, None, span);
+        local.owns_storage = true;
+        if self.node_value_needs_semantic_drop(env, value, ty, span) {
+            local.drop_mode = LocalDropMode::Value;
+        }
+        let id = env.push_local(local);
+
+        let value_effects = env.ir_arena[value].effects.clone();
+        let store = env.ir_arena.alloc(hir::Node::new(
+            NodeKind::EnvStore(hir::EnvStore { value, id }),
+            Type::unit(),
+            value_effects,
+            span,
+        ));
+        let load = env.ir_arena.alloc(hir::Node::new(
+            NodeKind::EnvLoad(hir::EnvLoad { id }),
+            ty,
+            no_effects(),
+            span,
+        ));
+        (store, load)
+    }
+
+    fn borrowed_argument_temp_stores(
+        &mut self,
+        env: &mut TypingEnv,
+        args: &mut [NodeId],
+        arg_tys: &[FnArgType],
+        arg_passing: Option<&[ArgPassing]>,
+        span: Location,
+    ) -> Vec<NodeId> {
+        args.iter_mut()
+            .zip(arg_tys)
+            .enumerate()
+            .filter_map(|(index, (arg, arg_ty))| {
+                if !argument_is_passed_by_shared_ref(
+                    arg_ty,
+                    arg_passing.and_then(|passing| passing.get(index)).copied(),
+                ) || node_is_place_reference(env.ir_arena, *arg)
+                {
+                    return None;
+                }
+                let (store, load) = self.store_owned_temp(env, *arg, arg_ty.ty, span, ustr("$arg"));
+                *arg = load;
+                Some(store)
+            })
+            .collect()
+    }
+
+    fn wrap_call_with_temp_drops(
+        &mut self,
+        env: &mut TypingEnv,
+        temp_start_index: usize,
+        mut prefix: Vec<NodeId>,
+        call: hir::Node,
+    ) -> NodeKind {
+        if prefix.is_empty() {
+            return call.kind;
+        }
+
+        let span = call.span;
+        let call = env.ir_arena.alloc(call);
+        prefix.push(call);
+        prefix.extend(self.drop_nodes_for_locals(env, temp_start_index, None, span));
+        env.cur_locals.truncate(temp_start_index);
+        NodeKind::Block(b(SVec2::from_vec(prefix)))
+    }
+
     fn drop_nodes_for_locals(
         &mut self,
         env: &mut TypingEnv,
@@ -1241,19 +1364,21 @@ impl TypeInference {
             .filter(|(_, local_id)| Some(*local_id) != skip_drop)
             .filter(|(_, local_id)| {
                 let local = &env.all_locals[local_id.as_index()];
-                local.owns_storage
+                local.owns_storage && local.drop_mode == LocalDropMode::Value
             })
             .collect::<Vec<_>>();
 
         for (_, id) in &locals_to_drop {
             let local = &mut env.all_locals[id.as_index()];
             if local.drop.is_none() {
-                self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                    VALUE_TRAIT.clone(),
-                    vec![local.ty],
-                    vec![],
-                    span,
-                ));
+                if !local.ty.is_function() {
+                    self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                        VALUE_TRAIT.clone(),
+                        vec![local.ty],
+                        vec![],
+                        span,
+                    ));
+                }
                 local.drop = Some(LocalDrop::Required);
             }
         }
@@ -1261,12 +1386,9 @@ impl TypeInference {
         locals_to_drop
             .into_iter()
             .rev()
-            .map(|(index, id)| {
+            .map(|(_, id)| {
                 env.ir_arena.alloc(hir::Node::new(
-                    NodeKind::EnvDrop(hir::EnvDrop {
-                        index: index as u32,
-                        id,
-                    }),
+                    NodeKind::EnvDrop(hir::EnvDrop { id }),
                     Type::unit(),
                     no_effects(),
                     span,
@@ -1303,15 +1425,14 @@ impl TypeInference {
         &mut self,
         env: &mut TypingEnv,
         value: NodeId,
-        min_local_index: usize,
+        min_local_decl_index: usize,
         span: Location,
     ) -> (NodeId, Option<LocalDeclId>) {
-        let (index, id) = match &env.ir_arena[value].kind {
-            NodeKind::EnvLoad(load) => (load.index, load.id),
+        let id = match &env.ir_arena[value].kind {
+            NodeKind::EnvLoad(load) => load.id,
             _ => return (value, None),
         };
-        let local_index = index as usize;
-        if local_index < min_local_index {
+        if id.as_index() < min_local_decl_index {
             return (value, None);
         }
         if !env.all_locals[id.as_index()].owns_storage {
@@ -1320,7 +1441,7 @@ impl TypeInference {
         let ty = env.ir_arena[value].ty;
         let effects = env.ir_arena[value].effects.clone();
         let move_node = env.ir_arena.alloc(hir::Node::new(
-            NodeKind::EnvMove(hir::EnvMove { index, id }),
+            NodeKind::EnvMove(hir::EnvMove { id }),
             ty,
             effects,
             span,
@@ -1343,29 +1464,66 @@ impl TypeInference {
             return self.trivial_copy_value(env, value, span);
         }
 
-        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-            VALUE_TRAIT.clone(),
-            vec![ty],
-            vec![],
-            span,
-        ));
+        if !ty.is_function() {
+            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                VALUE_TRAIT.clone(),
+                vec![ty],
+                vec![],
+                span,
+            ));
+        }
         let effects = env.ir_arena[value].effects.clone();
         env.ir_arena.alloc(hir::Node::new(
-            NodeKind::ValueClone(b(hir::ValueClone {
+            NodeKind::ValueClone(hir::ValueClone {
                 source: value,
                 clone: Some(LocalClone::Required),
-            })),
+            }),
             ty,
             effects,
             span,
         ))
     }
 
+    fn type_needs_semantic_drop(&mut self, env: &mut TypingEnv, ty: Type, span: Location) -> bool {
+        // Std-only pointer values are interpreter metadata. They own Rust
+        // storage in the boxed interpreter, but they do not have Ferlium
+        // `Value::drop` semantics.
+        if is_pointer_type(ty) {
+            return false;
+        }
+        !type_has_known_trivial_copy_impl(env, ty, span)
+    }
+
+    fn node_value_needs_semantic_drop(
+        &mut self,
+        env: &mut TypingEnv,
+        value: NodeId,
+        ty: Type,
+        span: Location,
+    ) -> bool {
+        use NodeKind::*;
+
+        let kind = env.ir_arena[value].kind.clone();
+        match kind {
+            Immediate(_) | GetFunction(_) => false,
+            Variant(_, payload) => {
+                self.node_value_needs_semantic_drop(env, payload, env.ir_arena[payload].ty, span)
+            }
+            Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().any(|node| {
+                self.node_value_needs_semantic_drop(env, *node, env.ir_arena[*node].ty, span)
+            }),
+            BuildClosure(closure) => closure.captures.iter().any(|capture| {
+                self.node_value_needs_semantic_drop(env, *capture, env.ir_arena[*capture].ty, span)
+            }),
+            _ => self.type_needs_semantic_drop(env, ty, span),
+        }
+    }
+
     fn trivial_copy_value(&mut self, env: &mut TypingEnv, value: NodeId, span: Location) -> NodeId {
         let ty = env.ir_arena[value].ty;
         let effects = env.ir_arena[value].effects.clone();
         env.ir_arena.alloc(hir::Node::new(
-            NodeKind::TrivialCopy(b(hir::TrivialCopy { source: value })),
+            NodeKind::TrivialCopy(hir::TrivialCopy { source: value }),
             ty,
             effects,
             span,
@@ -1425,6 +1583,21 @@ impl TypeInference {
         span: Location,
     ) -> NodeId {
         if !node_is_place_reference(env.ir_arena, value) {
+            let ty = env.ir_arena[value].ty;
+            if self.node_value_needs_semantic_drop(env, value, ty, span) {
+                let temp_start_index = env.cur_locals.len();
+                let (store, _) = self.store_owned_temp(env, value, ty, span, ustr("$discard"));
+                let mut nodes = vec![store];
+                nodes.extend(self.drop_nodes_for_locals(env, temp_start_index, None, span));
+                env.cur_locals.truncate(temp_start_index);
+                let effects = env.ir_arena[value].effects.clone();
+                return env.ir_arena.alloc(hir::Node::new(
+                    NodeKind::Block(b(SVec2::from_vec(nodes))),
+                    Type::unit(),
+                    effects,
+                    span,
+                ));
+            }
             return value;
         }
 
@@ -1517,7 +1690,7 @@ impl TypeInference {
                     self.add_pub_constraint(constraint);
                 });
                 // Make sure the types of the trait arguments match the expected types
-                let (args_node_ids, args_effects, args_diverge) =
+                let (mut args_node_ids, args_effects, args_diverge) =
                     self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
                 if args_diverge {
                     let nodes =
@@ -1538,7 +1711,15 @@ impl TypeInference {
                     let ret_ty = inst_fn_ty.ret;
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                    let node = K::TraitMethodApply(b(hir::TraitMethodApplication {
+                    let temp_start_index = env.cur_locals.len();
+                    let temp_stores = self.borrowed_argument_temp_stores(
+                        env,
+                        &mut args_node_ids,
+                        &inst_fn_ty.args,
+                        None,
+                        path_span,
+                    );
+                    let call = K::TraitMethodApply(b(hir::TraitMethodApplication {
                         trait_ref,
                         method_index,
                         method_path: path.clone(),
@@ -1549,9 +1730,14 @@ impl TypeInference {
                         input_tys,
                         inst_data,
                     }));
+                    let call = hir::Node::new(call, ret_ty, combined_effects.clone(), path_span);
+                    let node =
+                        self.wrap_call_with_temp_drops(env, temp_start_index, temp_stores, call);
                     (node, ret_ty, MutType::constant(), combined_effects)
                 }
-            } else if let Some((definition, function, _module_id)) = env.get_function(path)? {
+            } else if let Some((definition, function, _module_id, arg_passing)) =
+                env.get_function(path)?
+            {
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: definition.ty_scheme.ty.args.len(),
@@ -1567,7 +1753,7 @@ impl TypeInference {
                 // Get argument names if any
                 let argument_names = arguments_unnamed.filter_args(&definition.arg_names);
                 // Get the code and make sure the types of its arguments match the expected types
-                let (args_node_ids, args_effects, args_diverge) =
+                let (mut args_node_ids, args_effects, args_diverge) =
                     self.check_exprs_until_never(env, args, &inst_fn_ty.args, path_span)?;
                 if args_diverge {
                     let nodes =
@@ -1578,7 +1764,20 @@ impl TypeInference {
                     let ret_ty = inst_fn_ty.ret;
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                    let node = K::StaticApply(b(hir::StaticApplication {
+                    let visible_arg_passing = arg_passing.map(|passing| {
+                        let hidden_dict_arg_count = inst_data.dicts_req.len();
+                        assert!(passing.len() >= hidden_dict_arg_count);
+                        &passing[hidden_dict_arg_count..]
+                    });
+                    let temp_start_index = env.cur_locals.len();
+                    let temp_stores = self.borrowed_argument_temp_stores(
+                        env,
+                        &mut args_node_ids,
+                        &inst_fn_ty.args,
+                        visible_arg_passing,
+                        path_span,
+                    );
+                    let call = K::StaticApply(b(hir::StaticApplication {
                         function,
                         function_path: Some(path.clone()),
                         function_span: path_span,
@@ -1587,6 +1786,9 @@ impl TypeInference {
                         ty: inst_fn_ty,
                         inst_data,
                     }));
+                    let call = hir::Node::new(call, ret_ty, combined_effects.clone(), path_span);
+                    let node =
+                        self.wrap_call_with_temp_drops(env, temp_start_index, temp_stores, call);
                     (node, ret_ty, MutType::constant(), combined_effects)
                 }
             } else if let Some(type_def) = env.get_type_def(path)? {
@@ -2325,6 +2527,25 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
     }
 }
 
+fn assignment_initializes_storage(
+    arena: &NodeArena,
+    place_id: NodeId,
+    env: &TypingEnv<'_>,
+) -> bool {
+    use NodeKind::*;
+
+    match &arena[place_id].kind {
+        EnvLoad(load) => {
+            env.all_locals[load.id.as_index()].assignment_mode
+                == LocalAssignmentMode::InitializeStorage
+        }
+        Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
+            assignment_initializes_storage(arena, *base, env)
+        }
+        _ => false,
+    }
+}
+
 fn type_has_known_trivial_copy_impl(env: &mut TypingEnv<'_>, ty: Type, span: Location) -> bool {
     if !ty.is_constant() {
         return false;
@@ -2335,6 +2556,30 @@ fn type_has_known_trivial_copy_impl(env: &mut TypingEnv<'_>, ty: Type, span: Loc
     trait_solver
         .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, env.ir_arena)
         .is_ok()
+}
+
+fn argument_is_passed_by_shared_ref(arg: &FnArgType, passing: Option<ArgPassing>) -> bool {
+    match passing {
+        Some(ArgPassing::SharedRef) => true,
+        Some(ArgPassing::OwnedValue | ArgPassing::MutableRef) => false,
+        None => {
+            !arg.mut_ty
+                .as_resolved()
+                .is_some_and(|mut_ty| mut_ty.is_mutable())
+                && !type_is_direct_interpreter_argument(arg.ty)
+        }
+    }
+}
+
+fn type_is_direct_interpreter_argument(ty: Type) -> bool {
+    let ty_data = ty.data();
+    let TypeKind::Native(native) = &*ty_data else {
+        return false;
+    };
+    native.arguments.is_empty()
+        && (native.bare_ty == bare_native_type::<()>()
+            || native.bare_ty == bare_native_type::<bool>()
+            || native.bare_ty == bare_native_type::<isize>())
 }
 
 fn collect_pattern_vars(pattern: &Pattern, bound: &mut FxHashSet<ustr::Ustr>) {

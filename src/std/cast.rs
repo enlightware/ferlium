@@ -12,7 +12,6 @@ use std::sync::LazyLock;
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
-    containers::b,
     hir,
     hir::function::FunctionDefinition,
     module::{LocalClone, LocalDeclId, Module, TraitImplId, id::Id},
@@ -54,7 +53,7 @@ impl Deriver for SelfCastDeriver {
         // the returned value.
         let locals = vec![local("value", from_ty)];
         let id = LocalDeclId::from_index(0);
-        let source_id = arena.alloc(hir::Node::new(load(0, id), from_ty, EffType::empty(), span));
+        let source_id = arena.alloc(hir::Node::new(load(id), from_ty, EffType::empty(), span));
         let clone = solver.solve_impl_method(
             &VALUE_TRAIT,
             &[from_ty],
@@ -63,10 +62,10 @@ impl Deriver for SelfCastDeriver {
             arena,
         )?;
         let code_id = arena.alloc(hir::Node::new(
-            hir::NodeKind::ValueClone(b(hir::ValueClone {
+            hir::NodeKind::ValueClone(hir::ValueClone {
                 source: source_id,
                 clone: Some(LocalClone::Static(clone)),
-            })),
+            }),
             from_ty,
             EffType::empty(),
             span,

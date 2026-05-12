@@ -252,11 +252,13 @@ impl FunctionCollector {
     pub fn next_id(&self) -> LocalFunctionId {
         LocalFunctionId::from_index(self.initial_count + self.new_elements.len())
     }
-    pub fn push(&mut self, name: Ustr, function: ModuleFunction) {
+    pub fn push(&mut self, name: Ustr, mut function: ModuleFunction) {
+        LocalDecl::assign_sequential_slots(&mut function.locals);
         self.new_elements.push((name, function));
     }
 
-    pub(crate) fn replace(&mut self, id: LocalFunctionId, function: ModuleFunction) {
+    pub(crate) fn replace(&mut self, id: LocalFunctionId, mut function: ModuleFunction) {
+        LocalDecl::assign_sequential_slots(&mut function.locals);
         let index = id
             .as_index()
             .checked_sub(self.initial_count)

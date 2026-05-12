@@ -23,13 +23,14 @@ use crate::{
     hir::function::ArgPassing,
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
-        FunctionId, LocalClone, LocalDecl, LocalDrop, LocalFunctionId, ModuleFunction, ModuleId,
-        TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
+        LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, TraitDictionary,
+        TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
-    std::{array, logic::bool_type, math::int_type},
+    std::array,
     types::{
         r#trait::TraitDictionaryEntryIndex,
-        r#type::{FnArgType, Type},
+        r#type::{FnArgType, Type, TypeKind, bare_native_type},
         type_like::TypeLike,
     },
 };
@@ -123,6 +124,37 @@ impl ValOrMut {
             ValOrMut::Mut(place) => place,
         }
     }
+
+    pub(crate) fn discard_storage(self) {
+        if let ValOrMut::Val(value) = self {
+            value.discard_storage();
+        }
+    }
+}
+
+/// Draining iterator that discards unconsumed owned argument storage on drop.
+pub(crate) struct ValOrMutArgs {
+    args: std::vec::IntoIter<ValOrMut>,
+}
+
+impl ValOrMutArgs {
+    pub(crate) fn new(args: Vec<ValOrMut>) -> Self {
+        Self {
+            args: args.into_iter(),
+        }
+    }
+
+    pub(crate) fn next(&mut self) -> Option<ValOrMut> {
+        self.args.next()
+    }
+}
+
+impl Drop for ValOrMutArgs {
+    fn drop(&mut self) {
+        for arg in self.args.by_ref() {
+            arg.discard_storage();
+        }
+    }
 }
 
 impl FormatWith<EvalCtx<'_>> for ValOrMut {
@@ -209,6 +241,44 @@ impl<'a> EvalCtx<'a> {
     /// Get the compiler session.
     pub fn compiler_session(&self) -> &'a CompilerSession {
         self.compiler_session
+    }
+
+    pub fn pop_environment_entry(&mut self) -> Option<ValOrMut> {
+        #[cfg(debug_assertions)]
+        self.environment_names.pop();
+        self.environment.pop()
+    }
+
+    pub fn pop_environment_entry_discard(&mut self) {
+        if let Some(entry) = self.pop_environment_entry() {
+            entry.discard_storage();
+        }
+    }
+
+    pub fn truncate_environment_storage(&mut self, len: usize) {
+        while self.environment.len() > len {
+            self.pop_environment_entry_discard();
+        }
+    }
+
+    fn ensure_environment_slot(&mut self, index: usize, name: Ustr) {
+        #[cfg(not(debug_assertions))]
+        let _ = name;
+        while self.environment.len() <= index {
+            self.environment.push(ValOrMut::Val(Value::uninit()));
+            #[cfg(debug_assertions)]
+            self.environment_names.push(name);
+        }
+    }
+
+    fn set_environment_entry(&mut self, index: usize, value: ValOrMut, name: Ustr) {
+        self.ensure_environment_slot(index, name);
+        let old = mem::replace(&mut self.environment[index], value);
+        old.discard_storage();
+        #[cfg(debug_assertions)]
+        {
+            self.environment_names[index] = name;
+        }
     }
 
     pub fn with_environment(
@@ -450,13 +520,15 @@ impl<'a> EvalCtx<'a> {
                 }),
                 location,
             );
-            #[cfg(debug_assertions)]
-            self.environment_names.pop();
-            self.environment.pop();
-            let result = result.and_then(|result| {
-                drop_result?;
-                Ok(result)
-            });
+            self.pop_environment_entry_discard();
+            let result = match (result, drop_result) {
+                (Ok(result), Ok(_)) => Ok(result),
+                (Ok(result), Err(err)) => {
+                    result.into_value().discard_storage();
+                    Err(err)
+                }
+                (Err(err), _) => Err(err),
+            };
             #[cfg(debug_assertions)]
             self.stack_trace.pop();
             return result;
@@ -591,8 +663,7 @@ impl Place {
         Ok(target)
     }
 
-    /// Get a shared reference to the target value
-    pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, RuntimeErrorKind> {
+    fn target_ref_allow_uninit<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, RuntimeErrorKind> {
         let mut path = self.path.iter().copied().collect::<VecDeque<_>>();
         let mut index = self.target;
         let mut target = loop {
@@ -636,6 +707,12 @@ impl Place {
                 _ => panic!("Cannot access a non-compound value"),
             };
         }
+        Ok(target)
+    }
+
+    /// Get a shared reference to the target value
+    pub fn target_ref<'c>(&self, ctx: &'c EvalCtx) -> Result<&'c Value, RuntimeErrorKind> {
+        let target = self.target_ref_allow_uninit(ctx)?;
         if matches!(target, Value::Uninit) {
             panic!("attempted to read an uninitialized value");
         }
@@ -664,6 +741,14 @@ impl FormatWith<EvalCtx<'_>> for Place {
 pub enum ControlFlow<V> {
     Continue(V),
     Return(Value),
+}
+impl<V> ControlFlow<V> {
+    fn map_continue<U>(self, f: impl FnOnce(V) -> U) -> ControlFlow<U> {
+        match self {
+            ControlFlow::Continue(value) => ControlFlow::Continue(f(value)),
+            ControlFlow::Return(value) => ControlFlow::Return(value),
+        }
+    }
 }
 impl ControlFlow<Value> {
     pub fn into_value(self) -> Value {
@@ -901,7 +986,7 @@ pub fn eval_node_with_ctx(
         }
         EnvStore(node) => eval_env_store(arena, node, arena[id].span, ctx, locals),
         EnvDrop(node) => eval_env_drop(node, arena[id].span, ctx, locals),
-        EnvMove(node) => eval_env_move(node, arena[id].span, ctx),
+        EnvMove(node) => eval_env_move(node, arena[id].span, ctx, locals),
         EnvLoad(node) => eval_env_load(arena, id, node, ctx, locals),
         Return(node) => eval_return(arena, *node, ctx, locals),
         Block(nodes) => eval_block(arena, nodes, ctx, locals),
@@ -1040,11 +1125,12 @@ pub(crate) fn try_dictionary_from_place(place: &Place, ctx: &EvalCtx) -> Option<
     }
 }
 
-fn dictionary_from_local_index(
+fn dictionary_from_extra_parameter(
     ctx: &EvalCtx,
-    local_index: usize,
+    extra_parameter: ExtraParameterId,
     _span: Location,
 ) -> TraitDictionaryId {
+    let local_index = extra_parameter.as_index();
     let place = Place {
         target: ctx.frame_base + local_index,
         path: Vec::new(),
@@ -1081,6 +1167,68 @@ fn call_dictionary_method(
     ctx.call_function_value(&function_value, arguments, span)
 }
 
+fn discard_call_result(result: EvalControlFlowResult) -> Result<(), RuntimeError> {
+    result?.into_value().discard_storage();
+    Ok(())
+}
+
+fn call_local_drop_dispatch(
+    ctx: &mut EvalCtx,
+    drop: &LocalDrop,
+    target: Place,
+    span: Location,
+) -> Result<(), RuntimeError> {
+    let arguments = vec![ValOrMut::Mut(target)];
+    match drop {
+        LocalDrop::Required => {
+            panic!("LocalDrop::Required should have been resolved before evaluation")
+        }
+        LocalDrop::Static(function) => {
+            discard_call_result(ctx.call_function_id(*function, arguments, span))
+        }
+        LocalDrop::Dictionary(dict_index) => {
+            let dictionary = dictionary_from_extra_parameter(ctx, *dict_index, span);
+            discard_call_result(call_dictionary_method(
+                ctx,
+                dictionary,
+                VALUE_TRAIT.dictionary_method_index(VALUE_DROP_METHOD_INDEX),
+                arguments,
+                span,
+            ))
+        }
+    }
+}
+
+pub(crate) fn drop_frame_owned_locals_on_error(
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+    span: Location,
+) -> Result<(), RuntimeError> {
+    for (index, local) in locals.iter().enumerate().rev() {
+        if !local.owns_storage {
+            continue;
+        }
+        let Some(drop) = &local.drop else {
+            continue;
+        };
+        let id = LocalDeclId::from_index(index);
+        let target_index = local_environment_index(ctx, locals, id);
+        if target_index >= ctx.environment.len() {
+            continue;
+        }
+        let target = Place {
+            target: target_index,
+            path: Vec::new(),
+        };
+        if place_contains_uninit(ctx, &target, span)? {
+            continue;
+        }
+        call_local_drop_dispatch(ctx, drop, target.clone(), span)?;
+        discard_value_storage_at_place(ctx, &target, span)?;
+    }
+    Ok(())
+}
+
 fn call_value_clone_with(
     ctx: &mut EvalCtx,
     source: ValOrMut,
@@ -1096,10 +1244,11 @@ fn call_value_clone_with(
         path: Vec::new(),
     };
     let result = call(ctx, vec![source, ValOrMut::Mut(target)]);
-    #[cfg(debug_assertions)]
-    ctx.environment_names.pop();
-    let target = ctx.environment.pop().unwrap().into_val().unwrap();
-    result?;
+    let target = ctx.pop_environment_entry().unwrap().into_val().unwrap();
+    if let Err(err) = discard_call_result(result) {
+        target.discard_storage();
+        return Err(err);
+    }
     if matches!(target, Value::Uninit) {
         panic!("Value::clone returned without initializing its target");
     }
@@ -1130,13 +1279,13 @@ pub(crate) fn call_value_clone_to_target(
     target: Place,
     span: Location,
 ) -> EvalControlFlowResult {
-    call_dictionary_method(
+    discard_call_result(call_dictionary_method(
         ctx,
         dictionary,
         VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX),
         vec![source, ValOrMut::Mut(target.clone())],
         span,
-    )?;
+    ))?;
     let target_value = target
         .target_mut(ctx)
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
@@ -1158,7 +1307,7 @@ fn call_value_clone_dispatch_for_temp(
         }
         LocalClone::Static(function) => ctx.call_function_id(*function, arguments, span),
         LocalClone::Dictionary(dict_index) => {
-            let dictionary = dictionary_from_local_index(ctx, *dict_index, span);
+            let dictionary = dictionary_from_extra_parameter(ctx, *dict_index, span);
             call_dictionary_method(
                 ctx,
                 dictionary,
@@ -1201,24 +1350,26 @@ pub(crate) fn call_value_drop_for_temp(
             })
         }
     };
-    let result = call_dictionary_method(
+    let result = discard_call_result(call_dictionary_method(
         ctx,
         dictionary,
         VALUE_TRAIT.dictionary_method_index(VALUE_DROP_METHOD_INDEX),
         vec![target],
         span,
-    );
+    ));
     if result.is_ok() {
         if let Some(place) = &target_place {
             discard_value_storage_at_place(ctx, place, span)?;
         }
     }
     if let Some(target_index) = temp_target {
-        #[cfg(debug_assertions)]
-        ctx.environment_names.pop();
-        let value = ctx.environment.pop().unwrap();
+        let value = ctx.pop_environment_entry().unwrap();
         debug_assert_eq!(target_index, ctx.environment.len());
-        debug_assert!(matches!(value, ValOrMut::Val(Value::Uninit)));
+        if result.is_ok() {
+            debug_assert!(matches!(value, ValOrMut::Val(Value::Uninit)));
+        } else {
+            value.discard_storage();
+        }
     }
     result?;
     cont(Value::unit())
@@ -1235,6 +1386,52 @@ fn discard_value_storage_at_place(
     let value = mem::replace(target, Value::uninit());
     value.discard_storage();
     Ok(())
+}
+
+fn replace_value_storage_at_place(
+    ctx: &mut EvalCtx,
+    place: &Place,
+    value: Value,
+    span: Location,
+) -> Result<(), RuntimeError> {
+    let target = match place.target_mut(ctx) {
+        Ok(target) => target,
+        Err(err) => {
+            value.discard_storage();
+            return Err(RuntimeError::new(err, Some(span)));
+        }
+    };
+    let old_value = mem::replace(target, value);
+    old_value.discard_storage();
+    Ok(())
+}
+
+fn place_contains_uninit(
+    ctx: &EvalCtx,
+    place: &Place,
+    span: Location,
+) -> Result<bool, RuntimeError> {
+    let target = place
+        .target_ref_allow_uninit(ctx)
+        .map_err(|err| RuntimeError::new(err, Some(span)))?;
+    Ok(matches!(target, Value::Uninit))
+}
+
+fn scratch_environment_index_after_locals(ctx: &EvalCtx, locals: &[LocalDecl]) -> usize {
+    let local_limit = locals
+        .iter()
+        .map(|local| ctx.frame_base + local.slot as usize + 1)
+        .max()
+        .unwrap_or(ctx.frame_base);
+    ctx.environment.len().max(local_limit)
+}
+
+fn local_environment_index(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> usize {
+    ctx.frame_base + locals[id.as_index()].slot as usize
+}
+
+fn extra_parameter_environment_index(ctx: &EvalCtx, id: ExtraParameterId) -> usize {
+    ctx.frame_base + id.as_index()
 }
 
 #[inline(never)]
@@ -1451,12 +1648,18 @@ fn eval_env_store(
             Some(span),
         ));
     }
+    let target_index = local_environment_index(ctx, locals, node.id);
+    if target_index >= ctx.stack_limit {
+        return Err(RuntimeError::new(
+            RuntimeErrorKind::StackLimitExceeded {
+                limit: ctx.stack_limit,
+            },
+            Some(span),
+        ));
+    }
+    let local_name = locals[node.id.as_index()].name.0;
     if let Some(clone) = &locals[node.id.as_index()].clone {
-        let target_index = ctx.environment.len();
-        ctx.environment.push(ValOrMut::Val(Value::uninit()));
-        #[cfg(debug_assertions)]
-        ctx.environment_names
-            .push(locals[node.id.as_index()].name.0);
+        ctx.ensure_environment_slot(target_index, local_name);
         let target = Place {
             target: target_index,
             path: Vec::new(),
@@ -1468,41 +1671,40 @@ fn eval_env_store(
             ))),
         };
         let arguments = vec![source, ValOrMut::Mut(target)];
-        match clone {
+        let result = match clone {
             LocalClone::Required => {
                 panic!("LocalClone::Required should have been resolved before evaluation")
             }
-            LocalClone::Static(function) => {
-                ctx.call_function_id(*function, arguments, span)?;
-            }
+            LocalClone::Static(function) => ctx.call_function_id(*function, arguments, span),
             LocalClone::Dictionary(dict_index) => {
-                let dictionary = dictionary_from_local_index(ctx, *dict_index, span);
+                let dictionary = dictionary_from_extra_parameter(ctx, *dict_index, span);
                 call_dictionary_method(
                     ctx,
                     dictionary,
                     VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX),
                     arguments,
                     span,
-                )?;
+                )
             }
-        }
+        };
+        discard_call_result(result)?;
         if matches!(&ctx.environment[target_index], ValOrMut::Val(Value::Uninit)) {
             panic!("Value::clone returned without initializing local storage");
         }
     } else if !locals[node.id.as_index()].owns_storage {
-        match eval_or_return!(try_resolve_node_place(arena, node.value, ctx, locals)) {
+        let entry = match eval_or_return!(try_resolve_node_place(arena, node.value, ctx, locals)) {
             Some(place) => {
                 if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
-                    ctx.environment.push(ValOrMut::Dictionary(dictionary));
+                    ValOrMut::Dictionary(dictionary)
                 } else if let Some(value) = try_copy_trivial_value_from_place(
                     &place,
                     locals[node.id.as_index()].ty,
                     ctx,
                     span,
                 )? {
-                    ctx.environment.push(ValOrMut::Val(value));
+                    ValOrMut::Val(value)
                 } else {
-                    ctx.environment.push(ValOrMut::Mut(place));
+                    ValOrMut::Mut(place)
                 }
             }
             None if locals[node.id.as_index()].ty == Type::never() => {
@@ -1513,18 +1715,18 @@ fn eval_env_store(
                 let dictionary = eval_or_return!(eval_dictionary_metadata_node(
                     arena, node.value, ctx, locals
                 ));
-                ctx.environment.push(ValOrMut::Dictionary(dictionary));
+                ValOrMut::Dictionary(dictionary)
             }
             None if matches!(arena[node.value].kind, NodeKind::GetFunction(_)) => {
                 let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
-                ctx.environment.push(ValOrMut::Val(value));
+                ValOrMut::Val(value)
             }
             None => {
                 if eval_or_return!(is_dictionary_entry_projection(
                     arena, node.value, ctx, locals
                 )) {
                     let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
-                    ctx.environment.push(ValOrMut::Val(value));
+                    ValOrMut::Val(value)
                 } else {
                     panic!(
                         "Cannot bind non-owning local '{}' of type {:?} to non-place node: {:?}",
@@ -1534,23 +1736,19 @@ fn eval_env_store(
                     );
                 }
             }
-        }
-        #[cfg(debug_assertions)]
-        ctx.environment_names
-            .push(locals[node.id.as_index()].name.0);
+        };
+        ctx.set_environment_entry(target_index, entry, local_name);
     } else {
-        if matches!(arena[node.value].kind, NodeKind::GetDictionary(_)) {
+        let entry = if matches!(arena[node.value].kind, NodeKind::GetDictionary(_)) {
             let dictionary = eval_or_return!(eval_dictionary_metadata_node(
                 arena, node.value, ctx, locals
             ));
-            ctx.environment.push(ValOrMut::Dictionary(dictionary));
+            ValOrMut::Dictionary(dictionary)
         } else {
             let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
-            ctx.environment.push(ValOrMut::Val(value));
-        }
-        #[cfg(debug_assertions)]
-        ctx.environment_names
-            .push(locals[node.id.as_index()].name.0);
+            ValOrMut::Val(value)
+        };
+        ctx.set_environment_entry(target_index, entry, local_name);
     }
     cont(Value::unit())
 }
@@ -1566,35 +1764,22 @@ fn eval_env_drop(
         return cont(Value::unit());
     };
     let target = Place {
-        target: ctx.frame_base + node.index as usize,
+        target: local_environment_index(ctx, locals, node.id),
         path: Vec::new(),
     };
-    let arguments = vec![ValOrMut::Mut(target.clone())];
-    match drop {
-        LocalDrop::Required => {
-            panic!("LocalDrop::Required should have been resolved before evaluation")
-        }
-        LocalDrop::Static(function) => {
-            ctx.call_function_id(*function, arguments, span)?;
-        }
-        LocalDrop::Dictionary(dict_index) => {
-            let dictionary = dictionary_from_local_index(ctx, *dict_index, span);
-            call_dictionary_method(
-                ctx,
-                dictionary,
-                VALUE_TRAIT.dictionary_method_index(VALUE_DROP_METHOD_INDEX),
-                arguments,
-                span,
-            )?;
-        }
-    }
+    call_local_drop_dispatch(ctx, drop, target.clone(), span)?;
     discard_value_storage_at_place(ctx, &target, span)?;
     cont(Value::unit())
 }
 
 #[inline(never)]
-fn eval_env_move(node: &hir::EnvMove, _span: Location, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let index = ctx.frame_base + node.index as usize;
+fn eval_env_move(
+    node: &hir::EnvMove,
+    _span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let index = local_environment_index(ctx, locals, node.id);
     match mem::replace(&mut ctx.environment[index], ValOrMut::Val(Value::uninit())) {
         ValOrMut::Val(value) => cont(value),
         ValOrMut::Dictionary(_) => panic!("cannot move out of a trait dictionary metadata local"),
@@ -1610,33 +1795,41 @@ fn eval_env_move(node: &hir::EnvMove, _span: Location, ctx: &mut EvalCtx) -> Eva
 // copy driven by the layout of the concrete value, and this hand-written list
 // should disappear.
 fn trivial_copy_value(value: &Value, ty: Type) -> Option<Value> {
-    if ty == Type::unit() {
-        value.as_primitive_ty::<()>().map(|_| Value::unit())
-    } else if ty == bool_type() {
-        value
-            .as_primitive_ty::<bool>()
-            .map(|value| Value::native(*value))
-    } else if ty == int_type() {
-        value
-            .as_primitive_ty::<isize>()
-            .map(|value| Value::native(*value))
-    } else if !ty.is_constant() {
-        value
-            .as_primitive_ty::<()>()
-            .map(|_| Value::unit())
-            .or_else(|| {
-                value
-                    .as_primitive_ty::<bool>()
-                    .map(|value| Value::native(*value))
-            })
-            .or_else(|| {
-                value
-                    .as_primitive_ty::<isize>()
-                    .map(|value| Value::native(*value))
-            })
-    } else {
-        None
+    let ty_data = ty.data();
+    if let TypeKind::Native(native) = &*ty_data
+        && native.arguments.is_empty()
+    {
+        if native.bare_ty == bare_native_type::<()>() {
+            return value.as_primitive_ty::<()>().map(|_| Value::unit());
+        }
+        if native.bare_ty == bare_native_type::<bool>() {
+            return value
+                .as_primitive_ty::<bool>()
+                .map(|value| Value::native(*value));
+        }
+        if native.bare_ty == bare_native_type::<isize>() {
+            return value
+                .as_primitive_ty::<isize>()
+                .map(|value| Value::native(*value));
+        }
     }
+    if ty.is_constant() {
+        return None;
+    }
+
+    value
+        .as_primitive_ty::<()>()
+        .map(|_| Value::unit())
+        .or_else(|| {
+            value
+                .as_primitive_ty::<bool>()
+                .map(|value| Value::native(*value))
+        })
+        .or_else(|| {
+            value
+                .as_primitive_ty::<isize>()
+                .map(|value| Value::native(*value))
+        })
 }
 
 fn copy_trivial_value_from_place(
@@ -1685,7 +1878,7 @@ fn eval_env_load(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let index = ctx.frame_base + node.index as usize;
+    let index = local_environment_index(ctx, locals, node.id);
     let place = Place {
         target: index,
         path: Vec::new(),
@@ -1716,28 +1909,31 @@ fn eval_block(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let env_size = ctx.environment.len();
-    let mut last_value = Value::unit();
+    let mut last_value: Option<Value> = None;
     for node in nodes.iter() {
         match eval_node_with_ctx(arena, *node, ctx, locals)? {
             ControlFlow::Return(val) => {
                 // Early return: clean up environment and propagate.
-                ctx.environment.truncate(env_size);
-                #[cfg(debug_assertions)]
-                ctx.environment_names.truncate(env_size);
+                if let Some(value) = last_value.take() {
+                    value.discard_storage();
+                }
+                ctx.truncate_environment_storage(env_size);
                 return Ok(ControlFlow::Return(val));
             }
             ControlFlow::Continue(val) => {
                 if !matches!(arena[*node].kind, NodeKind::EnvDrop(_)) {
-                    last_value = val;
+                    if let Some(old_value) = last_value.replace(val) {
+                        old_value.discard_storage();
+                    }
+                } else {
+                    val.discard_storage();
                 }
             }
         }
     }
     // Normal block completion.
-    ctx.environment.truncate(env_size);
-    #[cfg(debug_assertions)]
-    ctx.environment_names.truncate(env_size);
-    cont(last_value)
+    ctx.truncate_environment_storage(env_size);
+    cont(last_value.unwrap_or_else(Value::unit))
 }
 
 #[inline(never)]
@@ -1751,10 +1947,15 @@ fn eval_assign(
     // Evaluate left-to-right: place first, then value (matches Rust semantics).
     let place = eval_or_return!(resolve_node_place(arena, assignment.place, ctx, locals));
     let value = eval_or_return!(eval_node_with_ctx(arena, assignment.value, ctx, locals));
-    let target_ref = place
-        .target_mut(ctx)
-        .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?;
-    *target_ref = value;
+    let span = arena[id].span;
+    if let Some(drop) = &assignment.drop
+        && !place_contains_uninit(ctx, &place, span)?
+        && let Err(err) = call_local_drop_dispatch(ctx, drop, place.clone(), span)
+    {
+        value.discard_storage();
+        return Err(err);
+    }
+    replace_value_storage_at_place(ctx, &place, value, span)?;
     cont(Value::unit())
 }
 
@@ -1775,10 +1976,11 @@ fn eval_project(
     arena: &NodeArena,
     id: NodeId,
     data: NodeId,
-    index: usize,
+    index: ProjectionIndex,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    let index = index.as_index();
     if let Some(mut place) = eval_or_return!(try_resolve_node_place(arena, data, ctx, locals)) {
         if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
             return cont(dictionary_entry_value(
@@ -1818,12 +2020,12 @@ fn eval_project_at(
     arena: &NodeArena,
     id: NodeId,
     data: NodeId,
-    index: usize,
+    index: ExtraParameterId,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     if let Some(mut place) = eval_or_return!(try_resolve_node_place(arena, data, ctx, locals)) {
-        let index = ctx.frame_base + index;
+        let index = extra_parameter_environment_index(ctx, index);
         let index = *ctx.environment[index]
             .as_primitive::<isize>(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
@@ -1847,7 +2049,7 @@ fn eval_project_at(
     }
     if is_dictionary_metadata_node(arena, data) {
         let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, data, ctx, locals));
-        let index = ctx.frame_base + index;
+        let index = extra_parameter_environment_index(ctx, index);
         let index = *ctx.environment[index]
             .as_primitive::<isize>(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
@@ -1859,7 +2061,7 @@ fn eval_project_at(
         ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, data, ctx, locals));
-    let index = ctx.frame_base + index;
+    let index = extra_parameter_environment_index(ctx, index);
     let index = *ctx.environment[index]
         .as_primitive::<isize>(ctx)
         .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
@@ -1942,14 +2144,26 @@ fn eval_index(
 ) -> EvalControlFlowResult {
     // Evaluate left-to-right: array first, then index (matches Rust semantics).
     let mut array_place = eval_or_return!(try_resolve_node_place(arena, index.array, ctx, locals));
-    let mut temp_array_index = None;
+    let mut temp_array_env_len = None;
     if array_place.is_none() {
         let array = eval_or_return!(eval_node_with_ctx(arena, index.array, ctx, locals));
-        let target = ctx.environment.len();
-        ctx.environment.push(ValOrMut::Val(array));
-        #[cfg(debug_assertions)]
-        ctx.environment_names.push(ustr("$array_index_source"));
-        temp_array_index = Some(target);
+        let old_len = ctx.environment.len();
+        let target = scratch_environment_index_after_locals(ctx, locals);
+        if target >= ctx.stack_limit {
+            array.discard_storage();
+            return Err(RuntimeError::new(
+                RuntimeErrorKind::StackLimitExceeded {
+                    limit: ctx.stack_limit,
+                },
+                Some(arena[id].span),
+            ));
+        }
+        ctx.set_environment_entry(
+            target,
+            ValOrMut::Val(array),
+            Ustr::from("$array_index_source"),
+        );
+        temp_array_env_len = Some(old_len);
         array_place = Some(Place {
             target,
             path: Vec::new(),
@@ -1972,10 +2186,8 @@ fn eval_index(
         arena[id].span,
     );
 
-    if temp_array_index.is_some() {
-        #[cfg(debug_assertions)]
-        ctx.environment_names.pop();
-        ctx.environment.pop();
+    if let Some(old_len) = temp_array_env_len {
+        ctx.truncate_environment_storage(old_len);
     }
 
     result.map(ControlFlow::Continue)
@@ -2048,9 +2260,21 @@ fn eval_nodes(
 ) -> Result<ControlFlow<Vec<Value>>, RuntimeError> {
     let mut results = Vec::with_capacity(nodes.len());
     for &node in nodes {
-        results.push(eval_or_return!(eval_node_with_ctx(
-            arena, node, ctx, locals
-        )));
+        match eval_node_with_ctx(arena, node, ctx, locals) {
+            Ok(ControlFlow::Continue(value)) => results.push(value),
+            Ok(ControlFlow::Return(value)) => {
+                for result in results {
+                    result.discard_storage();
+                }
+                return Ok(ControlFlow::Return(value));
+            }
+            Err(err) => {
+                for result in results {
+                    result.discard_storage();
+                }
+                return Err(err);
+            }
+        }
     }
     Ok(ControlFlow::Continue(results))
 }
@@ -2070,30 +2294,44 @@ fn eval_args(
         let passing = arg_passing
             .and_then(|passing| passing.get(index).copied())
             .unwrap_or_else(|| default_argument_passing(ty));
-        results.push(match passing {
-            ArgPassing::MutableRef => ValOrMut::Mut(eval_or_return!(resolve_node_place(
-                arena, *arg, ctx, locals
-            ))),
-            ArgPassing::SharedRef => {
-                match eval_or_return!(try_resolve_node_place(arena, *arg, ctx, locals)) {
-                    Some(place) => ValOrMut::Mut(place),
-                    None if is_dictionary_metadata_node(arena, *arg) => ValOrMut::Dictionary(
-                        eval_or_return!(eval_dictionary_metadata_node(arena, *arg, ctx, locals)),
-                    ),
-                    None => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
-                        arena, *arg, ctx, locals
-                    ))),
+        let result = match passing {
+            ArgPassing::MutableRef => resolve_node_place(arena, *arg, ctx, locals)
+                .map(|result| result.map_continue(ValOrMut::Mut)),
+            ArgPassing::SharedRef => match try_resolve_node_place(arena, *arg, ctx, locals) {
+                Ok(ControlFlow::Continue(Some(place))) => {
+                    Ok(ControlFlow::Continue(ValOrMut::Mut(place)))
                 }
-            }
+                Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, *arg) => {
+                    eval_dictionary_metadata_node(arena, *arg, ctx, locals)
+                        .map(|result| result.map_continue(ValOrMut::Dictionary))
+                }
+                Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, *arg, ctx, locals)
+                    .map(|result| result.map_continue(ValOrMut::Val)),
+                Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
+                Err(err) => Err(err),
+            },
             ArgPassing::OwnedValue if is_dictionary_metadata_node(arena, *arg) => {
-                ValOrMut::Dictionary(eval_or_return!(eval_dictionary_metadata_node(
-                    arena, *arg, ctx, locals
-                )))
+                eval_dictionary_metadata_node(arena, *arg, ctx, locals)
+                    .map(|result| result.map_continue(ValOrMut::Dictionary))
             }
-            ArgPassing::OwnedValue => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
-                arena, *arg, ctx, locals
-            ))),
-        });
+            ArgPassing::OwnedValue => eval_node_with_ctx(arena, *arg, ctx, locals)
+                .map(|result| result.map_continue(ValOrMut::Val)),
+        };
+        match result {
+            Ok(ControlFlow::Continue(arg)) => results.push(arg),
+            Ok(ControlFlow::Return(value)) => {
+                for result in results {
+                    result.discard_storage();
+                }
+                return Ok(ControlFlow::Return(value));
+            }
+            Err(err) => {
+                for result in results {
+                    result.discard_storage();
+                }
+                return Err(err);
+            }
+        }
     }
     Ok(ControlFlow::Continue(results))
 }
@@ -2139,7 +2377,14 @@ fn default_argument_passing(arg: &FnArgType) -> ArgPassing {
 }
 
 fn is_direct_interpreter_argument(ty: Type) -> bool {
-    ty == Type::unit() || ty == bool_type() || ty == int_type()
+    let ty_data = ty.data();
+    let TypeKind::Native(native) = &*ty_data else {
+        return false;
+    };
+    native.arguments.is_empty()
+        && (native.bare_ty == bare_native_type::<()>()
+            || native.bare_ty == bare_native_type::<bool>()
+            || native.bare_ty == bare_native_type::<isize>())
 }
 
 fn try_resolve_node_place(
@@ -2160,7 +2405,7 @@ fn try_resolve_node_place(
             if try_dictionary_from_place(&place, ctx).is_some() {
                 return Ok(ControlFlow::Continue(None));
             }
-            place.path.push(*index as isize);
+            place.path.push(index.as_index() as isize);
             place
         }
         ProjectAt(node, index) => {
@@ -2169,7 +2414,7 @@ fn try_resolve_node_place(
             else {
                 return Ok(ControlFlow::Continue(None));
             };
-            let index = ctx.frame_base + *index;
+            let index = extra_parameter_environment_index(ctx, *index);
             let index = *ctx.environment[index]
                 .as_primitive::<isize>(ctx)
                 .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
@@ -2194,9 +2439,140 @@ fn try_resolve_node_place(
         EnvLoad(node) => Place {
             // By using frame_base here, we allow to access parent frames
             // when the ResolvedPlace is used in a child function.
-            target: ctx.frame_base + node.index as usize,
+            target: local_environment_index(ctx, locals, node.id),
             path: Vec::new(),
         },
         _ => return Ok(ControlFlow::Continue(None)),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fmt,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use crate::{
+        CompilerSession, Location,
+        eval::{ControlFlow, EvalCtx, eval_args, eval_nodes},
+        hir::{
+            Immediate, Node, NodeArena, NodeKind,
+            function::ArgPassing,
+            value::{LiteralValue, NativeDisplay},
+        },
+        module::{ModuleId, id::Id},
+        types::{
+            effects::EffType,
+            r#type::{FnArgType, Type},
+        },
+    };
+
+    static EVAL_DROP_TRACKED_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct EvalDropTracked;
+
+    impl Drop for EvalDropTracked {
+        fn drop(&mut self) {
+            EVAL_DROP_TRACKED_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl NativeDisplay for EvalDropTracked {
+        fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "<eval-drop-tracked>")
+        }
+    }
+
+    fn reset_eval_drop_tracked_count() {
+        EVAL_DROP_TRACKED_COUNT.store(0, Ordering::Relaxed);
+    }
+
+    fn eval_drop_tracked_count() -> usize {
+        EVAL_DROP_TRACKED_COUNT.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn eval_nodes_discards_partial_values_on_return() {
+        reset_eval_drop_tracked_count();
+        let span = Location::new_synthesized();
+        let mut arena = NodeArena::default();
+        let tracked = arena.alloc(Node::new(
+            NodeKind::Immediate(Immediate::new(LiteralValue::new_native(EvalDropTracked))),
+            Type::primitive::<EvalDropTracked>(),
+            EffType::empty(),
+            span,
+        ));
+        let unit = arena.alloc(Node::new(
+            NodeKind::Immediate(Immediate::new(LiteralValue::new_native(()))),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let return_unit = arena.alloc(Node::new(
+            NodeKind::Return(unit),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+
+        let result = eval_nodes(&arena, &[tracked, return_unit], &mut ctx, &[]).unwrap();
+        let ControlFlow::Return(value) = result else {
+            panic!("expected eval_nodes to propagate return");
+        };
+
+        assert_eq!(eval_drop_tracked_count(), 1);
+        value.discard_storage();
+    }
+
+    #[test]
+    fn eval_args_discards_partial_values_on_return() {
+        reset_eval_drop_tracked_count();
+        let span = Location::new_synthesized();
+        let mut arena = NodeArena::default();
+        let tracked = arena.alloc(Node::new(
+            NodeKind::Immediate(Immediate::new(LiteralValue::new_native(EvalDropTracked))),
+            Type::primitive::<EvalDropTracked>(),
+            EffType::empty(),
+            span,
+        ));
+        let unit = arena.alloc(Node::new(
+            NodeKind::Immediate(Immediate::new(LiteralValue::new_native(()))),
+            Type::unit(),
+            EffType::empty(),
+            span,
+        ));
+        let return_unit = arena.alloc(Node::new(
+            NodeKind::Return(unit),
+            Type::never(),
+            EffType::empty(),
+            span,
+        ));
+        let session = CompilerSession::new();
+        let mut ctx = EvalCtx::new(ModuleId::from_index(0), &session);
+        let arg_tys = [
+            FnArgType::new_by_val(Type::primitive::<EvalDropTracked>()),
+            FnArgType::new_by_val(Type::unit()),
+        ];
+        let arg_passing = [ArgPassing::OwnedValue, ArgPassing::OwnedValue];
+
+        let result = eval_args(
+            &arena,
+            &[tracked, return_unit],
+            &arg_tys,
+            Some(&arg_passing),
+            &mut ctx,
+            &[],
+        )
+        .unwrap();
+        let ControlFlow::Return(value) = result else {
+            panic!("expected eval_args to propagate return");
+        };
+
+        assert_eq!(eval_drop_tracked_count(), 1);
+        value.discard_storage();
+    }
 }

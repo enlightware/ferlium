@@ -14,8 +14,8 @@ use crate::{
     Location,
     compiler::error::RuntimeErrorKind,
     eval::{
-        EvalControlFlowResult, EvalCtx, Place, RuntimeError, ValOrMut, call_value_clone_to_target,
-        call_value_drop_for_temp, try_dictionary_from_place,
+        EvalControlFlowResult, EvalCtx, Place, RuntimeError, ValOrMut, ValOrMutArgs,
+        call_value_clone_to_target, call_value_drop_for_temp, try_dictionary_from_place,
     },
     format::write_with_separator_and_format_fn,
     hir::{
@@ -25,7 +25,7 @@ use crate::{
     module::{Module, ModuleFunction, TraitDictionaryId},
     types::{
         effects::no_effects,
-        r#type::{FnType, Type, bare_native_type},
+        r#type::{FnType, Type, TypeKind, bare_native_type},
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
@@ -86,12 +86,26 @@ pub(crate) fn mut_ptr_type(element_ty: Type) -> Type {
     Type::native::<MutPtr>([element_ty])
 }
 
+pub(crate) fn is_pointer_type(ty: Type) -> bool {
+    let ty_data = ty.data();
+    let TypeKind::Native(native) = &*ty_data else {
+        return false;
+    };
+    native.bare_ty == bare_native_type::<Ptr>() || native.bare_ty == bare_native_type::<MutPtr>()
+}
+
 pub(crate) fn place_from_arg(arg: ValOrMut) -> Result<Place, RuntimeError> {
     match arg {
         ValOrMut::Mut(place) => Ok(place),
-        ValOrMut::Val(_) | ValOrMut::Dictionary(_) | ValOrMut::Ref(_) => Err(
-            RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(ustr("place"))),
-        ),
+        ValOrMut::Val(value) => {
+            value.discard_storage();
+            Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
+                ustr("place"),
+            )))
+        }
+        ValOrMut::Dictionary(_) | ValOrMut::Ref(_) => Err(RuntimeError::new_native(
+            RuntimeErrorKind::InvalidArgument(ustr("place")),
+        )),
     }
 }
 
@@ -132,14 +146,19 @@ fn dictionary_from_arg(
         ValOrMut::Mut(place) => try_dictionary_from_place(&place, ctx).ok_or_else(|| {
             RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(ustr("dictionary")))
         }),
-        ValOrMut::Val(_) | ValOrMut::Ref(_) => Err(RuntimeError::new_native(
-            RuntimeErrorKind::InvalidArgument(ustr("dictionary")),
-        )),
+        ValOrMut::Val(value) => {
+            value.discard_storage();
+            Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
+                ustr("dictionary"),
+            )))
+        }
+        ValOrMut::Ref(_) => Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
+            ustr("dictionary"),
+        ))),
     }
 }
 
-fn clone_value_to_mut_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let mut args = args.into_iter();
+fn clone_value_to_mut_ptr(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let source = args.next().unwrap();
     let target = args
@@ -175,8 +194,7 @@ fn clone_value_to_mut_ptr_descr() -> ModuleFunction {
     )
 }
 
-fn clone_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let mut args = args.into_iter();
+fn clone_ptr(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let source = args
         .next()
@@ -220,8 +238,7 @@ fn clone_ptr_descr() -> ModuleFunction {
     )
 }
 
-fn drop_ptr(args: Vec<ValOrMut>, ctx: &mut EvalCtx) -> EvalControlFlowResult {
-    let mut args = args.into_iter();
+fn drop_ptr(mut args: ValOrMutArgs, ctx: &mut EvalCtx) -> EvalControlFlowResult {
     let dictionary = dictionary_from_arg(args.next().unwrap(), ctx)?;
     let target = args
         .next()

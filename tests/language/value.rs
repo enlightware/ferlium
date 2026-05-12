@@ -9,7 +9,10 @@
 use test_log::test;
 
 use crate::harness::{TestSession, int, string};
-use ferlium::{compiler::error::CompilationErrorImpl, hir::value::Value};
+use ferlium::{
+    compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
+    hir::value::Value,
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
@@ -233,7 +236,69 @@ fn generic_mut_let_drop_uses_value_dictionary() {
         "#,
         tracked_probe_value_impl()
     );
-    assert_val_eq!(session.run(&source), int(8));
+    assert_val_eq!(session.run(&source), int(88));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn assignment_overwrite_drops_old_value() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        {{
+            let mut value = Probe(1);
+            value = Probe(2);
+            ();
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(12));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn field_assignment_overwrite_drops_old_value() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        struct Wrapper<T>(T)
+
+        testing::reset_tracked_drops();
+        {{
+            let mut wrapper = Wrapper(Probe(3));
+            wrapper.0 = Probe(4);
+            ();
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(34));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn owned_function_argument_is_dropped_at_function_exit() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn consume(value: Probe) {{
+            ();
+        }}
+
+        testing::reset_tracked_drops();
+        consume(Probe(5));
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(5));
 }
 
 #[test]
@@ -254,6 +319,48 @@ fn alias_bindings_are_not_dropped_separately() {
         tracked_probe_value_impl()
     );
     assert_val_eq!(session.run(&source), int(3));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn unused_owned_temporary_is_dropped() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        testing::reset_tracked_drops();
+        {{
+            Probe(9);
+            ();
+        }};
+        testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(9));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn lexical_drop_runs_on_runtime_error() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn run() -> int {{
+            let owned = Probe(5);
+            [1][1]
+        }}
+        testing::reset_tracked_drops();
+        run()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_eq!(
+        session.fail_run(&source),
+        RuntimeErrorKind::ArrayAccessOutOfBounds { index: 1, len: 1 }
+    );
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(5));
 }
 
 #[test]
