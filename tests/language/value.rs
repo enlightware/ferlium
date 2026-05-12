@@ -323,6 +323,31 @@ fn alias_bindings_are_not_dropped_separately() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn let_binding_from_mutable_generic_place_owns_snapshot() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn swap<T>(a: &mut T, b: &mut T)
+        where
+            T: Value
+        {{
+            let temp = b;
+            b = a;
+            a = temp;
+        }}
+
+        let mut values = [Probe(0), Probe(1)];
+        swap(values[0], values[1]);
+        values[0].0 * 10 + values[1].0
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(10));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn unused_owned_temporary_is_dropped() {
     let mut session = TestSession::new();
     let source = format!(

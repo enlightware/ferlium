@@ -42,10 +42,7 @@ use crate::{
         mutability::{MutType, MutVar, MutVarKey},
         r#trait::{TraitMethodIndex, TraitRef},
         trait_solver::{TraitSolver, TraitSolverProbe},
-        r#type::{
-            FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar,
-            bare_native_type,
-        },
+        r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
         type_like::TypeLike,
         type_mapper::TypeMapper,
         type_scheme::{PubTypeConstraint, TypeScheme},
@@ -516,17 +513,21 @@ impl TypeInference {
             Let(data) => {
                 let name = data.pattern.kind.name;
                 let mut_val = data.pattern.kind.mut_val;
-                let node_id = self.infer_expr_drop_mut(env, data.expr)?;
+                let (node_id, initializer_mut_ty) = self.infer_expr(env, data.expr)?;
                 let node_ty = env.ir_arena[node_id].ty;
                 let initializer_is_borrow =
                     initializer_needs_mut_binding_clone(env.ir_arena, node_id);
+                let initializer_is_known_immutable = matches!(
+                    initializer_mut_ty,
+                    MutType::Resolved(mut_ty) if !mut_ty.is_mutable()
+                );
                 let initializer_is_known_trivial_copy =
-                    type_has_known_trivial_copy_impl(env, node_ty, expr_span);
-                let needs_mut_clone = mut_val.is_mutable()
+                    type_has_concrete_trivial_copy_impl(env, node_ty, expr_span);
+                let needs_clone = (mut_val.is_mutable() || !initializer_is_known_immutable)
                     && node_ty != Type::never()
                     && initializer_is_borrow
                     && !initializer_is_known_trivial_copy;
-                if needs_mut_clone && !node_ty.is_function() {
+                if needs_clone && !node_ty.is_function() {
                     self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                         VALUE_TRAIT.clone(),
                         vec![node_ty],
@@ -535,9 +536,7 @@ impl TypeInference {
                     ));
                 }
                 let owns_storage = node_ty != Type::never()
-                    && (needs_mut_clone
-                        || !initializer_is_borrow
-                        || initializer_is_known_trivial_copy);
+                    && (needs_clone || !initializer_is_borrow || initializer_is_known_trivial_copy);
                 let mut local = LocalDecl::new(
                     name,
                     MutType::resolved(mut_val),
@@ -549,7 +548,7 @@ impl TypeInference {
                 if owns_storage && self.type_needs_semantic_drop(env, node_ty, expr_span) {
                     local.drop_mode = LocalDropMode::Value;
                 }
-                if needs_mut_clone {
+                if needs_clone {
                     local.clone = Some(LocalClone::Required);
                 }
                 let value_id = if node_ty != Type::never()
@@ -1316,8 +1315,10 @@ impl TypeInference {
             .enumerate()
             .filter_map(|(index, (arg, arg_ty))| {
                 if !argument_is_passed_by_shared_ref(
+                    env,
                     arg_ty,
                     arg_passing.and_then(|passing| passing.get(index)).copied(),
+                    span,
                 ) || node_is_place_reference(env.ir_arena, *arg)
                 {
                     return None;
@@ -1460,7 +1461,7 @@ impl TypeInference {
         }
 
         let ty = env.ir_arena[value].ty;
-        if type_has_known_trivial_copy_impl(env, ty, span) {
+        if type_has_concrete_trivial_copy_impl(env, ty, span) {
             return self.trivial_copy_value(env, value, span);
         }
 
@@ -1491,7 +1492,7 @@ impl TypeInference {
         if is_pointer_type(ty) {
             return false;
         }
-        !type_has_known_trivial_copy_impl(env, ty, span)
+        !type_has_concrete_trivial_copy_impl(env, ty, span)
     }
 
     fn node_value_needs_semantic_drop(
@@ -2546,7 +2547,7 @@ fn assignment_initializes_storage(
     }
 }
 
-fn type_has_known_trivial_copy_impl(env: &mut TypingEnv<'_>, ty: Type, span: Location) -> bool {
+fn type_has_concrete_trivial_copy_impl(env: &mut TypingEnv<'_>, ty: Type, span: Location) -> bool {
     if !ty.is_constant() {
         return false;
     }
@@ -2558,7 +2559,12 @@ fn type_has_known_trivial_copy_impl(env: &mut TypingEnv<'_>, ty: Type, span: Loc
         .is_ok()
 }
 
-fn argument_is_passed_by_shared_ref(arg: &FnArgType, passing: Option<ArgPassing>) -> bool {
+fn argument_is_passed_by_shared_ref(
+    env: &mut TypingEnv<'_>,
+    arg: &FnArgType,
+    passing: Option<ArgPassing>,
+    span: Location,
+) -> bool {
     match passing {
         Some(ArgPassing::SharedRef) => true,
         Some(ArgPassing::OwnedValue | ArgPassing::MutableRef) => false,
@@ -2566,20 +2572,9 @@ fn argument_is_passed_by_shared_ref(arg: &FnArgType, passing: Option<ArgPassing>
             !arg.mut_ty
                 .as_resolved()
                 .is_some_and(|mut_ty| mut_ty.is_mutable())
-                && !type_is_direct_interpreter_argument(arg.ty)
+                && !type_has_concrete_trivial_copy_impl(env, arg.ty, span)
         }
     }
-}
-
-fn type_is_direct_interpreter_argument(ty: Type) -> bool {
-    let ty_data = ty.data();
-    let TypeKind::Native(native) = &*ty_data else {
-        return false;
-    };
-    native.arguments.is_empty()
-        && (native.bare_ty == bare_native_type::<()>()
-            || native.bare_ty == bare_native_type::<bool>()
-            || native.bare_ty == bare_native_type::<isize>())
 }
 
 fn collect_pattern_vars(pattern: &Pattern, bound: &mut FxHashSet<ustr::Ustr>) {

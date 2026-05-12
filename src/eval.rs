@@ -20,7 +20,7 @@ use crate::{
     CompilerSession, Location, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
-    hir::function::ArgPassing,
+    hir::function::{ArgPassing, TrivialCopy},
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
@@ -31,7 +31,6 @@ use crate::{
     types::{
         r#trait::TraitDictionaryEntryIndex,
         r#type::{FnArgType, Type, TypeKind, bare_native_type},
-        type_like::TypeLike,
     },
 };
 use crate::{
@@ -401,6 +400,22 @@ impl<'a> EvalCtx<'a> {
         let passing =
             self.function_argument_passing(function_value.function_id, function_value.module_id)?;
         Some(&passing[function_value.hidden_args.len() + function_value.closure_env_len..])
+    }
+
+    fn function_value_visible_argument_types(
+        &self,
+        function_value: &FunctionValue,
+    ) -> Vec<FnArgType> {
+        // Dynamic calls must use the actual callee signature. A generic
+        // dictionary projection can have surface type `(A, A) -> R` while its
+        // runtime `FunctionValue` points at a concrete method such as
+        // `Ord<int>::cmp`.
+        self.get_module_function(function_value.function_id, function_value.module_id)
+            .definition
+            .ty_scheme
+            .ty
+            .args
+            .clone()
     }
 
     /// Resolve a module-relative impl reference to a canonical runtime dictionary ID.
@@ -1592,15 +1607,7 @@ fn eval_apply(
     // from being mutably aliased by the call arguments.
     let function_value = unsafe { &*function_value };
     let arg_passing = ctx.function_value_argument_passing(function_value);
-    let args_ty = {
-        arena[app.function]
-            .ty
-            .data()
-            .as_function()
-            .expect("Apply needs a function type")
-            .args
-            .clone()
-    };
+    let args_ty = ctx.function_value_visible_argument_types(function_value);
     let arguments = eval_or_return!(eval_args(
         arena,
         &app.arguments,
@@ -1788,48 +1795,32 @@ fn eval_env_move(
     }
 }
 
-// Temporary boxed-`Value` interpreter bridge for HIR `TrivialCopy`.
-//
-// This is not the language contract for `TrivialCopy`. Once interpreter storage
-// moves to typed/linear value slots, this operation should become a storage-level
-// copy driven by the layout of the concrete value, and this hand-written list
-// should disappear.
-fn trivial_copy_value(value: &Value, ty: Type) -> Option<Value> {
+fn copy_trivial_native_value_typed<T: TrivialCopy + NativeValue>(value: &Value) -> Option<Value> {
+    value
+        .as_primitive_ty::<T>()
+        .map(|value| Value::native(*value))
+}
+
+/// Temporary boxed-interpreter copy for native values known to implement `TrivialCopy`.
+///
+/// This is not the language contract for `TrivialCopy`: future typed/linear
+/// storage should lower HIR `TrivialCopy` to a layout-driven memcpy instead.
+fn copy_trivial_native_value(value: &Value, ty: Type) -> Option<Value> {
     let ty_data = ty.data();
     if let TypeKind::Native(native) = &*ty_data
         && native.arguments.is_empty()
     {
         if native.bare_ty == bare_native_type::<()>() {
-            return value.as_primitive_ty::<()>().map(|_| Value::unit());
+            return copy_trivial_native_value_typed::<()>(value);
         }
         if native.bare_ty == bare_native_type::<bool>() {
-            return value
-                .as_primitive_ty::<bool>()
-                .map(|value| Value::native(*value));
+            return copy_trivial_native_value_typed::<bool>(value);
         }
         if native.bare_ty == bare_native_type::<isize>() {
-            return value
-                .as_primitive_ty::<isize>()
-                .map(|value| Value::native(*value));
+            return copy_trivial_native_value_typed::<isize>(value);
         }
     }
-    if ty.is_constant() {
-        return None;
-    }
-
-    value
-        .as_primitive_ty::<()>()
-        .map(|_| Value::unit())
-        .or_else(|| {
-            value
-                .as_primitive_ty::<bool>()
-                .map(|value| Value::native(*value))
-        })
-        .or_else(|| {
-            value
-                .as_primitive_ty::<isize>()
-                .map(|value| Value::native(*value))
-        })
+    None
 }
 
 fn copy_trivial_value_from_place(
@@ -1838,7 +1829,7 @@ fn copy_trivial_value_from_place(
     ctx: &EvalCtx,
     span: Location,
 ) -> Result<Value, RuntimeError> {
-    // Temporary companion to `trivial_copy_value` for the boxed-value
+    // Temporary companion to `copy_trivial_native_value` for the boxed-value
     // interpreter. This should collapse into the backend implementation of HIR
     // `TrivialCopy` once values are stored in copyable slots.
     try_copy_trivial_value_from_place(place, ty, ctx, span)?.ok_or_else(|| {
@@ -1863,11 +1854,11 @@ fn try_copy_trivial_value_from_place(
     ctx: &EvalCtx,
     span: Location,
 ) -> Result<Option<Value>, RuntimeError> {
-    // Temporary boxed-value interpreter bridge; see `trivial_copy_value`.
+    // Temporary boxed-value interpreter bridge; see `copy_trivial_native_value`.
     let value = place
         .target_ref(ctx)
         .map_err(|err| RuntimeError::new(err, Some(span)))?;
-    Ok(trivial_copy_value(value, ty))
+    Ok(copy_trivial_native_value(value, ty))
 }
 
 #[inline(never)]
@@ -2314,8 +2305,7 @@ fn eval_args(
                 eval_dictionary_metadata_node(arena, *arg, ctx, locals)
                     .map(|result| result.map_continue(ValOrMut::Dictionary))
             }
-            ArgPassing::OwnedValue => eval_node_with_ctx(arena, *arg, ctx, locals)
-                .map(|result| result.map_continue(ValOrMut::Val)),
+            ArgPassing::OwnedValue => eval_owned_arg(arena, *arg, ty.ty, ctx, locals),
         };
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
@@ -2334,6 +2324,27 @@ fn eval_args(
         }
     }
     Ok(ControlFlow::Continue(results))
+}
+
+fn eval_owned_arg(
+    arena: &NodeArena,
+    arg: NodeId,
+    ty: Type,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<ValOrMut>, RuntimeError> {
+    match try_resolve_node_place(arena, arg, ctx, locals) {
+        // If the expression is a place, materialize the by-value argument using
+        // the expected callee type. For dictionary-projected concrete methods,
+        // the place node can still carry the caller's generic surface type.
+        Ok(ControlFlow::Continue(Some(place))) => Ok(ControlFlow::Continue(ValOrMut::Val(
+            copy_trivial_value_from_place(&place, ty, ctx, arena[arg].span)?,
+        ))),
+        Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, arg, ctx, locals)
+            .map(|result| result.map_continue(ValOrMut::Val)),
+        Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
+        Err(err) => Err(err),
+    }
 }
 
 fn is_dictionary_metadata_node(arena: &NodeArena, node: NodeId) -> bool {

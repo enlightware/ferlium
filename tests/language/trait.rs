@@ -88,6 +88,28 @@ fn first_class_trait_methods_can_be_passed_as_arguments() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_trait_method_call_uses_concrete_dictionary_method_signature() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            fn cmp_wrapper<A>(left: A, right: A)
+            where
+                A: Ord
+            {
+                match cmp(left, right) {
+                    Greater => 42,
+                    _ => 0,
+                }
+            }
+
+            cmp_wrapper(1, 0)
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn user_defined_trait_methods_are_first_class_values() {
     let mut session = TestSession::new();
     assert_val_eq!(
