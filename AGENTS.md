@@ -8,6 +8,7 @@ It achieves so by borrowing the type system from Haskell, the syntax from Rust, 
 
 ## Preferred Commands
 - Run all tests efficiently: `cargo nextest run`
+- Also run test subsets with `nextest`: `cargo nextest run <substring>`
 - Run the Rust linter: `cargo clippy`
 - Validate IDE Lezer grammar: `make validate-grammar` in `playground/`
 - Print content of std: `cargo run --example ferlium -- --print-std`
