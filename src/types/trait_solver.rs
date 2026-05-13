@@ -149,6 +149,39 @@ pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, Loca
         .collect()
 }
 
+/// Stub `TraitOutputQuery` for paths that statically never invoke a query
+/// (concrete candidate matching only unifies types and never reaches `match_blanket_impl`).
+struct NeverProbe;
+
+impl TraitOutputQuery for NeverProbe {
+    fn solve_output_types_query(
+        &mut self,
+        _trait_ref: &TraitRef,
+        _input_tys: &[Type],
+        _fn_span: Location,
+        _arena: &mut NodeArena,
+    ) -> Result<Vec<Type>, InternalCompilationError> {
+        unreachable!(
+            "NeverProbe should not be queried — concrete candidates do not call match_blanket_impl"
+        )
+    }
+
+    fn improve_trait_application_query(
+        &mut self,
+        _ty_inf: &mut UnifiedTypeInference,
+        _trait_ref: &TraitRef,
+        _input_tys: &[Type],
+        _output_tys: &[Type],
+        _assumptions: ConstraintAssumptions<'_>,
+        _fn_span: Location,
+        _arena: &mut NodeArena,
+    ) -> Result<TraitImprovementMatch, InternalCompilationError> {
+        unreachable!(
+            "NeverProbe should not be queried — concrete candidates do not call match_blanket_impl"
+        )
+    }
+}
+
 /// Minimal query interface needed by blanket matching.
 ///
 /// This is a trait so the same matching code can run either against the real
@@ -631,18 +664,34 @@ impl<'a> TraitSolver<'a> {
         let mut found_multiple_candidates = false;
 
         for candidate in candidates {
-            let mut probe = TraitSolverProbe::from_solver(self);
             let snapshot = ty_inf.snapshot();
-            let matched = Self::improvement_candidate_matches(
-                &mut probe,
-                ty_inf,
-                &candidate,
-                input_tys,
-                output_tys,
-                assumptions,
-                fn_span,
-                arena,
-            )?;
+            // Concrete candidates only run unification against `ty_inf` and never reach `match_blanket_impl`, so they do not need a probe.
+            // Skipping the probe avoids cloning the impl table once per concrete candidate, which is the dominant cost of this loop.
+            let matched = match &candidate {
+                TraitImprovementCandidate::Concrete { .. } => Self::improvement_candidate_matches(
+                    &mut NeverProbe,
+                    ty_inf,
+                    &candidate,
+                    input_tys,
+                    output_tys,
+                    assumptions,
+                    fn_span,
+                    arena,
+                )?,
+                TraitImprovementCandidate::Blanket { .. } => {
+                    let mut probe = TraitSolverProbe::from_solver(self);
+                    Self::improvement_candidate_matches(
+                        &mut probe,
+                        ty_inf,
+                        &candidate,
+                        input_tys,
+                        output_tys,
+                        assumptions,
+                        fn_span,
+                        arena,
+                    )?
+                }
+            };
             let improved_input_tys = ty_inf.substitute_in_types(input_tys);
             let improved_output_tys = ty_inf.substitute_in_types(output_tys);
             ty_inf.rollback_to(snapshot);
