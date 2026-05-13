@@ -24,12 +24,12 @@ use crate::{
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, TraitDictionary,
-        TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        LocalFunctionId, LocalValueMethodDispatch, ModuleFunction, ModuleId, ProjectionIndex,
+        TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
     std::array,
     types::{
-        r#trait::TraitDictionaryEntryIndex,
+        r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
         r#type::{FnArgType, Type, TypeKind, bare_native_type},
     },
 };
@@ -1187,31 +1187,47 @@ fn discard_call_result(result: EvalControlFlowResult) -> Result<(), RuntimeError
     Ok(())
 }
 
+/// Invoke a resolved `Value` method (clone or drop) for a local-dispatch site.
+fn call_local_value_method(
+    ctx: &mut EvalCtx,
+    dispatch: &LocalValueMethodDispatch,
+    method_index: TraitMethodIndex,
+    arguments: Vec<ValOrMut>,
+    span: Location,
+) -> EvalControlFlowResult {
+    match dispatch {
+        LocalValueMethodDispatch::Required => {
+            panic!("LocalValueMethodDispatch::Required should have been resolved before evaluation")
+        }
+        LocalValueMethodDispatch::Static(function) => {
+            ctx.call_function_id(*function, arguments, span)
+        }
+        LocalValueMethodDispatch::Dictionary(dict_index) => {
+            let dictionary = dictionary_from_extra_parameter(ctx, *dict_index, span);
+            call_dictionary_method(
+                ctx,
+                dictionary,
+                VALUE_TRAIT.dictionary_method_index(method_index),
+                arguments,
+                span,
+            )
+        }
+    }
+}
+
 fn call_local_drop_dispatch(
     ctx: &mut EvalCtx,
     drop: &LocalDrop,
     target: Place,
     span: Location,
 ) -> Result<(), RuntimeError> {
-    let arguments = vec![ValOrMut::Mut(target)];
-    match drop {
-        LocalDrop::Required => {
-            panic!("LocalDrop::Required should have been resolved before evaluation")
-        }
-        LocalDrop::Static(function) => {
-            discard_call_result(ctx.call_function_id(*function, arguments, span))
-        }
-        LocalDrop::Dictionary(dict_index) => {
-            let dictionary = dictionary_from_extra_parameter(ctx, *dict_index, span);
-            discard_call_result(call_dictionary_method(
-                ctx,
-                dictionary,
-                VALUE_TRAIT.dictionary_method_index(VALUE_DROP_METHOD_INDEX),
-                arguments,
-                span,
-            ))
-        }
-    }
+    discard_call_result(call_local_value_method(
+        ctx,
+        drop,
+        VALUE_DROP_METHOD_INDEX,
+        vec![ValOrMut::Mut(target)],
+        span,
+    ))
 }
 
 pub(crate) fn drop_frame_owned_locals_on_error(
@@ -1328,21 +1344,8 @@ fn call_value_clone_dispatch_for_temp(
     source: ValOrMut,
     span: Location,
 ) -> Result<Value, RuntimeError> {
-    call_value_clone_with(ctx, source, span, |ctx, arguments| match clone {
-        LocalClone::Required => {
-            panic!("LocalClone::Required should have been resolved before evaluation")
-        }
-        LocalClone::Static(function) => ctx.call_function_id(*function, arguments, span),
-        LocalClone::Dictionary(dict_index) => {
-            let dictionary = dictionary_from_extra_parameter(ctx, *dict_index, span);
-            call_dictionary_method(
-                ctx,
-                dictionary,
-                VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX),
-                arguments,
-                span,
-            )
-        }
+    call_value_clone_with(ctx, source, span, |ctx, arguments| {
+        call_local_value_method(ctx, clone, VALUE_CLONE_METHOD_INDEX, arguments, span)
     })
 }
 
@@ -1352,13 +1355,8 @@ pub(crate) fn call_value_drop_for_temp(
     target: ValOrMut,
     span: Location,
 ) -> EvalControlFlowResult {
-    let mut temp_target = None;
-    let mut target_place = None;
-    let target = match target {
-        ValOrMut::Mut(place) => {
-            target_place = Some(place.clone());
-            ValOrMut::Mut(place)
-        }
+    let (target_place, temp_index) = match target {
+        ValOrMut::Mut(place) => (place, None),
         ValOrMut::Ref(_) => panic!("cannot drop shared reference storage"),
         ValOrMut::Dictionary(_) => panic!("cannot drop trait dictionary metadata as a Value"),
         ValOrMut::Val(value) => {
@@ -1366,30 +1364,24 @@ pub(crate) fn call_value_drop_for_temp(
             ctx.environment.push(ValOrMut::Val(value));
             #[cfg(debug_assertions)]
             ctx.environment_names.push(ustr("$function_drop_target"));
-            temp_target = Some(target_index);
-            target_place = Some(Place {
+            let place = Place {
                 target: target_index,
                 path: Vec::new(),
-            });
-            ValOrMut::Mut(Place {
-                target: target_index,
-                path: Vec::new(),
-            })
+            };
+            (place, Some(target_index))
         }
     };
     let result = discard_call_result(call_dictionary_method(
         ctx,
         dictionary,
         VALUE_TRAIT.dictionary_method_index(VALUE_DROP_METHOD_INDEX),
-        vec![target],
+        vec![ValOrMut::Mut(target_place.clone())],
         span,
     ));
     if result.is_ok() {
-        if let Some(place) = &target_place {
-            discard_value_storage_at_place(ctx, place, span)?;
-        }
+        discard_value_storage_at_place(ctx, &target_place, span)?;
     }
-    if let Some(target_index) = temp_target {
+    if let Some(target_index) = temp_index {
         let value = ctx.pop_environment_entry().unwrap();
         debug_assert_eq!(target_index, ctx.environment.len());
         if result.is_ok() {
@@ -1690,22 +1682,7 @@ fn eval_env_store(
             ))),
         };
         let arguments = vec![source, ValOrMut::Mut(target)];
-        let result = match clone {
-            LocalClone::Required => {
-                panic!("LocalClone::Required should have been resolved before evaluation")
-            }
-            LocalClone::Static(function) => ctx.call_function_id(*function, arguments, span),
-            LocalClone::Dictionary(dict_index) => {
-                let dictionary = dictionary_from_extra_parameter(ctx, *dict_index, span);
-                call_dictionary_method(
-                    ctx,
-                    dictionary,
-                    VALUE_TRAIT.dictionary_method_index(VALUE_CLONE_METHOD_INDEX),
-                    arguments,
-                    span,
-                )
-            }
-        };
+        let result = call_local_value_method(ctx, clone, VALUE_CLONE_METHOD_INDEX, arguments, span);
         discard_call_result(result)?;
         if matches!(&ctx.environment[target_index], ValOrMut::Val(Value::Uninit)) {
             panic!("Value::clone returned without initializing local storage");
