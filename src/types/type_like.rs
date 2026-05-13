@@ -130,6 +130,13 @@ pub fn instantiate_types<T: TypeLike>(tys: &[T], subst: &InstSubstitution) -> Ve
     tys.iter().map(|ty| ty.instantiate(subst)).collect()
 }
 
+/// In-place counterpart to [`instantiate_types`]: avoids re-allocating the slice's owning Vec.
+pub fn instantiate_types_in_place<T: TypeLike>(tys: &mut [T], subst: &InstSubstitution) {
+    for ty in tys {
+        *ty = ty.instantiate(subst);
+    }
+}
+
 /// Something that is like a type and can be casted to a type.
 pub trait CastableToType: TypeLike {
     /// Return this as a type

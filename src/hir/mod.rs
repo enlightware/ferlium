@@ -24,7 +24,7 @@ use crate::{
         ProjectionIndex, TraitImplId, id::Id,
     },
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
-    types::type_like::{CastableToType, TypeLike},
+    types::type_like::{CastableToType, TypeLike, instantiate_types_in_place},
 };
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -1044,52 +1044,24 @@ pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitut
         }
         TraitMethodApply(app) => {
             app.ty = app.ty.instantiate(subst);
-            app.input_tys = app
-                .input_tys
-                .iter()
-                .map(|ty| ty.instantiate(subst))
-                .collect();
+            instantiate_types_in_place(&mut app.input_tys, subst);
             app.inst_data.instantiate(subst);
         }
         GetFunction(get_fn) => {
             get_fn.inst_data.instantiate(subst);
         }
         GetTraitMethod(get_method) => {
-            get_method.input_tys = get_method
-                .input_tys
-                .iter()
-                .map(|ty| ty.instantiate(subst))
-                .collect();
-            get_method.output_tys = get_method
-                .output_tys
-                .iter()
-                .map(|ty| ty.instantiate(subst))
-                .collect();
+            instantiate_types_in_place(&mut get_method.input_tys, subst);
+            instantiate_types_in_place(&mut get_method.output_tys, subst);
             get_method.inst_data.instantiate(subst);
         }
         GetTraitAssociatedConst(get_const) => {
-            get_const.input_tys = get_const
-                .input_tys
-                .iter()
-                .map(|ty| ty.instantiate(subst))
-                .collect();
-            get_const.output_tys = get_const
-                .output_tys
-                .iter()
-                .map(|ty| ty.instantiate(subst))
-                .collect();
+            instantiate_types_in_place(&mut get_const.input_tys, subst);
+            instantiate_types_in_place(&mut get_const.output_tys, subst);
         }
         GetTraitDictionary(get_dict) => {
-            get_dict.input_tys = get_dict
-                .input_tys
-                .iter()
-                .map(|ty| ty.instantiate(subst))
-                .collect();
-            get_dict.output_tys = get_dict
-                .output_tys
-                .iter()
-                .map(|ty| ty.instantiate(subst))
-                .collect();
+            instantiate_types_in_place(&mut get_dict.input_tys, subst);
+            instantiate_types_in_place(&mut get_dict.output_tys, subst);
         }
         _ => {}
     }
