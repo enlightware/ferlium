@@ -14,6 +14,7 @@ use crate::{
     types::effects::EffectsSubstitution,
     types::r#type::{NamedType, Type, TypeKind},
     types::type_like::TypeLike,
+    types::type_mapper::BitmapSubstitutionTypeMapper,
     types::type_scheme::PubTypeConstraint,
 };
 
@@ -82,8 +83,9 @@ impl NamedTypeConstraintCollector {
             .zip(named.params.iter().copied())
             .collect::<FxHashMap<_, _>>();
         let subst = (ty_subst, EffectsSubstitution::default());
+        let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
         for constraint in &named.def.shape.constraints {
-            let mut constraint = constraint.instantiate(&subst);
+            let mut constraint = constraint.map(&mut mapper);
             constraint.instantiate_location(self.use_site);
             if self.seen_constraints.insert(constraint.clone()) {
                 self.collect_constraint(&constraint);

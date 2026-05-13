@@ -1,0 +1,168 @@
+// Tiny arithmetic-expression calculator: tokenize a string, then evaluate
+// it via recursive descent with the usual `*`/`/` over `+`/`-` precedence
+// and parenthesised sub-expressions. Example: `calculate("1 + 2 * (3 + 4)")`
+// returns 15.
+
+// A token has a kind tag and a numeric payload that is meaningful only when
+// the kind is Num.
+fn make_num(value) {
+    { kind: Num, num: value }
+}
+fn make_op(kind) {
+    { kind: kind, num: 0 }
+}
+
+fn is_digit(c) {
+    c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or
+    c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
+}
+
+fn is_space(c) {
+    c == " " or c == "\t" or c == "\n"
+}
+
+// Slice a single character at index `i` from the source.
+fn char_at(src, i) {
+    string_slice(src, i, i + 1)
+}
+
+// Consume consecutive digits starting at `i`. Returns { value, pos } where
+// `pos` is the first non-digit position.
+fn digit_value(c) {
+    match parse_int(c) {
+        Some(v) => v,
+        None => panic(f"Not a digit: {c}"),
+    }
+}
+
+fn read_number(src, i, n, acc) {
+    if i >= n {
+        { value: acc, pos: i }
+    } else {
+        let d = char_at(src, i);
+        if is_digit(d) {
+            read_number(src, i + 1, n, acc * 10 + digit_value(d))
+        } else {
+            { value: acc, pos: i }
+        }
+    }
+}
+
+// Append the next token (or skip whitespace) into `tokens`. Recurses until
+// the source is exhausted.
+fn tokenize_at(src, i, n, tokens) {
+    if i >= n {
+        ()
+    } else {
+        let c = char_at(src, i);
+        if is_space(c) {
+            tokenize_at(src, i + 1, n, tokens)
+        } else if is_digit(c) {
+            let r = read_number(src, i, n, 0);
+            array_append(tokens, make_num(r.value));
+            tokenize_at(src, r.pos, n, tokens)
+        } else if c == "+" {
+            array_append(tokens, make_op(Plus));
+            tokenize_at(src, i + 1, n, tokens)
+        } else if c == "-" {
+            array_append(tokens, make_op(Minus));
+            tokenize_at(src, i + 1, n, tokens)
+        } else if c == "*" {
+            array_append(tokens, make_op(Times));
+            tokenize_at(src, i + 1, n, tokens)
+        } else if c == "/" {
+            array_append(tokens, make_op(Div));
+            tokenize_at(src, i + 1, n, tokens)
+        } else if c == "(" {
+            array_append(tokens, make_op(LParen));
+            tokenize_at(src, i + 1, n, tokens)
+        } else if c == ")" {
+            array_append(tokens, make_op(RParen));
+            tokenize_at(src, i + 1, n, tokens)
+        } else {
+            panic(f"Unexpected character: {c}")
+        }
+    }
+}
+
+fn tokenize(src) {
+    let mut tokens = [];
+    tokenize_at(src, 0, string_len(src), tokens);
+    tokens
+}
+
+// expr   = term (('+' | '-') term)*
+// term   = factor (('*' | '/') factor)*
+// factor = number | '(' expr ')'
+//
+// Each parser returns the computed value plus the next position in the
+// token stream, threaded through the recursion.
+
+fn parse_factor(tokens, pos) {
+    let tok = tokens[pos];
+    match tok.kind {
+        Num => { value: tok.num, pos: pos + 1 },
+        LParen => {
+            let inner = parse_expr(tokens, pos + 1);
+            { value: inner.value, pos: inner.pos + 1 }
+        },
+        _ => panic("Expected number or '('"),
+    }
+}
+
+// Continue a `term` starting from `state` (the value/pos of the last factor).
+// Recurses while we see `*` or `/`.
+fn parse_term_tail(tokens, state) {
+    if state.pos >= len(tokens) {
+        state
+    } else {
+        let kind = tokens[state.pos].kind;
+        match kind {
+            Times => {
+                let rhs = parse_factor(tokens, state.pos + 1);
+                parse_term_tail(tokens, { value: state.value * rhs.value, pos: rhs.pos })
+            },
+            Div => {
+                let rhs = parse_factor(tokens, state.pos + 1);
+                parse_term_tail(tokens, { value: idiv(state.value, rhs.value), pos: rhs.pos })
+            },
+            _ => state,
+        }
+    }
+}
+
+fn parse_term(tokens, pos) {
+    let head = parse_factor(tokens, pos);
+    parse_term_tail(tokens, head)
+}
+
+// Continue an `expr` starting from `state`. Recurses while we see `+` or `-`.
+fn parse_expr_tail(tokens, state) {
+    if state.pos >= len(tokens) {
+        state
+    } else {
+        let kind = tokens[state.pos].kind;
+        match kind {
+            Plus => {
+                let rhs = parse_term(tokens, state.pos + 1);
+                parse_expr_tail(tokens, { value: state.value + rhs.value, pos: rhs.pos })
+            },
+            Minus => {
+                let rhs = parse_term(tokens, state.pos + 1);
+                parse_expr_tail(tokens, { value: state.value - rhs.value, pos: rhs.pos })
+            },
+            _ => state,
+        }
+    }
+}
+
+fn parse_expr(tokens, pos) {
+    let head = parse_term(tokens, pos);
+    parse_expr_tail(tokens, head)
+}
+
+fn calculate(src: string) {
+    let tokens = tokenize(src);
+    let result = parse_expr(tokens, 0);
+    result.value
+}

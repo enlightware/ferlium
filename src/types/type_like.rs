@@ -15,7 +15,7 @@ use crate::types::effects::EffectVar;
 use crate::types::mutability::MutVar;
 use crate::types::r#type::{Type, TypeVar};
 use crate::types::type_inference::substitution::InstSubstitution;
-use crate::types::type_mapper::{SubstitutionTypeMapper, TypeMapper};
+use crate::types::type_mapper::{SimpleSubstitutionTypeMapper, TypeMapper};
 use crate::types::type_visitor::{
     ContainsAnyTyVars, ContainsOnlyTyVars, EffectVarsCollector, MutVarsCollector, TyVarsCollector,
     TypeInnerVisitor,
@@ -30,12 +30,14 @@ pub trait TypeLike {
     /// Map the type and its inner components, calling the type mapper for each of them
     fn map(&self, f: &mut impl TypeMapper) -> Self;
 
-    /// Instantiate the type variables within this type with the given substitutions
-    fn instantiate(&self, subst: &InstSubstitution) -> Self
+    /// Instantiate the type variables within this type with the given substitutions in case of single instantiation.
+    fn instantiate_simple(&self, subst: &InstSubstitution) -> Self
     where
         Self: Sized,
     {
-        self.map(&mut SubstitutionTypeMapper { subst })
+        // One-shot path: build the cheap mapper, skip the bitmap setup that
+        // only pays off when reused across many `affects_type` calls.
+        self.map(&mut SimpleSubstitutionTypeMapper::new(subst))
     }
 
     /// Return all type variables contained in this type
@@ -121,14 +123,18 @@ pub trait TypeLike {
     }
 }
 
-pub fn instantiate_types<T: TypeLike>(tys: &[T], subst: &InstSubstitution) -> Vec<T> {
-    tys.iter().map(|ty| ty.instantiate(subst)).collect()
+/// Instantiate every type in `tys` using a pre-built mapper, returning a fresh `Vec`.
+pub(crate) fn instantiate_types<T: TypeLike, M: TypeMapper>(tys: &[T], mapper: &mut M) -> Vec<T> {
+    tys.iter().map(|ty| ty.map(mapper)).collect()
 }
 
-/// In-place counterpart to [`instantiate_types`]: avoids re-allocating the slice's owning Vec.
-pub fn instantiate_types_in_place<T: TypeLike>(tys: &mut [T], subst: &InstSubstitution) {
+/// In-place counterpart to [`instantiate_types`].
+pub(crate) fn instantiate_types_in_place<T: TypeLike, M: TypeMapper>(
+    tys: &mut [T],
+    mapper: &mut M,
+) {
     for ty in tys {
-        *ty = ty.instantiate(subst);
+        *ty = ty.map(mapper);
     }
 }
 

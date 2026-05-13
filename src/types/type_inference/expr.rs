@@ -45,7 +45,7 @@ use crate::{
         trait_solver::{TraitSolver, TraitSolverProbe},
         r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
         type_like::TypeLike,
-        type_mapper::TypeMapper,
+        type_mapper::{BitmapSubstitutionTypeMapper, TypeMapper},
         type_scheme::{PubTypeConstraint, TypeScheme},
         typing_env::{LoopFrame, TypingEnv},
     },
@@ -410,8 +410,9 @@ impl TypeInference {
                         inst_data.dicts_req.is_empty(),
                         "Instantiation data for trait method is not supported yet."
                     );
+                    let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
                     trait_ref.constraints.iter().for_each(|constraint| {
-                        let mut constraint = constraint.instantiate(&subst);
+                        let mut constraint = constraint.map(&mut mapper);
                         constraint.instantiate_location(expr_span);
                         self.add_pub_constraint(constraint);
                     });
@@ -1687,8 +1688,9 @@ impl TypeInference {
                     "Instantiation data for trait method is not supported yet."
                 );
                 // Instantiate the constraints and add them to our list.
+                let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
                 trait_ref.constraints.iter().for_each(|constraint| {
-                    let mut constraint = constraint.instantiate(&subst);
+                    let mut constraint = constraint.map(&mut mapper);
                     constraint.instantiate_location(path_span);
                     self.add_pub_constraint(constraint);
                 });

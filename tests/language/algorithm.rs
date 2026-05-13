@@ -162,6 +162,45 @@ fn bank_account() {
     );
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn sudoku() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/sudoku.fer"))
+        .module_id;
+
+    // The standard easy puzzle bundled in sudoku.fer has a unique solution;
+    // these spot-check cells across the grid are enough to detect a wrong
+    // backtracker without round-tripping a 9x9 array through the call macro.
+    // Reads back the only empty cell of the bundled puzzle; verifies the
+    // backtracker fills it with the digit that satisfies row/col/box.
+    let cell = run_fn_native!(session.session(), module_id, "solved_cell", [7 => isize, 7 => isize] -> isize).unwrap();
+    assert_eq!(cell, 3);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn calculator() {
+    let mut session = TestSession::new();
+    let module_id = session
+        .compile(include_str!("../modules/calculator.fer"))
+        .module_id;
+
+    let calc = |s: &str| {
+        let input = Str::new(s);
+        run_fn_native!(session.session(), module_id, "calculate", [input => Str] -> isize).unwrap()
+    };
+    assert_eq!(calc("1 + 2"), 3);
+    assert_eq!(calc("2 * 3 + 4"), 10); // precedence: *
+    assert_eq!(calc("2 + 3 * 4"), 14); // precedence: +
+    assert_eq!(calc("(1 + 2) * 3"), 9); // parens
+    assert_eq!(calc("1 + 2 * (3 + 4)"), 15);
+    assert_eq!(calc("100 - 20 - 5"), 75); // left-associativity of -
+    assert_eq!(calc("20 / 4 / 2"), 2); // left-associativity of /
+    assert_eq!(calc("((1 + 2) * (3 + 4) - 5) * 6 / 2 + 100"), 148);
+}
+
 // helpers for calling Ferlium functions from Rust
 
 fn run_native_int_int(

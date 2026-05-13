@@ -30,7 +30,7 @@ use crate::{
     types::trait_solver::TraitSolver,
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::TypeLike,
-    types::type_mapper::TypeMapper,
+    types::type_mapper::{BitmapSubstitutionTypeMapper, TypeMapper},
     types::type_visitor::TypeInnerVisitor,
 };
 use enum_as_inner::EnumAsInner;
@@ -40,7 +40,7 @@ use ustr::Ustr;
 use crate::{
     format::FormatWithData,
     hir::FnInstData,
-    hir::dictionary_passing::{DictionaryReq, instantiate_dictionaries_req},
+    hir::dictionary_passing::{DictionaryReq, instantiate_dictionaries_req_with},
     module::ModuleEnv,
     types::effects::{EffType, EffectVar, EffectsSubstitution},
     types::r#type::{Type, TypeSubstitution, TypeVar},
@@ -210,7 +210,7 @@ impl PubTypeConstraint {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut crate::hir::NodeArena,
     ) -> Result<Option<Self>, InternalCompilationError> {
-        let constraint = self.instantiate(subst);
+        let constraint = self.instantiate_simple(subst);
         use PubTypeConstraint::*;
         Ok(match &constraint {
             TupleAtIndexIs {
@@ -295,7 +295,7 @@ impl PubTypeConstraint {
                                 .collect::<TypeSubstitution>();
                             let local_subst = (ty_subst, EffectsSubstitution::default());
                             let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(ty_var_count);
-                            let output_ty = output_ty.instantiate(&local_subst);
+                            let output_ty = output_ty.instantiate_simple(&local_subst);
                             ty_inf
                                 .unify_same_type(
                                     *got_output_ty,
@@ -718,13 +718,15 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             ty_subst.extend(ext_subst);
         }
         let subst = (ty_subst, eff_subst);
+        let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
         for constraint in &self.constraints {
-            let mut constraint = constraint.instantiate(&subst);
+            let mut constraint = constraint.map(&mut mapper);
             constraint.instantiate_location(use_site);
             ty_inf.add_pub_constraint(constraint);
         }
-        let ty = self.ty.instantiate(&subst);
-        let dict_req = instantiate_dictionaries_req(&self.extra_parameters().requirements, &subst);
+        let ty = self.ty.map(&mut mapper);
+        let dict_req =
+            instantiate_dictionaries_req_with(&self.extra_parameters().requirements, &mut mapper);
         (ty, FnInstData::new(dict_req), subst)
     }
 
@@ -779,11 +781,12 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
 
         // Apply to type and constraints
         let subst = (ty_subst, eff_subst);
-        self.ty = self.ty.instantiate(&subst);
+        let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+        self.ty = self.ty.map(&mut mapper);
         self.constraints = self
             .constraints
             .iter()
-            .map(|constraint| constraint.instantiate(&subst))
+            .map(|constraint| constraint.map(&mut mapper))
             .collect();
 
         // Return

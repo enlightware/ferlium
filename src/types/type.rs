@@ -867,7 +867,7 @@ impl TypeDef {
             .collect();
         self.shape
             .ty
-            .instantiate(&(ty_subst, EffectsSubstitution::default()))
+            .instantiate_simple(&(ty_subst, EffectsSubstitution::default()))
     }
 
     pub fn payload_scheme(&self, tag: Option<Ustr>) -> TypeScheme<Type> {

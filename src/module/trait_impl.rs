@@ -848,7 +848,7 @@ fn format_impl_fn(
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
     let def = &function.definition;
-    let ty = def.ty_scheme.ty.instantiate(subst);
+    let ty = def.ty_scheme.ty.instantiate_simple(subst);
     write!(f, "    fn {name}")?;
     fmt_fn_type_with_arg_names(&ty, &def.arg_names, f, env)?;
     if def.ty_scheme.constraints.is_empty() {

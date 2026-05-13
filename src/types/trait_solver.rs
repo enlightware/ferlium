@@ -40,6 +40,7 @@ use crate::{
     types::r#type::{FnArgType, Type},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
+    types::type_mapper::BitmapSubstitutionTypeMapper,
 };
 
 #[cfg(debug_assertions)]
@@ -585,8 +586,9 @@ impl<'a> TraitSolver<'a> {
                     ty_inf.fresh_type_var_subst(*ty_var_count),
                     FxHashMap::default(),
                 );
-                let candidate_inputs = instantiate_types(candidate_inputs, &inst_subst);
-                let candidate_outputs = instantiate_types(candidate_outputs, &inst_subst);
+                let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
+                let candidate_inputs = instantiate_types(candidate_inputs, &mut mapper);
+                let candidate_outputs = instantiate_types(candidate_outputs, &mut mapper);
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
                     ty_inf.unify_same_type(*candidate_input, fn_span, *input_ty, fn_span)?;
                 }
@@ -911,9 +913,10 @@ impl<'a> TraitSolver<'a> {
             ty_inf.fresh_type_var_subst(imp_ty_var_count),
             FxHashMap::default(),
         );
-        let imp_input_tys = instantiate_types(imp_input_tys, &inst_subst);
-        let imp_output_tys = instantiate_types(imp_output_tys, &inst_subst);
-        let remaining = instantiate_types(imp_constraints, &inst_subst)
+        let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
+        let imp_input_tys = instantiate_types(imp_input_tys, &mut mapper);
+        let imp_output_tys = instantiate_types(imp_output_tys, &mut mapper);
+        let remaining = instantiate_types(imp_constraints, &mut mapper)
             .into_iter()
             .enumerate()
             .collect::<Vec<_>>();

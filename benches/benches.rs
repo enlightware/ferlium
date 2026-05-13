@@ -8,7 +8,6 @@
 //
 
 use gungraun::{library_benchmark, library_benchmark_group, main};
-use indoc::indoc;
 use std::hint::black_box;
 
 use ferlium::{
@@ -19,14 +18,54 @@ use ferlium::{
     std::{array::array_type, math::int_type, string::String as Str},
 };
 
-// --- Benchmark Functions ---
+// --- User-code corpus ---
+//
+// Bundle of mid-size, non-trivial modules used by the user-code compilation
+// benchmarks. Each tuple is (module-name, source). Order matters when modules
+// reference each other (here they don't).
+const USER_CODE_CORPUS: &[(&str, &str)] = &[
+    ("sudoku", include_str!("../tests/modules/sudoku.fer")),
+    (
+        "calculator",
+        include_str!("../tests/modules/calculator.fer"),
+    ),
+    ("quicksort", include_str!("../tests/modules/quicksort.fer")),
+    ("account", include_str!("../tests/modules/bank_account.fer")),
+    ("sieve", include_str!("../tests/modules/sieve.fer")),
+    ("csv", include_str!("../tests/modules/csv.fer")),
+    (
+        "rle_encode",
+        include_str!("../tests/modules/rle_encode.fer"),
+    ),
+];
+
+fn compile_user_code_corpus(session: &mut CompilerSession) {
+    for (name, src) in USER_CODE_CORPUS {
+        let file = format!("{name}.fer");
+        let module_id = session
+            .compile(src, &file, Path::single_str(name))
+            .unwrap()
+            .module_id;
+        black_box(module_id);
+    }
+}
+
+// --- Compilation benchmarks ---
 
 #[library_benchmark]
-fn bench_new_session() {
+fn bench_std_load() {
     CompilerSession::new();
 }
 
-fn compile_quicksort() -> (CompilerSession, ModuleId) {
+#[library_benchmark(setup = CompilerSession::new)]
+fn bench_user_code_compile_without_std_startup(mut session: CompilerSession) {
+    compile_user_code_corpus(&mut session);
+    black_box(session);
+}
+
+// --- Runtime benchmarks ---
+
+fn setup_quicksort() -> (CompilerSession, ModuleId, Vec<isize>) {
     let mut session = CompilerSession::new();
     let module_id = session
         .compile(
@@ -36,42 +75,6 @@ fn compile_quicksort() -> (CompilerSession, ModuleId) {
         )
         .unwrap()
         .module_id;
-    (session, module_id)
-}
-
-#[library_benchmark]
-fn bench_quicksort_compile() {
-    compile_quicksort();
-}
-
-fn setup_compiler_session() -> CompilerSession {
-    CompilerSession::new()
-}
-
-#[library_benchmark(setup = setup_compiler_session)]
-fn bench_quicksort_bank_account_compile_without_std_startup(mut session: CompilerSession) {
-    let quicksort = session
-        .compile(
-            include_str!("../tests/modules/quicksort.fer"),
-            "quicksort.fer",
-            Path::single_str("quicksort"),
-        )
-        .unwrap()
-        .module_id;
-    let account = session
-        .compile(
-            include_str!("../tests/modules/bank_account.fer"),
-            "bank_account.fer",
-            Path::single_str("account"),
-        )
-        .unwrap()
-        .module_id;
-
-    black_box((quicksort, account));
-}
-
-fn setup_quicksort() -> (CompilerSession, ModuleId, Vec<isize>) {
-    let (session, module_id) = compile_quicksort();
     let random_data = lcg_seq(300, 42);
     (session, module_id, random_data)
 }
@@ -158,7 +161,8 @@ fn bench_csv((session, module_id): (CompilerSession, ModuleId)) {
     run_fn_native!(&session, module_id, "csv_table", [black_box(500) => isize] -> Str).unwrap();
 }
 
-fn compile_bank_account() -> (CompilerSession, ModuleId) {
+fn setup_bank_account() -> (CompilerSession, ModuleId) {
+    use indoc::indoc;
     let mut session = CompilerSession::new();
     let _ = session.compile(
         include_str!("../tests/modules/quicksort.fer"),
@@ -189,14 +193,52 @@ fn compile_bank_account() -> (CompilerSession, ModuleId) {
     (session, module_id)
 }
 
-#[library_benchmark]
-fn bench_bank_account_compile() {
-    compile_bank_account();
-}
-
-#[library_benchmark(setup = compile_bank_account)]
+#[library_benchmark(setup = setup_bank_account)]
 fn bench_bank_account_run((session, module_id): (CompilerSession, ModuleId)) {
     run_fn_native!(&session, module_id, "test", [] -> Str).unwrap();
+}
+
+fn setup_sudoku() -> (CompilerSession, ModuleId) {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            include_str!("../tests/modules/sudoku.fer"),
+            "sudoku.fer",
+            Path::single_str("sudoku"),
+        )
+        .unwrap()
+        .module_id;
+    (session, module_id)
+}
+
+#[library_benchmark(setup = setup_sudoku)]
+fn bench_sudoku_run((session, module_id): (CompilerSession, ModuleId)) {
+    run_fn_native!(
+        &session,
+        module_id,
+        "solved_cell",
+        [black_box(0) => isize, black_box(2) => isize] -> isize
+    )
+    .unwrap();
+}
+
+fn setup_calculator() -> (CompilerSession, ModuleId, Str) {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            include_str!("../tests/modules/calculator.fer"),
+            "calculator.fer",
+            Path::single_str("calculator"),
+        )
+        .unwrap()
+        .module_id;
+    let expr = Str::new("((1 + 2) * (3 + 4) - 5) * 6 / 2 + 100");
+    (session, module_id, expr)
+}
+
+#[library_benchmark(setup = setup_calculator)]
+fn bench_calculator_run((session, module_id, expr): (CompilerSession, ModuleId, Str)) {
+    run_fn_native!(&session, module_id, "calculate", [expr => Str] -> isize).unwrap();
 }
 
 // --- Support functions ---
@@ -221,12 +263,7 @@ fn lcg_seq(n: usize, seed: usize) -> Vec<isize> {
 
 library_benchmark_group!(
     name = compilation,
-    benchmarks = [
-        bench_new_session,
-        bench_quicksort_compile,
-        bench_quicksort_bank_account_compile_without_std_startup,
-        bench_bank_account_compile
-    ]
+    benchmarks = [bench_std_load, bench_user_code_compile_without_std_startup]
 );
 
 library_benchmark_group!(
@@ -237,7 +274,9 @@ library_benchmark_group!(
         bench_sieve,
         bench_rle_encode,
         bench_csv,
-        bench_bank_account_run
+        bench_bank_account_run,
+        bench_sudoku_run,
+        bench_calculator_run
     ]
 );
 

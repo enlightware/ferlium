@@ -13,6 +13,7 @@ use crate::{
         trait_solver::TraitSolver,
         r#type::{Type, TypeVar},
         type_like::TypeLike,
+        type_mapper::BitmapSubstitutionTypeMapper,
         type_scheme::PubTypeConstraint,
     },
 };
@@ -475,9 +476,10 @@ impl UnifiedTypeInference {
                 }
 
                 valid_candidate = true;
+                let mut mapper = BitmapSubstitutionTypeMapper::new(&trial_subst);
                 let inst_input_tys = input_tys
                     .iter()
-                    .map(|input_ty| input_ty.instantiate(&trial_subst))
+                    .map(|input_ty| input_ty.map(&mut mapper))
                     .collect::<Vec<_>>();
                 if inst_input_tys.iter().all(Type::is_constant)
                     && trait_solver
@@ -546,11 +548,12 @@ impl UnifiedTypeInference {
                 FxHashMap::from_iter([(ty_var, int_type())]),
                 FxHashMap::default(),
             );
+            let mut mapper = BitmapSubstitutionTypeMapper::new(&trial_subst);
             for c in &subst_constraints {
                 if !c.contains_any_type_var(ty_var) {
                     continue;
                 }
-                let inst_c = c.instantiate(&trial_subst);
+                let inst_c = c.map(&mut mapper);
                 if let PubTypeConstraint::HaveTrait {
                     trait_ref,
                     input_tys,

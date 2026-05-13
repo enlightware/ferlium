@@ -25,6 +25,7 @@ use crate::{
     },
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
     types::type_like::{CastableToType, TypeLike, instantiate_types_in_place},
+    types::type_mapper::TypeMapper,
 };
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
@@ -39,7 +40,6 @@ use crate::{
     module::ModuleEnv,
     types::effects::EffType,
     types::r#type::{FnType, Type, TypeVar},
-    types::type_inference::substitution::InstSubstitution,
 };
 
 /// An index to a node in the HIR arena
@@ -60,11 +60,12 @@ impl FnInstData {
     pub fn any(&self) -> bool {
         !self.dicts_req.is_empty()
     }
-    pub fn instantiate(&mut self, subst: &InstSubstitution) {
+    /// Instantiate the dictionary requirements with the caller-supplied mapper.
+    pub(crate) fn instantiate_with<M: TypeMapper>(&mut self, mapper: &mut M) {
         self.dicts_req = self
             .dicts_req
             .iter()
-            .map(|req| req.instantiate(subst))
+            .map(|req| req.instantiate_with(mapper))
             .collect();
     }
 }
@@ -1029,44 +1030,49 @@ impl Node {
     }
 }
 
-pub fn instantiate_node(arena: &mut NodeArena, id: NodeId, subst: &InstSubstitution) {
+/// Instantiate a node and its children with a type mapper.
+pub(crate) fn instantiate_node_with<M: TypeMapper>(
+    arena: &mut NodeArena,
+    id: NodeId,
+    mapper: &mut M,
+) {
     use NodeKind::*;
     // Instantiate children first
     let children = arena[id].kind.child_node_ids();
     for child in children {
-        instantiate_node(arena, child, subst);
+        instantiate_node_with(arena, child, mapper);
     }
     // Then modify this node's kind-specific data
     match &mut arena[id].kind {
         StaticApply(app) => {
-            app.ty = app.ty.instantiate(subst);
-            app.inst_data.instantiate(subst);
+            app.ty = app.ty.map(mapper);
+            app.inst_data.instantiate_with(mapper);
         }
         TraitMethodApply(app) => {
-            app.ty = app.ty.instantiate(subst);
-            instantiate_types_in_place(&mut app.input_tys, subst);
-            app.inst_data.instantiate(subst);
+            app.ty = app.ty.map(mapper);
+            instantiate_types_in_place(&mut app.input_tys, mapper);
+            app.inst_data.instantiate_with(mapper);
         }
         GetFunction(get_fn) => {
-            get_fn.inst_data.instantiate(subst);
+            get_fn.inst_data.instantiate_with(mapper);
         }
         GetTraitMethod(get_method) => {
-            instantiate_types_in_place(&mut get_method.input_tys, subst);
-            instantiate_types_in_place(&mut get_method.output_tys, subst);
-            get_method.inst_data.instantiate(subst);
+            instantiate_types_in_place(&mut get_method.input_tys, mapper);
+            instantiate_types_in_place(&mut get_method.output_tys, mapper);
+            get_method.inst_data.instantiate_with(mapper);
         }
         GetTraitAssociatedConst(get_const) => {
-            instantiate_types_in_place(&mut get_const.input_tys, subst);
-            instantiate_types_in_place(&mut get_const.output_tys, subst);
+            instantiate_types_in_place(&mut get_const.input_tys, mapper);
+            instantiate_types_in_place(&mut get_const.output_tys, mapper);
         }
         GetTraitDictionary(get_dict) => {
-            instantiate_types_in_place(&mut get_dict.input_tys, subst);
-            instantiate_types_in_place(&mut get_dict.output_tys, subst);
+            instantiate_types_in_place(&mut get_dict.input_tys, mapper);
+            instantiate_types_in_place(&mut get_dict.output_tys, mapper);
         }
         _ => {}
     }
-    arena[id].ty = arena[id].ty.instantiate(subst);
-    arena[id].effects = arena[id].effects.instantiate(&subst.1);
+    arena[id].ty = arena[id].ty.map(mapper);
+    arena[id].effects = mapper.map_effect_type(&arena[id].effects);
 }
 
 #[derive(new)]

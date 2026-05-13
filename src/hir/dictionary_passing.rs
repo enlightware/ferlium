@@ -25,6 +25,7 @@ use crate::{
     types::trait_solver::TraitSolver,
     types::r#type::TypeVar,
     types::type_like::TypeLike,
+    types::type_mapper::TypeMapper,
     types::type_scheme::format_have_trait,
 };
 use derive_new::new;
@@ -47,7 +48,6 @@ use crate::{
     types::effects::no_effects,
     types::mutability::MutType,
     types::r#type::{FnArgType, Type, TypeKind},
-    types::type_inference::substitution::InstSubstitution,
 };
 
 /// A dictionary requirement, that will be passed as extra parameter to a function.
@@ -82,11 +82,12 @@ impl DictionaryReq {
         }
     }
 
-    pub fn instantiate(&self, subst: &InstSubstitution) -> DictionaryReq {
+    /// Instantiate self with a caller-supplied mapper.
+    pub(crate) fn instantiate_with<M: TypeMapper>(&self, mapper: &mut M) -> DictionaryReq {
         use DictionaryReq::*;
         match self {
             FieldIndex { ty, field } => FieldIndex {
-                ty: ty.instantiate(subst),
+                ty: ty.map(mapper),
                 field: *field,
             },
             TraitImpl {
@@ -95,8 +96,8 @@ impl DictionaryReq {
                 output_tys,
             } => TraitImpl {
                 trait_ref: trait_ref.clone(),
-                input_tys: input_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
-                output_tys: output_tys.iter().map(|ty| ty.instantiate(subst)).collect(),
+                input_tys: input_tys.iter().map(|ty| ty.map(mapper)).collect(),
+                output_tys: output_tys.iter().map(|ty| ty.map(mapper)).collect(),
             },
         }
     }
@@ -378,11 +379,14 @@ fn alloc_dictionary_method_projection(
     ))
 }
 
-pub fn instantiate_dictionaries_req(
+pub(crate) fn instantiate_dictionaries_req_with<M: TypeMapper>(
     dicts: &DictionariesReq,
-    subst: &InstSubstitution,
+    mapper: &mut M,
 ) -> DictionariesReq {
-    dicts.iter().map(|dict| dict.instantiate(subst)).collect()
+    dicts
+        .iter()
+        .map(|dict| dict.instantiate_with(mapper))
+        .collect()
 }
 
 fn extra_args_from_inst_data<'d, 'sr, 'sm>(

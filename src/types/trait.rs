@@ -31,6 +31,7 @@ use crate::{
     types::trait_solver::TraitSolver,
     types::r#type::{Type, TypeSubstitution, TypeVar},
     types::type_like::TypeLike,
+    types::type_mapper::BitmapSubstitutionTypeMapper,
     types::type_scheme::PubTypeConstraint,
     types::type_visitor::TyVarsCollector,
 };
@@ -371,10 +372,11 @@ impl Trait {
     ) -> Vec<FunctionDefinition> {
         let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
         let inst_subst = (ty_subst, FxHashMap::default());
+        let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
         self.methods
             .iter()
             .map(|(_, def)| {
-                let mut def = def.instantiate(&inst_subst);
+                let mut def = def.map(&mut mapper);
                 def.ty_scheme.simplify();
                 def
             })
@@ -386,10 +388,11 @@ impl Trait {
     pub fn get_dictionary_type_for_tys(&self, input_tys: &[Type], output_tys: &[Type]) -> Type {
         let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
         let inst_subst = (ty_subst, FxHashMap::default());
+        let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
         Type::tuple(
             self.methods
                 .iter()
-                .map(|(_, def)| Type::function_type(def.ty_scheme.ty.instantiate(&inst_subst)))
+                .map(|(_, def)| Type::function_type(def.ty_scheme.ty.map(&mut mapper)))
                 .chain(
                     self.associated_consts
                         .iter()
