@@ -86,6 +86,7 @@ pub(crate) fn mut_ptr_type(element_ty: Type) -> Type {
     Type::native::<MutPtr>([element_ty])
 }
 
+/// Whether `ty` is one of the std-internal pointer types (`Ptr<T>` or `MutPtr<T>`).
 pub(crate) fn is_pointer_type(ty: Type) -> bool {
     let ty_data = ty.data();
     let TypeKind::Native(native) = &*ty_data else {
