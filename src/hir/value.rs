@@ -347,16 +347,8 @@ impl Value {
 
     pub fn into_tuple_element(self, index: usize) -> Option<Value> {
         match self {
-            Self::Tuple(value) => {
-                let mut result = None;
-                for (i, value) in ManuallyDrop::into_inner(value).into_iter().enumerate() {
-                    if i == index && result.is_none() {
-                        result = Some(value);
-                    } else {
-                        value.discard_storage();
-                    }
-                }
-                result
+            Self::Tuple(values) => {
+                take_nth_discarding_rest(ManuallyDrop::into_inner(values), index)
             }
             other => {
                 other.discard_storage();
@@ -367,16 +359,8 @@ impl Value {
 
     pub fn into_projected_value(self, index: usize) -> Option<Value> {
         match self {
-            Self::Tuple(value) => {
-                let mut result = None;
-                for (i, value) in ManuallyDrop::into_inner(value).into_iter().enumerate() {
-                    if i == index && result.is_none() {
-                        result = Some(value);
-                    } else {
-                        value.discard_storage();
-                    }
-                }
-                result
+            Self::Tuple(values) => {
+                take_nth_discarding_rest(ManuallyDrop::into_inner(values), index)
             }
             Self::Variant(value) if index == 0 => Some(ManuallyDrop::into_inner(value).value),
             other => {
@@ -674,6 +658,20 @@ impl Value {
             Never => panic!("A value of type Never cannot exist"),
         }
     }
+}
+
+/// Take the value at `index` out of `values`, discarding the storage of every other element.
+fn take_nth_discarding_rest(values: B<SVec2<Value>>, index: usize) -> Option<Value> {
+    let mut result = None;
+    for (i, value) in values.into_iter().enumerate() {
+        if i == index {
+            debug_assert!(result.is_none());
+            result = Some(value);
+        } else {
+            value.discard_storage();
+        }
+    }
+    result
 }
 
 pub struct PrettyPrint<'a>(FormatWithData<'a, Value, Type>);
