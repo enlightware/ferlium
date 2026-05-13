@@ -1219,6 +1219,15 @@ pub(crate) fn drop_frame_owned_locals_on_error(
     locals: &[LocalDecl],
     span: Location,
 ) -> Result<(), RuntimeError> {
+    drop_owned_locals_on_error_from(ctx, locals, ctx.frame_base, span)
+}
+
+fn drop_owned_locals_on_error_from(
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+    start_environment_index: usize,
+    span: Location,
+) -> Result<(), RuntimeError> {
     for (index, local) in locals.iter().enumerate().rev() {
         if !local.owns_storage {
             continue;
@@ -1228,6 +1237,9 @@ pub(crate) fn drop_frame_owned_locals_on_error(
         };
         let id = LocalDeclId::from_index(index);
         let target_index = local_environment_index(ctx, locals, id);
+        if target_index < start_environment_index {
+            continue;
+        }
         if target_index >= ctx.environment.len() {
             continue;
         }
@@ -1902,8 +1914,18 @@ fn eval_block(
     let env_size = ctx.environment.len();
     let mut last_value: Option<Value> = None;
     for node in nodes.iter() {
-        match eval_node_with_ctx(arena, *node, ctx, locals)? {
-            ControlFlow::Return(val) => {
+        match eval_node_with_ctx(arena, *node, ctx, locals) {
+            Err(err) => {
+                if let Some(value) = last_value.take() {
+                    value.discard_storage();
+                }
+                let cleanup =
+                    drop_owned_locals_on_error_from(ctx, locals, env_size, arena[*node].span);
+                ctx.truncate_environment_storage(env_size);
+                cleanup?;
+                return Err(err);
+            }
+            Ok(ControlFlow::Return(val)) => {
                 // Early return: clean up environment and propagate.
                 if let Some(value) = last_value.take() {
                     value.discard_storage();
@@ -1911,7 +1933,7 @@ fn eval_block(
                 ctx.truncate_environment_storage(env_size);
                 return Ok(ControlFlow::Return(val));
             }
-            ControlFlow::Continue(val) => {
+            Ok(ControlFlow::Continue(val)) => {
                 if !matches!(arena[*node].kind, NodeKind::EnvDrop(_)) {
                     if let Some(old_value) = last_value.replace(val) {
                         old_value.discard_storage();

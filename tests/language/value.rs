@@ -11,7 +11,7 @@ use test_log::test;
 use crate::harness::{TestSession, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
-    hir::value::Value,
+    hir::{NodeKind, value::Value},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -36,6 +36,34 @@ fn tracked_probe_value_impl() -> &'static str {
 
         fn clone(source: Probe, target: &mut Probe) {
             target = Probe(source.0);
+        }
+
+        fn drop(target: &mut Probe) {
+            testing::record_tracked_drop(target.0);
+        }
+    }
+    "#
+}
+
+fn incrementing_clone_probe_value_impl() -> &'static str {
+    r#"
+    struct Probe(int)
+
+    impl Value for Probe {
+        fn eq(left: Probe, right: Probe) -> bool {
+            left.0 == right.0
+        }
+
+        fn to_string(value: Probe) -> string {
+            to_string(value.0)
+        }
+
+        fn hash(value: Probe, state: &mut hasher) {
+            hash(value.0, state)
+        }
+
+        fn clone(source: Probe, target: &mut Probe) {
+            target = Probe(source.0 + 1);
         }
 
         fn drop(target: &mut Probe) {
@@ -348,6 +376,94 @@ fn let_binding_from_mutable_generic_place_owns_snapshot() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_let_from_mutable_place_uses_value_clone_and_owns_snapshot() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn snapshot<T>(slot: &mut T) -> T
+        where
+            T: Value
+        {{
+            let owned = slot;
+            owned
+        }}
+
+        testing::reset_tracked_drops();
+        let observed = {{
+            let mut source = Probe(2);
+            let copy = snapshot(source);
+            source = Probe(5);
+            copy.0 * 10 + source.0
+        }};
+        observed * 1000 + testing::tracked_drop_log()
+        "#,
+        incrementing_clone_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(35235));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_owned_argument_from_mutable_place_uses_value_clone_and_owns_snapshot() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        struct Wrapper<T>(T)
+
+        fn wrap<T>(value: T) -> Wrapper<T>
+        where
+            T: Value
+        {{
+            Wrapper(value)
+        }}
+
+        testing::reset_tracked_drops();
+        let observed = {{
+            let mut source = Probe(2);
+            let wrapped = wrap(source);
+            source = Probe(5);
+            wrapped.0.0 * 10 + source.0
+        }};
+        observed * 1000 + testing::tracked_drop_log()
+        "#,
+        incrementing_clone_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(35235));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
+    let source = r#"
+        fn snapshot(slot: &mut int) -> int {
+            let copy = slot;
+            copy
+        }
+
+        let mut source = 1;
+        let copy = snapshot(source);
+        source = 2;
+        copy * 10 + source
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert!(
+        module
+            .ir_arena
+            .iter()
+            .any(|(_, node)| matches!(node.kind, NodeKind::TrivialCopy(_))),
+        "expected mutable int place materialization to lower through TrivialCopy"
+    );
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), int(12));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn unused_owned_temporary_is_dropped() {
     let mut session = TestSession::new();
     let source = format!(
@@ -386,6 +502,33 @@ fn lexical_drop_runs_on_runtime_error() {
         RuntimeErrorKind::ArrayAccessOutOfBounds { index: 1, len: 1 }
     );
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(5));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_value_drop_runs_on_runtime_error() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn fail_with_owned<T>(value: T) -> int
+        where
+            T: Value
+        {{
+            let mut owned = value;
+            [1][1]
+        }}
+
+        testing::reset_tracked_drops();
+        fail_with_owned(Probe(6))
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_eq!(
+        session.fail_run(&source),
+        RuntimeErrorKind::ArrayAccessOutOfBounds { index: 1, len: 1 }
+    );
+    assert_val_eq!(session.run("testing::tracked_drop_log()"), int(66));
 }
 
 #[test]
