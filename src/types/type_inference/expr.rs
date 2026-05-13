@@ -3,6 +3,7 @@ use std::borrow::Borrow;
 use derive_new::new;
 use ena::unify::InPlaceUnificationTable;
 use itertools::Itertools;
+use smallvec::{SmallVec, smallvec};
 use ustr::{Ustr, ustr};
 
 use crate::{
@@ -86,6 +87,9 @@ pub struct TypeInference {
     pub(super) ty_coverage_constraints: Vec<(Location, Type, Vec<LiteralValue>)>,
     pub(super) effect_unification_table: InPlaceUnificationTable<EffectVarKey>,
     pub(super) effect_constraints: Vec<EffectConstraint>,
+    /// Memoised results of `TrivialCopy` solver probes keyed by the queried concrete type.
+    /// `TraitSolverProbe::from_module` clones the module's impl table on every call, so this cache avoids re-cloning when the same type is checked repeatedly during a single inference pass.
+    trivial_copy_cache: FxHashMap<Type, bool>,
 }
 
 impl TypeInference {
@@ -522,7 +526,7 @@ impl TypeInference {
                     MutType::Resolved(mut_ty) if !mut_ty.is_mutable()
                 );
                 let initializer_is_known_trivial_copy =
-                    type_has_concrete_trivial_copy_impl(env, node_ty, expr_span);
+                    self.type_has_concrete_trivial_copy_impl(env, node_ty, expr_span);
                 let needs_clone = (mut_val.is_mutable() || !initializer_is_known_immutable)
                     && node_ty != Type::never()
                     && initializer_is_borrow
@@ -1314,7 +1318,7 @@ impl TypeInference {
             .zip(arg_tys)
             .enumerate()
             .filter_map(|(index, (arg, arg_ty))| {
-                if !argument_is_passed_by_shared_ref(
+                if !self.argument_is_passed_by_shared_ref(
                     env,
                     arg_ty,
                     arg_passing.and_then(|passing| passing.get(index)).copied(),
@@ -1461,7 +1465,7 @@ impl TypeInference {
         }
 
         let ty = env.ir_arena[value].ty;
-        if type_has_concrete_trivial_copy_impl(env, ty, span) {
+        if self.type_has_concrete_trivial_copy_impl(env, ty, span) {
             return self.trivial_copy_value(env, value, span);
         }
 
@@ -1492,7 +1496,7 @@ impl TypeInference {
         if is_pointer_type(ty) {
             return false;
         }
-        !type_has_concrete_trivial_copy_impl(env, ty, span)
+        !self.type_has_concrete_trivial_copy_impl(env, ty, span)
     }
 
     fn node_value_needs_semantic_drop(
@@ -1504,20 +1508,18 @@ impl TypeInference {
     ) -> bool {
         use NodeKind::*;
 
-        let kind = env.ir_arena[value].kind.clone();
-        match kind {
-            Immediate(_) | GetFunction(_) => false,
-            Variant(_, payload) => {
-                self.node_value_needs_semantic_drop(env, payload, env.ir_arena[payload].ty, span)
-            }
-            Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().any(|node| {
-                self.node_value_needs_semantic_drop(env, *node, env.ir_arena[*node].ty, span)
-            }),
-            BuildClosure(closure) => closure.captures.iter().any(|capture| {
-                self.node_value_needs_semantic_drop(env, *capture, env.ir_arena[*capture].ty, span)
-            }),
-            _ => self.type_needs_semantic_drop(env, ty, span),
-        }
+        // Pre-extract the children we need to recurse into so we can drop the borrow on the arena before the recursive call.
+        // Avoids cloning the whole `NodeKind` just to satisfy the borrow checker.
+        let children: SmallVec<[NodeId; 4]> = match &env.ir_arena[value].kind {
+            Immediate(_) | GetFunction(_) => return false,
+            Variant(_, payload) => smallvec![*payload],
+            Tuple(nodes) | Record(nodes) | Array(nodes) => nodes.iter().copied().collect(),
+            BuildClosure(closure) => closure.captures.iter().copied().collect(),
+            _ => return self.type_needs_semantic_drop(env, ty, span),
+        };
+        children.iter().any(|node| {
+            self.node_value_needs_semantic_drop(env, *node, env.ir_arena[*node].ty, span)
+        })
     }
 
     fn trivial_copy_value(&mut self, env: &mut TypingEnv, value: NodeId, span: Location) -> NodeId {
@@ -2547,32 +2549,47 @@ fn assignment_initializes_storage(
     }
 }
 
-fn type_has_concrete_trivial_copy_impl(env: &mut TypingEnv<'_>, ty: Type, span: Location) -> bool {
-    if !ty.is_constant() {
-        return false;
+impl TypeInference {
+    /// Whether `ty` has a concrete `TrivialCopy` impl in scope. Cached per
+    /// inference pass to avoid recloning the module's impl table on every
+    /// probe.
+    pub(super) fn type_has_concrete_trivial_copy_impl(
+        &mut self,
+        env: &mut TypingEnv<'_>,
+        ty: Type,
+        span: Location,
+    ) -> bool {
+        if !ty.is_constant() {
+            return false;
+        }
+        if let Some(&cached) = self.trivial_copy_cache.get(&ty) {
+            return cached;
+        }
+        let mut trait_solver =
+            TraitSolverProbe::from_module(env.module_env.current, env.module_env.modules);
+        let result = trait_solver
+            .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, env.ir_arena)
+            .is_ok();
+        self.trivial_copy_cache.insert(ty, result);
+        result
     }
 
-    let mut trait_solver =
-        TraitSolverProbe::from_module(env.module_env.current, env.module_env.modules);
-    trait_solver
-        .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, env.ir_arena)
-        .is_ok()
-}
-
-fn argument_is_passed_by_shared_ref(
-    env: &mut TypingEnv<'_>,
-    arg: &FnArgType,
-    passing: Option<ArgPassing>,
-    span: Location,
-) -> bool {
-    match passing {
-        Some(ArgPassing::SharedRef) => true,
-        Some(ArgPassing::OwnedValue | ArgPassing::MutableRef) => false,
-        None => {
-            !arg.mut_ty
-                .as_resolved()
-                .is_some_and(|mut_ty| mut_ty.is_mutable())
-                && !type_has_concrete_trivial_copy_impl(env, arg.ty, span)
+    fn argument_is_passed_by_shared_ref(
+        &mut self,
+        env: &mut TypingEnv<'_>,
+        arg: &FnArgType,
+        passing: Option<ArgPassing>,
+        span: Location,
+    ) -> bool {
+        match passing {
+            Some(ArgPassing::SharedRef) => true,
+            Some(ArgPassing::OwnedValue | ArgPassing::MutableRef) => false,
+            None => {
+                !arg.mut_ty
+                    .as_resolved()
+                    .is_some_and(|mut_ty| mut_ty.is_mutable())
+                    && !self.type_has_concrete_trivial_copy_impl(env, arg.ty, span)
+            }
         }
     }
 }

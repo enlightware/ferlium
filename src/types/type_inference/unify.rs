@@ -120,6 +120,7 @@ impl UnifiedTypeInference {
             ty_coverage_constraints,
             effect_unification_table,
             effect_constraints,
+            ..
         } = ty_inf;
         let mut unified_ty_inf = UnifiedTypeInference {
             ty_unification_table,
