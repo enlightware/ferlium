@@ -150,7 +150,7 @@ where
     }
 
     // Build the condensed graph of SCC dependencies
-    let mut scc_graph: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); sccs.len()];
+    let mut scc_graph: Vec<Option<FxHashSet<usize>>> = vec![None; sccs.len()];
     let mut in_degree = vec![0; sccs.len()];
 
     for (i, scc) in sccs.iter().enumerate() {
@@ -158,7 +158,11 @@ where
             for neighbor in graph[node].neighbors() {
                 let neighbor_index: usize = neighbor.try_into().unwrap();
                 if let Some(j) = node_to_scc[neighbor_index] {
-                    if i != j && scc_graph[i].insert(j) {
+                    if i != j
+                        && scc_graph[i]
+                            .get_or_insert_with(FxHashSet::default)
+                            .insert(j)
+                    {
                         // Increment in-degree only if the edge is unique
                         in_degree[j] += 1;
                     }
@@ -180,7 +184,10 @@ where
 
     while let Some(i) = queue.pop_front() {
         sorted_sccs.push(sccs[i].clone());
-        for &neighbor in &scc_graph[i] {
+        let Some(neighbors) = scc_graph[i].as_ref() else {
+            continue;
+        };
+        for &neighbor in neighbors {
             in_degree[neighbor] -= 1;
             if in_degree[neighbor] == 0 {
                 queue.push_back(neighbor);
