@@ -167,8 +167,13 @@ impl LocalDecl {
     }
 
     pub fn assign_sequential_slots(locals: &mut [LocalDecl]) {
+        Self::assign_slots_with_prefix(locals, 0);
+    }
+
+    /// Assign slots `[prefix_count, prefix_count + locals.len())` to `locals` to make space for hidden dictionary parameters prepended to the frame.
+    pub fn assign_slots_with_prefix(locals: &mut [LocalDecl], prefix_count: u32) {
         for (index, local) in locals.iter_mut().enumerate() {
-            local.slot = index as u32;
+            local.slot = prefix_count + index as u32;
         }
     }
 }
@@ -293,12 +298,9 @@ impl ModuleFunction {
                 .map(|(i, r)| ustr(&r.to_dict_name(i))),
         );
         let scope = self.function_span();
-        LocalDecl::assign_sequential_slots(&mut self.locals);
-        let local_count = self.locals.len();
         let dictionary_count = ctx.dicts.requirements.len() as u32;
-        for local in &mut self.locals {
-            local.slot += dictionary_count;
-        }
+        LocalDecl::assign_slots_with_prefix(&mut self.locals, dictionary_count);
+        let local_count = self.locals.len();
         self.locals
             .extend(ctx.dicts.requirements.iter().enumerate().map(|(i, r)| {
                 let mut local = LocalDecl::new(
