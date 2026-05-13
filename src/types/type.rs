@@ -14,7 +14,6 @@ use std::fmt::Display;
 use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::iter;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -1199,39 +1198,81 @@ impl TypeKind {
         visitor.visit_ty_kind_end(self);
     }
 
-    pub fn inner_types(&self) -> B<dyn Iterator<Item = Type> + '_> {
+    #[inline]
+    fn for_each_inner_type(&self, mut f: impl FnMut(Type)) {
         use TypeKind::*;
         match self {
-            Native(g) => b(g.arguments.iter().copied()),
-            Variable(_) => b(iter::empty()),
-            Variant(types) => b(types.iter().map(|(_, ty)| *ty)),
-            Tuple(types) => b(types.iter().copied()),
-            Record(fields) => b(fields.iter().map(|(_, ty)| *ty)),
-            Function(function) => b(function
-                .args
-                .iter()
-                .map(|arg| arg.ty)
-                .chain(iter::once(function.ret))),
-            Named(NamedType { params: args, .. }) => b(args.iter().copied()),
-            Never => b(iter::empty()),
+            Native(g) => {
+                for &ty in &g.arguments {
+                    f(ty);
+                }
+            }
+            Variable(_) | Never => {}
+            Variant(types) => {
+                for (_, ty) in types {
+                    f(*ty);
+                }
+            }
+            Tuple(types) => {
+                for &ty in types {
+                    f(ty);
+                }
+            }
+            Record(fields) => {
+                for (_, ty) in fields {
+                    f(*ty);
+                }
+            }
+            Function(function) => {
+                for arg in &function.args {
+                    f(arg.ty);
+                }
+                f(function.ret);
+            }
+            Named(NamedType { params, .. }) => {
+                for &ty in params {
+                    f(ty);
+                }
+            }
         }
     }
 
-    pub fn inner_types_mut(&mut self) -> B<dyn Iterator<Item = &mut Type> + '_> {
+    #[inline]
+    fn for_each_inner_type_mut(&mut self, mut f: impl FnMut(&mut Type)) {
         use TypeKind::*;
         match self {
-            Native(g) => b(g.arguments.iter_mut()),
-            Variable(_) => b(iter::empty()),
-            Variant(types) => b(types.iter_mut().map(|(_, ty)| ty)),
-            Tuple(types) => b(types.iter_mut()),
-            Record(fields) => b(fields.iter_mut().map(|(_, ty)| ty)),
-            Function(function) => b(function
-                .args
-                .iter_mut()
-                .map(|arg| &mut arg.ty)
-                .chain(iter::once(&mut function.ret))),
-            Named(named) => b(named.params.iter_mut()),
-            Never => b(iter::empty()),
+            Native(g) => {
+                for ty in &mut g.arguments {
+                    f(ty);
+                }
+            }
+            Variable(_) | Never => {}
+            Variant(types) => {
+                for (_, ty) in types {
+                    f(ty);
+                }
+            }
+            Tuple(types) => {
+                for ty in types {
+                    f(ty);
+                }
+            }
+            Record(fields) => {
+                for (_, ty) in fields {
+                    f(ty);
+                }
+            }
+            Function(function) => {
+                for arg in &mut function.args {
+                    f(&mut arg.ty);
+                }
+                f(&mut function.ret);
+            }
+            Named(named) => {
+                for ty in &mut named.params {
+                    f(ty);
+                }
+            }
         }
     }
 
@@ -1257,7 +1298,7 @@ impl TypeKind {
     /// `subst[i]` is the new index for local type `i`. A value of
     /// `u32::MAX` means "not in this substitution" and panics if reached.
     fn substitute_locals(&mut self, subst: &[u32]) {
-        self.inner_types_mut().for_each(|ty| {
+        self.for_each_inner_type_mut(|ty| {
             if ty.world().is_none() {
                 let mapped = subst.get(ty.index as usize).copied().unwrap_or(u32::MAX);
                 if mapped == u32::MAX {
@@ -1452,11 +1493,13 @@ impl graph::Node for TypeKind {
     type Index = u32;
 
     fn neighbors(&self) -> impl Iterator<Item = Self::Index> {
-        self.inner_types()
-            .filter(|t| t.is_local())
-            .map(Type::index)
-            .collect::<Vec<_>>()
-            .into_iter()
+        let mut neighbors = Vec::new();
+        self.for_each_inner_type(|ty| {
+            if ty.is_local() {
+                neighbors.push(ty.index());
+            }
+        });
+        neighbors.into_iter()
     }
 }
 
@@ -1638,7 +1681,7 @@ fn verify_mapping(
         // Remap local_kind by replacing local references with world_idx references using mapping
         let mut remapped = local_kind.clone();
         let mut valid = true;
-        remapped.inner_types_mut().for_each(|ty| {
+        remapped.for_each_inner_type_mut(|ty| {
             if ty.is_local() {
                 let local_ref = ty.index as usize;
                 if local_ref < mapping.len() {
@@ -1722,7 +1765,7 @@ impl TypeUniverse {
             .flat_map(|mut input_indices| {
                 // Replace the already-processed local types with their true values in the type kind.
                 input_indices.iter().for_each(|input_index| {
-                    kinds[*input_index].inner_types_mut().for_each(|ty| {
+                    kinds[*input_index].for_each_inner_type_mut(|ty| {
                         if ty.is_local() {
                             if let Some(resolved_ty) = resolved[ty.index as usize] {
                                 *ty = resolved_ty;
@@ -1743,10 +1786,13 @@ impl TypeUniverse {
                     // Recursive-world references inside a non-recursive singleton are
                     // rare; 2 inline slots cover the common case without heap.
                     let mut worlds_to_check: SVec2<NonMaxU32> = SVec2::new();
-                    for ty in kind.inner_types() {
+                    kind.for_each_inner_type(|ty| {
+                        if !all_global {
+                            return;
+                        }
                         if ty.is_local() {
                             all_global = false;
-                            break;
+                            return;
                         }
                         if ty.is_global_recursive() {
                             let w = ty.world().unwrap();
@@ -1755,7 +1801,7 @@ impl TypeUniverse {
                                 worlds_to_check.push(w);
                             }
                         }
-                    }
+                    });
                     if all_global {
                         // Before adding to world 0, check if this matches an existing recursive type
                         // by checking if any recursive type's world contains this exact TypeKind.
@@ -1819,9 +1865,13 @@ impl TypeUniverse {
                     })
                     .collect();
                 assert!(local_world.iter().all(|kind| {
-                    kind.inner_types()
-                        .filter(|ty| ty.is_local())
-                        .all(|ty| (ty.index as usize) < local_world.len())
+                    let mut valid = true;
+                    kind.for_each_inner_type(|ty| {
+                        if ty.is_local() && (ty.index as usize) >= local_world.len() {
+                            valid = false;
+                        }
+                    });
+                    valid
                 }));
 
                 // Some helper functions to get the global indices from the local input indices.
@@ -1910,7 +1960,7 @@ impl TypeUniverse {
                 let kinds_renormalized: Vec<TypeKind> = local_world
                     .into_iter()
                     .map(|mut td| {
-                        td.inner_types_mut().for_each(|ty| {
+                        td.for_each_inner_type_mut(|ty| {
                             if ty.is_local() {
                                 ty.world = Some(NonMaxU32::new(global_world_index).unwrap());
                             }
