@@ -1,6 +1,6 @@
 install-deps:
 	cargo install cargo-nextest --locked
-	cargo install --version 0.17.2 gungraun-runner
+	cargo install --version 0.18.2 gungraun-runner
 
 test-local:
 	RUST_LOG=ferlium=debug cargo nextest run
