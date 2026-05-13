@@ -35,26 +35,26 @@ use crate::types::type_like::CastableToType;
 use crate::types::type_like::TypeLike;
 use crate::types::type_mapper::TypeMapper;
 use crate::types::type_visitor::TypeInnerVisitor;
+use crate::types::var_set::KindVarSet;
 use crate::{FxHashMap, FxHashSet, Location};
 use derive_new::new;
 use dyn_clone::DynClone;
 use dyn_eq::DynEq;
 use enum_as_inner::EnumAsInner;
 use indexmap::IndexSet;
-use itertools::Itertools;
 use nonmax::NonMaxU32;
 use ustr::{Ustr, ustr};
 
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
-use crate::containers::{B, b};
+use crate::containers::{B, SVec2, b};
 use crate::format::type_variable_index_to_string_greek;
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::module::ModuleEnv;
 use crate::sync::SyncPhantomData;
 use crate::types::effects::{EffType, EffectVar, EffectsSubstitution};
-use crate::types::mutability::MutType;
+use crate::types::mutability::{MutType, MutVar};
 use crate::types::type_scheme::{DisplayStyle, TypeScheme};
 
 // use crate::types::typing_env::Local;
@@ -549,6 +549,12 @@ impl Type {
         TypeDataRef { ty: self, guard }
     }
 
+    /// Cached free-variable summary for this interned type.
+    pub fn summary<'t>(self) -> TypeSummaryRef<'t> {
+        let guard = types().read().unwrap();
+        TypeSummaryRef { ty: self, guard }
+    }
+
     // filter
     pub fn is_local(self) -> bool {
         self.world.is_none()
@@ -605,6 +611,9 @@ impl Type {
 
 impl TypeLike for Type {
     fn map(&self, f: &mut impl TypeMapper) -> Self {
+        if !f.affects_type(*self) {
+            return *self;
+        }
         self.with_cycle_detection(
             |ty, _| {
                 let kind = ty.data().clone();
@@ -618,6 +627,43 @@ impl TypeLike for Type {
 
     fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
         self.data().visit(visitor)
+    }
+
+    // Overrides of the default `TypeLike` query methods that consult the
+    // cached free-variable summary instead of walking the type tree.
+
+    fn inner_ty_vars(&self) -> Vec<TypeVar> {
+        self.summary().free_ty_vars.iter().collect()
+    }
+
+    fn inner_mut_ty_vars(&self) -> Vec<MutVar> {
+        self.summary().free_mut_vars.iter().collect()
+    }
+
+    fn input_effect_vars(&self) -> FxHashSet<EffectVar> {
+        self.summary().free_eff_vars.iter().collect()
+    }
+
+    fn inner_effect_vars(&self) -> FxHashSet<EffectVar> {
+        // `Type` has no output-only effect vars (the default `fill_with_output_effect_vars` is a no-op),
+        // so the union equals the input set.
+        self.input_effect_vars()
+    }
+
+    fn contains_any_type_var(&self, var: TypeVar) -> bool {
+        self.summary().free_ty_vars.contains(var)
+    }
+
+    fn contains_any_ty_vars(&self, vars: &[TypeVar]) -> bool {
+        let summary = self.summary();
+        vars.iter().any(|v| summary.free_ty_vars.contains(*v))
+    }
+
+    fn is_constant(&self) -> bool {
+        let summary = self.summary();
+        summary.free_ty_vars.is_empty()
+            && summary.free_mut_vars.is_empty()
+            && summary.free_eff_vars.is_empty()
     }
 }
 
@@ -1123,7 +1169,7 @@ impl TypeKind {
     }
 
     /// Visit this type, allowing for multiple traversal strategies thanks to the TypeInnerVisitor trait.
-    pub(crate) fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
+    pub fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
         // helper for doing cycle detection on type
         fn process_ty(ty: Type, visitor: &mut impl TypeInnerVisitor) {
             ty.with_cycle_detection(|ty, visitor| ty.data().visit(visitor), |_, _| (), visitor)
@@ -1207,16 +1253,20 @@ impl TypeKind {
         }
     }
 
-    /// Substitute the indices of local types using subst
-    fn substitute_locals(&mut self, subst: &FxHashMap<u32, u32>) {
+    /// Substitute the indices of local types using `subst`, where
+    /// `subst[i]` is the new index for local type `i`. A value of
+    /// `u32::MAX` means "not in this substitution" and panics if reached.
+    fn substitute_locals(&mut self, subst: &[u32]) {
         self.inner_types_mut().for_each(|ty| {
             if ty.world().is_none() {
-                ty.index = *subst.get(&ty.index).unwrap_or_else(|| {
+                let mapped = subst.get(ty.index as usize).copied().unwrap_or(u32::MAX);
+                if mapped == u32::MAX {
                     panic!(
                         "Local type index {} not found in substitution {subst:?}",
                         ty.index
-                    )
-                });
+                    );
+                }
+                ty.index = mapped;
             }
         });
     }
@@ -1412,7 +1462,42 @@ impl graph::Node for TypeKind {
 
 /// A set of types representing a "world" of types,
 /// i.e. a collection of types that can reference each other.
-type TypeWorld = IndexSet<TypeKind>;
+type TypeWorld = IndexSet<InternedType>;
+
+/// Cached set of free variables of an interned type, used to short-circuit  substitutions that cannot affect the type.
+/// Computed once per interned type at insertion time and stored alongside its `TypeKind` in `InternedType`.
+#[derive(Debug, Clone, Default)]
+pub struct TypeSummary {
+    pub free_ty_vars: KindVarSet<TypeVar>,
+    pub free_mut_vars: KindVarSet<MutVar>,
+    pub free_eff_vars: KindVarSet<EffectVar>,
+}
+
+/// An interned type entry: a `TypeKind` paired with its cached free-variable summary.
+#[derive(Debug, Clone)]
+pub struct InternedType {
+    pub kind: TypeKind,
+    pub summary: TypeSummary,
+}
+
+impl Hash for InternedType {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+    }
+}
+
+impl PartialEq for InternedType {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+impl Eq for InternedType {}
+
+impl std::borrow::Borrow<TypeKind> for InternedType {
+    fn borrow(&self) -> &TypeKind {
+        &self.kind
+    }
+}
 
 /// Attempts to find an isomorphism (bijection) between local_world and existing_world.
 /// Returns a Vec where result[local_idx] = global_idx in existing_world, if an isomorphism exists.
@@ -1440,7 +1525,7 @@ fn find_world_isomorphism(
             let possible: Vec<usize> = (0..n)
                 .filter(|&existing_idx| {
                     // Quick structural check: compare ignoring type references
-                    types_could_match(local_kind, &existing_world[existing_idx])
+                    types_could_match(local_kind, &existing_world[existing_idx].kind)
                 })
                 .collect();
             (local_idx, possible)
@@ -1548,7 +1633,7 @@ fn verify_mapping(
 
     for (local_idx, &existing_idx) in mapping.iter().enumerate() {
         let local_kind = &local_world[local_idx];
-        let existing_kind = &existing_world[existing_idx];
+        let existing_kind = &existing_world[existing_idx].kind;
 
         // Remap local_kind by replacing local references with world_idx references using mapping
         let mut remapped = local_kind.clone();
@@ -1617,6 +1702,7 @@ impl TypeUniverse {
     fn insert_types(&mut self, kinds: impl Into<Vec<TypeKind>>) -> Vec<Type> {
         let mut kinds: Vec<_> = kinds.into();
         kinds.iter_mut().for_each(TypeKind::normalize);
+
         // Partition tks into sub-graphs of strongly connected recursive types.
         let sccs = find_strongly_connected_components(&kinds);
         let mut sorted_sccs = topological_sort_sccs(&kinds, &sccs);
@@ -1628,7 +1714,9 @@ impl TypeUniverse {
         // Note: Using local types as placeholders to build the array without having to
         // get a recursive lock on the universe.
         let mut types = vec![Type::new_local(0); kinds.len()];
-        let mut resolved = FxHashMap::<usize, Type>::default();
+        // Resolved global types per input index. Indexed by `input_index`
+        // (0..kinds.len()); `None` means not yet resolved.
+        let mut resolved: Vec<Option<Type>> = vec![None; kinds.len()];
         sorted_sccs
             .into_iter()
             .flat_map(|mut input_indices| {
@@ -1636,8 +1724,8 @@ impl TypeUniverse {
                 input_indices.iter().for_each(|input_index| {
                     kinds[*input_index].inner_types_mut().for_each(|ty| {
                         if ty.is_local() {
-                            if let Some(resolved_ty) = resolved.get(&(ty.index as usize)) {
-                                *ty = *resolved_ty;
+                            if let Some(resolved_ty) = resolved[ty.index as usize] {
+                                *ty = resolved_ty;
                             }
                         }
                     })
@@ -1647,23 +1735,32 @@ impl TypeUniverse {
                 if input_indices.len() == 1 {
                     let input_index = input_indices[0];
                     let kind = &kinds[input_index];
-                    let inner_all_global = kind.inner_types().all(|ty| !ty.is_local());
-                    if inner_all_global {
+                    // Single pass: detect any local inner type (disqualifies the
+                    // singleton fast path) and collect the set of recursive
+                    // worlds referenced by inner types (where equirecursive
+                    // matches may live).
+                    let mut all_global = true;
+                    // Recursive-world references inside a non-recursive singleton are
+                    // rare; 2 inline slots cover the common case without heap.
+                    let mut worlds_to_check: SVec2<NonMaxU32> = SVec2::new();
+                    for ty in kind.inner_types() {
+                        if ty.is_local() {
+                            all_global = false;
+                            break;
+                        }
+                        if ty.is_global_recursive() {
+                            let w = ty.world().unwrap();
+                            // Adjacent-dedup, matching the previous itertools::dedup behaviour.
+                            if worlds_to_check.last() != Some(&w) {
+                                worlds_to_check.push(w);
+                            }
+                        }
+                    }
+                    if all_global {
                         // Before adding to world 0, check if this matches an existing recursive type
                         // by checking if any recursive type's world contains this exact TypeKind.
                         // This handles equirecursive types where an "unfolded" variant equals
                         // a canonical recursive type.
-                        let worlds_to_check: Vec<_> = kind
-                            .inner_types()
-                            .filter_map(|ty| {
-                                if ty.is_global_recursive() {
-                                    Some(ty.world().unwrap())
-                                } else {
-                                    None
-                                }
-                            })
-                            .dedup()
-                            .collect();
                         for world_idx in worlds_to_check {
                             let world_idx = world_idx.get();
                             let world = &self.worlds[world_idx as usize];
@@ -1672,22 +1769,28 @@ impl TypeUniverse {
                             if let Some((idx, _)) = world.get_full(kind) {
                                 // Found a match! Return the type from that world
                                 let resolved_ty = Type::new_global(world_idx, idx as u32);
-                                resolved.insert(input_index, resolved_ty);
+                                resolved[input_index] = Some(resolved_ty);
                                 assert!(!resolved_ty.is_local());
                                 return vec![(input_index, resolved_ty)];
                             }
                         }
 
                         // No match in recursive worlds, add to world 0
-                        let first_world = &mut self.worlds[0];
                         // Is it already present?
-                        let index = if let Some((index, _)) = first_world.get_full(kind) {
+                        let index = if let Some((index, _)) = self.worlds[0].get_full(kind) {
                             index
                         } else {
-                            first_world.insert_full(kind.clone()).0
+                            // Compute the summary using already-interned children, then store.
+                            let summary = self.summary_with_global_children(kind);
+                            self.worlds[0]
+                                .insert_full(InternedType {
+                                    kind: kind.clone(),
+                                    summary,
+                                })
+                                .0
                         };
                         let resolved_ty = Type::new_global(0, index as u32);
-                        resolved.insert(input_index, resolved_ty);
+                        resolved[input_index] = Some(resolved_ty);
                         assert!(!resolved_ty.is_local());
                         return vec![(input_index, resolved_ty)];
                     }
@@ -1700,11 +1803,13 @@ impl TypeUniverse {
                 });
 
                 // Renormalize local indices and store into local world.
-                let subst_to_local: FxHashMap<_, _> = input_indices
-                    .iter()
-                    .enumerate()
-                    .map(|(local_index, &input_index)| (input_index as u32, local_index as u32))
-                    .collect();
+                // `subst_to_local[input_index] = local_index` for the SCC's
+                // members; `u32::MAX` for unrelated input indices (which
+                // `substitute_locals` will panic on if encountered).
+                let mut subst_to_local: Vec<u32> = vec![u32::MAX; kinds.len()];
+                for (local_index, &input_index) in input_indices.iter().enumerate() {
+                    subst_to_local[input_index] = local_index as u32;
+                }
                 let local_world: Vec<_> = input_indices
                     .iter()
                     .map(|&index| {
@@ -1739,8 +1844,8 @@ impl TypeUniverse {
                         .iter()
                         .for_each(|(input_index, resolved_ty)| {
                             assert!(!resolved_ty.is_local());
-                            let result = resolved.insert(*input_index, *resolved_ty);
-                            assert!(result.is_none());
+                            assert!(resolved[*input_index].is_none());
+                            resolved[*input_index] = Some(*resolved_ty);
                         });
                 };
 
@@ -1801,8 +1906,8 @@ impl TypeUniverse {
                 self.local_to_world
                     .insert(local_world.clone(), mapping.clone());
 
-                // Renormalize local indices to global indices and store into global world.
-                let global_world: IndexSet<_> = local_world
+                // Renormalize local indices to global indices.
+                let kinds_renormalized: Vec<TypeKind> = local_world
                     .into_iter()
                     .map(|mut td| {
                         td.inner_types_mut().for_each(|ty| {
@@ -1812,6 +1917,12 @@ impl TypeUniverse {
                         });
                         td
                     })
+                    .collect();
+                let summaries = self.compute_scc_summaries(&kinds_renormalized, global_world_index);
+                let global_world: IndexSet<_> = kinds_renormalized
+                    .into_iter()
+                    .zip(summaries)
+                    .map(|(kind, summary)| InternedType { kind, summary })
                     .collect();
                 self.worlds.push(global_world);
 
@@ -1825,6 +1936,14 @@ impl TypeUniverse {
     }
 
     fn get_type_data(&self, r: Type) -> &TypeKind {
+        &self.get_interned(r).kind
+    }
+
+    fn get_type_summary(&self, r: Type) -> &TypeSummary {
+        &self.get_interned(r).summary
+    }
+
+    fn get_interned(&self, r: Type) -> &InternedType {
         self.worlds[r
             .world
             .expect("Attempted to get type data for local world")
@@ -1832,6 +1951,125 @@ impl TypeUniverse {
             .get_index(r.index as usize)
             .expect("Attempted to get type data for non-existent type")
     }
+
+    /// Compute the free-variable summary of a `TypeKind` whose children are all already interned globally.
+    /// Used for non-recursive singletons inserted into world 0.
+    fn summary_with_global_children(&self, kind: &TypeKind) -> TypeSummary {
+        let mut summary = TypeSummary::default();
+        let mut visited = FxHashSet::default();
+        self.collect_into_summary(kind, &mut summary, &mut visited, |ty| {
+            self.get_interned(ty).summary.clone()
+        });
+        summary
+    }
+
+    /// Compute summaries for an SCC of kinds being added as a new world. Local
+    /// references that point into the same SCC (world == `scc_world_idx`) are
+    /// resolved against an in-progress `summaries` vector via fixed-point
+    /// iteration; references to types in other worlds use the cached summary.
+    fn compute_scc_summaries(&self, kinds: &[TypeKind], scc_world_idx: u32) -> Vec<TypeSummary> {
+        let n = kinds.len();
+        let mut summaries: Vec<TypeSummary> = vec![TypeSummary::default(); n];
+        loop {
+            let mut changed = false;
+            for i in 0..n {
+                let mut new_summary = TypeSummary::default();
+                let mut visited = FxHashSet::default();
+                self.collect_into_summary(&kinds[i], &mut new_summary, &mut visited, |ty| {
+                    if ty.world.map(|w| w.get()) == Some(scc_world_idx) {
+                        summaries[ty.index as usize].clone()
+                    } else {
+                        self.get_interned(ty).summary.clone()
+                    }
+                });
+                if !summaries_eq(&new_summary, &summaries[i]) {
+                    summaries[i] = new_summary;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        summaries
+    }
+
+    /// Generic kind walker that accumulates direct vars into `summary` and
+    /// folds in child summaries via `lookup`. Cycles are bounded by `visited`.
+    fn collect_into_summary(
+        &self,
+        kind: &TypeKind,
+        summary: &mut TypeSummary,
+        visited: &mut FxHashSet<Type>,
+        mut lookup: impl FnMut(Type) -> TypeSummary,
+    ) {
+        use TypeKind::*;
+        match kind {
+            Variable(v) => summary.free_ty_vars.insert(*v),
+            Function(fn_ty) => {
+                for arg in &fn_ty.args {
+                    if let Some(var) = arg.mut_ty.as_variable() {
+                        summary.free_mut_vars.insert(*var);
+                    }
+                    self.fold_child(arg.ty, summary, visited, &mut lookup);
+                }
+                for eff in fn_ty.effects.iter() {
+                    if let Some(var) = eff.as_variable() {
+                        summary.free_eff_vars.insert(*var);
+                    }
+                }
+                self.fold_child(fn_ty.ret, summary, visited, &mut lookup);
+            }
+            Native(g) => {
+                for ty in &g.arguments {
+                    self.fold_child(*ty, summary, visited, &mut lookup);
+                }
+            }
+            Variant(types) => {
+                for (_, ty) in types {
+                    self.fold_child(*ty, summary, visited, &mut lookup);
+                }
+            }
+            Tuple(types) => {
+                for ty in types {
+                    self.fold_child(*ty, summary, visited, &mut lookup);
+                }
+            }
+            Record(fields) => {
+                for (_, ty) in fields {
+                    self.fold_child(*ty, summary, visited, &mut lookup);
+                }
+            }
+            Named(NamedType { params, .. }) => {
+                for ty in params {
+                    self.fold_child(*ty, summary, visited, &mut lookup);
+                }
+            }
+            Never => {}
+        }
+    }
+
+    fn fold_child(
+        &self,
+        ty: Type,
+        summary: &mut TypeSummary,
+        visited: &mut FxHashSet<Type>,
+        lookup: &mut impl FnMut(Type) -> TypeSummary,
+    ) {
+        if !visited.insert(ty) {
+            return;
+        }
+        let child = lookup(ty);
+        summary.free_ty_vars.union_with(&child.free_ty_vars);
+        summary.free_mut_vars.union_with(&child.free_mut_vars);
+        summary.free_eff_vars.union_with(&child.free_eff_vars);
+    }
+}
+
+fn summaries_eq(a: &TypeSummary, b: &TypeSummary) -> bool {
+    a.free_ty_vars == b.free_ty_vars
+        && a.free_mut_vars == b.free_mut_vars
+        && a.free_eff_vars == b.free_eff_vars
 }
 
 /// An ergonomic constructor for a tuple type when constructing it from a list of types
@@ -1878,10 +2116,23 @@ pub fn store_types(types_data: &[TypeKind]) -> Vec<Type> {
         .insert_types(types_data)
 }
 
+/// Visit every interned `TypeKind` across all worlds.
+/// Intended for diagnostics/measurement.
+pub fn for_each_stored_kind(mut f: impl FnMut(&TypeKind)) {
+    let universe = types()
+        .try_read()
+        .expect("Cannot get a read lock to type universes");
+    for world in &universe.worlds {
+        for entry in world.iter() {
+            f(&entry.kind);
+        }
+    }
+}
+
 pub fn dump_type_world(index: usize, env: &ModuleEnv<'_>) {
-    let world: &IndexSet<TypeKind> = &types().read().unwrap().worlds[index];
-    for (i, ty) in world.iter().enumerate() {
-        println!("{}: {}", i, ty.format_with(env));
+    let universe = types().read().unwrap();
+    for (i, entry) in universe.worlds[index].iter().enumerate() {
+        println!("{}: {}", i, entry.kind.format_with(env));
     }
 }
 
@@ -1893,6 +2144,17 @@ impl std::ops::Deref for TypeDataRef<'_> {
     type Target = TypeKind;
     fn deref(&self) -> &Self::Target {
         self.guard.get_type_data(self.ty)
+    }
+}
+
+pub struct TypeSummaryRef<'a> {
+    ty: Type,
+    guard: std::sync::RwLockReadGuard<'a, TypeUniverse>,
+}
+impl std::ops::Deref for TypeSummaryRef<'_> {
+    type Target = TypeSummary;
+    fn deref(&self) -> &Self::Target {
+        self.guard.get_type_summary(self.ty)
     }
 }
 
@@ -1914,6 +2176,16 @@ mod tests {
     };
 
     use super::*;
+
+    /// Wrap a `TypeKind` in an `InternedType` with an empty summary, for tests
+    /// that only exercise the structural-isomorphism logic which never reads
+    /// the summary.
+    fn test_interned(kind: TypeKind) -> InternedType {
+        InternedType {
+            kind,
+            summary: TypeSummary::default(),
+        }
+    }
 
     #[test]
     fn parse_and_format() {
@@ -2372,11 +2644,14 @@ mod tests {
         ];
 
         let mut existing_world = IndexSet::new();
-        existing_world.insert(TypeKind::Native(b(NativeType::new(
+        existing_world.insert(test_interned(TypeKind::Native(b(NativeType::new(
             bare_native_type::<Array>(),
             vec![Type::new_global(1, 0)],
-        ))));
-        existing_world.insert(TypeKind::Tuple(vec![int, Type::new_global(1, 0)]));
+        )))));
+        existing_world.insert(test_interned(TypeKind::Tuple(vec![
+            int,
+            Type::new_global(1, 0),
+        ])));
 
         let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
 
@@ -2411,12 +2686,15 @@ mod tests {
         // Existing: [Variant{V(global[1,1])}, Array([global[1,0]])]
         // Same types but REVERSED order
         let mut existing_world = IndexSet::new();
-        existing_world.insert(TypeKind::Variant(vec![(ustr("V"), Type::new_global(1, 2))]));
-        existing_world.insert(TypeKind::Native(b(NativeType::new(
+        existing_world.insert(test_interned(TypeKind::Variant(vec![(
+            ustr("V"),
+            Type::new_global(1, 2),
+        )])));
+        existing_world.insert(test_interned(TypeKind::Native(b(NativeType::new(
             bare_native_type::<Array>(),
             vec![Type::new_global(1, 0)],
-        ))));
-        existing_world.insert(TypeKind::Tuple(vec![Type::new_global(1, 1)]));
+        )))));
+        existing_world.insert(test_interned(TypeKind::Tuple(vec![Type::new_global(1, 1)])));
 
         let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
 
@@ -2466,14 +2744,14 @@ mod tests {
 
         // Existing: [Array([global[1,0]]), Array([global[1,1]])]
         let mut existing_world = IndexSet::new();
-        existing_world.insert(TypeKind::Native(b(NativeType::new(
+        existing_world.insert(test_interned(TypeKind::Native(b(NativeType::new(
             bare_native_type::<Array>(),
             vec![Type::new_global(1, 0)],
-        ))));
-        existing_world.insert(TypeKind::Native(b(NativeType::new(
+        )))));
+        existing_world.insert(test_interned(TypeKind::Native(b(NativeType::new(
             bare_native_type::<Array>(),
             vec![Type::new_global(1, 1)],
-        ))));
+        )))));
 
         let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
 

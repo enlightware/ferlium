@@ -128,6 +128,43 @@ impl UnifiedTypeInference {
         }
     }
 
+    /// Sharper `affects_type` predicate shared by `SubstituteTypes` and
+    /// `NormalizeTypes`: returns `true` iff substituting `ty` against the
+    /// current unification tables would change anything. A free variable can
+    /// only induce a change if it has either been bound to a value or
+    /// unified with a different root variable.
+    fn substitution_affects_type(&mut self, ty: Type) -> bool {
+        let summary = ty.summary();
+        if summary.free_ty_vars.is_empty()
+            && summary.free_mut_vars.is_empty()
+            && summary.free_eff_vars.is_empty()
+        {
+            return false;
+        }
+        for var in summary.free_ty_vars.iter() {
+            if self.ty_unification_table.probe_value(var).is_some()
+                || self.ty_unification_table.find(var) != var
+            {
+                return true;
+            }
+        }
+        for var in summary.free_mut_vars.iter() {
+            if self.mut_unification_table.probe_value(var).is_some()
+                || self.mut_unification_table.find(var) != var
+            {
+                return true;
+            }
+        }
+        for var in summary.free_eff_vars.iter() {
+            if self.effect_unification_table.probe_value(var).is_some()
+                || self.effect_unification_table.find(var) != var
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn substitute_in_node(&mut self, arena: &mut hir::NodeArena, id: hir::NodeId) {
         let children = arena[id].kind.child_node_ids();
         for child in children {
@@ -345,6 +382,10 @@ impl TypeSubstituer for SubstituteTypes<'_> {
         self.0.substitute_mut_lookup(mut_ty, false)
     }
 
+    fn affects_type(&mut self, ty: Type) -> bool {
+        self.0.substitution_affects_type(ty)
+    }
+
     /// Substitute the effect type by flattening the effect variables.
     fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
         use Effect::*;
@@ -403,5 +444,9 @@ impl TypeSubstituer for NormalizeTypes<'_> {
 
     fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
         eff_ty.clone()
+    }
+
+    fn affects_type(&mut self, ty: Type) -> bool {
+        self.0.substitution_affects_type(ty)
     }
 }

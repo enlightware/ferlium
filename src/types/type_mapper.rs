@@ -17,6 +17,13 @@ pub trait TypeMapper {
     fn map_type(&mut self, ty: Type) -> Type;
     fn map_mut_type(&mut self, mut_ty: MutType) -> MutType;
     fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType;
+
+    /// Hot-path predicate: returns `false` when the mapper cannot affect `ty`,
+    /// allowing `Type::map` to skip the slow clone-walk-intern path.
+    /// Default is conservative `true`.
+    fn affects_type(&mut self, _ty: Type) -> bool {
+        true
+    }
 }
 
 /// Map a type using the given (ty_var, eff_var) substitution
@@ -45,5 +52,20 @@ impl TypeMapper for SubstitutionTypeMapper<'_> {
     }
     fn map_effect_type(&mut self, effects: &EffType) -> EffType {
         effects.instantiate(&self.subst.1)
+    }
+
+    fn affects_type(&mut self, ty: Type) -> bool {
+        let summary = ty.summary();
+        // A substitution can only affect `ty` if at least one variable in the
+        // substitution's domain appears in `ty`'s cached free-variable summary.
+        self.subst
+            .0
+            .keys()
+            .any(|v| summary.free_ty_vars.contains(*v))
+            || self
+                .subst
+                .1
+                .keys()
+                .any(|v| summary.free_eff_vars.contains(*v))
     }
 }

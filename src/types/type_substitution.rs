@@ -13,6 +13,7 @@ use crate::{
     types::effects::EffType,
     types::mutability::MutType,
     types::r#type::{FnArgType, FnType, NamedType, NativeType, Type, TypeKind, store_types},
+    types::type_like::TypeLike,
 };
 
 /// A struct that can substitute types, possibly mutating itself in the process.
@@ -21,14 +22,30 @@ pub trait TypeSubstituer {
     fn substitute_type(&mut self, ty: Type) -> Type;
     fn substitute_mut_type(&mut self, mut_ty: MutType) -> MutType;
     fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType;
+
+    /// Hot-path predicate: returns `false` when this substituer cannot affect
+    /// `ty`, allowing `substitute_type_rec` to skip the walk-clone-intern path.
+    /// Defaults to the conservative `!ty.is_constant()` check; implementors
+    /// backed by a unification table override with a sharper test that also
+    /// returns `false` when no free variable of `ty` has a binding.
+    fn affects_type(&mut self, ty: Type) -> bool {
+        !ty.is_constant()
+    }
 }
 
 /// Recursively substitute all inner types in a type, using the given substituer.
 pub fn substitute_type(ty: Type, substituer: &mut impl TypeSubstituer) -> Type {
     let mut kinds = Vec::new();
     let mut seen = FxHashMap::default();
-    substitute_type_rec(ty, substituer, &mut kinds, &mut seen);
-    store_types(&kinds)[0]
+    let result = substitute_type_rec(ty, substituer, &mut kinds, &mut seen);
+    // The recursive call may short-circuit and return the input `Type` directly
+    // when it is fully concrete (no free variables to resolve); in that case
+    // there is nothing to re-intern.
+    if result.world().is_some() {
+        result
+    } else {
+        store_types(&kinds)[result.index() as usize]
+    }
 }
 
 /// Recursively substitute all inner types in a list of types, using the given substituer.
@@ -72,6 +89,11 @@ fn substitute_type_rec(
     output: &mut Vec<TypeKind>,
     seen: &mut FxHashMap<Type, u32>,
 ) -> Type {
+    // Fast path: ask the substituer whether it can affect this type at all.
+    if !substituer.affects_type(ty) {
+        return ty;
+    }
+
     // Do substitution for this specific type
     let ty = substituer.substitute_type(ty);
 

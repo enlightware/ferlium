@@ -22,4 +22,5 @@ pub(crate) mod type_inference;
 pub(crate) mod type_like;
 pub(crate) mod type_mapper;
 pub(crate) mod type_substitution;
-pub(crate) mod type_visitor;
+pub mod type_visitor;
+pub mod var_set;

@@ -2411,6 +2411,12 @@ impl TypeMapper for AnnotationTypeMapper<'_, '_> {
                 .collect(),
         )
     }
+
+    fn affects_type(&mut self, ty: Type) -> bool {
+        // The mapper only acts on variables (type, mutability, or effect),
+        // so a fully concrete type is unchanged.
+        !ty.is_constant()
+    }
 }
 
 fn collect_free_variables(
