@@ -586,9 +586,8 @@ fn process_input(
                     "{}",
                     error.format_with(&(session.source_table(), session.modules()))
                 );
-                if cfg!(debug_assertions) {
-                    eval_ctx.print_environment();
-                }
+                #[cfg(debug_assertions)]
+                eval_ctx.print_environment();
                 return Err(2);
             }
         }
