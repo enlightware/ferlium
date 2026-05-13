@@ -661,6 +661,7 @@ impl Value {
 }
 
 /// Take the value at `index` out of `values`, discarding the storage of every other element.
+#[allow(clippy::boxed_local)]
 fn take_nth_discarding_rest(values: B<SVec2<Value>>, index: usize) -> Option<Value> {
     let mut result = None;
     for (i, value) in values.into_iter().enumerate() {
