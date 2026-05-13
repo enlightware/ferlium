@@ -7,7 +7,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use std::{iter::repeat, mem};
+use std::{borrow::Cow, iter::repeat, mem};
 
 use crate::{FxHashMap, FxHashSet, Modules, types::type_scheme::PubTypeConstraint};
 
@@ -122,7 +122,7 @@ pub(crate) use trait_solver_from_module;
 
 /// Scratch overlay for running trait-solver queries without mutating a real module.
 pub(crate) struct TraitSolverProbe<'a> {
-    impls: TraitImpls,
+    impls: Cow<'a, TraitImpls>,
     current_functions: FxHashMap<Ustr, LocalFunctionId>,
     import_fn_slots: Vec<ImportFunctionSlot>,
     import_impl_slots: Vec<ImportImplSlot>,
@@ -213,9 +213,9 @@ impl<'a> ConstraintAssumptions<'a> {
 }
 
 impl<'a> TraitSolverProbe<'a> {
-    pub(crate) fn from_module(module: &Module, others: &'a Modules) -> Self {
+    pub(crate) fn from_module(module: &'a Module, others: &'a Modules) -> Self {
         Self {
-            impls: module.impls.clone(),
+            impls: Cow::Borrowed(&module.impls),
             current_functions: current_function_map(&module.def_table),
             import_fn_slots: module.import_fn_slots.clone(),
             import_impl_slots: module.import_impl_slots.clone(),
@@ -231,7 +231,7 @@ impl<'a> TraitSolverProbe<'a> {
             .concrete_key_to_id
             .retain(|_, id| impls.data[id.as_index()].public);
         Self {
-            impls,
+            impls: Cow::Owned(impls),
             current_functions: solver.current_functions.clone(),
             import_fn_slots: solver.import_fn_slots.clone(),
             import_impl_slots: solver.import_impl_slots.clone(),
@@ -248,8 +248,8 @@ impl<'a> TraitSolverProbe<'a> {
             FunctionCollector::new(initial_count),
         );
         let mut solver = TraitSolver::new(
-            &mut self.impls,
-            self.current_functions.clone(),
+            self.impls.to_mut(),
+            mem::take(&mut self.current_functions),
             &mut self.import_fn_slots,
             &mut self.import_impl_slots,
             fn_collector,
@@ -258,6 +258,7 @@ impl<'a> TraitSolverProbe<'a> {
         solver.active_improvements = mem::take(&mut self.active_improvements);
         let result = f(&mut solver);
         self.active_improvements = mem::take(&mut solver.active_improvements);
+        self.current_functions = mem::take(&mut solver.current_functions);
         self.fn_collector = mem::replace(
             &mut solver.fn_collector,
             FunctionCollector::new(initial_count),
