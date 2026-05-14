@@ -7,9 +7,9 @@ use crate::{
     hir::{self, FnInstData},
     module::{ModuleEnv, ModuleFunction},
     types::{
-        effects::{EffType, Effect, EffectVar, EffectsSubstitution},
+        effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::{MutType, MutVar},
-        r#type::{FnType, Type, TypeKind, TypeSubstitution, TypeVar},
+        r#type::{FnType, Type, TypeInstSubst, TypeKind, TypeVar},
         type_scheme::PubTypeConstraint,
         type_substitution::{
             TypeSubstituer, substitute_fn_type, substitute_type, substitute_types,
@@ -20,7 +20,8 @@ use crate::{
 
 use super::unify::UnifiedTypeInference;
 
-pub type InstSubstitution = (TypeSubstitution, EffectsSubstitution);
+/// Instantiation substitution that maps type and effect variables to actual types and effects.
+pub type InstSubst = (TypeInstSubst, EffectsInstSubst);
 
 impl UnifiedTypeInference {
     /// Substitute the remaining constraints using the current unification tables,

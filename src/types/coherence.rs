@@ -23,7 +23,7 @@ use crate::{
     types::type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
     types::type_like::TypeLike,
     types::type_like::instantiate_types,
-    types::type_mapper::{BitmapSubstitutionTypeMapper, SimpleSubstitutionTypeMapper},
+    types::type_mapper::{BitmapInstantiationMapper, SimpleInstantiationMapper},
     types::type_scheme::PubTypeConstraint,
 };
 
@@ -336,7 +336,7 @@ fn blanket_impls_overlap(
         })
         .collect();
     let inst_subst = (rhs_ty_subst, FxHashMap::default());
-    let mut mapper = SimpleSubstitutionTypeMapper::new(&inst_subst);
+    let mut mapper = SimpleInstantiationMapper::new(&inst_subst);
     let rhs_inputs = instantiate_types(&rhs.input_tys, &mut mapper);
     let rhs_constraints = instantiate_types(&rhs.constraints, &mut mapper);
     let span = Location::new_synthesized();
@@ -554,7 +554,7 @@ fn blanket_impl_may_match_constraint(
         })
         .collect();
     let inst_subst = (candidate_ty_subst, FxHashMap::default());
-    let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
+    let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
     let candidate_inputs = instantiate_types(&key.sub_key.input_tys, &mut mapper);
     let candidate_outputs = instantiate_types(&imp.output_tys, &mut mapper);
     let candidate_constraints = instantiate_types(&key.sub_key.constraints, &mut mapper);

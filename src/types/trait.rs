@@ -29,9 +29,9 @@ use crate::{
     hir::function::FunctionDefinition,
     module::{ModuleEnv, ModuleId, TraitImplId, id::Id},
     types::trait_solver::TraitSolver,
-    types::r#type::{Type, TypeSubstitution, TypeVar},
+    types::r#type::{Type, TypeInstSubst, TypeVar},
     types::type_like::TypeLike,
-    types::type_mapper::BitmapSubstitutionTypeMapper,
+    types::type_mapper::BitmapInstantiationMapper,
     types::type_scheme::PubTypeConstraint,
     types::type_visitor::TyVarsCollector,
 };
@@ -372,7 +372,7 @@ impl Trait {
     ) -> Vec<FunctionDefinition> {
         let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
         let inst_subst = (ty_subst, FxHashMap::default());
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
+        let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         self.methods
             .iter()
             .map(|(_, def)| {
@@ -388,7 +388,7 @@ impl Trait {
     pub fn get_dictionary_type_for_tys(&self, input_tys: &[Type], output_tys: &[Type]) -> Type {
         let ty_subst = self.get_substitution_for_tys(input_tys, output_tys);
         let inst_subst = (ty_subst, FxHashMap::default());
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
+        let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         Type::tuple(
             self.methods
                 .iter()
@@ -402,11 +402,7 @@ impl Trait {
         )
     }
 
-    fn get_substitution_for_tys(
-        &self,
-        input_tys: &[Type],
-        output_tys: &[Type],
-    ) -> TypeSubstitution {
+    fn get_substitution_for_tys(&self, input_tys: &[Type], output_tys: &[Type]) -> TypeInstSubst {
         assert!(input_tys.len() == self.input_type_count() as usize);
         assert!(output_tys.len() == self.output_type_count() as usize);
         input_tys

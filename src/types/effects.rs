@@ -150,7 +150,7 @@ impl EffType {
             .any(|effect| matches!(effect, Effect::Variable(_)))
     }
 
-    fn has_variable_in_substitution(&self, subst: &EffectsSubstitution) -> bool {
+    fn has_variable_in_substitution(&self, subst: &EffectsInstSubst) -> bool {
         self.0.iter().any(|effect| match effect {
             Effect::Primitive(_) => false,
             Effect::Variable(var) => subst.contains_key(var),
@@ -240,7 +240,7 @@ impl EffType {
         }
     }
 
-    pub fn instantiate(&self, subst: &EffectsSubstitution) -> Self {
+    pub fn instantiate(&self, subst: &EffectsInstSubst) -> Self {
         if self.is_empty() || subst.is_empty() || !self.has_variable_in_substitution(subst) {
             return self.clone();
         }
@@ -316,7 +316,8 @@ pub fn effect_vars(vars: &[u32]) -> EffType {
     EffType::multiple_variable(&vars.iter().copied().map(EffectVar::new).collect::<Vec<_>>())
 }
 
-pub type EffectsSubstitution = FxHashMap<EffectVar, EffType>;
+/// Instantiation substitution that maps effect variables to actual effects.
+pub type EffectsInstSubst = FxHashMap<EffectVar, EffType>;
 
 #[cfg(test)]
 mod tests {
@@ -360,7 +361,7 @@ mod tests {
             Effect::Primitive(Read),
             Effect::Variable(EV::new(1)),
         ]);
-        let mut subst = EffectsSubstitution::default();
+        let mut subst = EffectsInstSubst::default();
         subst.insert(
             EV::new(1),
             ET::from_vec(vec![Effect::Primitive(Write), Effect::Primitive(Read)]),
@@ -374,9 +375,6 @@ mod tests {
                 Effect::Primitive(Write),
             ])
         );
-        assert_eq!(
-            effects.instantiate(&EffectsSubstitution::default()),
-            effects
-        );
+        assert_eq!(effects.instantiate(&EffectsInstSubst::default()), effects);
     }
 }

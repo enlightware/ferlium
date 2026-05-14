@@ -12,7 +12,7 @@ use ustr::Ustr;
 use crate::{
     format::FormatWith,
     module::{Module, ModuleEnv},
-    types::r#type::{NamedType, Type, TypeAliasEntry, TypeKind, TypeSubstitution, TypeVar},
+    types::r#type::{NamedType, Type, TypeAliasEntry, TypeInstSubst, TypeKind, TypeVar},
 };
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ pub(crate) fn render_generic_alias_name(
     ty: Type,
     env: &ModuleEnv<'_>,
 ) -> Option<GenericAliasName> {
-    let mut subst = TypeSubstitution::default();
+    let mut subst = TypeInstSubst::default();
     match_alias_type(alias.ty, ty, alias.ty_var_count, &mut subst).then(|| {
         let args = (0..alias.ty_var_count)
             .map(|i| subst.get(&TypeVar::new(i)).copied())
@@ -66,7 +66,7 @@ pub(crate) fn match_alias_type(
     pattern: Type,
     actual: Type,
     ty_var_count: u32,
-    subst: &mut TypeSubstitution,
+    subst: &mut TypeInstSubst,
 ) -> bool {
     let pattern_data = pattern.data();
     let actual_data = actual.data();

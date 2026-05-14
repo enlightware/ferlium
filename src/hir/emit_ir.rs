@@ -57,7 +57,7 @@ use crate::{
     types::mutability::MutType,
     types::r#trait::TraitRef,
     types::trait_solver::{TraitSolver, trait_solver_from_module},
-    types::r#type::{FnArgType, FnType, Type, TypeSubstitution, TypeVar},
+    types::r#type::{FnArgType, FnType, Type, TypeInstSubst, TypeVar},
     types::type_constraints::named_type_constraints_in_types,
     types::type_inference::{
         defaulting::{ConstraintBoundary, DefaultingScope},
@@ -65,7 +65,7 @@ use crate::{
         unify::UnifiedTypeInference,
     },
     types::type_like::{TypeLike, instantiate_types},
-    types::type_mapper::{BitmapSubstitutionTypeMapper, TypeMapper},
+    types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
     types::type_scheme::{
         PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
     },
@@ -136,13 +136,13 @@ struct ImplStubData {
     method_ids: Vec<LocalFunctionId>,
 }
 
-fn substitute_in_function_descr<M: TypeMapper>(
+fn instantiate_function_descr_in_place<M: TypeMapper>(
     ir_arena: &mut NodeArena,
     descr: &mut ModuleFunction,
     mapper: &mut M,
 ) {
     let root = descr.get_code_entry().unwrap();
-    hir::instantiate_node_with(ir_arena, root, mapper);
+    hir::instantiate_node_in_place(ir_arena, root, mapper);
     for local in &mut descr.locals {
         local.ty = local.ty.map(mapper);
     }
@@ -173,13 +173,13 @@ fn default_output_effects_in_functions(
         }
 
         let subst = (FxHashMap::default(), effect_subst);
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
         let function_and_lambdas =
             std::iter::once(id).chain(associated_lambdas.get(&id).into_iter().flatten().copied());
         for function_id in function_and_lambdas {
             let descr = &mut output.functions[function_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-            substitute_in_function_descr(ir_arena, descr, &mut mapper);
+            instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
         }
     }
 }
@@ -513,7 +513,7 @@ where
         explicit_trait_impl = trait_ctx.for_trait.map(|for_trait| {
             let mut mapper = impl_annotation_subst
                 .as_ref()
-                .map(BitmapSubstitutionTypeMapper::new);
+                .map(BitmapInstantiationMapper::new);
             let mut instantiate = |ty: Type| match &mut mapper {
                 Some(m) => ty.map(m),
                 None => ty,
@@ -589,7 +589,7 @@ where
         }
         let mut mapper = impl_annotation_subst
             .as_ref()
-            .map(BitmapSubstitutionTypeMapper::new);
+            .map(BitmapInstantiationMapper::new);
         for constraint in trait_ctx.impl_constraints {
             let constraint = match &mut mapper {
                 Some(m) => constraint.map(m),
@@ -696,7 +696,7 @@ where
             ty_inf.fresh_type_var_ty()
         };
         let annotation_subst = (annotation_ty_subst.clone(), FxHashMap::default());
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&annotation_subst);
+        let mut mapper = BitmapInstantiationMapper::new(&annotation_subst);
         for constraint in where_clause {
             ty_inf.add_pub_constraint(constraint.map(&mut mapper));
         }
@@ -895,13 +895,13 @@ where
                     .collect();
                 if !effect_subst.is_empty() {
                     let subst = (FxHashMap::default(), effect_subst);
-                    let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+                    let mut mapper = BitmapInstantiationMapper::new(&subst);
                     apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                         let descr = &mut output.functions[id.as_index()];
                         descr.definition.ty_scheme.ty =
                             descr.definition.ty_scheme.ty.map(&mut mapper);
                         let root = descr.get_code_entry().unwrap();
-                        hir::instantiate_node_with(ir_arena, root, &mut mapper);
+                        hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
                     });
                 }
             }
@@ -1058,14 +1058,14 @@ where
 
         // Apply unbound substitution to code and types.
         if !subst.0.is_empty() {
-            let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+            let mut mapper = BitmapInstantiationMapper::new(&subst);
             trait_output.input_tys = instantiate_types(&trait_output.input_tys, &mut mapper);
             trait_output.output_tys = instantiate_types(&trait_output.output_tys, &mut mapper);
             for id in local_fns.iter() {
                 apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                     let descr = &mut output.functions[id.as_index()];
                     descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
-                    substitute_in_function_descr(ir_arena, descr, &mut mapper);
+                    instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
                 });
             }
         }
@@ -1086,7 +1086,7 @@ where
 
         // Sixth pass, normalize the input types, substitute the types in the functions and input/output types.
         let subst = (normalize_types(&mut quantifiers), FxHashMap::default());
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
         trait_output.input_tys = instantiate_types(&trait_output.input_tys, &mut mapper);
         trait_output.output_tys = instantiate_types(&trait_output.output_tys, &mut mapper);
         trait_output.constraints = trait_output
@@ -1104,7 +1104,7 @@ where
                 assert!(eff_quantifiers.is_empty());
                 descr.definition.ty_scheme.eff_quantifiers = eff_quantifiers;
                 descr.definition.ty_scheme.constraints = trait_output.constraints.clone();
-                substitute_in_function_descr(ir_arena, descr, &mut mapper);
+                instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
             });
 
             // Name the function
@@ -1234,17 +1234,17 @@ where
 
             // Apply unbound→Never fixup if needed.
             if !uninstantiated_unbound.is_empty() {
-                let fixup_subst: (TypeSubstitution, FxHashMap<_, _>) = (
+                let fixup_subst: (TypeInstSubst, FxHashMap<_, _>) = (
                     uninstantiated_unbound
                         .iter()
                         .map(|v| (*v, Type::never()))
                         .collect(),
                     FxHashMap::default(),
                 );
-                let mut mapper = BitmapSubstitutionTypeMapper::new(&fixup_subst);
+                let mut mapper = BitmapInstantiationMapper::new(&fixup_subst);
                 apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                     let descr = &mut output.functions[id.as_index()];
-                    substitute_in_function_descr(ir_arena, descr, &mut mapper);
+                    instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
                 });
                 quantifiers.retain(|v| !uninstantiated_unbound.contains(v));
             }
@@ -1332,8 +1332,8 @@ where
                 // Note: after that normalization, the functions do not share the same
                 // type variables anymore.
                 let subst = descr.definition.ty_scheme.normalize();
-                let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
-                substitute_in_function_descr(ir_arena, descr, &mut mapper);
+                let mut mapper = BitmapInstantiationMapper::new(&subst);
+                instantiate_function_descr_in_place(ir_arena, descr, &mut mapper);
             });
         }
 
@@ -1502,7 +1502,7 @@ fn emit_expr_unsafe_inner(
     let uninstantiated_unbound = check_unbounds(unbound, &quantifiers)?;
 
     // Apply unbound→Never fixup if needed.
-    let fixup_subst: (TypeSubstitution, FxHashMap<_, _>) = (
+    let fixup_subst: (TypeInstSubst, FxHashMap<_, _>) = (
         uninstantiated_unbound
             .iter()
             .map(|v| (*v, Type::never()))
@@ -1510,13 +1510,13 @@ fn emit_expr_unsafe_inner(
         FxHashMap::default(),
     );
     if !fixup_subst.0.is_empty() {
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&fixup_subst);
-        hir::instantiate_node_with(ir_arena, node_id, &mut mapper);
+        let mut mapper = BitmapInstantiationMapper::new(&fixup_subst);
+        hir::instantiate_node_in_place(ir_arena, node_id, &mut mapper);
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
             let root = descr.get_code_entry().unwrap();
-            hir::instantiate_node_with(ir_arena, root, &mut mapper);
+            hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
             for local in &mut descr.locals {
                 local.ty = local.ty.map(&mut mapper);
             }
@@ -1556,13 +1556,13 @@ fn emit_expr_unsafe_inner(
     }
     quantifiers.retain(|ty_var| !drop_subst.0.contains_key(ty_var));
     if !drop_subst.0.is_empty() {
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&drop_subst);
-        hir::instantiate_node_with(ir_arena, node_id, &mut mapper);
+        let mut mapper = BitmapInstantiationMapper::new(&drop_subst);
+        hir::instantiate_node_in_place(ir_arena, node_id, &mut mapper);
         for lambda_id in lambda_functions.iter() {
             let descr = &mut module.functions[lambda_id.as_index()];
             descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
             let root = descr.get_code_entry().unwrap();
-            hir::instantiate_node_with(ir_arena, root, &mut mapper);
+            hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
             for local in &mut descr.locals {
                 local.ty = local.ty.map(&mut mapper);
             }
@@ -1608,13 +1608,13 @@ fn emit_expr_unsafe_inner(
     }
 
     // Substitute the normalized types in the node, effects and locals.
-    let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
-    hir::instantiate_node_with(ir_arena, node_id, &mut mapper);
+    let mut mapper = BitmapInstantiationMapper::new(&subst);
+    hir::instantiate_node_in_place(ir_arena, node_id, &mut mapper);
     for lambda_id in lambda_functions.iter() {
         let descr = &mut module.functions[lambda_id.as_index()];
         descr.definition.ty_scheme.ty = descr.definition.ty_scheme.ty.map(&mut mapper);
         let root = descr.get_code_entry().unwrap();
-        hir::instantiate_node_with(ir_arena, root, &mut mapper);
+        hir::instantiate_node_in_place(ir_arena, root, &mut mapper);
         for local in &mut descr.locals {
             local.ty = local.ty.map(&mut mapper);
         }

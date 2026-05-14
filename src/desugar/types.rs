@@ -880,7 +880,7 @@ fn desugar_resolved_type_with_args(
                 .collect();
             Ok(entry
                 .ty
-                .instantiate_simple(&(ty_subst, EffectsSubstitution::default())))
+                .instantiate_simple(&(ty_subst, EffectsInstSubst::default())))
         }
         ResolvedTypePath::TypeDef(type_def) => {
             expect_type_argument_count(

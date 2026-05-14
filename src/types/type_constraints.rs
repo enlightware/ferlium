@@ -11,10 +11,10 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     FxHashMap, Location,
-    types::effects::EffectsSubstitution,
+    types::effects::EffectsInstSubst,
     types::r#type::{NamedType, Type, TypeKind},
     types::type_like::TypeLike,
-    types::type_mapper::BitmapSubstitutionTypeMapper,
+    types::type_mapper::BitmapInstantiationMapper,
     types::type_scheme::PubTypeConstraint,
 };
 
@@ -82,8 +82,8 @@ impl NamedTypeConstraintCollector {
             .copied()
             .zip(named.params.iter().copied())
             .collect::<FxHashMap<_, _>>();
-        let subst = (ty_subst, EffectsSubstitution::default());
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+        let subst = (ty_subst, EffectsInstSubst::default());
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
         for constraint in &named.def.shape.constraints {
             let mut constraint = constraint.map(&mut mapper);
             constraint.instantiate_location(self.use_site);

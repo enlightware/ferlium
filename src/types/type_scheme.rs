@@ -30,7 +30,7 @@ use crate::{
     types::trait_solver::TraitSolver,
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::TypeLike,
-    types::type_mapper::{BitmapSubstitutionTypeMapper, TypeMapper},
+    types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
     types::type_visitor::TypeInnerVisitor,
 };
 use enum_as_inner::EnumAsInner;
@@ -40,11 +40,11 @@ use ustr::Ustr;
 use crate::{
     format::FormatWithData,
     hir::FnInstData,
-    hir::dictionary_passing::{DictionaryReq, instantiate_dictionaries_req_with},
+    hir::dictionary_passing::{DictionaryReq, instantiate_dictionary_requirements},
     module::ModuleEnv,
-    types::effects::{EffType, EffectVar, EffectsSubstitution},
-    types::r#type::{Type, TypeSubstitution, TypeVar},
-    types::type_inference::{expr::TypeInference, substitution::InstSubstitution},
+    types::effects::{EffType, EffectVar, EffectsInstSubst},
+    types::r#type::{Type, TypeInstSubst, TypeVar},
+    types::type_inference::{expr::TypeInference, substitution::InstSubst},
 };
 
 /// The display style for type schemes.
@@ -206,7 +206,7 @@ impl PubTypeConstraint {
 
     pub fn instantiate_and_drop_if_solved(
         &self,
-        subst: &mut InstSubstitution,
+        subst: &mut InstSubst,
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut crate::hir::NodeArena,
     ) -> Result<Option<Self>, InternalCompilationError> {
@@ -292,8 +292,8 @@ impl PubTypeConstraint {
                                 .map(|ty_var| {
                                     (inner_ty_vars[ty_var as usize], Type::variable_id(ty_var))
                                 })
-                                .collect::<TypeSubstitution>();
-                            let local_subst = (ty_subst, EffectsSubstitution::default());
+                                .collect::<TypeInstSubst>();
+                            let local_subst = (ty_subst, EffectsInstSubst::default());
                             let mut ty_inf = UnifiedTypeInference::new_with_ty_vars(ty_var_count);
                             let output_ty = output_ty.instantiate_simple(&local_subst);
                             ty_inf
@@ -704,7 +704,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         ty_inf: &mut TypeInference,
         use_site: Location,
         ty_var_count: Option<u32>,
-    ) -> (Ty, FnInstData, InstSubstitution) {
+    ) -> (Ty, FnInstData, InstSubst) {
         let mut ty_subst = ty_inf.fresh_type_var_subst(&self.ty_quantifiers);
         let eff_subst = ty_inf.fresh_effect_var_subst(&self.eff_quantifiers);
         if let Some(ty_var_count) = ty_var_count {
@@ -718,7 +718,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             ty_subst.extend(ext_subst);
         }
         let subst = (ty_subst, eff_subst);
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
         for constraint in &self.constraints {
             let mut constraint = constraint.map(&mut mapper);
             constraint.instantiate_location(use_site);
@@ -726,7 +726,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         }
         let ty = self.ty.map(&mut mapper);
         let dict_req =
-            instantiate_dictionaries_req_with(&self.extra_parameters().requirements, &mut mapper);
+            instantiate_dictionary_requirements(&self.extra_parameters().requirements, &mut mapper);
         (ty, FnInstData::new(dict_req), subst)
     }
 
@@ -754,14 +754,14 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             .collect()
     }
 
-    pub(crate) fn normalize(&mut self) -> InstSubstitution {
+    pub(crate) fn normalize(&mut self) -> InstSubst {
         // Build a substitution that maps each type quantifier to a fresh type variable from 0.
         let ty_subst = normalize_types(&mut self.ty_quantifiers);
 
         // Build a substitution that maps each input effect quantifier to a fresh effect variable from 0.,
         // Note: in case of recursive functions, we might have output-only effects.
         // In this case, replace them with empty effects.
-        let mut eff_subst = EffectsSubstitution::default();
+        let mut eff_subst = EffectsInstSubst::default();
         let input_effect_vars = self.ty.input_effect_vars();
         self.ty.output_effect_vars().iter().for_each(|var| {
             if !input_effect_vars.contains(var) {
@@ -781,7 +781,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
 
         // Apply to type and constraints
         let subst = (ty_subst, eff_subst);
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+        let mut mapper = BitmapInstantiationMapper::new(&subst);
         self.ty = self.ty.map(&mut mapper);
         self.constraints = self
             .constraints
@@ -1043,8 +1043,8 @@ pub fn format_have_trait(
 }
 
 // Build a substitution that maps each type variable to a fresh type variable from 0.
-pub(crate) fn normalize_types(tys: &mut [TypeVar]) -> TypeSubstitution {
-    let mut ty_subst: FxHashMap<TypeVar, Type> = TypeSubstitution::default();
+pub(crate) fn normalize_types(tys: &mut [TypeVar]) -> TypeInstSubst {
+    let mut ty_subst: FxHashMap<TypeVar, Type> = TypeInstSubst::default();
     tys.iter_mut().enumerate().for_each(|(i, quantifier)| {
         let new_var = TypeVar::new(i as u32);
         ty_subst.insert(*quantifier, Type::variable(new_var));

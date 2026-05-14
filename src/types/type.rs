@@ -52,7 +52,7 @@ use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::module::ModuleEnv;
 use crate::sync::SyncPhantomData;
-use crate::types::effects::{EffType, EffectVar, EffectsSubstitution};
+use crate::types::effects::{EffType, EffectVar, EffectsInstSubst};
 use crate::types::mutability::{MutType, MutVar};
 use crate::types::type_scheme::{DisplayStyle, TypeScheme};
 
@@ -88,7 +88,7 @@ impl TypeVar {
     pub fn format_math_style(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", type_variable_index_to_string_greek(self.name))
     }
-    pub fn instantiate(&self, subst: &TypeSubstitution) -> Type {
+    pub fn instantiate(&self, subst: &TypeInstSubst) -> Type {
         if let Some(ty) = subst.get(self) {
             *ty
         } else {
@@ -701,7 +701,8 @@ impl PartialOrd for Type {
     }
 }
 
-pub type TypeSubstitution = FxHashMap<TypeVar, Type>;
+/// Instantiation substitution that maps type variables to actual types.
+pub type TypeInstSubst = FxHashMap<TypeVar, Type>;
 
 define_id_type!(
     /// ID of a type alias definition within a module
@@ -866,7 +867,7 @@ impl TypeDef {
             .collect();
         self.shape
             .ty
-            .instantiate_simple(&(ty_subst, EffectsSubstitution::default()))
+            .instantiate_simple(&(ty_subst, EffectsInstSubst::default()))
     }
 
     pub fn payload_scheme(&self, tag: Option<Ustr>) -> TypeScheme<Type> {

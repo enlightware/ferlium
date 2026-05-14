@@ -25,8 +25,8 @@ use crate::{
     types::r#trait::{
         TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef,
     },
-    types::r#type::{Type, TypeSubstitution, TypeVar, fmt_fn_type_with_arg_names},
-    types::type_inference::substitution::InstSubstitution,
+    types::r#type::{Type, TypeInstSubst, TypeVar, fmt_fn_type_with_arg_names},
+    types::type_inference::substitution::InstSubst,
     types::type_like::TypeLike,
     types::type_scheme::{PubTypeConstraint, format_constraints_consolidated},
 };
@@ -617,23 +617,9 @@ impl TraitImpls {
                 // For blanket impls, the function types already use the correct type variables,
                 // so we don't need to apply any substitution.
                 if level == DisplayFilter::MethodDefinitions {
-                    format_impl_fns(
-                        &key.trait_ref,
-                        TypeSubstitution::default(),
-                        imp,
-                        false,
-                        f,
-                        env,
-                    )?;
+                    format_impl_fns(&key.trait_ref, TypeInstSubst::default(), imp, false, f, env)?;
                 } else if level == DisplayFilter::MethodCode {
-                    format_impl_fns(
-                        &key.trait_ref,
-                        TypeSubstitution::default(),
-                        imp,
-                        true,
-                        f,
-                        env,
-                    )?;
+                    format_impl_fns(&key.trait_ref, TypeInstSubst::default(), imp, true, f, env)?;
                 }
                 writeln!(f)?;
             }
@@ -716,14 +702,7 @@ pub fn format_blanket_impl(
     format_blanket_impl_header(key, &imp.output_tys, f, env)?;
     // For blanket impls, the function types already use the correct type variables,
     // so we don't need to apply any substitution.
-    format_impl_fns(
-        &key.trait_ref,
-        TypeSubstitution::default(),
-        imp,
-        false,
-        f,
-        env,
-    )
+    format_impl_fns(&key.trait_ref, TypeInstSubst::default(), imp, false, f, env)
 }
 
 pub fn format_impl_header_by_key(
@@ -731,7 +710,7 @@ pub fn format_impl_header_by_key(
     key: &TraitKey,
     imp: &TraitImpl,
     env: &ModuleEnv,
-) -> Result<TypeSubstitution, std::fmt::Error> {
+) -> Result<TypeInstSubst, std::fmt::Error> {
     use TraitKey::*;
     match key {
         Concrete(key) => format_concrete_impl_header(key, &imp.output_tys, f, env),
@@ -744,7 +723,7 @@ pub fn format_blanket_impl_header(
     output_tys: &[Type],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<TypeSubstitution, std::fmt::Error> {
+) -> Result<TypeInstSubst, std::fmt::Error> {
     let subst = format_impl_header_expanded(
         &key.trait_ref,
         key.sub_key.ty_var_count,
@@ -766,7 +745,7 @@ pub fn format_concrete_impl_header(
     output_tys: &[Type],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<TypeSubstitution, std::fmt::Error> {
+) -> Result<TypeInstSubst, std::fmt::Error> {
     format_impl_header_expanded(&key.trait_ref, 0, &key.input_tys, output_tys, f, env)
 }
 
@@ -777,7 +756,7 @@ fn format_impl_header_expanded(
     output_tys: &[Type],
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
-) -> Result<TypeSubstitution, std::fmt::Error> {
+) -> Result<TypeInstSubst, std::fmt::Error> {
     write!(f, "impl")?;
     if ty_var_count > 0 {
         fmt_ordered_quantifiers(f, ty_var_count)?;
@@ -808,7 +787,7 @@ fn format_impl_header_expanded(
         }
         write!(f, ">")?;
     }
-    let mut subst = TypeSubstitution::default();
+    let mut subst = TypeInstSubst::default();
     for (i, ty) in input_tys.iter().enumerate() {
         subst.insert(TypeVar::new(i as u32), *ty);
     }
@@ -820,7 +799,7 @@ fn format_impl_header_expanded(
 
 fn format_impl_fns(
     trait_ref: &TraitRef,
-    subst: TypeSubstitution,
+    subst: TypeInstSubst,
     imp: &TraitImpl,
     show_code: bool,
     f: &mut std::fmt::Formatter,
@@ -842,7 +821,7 @@ fn format_impl_fn(
     name: Ustr,
     function: &ModuleFunction,
     id: LocalFunctionId,
-    subst: &InstSubstitution,
+    subst: &InstSubst,
     show_code: bool,
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,

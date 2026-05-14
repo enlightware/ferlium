@@ -17,7 +17,7 @@ use crate::{
         mutability::{MutType, MutVal, MutVar, MutVarKey},
         r#trait::TraitRef,
         trait_solver::{ConstraintAssumptions, TraitSolver},
-        r#type::{FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
+        r#type::{FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
         type_like::TypeLike,
         type_scheme::PubTypeConstraint,
     },
@@ -79,7 +79,7 @@ impl UnifiedTypeInference {
         }
     }
 
-    pub(crate) fn fresh_type_var_subst(&mut self, count: u32) -> TypeSubstitution {
+    pub(crate) fn fresh_type_var_subst(&mut self, count: u32) -> TypeInstSubst {
         (0..count)
             .map(|old_var| (TypeVar::new(old_var), Type::variable(self.fresh_type_var())))
             .collect()

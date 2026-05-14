@@ -83,7 +83,7 @@ impl DictionaryReq {
     }
 
     /// Instantiate self with a caller-supplied mapper.
-    pub(crate) fn instantiate_with<M: TypeMapper>(&self, mapper: &mut M) -> DictionaryReq {
+    pub(crate) fn instantiate<M: TypeMapper>(&self, mapper: &mut M) -> DictionaryReq {
         let mut req = self.clone();
         req.instantiate_in_place(mapper);
         req
@@ -384,14 +384,11 @@ fn alloc_dictionary_method_projection(
     ))
 }
 
-pub(crate) fn instantiate_dictionaries_req_with<M: TypeMapper>(
+pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(
     dicts: &DictionariesReq,
     mapper: &mut M,
 ) -> DictionariesReq {
-    dicts
-        .iter()
-        .map(|dict| dict.instantiate_with(mapper))
-        .collect()
+    dicts.iter().map(|dict| dict.instantiate(mapper)).collect()
 }
 
 fn extra_args_from_inst_data<'d, 'sr, 'sm>(

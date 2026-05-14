@@ -37,7 +37,7 @@ use crate::{
     parser::helpers::syn_static_apply,
     std::{array::array_type, math::int_type},
     types::effects::EffType,
-    types::effects::EffectsSubstitution,
+    types::effects::EffectsInstSubst,
     types::mutability::{MutType, MutVal},
     types::r#type::{FnArgType, FnType, NativeType, Type, TypeDefRef, TypeVar},
     types::type_like::TypeLike,

@@ -13,37 +13,43 @@ use crate::types::{
     effects::{EffType, EffectVar},
     mutability::MutType,
     r#type::{Type, TypeVar},
-    type_inference::substitution::InstSubstitution,
+    type_inference::substitution::InstSubst,
     var_set::KindVarSet,
 };
 
-/// A struct that can map a type and its effects to another type and effects
+/// Leaf-rewrite policy used by `TypeLike::map`.
+///
+/// `TypeMapper` is for instantiation-style rewrites of values that already know
+/// how to traverse themselves. The `TypeLike` implementation owns traversal and
+/// reconstruction; this trait only decides how each encountered type,
+/// mutability, and effect leaf is rewritten.
+///
+/// This is separate from `TypeSubstituer`: it does not batch interning, track
+/// local type ids, or rebuild interned type graphs explicitly.
 pub trait TypeMapper {
     fn map_type(&mut self, ty: Type) -> Type;
     fn map_mut_type(&mut self, mut_ty: MutType) -> MutType;
     fn map_effect_type(&mut self, eff_ty: &EffType) -> EffType;
 
-    /// Hot-path predicate: returns `false` when the mapper cannot affect `ty`,
-    /// allowing `Type::map` to skip the slow clone-walk-intern path.
-    /// Default is conservative `true`.
+    /// Returns `false` when `TypeLike::map` can return this `Type` unchanged without walking or rebuilding it.
     fn affects_type(&mut self, _ty: Type) -> bool {
         true
     }
 }
 
-/// Map a type using the given (ty_var, eff_var) substitution.
+/// Map a type using the given (ty_var, eff_var) instantiation substitution.
 ///
 /// Cheap to construct (just stores a pointer), suited for one-shot calls on
 /// leaf-like types (single `TypeVar`, primitive) where the mapper is queried
 /// only a handful of times. For anything that walks a tree (function types,
 /// constraints, instantiation across many slices) prefer
-/// [`BitmapSubstitutionTypeMapper`].
+/// [`BitmapInstantiationMapper`].
 #[derive(new)]
-pub(crate) struct SimpleSubstitutionTypeMapper<'a> {
-    pub(crate) subst: &'a InstSubstitution,
+pub(crate) struct SimpleInstantiationMapper<'a> {
+    pub(crate) subst: &'a InstSubst,
 }
 
-impl TypeMapper for SimpleSubstitutionTypeMapper<'_> {
+impl TypeMapper for SimpleInstantiationMapper<'_> {
     fn map_type(&mut self, ty: Type) -> Type {
         map_type_via_subst(self.subst, ty)
     }
@@ -67,21 +73,21 @@ impl TypeMapper for SimpleSubstitutionTypeMapper<'_> {
     }
 }
 
-/// Map a type using the given (ty_var, eff_var) substitution, with
-/// pre-computed bitmaps of the substitution's domain.
+/// Map a type using the given (ty_var, eff_var) instantiation substitution,
+/// with pre-computed bitmaps of the substitution's domain.
 ///
 /// The bitmaps make `affects_type` constant-time regardless of substitution
 /// size, which pays off when the mapper is reused across many types (e.g.
-/// HIR tree walks via `instantiate_node_with`). For one-shot or small-fanout
-/// uses prefer [`SimpleSubstitutionTypeMapper`] to skip the construction cost.
-pub(crate) struct BitmapSubstitutionTypeMapper<'a> {
-    pub(crate) subst: &'a InstSubstitution,
+/// HIR tree walks via `instantiate_node_in_place`). For one-shot or small-fanout
+/// uses prefer [`SimpleInstantiationMapper`] to skip the construction cost.
+pub(crate) struct BitmapInstantiationMapper<'a> {
+    pub(crate) subst: &'a InstSubst,
     ty_var_domain: KindVarSet<TypeVar>,
     eff_var_domain: KindVarSet<EffectVar>,
 }
 
-impl<'a> BitmapSubstitutionTypeMapper<'a> {
-    pub(crate) fn new(subst: &'a InstSubstitution) -> Self {
+impl<'a> BitmapInstantiationMapper<'a> {
+    pub(crate) fn new(subst: &'a InstSubst) -> Self {
         Self {
             subst,
             ty_var_domain: KindVarSet::from_iterator(subst.0.keys().copied()),
@@ -90,7 +96,7 @@ impl<'a> BitmapSubstitutionTypeMapper<'a> {
     }
 }
 
-impl TypeMapper for BitmapSubstitutionTypeMapper<'_> {
+impl TypeMapper for BitmapInstantiationMapper<'_> {
     fn map_type(&mut self, ty: Type) -> Type {
         map_type_via_subst(self.subst, ty)
     }
@@ -108,7 +114,7 @@ impl TypeMapper for BitmapSubstitutionTypeMapper<'_> {
 }
 
 #[inline]
-fn map_type_via_subst(subst: &InstSubstitution, ty: Type) -> Type {
+fn map_type_via_subst(subst: &InstSubst, ty: Type) -> Type {
     if ty.data().is_variable() {
         let var = *ty.data().as_variable().unwrap();
         match subst.0.get(&var) {

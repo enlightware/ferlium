@@ -13,12 +13,12 @@ use crate::{
         trait_solver::TraitSolver,
         r#type::{Type, TypeVar},
         type_like::TypeLike,
-        type_mapper::BitmapSubstitutionTypeMapper,
+        type_mapper::BitmapInstantiationMapper,
         type_scheme::PubTypeConstraint,
     },
 };
 
-use super::{substitution::InstSubstitution, unify::UnifiedTypeInference};
+use super::{substitution::InstSubst, unify::UnifiedTypeInference};
 
 /// A transitive boundary over public constraints, defined by seed type variables.
 #[derive(Debug, Clone, Default)]
@@ -434,7 +434,7 @@ impl UnifiedTypeInference {
 
             let mut valid_candidate = false;
             let mut all_satisfied = true;
-            let trial_subst: InstSubstitution = (
+            let trial_subst: InstSubst = (
                 FxHashMap::from_iter([(ty_var, Type::unit())]),
                 FxHashMap::default(),
             );
@@ -476,7 +476,7 @@ impl UnifiedTypeInference {
                 }
 
                 valid_candidate = true;
-                let mut mapper = BitmapSubstitutionTypeMapper::new(&trial_subst);
+                let mut mapper = BitmapInstantiationMapper::new(&trial_subst);
                 let inst_input_tys = input_tys
                     .iter()
                     .map(|input_ty| input_ty.map(&mut mapper))
@@ -544,11 +544,11 @@ impl UnifiedTypeInference {
 
             // Check if all constraints mentioning this variable are satisfied with int.
             let mut all_satisfied = true;
-            let trial_subst: InstSubstitution = (
+            let trial_subst: InstSubst = (
                 FxHashMap::from_iter([(ty_var, int_type())]),
                 FxHashMap::default(),
             );
-            let mut mapper = BitmapSubstitutionTypeMapper::new(&trial_subst);
+            let mut mapper = BitmapInstantiationMapper::new(&trial_subst);
             for c in &subst_constraints {
                 if !c.contains_any_type_var(ty_var) {
                     continue;

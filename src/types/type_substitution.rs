@@ -16,18 +16,21 @@ use crate::{
     types::type_like::TypeLike,
 };
 
-/// A struct that can substitute types, possibly mutating itself in the process.
-/// The substitution is non-recursive and should not look into inner types.
+/// Leaf-rewrite policy for recursive substitution of interned `Type` graphs.
+///
+/// Implementors only provide the direct rewrite for one `Type`, `MutType`, or
+/// `EffType`. The free functions in this module own the recursive traversal,
+/// cycle handling, shared `seen` map, batched `store_types`, and remapping of
+/// local type ids back to interned world types.
+///
+/// `substitute_type` should not recursively substitute inner types itself; if it
+/// returns a composite type, the driver will recurse into it.
 pub trait TypeSubstituer {
     fn substitute_type(&mut self, ty: Type) -> Type;
     fn substitute_mut_type(&mut self, mut_ty: MutType) -> MutType;
     fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType;
 
-    /// Hot-path predicate: returns `false` when this substituer cannot affect
-    /// `ty`, allowing `substitute_type_rec` to skip the walk-clone-intern path.
-    /// Defaults to the conservative `!ty.is_constant()` check; implementors
-    /// backed by a unification table override with a sharper test that also
-    /// returns `false` when no free variable of `ty` has a binding.
+    /// Returns `false` when the substitution driver can return this `Type` unchanged without recursively rebuilding and re-interning it.
     fn affects_type(&mut self, ty: Type) -> bool {
         !ty.is_constant()
     }

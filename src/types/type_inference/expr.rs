@@ -37,15 +37,15 @@ use crate::{
     },
     types::{
         effects::{
-            EffType, Effect, EffectVar, EffectVarKey, EffectsSubstitution, PrimitiveEffect, effect,
+            EffType, Effect, EffectVar, EffectVarKey, EffectsInstSubst, PrimitiveEffect, effect,
             no_effects,
         },
         mutability::{MutType, MutVar, MutVarKey},
         r#trait::{TraitMethodIndex, TraitRef},
         trait_solver::{TraitSolver, TraitSolverProbe},
-        r#type::{FnArgType, FnType, TyVarKey, Type, TypeKind, TypeSubstitution, TypeVar},
+        r#type::{FnArgType, FnType, TyVarKey, Type, TypeInstSubst, TypeKind, TypeVar},
         type_like::TypeLike,
-        type_mapper::{BitmapSubstitutionTypeMapper, TypeMapper},
+        type_mapper::{BitmapInstantiationMapper, TypeMapper},
         type_scheme::{PubTypeConstraint, TypeScheme},
         typing_env::{LoopFrame, TypingEnv},
     },
@@ -130,14 +130,14 @@ impl TypeInference {
         FnArgType::new(self.fresh_type_var_ty(), self.fresh_mut_var_ty())
     }
 
-    pub fn fresh_type_var_subst(&mut self, source: &[TypeVar]) -> TypeSubstitution {
+    pub fn fresh_type_var_subst(&mut self, source: &[TypeVar]) -> TypeInstSubst {
         source
             .iter()
             .map(|&ty_var| (ty_var, self.fresh_type_var_ty()))
             .collect()
     }
 
-    pub fn fresh_effect_var_subst(&mut self, source: &FxHashSet<EffectVar>) -> EffectsSubstitution {
+    pub fn fresh_effect_var_subst(&mut self, source: &FxHashSet<EffectVar>) -> EffectsInstSubst {
         source
             .iter()
             .map(|&eff_var| (eff_var, self.fresh_effect_var_ty()))
@@ -410,7 +410,7 @@ impl TypeInference {
                         inst_data.dicts_req.is_empty(),
                         "Instantiation data for trait method is not supported yet."
                     );
-                    let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+                    let mut mapper = BitmapInstantiationMapper::new(&subst);
                     trait_ref.constraints.iter().for_each(|constraint| {
                         let mut constraint = constraint.map(&mut mapper);
                         constraint.instantiate_location(expr_span);
@@ -1688,7 +1688,7 @@ impl TypeInference {
                     "Instantiation data for trait method is not supported yet."
                 );
                 // Instantiate the constraints and add them to our list.
-                let mut mapper = BitmapSubstitutionTypeMapper::new(&subst);
+                let mut mapper = BitmapInstantiationMapper::new(&subst);
                 trait_ref.constraints.iter().for_each(|constraint| {
                     let mut constraint = constraint.map(&mut mapper);
                     constraint.instantiate_location(path_span);
@@ -2372,7 +2372,7 @@ impl TypeInference {
 #[derive(new)]
 pub struct AnnotationTypeMapper<'a, 'b> {
     ty_inf: &'a mut TypeInference,
-    explicit_ty_subst: Option<&'b TypeSubstitution>,
+    explicit_ty_subst: Option<&'b TypeInstSubst>,
 }
 impl TypeMapper for AnnotationTypeMapper<'_, '_> {
     fn map_type(&mut self, ty: Type) -> Type {

@@ -40,7 +40,7 @@ use crate::{
     types::r#type::{FnArgType, Type},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
-    types::type_mapper::BitmapSubstitutionTypeMapper,
+    types::type_mapper::BitmapInstantiationMapper,
 };
 
 #[cfg(debug_assertions)]
@@ -644,7 +644,7 @@ impl<'a> TraitSolver<'a> {
                     ty_inf.fresh_type_var_subst(*ty_var_count),
                     FxHashMap::default(),
                 );
-                let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
+                let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
                 let candidate_inputs = instantiate_types(candidate_inputs, &mut mapper);
                 let candidate_outputs = instantiate_types(candidate_outputs, &mut mapper);
                 for (candidate_input, input_ty) in candidate_inputs.iter().zip(input_tys.iter()) {
@@ -971,7 +971,7 @@ impl<'a> TraitSolver<'a> {
             ty_inf.fresh_type_var_subst(imp_ty_var_count),
             FxHashMap::default(),
         );
-        let mut mapper = BitmapSubstitutionTypeMapper::new(&inst_subst);
+        let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         let imp_input_tys = instantiate_types(imp_input_tys, &mut mapper);
         let imp_output_tys = instantiate_types(imp_output_tys, &mut mapper);
         let remaining = instantiate_types(imp_constraints, &mut mapper)

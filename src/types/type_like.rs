@@ -14,8 +14,8 @@ use itertools::Itertools;
 use crate::types::effects::EffectVar;
 use crate::types::mutability::MutVar;
 use crate::types::r#type::{Type, TypeVar};
-use crate::types::type_inference::substitution::InstSubstitution;
-use crate::types::type_mapper::{SimpleSubstitutionTypeMapper, TypeMapper};
+use crate::types::type_inference::substitution::InstSubst;
+use crate::types::type_mapper::{SimpleInstantiationMapper, TypeMapper};
 use crate::types::type_visitor::{
     ContainsAnyTyVars, ContainsOnlyTyVars, EffectVarsCollector, MutVarsCollector, TyVarsCollector,
     TypeInnerVisitor,
@@ -31,13 +31,13 @@ pub trait TypeLike {
     fn map(&self, f: &mut impl TypeMapper) -> Self;
 
     /// Instantiate the type variables within this type with the given substitutions in case of single instantiation.
-    fn instantiate_simple(&self, subst: &InstSubstitution) -> Self
+    fn instantiate_simple(&self, subst: &InstSubst) -> Self
     where
         Self: Sized,
     {
         // One-shot path: build the cheap mapper, skip the bitmap setup that
         // only pays off when reused across many `affects_type` calls.
-        self.map(&mut SimpleSubstitutionTypeMapper::new(subst))
+        self.map(&mut SimpleInstantiationMapper::new(subst))
     }
 
     /// Return all type variables contained in this type

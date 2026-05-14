@@ -60,8 +60,8 @@ impl FnInstData {
     pub fn any(&self) -> bool {
         !self.dicts_req.is_empty()
     }
-    /// Instantiate the dictionary requirements with the caller-supplied mapper.
-    pub(crate) fn instantiate_with<M: TypeMapper>(&mut self, mapper: &mut M) {
+    /// Instantiate the dictionary requirements in place with the caller-supplied mapper.
+    pub(crate) fn instantiate_in_place<M: TypeMapper>(&mut self, mapper: &mut M) {
         for req in &mut self.dicts_req {
             req.instantiate_in_place(mapper);
         }
@@ -1028,8 +1028,8 @@ impl Node {
     }
 }
 
-/// Instantiate a node and its children with a type mapper.
-pub(crate) fn instantiate_node_with<M: TypeMapper>(
+/// Instantiate a node and its children in place with a type mapper.
+pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
     arena: &mut NodeArena,
     id: NodeId,
     mapper: &mut M,
@@ -1038,26 +1038,26 @@ pub(crate) fn instantiate_node_with<M: TypeMapper>(
     // Instantiate children first
     let children = arena[id].kind.child_node_ids();
     for child in children {
-        instantiate_node_with(arena, child, mapper);
+        instantiate_node_in_place(arena, child, mapper);
     }
     // Then modify this node's kind-specific data
     match &mut arena[id].kind {
         StaticApply(app) => {
             app.ty = app.ty.map(mapper);
-            app.inst_data.instantiate_with(mapper);
+            app.inst_data.instantiate_in_place(mapper);
         }
         TraitMethodApply(app) => {
             app.ty = app.ty.map(mapper);
             instantiate_types_in_place(&mut app.input_tys, mapper);
-            app.inst_data.instantiate_with(mapper);
+            app.inst_data.instantiate_in_place(mapper);
         }
         GetFunction(get_fn) => {
-            get_fn.inst_data.instantiate_with(mapper);
+            get_fn.inst_data.instantiate_in_place(mapper);
         }
         GetTraitMethod(get_method) => {
             instantiate_types_in_place(&mut get_method.input_tys, mapper);
             instantiate_types_in_place(&mut get_method.output_tys, mapper);
-            get_method.inst_data.instantiate_with(mapper);
+            get_method.inst_data.instantiate_in_place(mapper);
         }
         GetTraitAssociatedConst(get_const) => {
             instantiate_types_in_place(&mut get_const.input_tys, mapper);
