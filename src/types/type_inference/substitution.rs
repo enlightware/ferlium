@@ -390,44 +390,56 @@ impl TypeSubstituer for SubstituteTypes<'_> {
     fn substitute_effect_type(&mut self, eff_ty: &EffType) -> EffType {
         use Effect::*;
 
+        if eff_ty.is_empty() || !eff_ty.has_variables() {
+            return eff_ty.clone();
+        }
+
         // Thread-local hash-map for cycle detection
         thread_local! {
             static VAR_VISITED: RefCell<FxHashSet<EffectVar>> = RefCell::new(FxHashSet::default());
         }
 
-        EffType::from_iter(eff_ty.iter().flat_map(|eff| {
-            EffType::into_iter(match eff {
-                Primitive(effect) => EffType::single_primitive(*effect),
-                Variable(var) => {
-                    let cycle_detected = VAR_VISITED.with(|visited| {
-                        let mut visited = visited.borrow_mut();
-                        if visited.contains(var) {
-                            true // Cycle detected
-                        } else {
-                            visited.insert(*var);
-                            false
-                        }
-                    });
-
-                    if cycle_detected {
-                        return EffType::empty().into_iter();
-                    }
-
-                    let mut effects = self.0.resolve_effect_var(*var);
-
-                    // add back the variable itself if not only variables
-                    if !effects.is_only_vars() {
-                        effects = effects.union(&EffType::single_variable(*var));
-                    }
-
-                    VAR_VISITED.with(|visited| {
-                        visited.borrow_mut().remove(var);
-                    });
-
-                    effects
+        let mut substitute_var = |var| {
+            let cycle_detected = VAR_VISITED.with(|visited| {
+                let mut visited = visited.borrow_mut();
+                if visited.contains(&var) {
+                    true // Cycle detected
+                } else {
+                    visited.insert(var);
+                    false
                 }
-            } as EffType)
-        }))
+            });
+
+            if cycle_detected {
+                return EffType::empty();
+            }
+
+            let mut effects = self.0.resolve_effect_var(var);
+
+            // add back the variable itself if not only variables
+            if !effects.is_only_vars() {
+                effects.insert(Variable(var));
+            }
+
+            VAR_VISITED.with(|visited| {
+                visited.borrow_mut().remove(&var);
+            });
+
+            effects
+        };
+
+        if let Some(Variable(var)) = eff_ty.as_single() {
+            return substitute_var(var);
+        }
+
+        let mut effects = Vec::new();
+        for eff in eff_ty.iter() {
+            match eff {
+                Primitive(effect) => effects.push(Primitive(*effect)),
+                Variable(var) => effects.extend(substitute_var(*var)),
+            }
+        }
+        EffType::from_vec(effects)
     }
 }
 

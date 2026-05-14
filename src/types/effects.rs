@@ -144,6 +144,19 @@ impl EffType {
             .all(|effect| matches!(effect, Effect::Variable(_)))
     }
 
+    pub fn has_variables(&self) -> bool {
+        self.0
+            .iter()
+            .any(|effect| matches!(effect, Effect::Variable(_)))
+    }
+
+    fn has_variable_in_substitution(&self, subst: &EffectsSubstitution) -> bool {
+        self.0.iter().any(|effect| match effect {
+            Effect::Primitive(_) => false,
+            Effect::Variable(var) => subst.contains_key(var),
+        })
+    }
+
     pub fn to_multiple_vars(&self) -> Option<Vec<EffectVar>> {
         if self.is_only_vars() {
             Some(
@@ -196,7 +209,7 @@ impl EffType {
     /// This is a conservative check: if self contains any effect variables, it returns false.
     pub fn is_subset_of(&self, other: &Self) -> bool {
         // If self has any effect variables, we cannot guarantee it is a subset
-        if !self.inner_vars().is_empty() {
+        if self.has_variables() {
             return false;
         }
         self.inner_non_vars()
@@ -228,20 +241,24 @@ impl EffType {
     }
 
     pub fn instantiate(&self, subst: &EffectsSubstitution) -> Self {
-        let effects = self
-            .0
-            .iter()
-            .flat_map(|effect| {
-                match effect {
-                    Effect::Primitive(effect) => EffType::single_primitive(*effect),
-                    Effect::Variable(var) => match subst.get(var) {
-                        Some(subst) => subst.clone(),
-                        None => EffType::single(*effect),
-                    },
-                }
-                .into_iter()
-            })
-            .collect();
+        if self.is_empty() || subst.is_empty() || !self.has_variable_in_substitution(subst) {
+            return self.clone();
+        }
+
+        if let Some(Effect::Variable(var)) = self.as_single() {
+            return subst.get(&var).cloned().unwrap_or_else(|| self.clone());
+        }
+
+        let mut effects = Vec::new();
+        for effect in &self.0 {
+            match effect {
+                Effect::Primitive(_) => effects.push(*effect),
+                Effect::Variable(var) => match subst.get(var) {
+                    Some(subst) => effects.extend(subst.0.iter().copied()),
+                    None => effects.push(*effect),
+                },
+            }
+        }
         Self::from_vec(effects)
     }
 }
@@ -329,6 +346,37 @@ mod tests {
         assert_eq!(
             format!("{}", ET::multiple_variable(&[EV::new(0), EV::new(1)])),
             "e₀, e₁"
+        );
+    }
+
+    #[test]
+    fn instantiate_effects_uses_substitution_when_relevant() {
+        use PrimitiveEffect::*;
+        type ET = EffType;
+        type EV = EffectVar;
+
+        let effects = ET::from_vec(vec![
+            Effect::Variable(EV::new(0)),
+            Effect::Primitive(Read),
+            Effect::Variable(EV::new(1)),
+        ]);
+        let mut subst = EffectsSubstitution::default();
+        subst.insert(
+            EV::new(1),
+            ET::from_vec(vec![Effect::Primitive(Write), Effect::Primitive(Read)]),
+        );
+
+        assert_eq!(
+            effects.instantiate(&subst),
+            ET::from_vec(vec![
+                Effect::Variable(EV::new(0)),
+                Effect::Primitive(Read),
+                Effect::Primitive(Write),
+            ])
+        );
+        assert_eq!(
+            effects.instantiate(&EffectsSubstitution::default()),
+            effects
         );
     }
 }
