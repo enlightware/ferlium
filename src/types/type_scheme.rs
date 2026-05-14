@@ -29,7 +29,7 @@ use crate::{
     types::r#trait::TraitRef,
     types::trait_solver::TraitSolver,
     types::type_inference::unify::UnifiedTypeInference,
-    types::type_like::TypeLike,
+    types::type_like::{TypeLike, instantiate_types_in_place},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
     types::type_visitor::TypeInnerVisitor,
 };
@@ -783,11 +783,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         let subst = (ty_subst, eff_subst);
         let mut mapper = BitmapInstantiationMapper::new(&subst);
         self.ty = self.ty.map(&mut mapper);
-        self.constraints = self
-            .constraints
-            .iter()
-            .map(|constraint| constraint.map(&mut mapper))
-            .collect();
+        instantiate_types_in_place(&mut self.constraints, &mut mapper);
 
         // Return
         subst

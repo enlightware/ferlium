@@ -254,15 +254,9 @@ impl UnifiedTypeInference {
 
         // Then, solve other constraints.
         if !remaining_constraints.is_empty() {
-            remaining_constraints = unified_ty_inf
-                .substitute_in_constraints(
-                    &remaining_constraints
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<PubTypeConstraint>>(),
-                )
-                .into_iter()
-                .collect();
+            let mut constraints = remaining_constraints.into_iter().collect::<Vec<_>>();
+            unified_ty_inf.substitute_in_constraints_in_place(&mut constraints);
+            remaining_constraints = constraints.into_iter().collect();
 
             loop {
                 // Loop as long as we make progress.
@@ -451,19 +445,14 @@ impl UnifiedTypeInference {
                         || records_field_is.contains_key(&ty)
                         || variants_are.contains_key(&ty)
                 };
-                remaining_constraints = unified_ty_inf
-                    .unify_constraint_pass(&constraints, is_ty_adt, trait_solver, arena)?
-                    .into_iter()
-                    .collect();
-                remaining_constraints = unified_ty_inf
-                    .substitute_in_constraints(
-                        &remaining_constraints
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<PubTypeConstraint>>(),
-                    )
-                    .into_iter()
-                    .collect();
+                let mut new_constraints = unified_ty_inf.unify_constraint_pass(
+                    &constraints,
+                    is_ty_adt,
+                    trait_solver,
+                    arena,
+                )?;
+                unified_ty_inf.substitute_in_constraints_in_place(&mut new_constraints);
+                remaining_constraints = new_constraints.into_iter().collect();
 
                 // Break if no progress was made
                 if remaining_constraints == old_remaining_constraints {
@@ -967,8 +956,8 @@ impl UnifiedTypeInference {
         trait_solver: &mut TraitSolver<'_>,
         arena: &mut NodeArena,
     ) -> Result<Option<PubTypeConstraint>, InternalCompilationError> {
-        let input_tys = self.normalize_types(input_tys);
-        let output_tys = self.normalize_types(output_tys);
+        let mut input_tys = self.normalize_types(input_tys);
+        let mut output_tys = self.normalize_types(output_tys);
 
         // Look for the special case of a Repr trait constraint where the target
         // is either definitely not a named type or is a tuple, a record or a variant.
@@ -1023,9 +1012,9 @@ impl UnifiedTypeInference {
                     span,
                     arena,
                 )?;
+                self.normalize_types_in_place(&mut input_tys);
+                self.normalize_types_in_place(&mut output_tys);
             }
-            let input_tys = self.normalize_types(&input_tys);
-            let output_tys = self.normalize_types(&output_tys);
             if input_tys.iter().all(Type::is_constant) {
                 let impl_output_tys =
                     trait_solver.solve_output_types(&trait_ref, &input_tys, span, arena)?;

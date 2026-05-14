@@ -5,15 +5,15 @@ use crate::{
     format::FormatWith,
     hir::dictionary_passing::DictionaryReq,
     hir::{self, FnInstData},
-    module::{ModuleEnv, ModuleFunction},
+    module::{LocalDecl, ModuleEnv, ModuleFunction},
     types::{
         effects::{EffType, Effect, EffectVar, EffectsInstSubst},
         mutability::{MutType, MutVar},
         r#type::{FnType, Type, TypeInstSubst, TypeKind, TypeVar},
         type_scheme::PubTypeConstraint,
         type_substitution::{
-            TypeSubstituer, substitute_fn_type, substitute_type, substitute_types,
-            substitute_types_in_place,
+            TypeSubstituer, substitute_fn_type, substitute_fn_type_in_place, substitute_type,
+            substitute_type_fields_in_place, substitute_types, substitute_types_in_place,
         },
     },
 };
@@ -27,8 +27,9 @@ impl UnifiedTypeInference {
     /// Substitute the remaining constraints using the current unification tables,
     /// storing the normalized constraints back into self.
     pub fn normalize_remaining_constraints(&mut self) {
-        let constraints = mem::take(&mut self.remaining_ty_constraints);
-        self.remaining_ty_constraints = self.substitute_in_constraints(&constraints);
+        let mut constraints = mem::take(&mut self.remaining_ty_constraints);
+        self.substitute_in_constraints_in_place(&mut constraints);
+        self.remaining_ty_constraints = constraints;
     }
 
     /// Borrow the remaining constraints. Call `normalize_remaining_constraints`
@@ -50,6 +51,10 @@ impl UnifiedTypeInference {
         substitute_types(tys, &mut NormalizeTypes(self))
     }
 
+    pub(super) fn normalize_types_in_place(&mut self, tys: &mut [Type]) {
+        substitute_types_in_place(tys, &mut NormalizeTypes(self));
+    }
+
     pub(super) fn normalize_mut_type(&mut self, mut_ty: MutType) -> MutType {
         NormalizeTypes(self).substitute_mut_type(mut_ty)
     }
@@ -59,16 +64,12 @@ impl UnifiedTypeInference {
         descr: &mut ModuleFunction,
         arena: &mut crate::hir::NodeArena,
     ) {
-        descr.definition.ty_scheme.ty = self.substitute_in_fn_type(&descr.definition.ty_scheme.ty);
-        descr.definition.ty_scheme.constraints =
-            self.substitute_in_constraints(&descr.definition.ty_scheme.constraints);
+        self.substitute_in_fn_type_in_place(&mut descr.definition.ty_scheme.ty);
+        self.substitute_in_constraints_in_place(&mut descr.definition.ty_scheme.constraints);
         if let Some(root) = descr.get_code_entry() {
             self.substitute_in_node(arena, root);
         }
-        for local in &mut descr.locals {
-            local.ty = self.substitute_in_type(local.ty);
-            local.mut_ty = self.substitute_in_mut_type(local.mut_ty);
-        }
+        self.substitute_in_local_decls_in_place(&mut descr.locals);
     }
 
     pub fn substitute_in_type(&mut self, ty: Type) -> Type {
@@ -87,8 +88,19 @@ impl UnifiedTypeInference {
         substitute_fn_type(fn_ty, &mut SubstituteTypes(self))
     }
 
+    pub fn substitute_in_fn_type_in_place(&mut self, fn_ty: &mut FnType) {
+        substitute_fn_type_in_place(fn_ty, &mut SubstituteTypes(self));
+    }
+
     pub fn substitute_in_mut_type(&mut self, mut_ty: MutType) -> MutType {
         SubstituteTypes(self).substitute_mut_type(mut_ty)
+    }
+
+    pub(crate) fn substitute_in_local_decls_in_place(&mut self, locals: &mut [LocalDecl]) {
+        substitute_type_fields_in_place(locals, |local| &mut local.ty, &mut SubstituteTypes(self));
+        for local in locals {
+            local.mut_ty = self.substitute_in_mut_type(local.mut_ty);
+        }
     }
 
     pub fn lookup_type_var(&mut self, var: TypeVar) -> Type {
@@ -182,11 +194,11 @@ impl UnifiedTypeInference {
         use hir::NodeKind::*;
         match &mut arena[id].kind {
             StaticApply(app) => {
-                app.ty = self.substitute_in_fn_type(&app.ty);
+                self.substitute_in_fn_type_in_place(&mut app.ty);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
             TraitMethodApply(app) => {
-                app.ty = self.substitute_in_fn_type(&app.ty);
+                self.substitute_in_fn_type_in_place(&mut app.ty);
                 self.substitute_in_types_in_place(&mut app.input_tys);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
@@ -232,73 +244,45 @@ impl UnifiedTypeInference {
         &mut self,
         constraint: &PubTypeConstraint,
     ) -> PubTypeConstraint {
+        let mut constraint = constraint.clone();
+        self.substitute_in_constraint_in_place(&mut constraint);
+        constraint
+    }
+
+    fn substitute_in_constraint_in_place(&mut self, constraint: &mut PubTypeConstraint) {
         use PubTypeConstraint::*;
         match constraint {
             TupleAtIndexIs {
                 tuple_ty,
-                tuple_span,
-                index,
-                index_span,
                 element_ty,
+                ..
             } => {
-                let tuple_ty = self.substitute_in_type(*tuple_ty);
-                let element_ty = self.substitute_in_type(*element_ty);
-                TupleAtIndexIs {
-                    tuple_ty,
-                    tuple_span: tuple_span.clone(),
-                    index: *index,
-                    index_span: index_span.clone(),
-                    element_ty,
-                }
+                *tuple_ty = self.substitute_in_type(*tuple_ty);
+                *element_ty = self.substitute_in_type(*element_ty);
             }
             RecordFieldIs {
                 record_ty,
-                record_span,
-                field,
-                field_span,
                 element_ty,
+                ..
             } => {
-                let record_ty = self.substitute_in_type(*record_ty);
-                let element_ty = self.substitute_in_type(*element_ty);
-                RecordFieldIs {
-                    record_ty,
-                    record_span: record_span.clone(),
-                    field: *field,
-                    field_span: field_span.clone(),
-                    element_ty,
-                }
+                *record_ty = self.substitute_in_type(*record_ty);
+                *element_ty = self.substitute_in_type(*element_ty);
             }
             TypeHasVariant {
                 variant_ty,
-                variant_span,
-                tag,
                 payload_ty,
-                payload_span,
+                ..
             } => {
-                let variant_ty = self.substitute_in_type(*variant_ty);
-                let payload_ty = self.substitute_in_type(*payload_ty);
-                TypeHasVariant {
-                    variant_ty,
-                    variant_span: variant_span.clone(),
-                    tag: *tag,
-                    payload_ty,
-                    payload_span: payload_span.clone(),
-                }
+                *variant_ty = self.substitute_in_type(*variant_ty);
+                *payload_ty = self.substitute_in_type(*payload_ty);
             }
             HaveTrait {
-                trait_ref,
                 input_tys,
                 output_tys,
-                span,
+                ..
             } => {
-                let input_tys = self.substitute_in_types(input_tys);
-                let output_tys = self.substitute_in_types(output_tys);
-                HaveTrait {
-                    trait_ref: trait_ref.clone(),
-                    input_tys,
-                    output_tys,
-                    span: span.clone(),
-                }
+                self.substitute_in_types_in_place(input_tys);
+                self.substitute_in_types_in_place(output_tys);
             }
         }
     }
@@ -307,10 +291,18 @@ impl UnifiedTypeInference {
         &mut self,
         constraints: &[PubTypeConstraint],
     ) -> Vec<PubTypeConstraint> {
+        let mut constraints = constraints.to_vec();
+        self.substitute_in_constraints_in_place(&mut constraints);
         constraints
-            .iter()
-            .map(|c| self.substitute_in_constraint(c))
-            .collect()
+    }
+
+    pub(super) fn substitute_in_constraints_in_place(
+        &mut self,
+        constraints: &mut [PubTypeConstraint],
+    ) {
+        for constraint in constraints {
+            self.substitute_in_constraint_in_place(constraint);
+        }
     }
 
     pub fn log_debug_constraints(&self, module_env: ModuleEnv) {

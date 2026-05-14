@@ -64,7 +64,7 @@ use crate::{
         expr::{AnnotationTypeMapper, TypeInference},
         unify::UnifiedTypeInference,
     },
-    types::type_like::{TypeLike, instantiate_types},
+    types::type_like::{TypeLike, instantiate_types_in_place},
     types::type_mapper::{BitmapInstantiationMapper, TypeMapper},
     types::type_scheme::{
         PubTypeConstraint, TypeScheme, extra_parameters_from_constraints, normalize_types,
@@ -1059,8 +1059,8 @@ where
         // Apply unbound substitution to code and types.
         if !subst.0.is_empty() {
             let mut mapper = BitmapInstantiationMapper::new(&subst);
-            trait_output.input_tys = instantiate_types(&trait_output.input_tys, &mut mapper);
-            trait_output.output_tys = instantiate_types(&trait_output.output_tys, &mut mapper);
+            instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
+            instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
             for id in local_fns.iter() {
                 apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                     let descr = &mut output.functions[id.as_index()];
@@ -1087,13 +1087,9 @@ where
         // Sixth pass, normalize the input types, substitute the types in the functions and input/output types.
         let subst = (normalize_types(&mut quantifiers), FxHashMap::default());
         let mut mapper = BitmapInstantiationMapper::new(&subst);
-        trait_output.input_tys = instantiate_types(&trait_output.input_tys, &mut mapper);
-        trait_output.output_tys = instantiate_types(&trait_output.output_tys, &mut mapper);
-        trait_output.constraints = trait_output
-            .constraints
-            .into_iter()
-            .map(|c| c.map(&mut mapper))
-            .collect();
+        instantiate_types_in_place(&mut trait_output.input_tys, &mut mapper);
+        instantiate_types_in_place(&mut trait_output.output_tys, &mut mapper);
+        instantiate_types_in_place(&mut trait_output.constraints, &mut mapper);
         for (method_index, id) in local_fns.iter().enumerate() {
             let method_index = TraitMethodIndex::from_index(method_index);
             apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
@@ -1482,10 +1478,7 @@ fn emit_expr_unsafe_inner(
         let descr = module.get_function_by_id_mut(*lambda_id).unwrap();
         ty_inf.substitute_in_module_function(descr, ir_arena);
     }
-    for local in locals.iter_mut().skip(initial_local_count) {
-        local.ty = ty_inf.substitute_in_type(local.ty);
-        local.mut_ty = ty_inf.substitute_in_mut_type(local.mut_ty);
-    }
+    ty_inf.substitute_in_local_decls_in_place(&mut locals[initial_local_count..]);
 
     // Take final substituted constraints.
     let module_env = ModuleEnv::new(module, others);

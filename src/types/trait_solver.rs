@@ -973,7 +973,7 @@ impl<'a> TraitSolver<'a> {
         );
         let mut mapper = BitmapInstantiationMapper::new(&inst_subst);
         let imp_input_tys = instantiate_types(imp_input_tys, &mut mapper);
-        let imp_output_tys = instantiate_types(imp_output_tys, &mut mapper);
+        let mut imp_output_tys = instantiate_types(imp_output_tys, &mut mapper);
         let remaining = instantiate_types(imp_constraints, &mut mapper)
             .into_iter()
             .enumerate()
@@ -1132,8 +1132,9 @@ impl<'a> TraitSolver<'a> {
         }
 
         resolved_constraints.sort_by_key(|constraint| constraint.index);
+        ty_inf.substitute_in_types_in_place(&mut imp_output_tys);
         Ok(BlanketImplMatch::Yes {
-            output_tys: ty_inf.substitute_in_types(&imp_output_tys),
+            output_tys: imp_output_tys,
             resolved_constraints,
         })
     }

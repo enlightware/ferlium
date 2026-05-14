@@ -53,14 +53,9 @@ pub fn substitute_type(ty: Type, substituer: &mut impl TypeSubstituer) -> Type {
 
 /// Recursively substitute all inner types in a list of types, using the given substituer.
 pub fn substitute_types(tys: &[Type], substituer: &mut impl TypeSubstituer) -> Vec<Type> {
-    let mut kinds = Vec::new();
-    let mut seen = FxHashMap::default();
-    let tys = substitute_types_rec(tys, substituer, &mut kinds, &mut seen);
-    let new_tys = store_types(&kinds);
-    // Map all local types to their new world types in the list of types
-    tys.into_iter()
-        .map(|ty| remap_local_type(ty, &new_tys))
-        .collect()
+    let mut tys = tys.to_vec();
+    substitute_types_in_place(&mut tys, substituer);
+    tys
 }
 
 /// Recursively substitute all inner types in a list of types in place.
@@ -70,26 +65,62 @@ pub fn substitute_types_in_place(tys: &mut [Type], substituer: &mut impl TypeSub
     for ty in tys.iter_mut() {
         *ty = substitute_type_rec(*ty, substituer, &mut kinds, &mut seen);
     }
+    if kinds.is_empty() {
+        return;
+    }
     let new_tys = store_types(&kinds);
     for ty in tys {
         *ty = remap_local_type(*ty, &new_tys);
     }
 }
 
-/// Recursively substitute all inner types in a function type, using the given substituer.
-pub fn substitute_fn_type(fn_ty: &FnType, substituer: &mut impl TypeSubstituer) -> FnType {
+/// Recursively substitute type fields in place, sharing one substitution batch.
+pub fn substitute_type_fields_in_place<T>(
+    items: &mut [T],
+    mut get_type: impl for<'a> FnMut(&'a mut T) -> &'a mut Type,
+    substituer: &mut impl TypeSubstituer,
+) {
     let mut kinds = Vec::new();
     let mut seen = FxHashMap::default();
-    let mut fn_ty = substitute_fn_type_rec(fn_ty, substituer, &mut kinds, &mut seen);
+    for item in items.iter_mut() {
+        let ty = get_type(item);
+        *ty = substitute_type_rec(*ty, substituer, &mut kinds, &mut seen);
+    }
+    if kinds.is_empty() {
+        return;
+    }
     let new_tys = store_types(&kinds);
-    // Map all local types to their new world types in the function type
-    fn_ty.args = fn_ty
-        .args
-        .into_iter()
-        .map(|arg| FnArgType::new(remap_local_type(arg.ty, &new_tys), arg.mut_ty))
-        .collect();
-    fn_ty.ret = remap_local_type(fn_ty.ret, &new_tys);
+    for item in items {
+        let ty = get_type(item);
+        *ty = remap_local_type(*ty, &new_tys);
+    }
+}
+
+/// Recursively substitute all inner types in a function type, using the given substituer.
+pub fn substitute_fn_type(fn_ty: &FnType, substituer: &mut impl TypeSubstituer) -> FnType {
+    let mut fn_ty = fn_ty.clone();
+    substitute_fn_type_in_place(&mut fn_ty, substituer);
     fn_ty
+}
+
+/// Recursively substitute all inner types in a function type in place.
+pub fn substitute_fn_type_in_place(fn_ty: &mut FnType, substituer: &mut impl TypeSubstituer) {
+    let mut kinds = Vec::new();
+    let mut seen = FxHashMap::default();
+    for arg in &mut fn_ty.args {
+        arg.ty = substitute_type_rec(arg.ty, substituer, &mut kinds, &mut seen);
+        arg.mut_ty = substituer.substitute_mut_type(arg.mut_ty);
+    }
+    fn_ty.ret = substitute_type_rec(fn_ty.ret, substituer, &mut kinds, &mut seen);
+    fn_ty.effects = substituer.substitute_effect_type(&fn_ty.effects);
+    if kinds.is_empty() {
+        return;
+    }
+    let new_tys = store_types(&kinds);
+    for arg in &mut fn_ty.args {
+        arg.ty = remap_local_type(arg.ty, &new_tys);
+    }
+    fn_ty.ret = remap_local_type(fn_ty.ret, &new_tys);
 }
 
 fn remap_local_type(ty: Type, new_tys: &[Type]) -> Type {
