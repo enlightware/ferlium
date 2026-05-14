@@ -1276,6 +1276,28 @@ impl TypeKind {
         }
     }
 
+    fn recursive_worlds_if_no_local_refs(&self) -> Option<SVec2<NonMaxU32>> {
+        let mut worlds_to_check = SVec2::new();
+        let mut has_local_ref = false;
+        self.for_each_inner_type(|ty| {
+            if has_local_ref {
+                return;
+            }
+            if ty.is_local() {
+                has_local_ref = true;
+                return;
+            }
+            if ty.is_global_recursive() {
+                let world = ty.world().unwrap();
+                // Adjacent-dedup, matching the previous itertools::dedup behaviour.
+                if worlds_to_check.last() != Some(&world) {
+                    worlds_to_check.push(world);
+                }
+            }
+        });
+        (!has_local_ref).then_some(worlds_to_check)
+    }
+
     fn local_cmp(&self, other: &Self) -> Ordering {
         use TypeKind::*;
         match (self, other) {
@@ -1742,14 +1764,74 @@ impl TypeUniverse {
         self.insert_types(&[tk])[0]
     }
 
+    fn insert_non_recursive_kind(
+        &mut self,
+        kind: &TypeKind,
+        worlds_to_check: SVec2<NonMaxU32>,
+    ) -> Type {
+        // Before adding to world 0, check if this matches an existing recursive type
+        // by checking if any recursive type's world contains this exact TypeKind.
+        // This handles equirecursive types where an "unfolded" variant equals
+        // a canonical recursive type.
+        for world_idx in worlds_to_check {
+            let world_idx = world_idx.get();
+            let world = &self.worlds[world_idx as usize];
+
+            // Check if kind matches any TypeKind in this world
+            if let Some((idx, _)) = world.get_full(kind) {
+                // Found a match! Return the type from that world
+                let resolved_ty = Type::new_global(world_idx, idx as u32);
+                assert!(!resolved_ty.is_local());
+                return resolved_ty;
+            }
+        }
+
+        // No match in recursive worlds, add to world 0.
+        let index = if let Some((index, _)) = self.worlds[0].get_full(kind) {
+            index
+        } else {
+            // Compute the summary using already-interned children, then store.
+            let summary = self.summary_with_global_children(kind);
+            self.worlds[0]
+                .insert_full(InternedType {
+                    kind: kind.clone(),
+                    summary,
+                })
+                .0
+        };
+        let resolved_ty = Type::new_global(0, index as u32);
+        assert!(!resolved_ty.is_local());
+        resolved_ty
+    }
+
     fn insert_types(&mut self, kinds: impl Into<Vec<TypeKind>>) -> Vec<Type> {
         let mut kinds: Vec<_> = kinds.into();
         kinds.iter_mut().for_each(TypeKind::normalize);
 
+        if let Some(worlds_to_check) = kinds
+            .iter()
+            .map(TypeKind::recursive_worlds_if_no_local_refs)
+            .collect::<Option<Vec<_>>>()
+        {
+            let mut types = vec![Type::new_local(0); kinds.len()];
+            for input_index in (0..kinds.len()).rev() {
+                types[input_index] = self.insert_non_recursive_kind(
+                    &kinds[input_index],
+                    worlds_to_check[input_index].clone(),
+                );
+            }
+            return types;
+        }
+
         // Partition tks into sub-graphs of strongly connected recursive types.
-        let sccs = find_strongly_connected_components(&kinds);
-        let mut sorted_sccs = topological_sort_sccs(&kinds, &sccs);
-        sorted_sccs.reverse();
+        let sorted_sccs = if kinds.len() == 1 {
+            vec![vec![0]]
+        } else {
+            let sccs = find_strongly_connected_components(&kinds);
+            let mut sorted_sccs = topological_sort_sccs(&kinds, &sccs);
+            sorted_sccs.reverse();
+            sorted_sccs
+        };
 
         // TODO: somewhere, renormalize generics to be in the same order.
 
@@ -1778,66 +1860,9 @@ impl TypeUniverse {
                 if input_indices.len() == 1 {
                     let input_index = input_indices[0];
                     let kind = &kinds[input_index];
-                    // Single pass: detect any local inner type (disqualifies the
-                    // singleton fast path) and collect the set of recursive
-                    // worlds referenced by inner types (where equirecursive
-                    // matches may live).
-                    let mut all_global = true;
-                    // Recursive-world references inside a non-recursive singleton are
-                    // rare; 2 inline slots cover the common case without heap.
-                    let mut worlds_to_check: SVec2<NonMaxU32> = SVec2::new();
-                    kind.for_each_inner_type(|ty| {
-                        if !all_global {
-                            return;
-                        }
-                        if ty.is_local() {
-                            all_global = false;
-                            return;
-                        }
-                        if ty.is_global_recursive() {
-                            let w = ty.world().unwrap();
-                            // Adjacent-dedup, matching the previous itertools::dedup behaviour.
-                            if worlds_to_check.last() != Some(&w) {
-                                worlds_to_check.push(w);
-                            }
-                        }
-                    });
-                    if all_global {
-                        // Before adding to world 0, check if this matches an existing recursive type
-                        // by checking if any recursive type's world contains this exact TypeKind.
-                        // This handles equirecursive types where an "unfolded" variant equals
-                        // a canonical recursive type.
-                        for world_idx in worlds_to_check {
-                            let world_idx = world_idx.get();
-                            let world = &self.worlds[world_idx as usize];
-
-                            // Check if kind matches any TypeKind in this world
-                            if let Some((idx, _)) = world.get_full(kind) {
-                                // Found a match! Return the type from that world
-                                let resolved_ty = Type::new_global(world_idx, idx as u32);
-                                resolved[input_index] = Some(resolved_ty);
-                                assert!(!resolved_ty.is_local());
-                                return vec![(input_index, resolved_ty)];
-                            }
-                        }
-
-                        // No match in recursive worlds, add to world 0
-                        // Is it already present?
-                        let index = if let Some((index, _)) = self.worlds[0].get_full(kind) {
-                            index
-                        } else {
-                            // Compute the summary using already-interned children, then store.
-                            let summary = self.summary_with_global_children(kind);
-                            self.worlds[0]
-                                .insert_full(InternedType {
-                                    kind: kind.clone(),
-                                    summary,
-                                })
-                                .0
-                        };
-                        let resolved_ty = Type::new_global(0, index as u32);
+                    if let Some(worlds_to_check) = kind.recursive_worlds_if_no_local_refs() {
+                        let resolved_ty = self.insert_non_recursive_kind(kind, worlds_to_check);
                         resolved[input_index] = Some(resolved_ty);
-                        assert!(!resolved_ty.is_local());
                         return vec![(input_index, resolved_ty)];
                     }
                 }
