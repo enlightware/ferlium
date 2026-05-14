@@ -13,6 +13,7 @@ use crate::{
         type_scheme::PubTypeConstraint,
         type_substitution::{
             TypeSubstituer, substitute_fn_type, substitute_type, substitute_types,
+            substitute_types_in_place,
         },
     },
 };
@@ -75,6 +76,10 @@ impl UnifiedTypeInference {
 
     pub fn substitute_in_types(&mut self, tys: &[Type]) -> Vec<Type> {
         substitute_types(tys, &mut SubstituteTypes(self))
+    }
+
+    pub fn substitute_in_types_in_place(&mut self, tys: &mut [Type]) {
+        substitute_types_in_place(tys, &mut SubstituteTypes(self));
     }
 
     pub fn substitute_in_fn_type(&mut self, fn_ty: &FnType) -> FnType {
@@ -181,24 +186,24 @@ impl UnifiedTypeInference {
             }
             TraitMethodApply(app) => {
                 app.ty = self.substitute_in_fn_type(&app.ty);
-                app.input_tys = self.substitute_in_types(&app.input_tys);
+                self.substitute_in_types_in_place(&mut app.input_tys);
                 self.substitute_in_fn_inst_data(&mut app.inst_data);
             }
             GetFunction(get_fn) => {
                 self.substitute_in_fn_inst_data(&mut get_fn.inst_data);
             }
             GetTraitMethod(get_method) => {
-                get_method.input_tys = self.substitute_in_types(&get_method.input_tys);
-                get_method.output_tys = self.substitute_in_types(&get_method.output_tys);
+                self.substitute_in_types_in_place(&mut get_method.input_tys);
+                self.substitute_in_types_in_place(&mut get_method.output_tys);
                 self.substitute_in_fn_inst_data(&mut get_method.inst_data);
             }
             GetTraitAssociatedConst(get_const) => {
-                get_const.input_tys = self.substitute_in_types(&get_const.input_tys);
-                get_const.output_tys = self.substitute_in_types(&get_const.output_tys);
+                self.substitute_in_types_in_place(&mut get_const.input_tys);
+                self.substitute_in_types_in_place(&mut get_const.output_tys);
             }
             GetTraitDictionary(get_dict) => {
-                get_dict.input_tys = self.substitute_in_types(&get_dict.input_tys);
-                get_dict.output_tys = self.substitute_in_types(&get_dict.output_tys);
+                self.substitute_in_types_in_place(&mut get_dict.input_tys);
+                self.substitute_in_types_in_place(&mut get_dict.output_tys);
             }
             _ => {}
         }
@@ -215,8 +220,8 @@ impl UnifiedTypeInference {
                     output_tys,
                     ..
                 } => {
-                    *input_tys = self.substitute_in_types(input_tys);
-                    *output_tys = self.substitute_in_types(output_tys);
+                    self.substitute_in_types_in_place(input_tys);
+                    self.substitute_in_types_in_place(output_tys);
                 }
             }
         }

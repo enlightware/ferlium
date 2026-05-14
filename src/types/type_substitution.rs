@@ -56,11 +56,21 @@ pub fn substitute_types(tys: &[Type], substituer: &mut impl TypeSubstituer) -> V
     let new_tys = store_types(&kinds);
     // Map all local types to their new world types in the list of types
     tys.into_iter()
-        .map(|ty| {
-            ty.world()
-                .map_or_else(|| new_tys[ty.index() as usize], |_| ty)
-        })
+        .map(|ty| remap_local_type(ty, &new_tys))
         .collect()
+}
+
+/// Recursively substitute all inner types in a list of types in place.
+pub fn substitute_types_in_place(tys: &mut [Type], substituer: &mut impl TypeSubstituer) {
+    let mut kinds = Vec::new();
+    let mut seen = FxHashMap::default();
+    for ty in tys.iter_mut() {
+        *ty = substitute_type_rec(*ty, substituer, &mut kinds, &mut seen);
+    }
+    let new_tys = store_types(&kinds);
+    for ty in tys {
+        *ty = remap_local_type(*ty, &new_tys);
+    }
 }
 
 /// Recursively substitute all inner types in a function type, using the given substituer.
@@ -70,17 +80,18 @@ pub fn substitute_fn_type(fn_ty: &FnType, substituer: &mut impl TypeSubstituer) 
     let mut fn_ty = substitute_fn_type_rec(fn_ty, substituer, &mut kinds, &mut seen);
     let new_tys = store_types(&kinds);
     // Map all local types to their new world types in the function type
-    let map_ty = |ty: Type| {
-        ty.world()
-            .map_or_else(|| new_tys[ty.index() as usize], |_| ty)
-    };
     fn_ty.args = fn_ty
         .args
         .into_iter()
-        .map(|arg| FnArgType::new(map_ty(arg.ty), arg.mut_ty))
+        .map(|arg| FnArgType::new(remap_local_type(arg.ty, &new_tys), arg.mut_ty))
         .collect();
-    fn_ty.ret = map_ty(fn_ty.ret);
+    fn_ty.ret = remap_local_type(fn_ty.ret, &new_tys);
     fn_ty
+}
+
+fn remap_local_type(ty: Type, new_tys: &[Type]) -> Type {
+    ty.world()
+        .map_or_else(|| new_tys[ty.index() as usize], |_| ty)
 }
 
 fn substitute_type_rec(

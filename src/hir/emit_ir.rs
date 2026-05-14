@@ -972,8 +972,8 @@ where
         default_output_effects_in_functions(output, ir_arena, &associated_lambdas, &local_fns);
 
         // Resolve input and output types.
-        trait_output.input_tys = ty_inf.substitute_in_types(&trait_output.input_tys);
-        trait_output.output_tys = ty_inf.substitute_in_types(&trait_output.output_tys);
+        ty_inf.substitute_in_types_in_place(&mut trait_output.input_tys);
+        ty_inf.substitute_in_types_in_place(&mut trait_output.output_tys);
 
         // Take final substituted constraints.
         ty_inf.normalize_remaining_constraints();
