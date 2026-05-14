@@ -46,7 +46,7 @@ use ustr::{Ustr, ustr};
 
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
-use crate::containers::{B, SVec2, b};
+use crate::containers::{B, DenseBitSet, SVec2, b};
 use crate::format::type_variable_index_to_string_greek;
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
@@ -1577,37 +1577,38 @@ fn find_world_isomorphism(
     let n = local_world.len();
     assert_eq!(n, existing_world.len());
 
-    // Try to build mapping greedily by matching types
-    // Start with types that have the fewest candidates
     let mut mapping: Vec<Option<usize>> = vec![None; n];
-    let mut reverse_mapping: FxHashMap<usize, usize> = FxHashMap::default();
 
     // For each local type, find all possible matches in existing_world
-    let mut candidates: Vec<(usize, Vec<usize>)> = (0..n)
+    let mut candidates: Vec<(usize, DenseBitSet)> = (0..n)
         .map(|local_idx| {
             let local_kind = &local_world[local_idx];
-            // Find all indices in existing_world that could potentially match
-            let possible: Vec<usize> = (0..n)
-                .filter(|&existing_idx| {
-                    // Quick structural check: compare ignoring type references
-                    types_could_match(local_kind, &existing_world[existing_idx].kind)
-                })
-                .collect();
+            let mut possible = DenseBitSet::with_capacity(n);
+            for existing_idx in 0..n {
+                // Quick structural check: compare ignoring type references.
+                if types_could_match(local_kind, &existing_world[existing_idx].kind) {
+                    possible.insert(existing_idx);
+                }
+            }
             (local_idx, possible)
         })
         .collect();
+    if candidates.iter().any(|(_, possible)| possible.is_empty()) {
+        return None;
+    }
 
     // Sort by number of candidates (fewest first for constraint propagation)
-    candidates.sort_by_key(|(_, poss)| poss.len());
+    candidates.sort_by_key(|(_, possible)| possible.len());
+    let mut used_existing = DenseBitSet::with_capacity(n);
 
     // Recursive backtracking search
     fn search(
         local_world: &[TypeKind],
         existing_world: &TypeWorld,
         world_idx: usize,
-        candidates: &[(usize, Vec<usize>)],
+        candidates: &[(usize, DenseBitSet)],
         mapping: &mut Vec<Option<usize>>,
-        reverse_mapping: &mut FxHashMap<usize, usize>,
+        used_existing: &mut DenseBitSet,
         depth: usize,
     ) -> bool {
         if depth == candidates.len() {
@@ -1617,14 +1618,14 @@ fn find_world_isomorphism(
         }
 
         let (local_idx, possible) = &candidates[depth];
-        for &existing_idx in possible {
-            if reverse_mapping.contains_key(&existing_idx) {
+        for existing_idx in possible.iter_ones() {
+            if used_existing.contains(existing_idx) {
                 continue; // Already mapped
             }
 
             // Try this mapping
             mapping[*local_idx] = Some(existing_idx);
-            reverse_mapping.insert(existing_idx, *local_idx);
+            used_existing.insert(existing_idx);
 
             if search(
                 local_world,
@@ -1632,7 +1633,7 @@ fn find_world_isomorphism(
                 world_idx,
                 candidates,
                 mapping,
-                reverse_mapping,
+                used_existing,
                 depth + 1,
             ) {
                 return true;
@@ -1640,7 +1641,7 @@ fn find_world_isomorphism(
 
             // Backtrack
             mapping[*local_idx] = None;
-            reverse_mapping.remove(&existing_idx);
+            used_existing.remove(existing_idx);
         }
 
         false
@@ -1652,7 +1653,7 @@ fn find_world_isomorphism(
         world_idx,
         &candidates,
         &mut mapping,
-        &mut reverse_mapping,
+        &mut used_existing,
         0,
     ) {
         Some(mapping.into_iter().map(|opt| opt.unwrap() as u32).collect())

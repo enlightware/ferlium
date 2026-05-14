@@ -13,16 +13,16 @@
 //! substitution can short-circuit when a substitution's domain does not
 //! intersect a type's free variables.
 //!
-//! The representation is biased for the observed distribution: ~10% of types
-//! have no free variables at all, and the names of free variables are almost
-//! always small (max name 76 across the std + test workloads, with 96% of
-//! occurrences fitting in `Compact(u64)`). The `Many` variant is the cold
-//! insurance path for higher names.
+//! The representation is biased for the observed distribution: most variable
+//! names fit in one inline `u64`, with a boxed-slice fallback for higher names.
 
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
 
-use crate::types::{effects::EffectVar, mutability::MutVar, r#type::TypeVar};
+use crate::{
+    containers::{DenseBitSet, DenseBitSetOnes},
+    types::{effects::EffectVar, mutability::MutVar, r#type::TypeVar},
+};
 
 /// A trait for variable identifiers represented by a small `u32` name.
 pub trait NamedVar: Copy {
@@ -58,15 +58,9 @@ impl NamedVar for EffectVar {
 }
 
 /// A compact set of `NamedVar`s identified by their `name()` index.
-///
-/// Invariants:
-/// - `Compact(0)` is normalised to `Empty`.
-/// - `Many(words)` is only used when at least one bit with name >= 64 is set;
-///   it is never used when `Compact` would suffice. Trailing zero words are
-///   trimmed so equal sets always have equal `Many` payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KindVarSet<V: NamedVar> {
-    repr: Repr,
+    bits: DenseBitSet,
     _phantom: PhantomData<fn() -> V>,
 }
 
@@ -76,18 +70,10 @@ impl<V: NamedVar> Default for KindVarSet<V> {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-enum Repr {
-    #[default]
-    Empty,
-    Compact(u64),
-    Many(Box<[u64]>),
-}
-
 impl<V: NamedVar> KindVarSet<V> {
     pub const fn empty() -> Self {
         Self {
-            repr: Repr::Empty,
+            bits: DenseBitSet::empty(),
             _phantom: PhantomData,
         }
     }
@@ -107,148 +93,45 @@ impl<V: NamedVar> KindVarSet<V> {
     }
 
     pub fn is_empty(&self) -> bool {
-        matches!(self.repr, Repr::Empty)
+        self.bits.is_empty()
     }
 
     pub fn insert(&mut self, var: V) {
-        let name = var.name();
-        if name < 64 {
-            let bit = 1u64 << name;
-            match &mut self.repr {
-                Repr::Empty => self.repr = Repr::Compact(bit),
-                Repr::Compact(bits) => *bits |= bit,
-                Repr::Many(words) => words[0] |= bit,
-            }
-            return;
-        }
-        // name >= 64: must use Many.
-        let word = name as usize / 64;
-        let bit = 1u64 << (name % 64);
-        let needed_len = word + 1;
-        match &mut self.repr {
-            Repr::Empty => {
-                self.repr = Repr::Many(boxed_slice_with(needed_len, |i| {
-                    if i == word { bit } else { 0 }
-                }));
-            }
-            Repr::Compact(low) => {
-                let low = *low;
-                self.repr = Repr::Many(boxed_slice_with(needed_len, |i| match i {
-                    0 if word == 0 => low | bit,
-                    0 => low,
-                    i if i == word => bit,
-                    _ => 0,
-                }));
-            }
-            Repr::Many(words) => {
-                if words.len() < needed_len {
-                    let old = std::mem::take(words);
-                    *words = boxed_slice_with(needed_len, |i| {
-                        let prev = old.get(i).copied().unwrap_or(0);
-                        if i == word { prev | bit } else { prev }
-                    });
-                } else {
-                    words[word] |= bit;
-                }
-            }
-        }
+        self.bits.insert(var.name() as usize);
     }
 
     /// Mutate `self` to be the union of itself and `other`.
     pub fn union_with(&mut self, other: &Self) {
-        match (&mut self.repr, &other.repr) {
-            (_, Repr::Empty) => {}
-            (Repr::Empty, _) => *self = other.clone(),
-            (Repr::Compact(a), Repr::Compact(b)) => {
-                *a |= *b;
-            }
-            (Repr::Many(a), Repr::Compact(b)) => {
-                a[0] |= *b;
-            }
-            (Repr::Compact(a), Repr::Many(b)) => {
-                let low = *a;
-                self.repr = Repr::Many(boxed_slice_with(b.len(), |i| {
-                    if i == 0 { low | b[0] } else { b[i] }
-                }));
-            }
-            (Repr::Many(a), Repr::Many(b)) => {
-                let len = a.len().max(b.len());
-                if a.len() == len {
-                    for (i, word) in b.iter().enumerate() {
-                        a[i] |= *word;
-                    }
-                } else {
-                    let old = std::mem::take(a);
-                    *a = boxed_slice_with(len, |i| {
-                        let av = old.get(i).copied().unwrap_or(0);
-                        let bv = b.get(i).copied().unwrap_or(0);
-                        av | bv
-                    });
-                }
-            }
-        }
+        self.bits.union_with(&other.bits);
     }
 
     /// Returns true if `self` and `other` share at least one variable.
     pub fn intersects(&self, other: &Self) -> bool {
-        match (&self.repr, &other.repr) {
-            (Repr::Empty, _) | (_, Repr::Empty) => false,
-            (Repr::Compact(a), Repr::Compact(b)) => (*a & *b) != 0,
-            (Repr::Compact(a), Repr::Many(b)) | (Repr::Many(b), Repr::Compact(a)) => {
-                (*a & b[0]) != 0
-            }
-            (Repr::Many(a), Repr::Many(b)) => a.iter().zip(b.iter()).any(|(x, y)| (x & y) != 0),
-        }
+        self.bits.intersects(&other.bits)
     }
 
     /// Iterate over the variables present in the set, in ascending name order.
     pub fn iter(&self) -> KindVarSetIter<'_, V> {
-        let words: &[u64] = match &self.repr {
-            Repr::Empty => &[],
-            Repr::Compact(bits) => std::slice::from_ref(bits),
-            Repr::Many(words) => words,
-        };
         KindVarSetIter {
-            words,
-            word_idx: 0,
-            current: words.first().copied().unwrap_or(0),
+            inner: self.bits.iter_ones(),
             _phantom: PhantomData,
         }
     }
 
     /// Number of variables present in the set.
     pub fn len(&self) -> usize {
-        match &self.repr {
-            Repr::Empty => 0,
-            Repr::Compact(bits) => bits.count_ones() as usize,
-            Repr::Many(words) => words.iter().map(|w| w.count_ones() as usize).sum(),
-        }
+        self.bits.len()
     }
 
     /// Returns true if `self` contains the given variable.
     pub fn contains(&self, var: V) -> bool {
-        let name = var.name();
-        let word = name as usize / 64;
-        let bit = 1u64 << (name % 64);
-        match &self.repr {
-            Repr::Empty => false,
-            Repr::Compact(bits) => word == 0 && (*bits & bit) != 0,
-            Repr::Many(words) => words.get(word).is_some_and(|w| (w & bit) != 0),
-        }
+        self.bits.contains(var.name() as usize)
     }
-}
-
-/// Allocate a `Box<[u64]>` of exactly `len` words, filled by `f(i)`.
-fn boxed_slice_with(len: usize, mut f: impl FnMut(usize) -> u64) -> Box<[u64]> {
-    (0..len).map(&mut f).collect()
 }
 
 /// Ascending-name iterator over a `KindVarSet<V>`'s elements.
 pub struct KindVarSetIter<'a, V: NamedVar> {
-    words: &'a [u64],
-    word_idx: usize,
-    /// Bits of the current word still to be yielded; cleared as we go.
-    current: u64,
+    inner: DenseBitSetOnes<'a>,
     _phantom: PhantomData<fn() -> V>,
 }
 
@@ -256,19 +139,7 @@ impl<V: NamedVar> Iterator for KindVarSetIter<'_, V> {
     type Item = V;
 
     fn next(&mut self) -> Option<V> {
-        loop {
-            if self.current != 0 {
-                let bit = self.current.trailing_zeros();
-                self.current &= self.current - 1;
-                let name = (self.word_idx as u32) * 64 + bit;
-                return Some(V::from_name(name));
-            }
-            self.word_idx += 1;
-            if self.word_idx >= self.words.len() {
-                return None;
-            }
-            self.current = self.words[self.word_idx];
-        }
+        self.inner.next().map(|name| V::from_name(name as u32))
     }
 }
 

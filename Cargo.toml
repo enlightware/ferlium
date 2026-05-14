@@ -9,7 +9,7 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Our mission: To bring the power of Haskell to the users of Python and Javascript."
 authors = ["Enlightware GmbH"]
-rust-version = "1.85"
+rust-version = "1.92"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -76,6 +76,9 @@ wasm-bindgen = "0.2.118"
 [lints.rust]
 # As we are developing, some assignments may be unused temporarily.
 unused_assignments = "allow"
+
+[lints.clippy]
+collapsible_if = "allow"
 
 [[bench]]
 name = "benches"
