@@ -1613,8 +1613,7 @@ fn find_world_isomorphism(
     ) -> bool {
         if depth == candidates.len() {
             // Check if complete mapping is valid
-            let complete_mapping: Vec<usize> = mapping.iter().map(|opt| opt.unwrap()).collect();
-            return verify_mapping(local_world, existing_world, world_idx, &complete_mapping);
+            return verify_mapping(local_world, existing_world, world_idx, mapping);
         }
 
         let (local_idx, possible) = &candidates[depth];
@@ -1690,46 +1689,107 @@ fn verify_mapping(
     local_world: &[TypeKind],
     existing_world: &TypeWorld,
     world_idx: usize,
-    mapping: &[usize],
+    mapping: &[Option<usize>],
 ) -> bool {
     // Check that the mapping is complete (bijective)
     if mapping.len() != local_world.len() {
         return false;
     }
 
-    for (local_idx, &existing_idx) in mapping.iter().enumerate() {
+    for (local_idx, existing_idx) in mapping.iter().copied().enumerate() {
+        let Some(existing_idx) = existing_idx else {
+            return false;
+        };
         let local_kind = &local_world[local_idx];
         let existing_kind = &existing_world[existing_idx].kind;
-
-        // Remap local_kind by replacing local references with world_idx references using mapping
-        let mut remapped = local_kind.clone();
-        let mut valid = true;
-        remapped.for_each_inner_type_mut(|ty| {
-            if ty.is_local() {
-                let local_ref = ty.index as usize;
-                if local_ref < mapping.len() {
-                    let mapped_idx = mapping[local_ref];
-                    *ty = Type {
-                        world: Some(NonMaxU32::new(world_idx as u32).unwrap()),
-                        index: mapped_idx as u32,
-                    };
-                } else {
-                    // Reference to unmapped local type - invalid
-                    valid = false;
-                }
-            }
-        });
-
-        if !valid {
-            return false;
-        }
-
-        if &remapped != existing_kind {
+        // Compare local references through `mapping` without cloning the local kind.
+        if !type_kinds_match_with_mapping(local_kind, existing_kind, world_idx, mapping) {
             return false;
         }
     }
 
     true
+}
+
+fn type_kinds_match_with_mapping(
+    local: &TypeKind,
+    existing: &TypeKind,
+    world_idx: usize,
+    mapping: &[Option<usize>],
+) -> bool {
+    match (local, existing) {
+        (TypeKind::Never, TypeKind::Never) => true,
+        (TypeKind::Variable(a), TypeKind::Variable(b)) => a == b,
+        (TypeKind::Tuple(a), TypeKind::Tuple(b)) => {
+            type_slices_match_with_mapping(a, b, world_idx, mapping)
+        }
+        (TypeKind::Record(a), TypeKind::Record(b)) => {
+            tagged_type_slices_match_with_mapping(a, b, world_idx, mapping)
+        }
+        (TypeKind::Variant(a), TypeKind::Variant(b)) => {
+            tagged_type_slices_match_with_mapping(a, b, world_idx, mapping)
+        }
+        (TypeKind::Function(a), TypeKind::Function(b)) => {
+            a.effects == b.effects
+                && a.args.len() == b.args.len()
+                && a.args.iter().zip(&b.args).all(|(a, b)| {
+                    a.mut_ty == b.mut_ty
+                        && type_matches_with_mapping(a.ty, b.ty, world_idx, mapping)
+                })
+                && type_matches_with_mapping(a.ret, b.ret, world_idx, mapping)
+        }
+        (TypeKind::Native(a), TypeKind::Native(b)) => {
+            a.bare_ty == b.bare_ty
+                && type_slices_match_with_mapping(&a.arguments, &b.arguments, world_idx, mapping)
+        }
+        (TypeKind::Named(a), TypeKind::Named(b)) => {
+            a.def == b.def
+                && type_slices_match_with_mapping(&a.params, &b.params, world_idx, mapping)
+        }
+        _ => false,
+    }
+}
+
+fn type_slices_match_with_mapping(
+    local: &[Type],
+    existing: &[Type],
+    world_idx: usize,
+    mapping: &[Option<usize>],
+) -> bool {
+    local.len() == existing.len()
+        && local.iter().zip(existing).all(|(&local, &existing)| {
+            type_matches_with_mapping(local, existing, world_idx, mapping)
+        })
+}
+
+fn tagged_type_slices_match_with_mapping(
+    local: &[(Ustr, Type)],
+    existing: &[(Ustr, Type)],
+    world_idx: usize,
+    mapping: &[Option<usize>],
+) -> bool {
+    local.len() == existing.len()
+        && local.iter().zip(existing).all(
+            |(&(local_name, local_ty), &(existing_name, existing_ty))| {
+                local_name == existing_name
+                    && type_matches_with_mapping(local_ty, existing_ty, world_idx, mapping)
+            },
+        )
+}
+
+fn type_matches_with_mapping(
+    local: Type,
+    existing: Type,
+    world_idx: usize,
+    mapping: &[Option<usize>],
+) -> bool {
+    if !local.is_local() {
+        return local == existing;
+    }
+    let Some(mapped_idx) = mapping.get(local.index as usize).copied().flatten() else {
+        return false;
+    };
+    Type::new_global(world_idx as u32, mapped_idx as u32) == existing
 }
 
 /// A mapping from a local world to a global world
