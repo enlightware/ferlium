@@ -210,6 +210,64 @@ trait TraitOutputQuery {
     ) -> Result<TraitImprovementMatch, InternalCompilationError>;
 }
 
+/// Lazily materializes a scratch solver only if blanket matching reaches a
+/// nested trait query. Head matching can reject many candidates without
+/// needing to clone the solver state.
+struct LazyTraitSolverProbe<'solver, 'a> {
+    solver: &'solver TraitSolver<'a>,
+    probe: Option<TraitSolverProbe<'a>>,
+}
+
+impl<'solver, 'a> LazyTraitSolverProbe<'solver, 'a> {
+    fn new(solver: &'solver TraitSolver<'a>) -> Self {
+        Self {
+            solver,
+            probe: None,
+        }
+    }
+
+    fn probe(&mut self) -> &mut TraitSolverProbe<'a> {
+        if self.probe.is_none() {
+            self.probe = Some(TraitSolverProbe::from_solver(self.solver));
+        }
+        self.probe.as_mut().unwrap()
+    }
+}
+
+impl TraitOutputQuery for LazyTraitSolverProbe<'_, '_> {
+    fn solve_output_types_query(
+        &mut self,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<Vec<Type>, InternalCompilationError> {
+        self.probe()
+            .solve_output_types_query(trait_ref, input_tys, fn_span, arena)
+    }
+
+    fn improve_trait_application_query(
+        &mut self,
+        ty_inf: &mut UnifiedTypeInference,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        assumptions: ConstraintAssumptions<'_>,
+        fn_span: Location,
+        arena: &mut NodeArena,
+    ) -> Result<TraitImprovementMatch, InternalCompilationError> {
+        self.probe().improve_trait_application_query(
+            ty_inf,
+            trait_ref,
+            input_tys,
+            output_tys,
+            assumptions,
+            fn_span,
+            arena,
+        )
+    }
+}
+
 /// Borrowed view over the ambient public trait constraints that may discharge
 /// nested blanket-impl requirements.
 #[derive(Debug, Clone, Copy)]
@@ -681,9 +739,9 @@ impl<'a> TraitSolver<'a> {
                     arena,
                 )?,
                 TraitImprovementCandidate::Blanket { .. } => {
-                    let mut probe = TraitSolverProbe::from_solver(self);
+                    let mut query = LazyTraitSolverProbe::new(self);
                     Self::improvement_candidate_matches(
-                        &mut probe,
+                        &mut query,
                         ty_inf,
                         &candidate,
                         input_tys,
