@@ -62,11 +62,9 @@ impl FnInstData {
     }
     /// Instantiate the dictionary requirements with the caller-supplied mapper.
     pub(crate) fn instantiate_with<M: TypeMapper>(&mut self, mapper: &mut M) {
-        self.dicts_req = self
-            .dicts_req
-            .iter()
-            .map(|req| req.instantiate_with(mapper))
-            .collect();
+        for req in &mut self.dicts_req {
+            req.instantiate_in_place(mapper);
+        }
     }
 }
 

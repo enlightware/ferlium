@@ -205,26 +205,21 @@ impl UnifiedTypeInference {
     }
 
     fn substitute_in_fn_inst_data(&mut self, inst_data: &mut FnInstData) {
-        use DictionaryReq::*;
-        inst_data.dicts_req = inst_data
-            .dicts_req
-            .iter()
-            .map(|dict| match dict {
-                FieldIndex { ty, field } => FieldIndex {
-                    ty: self.substitute_in_type(*ty),
-                    field: *field,
-                },
-                TraitImpl {
-                    trait_ref,
+        for dict in &mut inst_data.dicts_req {
+            match dict {
+                DictionaryReq::FieldIndex { ty, .. } => {
+                    *ty = self.substitute_in_type(*ty);
+                }
+                DictionaryReq::TraitImpl {
                     input_tys,
                     output_tys,
-                } => TraitImpl {
-                    trait_ref: trait_ref.clone(),
-                    input_tys: self.substitute_in_types(input_tys),
-                    output_tys: self.substitute_in_types(output_tys),
-                },
-            })
-            .collect();
+                    ..
+                } => {
+                    *input_tys = self.substitute_in_types(input_tys);
+                    *output_tys = self.substitute_in_types(output_tys);
+                }
+            }
+        }
     }
 
     pub fn substitute_in_constraint(

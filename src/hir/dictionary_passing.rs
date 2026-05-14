@@ -24,7 +24,7 @@ use crate::{
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef},
     types::trait_solver::TraitSolver,
     types::r#type::TypeVar,
-    types::type_like::TypeLike,
+    types::type_like::{TypeLike, instantiate_types_in_place},
     types::type_mapper::TypeMapper,
     types::type_scheme::format_have_trait,
 };
@@ -84,21 +84,26 @@ impl DictionaryReq {
 
     /// Instantiate self with a caller-supplied mapper.
     pub(crate) fn instantiate_with<M: TypeMapper>(&self, mapper: &mut M) -> DictionaryReq {
+        let mut req = self.clone();
+        req.instantiate_in_place(mapper);
+        req
+    }
+
+    /// Instantiate self in place with a caller-supplied mapper.
+    pub(crate) fn instantiate_in_place<M: TypeMapper>(&mut self, mapper: &mut M) {
         use DictionaryReq::*;
         match self {
-            FieldIndex { ty, field } => FieldIndex {
-                ty: ty.map(mapper),
-                field: *field,
-            },
+            FieldIndex { ty, .. } => {
+                *ty = ty.map(mapper);
+            }
             TraitImpl {
-                trait_ref,
                 input_tys,
                 output_tys,
-            } => TraitImpl {
-                trait_ref: trait_ref.clone(),
-                input_tys: input_tys.iter().map(|ty| ty.map(mapper)).collect(),
-                output_tys: output_tys.iter().map(|ty| ty.map(mapper)).collect(),
-            },
+                ..
+            } => {
+                instantiate_types_in_place(input_tys, mapper);
+                instantiate_types_in_place(output_tys, mapper);
+            }
         }
     }
 
