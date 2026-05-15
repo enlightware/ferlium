@@ -1,3 +1,5 @@
+use std::mem;
+
 use crate::{
   Location, Modules, containers,
   format::FormatWith,
@@ -7,6 +9,7 @@ use crate::{
 };
 
 /// Emit the low-level (aka SSA) ferlium IR of `module`.
+/// Returns a string for debugging purpose.
 pub fn emit_ssa(module: &Module, others: &Modules) -> String {
   let mut a: Vec<String> = [].to_vec();
   for n in module.own_symbols() {
@@ -111,8 +114,8 @@ impl<'a> Emitter<'a> {
   }
 
   /// Returns a reference to the function identified by `f`.
-  fn demand_function(&mut self, f: FunctionId) -> ssa::Value {
-    let e = ModuleEnv::new(self.module, self.others);
+  fn demand_function(&mut self, f: FunctionId, current_module: &'a Module) -> ssa::Value {
+    let e = ModuleEnv::new(current_module, self.others);
     let s = format!("{}", f.format_with(&e));
     ssa::Value::Function(s.into())
   }
@@ -141,9 +144,48 @@ impl<'a> Emitter<'a> {
     CaseBlocks { heads, bodies, default: default, tail:tail }
   }
 
-  /// Returns a copy of the dictionary value of `t`.
-  fn dictionnary_value(&mut self, t: Option<&TraitImpl>) -> Value {
+  /// Returns a copy of the dictionnary value holded by `t`.
+  fn dictionnary_value(&mut self, t: &hir::GetDictionary) -> hir::value::Value {
+    match t.dictionary {
+      TraitImplId::Local(id) => {
+        self.dictionnary_value_from_trait(self.module.get_impl_data(id))
+      },
+      TraitImplId::Import(id) => {
+        let slot = self.module.get_import_impl_slot(id).unwrap();
+        let other_module = self.others.get(slot.module).unwrap().module().unwrap();
+        self.dictionnary_value_from_trait(other_module.get_impl_data_by_trait_key(&slot.key))
+      }
+    }
+  }
+
+  /// Returns a copy of the dictionnary value of `t`.
+  fn dictionnary_value_from_trait(&mut self, t: Option<&TraitImpl>) -> hir::value::Value {
     t.unwrap().dictionary_value.clone()
+  }
+
+  /// Converts a HIR `Tuple` into a SSA `Dictionnary`.
+  fn to_ssa_dictionnary(&mut self, v: Value) -> ssa::Value {
+    let mut r: Vec<ssa::Value> = vec![];
+    let hir::value::Value::Tuple(t) = v else {
+      panic!("the value must be a tuple to be converted into a dictionnary");
+    };
+    for tv in t.iter() {
+      let hir::value::Value::Function(f) = tv else {
+        panic!("");
+      };
+      let i = f.as_ref().function;
+      let n = if f.as_ref().module == self.module.module_id() {
+        let f = FunctionId::Local(i);
+        self.demand_function(f, self.module)
+      } else {
+        let oe = self.others.get(f.as_ref().module).unwrap();
+        let om = oe.module().unwrap();
+        let f = FunctionId::Local(i);
+        self.demand_function(f, om)
+      };
+      r.push(n);
+    };
+    ssa::Value::Dictionary(r)
   }
 
   /// Generates the IR for `node`, which occurs as rvalue.
@@ -186,7 +228,6 @@ impl<'a> Emitter<'a> {
           self.context.point = InsertionPoint::End(blocks.heads[i]);
 
           // Lower the pattern
-          // TODO: We may want to check if the types of the lowered condition and the scrutinee are the same
           let x0 = self.lower_as_primitive(&c.clone().into_value()).unwrap();
           // Compare the condition with the scrutinee and, depending on the result, branch to
           // either the body of the current alternative or the next head.
@@ -231,7 +272,6 @@ impl<'a> Emitter<'a> {
 
       K::EnvLoad(n) => {
         // The following assumes we can simply copy any value referred to by a load.
-        // TODO: Is the casting from u32 to usize acceptable ?
         self.context.environment[n.index as usize].clone()
       }
 
@@ -242,7 +282,7 @@ impl<'a> Emitter<'a> {
       }
 
       K::StaticApply(n) => {
-        let f = self.demand_function(n.function);
+        let f = self.demand_function(n.function, self.module);
         let mut a: Vec<ssa::Value> = vec![];
         for x in &n.arguments {
           a.push(self.lower_as_rvalue(&self.hir_arena[*x]));
@@ -255,47 +295,8 @@ impl<'a> Emitter<'a> {
       }
 
       K::GetDictionary(n) => {
-        let v = match n.dictionary {
-          TraitImplId::Local(id) => {
-            self.dictionnary_value(self.module.get_impl_data(id))
-          },
-          TraitImplId::Import(id) => {
-            let slot = self.module.get_import_impl_slot(id).unwrap();
-            let other_module = self.others.get(slot.module).unwrap().module().unwrap();
-            self.dictionnary_value(other_module.get_impl_data_by_trait_key(&slot.key))
-          }
-        };
-        let mut r: Vec<ssa::Value> = vec![];
-        match v {
-          Value::Tuple(n) => {
-            for f in n.iter() {
-              match f {
-                Value::Function(v) => {
-                  let i = v.as_ref().function;
-                  let n = if v.as_ref().module == self.module.module_id() {
-                    let f = FunctionId::Local(i);
-                    let e = ModuleEnv::new(self.module, self.others);
-                    format!("{}", f.format_with(&e))
-                  } else {
-                    let oe = self.others.get(m).unwrap();
-                    let om = oe.module().unwrap();
-                    let f = FunctionId::Local(i);
-                    let e = ModuleEnv::new(om, self.others);
-                    format!("{}", f.format_with(&e))
-                  };
-                  r.push(ssa::Value::Function(n.into()));
-                }
-                _ => {
-                  panic!("unreachable: all node in dictionnary tuple should be functions");
-                }
-              }
-            }
-          }
-          _ => {
-            panic!("unreachable: dictionnary value should be a tuple");
-          }
-        }
-        ssa::Value::Dictionary(r)
+        let v = self.dictionnary_value(n);
+        self.to_ssa_dictionnary(v)
       }
 
       K::Apply(n) => {
@@ -315,8 +316,6 @@ impl<'a> Emitter<'a> {
 
         let v = self.lower_as_rvalue(m);
 
-        // TODO: For now, the index is passed as a usize directly, and just printed in the instruction.
-        // We may want to lower it as a primitive to have the type information directly wrapped in here
         self
           .insert(ssa::Instruction::project(node.span, v, *i, node.ty))
           .unwrap()
@@ -331,7 +330,6 @@ impl<'a> Emitter<'a> {
               self.context.function.add_block().id(),
             );
 
-            // Writing the loop head
             self.context.point = InsertionPoint::End(head);
 
             // Compute the next iterator element.
@@ -342,8 +340,7 @@ impl<'a> Emitter<'a> {
                 // Lower in the loop's condition.
                 let scrutinee = self.lower_as_rvalue(&self.hir_arena[n.value]);
 
-                // We assumes that we have a single alternative
-                assert_eq!(&n.alternatives.len(), &(1 as usize));
+                assert_eq!(n.alternatives.len(), 1 as usize);
 
                 let c0 = self.lower_as_primitive(&n.alternatives[0].0.clone().into_value()).unwrap();
 
@@ -353,16 +350,12 @@ impl<'a> Emitter<'a> {
                   .unwrap();
                 self.insert(ssa::Instruction::condbr(node.span, v, body, tail));
 
-                // We target the loop body block now
                 self.context.point = InsertionPoint::End(body);
-                // We lower the loop content
+                // We lower the loop body
                 self.lower_as_rvalue(&self.hir_arena[n.alternatives[0].1]);
-                // We branch unconditionaly to the head again
-                self.insert(ssa::Instruction::br(node.span, head));
 
-                // We lower the tail, this is the loop end
+                self.insert(ssa::Instruction::br(node.span, head));
                 self.context.point = InsertionPoint::End(tail);
-                // Loop evaluation = Unit
                 ssa::Value::Unit
               }
               _ => {
