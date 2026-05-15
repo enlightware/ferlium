@@ -18,7 +18,7 @@ pub fn emit_ssa(module: &Module, others: &Modules) -> String {
   a.join("\n")
 }
 
-/// The SSA blocks composing a Case HIR node.
+/// The SSA blocks involved in the lowering of a case in a match expression.
 struct CaseBlocks {
   /// The conditions head blocks
   heads: Vec<BlockIdentity>,
@@ -141,7 +141,7 @@ impl<'a> Emitter<'a> {
     CaseBlocks { heads, bodies, default: default, tail:tail }
   }
 
-  /// Returns a copy of the dictionnary value from `t`
+  /// Returns a copy of the dictionary value of `t`.
   fn dictionnary_value(&mut self, t: Option<&TraitImpl>) -> Value {
     t.unwrap().dictionary_value.clone()
   }
@@ -163,7 +163,7 @@ impl<'a> Emitter<'a> {
 
         let end: usize = self.context.environment.len();
 
-        // We want to lower the scrutinee before the case blocks. This allows us to use the lowered scrutinee value in all conditions blocks
+        // We lower the scrutinee before the case blocks so that its value can be used in all conditions.
         let scrutinee = self.lower_as_rvalue(&self.hir_arena[n.value]);
 
         // Create a temporary allocation to store the result of the match.
@@ -174,27 +174,28 @@ impl<'a> Emitter<'a> {
 
         // Lower the alternatives.
         for (i, (c, a)) in n.alternatives.iter().enumerate() {
-          // Load the next alternative's condition. If there aren't any left, we've reached the base case.
+          // Load the next alternative's condition if there's one. Otherwise, we've reached the
+          // default case.
           let next = if i < &n.alternatives.len() - 1 {
             blocks.heads[i + 1]
           } else {
             blocks.default
           };
 
-          // Transfer control flow to the head of the loop.
+          // Transfer control flow to the head of the match.
           self.context.point = InsertionPoint::End(blocks.heads[i]);
 
           // Lower the pattern
           // TODO: We may want to check if the types of the lowered condition and the scrutinee are the same
           let x0 = self.lower_as_primitive(&c.clone().into_value()).unwrap();
-          // We compare and branch either on the current condition body, or to the next condition head
+          // Compare the condition with the scrutinee and, depending on the result, branch to
+          // either the body of the current alternative or the next head.
           let v = self
-            .insert(ssa::Instruction::compare_eq(
-              node.span, scrutinee.clone(), x0))
+            .insert(ssa::Instruction::compare_eq(node.span, scrutinee.clone(), x0))
             .unwrap();
           self.insert(ssa::Instruction::condbr(node.span, v, blocks.bodies[i], next));
 
-          // Lower the pattern body
+          // Lower the body of the alternative.
           self.context.point = InsertionPoint::End(blocks.bodies[i]);
           let x1 = self.lower_as_rvalue(&self.hir_arena[*a]);
 
@@ -204,14 +205,14 @@ impl<'a> Emitter<'a> {
           self.context.environment.truncate(end);
         }
 
-        // Default case
+        // Default case.
         self.context.point = InsertionPoint::End(blocks.default);
         let v = self.lower_as_rvalue(&self.hir_arena[n.default]);
         self.insert(ssa::Instruction::store(node.span, v, temporary.clone()));
         self.insert(ssa::Instruction::br(node.span, blocks.tail));
         self.context.environment.truncate(end);
 
-        // Tail
+        // Tail.
         self.context.point = InsertionPoint::End(blocks.tail);
         self
           .insert(ssa::Instruction::load(node.span, temporary))
@@ -271,8 +272,7 @@ impl<'a> Emitter<'a> {
               match f {
                 Value::Function(v) => {
                   let i = v.as_ref().function;
-                  let m = v.as_ref().module;
-                  let n = if m == self.module.module_id() {
+                  let n = if v.as_ref().module == self.module.module_id() {
                     let f = FunctionId::Local(i);
                     let e = ModuleEnv::new(self.module, self.others);
                     format!("{}", f.format_with(&e))
@@ -300,17 +300,14 @@ impl<'a> Emitter<'a> {
 
       K::Apply(n) => {
         let f = self.lower_as_rvalue(&self.hir_arena[n.function]);
-        let a: Vec<ssa::Value> = n
-          .arguments
-          .iter()
+        let a: Vec<ssa::Value> = n.arguments.iter()
           .map(|a| self.lower_as_rvalue(&self.hir_arena[*a]))
           .collect();
 
-        self
-          .insert(ssa::Instruction::call(
-            node.span, f, a, self.hir_arena[n.function].ty,
-          ))
-          .unwrap()
+        self.insert(ssa::Instruction::call(
+          node.span, f, a, self.hir_arena[n.function].ty,
+        ))
+        .unwrap()
       }
 
       K::Project(n, i) => {
@@ -337,27 +334,22 @@ impl<'a> Emitter<'a> {
             // Writing the loop head
             self.context.point = InsertionPoint::End(head);
 
-            // We store the next iterator element on the memory
+            // Compute the next iterator element.
             self.lower_as_rvalue(&self.hir_arena[b[0]]);
 
             match &self.hir_arena[b[1]].kind {
               K::Case(n) => {
-                // We lower in the loop head. This is the instruction we need to run to evaluate the condition each iteration in the loop
+                // Lower in the loop's condition.
                 let scrutinee = self.lower_as_rvalue(&self.hir_arena[n.value]);
 
                 // We assumes that we have a single alternative
                 assert_eq!(&n.alternatives.len(), &(1 as usize));
 
-                // We lower the condition of the first alternative (=> The loop condition to check)
                 let c0 = self.lower_as_primitive(&n.alternatives[0].0.clone().into_value()).unwrap();
 
-                // We compare to branch -> either to loop head again || to loop tail
+                // Jump to the loop's body if the condition holds or to its tail otherwise.
                 let v = self
-                  .insert(ssa::Instruction::compare_eq(
-                    node.span,
-                    scrutinee.clone(),
-                    c0,
-                  ))
+                  .insert(ssa::Instruction::compare_eq(node.span, scrutinee.clone(), c0,))
                   .unwrap();
                 self.insert(ssa::Instruction::condbr(node.span, v, body, tail));
 
@@ -423,14 +415,6 @@ impl<'a> Emitter<'a> {
       None
     }
   }
-
-  // /// Returns the result of `action` on `self` with the insertion context attached to `span`.
-  // fn at<T>(&mut self, mut span: Location, action: impl FnOnce(&mut Self) -> T) -> T {
-  //   mem::swap(&mut self.context.span, &mut span);
-  //   let result = action(self);
-  //   mem::swap(&mut self.context.span, &mut span);
-  //   result
-  // }
 
   /// Inserts `s` at the current insertion point and returns the result the register assigned by
   /// that instruction, if any.

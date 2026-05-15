@@ -189,7 +189,7 @@ impl InstructionKind for Call {
 
 }
 
-/// A equal comparision in SSA.
+/// A comparison for equality in SSA.
 struct CompareEqual {}
 
 impl InstructionKind for CompareEqual {
@@ -293,7 +293,7 @@ impl InstructionKind for Store {
 
 }
 
-/// A SSA terminator that unconditionally transfers control flow to the start of another block, unconditionally.
+/// A SSA terminator that unconditionally transfers control flow to the start of another block.
 struct UnconditionalBranch {
   target: ssa::BlockIdentity,
 }

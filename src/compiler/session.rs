@@ -544,10 +544,10 @@ impl CompilerSession {
         )
     }
 
-    /// Emit the SSA form for the given `source_name`
+    /// Emits the SSA form for the given `source_name`
     pub fn emit_ssa(&mut self, source_name: &str, src: &str) -> String {
-        let path = module::Path::single_str(source_name);
-        let i = self.compile(src, source_name, path).unwrap().module_id;
+        let p = module::Path::single_str(source_name);
+        let i = self.compile(src, source_name, p).unwrap().module_id;
         let module = self.expect_fresh_module(i);
         emit_ssa::emit_ssa(module, self.modules())
     }
