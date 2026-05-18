@@ -972,16 +972,79 @@ impl TypeDef {
 
 /// A handle to a type declaration.
 #[derive(Debug, Clone)]
-pub struct TypeDefRef(Arc<TypeDef>);
+pub struct TypeDefRef(Arc<TypeDefSlot>);
+
+#[derive(Debug)]
+struct TypeDefHeader {
+    name: Ustr,
+    param_names: Vec<Ustr>,
+    span: Location,
+}
+
+impl TypeDefHeader {
+    fn from_def(def: &TypeDef) -> Self {
+        Self {
+            name: def.name,
+            param_names: def.param_names.clone(),
+            span: def.span,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TypeDefSlot {
+    // This duplicates fields stored in the resolved TypeDef. Keeping the header
+    // available before resolution is a temporary bridge while TypeDefRef remains
+    // an Arc-backed handle instead of a compiler-wide typed id.
+    header: TypeDefHeader,
+    def: OnceLock<TypeDef>,
+}
+
 impl TypeDefRef {
     pub fn new(def: TypeDef) -> Self {
         def.validate();
-        Self(Arc::new(def))
+        let slot = TypeDefSlot {
+            header: TypeDefHeader::from_def(&def),
+            def: OnceLock::from(def),
+        };
+        Self(Arc::new(slot))
+    }
+
+    pub(crate) fn new_unfilled(name: Ustr, param_names: Vec<Ustr>, span: Location) -> Self {
+        Self(Arc::new(TypeDefSlot {
+            header: TypeDefHeader {
+                name,
+                param_names,
+                span,
+            },
+            def: OnceLock::new(),
+        }))
+    }
+
+    pub(crate) fn fill(&self, def: TypeDef) {
+        assert_eq!(self.0.header.name, def.name);
+        assert_eq!(self.0.header.param_names, def.param_names);
+        assert_eq!(self.0.header.span, def.span);
+        def.validate();
+        self.0.def.set(def).unwrap_or_else(|_| {
+            panic!(
+                "Type definition `{}` was already filled",
+                self.0.header.name
+            )
+        });
+    }
+
+    pub(crate) fn param_names(&self) -> &[Ustr] {
+        &self.0.header.param_names
+    }
+
+    pub(crate) fn span(&self) -> Location {
+        self.0.header.span
     }
 
     pub fn as_type(&self) -> Type {
         assert!(
-            self.param_names.is_empty(),
+            self.param_names().is_empty(),
             "Generic type definitions not implemented yet"
         );
         Type::named(self.clone(), vec![])
@@ -992,7 +1055,12 @@ impl Deref for TypeDefRef {
     type Target = TypeDef;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0.def.get().unwrap_or_else(|| {
+            panic!(
+                "Type definition `{}` was used before its declaration was filled",
+                self.0.header.name
+            )
+        })
     }
 }
 

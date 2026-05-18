@@ -465,6 +465,28 @@ impl Display for UnsafeFeature {
 }
 
 #[derive(Debug, Clone, EnumAsInner)]
+pub enum InfiniteTypeKind<S: Scope> {
+    TypeVariableCycle { ty_var: S::TypeVar, ty: S::Type },
+    ProductCycleWithoutSum { name: Ustr },
+    SumCycleWithoutTerminatingVariant { name: Ustr },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidRecursiveTypeKind {
+    NonRegularGenericShape { name: Ustr },
+}
+
+impl InvalidRecursiveTypeKind {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NonRegularGenericShape { name } => format!(
+                "Recursive generic type `{name}` is non-regular; recursive references must use the type parameters unchanged"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, EnumAsInner)]
 pub enum CompilationErrorImpl<S: Scope> {
     ParsingFailed(Vec<LocatedError>),
     NameDefinedMultipleTimes {
@@ -534,7 +556,14 @@ pub enum CompilationErrorImpl<S: Scope> {
         expected_decl: S::TypeDefRef,
         expected_span: Location,
     },
-    InfiniteType(S::TypeVar, S::Type, Location),
+    InfiniteType {
+        kind: InfiniteTypeKind<S>,
+        span: Location,
+    },
+    InvalidRecursiveType {
+        kind: InvalidRecursiveTypeKind,
+        span: Location,
+    },
     UnboundTypeVar {
         ty_var: S::TypeVar,
         ty: S::Type,
@@ -1019,14 +1048,33 @@ impl FormatWith<SourceTable> for CompilationError {
                 fmt_span(expected_span),
                 fmt_span(&expected_decl.1),
             ),
-            InfiniteType(ty_var, ty, span) => {
-                write!(
-                    f,
-                    "Infinite type: `{}` = `{}` in {}",
-                    ty_var,
-                    ty,
-                    fmt_span(span)
-                )
+            InfiniteType { kind, span } => match kind {
+                InfiniteTypeKind::TypeVariableCycle { ty_var, ty } => {
+                    write!(
+                        f,
+                        "Infinite type: `{}` = `{}` in {}",
+                        ty_var,
+                        ty,
+                        fmt_span(span)
+                    )
+                }
+                InfiniteTypeKind::ProductCycleWithoutSum { name } => {
+                    write!(
+                        f,
+                        "Type `{name}` is infinitely recursive because its cycle does not pass through an enum or variant union in {}",
+                        fmt_span(span)
+                    )
+                }
+                InfiniteTypeKind::SumCycleWithoutTerminatingVariant { name } => {
+                    write!(
+                        f,
+                        "Type `{name}` is infinitely recursive because every enum or variant-union branch refers back to the recursive cycle in {}",
+                        fmt_span(span)
+                    )
+                }
+            },
+            InvalidRecursiveType { kind, span } => {
+                write!(f, "{} in {}", kind.message(), fmt_span(span))
             }
             UnboundTypeVar { ty_var, ty, span } => {
                 write!(
@@ -1689,12 +1737,25 @@ impl CompilationError {
                 expected_decl: (expected_decl.name.to_string(), expected_decl.span),
                 expected_span,
             }),
-            InfiniteType(ty_var, ty, span) => {
-                compilation_error!(InfiniteType(
-                    ty_var.to_string(),
-                    ty.format_with(env).to_string(),
-                    span
-                ))
+            InfiniteType { kind, span } => {
+                let kind = match kind {
+                    InfiniteTypeKind::TypeVariableCycle { ty_var, ty } => {
+                        InfiniteTypeKind::TypeVariableCycle {
+                            ty_var: ty_var.to_string(),
+                            ty: ty.format_with(env).to_string(),
+                        }
+                    }
+                    InfiniteTypeKind::ProductCycleWithoutSum { name } => {
+                        InfiniteTypeKind::ProductCycleWithoutSum { name }
+                    }
+                    InfiniteTypeKind::SumCycleWithoutTerminatingVariant { name } => {
+                        InfiniteTypeKind::SumCycleWithoutTerminatingVariant { name }
+                    }
+                };
+                compilation_error!(InfiniteType { kind, span })
+            }
+            InvalidRecursiveType { kind, span } => {
+                compilation_error!(InvalidRecursiveType { kind, span })
             }
             UnboundTypeVar { ty_var, ty, span } => compilation_error!(UnboundTypeVar {
                 ty_var: ty_var.to_string(),

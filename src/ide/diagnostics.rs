@@ -15,8 +15,8 @@ use std::{
 use crate::{
     CompilationError, Location, SourceId,
     compiler::error::{
-        CompilationErrorImpl, ImportKind, MutabilityMustBeWhat, WhatIsNotAProductType,
-        WhichProductTypeIsNot,
+        CompilationErrorImpl, ImportKind, InfiniteTypeKind, MutabilityMustBeWhat,
+        WhatIsNotAProductType, WhichProductTypeIsNot,
     },
     parser::location::SourceTable,
 };
@@ -247,10 +247,27 @@ pub(super) fn compilation_error_to_data(
                 fmt_span(&expected_decl.1),
             ),
         )],
-        InfiniteType(ty_var, ty, span) => vec![error_data_from_location(
-            span,
-            format!("Infinite type: `{ty_var}` = `{ty}`"),
-        )],
+        InfiniteType { kind, span } => {
+            let message = match kind {
+                InfiniteTypeKind::TypeVariableCycle { ty_var, ty } => {
+                    format!("Infinite type: `{ty_var}` = `{ty}`")
+                }
+                InfiniteTypeKind::ProductCycleWithoutSum { name } => {
+                    format!(
+                        "Type `{name}` is infinitely recursive because its cycle does not pass through an enum or variant union"
+                    )
+                }
+                InfiniteTypeKind::SumCycleWithoutTerminatingVariant { name } => {
+                    format!(
+                        "Type `{name}` is infinitely recursive because every enum or variant-union branch refers back to the recursive cycle"
+                    )
+                }
+            };
+            vec![error_data_from_location(span, message)]
+        }
+        InvalidRecursiveType { kind, span } => {
+            vec![error_data_from_location(span, kind.message())]
+        }
         UnboundTypeVar { ty_var, ty, span } => vec![error_data_from_location(
             span,
             format!("Unbound type variable `{ty_var}` in `{ty}`"),

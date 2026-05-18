@@ -26,7 +26,7 @@ use crate::{
         StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
     },
     compiler::error::{
-        DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
+        DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner, InfiniteTypeKind,
         InternalCompilationError, InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind,
         InvalidTraitConstraintKind, WhatIsNotAProductType, WhichProductTypeIsNot,
     },

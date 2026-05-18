@@ -1,6 +1,300 @@
 use super::*;
-use crate::compiler::error::UnsafeFeature;
-use crate::types::r#type::{BareNativeTypeB, TypeAliasEntry};
+use crate::compiler::error::{InvalidRecursiveTypeKind, UnsafeFeature};
+use crate::std::array::Array as FerliumArray;
+use crate::types::r#type::{
+    BareNativeTypeB, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind, bare_native_type, store_types,
+};
+
+/// Placeholder metadata for an alias root while a recursive type SCC is lowered.
+#[derive(Clone)]
+pub(crate) struct RecursiveAliasRef {
+    pub name: Ustr,
+    pub index: u32,
+    pub param_names: Vec<Ustr>,
+    pub ty_var_count: u32,
+    pub span: Location,
+}
+
+/// Builds structural recursive alias types from local placeholders and final root shapes.
+pub(crate) struct RecursiveTypeBuilder<'a, 'm> {
+    env: &'a ModuleEnv<'m>,
+    generic_ty_params: GenericTyParams,
+    modules_used: &'a mut FxHashSet<ModuleId>,
+    aliases: &'a FxHashMap<Ustr, RecursiveAliasRef>,
+    type_defs: &'a FxHashMap<Ustr, TypeDefRef>,
+    kinds: Vec<TypeKind>,
+}
+
+impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
+    pub(crate) fn new(
+        root_count: usize,
+        env: &'a ModuleEnv<'m>,
+        modules_used: &'a mut FxHashSet<ModuleId>,
+        aliases: &'a FxHashMap<Ustr, RecursiveAliasRef>,
+        type_defs: &'a FxHashMap<Ustr, TypeDefRef>,
+    ) -> Self {
+        Self {
+            env,
+            generic_ty_params: GenericTyParams::default(),
+            modules_used,
+            aliases,
+            type_defs,
+            kinds: vec![TypeKind::Never; root_count],
+        }
+    }
+
+    pub(crate) fn set_generic_ty_params(&mut self, generic_ty_params: GenericTyParams) {
+        self.generic_ty_params = generic_ty_params;
+    }
+
+    pub(crate) fn desugar_root(
+        &mut self,
+        root_index: u32,
+        ty: &ast::PType,
+        span: Location,
+    ) -> Result<Type, InternalCompilationError> {
+        self.desugar_type(ty, span, false, Some(root_index))
+    }
+
+    pub(crate) fn finish(self, roots: &[Type]) -> Vec<Type> {
+        let stored = store_types(&self.kinds);
+        roots
+            .iter()
+            .map(|ty| {
+                ty.world()
+                    .map_or_else(|| stored[ty.index() as usize], |_| *ty)
+            })
+            .collect()
+    }
+
+    fn store_kind(&mut self, kind: TypeKind, slot: Option<u32>) -> Type {
+        let index = if let Some(index) = slot {
+            self.kinds[index as usize] = kind;
+            index
+        } else {
+            let index = self.kinds.len() as u32;
+            self.kinds.push(kind);
+            index
+        };
+        Type::new_local(index)
+    }
+
+    fn resolve_local_alias_without_args(
+        &self,
+        alias: &RecursiveAliasRef,
+        span: Location,
+    ) -> Result<Type, InternalCompilationError> {
+        expect_type_argument_count(alias.param_names.len(), alias.span, 0, span)?;
+        Ok(Type::new_local(alias.index))
+    }
+
+    fn resolve_local_alias_with_args(
+        &mut self,
+        alias: &RecursiveAliasRef,
+        args: &[ast::TypeSpan<Parsed>],
+        span: Location,
+    ) -> Result<Type, InternalCompilationError> {
+        expect_type_argument_count(alias.param_names.len(), alias.span, args.len(), span)?;
+        let desugared_args = args
+            .iter()
+            .map(|(arg, arg_span)| self.desugar_type(arg, *arg_span, false, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let is_identity = desugared_args
+            .iter()
+            .copied()
+            .eq((0..alias.ty_var_count).map(|index| Type::variable(TypeVar::new(index))));
+        if is_identity {
+            Ok(Type::new_local(alias.index))
+        } else {
+            Err(internal_compilation_error!(InvalidRecursiveType {
+                kind: InvalidRecursiveTypeKind::NonRegularGenericShape { name: alias.name },
+                span,
+            }))
+        }
+    }
+
+    fn desugar_path_without_args(
+        &mut self,
+        path: &ast::Path,
+        span: Location,
+    ) -> Result<Type, InternalCompilationError> {
+        if let [(name, _)] = &path.segments[..] {
+            if let Some(ty_var) = self.generic_ty_params.get(name) {
+                return Ok(Type::variable(*ty_var));
+            }
+            if let Some(alias) = self.aliases.get(name) {
+                return self.resolve_local_alias_without_args(alias, span);
+            }
+            if let Some(type_def) = self.type_defs.get(name) {
+                expect_type_argument_count(type_def.param_names().len(), type_def.span(), 0, span)?;
+                return Ok(Type::named(type_def.clone(), Vec::new()));
+            }
+        }
+        if let Some(resolved) = resolve_type_path(path, self.env, self.modules_used)? {
+            desugar_resolved_type_without_args(resolved, path, span)
+        } else if let [(name, _)] = &path.segments[..] {
+            Ok(self.store_kind(TypeKind::Variant(vec![(*name, Type::unit())]), None))
+        } else {
+            Err(internal_compilation_error!(TypeNotFound(span)))
+        }
+    }
+
+    fn desugar_path_with_args(
+        &mut self,
+        path: &ast::Path,
+        args: &[ast::TypeSpan<Parsed>],
+        span: Location,
+    ) -> Result<Type, InternalCompilationError> {
+        if let [(name, name_span)] = &path.segments[..] {
+            if self.generic_ty_params.contains_key(name) {
+                return Err(internal_compilation_error!(WrongNumberOfArguments {
+                    expected: 0,
+                    expected_span: *name_span,
+                    got: args.len(),
+                    got_span: span,
+                }));
+            }
+            if let Some(alias) = self.aliases.get(name).cloned() {
+                return self.resolve_local_alias_with_args(&alias, args, span);
+            }
+            if let Some(type_def) = self.type_defs.get(name) {
+                expect_type_argument_count(
+                    type_def.param_names().len(),
+                    type_def.span(),
+                    args.len(),
+                    span,
+                )?;
+                let desugared_args = args
+                    .iter()
+                    .map(|(arg, arg_span)| self.desugar_type(arg, *arg_span, false, None))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Type::named(type_def.clone(), desugared_args));
+            }
+        }
+        if let Some(resolved) = resolve_type_path(path, self.env, self.modules_used)? {
+            let desugared_args = args
+                .iter()
+                .map(|(arg, arg_span)| self.desugar_type(arg, *arg_span, false, None))
+                .collect::<Result<Vec<_>, _>>()?;
+            desugar_resolved_type_with_args(resolved, path, desugared_args, span)
+        } else {
+            Err(internal_compilation_error!(TypeNotFound(span)))
+        }
+    }
+
+    fn desugar_fn_type(
+        &mut self,
+        fn_type: &ast::PFnType,
+    ) -> Result<FnType, InternalCompilationError> {
+        let args = fn_type
+            .args
+            .iter()
+            .map(|arg| {
+                let ty = self.desugar_type(&arg.ty.0, arg.ty.1, false, None)?;
+                let mut_ty = match arg.mut_ty {
+                    Some(ast::PMutType::Mut) => MutType::mutable(),
+                    Some(ast::PMutType::Infer) => MutType::variable_id(0),
+                    None => MutType::constant(),
+                };
+                Ok(FnArgType::new(ty, mut_ty))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let ret = self.desugar_type(&fn_type.ret.0, fn_type.ret.1, false, None)?;
+        let effects = match &fn_type.effects {
+            ast::PFnEffects::ImplicitPure => EffType::empty(),
+            ast::PFnEffects::ImplicitGeneric => EffType::single_variable_id(0),
+            ast::PFnEffects::Explicit(effects) => EffType::multiple_primitive(effects),
+        };
+        Ok(FnType::new(args, ret, effects))
+    }
+
+    fn desugar_type(
+        &mut self,
+        ty: &ast::PType,
+        span: Location,
+        in_ty_def: bool,
+        slot: Option<u32>,
+    ) -> Result<Type, InternalCompilationError> {
+        use ast::PType::*;
+        Ok(match ty {
+            Never => Type::never(),
+            Unit => Type::unit(),
+            Resolved(ty) => *ty,
+            Infer => Type::variable_id(0),
+            Path(path) => self.desugar_path_without_args(path, span)?,
+            AppliedPath { path, args } => self.desugar_path_with_args(path, args, span)?,
+            Variant(types) => {
+                let mut seen = FxHashMap::default();
+                let variants = types
+                    .iter()
+                    .map(|((name, name_span), (ty, ty_span))| {
+                        if let Some(prev_span) = seen.get(&name) {
+                            Err(internal_compilation_error!(DuplicatedVariant {
+                                first_occurrence: *prev_span,
+                                second_occurrence: *name_span,
+                                ctx_span: span,
+                                ctx: if in_ty_def {
+                                    DuplicatedVariantContext::Enum
+                                } else {
+                                    DuplicatedVariantContext::Variant
+                                },
+                            }))
+                        } else {
+                            seen.insert(name, *name_span);
+                            Ok((*name, self.desugar_type(ty, *ty_span, false, None)?))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.store_kind(TypeKind::Variant(variants), slot)
+            }
+            Tuple(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|(ty, ty_span)| self.desugar_type(ty, *ty_span, false, None))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.store_kind(TypeKind::Tuple(elements), slot)
+            }
+            Record(fields) => {
+                let mut seen = FxHashMap::default();
+                let fields = fields
+                    .iter()
+                    .map(|((name, name_span), (ty, ty_span))| {
+                        if let Some(prev_span) = seen.get(&name) {
+                            Err(internal_compilation_error!(DuplicatedField {
+                                first_occurrence: *prev_span,
+                                second_occurrence: *name_span,
+                                constructor_span: span,
+                                ctx: if in_ty_def {
+                                    DuplicatedFieldContext::Struct
+                                } else {
+                                    DuplicatedFieldContext::Record
+                                },
+                            }))
+                        } else {
+                            seen.insert(name, *name_span);
+                            Ok((*name, self.desugar_type(ty, *ty_span, false, None)?))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.store_kind(TypeKind::Record(fields), slot)
+            }
+            Array(array) => {
+                let element = self.desugar_type(&array.0, array.1, false, None)?;
+                self.store_kind(
+                    TypeKind::Native(b(NativeType {
+                        bare_ty: bare_native_type::<FerliumArray>(),
+                        arguments: vec![element],
+                    })),
+                    slot,
+                )
+            }
+            Function(fn_type) => {
+                let fn_type = self.desugar_fn_type(fn_type)?;
+                self.store_kind(TypeKind::Function(b(fn_type)), slot)
+            }
+        })
+    }
+}
 
 fn desugar_type_constraint(
     constraint: &ast::PTypeConstraint,
@@ -393,11 +687,11 @@ impl ast::PType {
 }
 
 impl PTypeDef {
-    pub(crate) fn desugar(
+    pub(crate) fn desugar_data(
         &self,
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
-    ) -> Result<TypeDefRef, InternalCompilationError> {
+    ) -> Result<HirTypeDef, InternalCompilationError> {
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
             &self.generic_params,
@@ -423,7 +717,7 @@ impl PTypeDef {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let default_variant = desugar_default_variant(self)?;
-        Ok(TypeDefRef::new(crate::types::r#type::TypeDef {
+        Ok(HirTypeDef {
             name: self.name.0,
             doc: (!self.doc_comments.is_empty()).then(|| self.doc_comments.join("\n")),
             param_names: self.generic_params.iter().map(|(name, _)| *name).collect(),
@@ -436,7 +730,15 @@ impl PTypeDef {
             span: self.span,
             attributes: self.attributes.clone(),
             default_variant,
-        }))
+        })
+    }
+
+    pub(crate) fn desugar(
+        &self,
+        env: &ModuleEnv<'_>,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<TypeDefRef, InternalCompilationError> {
+        Ok(TypeDefRef::new(self.desugar_data(env, modules_used)?))
     }
 }
 
@@ -853,7 +1155,7 @@ fn desugar_resolved_type_without_args(
             Ok(entry.ty)
         }
         ResolvedTypePath::TypeDef(type_def) => {
-            expect_type_argument_count(type_def.param_names.len(), type_def.span, 0, span)?;
+            expect_type_argument_count(type_def.param_names().len(), type_def.span(), 0, span)?;
             Ok(Type::named(type_def, Vec::new()))
         }
         ResolvedTypePath::BareNative(bare) => Ok(Type::native_type(NativeType::new(bare, vec![]))),
@@ -884,8 +1186,8 @@ fn desugar_resolved_type_with_args(
         }
         ResolvedTypePath::TypeDef(type_def) => {
             expect_type_argument_count(
-                type_def.param_names.len(),
-                type_def.span,
+                type_def.param_names().len(),
+                type_def.span(),
                 args.len(),
                 span,
             )?;

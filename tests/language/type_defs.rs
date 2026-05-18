@@ -2028,6 +2028,201 @@ fn create_mix_enum_values() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_enum_values() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum List {
+                Nil,
+                Cons(int, List),
+            }
+
+            let xs = List::Cons(1, List::Cons(2, List::Nil));
+            match xs {
+                Cons(a, tail) => match tail {
+                    Cons(b, tail2) => match tail2 {
+                        Nil => a + b,
+                        Cons(c, rest) => c,
+                    },
+                    Nil => 0,
+                },
+                Nil => 0,
+            }
+        "# }),
+        int(3)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum A {
+                End,
+                Next(B),
+            }
+            enum B {
+                Back(A),
+            }
+
+            let value = A::Next(B::Back(A::End));
+            match value {
+                Next(b) => match b {
+                    Back(a) => match a {
+                        End => 1,
+                        Next(next) => 0,
+                    },
+                },
+                End => 0,
+            }
+        "# }),
+        int(1)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum GList<T> {
+                Nil,
+                Cons(T, GList<T>),
+            }
+
+            let xs = GList::Cons(1, GList::Nil);
+            match xs {
+                Cons(a, tail) => a,
+                Nil => 0,
+            }
+        "# }),
+        int(1)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Tree {
+                Leaf,
+                Node(NodeData),
+            }
+            struct NodeData {
+                left: Tree,
+                right: Tree,
+            }
+
+            let tree = Tree::Node(NodeData { left: Tree::Leaf, right: Tree::Leaf });
+            match tree {
+                Node(data) => match data.left {
+                    Leaf => 1,
+                    Node(next) => 0,
+                },
+                Leaf => 0,
+            }
+        "# }),
+        int(1)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type AliasTree = Leaf | Node(AliasNodeData);
+            struct AliasNodeData {
+                left: AliasTree,
+                right: AliasTree,
+            }
+
+            let tree: AliasTree = Node(AliasNodeData { left: Leaf, right: Leaf });
+            match tree {
+                Node(data) => match data.left {
+                    Leaf => 1,
+                    Node(next) => 0,
+                },
+                Leaf => 0,
+            }
+        "# }),
+        int(1)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type Payload<T> = GenericNodeData<T>;
+            enum GenericTree<T> {
+                Leaf,
+                Node(Payload<T>),
+            }
+            struct GenericNodeData<T> {
+                value: T,
+                left: GenericTree<T>,
+                right: GenericTree<T>,
+            }
+
+            let tree: GenericTree<int> = GenericTree::Node(
+                GenericNodeData {
+                    value: 9,
+                    left: GenericTree::Leaf,
+                    right: GenericTree::Leaf,
+                }
+            );
+            match tree {
+                Node(data) => data.value,
+                Leaf => 0,
+            }
+        "# }),
+        int(9)
+    );
+
+    session
+        .fail_compilation(indoc! { r#"
+            enum Weird<T> {
+                Done,
+                Next(Weird<(T, T)>),
+            }
+        "# })
+        .expect_non_regular_recursive_generic_shape("Weird");
+
+    session
+        .fail_compilation(indoc! { r#"
+            enum A<T> {
+                End,
+                Next(B<(T, T)>),
+            }
+            enum B<T> {
+                Back(A<T>),
+            }
+        "# })
+        .expect_non_regular_recursive_generic_shape("B");
+
+    session
+        .fail_compilation(indoc! { r#"
+            type Payload<T> = GenericNodeData<(T, T)>;
+            enum GenericTree<T> {
+                Leaf,
+                Node(Payload<T>),
+            }
+            struct GenericNodeData<T> {
+                left: GenericTree<T>,
+            }
+        "# })
+        .expect_non_regular_recursive_generic_shape("GenericNodeData");
+
+    session
+        .fail_compilation(indoc! { r#"
+            type Payload<T> = GenericTree<T>;
+            enum GenericTree<T> {
+                Leaf,
+                Node(GenericNodeData<(T, T)>),
+            }
+            struct GenericNodeData<T> {
+                left: Payload<T>,
+            }
+        "# })
+        .expect_non_regular_recursive_generic_shape("GenericNodeData");
+
+    session
+        .fail_compilation(indoc! { r#"
+            type BadAlias = BadData;
+            struct BadData {
+                next: BadAlias,
+            }
+        "# })
+        .expect_infinite_type_product_cycle("BadAlias");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn enum_projections() {
     let mut session = TestSession::new();
     assert_val_eq!(
@@ -2430,33 +2625,15 @@ fn same_module_references() {
         tuple!(string("John"), int(30))
     );
 
-    assert_eq!(
-        session
-            .fail_compilation("struct A { a: A }")
-            .into_inner()
-            .into_unsupported()
-            .unwrap()
-            .1,
-        "Self-referential type paths are not supported, but `A` refers to itself"
-    );
-    assert_eq!(
-        session
-            .fail_compilation("enum A { X(A) }")
-            .into_inner()
-            .into_unsupported()
-            .unwrap()
-            .1,
-        "Self-referential type paths are not supported, but `A` refers to itself"
-    );
-    assert_eq!(
-        session
-            .fail_compilation("enum A { X(B) } struct B { a: A }")
-            .into_inner()
-            .into_unsupported()
-            .unwrap()
-            .1,
-        "Cyclic types are not supported, but `B` indirectly refers to itself"
-    );
+    session
+        .fail_compilation("struct A { a: A }")
+        .expect_infinite_type_product_cycle("A");
+    session
+        .fail_compilation("enum A { X(A) }")
+        .expect_infinite_type_sum_cycle_without_terminating_variant("A");
+    session
+        .fail_compilation("enum A { X(B) } struct B { a: A }")
+        .expect_infinite_type_sum_cycle_without_terminating_variant("B");
 }
 
 #[test]

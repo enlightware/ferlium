@@ -10,6 +10,7 @@
 use ustr::Ustr;
 
 use crate::{
+    FxHashSet,
     format::FormatWith,
     module::{Module, ModuleEnv},
     types::r#type::{NamedType, Type, TypeAliasEntry, TypeInstSubst, TypeKind, TypeVar},
@@ -68,6 +69,20 @@ pub(crate) fn match_alias_type(
     ty_var_count: u32,
     subst: &mut TypeInstSubst,
 ) -> bool {
+    let mut visited = FxHashSet::default();
+    match_alias_type_inner(pattern, actual, ty_var_count, subst, &mut visited)
+}
+
+fn match_alias_type_inner(
+    pattern: Type,
+    actual: Type,
+    ty_var_count: u32,
+    subst: &mut TypeInstSubst,
+    visited: &mut FxHashSet<(Type, Type)>,
+) -> bool {
+    if !visited.insert((pattern, actual)) {
+        return true;
+    }
     let pattern_data = pattern.data();
     let actual_data = actual.data();
     use TypeKind::*;
@@ -84,10 +99,9 @@ pub(crate) fn match_alias_type(
         (Never, Never) => true,
         (Tuple(lhs), Tuple(rhs)) => {
             lhs.len() == rhs.len()
-                && lhs
-                    .iter()
-                    .zip(rhs.iter())
-                    .all(|(lhs, rhs)| match_alias_type(*lhs, *rhs, ty_var_count, subst))
+                && lhs.iter().zip(rhs.iter()).all(|(lhs, rhs)| {
+                    match_alias_type_inner(*lhs, *rhs, ty_var_count, subst, visited)
+                })
         }
         (Record(lhs), Record(rhs)) => {
             lhs.len() == rhs.len()
@@ -96,7 +110,13 @@ pub(crate) fn match_alias_type(
                     .zip(rhs.iter())
                     .all(|((lhs_name, lhs_ty), (rhs_name, rhs_ty))| {
                         lhs_name == rhs_name
-                            && match_alias_type(*lhs_ty, *rhs_ty, ty_var_count, subst)
+                            && match_alias_type_inner(
+                                *lhs_ty,
+                                *rhs_ty,
+                                ty_var_count,
+                                subst,
+                                visited,
+                            )
                     })
         }
         (Variant(lhs), Variant(rhs)) => {
@@ -106,7 +126,13 @@ pub(crate) fn match_alias_type(
                     .zip(rhs.iter())
                     .all(|((lhs_name, lhs_ty), (rhs_name, rhs_ty))| {
                         lhs_name == rhs_name
-                            && match_alias_type(*lhs_ty, *rhs_ty, ty_var_count, subst)
+                            && match_alias_type_inner(
+                                *lhs_ty,
+                                *rhs_ty,
+                                ty_var_count,
+                                subst,
+                                visited,
+                            )
                     })
         }
         (Native(lhs), Native(rhs)) => {
@@ -116,16 +142,18 @@ pub(crate) fn match_alias_type(
                     .arguments
                     .iter()
                     .zip(rhs.arguments.iter())
-                    .all(|(lhs, rhs)| match_alias_type(*lhs, *rhs, ty_var_count, subst))
+                    .all(|(lhs, rhs)| {
+                        match_alias_type_inner(*lhs, *rhs, ty_var_count, subst, visited)
+                    })
         }
         (Function(lhs), Function(rhs)) => {
             lhs.args.len() == rhs.args.len()
                 && lhs.effects == rhs.effects
                 && lhs.args.iter().zip(rhs.args.iter()).all(|(lhs, rhs)| {
                     lhs.mut_ty == rhs.mut_ty
-                        && match_alias_type(lhs.ty, rhs.ty, ty_var_count, subst)
+                        && match_alias_type_inner(lhs.ty, rhs.ty, ty_var_count, subst, visited)
                 })
-                && match_alias_type(lhs.ret, rhs.ret, ty_var_count, subst)
+                && match_alias_type_inner(lhs.ret, rhs.ret, ty_var_count, subst, visited)
         }
         (
             Named(NamedType {
@@ -139,10 +167,9 @@ pub(crate) fn match_alias_type(
         ) => {
             lhs_def == rhs_def
                 && lhs_params.len() == rhs_params.len()
-                && lhs_params
-                    .iter()
-                    .zip(rhs_params.iter())
-                    .all(|(lhs, rhs)| match_alias_type(*lhs, *rhs, ty_var_count, subst))
+                && lhs_params.iter().zip(rhs_params.iter()).all(|(lhs, rhs)| {
+                    match_alias_type_inner(*lhs, *rhs, ty_var_count, subst, visited)
+                })
         }
         _ => false,
     }

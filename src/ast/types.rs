@@ -19,7 +19,6 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::{B, b},
     format::{FormatWith, write_with_separator},
-    internal_compilation_error,
     module::ModuleEnv,
     types::effects::PrimitiveEffect,
     types::mutability::FormatInFnArg,
@@ -207,14 +206,6 @@ impl PType {
             Path(path) => {
                 if path.segments.len() == 1 {
                     let ty_name = path.segments[0].0;
-                    if ty_name == name {
-                        return Err(internal_compilation_error!(Unsupported {
-                            reason: format!(
-                                "Self-referential type paths are not supported, but `{ty_name}` refers to itself"
-                            ),
-                            span: path.segments[0].1,
-                        }));
-                    }
                     if let Some(index) = ty_names.get(&ty_name) {
                         collected.insert(*index);
                     }
@@ -223,14 +214,6 @@ impl PType {
             AppliedPath { path, args } => {
                 if path.segments.len() == 1 {
                     let ty_name = path.segments[0].0;
-                    if ty_name == name {
-                        return Err(internal_compilation_error!(Unsupported {
-                            reason: format!(
-                                "Self-referential type paths are not supported, but `{ty_name}` refers to itself"
-                            ),
-                            span: path.segments[0].1,
-                        }));
-                    }
                     if let Some(index) = ty_names.get(&ty_name) {
                         collected.insert(*index);
                     }

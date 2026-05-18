@@ -10,7 +10,10 @@ use std::ops::Deref;
 
 use crate::types::effects::EffType;
 
-use super::{CompilationError, CompilationErrorImpl, MutabilityMustBeWhat};
+use super::{
+    CompilationError, CompilationErrorImpl, InfiniteTypeKind, InvalidRecursiveTypeKind,
+    MutabilityMustBeWhat,
+};
 
 impl CompilationError {
     pub fn expect_name_defined_multiple_times(&self, name: &str) {
@@ -100,6 +103,40 @@ impl CompilationError {
         match self.deref() {
             UnboundTypeVar { .. } => (),
             _ => panic!("expect_unbound_ty_val called on non-UnboundTypeVar error {self:?}"),
+        }
+    }
+
+    pub fn expect_infinite_type_product_cycle(&self, expected_name: &str) {
+        match self.deref() {
+            CompilationErrorImpl::InfiniteType {
+                kind: InfiniteTypeKind::ProductCycleWithoutSum { name },
+                ..
+            } if name.as_str() == expected_name => {}
+            _ => panic!("expect_infinite_type_product_cycle called on unexpected error {self:?}"),
+        }
+    }
+
+    pub fn expect_infinite_type_sum_cycle_without_terminating_variant(&self, expected_name: &str) {
+        match self.deref() {
+            CompilationErrorImpl::InfiniteType {
+                kind: InfiniteTypeKind::SumCycleWithoutTerminatingVariant { name },
+                ..
+            } if name.as_str() == expected_name => {}
+            _ => panic!(
+                "expect_infinite_type_sum_cycle_without_terminating_variant called on unexpected error {self:?}"
+            ),
+        }
+    }
+
+    pub fn expect_non_regular_recursive_generic_shape(&self, expected_name: &str) {
+        match self.deref() {
+            CompilationErrorImpl::InvalidRecursiveType {
+                kind: InvalidRecursiveTypeKind::NonRegularGenericShape { name },
+                ..
+            } if name.as_str() == expected_name => {}
+            _ => panic!(
+                "expect_non_regular_recursive_generic_shape called on unexpected error {self:?}"
+            ),
         }
     }
 

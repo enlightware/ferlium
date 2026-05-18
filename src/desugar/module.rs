@@ -1,4 +1,7 @@
-use crate::desugar::types::{desugar_type_constraints, extend_generic_ty_params};
+use crate::compiler::error::InvalidRecursiveTypeKind;
+use crate::desugar::types::{
+    RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints, extend_generic_ty_params,
+};
 use crate::hir::function::FunctionDefinition;
 use crate::types::r#trait::{Trait, TraitMethodSpans, TraitRef, TraitSpans, TraitValidationError};
 
@@ -11,22 +14,6 @@ enum NamedTypeData {
     Def(PTypeDef),
 }
 impl NamedTypeData {
-    fn collect_refs(
-        &self,
-        ty_names: &FxHashMap<Ustr, usize>,
-        collected: &mut FxHashSet<usize>,
-    ) -> Result<(), InternalCompilationError> {
-        use NamedTypeData::*;
-        match self {
-            Alias(name, _, alias) => alias.0.collect_refs(name.0, ty_names, collected),
-            Def(def) => {
-                def.shape.collect_refs(def.name.0, ty_names, collected)?;
-                def.where_clause.iter().try_for_each(|constraint| {
-                    constraint.collect_refs(def.name.0, ty_names, collected)
-                })
-            }
-        }
-    }
     fn name(&self) -> Ustr {
         use NamedTypeData::*;
         match self {
@@ -41,6 +28,719 @@ impl NamedTypeData {
             Def(def) => def.name.1,
         }
     }
+    fn generic_params(&self) -> &[UstrSpan] {
+        use NamedTypeData::*;
+        match self {
+            Alias(_, generic_params, _) => generic_params,
+            Def(def) => &def.generic_params,
+        }
+    }
+
+    /// Summarizes the local named-type references made by this alias or type definition.
+    fn cycle_info(&self, ty_names: &FxHashMap<Ustr, usize>) -> TypeCycleInfo {
+        let mut info = TypeCycleInfo::default();
+        match self {
+            NamedTypeData::Alias(_, _, alias) => {
+                info.collect_from_type(&alias.0, ty_names, false);
+            }
+            NamedTypeData::Def(def) => {
+                // Type definitions depend on both their shape and their where-clause
+                // types. Bounds can mention local named types too, so they must take
+                // part in the same dependency graph.
+                info.collect_from_type(&def.shape, ty_names, false);
+                for constraint in &def.where_clause {
+                    for input in &constraint.input_types {
+                        info.collect_from_type(&input.ty.0, ty_names, false);
+                    }
+                    for output in &constraint.output_types {
+                        info.collect_from_type(&output.ty.0, ty_names, false);
+                    }
+                }
+            }
+        }
+        info
+    }
+
+    /// Rejects non-regular generic references to declarations in the same recursive SCC.
+    fn validate_regular_recursive_generic_refs(
+        &self,
+        scc_set: &FxHashSet<usize>,
+        ty_names: &FxHashMap<Ustr, usize>,
+        ty_refs: &[NamedTypeData],
+    ) -> Result<(), InternalCompilationError> {
+        match self {
+            NamedTypeData::Alias(_, generic_params, alias) => {
+                validate_regular_generic_refs_in_type(
+                    &alias.0,
+                    alias.1,
+                    generic_params,
+                    scc_set,
+                    ty_names,
+                    ty_refs,
+                )
+            }
+            NamedTypeData::Def(def) => {
+                validate_regular_generic_refs_in_type(
+                    &def.shape,
+                    def.span,
+                    &def.generic_params,
+                    scc_set,
+                    ty_names,
+                    ty_refs,
+                )?;
+                for constraint in &def.where_clause {
+                    for input in &constraint.input_types {
+                        validate_regular_generic_refs_in_type(
+                            &input.ty.0,
+                            input.ty.1,
+                            &def.generic_params,
+                            scc_set,
+                            ty_names,
+                            ty_refs,
+                        )?;
+                    }
+                    for output in &constraint.output_types {
+                        validate_regular_generic_refs_in_type(
+                            &output.ty.0,
+                            output.ty.1,
+                            &def.generic_params,
+                            scc_set,
+                            ty_names,
+                            ty_refs,
+                        )?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Lowers this non-recursive named type after its local dependencies have been inserted.
+    fn desugar_acyclic(
+        &self,
+        env: &ModuleEnv<'_>,
+        modules_used: &mut FxHashSet<ModuleId>,
+    ) -> Result<DesugaredNamedType, InternalCompilationError> {
+        // Acyclic declarations can be lowered directly because topological ordering
+        // guarantees that every local dependency has already been inserted into the
+        // output module.
+        Ok(match self {
+            NamedTypeData::Alias(name, generic_params, alias) => {
+                let generic_ty_params = extend_generic_ty_params(
+                    &GenericTyParams::default(),
+                    generic_params,
+                    GenericParamsOwner::TypeAlias { name: name.0 },
+                )?;
+                let ty_var_count = generic_params.len() as u32;
+                let param_names: Vec<_> = generic_params.iter().map(|(name, _)| *name).collect();
+                let ty = alias.0.desugar_with_ty_params(
+                    alias.1,
+                    false,
+                    env,
+                    &generic_ty_params,
+                    modules_used,
+                )?;
+                DesugaredNamedType::Alias(*name, param_names, ty_var_count, ty)
+            }
+            NamedTypeData::Def(def) => {
+                DesugaredNamedType::Def(def.name.0, def.desugar(env, modules_used)?)
+            }
+        })
+    }
+}
+
+/// Returns whether `args` is exactly `<T, U, ...>` for the current declaration's parameters.
+fn is_regular_recursive_generic_application(
+    current_generic_params: &[UstrSpan],
+    target_generic_params: &[UstrSpan],
+    args: &[ast::TypeSpan<Parsed>],
+) -> bool {
+    target_generic_params.len() == current_generic_params.len()
+        && args.len() == current_generic_params.len()
+        && args
+            .iter()
+            .zip(current_generic_params)
+            .all(|((arg, _), (expected_name, _))| match arg {
+                ast::PType::Path(path) => {
+                    matches!(&path.segments[..], [(name, _)] if name == expected_name)
+                }
+                _ => false,
+            })
+}
+
+/// Walks a parsed type and checks same-SCC generic applications for regular recursive shape.
+fn validate_regular_generic_refs_in_type(
+    ty: &ast::PType,
+    span: Location,
+    current_generic_params: &[UstrSpan],
+    scc_set: &FxHashSet<usize>,
+    ty_names: &FxHashMap<Ustr, usize>,
+    ty_refs: &[NamedTypeData],
+) -> Result<(), InternalCompilationError> {
+    use ast::PType::*;
+    match ty {
+        AppliedPath { path, args } => {
+            // For now, recursive generic SCCs must be regular: every recursive
+            // application of a generic declaration in the SCC must pass the
+            // current declaration's type parameters through unchanged. This
+            // rejects shapes such as `Tree<T> = Leaf | Node(Tree<(T, T)>)`,
+            // which would otherwise require recursive type-level computation.
+            if let [(name, _)] = &path.segments[..]
+                && let Some(target_index) = ty_names.get(name)
+                && scc_set.contains(target_index)
+            {
+                let target_generic_params = ty_refs[*target_index].generic_params();
+                if !target_generic_params.is_empty()
+                    && !is_regular_recursive_generic_application(
+                        current_generic_params,
+                        target_generic_params,
+                        args,
+                    )
+                {
+                    return Err(internal_compilation_error!(InvalidRecursiveType {
+                        kind: InvalidRecursiveTypeKind::NonRegularGenericShape { name: *name },
+                        span,
+                    }));
+                }
+            }
+            for (arg, arg_span) in args {
+                validate_regular_generic_refs_in_type(
+                    arg,
+                    *arg_span,
+                    current_generic_params,
+                    scc_set,
+                    ty_names,
+                    ty_refs,
+                )?;
+            }
+        }
+        Variant(variants) => {
+            for (_, (payload, payload_span)) in variants {
+                validate_regular_generic_refs_in_type(
+                    payload,
+                    *payload_span,
+                    current_generic_params,
+                    scc_set,
+                    ty_names,
+                    ty_refs,
+                )?;
+            }
+        }
+        Tuple(elements) => {
+            for (element, element_span) in elements {
+                validate_regular_generic_refs_in_type(
+                    element,
+                    *element_span,
+                    current_generic_params,
+                    scc_set,
+                    ty_names,
+                    ty_refs,
+                )?;
+            }
+        }
+        Record(fields) => {
+            for (_, (field, field_span)) in fields {
+                validate_regular_generic_refs_in_type(
+                    field,
+                    *field_span,
+                    current_generic_params,
+                    scc_set,
+                    ty_names,
+                    ty_refs,
+                )?;
+            }
+        }
+        Array(inner) => validate_regular_generic_refs_in_type(
+            &inner.0,
+            inner.1,
+            current_generic_params,
+            scc_set,
+            ty_names,
+            ty_refs,
+        )?,
+        Function(fn_type) => {
+            for arg in &fn_type.args {
+                validate_regular_generic_refs_in_type(
+                    &arg.ty.0,
+                    arg.ty.1,
+                    current_generic_params,
+                    scc_set,
+                    ty_names,
+                    ty_refs,
+                )?;
+            }
+            validate_regular_generic_refs_in_type(
+                &fn_type.ret.0,
+                fn_type.ret.1,
+                current_generic_params,
+                scc_set,
+                ty_names,
+                ty_refs,
+            )?;
+        }
+        Never | Unit | Resolved(_) | Infer | Path(_) => {}
+    }
+    Ok(())
+}
+
+/// Per-declaration summary used to classify recursive type SCCs.
+///
+/// References are split by whether they are guarded by a sum type. Variant payload
+/// reference sets are kept separately so termination can be checked relative to
+/// the current SCC.
+#[derive(Default)]
+struct TypeCycleInfo {
+    guarded_refs: FxHashSet<usize>,
+    unguarded_refs: FxHashSet<usize>,
+    variant_payload_refs: Vec<FxHashSet<usize>>,
+}
+
+impl TypeCycleInfo {
+    /// Collects local named-type references from one parsed type, noting whether they cross a sum boundary.
+    fn collect_from_type(
+        &mut self,
+        ty: &ast::PType,
+        ty_names: &FxHashMap<Ustr, usize>,
+        guarded: bool,
+    ) {
+        use ast::PType::*;
+        match ty {
+            Path(path) => {
+                if let [(name, _)] = &path.segments[..]
+                    && let Some(index) = ty_names.get(name)
+                {
+                    if guarded {
+                        self.guarded_refs.insert(*index);
+                    } else {
+                        self.unguarded_refs.insert(*index);
+                    }
+                }
+            }
+            AppliedPath { path, args } => {
+                // A generic use such as `List<T>` contributes the same dependency as
+                // `List`; its arguments may contribute additional local dependencies.
+                if let [(name, _)] = &path.segments[..]
+                    && let Some(index) = ty_names.get(name)
+                {
+                    if guarded {
+                        self.guarded_refs.insert(*index);
+                    } else {
+                        self.unguarded_refs.insert(*index);
+                    }
+                }
+                for (arg, _) in args {
+                    self.collect_from_type(arg, ty_names, guarded);
+                }
+            }
+            Variant(variants) => {
+                for (_, (payload, _)) in variants {
+                    // Entering a variant payload crosses a sum boundary. A recursive
+                    // reference below this point is guarded by the sum type, and each
+                    // payload is tracked independently so we can later prove that at
+                    // least one branch terminates outside the current SCC.
+                    let mut payload_info = TypeCycleInfo::default();
+                    payload_info.collect_from_type(payload, ty_names, true);
+                    let payload_refs = payload_info.refs();
+                    self.guarded_refs.extend(payload_info.guarded_refs);
+                    self.unguarded_refs.extend(payload_info.unguarded_refs);
+                    self.variant_payload_refs.push(payload_refs);
+                }
+            }
+            Tuple(elements) => {
+                for (element, _) in elements {
+                    self.collect_from_type(element, ty_names, guarded);
+                }
+            }
+            Record(fields) => {
+                for (_, (field, _)) in fields {
+                    self.collect_from_type(field, ty_names, guarded);
+                }
+            }
+            Array(inner) => self.collect_from_type(&inner.0, ty_names, guarded),
+            Function(fn_type) => {
+                for arg in &fn_type.args {
+                    self.collect_from_type(&arg.ty.0, ty_names, guarded);
+                }
+                self.collect_from_type(&fn_type.ret.0, ty_names, guarded);
+            }
+            Never | Unit | Resolved(_) | Infer => {}
+        }
+    }
+
+    /// Returns all same-module named-type references found in this declaration.
+    fn refs(&self) -> FxHashSet<usize> {
+        self.guarded_refs
+            .union(&self.unguarded_refs)
+            .copied()
+            .collect()
+    }
+}
+
+/// Returns whether a one-node SCC is recursive through a self-edge.
+fn is_recursive_singleton(index: usize, deps: &[DepGraphNode]) -> bool {
+    deps[index].0.contains(&index)
+}
+
+/// Rejects recursive SCCs that are product-only or have no terminating sum branch.
+fn validate_type_cycle(
+    scc: &[usize],
+    ty_refs: &[NamedTypeData],
+    cycle_infos: &[TypeCycleInfo],
+    ty_names: &FxHashMap<Ustr, usize>,
+) -> Result<(), InternalCompilationError> {
+    // We accept recursive types only when recursion is guarded by at least one
+    // sum type. To check that, restrict the dependency graph to unguarded edges
+    // inside this SCC. Any cycle that remains is a product-only infinite type:
+    // examples are `type A = A`, mutually recursive structs, or recursion through
+    // tuples/records/functions without crossing a variant.
+    let scc_set = scc.iter().copied().collect::<FxHashSet<_>>();
+    let scc_pos = scc
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(pos, index)| (index, pos))
+        .collect::<FxHashMap<_, _>>();
+    let unguarded_graph = scc
+        .iter()
+        .map(|index| {
+            DepGraphNode(
+                cycle_infos[*index]
+                    .unguarded_refs
+                    .iter()
+                    .copied()
+                    .filter(|dep| scc_set.contains(dep))
+                    .map(|dep| scc_pos[&dep])
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let unguarded_sccs = find_strongly_connected_components(&unguarded_graph);
+    for unguarded_scc in unguarded_sccs {
+        if unguarded_scc.len() > 1
+            || (unguarded_scc.len() == 1
+                && unguarded_graph[unguarded_scc[0]]
+                    .0
+                    .contains(&unguarded_scc[0]))
+        {
+            let ty_ref = &ty_refs[scc[unguarded_scc[0]]];
+            return Err(internal_compilation_error!(InfiniteType {
+                kind: InfiniteTypeKind::ProductCycleWithoutSum {
+                    name: ty_ref.name()
+                },
+                span: ty_ref.name_span(),
+            }));
+        }
+    }
+
+    // Guarded recursion is still not enough: the sum must have a terminating
+    // branch. We accept the SCC when any variant payload in the cycle has no
+    // reference back into the SCC, e.g. `Nil` in `Nil | Cons(T, List<T>)`.
+    let has_terminating_variant = scc.iter().any(|index| {
+        cycle_infos[*index]
+            .variant_payload_refs
+            .iter()
+            .any(|refs| refs.is_disjoint(&scc_set))
+    });
+    if !has_terminating_variant {
+        let ty_ref = &ty_refs[scc[0]];
+        return Err(internal_compilation_error!(InfiniteType {
+            kind: InfiniteTypeKind::SumCycleWithoutTerminatingVariant {
+                name: ty_ref.name()
+            },
+            span: ty_ref.name_span(),
+        }));
+    }
+
+    for index in scc {
+        ty_refs[*index].validate_regular_recursive_generic_refs(&scc_set, ty_names, ty_refs)?;
+    }
+
+    Ok(())
+}
+
+/// Local named-type dependency graph for aliases and type definitions in one module.
+///
+/// `ty_refs` owns the declarations, `ty_dep_graph` stores their local dependency
+/// edges by index, and `sccs` is the SCC partition used for dependency-ordered
+/// desugaring and recursive-cycle handling.
+struct NamedTypeGraph {
+    ty_refs: Vec<NamedTypeData>,
+    ty_dep_graph: Vec<DepGraphNode>,
+    sccs: Vec<Vec<usize>>,
+}
+
+impl NamedTypeGraph {
+    /// Lowers all named types in dependency order, using SCC-specific handling for recursive groups.
+    fn desugar(
+        self,
+        output: &mut Module,
+        others: &Modules,
+    ) -> Result<FxHashSet<ModuleId>, InternalCompilationError> {
+        let NamedTypeGraph {
+            ty_refs,
+            ty_dep_graph,
+            sccs,
+        } = self;
+
+        // Process SCCs in dependency order. The graph edge direction points from a
+        // declaration to the declarations it mentions, so we reverse the topological
+        // SCC order before inserting declarations into the output module.
+        let sorted_sccs = topological_sort_sccs(&ty_dep_graph, &sccs);
+        let mut modules_used = FxHashSet::<ModuleId>::default();
+        for scc in sorted_sccs.into_iter().rev() {
+            let is_recursive = scc.len() > 1 || is_recursive_singleton(scc[0], &ty_dep_graph);
+
+            if is_recursive {
+                desugar_recursive_named_type_scc(
+                    &scc,
+                    &ty_refs,
+                    output,
+                    others,
+                    &mut modules_used,
+                )?;
+                continue;
+            }
+
+            assert_eq!(scc.len(), 1);
+            let desugared = {
+                // Keep the immutable environment borrow short so the output module can
+                // be updated after each acyclic declaration.
+                let env = ModuleEnv::new(output, others);
+                ty_refs[scc[0]].desugar_acyclic(&env, &mut modules_used)?
+            };
+            match desugared {
+                DesugaredNamedType::Alias(name, param_names, ty_var_count, ty) => {
+                    output.add_type_alias(name.0, param_names, ty_var_count, ty);
+                }
+                DesugaredNamedType::Def(name, type_def) => {
+                    output.add_type_def(name, type_def);
+                }
+            }
+        }
+        Ok(modules_used)
+    }
+}
+
+fn build_named_type_graph(
+    type_aliases: Vec<ast::TypeAlias>,
+    type_defs: Vec<PTypeDef>,
+) -> Result<NamedTypeGraph, InternalCompilationError> {
+    // First gather all local aliases and type definitions into a single indexed
+    // list. `ty_names` maps source names back to those indices so dependency
+    // collection can recognize same-module references without consulting the
+    // partially built output module.
+    let (ty_names, ty_refs): (FxHashMap<_, _>, Vec<_>) = type_aliases
+        .into_iter()
+        .map(|alias| {
+            (
+                alias.name.0,
+                NamedTypeData::Alias(alias.name, alias.generic_params, alias.ty),
+            )
+        })
+        .chain(
+            type_defs
+                .into_iter()
+                .map(|def| (def.name.0, NamedTypeData::Def(def))),
+        )
+        .enumerate()
+        .map(|(index, (name, ty_data))| ((name, index), ty_data))
+        .unzip();
+
+    // Build one dependency graph over all named types in the module. The graph
+    // is used both to order acyclic declarations and to identify recursive SCCs
+    // that need validation and special lowering.
+    let cycle_infos = ty_refs
+        .iter()
+        .map(|ty_ref| ty_ref.cycle_info(&ty_names))
+        .collect::<Vec<_>>();
+    let ty_dep_graph = cycle_infos
+        .iter()
+        .map(|info| DepGraphNode(info.refs().into_iter().collect()))
+        .collect::<Vec<_>>();
+    let sccs = find_strongly_connected_components(&ty_dep_graph);
+
+    // Validate every recursive SCC before lowering. This keeps semantic cycle
+    // errors independent from the representation strategy used later for aliases
+    // and nominal type definitions.
+    for scc in &sccs {
+        if scc.len() > 1 || is_recursive_singleton(scc[0], &ty_dep_graph) {
+            validate_type_cycle(scc, &ty_refs, &cycle_infos, &ty_names)?;
+        }
+    }
+
+    Ok(NamedTypeGraph {
+        ty_refs,
+        ty_dep_graph,
+        sccs,
+    })
+}
+
+/// Builds structural placeholder metadata for all aliases in one recursive SCC.
+fn build_recursive_alias_refs(
+    scc: &[usize],
+    ty_refs: &[NamedTypeData],
+) -> FxHashMap<Ustr, RecursiveAliasRef> {
+    scc.iter()
+        .filter_map(|&index| match &ty_refs[index] {
+            NamedTypeData::Alias(name, generic_params, _) => Some((*name, generic_params)),
+            NamedTypeData::Def(_) => None,
+        })
+        .enumerate()
+        .map(|(local_index, (name, generic_params))| {
+            (
+                name.0,
+                RecursiveAliasRef {
+                    name: name.0,
+                    index: local_index as u32,
+                    param_names: generic_params.iter().map(|(name, _)| *name).collect(),
+                    ty_var_count: generic_params.len() as u32,
+                    span: name.1,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Inserts unfilled nominal type-definition handles for all type definitions in one recursive SCC.
+fn predeclare_recursive_type_defs(
+    scc: &[usize],
+    ty_refs: &[NamedTypeData],
+    output: &mut Module,
+) -> FxHashMap<Ustr, TypeDefRef> {
+    scc.iter()
+        .filter_map(|&index| match &ty_refs[index] {
+            NamedTypeData::Alias(..) => None,
+            NamedTypeData::Def(def) => {
+                let param_names = def.generic_params.iter().map(|(name, _)| *name).collect();
+                let type_def = TypeDefRef::new_unfilled(def.name.0, param_names, def.span);
+                output.add_type_def(def.name.0, type_def.clone());
+                Some((def.name.0, type_def))
+            }
+        })
+        .collect()
+}
+
+/// Lowers all aliases in a recursive SCC using structural alias slots and reserved type definitions.
+fn desugar_recursive_aliases_in_scc(
+    scc: &[usize],
+    ty_refs: &[NamedTypeData],
+    env: &ModuleEnv<'_>,
+    modules_used: &mut FxHashSet<ModuleId>,
+    alias_refs: &FxHashMap<Ustr, RecursiveAliasRef>,
+    type_defs: &FxHashMap<Ustr, TypeDefRef>,
+) -> Result<Vec<(UstrSpan, Vec<UstrSpan>, Type)>, InternalCompilationError> {
+    let mut root_tys = Vec::with_capacity(alias_refs.len());
+    let mut root_entries = Vec::with_capacity(alias_refs.len());
+    let mut builder =
+        RecursiveTypeBuilder::new(alias_refs.len(), env, modules_used, alias_refs, type_defs);
+    for &index in scc {
+        let NamedTypeData::Alias(name, generic_params, alias) = &ty_refs[index] else {
+            continue;
+        };
+        let alias_ref = &alias_refs[&name.0];
+        // Each alias root gets its own generic parameter environment. Recursive
+        // generic references are accepted only when they use that alias's own
+        // parameters unchanged; non-regular recursive generic shapes are rejected
+        // by `RecursiveTypeBuilder`.
+        let generic_ty_params = extend_generic_ty_params(
+            &GenericTyParams::default(),
+            generic_params,
+            GenericParamsOwner::TypeAlias { name: name.0 },
+        )?;
+        builder.set_generic_ty_params(generic_ty_params);
+        let ty = builder.desugar_root(alias_ref.index, &alias.0, alias.1)?;
+        root_tys.push(ty);
+        root_entries.push((*name, generic_params.clone()));
+    }
+    let root_tys = builder.finish(&root_tys);
+    Ok(root_entries
+        .into_iter()
+        .zip(root_tys)
+        .map(|((name, generic_params), ty)| (name, generic_params, ty))
+        .collect())
+}
+
+/// Fills all predeclared nominal type definitions in a recursive SCC.
+fn fill_recursive_type_defs_in_scc(
+    scc: &[usize],
+    ty_refs: &[NamedTypeData],
+    env: &ModuleEnv<'_>,
+    modules_used: &mut FxHashSet<ModuleId>,
+    type_defs: &FxHashMap<Ustr, TypeDefRef>,
+) -> Result<(), InternalCompilationError> {
+    for &index in scc {
+        let NamedTypeData::Def(def) = &ty_refs[index] else {
+            continue;
+        };
+        let type_def = type_defs[&def.name.0].clone();
+        type_def.fill(def.desugar_data(env, modules_used)?);
+    }
+    Ok(())
+}
+
+/// Lowers one recursive named-type SCC by reserving aliases and type definitions before finalization.
+fn desugar_recursive_named_type_scc(
+    scc: &[usize],
+    ty_refs: &[NamedTypeData],
+    output: &mut Module,
+    others: &Modules,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Result<(), InternalCompilationError> {
+    // Recursive SCC lowering has one common shape:
+    //
+    // 1. Reserve every name whose final value may be mentioned while the SCC is
+    //    still being lowered.
+    // 2. Lower structural aliases against those reservations.
+    // 3. Publish the resolved aliases in the output module.
+    // 4. Lower and fill nominal type definitions against the now-complete SCC.
+    //
+    // Pure alias SCCs are the degenerate case with no nominal reservations. Pure
+    // type-def SCCs are the degenerate case with no structural alias slots. Mixed
+    // SCCs use both mechanisms in the same pass.
+    let alias_refs = build_recursive_alias_refs(scc, ty_refs);
+    let type_defs = predeclare_recursive_type_defs(scc, ty_refs, output);
+
+    if !alias_refs.is_empty() {
+        // Recursive aliases are structural types, so recursive alias references
+        // are represented as local placeholders while each alias root is
+        // desugared. Type definitions in the same SCC have already been reserved
+        // in the module, and are also passed directly to the builder so aliases
+        // can refer to those nominal handles before their bodies are filled.
+        let entries = {
+            let env = ModuleEnv::new(output, others);
+            desugar_recursive_aliases_in_scc(
+                scc,
+                ty_refs,
+                &env,
+                modules_used,
+                &alias_refs,
+                &type_defs,
+            )?
+        };
+        for (name, generic_params, ty) in entries {
+            output.add_type_alias(
+                name.0,
+                generic_params.iter().map(|(name, _)| *name).collect(),
+                generic_params.len() as u32,
+                ty,
+            );
+        }
+    }
+
+    if !type_defs.is_empty() {
+        // Once aliases have been published, type definition bodies can resolve
+        // aliases and nominal definitions from the same SCC through the normal
+        // module environment.
+        let env = ModuleEnv::new(output, others);
+        fill_recursive_type_defs_in_scc(scc, ty_refs, &env, modules_used, &type_defs)?;
+    }
+
+    Ok(())
+}
+
+enum DesugaredNamedType {
+    Alias(UstrSpan, Vec<Ustr>, u32, Type),
+    Def(Ustr, TypeDefRef),
 }
 
 impl PModule {
@@ -67,85 +767,9 @@ impl PModule {
         let resolver = ModulesResolver::new(others);
         resolve_imports(&uses, &local_names, &resolver, &mut output.uses)?;
 
-        // Build a map of type names to their location and definitions or aliases.
-        // The ty_names map holds indices to the ty_refs vector, which contains the data.
-        let (ty_names, ty_refs): (FxHashMap<_, _>, Vec<_>) = type_aliases
-            .into_iter()
-            .map(|alias| {
-                (
-                    alias.name.0,
-                    NamedTypeData::Alias(alias.name, alias.generic_params, alias.ty),
-                )
-            })
-            .chain(
-                type_defs
-                    .into_iter()
-                    .map(|def| (def.name.0, NamedTypeData::Def(def))),
-            )
-            .enumerate()
-            .map(|(index, (name, ty_data))| ((name, index), ty_data))
-            .unzip();
-
-        // Create the dependency graph of the named types in this module.
-        let ty_dep_graph = ty_refs
-            .iter()
-            .map(|ty_ref| {
-                let mut collected = FxHashSet::default();
-                ty_ref.collect_refs(&ty_names, &mut collected)?;
-                Ok(DepGraphNode(collected.into_iter().collect()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let sccs = find_strongly_connected_components(&ty_dep_graph);
-        for scc in &sccs {
-            if scc.len() > 1 {
-                // If there are multiple types in the same SCC, we have a cycle.
-                // This is currently not allowed in type definitions.
-                let ty_ref = &ty_refs[scc[0]];
-                return Err(internal_compilation_error!(Unsupported {
-                    reason: format!(
-                        "Cyclic types are not supported, but `{}` indirectly refers to itself",
-                        ty_ref.name()
-                    ),
-                    span: ty_ref.name_span(),
-                }));
-            }
-        }
-
-        // Build a module environment with the current module and the others.
+        let type_graph = build_named_type_graph(type_aliases, type_defs)?;
+        let mut modules_used = type_graph.desugar(output, others)?;
         let mut env = ModuleEnv::new(output, others);
-
-        // Process types in order of their dependencies and resolve type aliases and type definitions.
-        // Directly insert them into the output module once they are resolved.
-        let sorted_sccs = topological_sort_sccs(&ty_dep_graph, &sccs);
-        let mut modules_used = FxHashSet::<ModuleId>::default();
-        for scc in sorted_sccs.into_iter().rev() {
-            assert_eq!(scc.len(), 1);
-            let ty_ref = &ty_refs[scc[0]];
-            match ty_ref {
-                NamedTypeData::Alias(name, generic_params, alias) => {
-                    let generic_ty_params = extend_generic_ty_params(
-                        &GenericTyParams::default(),
-                        generic_params,
-                        GenericParamsOwner::TypeAlias { name: name.0 },
-                    )?;
-                    let ty_var_count = generic_params.len() as u32;
-                    let param_names: Vec<_> =
-                        generic_params.iter().map(|(name, _)| *name).collect();
-                    let ty = alias.0.desugar_with_ty_params(
-                        alias.1,
-                        false,
-                        &env,
-                        &generic_ty_params,
-                        &mut modules_used,
-                    )?;
-                    output.add_type_alias(name.0, param_names, ty_var_count, ty);
-                }
-                NamedTypeData::Def(def) => {
-                    output.add_type_def(def.name.0, def.desugar(&env, &mut modules_used)?);
-                }
-            }
-            env = ModuleEnv::new(output, others);
-        }
 
         for trait_def in traits {
             output.add_trait(trait_def.desugar(&env, &mut modules_used)?);

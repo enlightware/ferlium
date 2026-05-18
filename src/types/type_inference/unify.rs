@@ -6,7 +6,8 @@ use ustr::Ustr;
 use crate::{
     FxHashMap, FxHashSet,
     compiler::error::{
-        ADTAccessType, InternalCompilationError, MutabilityMustBeContext, MutabilityMustBeWhat,
+        ADTAccessType, InfiniteTypeKind, InternalCompilationError, MutabilityMustBeContext,
+        MutabilityMustBeWhat,
     },
     hir::NodeArena,
     internal_compilation_error,
@@ -747,7 +748,10 @@ impl UnifiedTypeInference {
         ty_span: Location,
     ) -> Result<(), InternalCompilationError> {
         if ty.contains_any_type_var(var) {
-            Err(internal_compilation_error!(InfiniteType(var, ty, ty_span)))
+            Err(internal_compilation_error!(InfiniteType {
+                kind: InfiniteTypeKind::TypeVariableCycle { ty_var: var, ty },
+                span: ty_span,
+            }))
         } else {
             // If the type is a function type with concrete (non-variable) effects,
             // we need to generalize those effects to preserve effect polymorphism.

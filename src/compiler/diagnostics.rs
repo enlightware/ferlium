@@ -99,7 +99,8 @@ pub(crate) fn diagnostics_from_error(
         | InvalidTraitDefinition { span, .. }
         | UnsupportedTraitDefinition { span, .. }
         | InvalidEnumDefaultAttribute { span, .. }
-        | InfiniteType(_, _, span)
+        | InfiniteType { span, .. }
+        | InvalidRecursiveType { span, .. }
         | UnboundTypeVar { span, .. }
         | UnresolvedConstraints { span, .. }
         | InvalidVariantConstructor { span }

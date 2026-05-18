@@ -123,6 +123,96 @@ fn type_aliases() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_type_aliases() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type List = Nil | Cons(int, List);
+
+            let xs: List = Cons(1, Cons(2, Nil));
+            match xs {
+                Cons(a, tail) => match tail {
+                    Cons(b, tail2) => match tail2 {
+                        Nil => a + b,
+                        Cons(c, rest) => c,
+                    },
+                    Nil => 0,
+                },
+                Nil => 0,
+            }
+        "# }),
+        int(3)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type A = Done | Next(B);
+            type B = Back(A);
+
+            let value: A = Next(Back(Done));
+            match value {
+                Next(b) => match b {
+                    Back(a) => match a {
+                        Done => 1,
+                        Next(next) => 0,
+                    },
+                },
+                Done => 0,
+            }
+        "# }),
+        int(1)
+    );
+
+    session
+        .fail_compilation("type A = A;")
+        .expect_infinite_type_product_cycle("A");
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type List<T> = Nil | Cons(T, List<T>);
+
+            let xs: List<int> = Cons(1, Cons(2, Nil));
+            match xs {
+                Cons(a, tail) => match tail {
+                    Cons(b, tail2) => match tail2 {
+                        Nil => a + b,
+                        Cons(c, rest) => c,
+                    },
+                    Nil => 0,
+                },
+                Nil => 0,
+            }
+        "# }),
+        int(3)
+    );
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            type A<T> = End(T) | Next(B<T>);
+            type B<T> = Back(A<T>);
+
+            let value: A<int> = Next(Back(End(7)));
+            match value {
+                Next(b) => match b {
+                    Back(a) => match a {
+                        End(value) => value,
+                        Next(next) => 0,
+                    },
+                },
+                End(value) => value,
+            }
+        "# }),
+        int(7)
+    );
+
+    session
+        .fail_compilation("type Weird<T> = Done | Next(Weird<(T, T)>);")
+        .expect_non_regular_recursive_generic_shape("Weird");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_type_aliases() {
     let mut session = TestSession::new();
 
