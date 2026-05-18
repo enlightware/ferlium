@@ -71,6 +71,30 @@ fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
     module.format_with(session.session().modules()).to_string()
 }
 
+fn annotated_ide_source(compiler: &mut IdeCompiler, src: &str) -> String {
+    let char_to_byte = |char_pos: usize| {
+        src.char_indices()
+            .map(|(index, _)| index)
+            .nth(char_pos)
+            .unwrap_or(src.len())
+    };
+
+    let mut grouped = Vec::<(usize, String)>::new();
+    for annotation in compiler.get_annotations() {
+        if let Some((_, hint)) = grouped.last_mut().filter(|(pos, _)| *pos == annotation.pos) {
+            hint.push_str(&annotation.hint);
+        } else {
+            grouped.push((annotation.pos, annotation.hint));
+        }
+    }
+
+    let mut annotated = src.to_string();
+    for (pos, hint) in grouped.into_iter().rev() {
+        annotated.insert_str(char_to_byte(pos), &hint);
+    }
+    annotated
+}
+
 fn join_src(parts: &[&str]) -> String {
     parts.join("\n\n")
 }
@@ -2513,6 +2537,52 @@ fn recursive_generic_alias_ide_annotations_preserve_arguments_on_cycle_edges() {
     assert!(
         !signature.contains("Tree<G>") && !annotations.contains("Tree<G>"),
         "recursive edge kept an uninstantiated type variable; signature: {signature}; annotations: {annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_generic_alias_ide_annotations_do_not_leak_borrowed_argument_temps() {
+    let src = indoc! { r#"
+        type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
+
+        fn sum<T>(tree: Tree<T>) {
+            match tree {
+                Leaf(v) => v,
+                Node(l, r) => sum(l) + sum(r)
+            }
+        }
+
+        sum(Node(Node(Leaf(2), Leaf(3)), Leaf(4)))
+    "# };
+    let expected = indoc! { r#"
+        type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
+
+        fn sum<T>(tree: Tree<T>) -> T where T: Num, T: Value {
+            match tree {
+                Leaf(v: T) => v,
+                Node(l: Tree<T>, r: Tree<T>) => sum(tree: l) + sum(tree: r)
+            }
+        }
+
+        sum(tree: Node(Node(Leaf(2), Leaf(3)), Leaf(4))): int
+    "# };
+    let mut compiler = IdeCompiler::new();
+    assert!(
+        compiler.compile(src).is_none(),
+        "source should compile successfully"
+    );
+
+    let annotated = annotated_ide_source(&mut compiler, src);
+
+    assert_eq!(annotated, expected);
+    assert!(
+        !annotated.contains("+:"),
+        "operator spans should not receive type annotations:\n{annotated}"
+    );
+    assert!(
+        !annotated.contains("tree: sum:"),
+        "borrowed argument temporaries should not move hints before the call:\n{annotated}"
     );
 }
 

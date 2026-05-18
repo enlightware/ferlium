@@ -1287,7 +1287,14 @@ impl TypeInference {
         span: Location,
         name: Ustr,
     ) -> (NodeId, NodeId) {
-        let mut local = LocalDecl::new((name, span), MutType::constant(), ty, None, span);
+        let value_span = env.ir_arena[value].span;
+        let mut local = LocalDecl::new(
+            (name, Location::new_synthesized()),
+            MutType::constant(),
+            ty,
+            None,
+            span,
+        );
         local.owns_storage = true;
         if self.node_value_needs_semantic_drop(env, value, ty, span) {
             local.drop_mode = LocalDropMode::Value;
@@ -1305,7 +1312,7 @@ impl TypeInference {
             NodeKind::EnvLoad(hir::EnvLoad { id }),
             ty,
             no_effects(),
-            span,
+            value_span,
         ));
         (store, load)
     }
@@ -1725,7 +1732,7 @@ impl TypeInference {
                         &mut args_node_ids,
                         &inst_fn_ty.args,
                         None,
-                        path_span,
+                        expr_span,
                     );
                     let call = K::TraitMethodApply(b(hir::TraitMethodApplication {
                         trait_ref,
@@ -1738,7 +1745,7 @@ impl TypeInference {
                         input_tys,
                         inst_data,
                     }));
-                    let call = hir::Node::new(call, ret_ty, combined_effects.clone(), path_span);
+                    let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
                     let node =
                         self.wrap_call_with_temp_drops(env, temp_start_index, temp_stores, call);
                     (node, ret_ty, MutType::constant(), combined_effects)
@@ -1783,7 +1790,7 @@ impl TypeInference {
                         &mut args_node_ids,
                         &inst_fn_ty.args,
                         visible_arg_passing,
-                        path_span,
+                        expr_span,
                     );
                     let call = K::StaticApply(b(hir::StaticApplication {
                         function,
@@ -1794,7 +1801,7 @@ impl TypeInference {
                         ty: inst_fn_ty,
                         inst_data,
                     }));
-                    let call = hir::Node::new(call, ret_ty, combined_effects.clone(), path_span);
+                    let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
                     let node =
                         self.wrap_call_with_temp_drops(env, temp_start_index, temp_stores, call);
                     (node, ret_ty, MutType::constant(), combined_effects)
