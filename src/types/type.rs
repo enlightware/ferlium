@@ -31,6 +31,7 @@ use crate::types::mutability::FormatInFnArg;
 use crate::types::type_like::CastableToType;
 use crate::types::type_like::TypeLike;
 use crate::types::type_mapper::TypeMapper;
+use crate::types::type_substitution::{instantiate_type, map_type_recursive};
 use crate::types::type_visitor::TypeInnerVisitor;
 use crate::types::var_set::KindVarSet;
 use crate::{FxHashMap, FxHashSet, Location};
@@ -608,18 +609,7 @@ impl Type {
 
 impl TypeLike for Type {
     fn map(&self, f: &mut impl TypeMapper) -> Self {
-        if !f.affects_type(*self) {
-            return *self;
-        }
-        self.with_cycle_detection(
-            |ty, _| {
-                let kind = ty.data().clone();
-                let new_ty = kind.map(f);
-                f.map_type(new_ty)
-            },
-            |ty, _| *ty,
-            (),
-        )
+        map_type_recursive(*self, f)
     }
 
     fn visit(&self, visitor: &mut impl TypeInnerVisitor) {
@@ -863,9 +853,7 @@ impl TypeDef {
             .copied()
             .zip(params.iter().copied())
             .collect();
-        self.shape
-            .ty
-            .instantiate_simple(&(ty_subst, EffectsInstSubst::default()))
+        instantiate_type(self.shape.ty, &(ty_subst, EffectsInstSubst::default()))
     }
 
     pub fn payload_scheme(&self, tag: Option<Ustr>) -> TypeScheme<Type> {

@@ -14,7 +14,10 @@ use crate::{
     types::mutability::MutType,
     types::r#type::{FnArgType, FnType, NamedType, NativeType, Type, TypeKind, store_types},
     types::type_like::TypeLike,
+    types::type_mapper::{SimpleInstantiationMapper, TypeMapper},
 };
+
+use super::type_inference::substitution::InstSubst;
 
 /// Leaf-rewrite policy for recursive substitution of interned `Type` graphs.
 ///
@@ -44,6 +47,27 @@ pub fn substitute_type(ty: Type, substituer: &mut impl TypeSubstituer) -> Type {
     // The recursive call may short-circuit and return the input `Type` directly
     // when it is fully concrete (no free variables to resolve); in that case
     // there is nothing to re-intern.
+    if result.world().is_some() {
+        result
+    } else {
+        store_types(&kinds)[result.index() as usize]
+    }
+}
+
+/// Recursively instantiate type/effect variables, preserving recursive type graphs.
+pub(crate) fn instantiate_type(ty: Type, subst: &InstSubst) -> Type {
+    map_type_recursive(ty, &mut SimpleInstantiationMapper::new(subst))
+}
+
+/// Recursively map a type while preserving recursive type graphs.
+///
+/// Variable replacements are treated as opaque, matching `TypeMapper`'s
+/// existing instantiation semantics: the mapper rewrites the original graph,
+/// not the types it returns as replacements.
+pub(crate) fn map_type_recursive(ty: Type, mapper: &mut impl TypeMapper) -> Type {
+    let mut kinds = Vec::new();
+    let mut seen = FxHashMap::default();
+    let result = map_type_rec(ty, mapper, &mut kinds, &mut seen);
     if result.world().is_some() {
         result
     } else {
@@ -190,6 +214,92 @@ fn substitute_type_rec(
     // Write back the actual kind into the output list
     output[this_ty_index as usize] = kind;
     Type::new_local(this_ty_index)
+}
+
+fn map_type_rec(
+    ty: Type,
+    mapper: &mut impl TypeMapper,
+    output: &mut Vec<TypeKind>,
+    seen: &mut FxHashMap<Type, u32>,
+) -> Type {
+    if !mapper.affects_type(ty) {
+        return ty;
+    }
+
+    let type_data: TypeKind = { ty.data().clone() };
+    if let TypeKind::Variable(var) = type_data {
+        return mapper.map_type(Type::variable(var));
+    }
+
+    if let Some(index) = seen.get(&ty) {
+        return Type::new_local(*index);
+    }
+
+    let this_ty_index = output.len() as u32;
+    seen.insert(ty, this_ty_index);
+    output.push(TypeKind::Never);
+
+    use TypeKind::*;
+    let kind = match type_data {
+        Variable(_) => unreachable!(),
+        Native(ty) => Native(b(NativeType::new(
+            ty.bare_ty.clone(),
+            map_types_rec(&ty.arguments, mapper, output, seen),
+        ))),
+        Variant(tys) => Variant(
+            tys.into_iter()
+                .map(|(name, ty)| (name, map_type_rec(ty, mapper, output, seen)))
+                .collect(),
+        ),
+        Tuple(tys) => Tuple(map_types_rec(&tys, mapper, output, seen)),
+        Record(fields) => Record(
+            fields
+                .into_iter()
+                .map(|(name, ty)| (name, map_type_rec(ty, mapper, output, seen)))
+                .collect(),
+        ),
+        Function(fn_ty) => Function(b(map_fn_type_rec(&fn_ty, mapper, output, seen))),
+        Named(NamedType { def, params }) => Named(NamedType {
+            def,
+            params: map_types_rec(&params, mapper, output, seen),
+        }),
+        Never => Never,
+    };
+
+    output[this_ty_index as usize] = kind;
+    Type::new_local(this_ty_index)
+}
+
+fn map_types_rec(
+    tys: &[Type],
+    mapper: &mut impl TypeMapper,
+    output: &mut Vec<TypeKind>,
+    seen: &mut FxHashMap<Type, u32>,
+) -> Vec<Type> {
+    tys.iter()
+        .map(|ty| map_type_rec(*ty, mapper, output, seen))
+        .collect()
+}
+
+fn map_fn_type_rec(
+    fn_ty: &FnType,
+    mapper: &mut impl TypeMapper,
+    output: &mut Vec<TypeKind>,
+    seen: &mut FxHashMap<Type, u32>,
+) -> FnType {
+    let args = fn_ty
+        .args
+        .iter()
+        .map(|arg| {
+            FnArgType::new(
+                map_type_rec(arg.ty, mapper, output, seen),
+                mapper.map_mut_type(arg.mut_ty),
+            )
+        })
+        .collect();
+    let ret = map_type_rec(fn_ty.ret, mapper, output, seen);
+    let effects = mapper.map_effect_type(&fn_ty.effects);
+    FnType::new(args, ret, effects)
 }
 
 fn substitute_types_rec(

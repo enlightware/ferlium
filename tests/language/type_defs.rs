@@ -14,6 +14,7 @@ use ferlium::compiler::error::{
 use ferlium::eval::eval_node;
 use ferlium::format::FormatWith;
 use ferlium::hir::value::Value;
+use ferlium::ide::Compiler as IdeCompiler;
 use ferlium::module::id::Id;
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
@@ -2220,6 +2221,104 @@ fn recursive_enum_values() {
             }
         "# })
         .expect_infinite_type_product_cycle("BadAlias");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_generic_alias_instantiation_preserves_arguments_on_cycle_edges() {
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
+
+            fn sum<T>(tree: Tree<T>) {
+                match tree {
+                    Leaf(v) => v,
+                    Node(l, r) => sum(l) + sum(r),
+                }
+            }
+        "# },
+    );
+
+    assert!(
+        rendered.contains("fn sum<A>(tree: Tree<A>) -> A"),
+        "recursive generic alias should keep a single type argument in the signature, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Tree<G>"),
+        "recursive edge kept an uninstantiated type variable:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_generic_enum_instantiation_preserves_arguments_on_cycle_edges() {
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            enum Tree<T> {
+                Leaf(T),
+                Node(Tree<T>, Tree<T>),
+            }
+
+            fn sum<T>(tree: Tree<T>) {
+                match tree {
+                    Leaf(v) => v,
+                    Node(l, r) => sum(l) + sum(r),
+                }
+            }
+        "# },
+    );
+
+    assert!(
+        rendered.contains("Node (Tree<A>, Tree<A>)"),
+        "recursive generic enum should keep a single type argument on recursive edges, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Tree<G>"),
+        "recursive edge kept an uninstantiated type variable:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_generic_alias_ide_annotations_preserve_arguments_on_cycle_edges() {
+    let src = indoc! { r#"
+        type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
+
+        fn sum<T>(tree: Tree<T>) {
+            match tree {
+                Leaf(v) => v,
+                Node(l, r) => sum(l) + sum(r),
+            }
+        }
+    "# };
+    let mut compiler = IdeCompiler::new();
+    assert!(
+        compiler.compile(src).is_none(),
+        "source should compile successfully"
+    );
+    let signature = compiler.fn_signature("sum").unwrap();
+    let annotations = compiler
+        .get_annotations()
+        .into_iter()
+        .map(|annotation| annotation.hint)
+        .collect::<String>();
+
+    assert!(
+        signature.contains("Tree<A>"),
+        "signature should render the recursive alias with a single argument, got: {signature}"
+    );
+    assert!(
+        annotations.contains("Tree<A>"),
+        "IDE annotations should render the recursive alias with a single argument, got: {annotations}"
+    );
+    assert!(
+        !signature.contains("Tree<G>") && !annotations.contains("Tree<G>"),
+        "recursive edge kept an uninstantiated type variable; signature: {signature}; annotations: {annotations}"
+    );
 }
 
 #[test]

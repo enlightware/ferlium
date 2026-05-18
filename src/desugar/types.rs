@@ -4,6 +4,7 @@ use crate::std::array::Array as FerliumArray;
 use crate::types::r#type::{
     BareNativeTypeB, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind, bare_native_type, store_types,
 };
+use crate::types::type_substitution::instantiate_type;
 
 /// Placeholder metadata for an alias root while a recursive type SCC is lowered.
 #[derive(Clone)]
@@ -1192,9 +1193,10 @@ fn desugar_resolved_type_with_args(
                 .map(TypeVar::new)
                 .zip(args)
                 .collect();
-            Ok(entry
-                .ty
-                .instantiate_simple(&(ty_subst, EffectsInstSubst::default())))
+            Ok(instantiate_type(
+                entry.ty,
+                &(ty_subst, EffectsInstSubst::default()),
+            ))
         }
         ResolvedTypePath::TypeDef(type_def) => {
             expect_type_argument_count(
