@@ -212,6 +212,45 @@ This lets one named type definition work for many concrete types while keeping n
 
 Ferlium also supports explicit `where` clauses on generic named types, but the full syntax and meaning of explicit generic parameters and constraints are introduced later in [Explicit Types](./explicit-types.md).
 
+## Recursive types
+
+Type aliases and named types can refer to themselves, directly or indirectly, when the recursion goes through a sum type.
+This is useful for lists, trees, and other recursive data structures.
+
+```ferlium
+type List<T> = Nil | Cons(T, List<T>);
+```
+
+Recursive enums work the same way:
+
+```ferlium
+enum Tree<T> {
+    Leaf,
+    Node(T, Tree<T>, Tree<T>),
+}
+```
+
+The recursion may also pass through another type:
+
+```ferlium
+enum Tree<T> {
+    Leaf,
+    Node(NodeData<T>),
+}
+
+struct NodeData<T> {
+    value: T,
+    left: Tree<T>,
+    right: Tree<T>,
+}
+```
+
+Recursive product types are rejected unless the cycle goes through a sum type with a terminating branch.
+For example, `struct Node { next: Node }` has no finite value, while `Tree` works because `Leaf` stops the recursion.
+
+For generic recursive types, recursive references must pass the type parameters through unchanged.
+For example, `Tree<T>` is supported, but `Tree<(T, T)>` in the recursive position is rejected.
+
 ## Destructuring structured values
 
 Tuples, records, and nominal product types can also be destructured in `let` bindings.
