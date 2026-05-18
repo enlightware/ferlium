@@ -48,15 +48,6 @@ use crate::{
     types::type_inference::{expr::TypeInference, substitution::InstSubst},
 };
 
-/// The display style for type schemes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DisplayStyle {
-    /// Explicitly show quantifiers and constraints in () and connected with ∧.
-    Mathematical,
-    /// Implicitly show quantifiers and constraints connected with , in a where clause.
-    Rust,
-}
-
 /// A constraint that can be part of a type scheme.
 /// This corresponds to a solved constraint in HM(X).
 #[derive(Debug, Clone, Eq, EnumAsInner)]
@@ -895,63 +886,6 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         extra_parameters_from_constraints(&self.constraints)
     }
 
-    pub(crate) fn format_quantifiers_math_style(
-        &self,
-        f: &mut std::fmt::Formatter,
-    ) -> std::fmt::Result {
-        let mut i = 0;
-        for quantifier in &self.ty_quantifiers {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "∀")?;
-            quantifier.format_math_style(f)?;
-            i += 1;
-        }
-        for quantifier in self.eff_quantifiers.iter().sorted() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "∀{quantifier}")?;
-            i += 1;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn format_constraints(
-        &self,
-        style: DisplayStyle,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
-        format_constraints(&self.constraints, style, f, env)
-    }
-
-    pub(crate) fn format_quantifiers_and_constraints_math_style(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
-    ) -> std::fmt::Result {
-        self.format_quantifiers_math_style(f)?;
-        if !self.ty_quantifiers.is_empty() || !self.eff_quantifiers.is_empty() {
-            write!(f, ".")?;
-        }
-        if !self.constraints.is_empty() {
-            write!(f, " ")?;
-        }
-        self.format_constraints(DisplayStyle::Mathematical, f, env)
-    }
-
-    pub(crate) fn display_quantifiers_and_constraints_math_style<'m>(
-        &'m self,
-        env: &'m ModuleEnv<'m>,
-    ) -> FormatQuantifiersAndConstraintsMathStyle<'m, Self> {
-        FormatQuantifiersAndConstraintsMathStyle(FormatWithData {
-            value: self,
-            data: env,
-        })
-    }
-
     pub(crate) fn format_constraints_rust_style_with_type_env(
         &self,
         f: &mut std::fmt::Formatter,
@@ -961,7 +895,7 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             return Ok(());
         }
         write!(f, "where ")?;
-        format_constraints_with_env(&self.constraints, DisplayStyle::Rust, f, env)
+        format_constraints_consolidated_with_env(&self.constraints, f, env)
     }
 
     pub(crate) fn display_constraints_rust_style_with_type_env<'a, 'm>(
@@ -969,30 +903,6 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         env: &'a TypeDisplayEnv<'a, 'm>,
     ) -> FormatConstraintsRustStyleWithTypeEnv<'a, 'm, Ty> {
         FormatConstraintsRustStyleWithTypeEnv { value: self, env }
-    }
-}
-
-impl<'a, Ty> TypeScheme<Ty>
-where
-    Ty: TypeLike + FormatWith<ModuleEnv<'a>>,
-{
-    pub(crate) fn format_math_style(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'a>,
-    ) -> std::fmt::Result {
-        self.format_quantifiers_and_constraints_math_style(f, env)?;
-        if !self.is_just_type_and_effects() {
-            write!(f, " ⇒ ")?;
-        }
-        write!(f, "{}", self.ty.format_with(env))
-    }
-
-    pub fn display_math_style<'m>(&'m self, env: &'m ModuleEnv<'m>) -> FormatMathStyle<'m, Self> {
-        FormatMathStyle(FormatWithData {
-            value: self,
-            data: env,
-        })
     }
 }
 
@@ -1007,17 +917,13 @@ where
         env: &ModuleEnv<'a>,
     ) -> std::fmt::Result {
         let has_constraints = !self.constraints.is_empty();
-        // if has_constraints {
-        //     write!(f, "{{")?;
-        // }
         let ty_var_names = self.display_ty_var_names();
         let type_env = self.type_display_env(env, &ty_var_names);
         write!(f, "{}", self.ty.format_with(&type_env))?;
         if has_constraints {
             write!(f, " ")?;
             write!(f, "where ")?;
-            format_constraints_with_env(&self.constraints, DisplayStyle::Rust, f, &type_env)?;
-            // write!(f, "}}")?;
+            format_constraints_consolidated_with_env(&self.constraints, f, &type_env)?;
         }
         Ok(())
     }
@@ -1229,44 +1135,6 @@ pub(crate) fn extra_parameters_from_constraints(
     }
 }
 
-pub(crate) fn format_constraints(
-    constraints: &[PubTypeConstraint],
-    style: DisplayStyle,
-    f: &mut std::fmt::Formatter,
-    env: &ModuleEnv<'_>,
-) -> std::fmt::Result {
-    format_constraints_with_env(constraints, style, f, env)
-}
-
-fn format_constraints_with_env<Env>(
-    constraints: &[PubTypeConstraint],
-    style: DisplayStyle,
-    f: &mut std::fmt::Formatter,
-    env: &Env,
-) -> std::fmt::Result
-where
-    Type: FormatWith<Env>,
-    PubTypeConstraint: FormatWith<Env>,
-{
-    use DisplayStyle::*;
-    if style == Rust && !constraints.is_empty() {
-        return format_constraints_consolidated_with_env(constraints, f, env);
-    }
-    for (i, constraint) in constraints.iter().enumerate() {
-        if i > 0 {
-            match style {
-                Mathematical => write!(f, " ∧ ")?,
-                Rust => write!(f, ", ")?,
-            }
-        }
-        match style {
-            Mathematical => write!(f, "({})", constraint.format_with(env)),
-            Rust => write!(f, "{}", constraint.format_with(env)),
-        }?;
-    }
-    Ok(())
-}
-
 pub(crate) fn format_constraints_consolidated(
     constraints: &[PubTypeConstraint],
     f: &mut std::fmt::Formatter,
@@ -1393,30 +1261,6 @@ where
         }
     }
     Ok(())
-}
-
-pub(crate) struct FormatQuantifiersAndConstraintsMathStyle<'a, T>(
-    FormatWithData<'a, T, ModuleEnv<'a>>,
-);
-
-impl<Ty: TypeLike> std::fmt::Display
-    for FormatQuantifiersAndConstraintsMathStyle<'_, TypeScheme<Ty>>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0
-            .value
-            .format_quantifiers_and_constraints_math_style(f, self.0.data)
-    }
-}
-
-pub struct FormatMathStyle<'a, T>(FormatWithData<'a, T, ModuleEnv<'a>>);
-
-impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> std::fmt::Display
-    for FormatMathStyle<'a, TypeScheme<Ty>>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.value.format_math_style(f, self.0.data)
-    }
 }
 
 pub(crate) struct FormatConstraintsRustStyleWithTypeEnv<'a, 'm, T: TypeLike> {

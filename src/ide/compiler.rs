@@ -10,8 +10,8 @@
 use std::sync::LazyLock;
 
 use crate::{
-    CompilationError, CompilerSession, DisplayStyle, EvalExprError, FxHashMap, FxHashSet,
-    ModuleAndExpr, ModuleEnv, Path, SourceId, call_fn,
+    CompilationError, CompilerSession, EvalExprError, FxHashMap, FxHashSet, ModuleAndExpr,
+    ModuleEnv, Path, SourceId, call_fn,
     eval::{ValOrMut, eval_node},
     format::FormatWith,
     hir::hir_syn::local,
@@ -229,7 +229,6 @@ impl Compiler {
             source_id,
             source_entry.source(),
             &self.session,
-            DisplayStyle::Rust,
         );
         let mut annotations = annotations
             .into_iter()

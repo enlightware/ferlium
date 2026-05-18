@@ -17,7 +17,7 @@ use crate::{
     format::FormatWith,
     hir::{Node, NodeArena, NodeId, NodeKind},
     module::{LocalDecl, ModuleEnv, id::Id},
-    types::{r#type::Type, type_scheme::DisplayStyle},
+    types::r#type::Type,
 };
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -44,9 +44,7 @@ pub(super) fn display_annotations(
     source_id: SourceId,
     src: &str,
     session: &CompilerSession,
-    style: DisplayStyle,
 ) -> Vec<(usize, String)> {
-    use DisplayStyle::*;
     let entry = session.expect_module_entry(module_and_expr.module_id);
     let module = match entry.module() {
         None => return vec![],
@@ -109,56 +107,32 @@ pub(super) fn display_annotations(
             ty_scheme.display_ty_var_names_with_source_params(&function.definition.generic_params);
         let type_env = ty_scheme.type_display_env(&env, &ty_var_names);
         if !function.definition.ty_scheme.is_just_type() {
-            match style {
-                Mathematical => {
+            let source_param_count = function.definition.generic_params.len();
+            let mut inserted_quantifiers = ty_scheme
+                .display_ty_quantifiers_with_source_params(&function.definition.generic_params)
+                .into_iter()
+                .filter(|ty_var| ty_var.name() as usize >= source_param_count)
+                .map(|ty_var| {
+                    ty_var_names
+                        .get(&ty_var)
+                        .map_or_else(|| format!("{ty_var}"), ToString::to_string)
+                })
+                .chain(ty_scheme.eff_quantifiers.iter().map(|q| format!("{q}")))
+                .peekable();
+            if inserted_quantifiers.peek().is_some() {
+                let inserted_quantifiers = inserted_quantifiers.collect::<Vec<_>>().join(", ");
+                if let Some((_, last_source_param_span)) = function
+                    .definition
+                    .generic_params
+                    .iter()
+                    .max_by_key(|(_, span)| span.end_usize())
+                {
                     annotations.push((
-                        spans.span.start_usize(),
-                        format!(
-                            "{} ",
-                            function
-                                .definition
-                                .ty_scheme
-                                .display_quantifiers_and_constraints_math_style(&env)
-                        ),
+                        last_source_param_span.end_usize(),
+                        format!(", {inserted_quantifiers}"),
                     ));
-                }
-                Rust => {
-                    let source_ty_vars = (0..function.definition.generic_params.len())
-                        .map(|index| crate::types::r#type::TypeVar::new(index as u32))
-                        .collect::<FxHashSet<_>>();
-                    let mut inserted_quantifiers = ty_scheme
-                        .display_ty_quantifiers_with_source_params(
-                            &function.definition.generic_params,
-                        )
-                        .into_iter()
-                        .filter(|ty_var| !source_ty_vars.contains(ty_var))
-                        .map(|ty_var| {
-                            ty_var_names
-                                .get(&ty_var)
-                                .map_or_else(|| format!("{ty_var}"), ToString::to_string)
-                        })
-                        .chain(ty_scheme.eff_quantifiers.iter().map(|q| format!("{q}")))
-                        .peekable();
-                    if inserted_quantifiers.peek().is_some() {
-                        let inserted_quantifiers =
-                            inserted_quantifiers.collect::<Vec<_>>().join(", ");
-                        if let Some((_, last_source_param_span)) = function
-                            .definition
-                            .generic_params
-                            .iter()
-                            .max_by_key(|(_, span)| span.end_usize())
-                        {
-                            annotations.push((
-                                last_source_param_span.end_usize(),
-                                format!(", {inserted_quantifiers}"),
-                            ));
-                        } else {
-                            annotations.push((
-                                spans.name.end_usize(),
-                                format!("<{inserted_quantifiers}>"),
-                            ));
-                        }
-                    }
+                } else {
+                    annotations.push((spans.name.end_usize(), format!("<{inserted_quantifiers}>")));
                 }
             }
         }
@@ -234,7 +208,7 @@ pub(super) fn display_annotations(
                 function.definition.ty_scheme.ty.effects
             ))
         };
-        if style == Rust && !function.definition.ty_scheme.is_just_type_and_effects() {
+        if !function.definition.ty_scheme.is_just_type_and_effects() {
             annotation = Some(format!(
                 "{}{}{}",
                 annotation.as_ref().map_or("", |v| v),
@@ -262,10 +236,7 @@ pub(super) fn display_annotations(
         let root_span = module.ir_arena[expr.expr].span;
         annotations.push((
             root_span.end_usize(),
-            match style {
-                Mathematical => format!(": {}", expr.ty.display_math_style(&env)),
-                Rust => format!(": {}", expr.ty.display_rust_style(&env)),
-            },
+            format!(": {}", expr.ty.display_rust_style(&env)),
         ));
     }
     // FIXME: this need better behaviour to be useful.

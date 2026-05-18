@@ -46,7 +46,6 @@ use ustr::{Ustr, ustr};
 use crate::assert::assert_unique_strings;
 use crate::containers::compare_by;
 use crate::containers::{B, DenseBitSet, SVec2, b};
-use crate::format::type_variable_index_to_string_greek;
 use crate::format::type_variable_index_to_string_latin;
 use crate::graph;
 use crate::module::ModuleEnv;
@@ -83,9 +82,6 @@ impl TypeVar {
     }
     pub fn format_rust_style(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", type_variable_index_to_string_latin(self.name))
-    }
-    pub fn format_math_style(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", type_variable_index_to_string_greek(self.name))
     }
     pub fn instantiate(&self, subst: &TypeInstSubst) -> Type {
         if let Some(ty) = subst.get(self) {

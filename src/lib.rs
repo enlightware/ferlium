@@ -37,8 +37,6 @@ pub use module::{ModuleEnv, Path};
 pub use parser::location::{Location, SourceId, SourceTable};
 pub use types::type_inference::unify::SubOrSameType;
 
-use types::type_scheme::DisplayStyle;
-
 /// Call a compiled function after validating its type signature, for any arity.
 /// - Session: `session` — a `CompilerSession` containing the module to call the function from.
 /// - Module: `module_id` — the id of the module to call the function from
