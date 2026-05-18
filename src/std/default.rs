@@ -50,11 +50,12 @@ impl Deriver for EnumDefaultDeriver {
         };
         let named = named.clone();
         drop(ty_data);
-        let Some(default_variant) = named.def.default_variant else {
+        let type_def = solver.type_def(named.def);
+        let Some(default_variant) = type_def.default_variant else {
             return Ok(None);
         };
 
-        let shape = named.instantiated_shape();
+        let shape = type_def.instantiated_shape(&named.params);
         let shape_data = shape.data();
         let payload_ty = shape_data
             .as_variant()

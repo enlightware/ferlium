@@ -634,7 +634,7 @@ impl Node {
                 let inner_ty = if ty_data.is_named() {
                     let named = ty_data.as_named().unwrap().clone();
                     drop(ty_data);
-                    named.instantiated_shape()
+                    named.instantiated_shape(env)
                 } else {
                     drop(ty_data);
                     self.ty

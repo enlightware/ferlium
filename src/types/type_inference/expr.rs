@@ -162,18 +162,20 @@ impl TypeInference {
         &mut self,
         type_def_lookup: TypeDefLookupResult,
         use_site: Location,
-    ) -> (crate::types::r#type::TypeDefRef, Type, Type, Option<Ustr>) {
+        module_env: &ModuleEnv<'_>,
+    ) -> (crate::module::TypeDefId, Type, Type, Option<Ustr>) {
         let (type_def, tag) = type_def_lookup.lookup_payload();
-        let (payload_ty, _inst_data, subst) = type_def
+        let type_def_data = module_env.type_def(type_def);
+        let (payload_ty, _inst_data, subst) = type_def_data
             .payload_scheme(tag)
             .instantiate_with_fresh_vars(self, use_site, None);
-        let params: Vec<_> = type_def
+        let params: Vec<_> = type_def_data
             .shape
             .ty_quantifiers
             .iter()
             .map(|quantifier| quantifier.instantiate(&subst.0))
             .collect();
-        let named_ty = Type::named(type_def.clone(), params);
+        let named_ty = Type::named(type_def, params);
         (type_def, payload_ty, named_ty, tag)
     }
 
@@ -466,11 +468,11 @@ impl TypeInference {
                 else if let Some(type_def) = env.get_type_def(path)? {
                     // Retrieve the payload type and the tag, if it is an enum.
                     let (type_def, payload_ty, ty, tag) =
-                        self.instantiate_type_def(type_def, expr_span);
+                        self.instantiate_type_def(type_def, expr_span, &env.module_env);
                     if payload_ty != Type::unit() {
                         return Err(internal_compilation_error!(IsNotCorrectProductType {
                             which: WhichProductTypeIsNot::Unit,
-                            type_def: type_def.clone(),
+                            type_def,
                             what: WhatIsNotAProductType::from_tag(tag),
                             instantiation_span: expr_span,
                         }));
@@ -595,8 +597,9 @@ impl TypeInference {
                     }
                     PatternConstraintKind::NamedType(type_def) => {
                         let (_type_def, _payload_ty, named_ty, _tag) = self.instantiate_type_def(
-                            TypeDefLookupResult::Struct(type_def.clone()),
+                            TypeDefLookupResult::Struct(*type_def),
                             data.span,
+                            &env.module_env,
                         );
                         self.add_same_type_constraint(
                             env.ir_arena[node_id].ty,
@@ -927,12 +930,12 @@ impl TypeInference {
                 if let Some(type_def) = env.get_type_def(&data.path)? {
                     // Then resolve the layout of the struct.
                     let (type_def, payload_ty, ty, tag) =
-                        self.instantiate_type_def(type_def, expr_span);
+                        self.instantiate_type_def(type_def, expr_span, &env.module_env);
                     // Check that it is a record.
                     if !payload_ty.data().is_record() {
                         return Err(internal_compilation_error!(IsNotCorrectProductType {
                             which: WhichProductTypeIsNot::Record,
-                            type_def: type_def.clone(),
+                            type_def,
                             what: WhatIsNotAProductType::from_tag(tag),
                             instantiation_span: expr_span,
                         }));
@@ -1799,7 +1802,7 @@ impl TypeInference {
             } else if let Some(type_def) = env.get_type_def(path)? {
                 // Retrieve the payload type and the tag, if it is an enum.
                 let (type_def, payload_ty, ty, tag) =
-                    self.instantiate_type_def(type_def, expr_span);
+                    self.instantiate_type_def(type_def, expr_span, &env.module_env);
                 // Compute the arity from the payload type.
                 let payload_tys = if payload_ty == Type::unit() {
                     vec![]
@@ -1809,7 +1812,7 @@ impl TypeInference {
                         TypeKind::Record(_) => {
                             return Err(internal_compilation_error!(IsNotCorrectProductType {
                                 which: WhichProductTypeIsNot::Tuple,
-                                type_def: type_def.clone(),
+                                type_def,
                                 what: WhatIsNotAProductType::from_tag(tag),
                                 instantiation_span: expr_span,
                             }));

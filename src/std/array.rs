@@ -20,7 +20,7 @@ use crate::{
         UnaryNativeFnMN, UnaryNativeFnMV, UnaryNativeFnNN, UnaryNativeFnRN,
     },
     hir::value::{NativeDisplay, NativeValue, Value},
-    module::{BlanketTraitImplSubKey, Module, ModuleFunction},
+    module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleFunction},
     types::effects::no_effects,
     types::r#type::{FnType, NativeType, Type, bare_native_type},
     types::type_scheme::{PubTypeConstraint, TypeScheme},
@@ -390,11 +390,18 @@ impl NativeDisplay for Array {
         write_with_separator_and_format_fn(self.0.iter(), ", ", Value::format_as_string_repr, f)?;
         write!(f, "]")
     }
-    fn fmt_pretty(&self, f: &mut fmt::Formatter, ty: &NativeType) -> fmt::Result {
+    fn fmt_pretty(
+        &self,
+        f: &mut fmt::Formatter,
+        ty: &NativeType,
+        env: Option<&ModuleEnv<'_>>,
+    ) -> fmt::Result {
         write!(f, "[")?;
         let inner_ty = ty.arguments[0];
         write_with_separator(
-            self.0.iter().map(|item| item.display_pretty(&inner_ty)),
+            self.0
+                .iter()
+                .map(|item| item.display_pretty_env(&inner_ty, env)),
             ", ",
             f,
         )?;

@@ -27,7 +27,7 @@ use crate::{
         DefTable, FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitDictionary,
-        TraitImpl, TraitImplId, TraitImpls, TraitKey, build_dictionary_value, id::Id,
+        TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value, id::Id,
     },
     std::{
         core::REPR_TRAIT,
@@ -37,7 +37,7 @@ use crate::{
     types::effects::EffType,
     types::mutability::MutType,
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
-    types::r#type::{FnArgType, Type},
+    types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::BitmapInstantiationMapper,
@@ -46,10 +46,34 @@ use crate::{
 #[cfg(debug_assertions)]
 use crate::types::type_visitor::AllVarsCollector;
 
+/// Type definitions owned by the module currently being solved.
+#[derive(Clone, Copy, Debug)]
+pub struct CurrentTypeDefs<'a> {
+    module_id: ModuleId,
+    slots: &'a [TypeDefSlot],
+}
+
+impl<'a> CurrentTypeDefs<'a> {
+    pub(crate) fn new(module_id: ModuleId, slots: &'a [TypeDefSlot]) -> Self {
+        Self { module_id, slots }
+    }
+
+    fn get(self, id: TypeDefId) -> Option<&'a TypeDef> {
+        if id.module == self.module_id {
+            Some(self.slots[id.index.as_index()].def())
+        } else {
+            None
+        }
+    }
+}
+
 /// Trait solving is performed by this structure, mutating it by caching intermediate results.
+#[allow(clippy::too_many_arguments)]
 #[derive(Debug, new)]
 #[must_use = "call .commit() to store the created functions"]
 pub struct TraitSolver<'a> {
+    /// Current module type definitions.
+    pub current_type_defs: CurrentTypeDefs<'a>,
     /// Current module implementations.
     pub impls: &'a mut TraitImpls,
     /// Current module functions available by name.
@@ -80,6 +104,7 @@ fn materialized_associated_const_values(
     input_tys: &[Type],
     template_values: &[isize],
     span: Location,
+    solver: &TraitSolver<'_>,
 ) -> Result<Vec<isize>, InternalCompilationError> {
     if trait_ref.associated_const_count() == 0 {
         return Ok(Vec::new());
@@ -90,7 +115,7 @@ fn materialized_associated_const_values(
     // Temporary special case: blanket impls cannot yet store associated const
     // formulas, so materialized Value dictionaries synthesize layout metadata.
     if trait_ref == &*VALUE_TRAIT {
-        return Ok(value_layout_associated_const_values(input_tys[0], span)?.into());
+        return Ok(value_layout_associated_const_values(input_tys[0], span, solver)?.into());
     }
     Err(internal_compilation_error!(Internal {
         error: format!(
@@ -110,6 +135,10 @@ macro_rules! trait_solver_from_module {
             crate::types::trait_solver::current_function_map(&$module.def_table);
         let function_count = $module.functions.len();
         TraitSolver::new(
+            crate::types::trait_solver::CurrentTypeDefs::new(
+                $module.module_id(),
+                $module.type_defs.as_slice(),
+            ),
             &mut $module.impls,
             current_functions,
             &mut $module.import_fn_slots,
@@ -123,6 +152,7 @@ pub(crate) use trait_solver_from_module;
 
 /// Scratch overlay for running trait-solver queries without mutating a real module.
 pub(crate) struct TraitSolverProbe<'a> {
+    current_type_defs: CurrentTypeDefs<'a>,
     impls: Cow<'a, TraitImpls>,
     current_functions: FxHashMap<Ustr, LocalFunctionId>,
     import_fn_slots: Vec<ImportFunctionSlot>,
@@ -307,6 +337,10 @@ impl<'a> ConstraintAssumptions<'a> {
 impl<'a> TraitSolverProbe<'a> {
     pub(crate) fn from_module(module: &'a Module, others: &'a Modules) -> Self {
         Self {
+            current_type_defs: CurrentTypeDefs::new(
+                module.module_id(),
+                module.type_defs.as_slice(),
+            ),
             impls: Cow::Borrowed(&module.impls),
             current_functions: current_function_map(&module.def_table),
             import_fn_slots: module.import_fn_slots.clone(),
@@ -323,6 +357,7 @@ impl<'a> TraitSolverProbe<'a> {
             .concrete_key_to_id
             .retain(|_, id| impls.data[id.as_index()].public);
         Self {
+            current_type_defs: solver.current_type_defs,
             impls: Cow::Owned(impls),
             current_functions: solver.current_functions.clone(),
             import_fn_slots: solver.import_fn_slots.clone(),
@@ -340,6 +375,7 @@ impl<'a> TraitSolverProbe<'a> {
             FunctionCollector::new(initial_count),
         );
         let mut solver = TraitSolver::new(
+            self.current_type_defs,
             self.impls.to_mut(),
             mem::take(&mut self.current_functions),
             &mut self.import_fn_slots,
@@ -482,6 +518,16 @@ enum BlanketImplMatch {
 }
 
 impl<'a> TraitSolver<'a> {
+    pub fn type_def(&self, id: TypeDefId) -> &TypeDef {
+        self.current_type_defs.get(id).unwrap_or_else(|| {
+            self.others
+                .get(id.module)
+                .and_then(|entry| entry.module())
+                .unwrap_or_else(|| panic!("Type definition module #{} is unavailable", id.module))
+                .type_def(id)
+        })
+    }
+
     /// Collect all visible concrete and blanket impl heads for a trait.
     ///
     /// This is used by trait improvement to probe whether a partially known
@@ -1442,7 +1488,7 @@ impl<'a> TraitSolver<'a> {
             let ty_data = input_ty.data();
             let output_ty = if ty_data.is_named() {
                 let named = ty_data.as_named().unwrap().clone();
-                named.instantiated_shape()
+                self.type_def(named.def).instantiated_shape(&named.params)
             } else {
                 input_ty
             };
@@ -1581,6 +1627,7 @@ impl<'a> TraitSolver<'a> {
                         input_tys,
                         &imp.associated_const_values,
                         fn_span,
+                        self,
                     )?;
 
                     // Then collect constraint dictionary info for building thunk nodes later.
@@ -1740,6 +1787,7 @@ impl<'a> TraitSolver<'a> {
                     input_tys,
                     &imp_associated_const_values,
                     fn_span,
+                    self,
                 )?;
                 let materialization_snapshot = self.snapshot_derived_impl_state();
                 let local_impl_id = self.reserve_concrete_impl_from_code_entries(

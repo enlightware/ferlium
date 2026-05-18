@@ -11,6 +11,7 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     FxHashMap, Location,
+    module::ModuleEnv,
     types::effects::EffectsInstSubst,
     types::r#type::{NamedType, Type, TypeKind},
     types::type_like::TypeLike,
@@ -18,20 +19,22 @@ use crate::{
     types::type_scheme::PubTypeConstraint,
 };
 
-struct NamedTypeConstraintCollector {
+struct NamedTypeConstraintCollector<'a> {
     use_site: Location,
     seen_tys: FxHashSet<Type>,
     seen_constraints: FxHashSet<PubTypeConstraint>,
     constraints: Vec<PubTypeConstraint>,
+    env: &'a ModuleEnv<'a>,
 }
 
-impl NamedTypeConstraintCollector {
-    fn new(use_site: Location) -> Self {
+impl<'a> NamedTypeConstraintCollector<'a> {
+    fn new(use_site: Location, env: &'a ModuleEnv<'a>) -> Self {
         Self {
             use_site,
             seen_tys: FxHashSet::default(),
             seen_constraints: FxHashSet::default(),
             constraints: Vec::new(),
+            env,
         }
     }
 
@@ -74,8 +77,8 @@ impl NamedTypeConstraintCollector {
     }
 
     fn collect_named_type(&mut self, named: &NamedType) {
-        let ty_subst = named
-            .def
+        let type_def = self.env.type_def(named.def);
+        let ty_subst = type_def
             .shape
             .ty_quantifiers
             .iter()
@@ -84,7 +87,7 @@ impl NamedTypeConstraintCollector {
             .collect::<FxHashMap<_, _>>();
         let subst = (ty_subst, EffectsInstSubst::default());
         let mut mapper = BitmapInstantiationMapper::new(&subst);
-        for constraint in &named.def.shape.constraints {
+        for constraint in &type_def.shape.constraints {
             let mut constraint = constraint.map(&mut mapper);
             constraint.instantiate_location(self.use_site);
             if self.seen_constraints.insert(constraint.clone()) {
@@ -142,8 +145,9 @@ impl NamedTypeConstraintCollector {
 pub(crate) fn named_type_constraints_in_types(
     tys: impl IntoIterator<Item = Type>,
     use_site: Location,
+    env: &ModuleEnv<'_>,
 ) -> Vec<PubTypeConstraint> {
-    let mut collector = NamedTypeConstraintCollector::new(use_site);
+    let mut collector = NamedTypeConstraintCollector::new(use_site, env);
     for ty in tys {
         collector.collect_type(ty);
     }

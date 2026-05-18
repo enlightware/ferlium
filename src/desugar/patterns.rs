@@ -165,7 +165,7 @@ fn resolve_struct_pattern_type(
     path: &ast::Path,
     ctx: &DesugarCtx,
     modules_used: &mut FxHashSet<ModuleId>,
-) -> Result<TypeDefRef, InternalCompilationError> {
+) -> Result<TypeDefId, InternalCompilationError> {
     let path_span = path.span().unwrap();
     match ctx.module_env.type_def_for_construction(path)? {
         Some((module_id, TypeDefLookupResult::Struct(type_def))) => {
@@ -198,12 +198,12 @@ fn tuple_pattern_type_constraint(
         let path_span = path.span().unwrap_or(pattern_span);
         let type_def = resolve_struct_pattern_type(path, ctx, modules_used)?;
         let arity = {
-            let payload_ty = type_def.shape_ty();
+            let payload_ty = ctx.module_env.type_def(type_def).shape_ty();
             let payload_data = payload_ty.data();
             let tuple_tys = payload_data.as_tuple().ok_or_else(|| {
                 internal_compilation_error!(IsNotCorrectProductType {
                     which: WhichProductTypeIsNot::Tuple,
-                    type_def: type_def.clone(),
+                    type_def,
                     what: WhatIsNotAProductType::Struct,
                     instantiation_span: path_span,
                 })
@@ -225,16 +225,17 @@ fn tuple_pattern_type_constraint(
 }
 
 fn validate_record_struct_pattern(
-    type_def: &TypeDefRef,
+    type_def: TypeDefId,
     sorted_fields: &[&LetRecordPatternField],
     pattern_span: Location,
     has_rest: bool,
+    env: &ModuleEnv<'_>,
 ) -> Result<(), InternalCompilationError> {
-    let shape_data = type_def.shape_ty().data();
+    let shape_data = env.type_def(type_def).shape_ty().data();
     let layout = shape_data.as_record().ok_or_else(|| {
         internal_compilation_error!(IsNotCorrectProductType {
             which: WhichProductTypeIsNot::Record,
-            type_def: type_def.clone(),
+            type_def,
             what: WhatIsNotAProductType::Struct,
             instantiation_span: pattern_span,
         })
@@ -247,7 +248,7 @@ fn validate_record_struct_pattern(
                 .is_err()
             {
                 return Err(internal_compilation_error!(InvalidStructField {
-                    type_def: type_def.clone(),
+                    type_def,
                     field_name: field.name.0,
                     field_span: field.name.1,
                     instantiation_span: pattern_span,
@@ -264,13 +265,13 @@ fn validate_record_struct_pattern(
         let field_name = field.name.0;
         if layout_field_name < field_name {
             return Err(internal_compilation_error!(MissingStructField {
-                type_def: type_def.clone(),
+                type_def,
                 field_name: layout_field_name,
                 instantiation_span: pattern_span,
             }));
         } else if layout_field_name > field_name {
             return Err(internal_compilation_error!(InvalidStructField {
-                type_def: type_def.clone(),
+                type_def,
                 field_name,
                 field_span: field.name.1,
                 instantiation_span: pattern_span,
@@ -280,7 +281,7 @@ fn validate_record_struct_pattern(
 
     if layout_size > fields_size {
         return Err(internal_compilation_error!(MissingStructField {
-            type_def: type_def.clone(),
+            type_def,
             field_name: layout[fields_size].0,
             instantiation_span: pattern_span,
         }));
@@ -288,7 +289,7 @@ fn validate_record_struct_pattern(
     if layout_size < fields_size {
         let field = sorted_fields[layout_size];
         return Err(internal_compilation_error!(InvalidStructField {
-            type_def: type_def.clone(),
+            type_def,
             field_name: field.name.0,
             field_span: field.name.1,
             instantiation_span: pattern_span,
@@ -314,7 +315,13 @@ fn record_pattern_type_constraint(
     let sorted_fields = sort_record_pattern_fields(fields, pattern_span, record_ctx)?;
     if let Some(path) = path {
         let type_def = resolve_struct_pattern_type(path, ctx, modules_used)?;
-        validate_record_struct_pattern(&type_def, &sorted_fields, pattern_span, has_rest)?;
+        validate_record_struct_pattern(
+            type_def,
+            &sorted_fields,
+            pattern_span,
+            has_rest,
+            ctx.module_env,
+        )?;
         Ok(Some(PatternConstraintKind::NamedType(type_def)))
     } else {
         Ok(None)

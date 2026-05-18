@@ -606,14 +606,13 @@ fn predeclare_recursive_type_defs(
     scc: &[usize],
     ty_refs: &[NamedTypeData],
     output: &mut Module,
-) -> FxHashMap<Ustr, TypeDefRef> {
+) -> FxHashMap<Ustr, TypeDefId> {
     scc.iter()
         .filter_map(|&index| match &ty_refs[index] {
             NamedTypeData::Alias(..) => None,
             NamedTypeData::Def(def) => {
                 let param_names = def.generic_params.iter().map(|(name, _)| *name).collect();
-                let type_def = TypeDefRef::new_unfilled(def.name.0, param_names, def.span);
-                output.add_type_def(def.name.0, type_def.clone());
+                let type_def = output.reserve_type_def(def.name.0, param_names, def.span);
                 Some((def.name.0, type_def))
             }
         })
@@ -627,7 +626,7 @@ fn desugar_recursive_aliases_in_scc(
     env: &ModuleEnv<'_>,
     modules_used: &mut FxHashSet<ModuleId>,
     alias_refs: &FxHashMap<Ustr, RecursiveAliasRef>,
-    type_defs: &FxHashMap<Ustr, TypeDefRef>,
+    type_defs: &FxHashMap<Ustr, TypeDefId>,
 ) -> Result<Vec<(UstrSpan, Vec<UstrSpan>, Type)>, InternalCompilationError> {
     let mut root_tys = Vec::with_capacity(alias_refs.len());
     let mut root_entries = Vec::with_capacity(alias_refs.len());
@@ -664,16 +663,21 @@ fn desugar_recursive_aliases_in_scc(
 fn fill_recursive_type_defs_in_scc(
     scc: &[usize],
     ty_refs: &[NamedTypeData],
-    env: &ModuleEnv<'_>,
+    output: &mut Module,
+    others: &Modules,
     modules_used: &mut FxHashSet<ModuleId>,
-    type_defs: &FxHashMap<Ustr, TypeDefRef>,
+    type_defs: &FxHashMap<Ustr, TypeDefId>,
 ) -> Result<(), InternalCompilationError> {
     for &index in scc {
         let NamedTypeData::Def(def) = &ty_refs[index] else {
             continue;
         };
-        let type_def = type_defs[&def.name.0].clone();
-        type_def.fill(def.desugar_data(env, modules_used)?);
+        let type_def = type_defs[&def.name.0];
+        let desugared = {
+            let env = ModuleEnv::new(output, others);
+            def.desugar_data(&env, modules_used)?
+        };
+        output.fill_type_def(type_def, desugared);
     }
     Ok(())
 }
@@ -731,8 +735,7 @@ fn desugar_recursive_named_type_scc(
         // Once aliases have been published, type definition bodies can resolve
         // aliases and nominal definitions from the same SCC through the normal
         // module environment.
-        let env = ModuleEnv::new(output, others);
-        fill_recursive_type_defs_in_scc(scc, ty_refs, &env, modules_used, &type_defs)?;
+        fill_recursive_type_defs_in_scc(scc, ty_refs, output, others, modules_used, &type_defs)?;
     }
 
     Ok(())
@@ -740,7 +743,7 @@ fn desugar_recursive_named_type_scc(
 
 enum DesugaredNamedType {
     Alias(UstrSpan, Vec<Ustr>, u32, Type),
-    Def(Ustr, TypeDefRef),
+    Def(Ustr, HirTypeDef),
 }
 
 impl PModule {

@@ -30,7 +30,7 @@ use ferlium::{
     },
     types::effects::{PrimitiveEffect, effect, effects, no_effects},
     types::r#trait::TraitRef,
-    types::r#type::{FnType, Type, TypeDef, TypeDefRef, TypeVar, variant_type},
+    types::r#type::{FnType, Type, TypeDef, TypeVar, variant_type},
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
 use std::{cell::RefCell, sync::atomic::AtomicIsize};
@@ -262,8 +262,8 @@ fn test_witnessed_project_trait() -> TraitRef {
     )
 }
 
-fn option_type_def() -> TypeDefRef {
-    TypeDefRef::new(TypeDef {
+fn option_type_def() -> TypeDef {
+    TypeDef {
         name: ustr("Option"),
         doc: None,
         param_names: vec![ustr("T")],
@@ -279,11 +279,11 @@ fn option_type_def() -> TypeDefRef {
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,
-    })
+    }
 }
 
-fn map_iterator_type_def(iterator_trait: TraitRef) -> TypeDefRef {
-    TypeDefRef::new(TypeDef {
+fn map_iterator_type_def(iterator_trait: TraitRef) -> TypeDef {
+    TypeDef {
         name: ustr("MapIterator"),
         doc: None,
         param_names: vec![ustr("I"), ustr("T"), ustr("O")],
@@ -307,11 +307,11 @@ fn map_iterator_type_def(iterator_trait: TraitRef) -> TypeDefRef {
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,
-    })
+    }
 }
 
-fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDefRef {
-    TypeDefRef::new(TypeDef {
+fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDef {
+    TypeDef {
         name: ustr("Witnessed"),
         doc: None,
         param_names: vec![ustr("Input"), ustr("Output")],
@@ -329,7 +329,7 @@ fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDefRef {
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,
-    })
+    }
 }
 
 static TRACKED_CLONES: AtomicIsize = AtomicIsize::new(0);
@@ -440,14 +440,14 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
             ferlium::std::string::String::new(if value { "true" } else { "false" })
         })) as Function],
     );
-    module.add_type_def(option_type_def.name, option_type_def.clone());
-    module.add_type_def(map_iterator_type_def.name, map_iterator_type_def.clone());
-    module.add_type_def(witnessed_type_def.name, witnessed_type_def.clone());
+    let option_type_def_id = module.add_type_def(option_type_def.name, option_type_def);
+    module.add_type_def(map_iterator_type_def.name, map_iterator_type_def);
+    let witnessed_type_def_id = module.add_type_def(witnessed_type_def.name, witnessed_type_def);
     module.add_blanket_impl_no_locals(
         test_witnessed_project_trait,
         BlanketTraitImplSubKey {
             input_tys: vec![Type::named(
-                witnessed_type_def.clone(),
+                witnessed_type_def_id,
                 [Type::variable_id(0), Type::variable_id(1)],
             )],
             ty_var_count: 2,
@@ -485,7 +485,7 @@ fn testing_module(module_id: ModuleId, iterator_trait: TraitRef) -> Module {
             ["option"],
             "Wraps an integer into an Option variant.",
             int_type(),
-            Type::named(option_type_def, [int_type()]),
+            Type::named(option_type_def_id, [int_type()]),
             no_effects(),
         ),
     );

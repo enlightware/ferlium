@@ -7,15 +7,16 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use crate::{
+    Location,
     ast::{self, UstrSpan},
     compiler::error::InternalCompilationError,
     module::{
-        Module, ModuleFunction, ModuleId, Modules, id::Id, path::Path,
+        Module, ModuleFunction, ModuleId, Modules, TypeDefId, id::Id, path::Path,
         type_alias_name::find_generic_alias_name,
     },
     std::STD_MODULE_ID,
     types::r#trait::{TraitMethodIndex, TraitRef},
-    types::r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDefRef},
+    types::r#type::{BareNativeTypeB, Type, TypeAliasEntry, TypeDef},
     types::typing_env::TraitMethodDescription,
 };
 use derive_new::new;
@@ -23,17 +24,21 @@ use ustr::{Ustr, ustr};
 
 #[derive(Debug, Clone)]
 pub enum TypeDefLookupResult {
-    Enum(TypeDefRef, Ustr),
-    Struct(TypeDefRef),
+    Enum(TypeDefId, Ustr),
+    Struct(TypeDefId),
 }
 impl TypeDefLookupResult {
-    pub fn lookup_payload(&self) -> (TypeDefRef, Option<Ustr>) {
+    pub fn lookup_payload(&self) -> (TypeDefId, Option<Ustr>) {
         use TypeDefLookupResult::*;
         match self {
-            Enum(type_def, tag) => (type_def.clone(), Some(*tag)),
-            Struct(type_def) => (type_def.clone(), None),
+            Enum(type_def, tag) => (*type_def, Some(*tag)),
+            Struct(type_def) => (*type_def, None),
         }
     }
+}
+
+fn unavailable_type_def<T>(id: TypeDefId) -> T {
+    panic!("Type definition #{}:{} is unavailable", id.module, id.index)
 }
 
 #[derive(Clone, Copy, Debug, new)]
@@ -161,10 +166,58 @@ impl<'m> ModuleEnv<'m> {
     pub fn type_def_with_module(
         &self,
         path: &ast::Path,
-    ) -> Result<Option<(Option<ModuleId>, TypeDefRef)>, InternalCompilationError> {
+    ) -> Result<Option<(Option<ModuleId>, TypeDefId)>, InternalCompilationError> {
         self.get_module_member(&path.segments, &|name, module| {
-            module.get_type_def(ustr(name)).cloned()
+            module.get_type_def_id(ustr(name))
         })
+    }
+
+    fn type_def_module(&self, id: TypeDefId) -> Option<&Module> {
+        if id.module == self.current.module_id() {
+            Some(self.current)
+        } else {
+            self.modules.get(id.module).and_then(|entry| entry.module())
+        }
+    }
+
+    pub fn type_def_name(&self, id: TypeDefId) -> Ustr {
+        self.try_type_def_name(id)
+            .unwrap_or_else(|| unavailable_type_def(id))
+    }
+
+    pub fn try_type_def_name(&self, id: TypeDefId) -> Option<Ustr> {
+        self.type_def_module(id)
+            .and_then(|module| module.try_type_def_name(id))
+    }
+
+    pub fn type_def_param_names(&self, id: TypeDefId) -> &[Ustr] {
+        self.try_type_def_param_names(id)
+            .unwrap_or_else(|| unavailable_type_def(id))
+    }
+
+    pub fn try_type_def_param_names(&self, id: TypeDefId) -> Option<&[Ustr]> {
+        self.type_def_module(id)
+            .and_then(|module| module.try_type_def_param_names(id))
+    }
+
+    pub fn type_def_span(&self, id: TypeDefId) -> Location {
+        self.try_type_def_span(id)
+            .unwrap_or_else(|| unavailable_type_def(id))
+    }
+
+    pub fn try_type_def_span(&self, id: TypeDefId) -> Option<Location> {
+        self.type_def_module(id)
+            .and_then(|module| module.try_type_def_span(id))
+    }
+
+    pub fn type_def(&self, id: TypeDefId) -> &TypeDef {
+        self.try_type_def(id)
+            .unwrap_or_else(|| unavailable_type_def(id))
+    }
+
+    pub fn try_type_def(&self, id: TypeDefId) -> Option<&TypeDef> {
+        self.type_def_module(id)
+            .and_then(|module| module.try_type_def(id))
     }
 
     pub fn type_def_for_construction(
@@ -179,15 +232,16 @@ impl<'m> ModuleEnv<'m> {
             let variant_name = segments[len - 1].0;
             if let Some((module_id, ty_def)) = self
                 .get_module_member(enum_segments, &|name, module| {
-                    module.get_type_def(ustr(name))
+                    module.get_type_def_id(ustr(name))
                 })?
             {
-                if ty_def.is_enum() {
-                    let ty_data = ty_def.shape_ty().data();
+                let ty_def_data = self.type_def(ty_def);
+                if ty_def_data.is_enum() {
+                    let ty_data = ty_def_data.shape_ty().data();
                     let variants = ty_data.as_variant().unwrap();
                     let variant = variants.iter().find(|(name, _)| *name == variant_name);
                     if let Some((tag, _)) = variant {
-                        let td = TypeDefLookupResult::Enum(ty_def.clone(), *tag);
+                        let td = TypeDefLookupResult::Enum(ty_def, *tag);
                         return Ok(Some((module_id, td)));
                     }
                 }
@@ -195,11 +249,11 @@ impl<'m> ModuleEnv<'m> {
         }
         // Not found, search for a matching struct
         if len >= 1 {
-            if let Some((module_id, ty_def)) =
-                self.get_module_member(segments, &|name, module| module.get_type_def(ustr(name)))?
+            if let Some((module_id, ty_def)) = self
+                .get_module_member(segments, &|name, module| module.get_type_def_id(ustr(name)))?
             {
-                if ty_def.is_struct_like() {
-                    let td = TypeDefLookupResult::Struct(ty_def.clone());
+                if self.type_def(ty_def).is_struct_like() {
+                    let td = TypeDefLookupResult::Struct(ty_def);
                     return Ok(Some((module_id, td)));
                 }
             }
@@ -212,9 +266,11 @@ impl<'m> ModuleEnv<'m> {
         &self,
         path: &ast::Path,
     ) -> Result<Option<Type>, InternalCompilationError> {
-        Ok(self
-            .type_def_with_module(path)?
-            .and_then(|(_, type_def)| type_def.param_names.is_empty().then(|| type_def.as_type())))
+        Ok(self.type_def_with_module(path)?.and_then(|(_, type_def)| {
+            self.type_def_param_names(type_def)
+                .is_empty()
+                .then(|| Type::named(type_def, vec![]))
+        }))
     }
 
     /// Like [`type_def_type`], but also returns the source [`ModuleId`] when the type
@@ -226,10 +282,9 @@ impl<'m> ModuleEnv<'m> {
         Ok(self
             .type_def_with_module(path)?
             .and_then(|(module_id, type_def)| {
-                type_def
-                    .param_names
+                self.type_def_param_names(type_def)
                     .is_empty()
-                    .then(|| (module_id, type_def.as_type()))
+                    .then(|| (module_id, Type::named(type_def, vec![])))
             }))
     }
 

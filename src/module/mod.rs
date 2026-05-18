@@ -31,7 +31,7 @@ pub use path::*;
 pub use trait_impl::*;
 pub use uses::*;
 
-use std::{fmt, hash::Hash};
+use std::{fmt, hash::Hash, ops};
 
 use ustr::{Ustr, ustr};
 
@@ -40,13 +40,15 @@ use crate::{
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     define_id_type,
     format::FormatWith,
-    hir::emit_ir::EmitTraitOutput,
-    hir::function::Function,
-    hir::{self, NodeArena},
+    hir::{self, NodeArena, emit_ir::EmitTraitOutput, function::Function},
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
-    types::r#trait::TraitRef,
-    types::r#type::{LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDefRef, TypeVar},
+    types::{
+        r#trait::TraitRef,
+        r#type::{
+            LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot, TypeVar,
+        },
+    },
 };
 
 define_id_type!(
@@ -67,6 +69,30 @@ define_id_type!(
     LocalTypeDefId
 );
 
+/// A fully-qualified reference to a type definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, new)]
+pub struct TypeDefId {
+    pub module: ModuleId,
+    pub index: LocalTypeDefId,
+}
+
+impl FormatWith<ModuleEnv<'_>> for TypeDefId {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
+        let type_name = env
+            .try_type_def_name(*self)
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| format!("#{}", self.index));
+
+        if self.module == env.current.module_id() {
+            write!(f, "{type_name}")
+        } else if let Some(module_name) = env.modules.get_name(self.module) {
+            write!(f, "{module_name}::{type_name}")
+        } else {
+            write!(f, "#{}::{type_name}", self.module)
+        }
+    }
+}
+
 define_id_type!(
     /// ID of a trait definition within a module
     LocalTraitId
@@ -83,6 +109,49 @@ pub enum DefKind {
 }
 
 pub type DefTable = NamedIndexed<Ustr, LocalDefId, DefKind>;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TypeDefSlots(Vec<TypeDefSlot>);
+
+impl TypeDefSlots {
+    fn push(&mut self, slot: TypeDefSlot) {
+        self.0.push(slot);
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn get(&self, index: usize) -> Option<&TypeDefSlot> {
+        self.0.get(index)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &TypeDefSlot> {
+        self.0.iter()
+    }
+
+    pub(crate) fn as_slice(&self) -> &[TypeDefSlot] {
+        &self.0
+    }
+}
+
+impl ops::Index<usize> for TypeDefSlots {
+    type Output = TypeDefSlot;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl ops::IndexMut<usize> for TypeDefSlots {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.0[index]
+    }
+}
 
 // Module itself
 
@@ -110,7 +179,7 @@ pub struct Module {
 
     // Type system content
     type_aliases: TypeAliases,
-    type_defs: Vec<TypeDefRef>,
+    pub(crate) type_defs: TypeDefSlots,
     traits: Traits,
     pub(crate) impls: TraitImpls,
 
@@ -130,7 +199,7 @@ impl Module {
             unsafe_items: FxHashSet::default(),
             functions: Vec::new(),
             type_aliases: TypeAliases::default(),
-            type_defs: Vec::new(),
+            type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
             impls: TraitImpls::new(module_id),
             ir_arena: NodeArena::default(),
@@ -148,7 +217,7 @@ impl Module {
             unsafe_items: FxHashSet::default(),
             functions: Vec::new(),
             type_aliases: TypeAliases::default(),
-            type_defs: Vec::new(),
+            type_defs: TypeDefSlots::default(),
             traits: Traits::new(),
             impls: TraitImpls::new(module_id),
             ir_arena: NodeArena::default(),
@@ -425,28 +494,120 @@ impl Module {
     // Type definitions
 
     /// Add a type definition to this module, returning its ID.
-    pub fn add_type_def(&mut self, name: Ustr, type_def: TypeDefRef) -> LocalTypeDefId {
+    pub fn reserve_type_def(
+        &mut self,
+        name: Ustr,
+        param_names: Vec<Ustr>,
+        span: Location,
+    ) -> TypeDefId {
         let id = LocalTypeDefId::from_index(self.type_defs.len());
-        self.type_defs.push(type_def);
+        self.type_defs
+            .push(TypeDefSlot::reserved(name, param_names, span));
         self.def_table.insert(name, DefKind::TypeDef(id));
-        id
+        TypeDefId::new(self.module_id(), id)
     }
 
-    /// Look-up a type definition by name in this module.
-    pub fn get_type_def(&self, name: Ustr) -> Option<&TypeDefRef> {
+    /// Add a type definition to this module, returning its ID.
+    pub fn add_type_def(&mut self, name: Ustr, type_def: TypeDef) -> TypeDefId {
+        let id = LocalTypeDefId::from_index(self.type_defs.len());
+        self.type_defs.push(TypeDefSlot::resolved(type_def));
+        self.def_table.insert(name, DefKind::TypeDef(id));
+        TypeDefId::new(self.module_id(), id)
+    }
+
+    /// Fill a reserved type definition slot.
+    pub fn fill_type_def(&mut self, id: TypeDefId, type_def: TypeDef) {
+        assert_eq!(id.module, self.module_id());
+        self.type_defs[id.index.as_index()].fill(type_def);
+    }
+
+    pub fn type_def_name(&self, id: TypeDefId) -> Ustr {
+        assert_eq!(id.module, self.module_id());
+        self.type_defs[id.index.as_index()].name()
+    }
+
+    pub fn try_type_def_name(&self, id: TypeDefId) -> Option<Ustr> {
+        if id.module == self.module_id() {
+            self.type_defs
+                .get(id.index.as_index())
+                .map(TypeDefSlot::name)
+        } else {
+            None
+        }
+    }
+
+    pub fn type_def_param_names(&self, id: TypeDefId) -> &[Ustr] {
+        assert_eq!(id.module, self.module_id());
+        self.type_defs[id.index.as_index()].param_names()
+    }
+
+    pub fn try_type_def_param_names(&self, id: TypeDefId) -> Option<&[Ustr]> {
+        if id.module == self.module_id() {
+            self.type_defs
+                .get(id.index.as_index())
+                .map(TypeDefSlot::param_names)
+        } else {
+            None
+        }
+    }
+
+    pub fn type_def_span(&self, id: TypeDefId) -> Location {
+        assert_eq!(id.module, self.module_id());
+        self.type_defs[id.index.as_index()].span()
+    }
+
+    pub fn try_type_def_span(&self, id: TypeDefId) -> Option<Location> {
+        if id.module == self.module_id() {
+            self.type_defs
+                .get(id.index.as_index())
+                .map(TypeDefSlot::span)
+        } else {
+            None
+        }
+    }
+
+    /// Return a resolved type definition by ID.
+    pub fn type_def(&self, id: TypeDefId) -> &TypeDef {
+        assert_eq!(id.module, self.module_id());
+        self.type_defs[id.index.as_index()].def()
+    }
+
+    pub fn try_type_def(&self, id: TypeDefId) -> Option<&TypeDef> {
+        if id.module == self.module_id() {
+            self.type_defs
+                .get(id.index.as_index())
+                .map(TypeDefSlot::def)
+        } else {
+            None
+        }
+    }
+
+    /// Iterate over type definition IDs in declaration order.
+    pub(crate) fn type_def_ids(&self) -> impl Iterator<Item = TypeDefId> + '_ {
+        (0..self.type_defs.len())
+            .map(|index| TypeDefId::new(self.module_id(), LocalTypeDefId::from_index(index)))
+    }
+
+    /// Look-up a type definition ID by name in this module.
+    pub fn get_type_def_id(&self, name: Ustr) -> Option<TypeDefId> {
         self.get_definition(name).and_then(|def_kind| {
             def_kind
                 .as_type_def()
-                .map(|type_def_id| &self.type_defs[type_def_id.as_index()])
+                .map(|type_def_id| TypeDefId::new(self.module_id(), *type_def_id))
         })
     }
 
-    pub(crate) fn owns_type_def(&self, type_def: &TypeDefRef) -> bool {
-        self.type_defs.iter().any(|local| local == type_def)
+    /// Look-up a resolved type definition by name in this module.
+    pub fn get_type_def(&self, name: Ustr) -> Option<&TypeDef> {
+        self.get_type_def_id(name).map(|id| self.type_def(id))
     }
 
-    pub(crate) fn type_defs(&self) -> &[TypeDefRef] {
-        &self.type_defs
+    pub(crate) fn owns_type_def(&self, type_def: TypeDefId) -> bool {
+        type_def.module == self.module_id()
+            && type_def.index.as_index() < self.type_defs.len()
+            && self
+                .get_definition(self.type_def_name(type_def))
+                .is_some_and(|def| def.as_type_def() == Some(&type_def.index))
     }
 
     // Trait definitions and implementations
@@ -990,7 +1151,7 @@ impl Module {
         if !self.type_defs.is_empty() {
             writeln!(f, "New types ({}):\n", self.type_defs.len())?;
             for decl in self.type_defs.iter() {
-                decl.format_details(&env, f)?;
+                decl.def().format_details(&env, f)?;
                 writeln!(f)?;
             }
             writeln!(f, "\n")?;

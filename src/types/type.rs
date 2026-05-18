@@ -14,8 +14,6 @@ use std::fmt::Display;
 use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
@@ -27,8 +25,8 @@ use crate::format::FormatWith;
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
 use crate::hir::value::LiteralValue;
-use crate::module::LocalDecl;
 use crate::module::id::Id;
+use crate::module::{LocalDecl, TypeDefId};
 use crate::types::mutability::FormatInFnArg;
 use crate::types::type_like::CastableToType;
 use crate::types::type_like::TypeLike;
@@ -503,7 +501,7 @@ impl Type {
         Self::function_by_val([arg1, arg2], ret)
     }
 
-    pub fn named(decl: TypeDefRef, arg_tys: impl Into<Vec<Self>>) -> Self {
+    pub fn named(decl: TypeDefId, arg_tys: impl Into<Vec<Self>>) -> Self {
         TypeKind::Named(NamedType {
             def: decl,
             params: arg_tys.into(),
@@ -808,7 +806,7 @@ pub struct TypeDef {
 }
 
 impl TypeDef {
-    fn validate(&self) {
+    pub(crate) fn validate(&self) {
         assert_eq!(
             self.param_names.len(),
             self.shape.ty_quantifiers.len(),
@@ -970,111 +968,83 @@ impl TypeDef {
     }
 }
 
-/// A handle to a type declaration.
+/// Header metadata kept only while a recursive type definition slot is reserved.
 #[derive(Debug, Clone)]
-pub struct TypeDefRef(Arc<TypeDefSlot>);
-
-#[derive(Debug)]
-struct TypeDefHeader {
+pub(crate) struct TypeDefHeader {
     name: Ustr,
     param_names: Vec<Ustr>,
     span: Location,
 }
 
 impl TypeDefHeader {
-    fn from_def(def: &TypeDef) -> Self {
+    fn new(name: Ustr, param_names: Vec<Ustr>, span: Location) -> Self {
         Self {
-            name: def.name,
-            param_names: def.param_names.clone(),
-            span: def.span,
+            name,
+            param_names,
+            span,
         }
     }
 }
 
-#[derive(Debug)]
-struct TypeDefSlot {
-    // This duplicates fields stored in the resolved TypeDef. Keeping the header
-    // available before resolution is a temporary bridge while TypeDefRef remains
-    // an Arc-backed handle instead of a compiler-wide typed id.
-    header: TypeDefHeader,
-    def: OnceLock<TypeDef>,
+/// Module-owned type definition slot, reserved before recursive SCCs are filled.
+#[derive(Debug, Clone)]
+pub(crate) enum TypeDefSlot {
+    Reserved(TypeDefHeader),
+    Resolved(TypeDef),
 }
 
-impl TypeDefRef {
-    pub fn new(def: TypeDef) -> Self {
+impl TypeDefSlot {
+    pub(crate) fn resolved(def: TypeDef) -> Self {
         def.validate();
-        let slot = TypeDefSlot {
-            header: TypeDefHeader::from_def(&def),
-            def: OnceLock::from(def),
+        Self::Resolved(def)
+    }
+
+    pub(crate) fn reserved(name: Ustr, param_names: Vec<Ustr>, span: Location) -> Self {
+        Self::Reserved(TypeDefHeader::new(name, param_names, span))
+    }
+
+    pub(crate) fn fill(&mut self, def: TypeDef) {
+        let Self::Reserved(header) = self else {
+            panic!("Type definition `{}` was already filled", self.name())
         };
-        Self(Arc::new(slot))
-    }
-
-    pub(crate) fn new_unfilled(name: Ustr, param_names: Vec<Ustr>, span: Location) -> Self {
-        Self(Arc::new(TypeDefSlot {
-            header: TypeDefHeader {
-                name,
-                param_names,
-                span,
-            },
-            def: OnceLock::new(),
-        }))
-    }
-
-    pub(crate) fn fill(&self, def: TypeDef) {
-        assert_eq!(self.0.header.name, def.name);
-        assert_eq!(self.0.header.param_names, def.param_names);
-        assert_eq!(self.0.header.span, def.span);
+        assert_eq!(header.name, def.name);
+        assert_eq!(header.param_names, def.param_names);
+        assert_eq!(header.span, def.span);
         def.validate();
-        self.0.def.set(def).unwrap_or_else(|_| {
-            panic!(
-                "Type definition `{}` was already filled",
-                self.0.header.name
-            )
-        });
+        *self = Self::Resolved(def);
+    }
+
+    pub(crate) fn name(&self) -> Ustr {
+        match self {
+            Self::Reserved(header) => header.name,
+            Self::Resolved(def) => def.name,
+        }
     }
 
     pub(crate) fn param_names(&self) -> &[Ustr] {
-        &self.0.header.param_names
+        match self {
+            Self::Reserved(header) => &header.param_names,
+            Self::Resolved(def) => &def.param_names,
+        }
     }
 
     pub(crate) fn span(&self) -> Location {
-        self.0.header.span
+        match self {
+            Self::Reserved(header) => header.span,
+            Self::Resolved(def) => def.span,
+        }
     }
 
-    pub fn as_type(&self) -> Type {
-        assert!(
-            self.param_names().is_empty(),
-            "Generic type definitions not implemented yet"
-        );
-        Type::named(self.clone(), vec![])
-    }
-}
-
-impl Deref for TypeDefRef {
-    type Target = TypeDef;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.def.get().unwrap_or_else(|| {
-            panic!(
-                "Type definition `{}` was used before its declaration was filled",
-                self.0.header.name
-            )
-        })
-    }
-}
-
-impl PartialEq for TypeDefRef {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for TypeDefRef {}
-
-impl Hash for TypeDefRef {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::ptr::hash(Arc::as_ptr(&self.0), state)
+    pub(crate) fn def(&self) -> &TypeDef {
+        match self {
+            Self::Resolved(def) => def,
+            Self::Reserved(header) => {
+                panic!(
+                    "Type definition `{}` was used before its declaration was filled",
+                    header.name
+                )
+            }
+        }
     }
 }
 
@@ -1082,15 +1052,15 @@ impl Hash for TypeDefRef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NamedType {
     /// The type declaration reference
-    pub def: TypeDefRef,
+    pub def: TypeDefId,
     /// The type arguments for this named type to replace its generic variables
     pub params: Vec<Type>,
     // TODO: add constraints for the type arguments
 }
 
 impl NamedType {
-    pub fn instantiated_shape(&self) -> Type {
-        self.def.instantiated_shape(&self.params)
+    pub fn instantiated_shape(&self, env: &ModuleEnv<'_>) -> Type {
+        env.type_def(self.def).instantiated_shape(&self.params)
     }
 }
 
@@ -1228,10 +1198,7 @@ impl TypeKind {
             Named(NamedType {
                 def: decl,
                 params: args,
-            }) => Type::named(
-                decl.clone(),
-                args.iter().map(|ty| ty.map(f)).collect::<Vec<_>>(),
-            ),
+            }) => Type::named(*decl, args.iter().map(|ty| ty.map(f)).collect::<Vec<_>>()),
             Never => Type::never(),
         }
     }
@@ -1540,7 +1507,10 @@ impl FormatWith<ModuleEnv<'_>> for TypeKind {
             }
             Function(function) => function.fmt_with(f, env),
             Named(NamedType { def, params: args }) => {
-                write!(f, "{}", def.name)?;
+                match env.try_type_def_name(*def) {
+                    Some(name) => write!(f, "{name}")?,
+                    None => write!(f, "#{}:{}", def.module, def.index)?,
+                }
                 if !args.is_empty() {
                     write!(f, "<")?;
                     for (i, ty) in args.iter().enumerate() {

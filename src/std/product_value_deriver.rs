@@ -103,7 +103,7 @@ impl Deriver for ProductValueDeriver {
                 drop(ty_data);
                 return Ok(Some(solver.solve_impl(
                     trait_ref,
-                    &[named.instantiated_shape()],
+                    &[solver.type_def(named.def).instantiated_shape(&named.params)],
                     span,
                     arena,
                 )?));

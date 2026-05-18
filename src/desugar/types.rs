@@ -21,7 +21,7 @@ pub(crate) struct RecursiveTypeBuilder<'a, 'm> {
     generic_ty_params: GenericTyParams,
     modules_used: &'a mut FxHashSet<ModuleId>,
     aliases: &'a FxHashMap<Ustr, RecursiveAliasRef>,
-    type_defs: &'a FxHashMap<Ustr, TypeDefRef>,
+    type_defs: &'a FxHashMap<Ustr, TypeDefId>,
     kinds: Vec<TypeKind>,
 }
 
@@ -31,7 +31,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
         env: &'a ModuleEnv<'m>,
         modules_used: &'a mut FxHashSet<ModuleId>,
         aliases: &'a FxHashMap<Ustr, RecursiveAliasRef>,
-        type_defs: &'a FxHashMap<Ustr, TypeDefRef>,
+        type_defs: &'a FxHashMap<Ustr, TypeDefId>,
     ) -> Self {
         Self {
             env,
@@ -126,12 +126,17 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                 return self.resolve_local_alias_without_args(alias, span);
             }
             if let Some(type_def) = self.type_defs.get(name) {
-                expect_type_argument_count(type_def.param_names().len(), type_def.span(), 0, span)?;
-                return Ok(Type::named(type_def.clone(), Vec::new()));
+                expect_type_argument_count(
+                    self.env.type_def_param_names(*type_def).len(),
+                    self.env.type_def_span(*type_def),
+                    0,
+                    span,
+                )?;
+                return Ok(Type::named(*type_def, Vec::new()));
             }
         }
         if let Some(resolved) = resolve_type_path(path, self.env, self.modules_used)? {
-            desugar_resolved_type_without_args(resolved, path, span)
+            desugar_resolved_type_without_args(resolved, path, span, self.env)
         } else if let [(name, _)] = &path.segments[..] {
             Ok(self.store_kind(TypeKind::Variant(vec![(*name, Type::unit())]), None))
         } else {
@@ -159,8 +164,8 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
             }
             if let Some(type_def) = self.type_defs.get(name) {
                 expect_type_argument_count(
-                    type_def.param_names().len(),
-                    type_def.span(),
+                    self.env.type_def_param_names(*type_def).len(),
+                    self.env.type_def_span(*type_def),
                     args.len(),
                     span,
                 )?;
@@ -168,7 +173,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                     .iter()
                     .map(|(arg, arg_span)| self.desugar_type(arg, *arg_span, false, None))
                     .collect::<Result<Vec<_>, _>>()?;
-                return Ok(Type::named(type_def.clone(), desugared_args));
+                return Ok(Type::named(*type_def, desugared_args));
             }
         }
         if let Some(resolved) = resolve_type_path(path, self.env, self.modules_used)? {
@@ -176,7 +181,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
                 .iter()
                 .map(|(arg, arg_span)| self.desugar_type(arg, *arg_span, false, None))
                 .collect::<Result<Vec<_>, _>>()?;
-            desugar_resolved_type_with_args(resolved, path, desugared_args, span)
+            desugar_resolved_type_with_args(resolved, path, desugared_args, span, self.env)
         } else {
             Err(internal_compilation_error!(TypeNotFound(span)))
         }
@@ -562,7 +567,7 @@ impl ast::PType {
                 {
                     Type::variable(*ty_var)
                 } else if let Some(resolved) = resolve_type_path(path, env, modules_used)? {
-                    desugar_resolved_type_without_args(resolved, path, span)?
+                    desugar_resolved_type_without_args(resolved, path, span, env)?
                 } else if let [(name, _)] = &path.segments[..] {
                     Type::variant([(*name, Type::unit())])
                 } else {
@@ -573,7 +578,7 @@ impl ast::PType {
                 if let Some(resolved) = resolve_type_path(path, env, modules_used)? {
                     let desugared_args =
                         desugar_type_arguments(args, env, generic_ty_params, modules_used)?;
-                    desugar_resolved_type_with_args(resolved, path, desugared_args, span)?
+                    desugar_resolved_type_with_args(resolved, path, desugared_args, span, env)?
                 } else if let [(name, name_span)] = &path.segments[..] {
                     if generic_ty_params.contains_key(name) {
                         return Err(internal_compilation_error!(WrongNumberOfArguments {
@@ -737,8 +742,8 @@ impl PTypeDef {
         &self,
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
-    ) -> Result<TypeDefRef, InternalCompilationError> {
-        Ok(TypeDefRef::new(self.desugar_data(env, modules_used)?))
+    ) -> Result<HirTypeDef, InternalCompilationError> {
+        self.desugar_data(env, modules_used)
     }
 }
 
@@ -1062,7 +1067,7 @@ fn desugar_trait_impl_for(
 #[derive(Clone)]
 enum ResolvedTypePath {
     Alias(TypeAliasEntry),
-    TypeDef(TypeDefRef),
+    TypeDef(TypeDefId),
     BareNative(BareNativeTypeB),
 }
 
@@ -1075,7 +1080,7 @@ fn resolve_type_path(
         if let Some(entry) = env.current.get_type_alias(ustr(name)).cloned() {
             return Ok(Some(ResolvedTypePath::Alias(entry)));
         }
-        if let Some(type_def) = env.current.get_type_def(ustr(name)).cloned() {
+        if let Some(type_def) = env.current.get_type_def_id(ustr(name)) {
             return Ok(Some(ResolvedTypePath::TypeDef(type_def)));
         }
         if let Some(bare) = env.current.get_bare_native_type_alias(ustr(name)) {
@@ -1143,6 +1148,7 @@ fn desugar_resolved_type_without_args(
     resolved: ResolvedTypePath,
     path: &ast::Path,
     span: Location,
+    env: &ModuleEnv<'_>,
 ) -> Result<Type, InternalCompilationError> {
     match resolved {
         ResolvedTypePath::Alias(entry) => {
@@ -1155,7 +1161,12 @@ fn desugar_resolved_type_without_args(
             Ok(entry.ty)
         }
         ResolvedTypePath::TypeDef(type_def) => {
-            expect_type_argument_count(type_def.param_names().len(), type_def.span(), 0, span)?;
+            expect_type_argument_count(
+                env.type_def_param_names(type_def).len(),
+                env.type_def_span(type_def),
+                0,
+                span,
+            )?;
             Ok(Type::named(type_def, Vec::new()))
         }
         ResolvedTypePath::BareNative(bare) => Ok(Type::native_type(NativeType::new(bare, vec![]))),
@@ -1167,6 +1178,7 @@ fn desugar_resolved_type_with_args(
     path: &ast::Path,
     args: Vec<Type>,
     span: Location,
+    env: &ModuleEnv<'_>,
 ) -> Result<Type, InternalCompilationError> {
     match resolved {
         ResolvedTypePath::Alias(entry) => {
@@ -1186,8 +1198,8 @@ fn desugar_resolved_type_with_args(
         }
         ResolvedTypePath::TypeDef(type_def) => {
             expect_type_argument_count(
-                type_def.param_names().len(),
-                type_def.span(),
+                env.type_def_param_names(type_def).len(),
+                env.type_def_span(type_def),
                 args.len(),
                 span,
             )?;

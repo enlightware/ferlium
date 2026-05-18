@@ -18,7 +18,7 @@ use crate::{
         function::ScriptFunction,
     },
     internal_compilation_error,
-    module::{LocalFunctionId, Module, ModuleFunction, id::Id},
+    module::{LocalFunctionId, Module, ModuleEnv, ModuleFunction, TypeDefId, id::Id},
     std::value::{
         VALUE_TRAIT, derive_generic_value_code_entries, function_value_method_function,
         function_value_method_name, is_function_surface_only_value_type,
@@ -27,7 +27,7 @@ use crate::{
         coherence::check_trait_impl,
         r#trait::{TraitMethodIndex, TraitRef},
         trait_solver::{TraitSolver, trait_solver_from_module},
-        r#type::{Type, TypeDefRef, TypeKind, TypeVar},
+        r#type::{Type, TypeDef, TypeKind, TypeVar},
         type_constraints::named_type_constraints_in_types,
         type_like::TypeLike,
         type_scheme::{PubTypeConstraint, TypeScheme, extra_parameters_from_constraints},
@@ -113,7 +113,7 @@ fn type_has_any_ty_var(ty: Type, vars: &[TypeVar]) -> bool {
 
 /// Return the fields/payloads whose `Value` impls are called directly by the
 /// generated `Value` impl for `ty`.
-fn auto_value_direct_member_tys(ty: Type) -> Vec<Type> {
+fn auto_value_direct_member_tys(ty: Type, env: &ModuleEnv<'_>) -> Vec<Type> {
     let ty_data = ty.data();
     match &*ty_data {
         TypeKind::Tuple(member_tys) => member_tys.clone(),
@@ -122,8 +122,8 @@ fn auto_value_direct_member_tys(ty: Type) -> Vec<Type> {
         TypeKind::Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = named.instantiated_shape();
-            auto_value_direct_member_tys(shape_ty)
+            let shape_ty = named.instantiated_shape(env);
+            auto_value_direct_member_tys(shape_ty, env)
         }
         _ => Vec::new(),
     }
@@ -134,16 +134,20 @@ fn auto_value_direct_member_tys(ty: Type) -> Vec<Type> {
 /// Function-typed members are skipped because their `Value` impl is
 /// compiler-provided from the hidden closure environment, not from a
 /// user-visible dictionary requirement.
-fn auto_value_constraints(type_def: &TypeDefRef, input_ty: Type) -> Vec<PubTypeConstraint> {
+fn auto_value_constraints(
+    type_def: &TypeDef,
+    input_ty: Type,
+    env: &ModuleEnv<'_>,
+) -> Vec<PubTypeConstraint> {
     let span = type_def.span;
     let params = &type_def.shape.ty_quantifiers;
     let mut constraints = IndexSet::new();
 
-    for constraint in named_type_constraints_in_types([input_ty], span) {
+    for constraint in named_type_constraints_in_types([input_ty], span, env) {
         constraints.insert(constraint);
     }
 
-    for member_ty in auto_value_direct_member_tys(input_ty) {
+    for member_ty in auto_value_direct_member_tys(input_ty, env) {
         if member_ty == Type::unit()
             || member_ty.is_function()
             || is_function_surface_only_value_type(member_ty)
@@ -159,7 +163,7 @@ fn auto_value_constraints(type_def: &TypeDefRef, input_ty: Type) -> Vec<PubTypeC
     constraints.into_iter().collect()
 }
 
-fn explicit_value_impl_overlaps_type_def(imp: &ast::DTraitImpl, type_def: &TypeDefRef) -> bool {
+fn explicit_value_impl_overlaps_type_def(imp: &ast::DTraitImpl, type_def: TypeDefId) -> bool {
     if imp.trait_name.0 != VALUE_TRAIT.name {
         return false;
     }
@@ -173,14 +177,14 @@ fn explicit_value_impl_overlaps_type_def(imp: &ast::DTraitImpl, type_def: &TypeD
     has_named_head_for_type_def(ty, type_def)
 }
 
-fn has_named_head_for_type_def(ty: Type, type_def: &TypeDefRef) -> bool {
+fn has_named_head_for_type_def(ty: Type, type_def: TypeDefId) -> bool {
     let ty_data = ty.data();
     ty_data
         .as_named()
-        .is_some_and(|named| named.def == *type_def)
+        .is_some_and(|named| named.def == type_def)
 }
 
-fn value_impl_for_type_def_already_exists(output: &Module, type_def: &TypeDefRef) -> bool {
+fn value_impl_for_type_def_already_exists(output: &Module, type_def: TypeDefId) -> bool {
     output.impls.concrete().keys().any(|key| {
         key.trait_ref == *VALUE_TRAIT
             && key
@@ -209,32 +213,42 @@ pub(super) fn emit_auto_value_impls(
     others: &Modules,
     explicit_impls: &[ast::DTraitImpl],
 ) -> Result<(), InternalCompilationError> {
-    let type_defs = output.type_defs().to_vec();
-    for type_def in type_defs {
-        if value_impl_for_type_def_already_exists(output, &type_def) {
+    let type_defs = output.type_def_ids().collect::<Vec<_>>();
+    for type_def_id in type_defs {
+        if value_impl_for_type_def_already_exists(output, type_def_id) {
             continue;
         }
         if explicit_impls
             .iter()
-            .any(|imp| explicit_value_impl_overlaps_type_def(imp, &type_def))
+            .any(|imp| explicit_value_impl_overlaps_type_def(imp, type_def_id))
         {
             continue;
         }
 
+        let type_def = output.type_def(type_def_id);
+        let type_def_span = type_def.span;
+        let type_def_param_count = type_def.param_names.len();
         let input_ty = Type::named(
-            type_def.clone(),
-            (0..type_def.param_names.len())
+            type_def_id,
+            (0..type_def_param_count)
                 .map(|index| Type::variable_id(index as u32))
                 .collect::<Vec<_>>(),
         );
-        let constraints = auto_value_constraints(&type_def, input_ty);
+        let constraints = {
+            let env = ModuleEnv::new(output, others);
+            auto_value_constraints(type_def, input_ty, &env)
+        };
         let ty_var_count = TypeScheme::list_ty_vars(&input_ty, constraints.iter()).len() as u32;
-        let associated_const_values = emitted_associated_const_values(
-            &VALUE_TRAIT,
-            &[input_ty],
-            ty_var_count,
-            type_def.span,
-        )?;
+        let associated_const_values = {
+            let solver = trait_solver_from_module!(output, others);
+            emitted_associated_const_values(
+                &VALUE_TRAIT,
+                &[input_ty],
+                ty_var_count,
+                type_def_span,
+                &solver,
+            )?
+        };
 
         check_trait_impl(
             output,
@@ -244,7 +258,7 @@ pub(super) fn emit_auto_value_impls(
             &[input_ty],
             ty_var_count,
             &constraints,
-            type_def.span,
+            type_def_span,
         )?;
 
         let Some(code_entries) = ({
@@ -252,7 +266,7 @@ pub(super) fn emit_auto_value_impls(
             let code_entries = derive_generic_value_code_entries(
                 &VALUE_TRAIT,
                 &[input_ty],
-                type_def.span,
+                type_def_span,
                 ir_arena,
                 &mut solver,
             )?;
@@ -303,7 +317,7 @@ pub(super) fn emit_auto_value_impls(
                 functions: function_ids,
             },
             associated_const_values,
-            Some(type_def.span),
+            Some(type_def_span),
         );
     }
 

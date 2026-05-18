@@ -158,6 +158,7 @@ fn layout_for_value_type(
     ty: Type,
     span: Location,
     active: &mut FxHashSet<Type>,
+    solver: &TraitSolver<'_>,
 ) -> Result<ValueLayout, InternalCompilationError> {
     if !active.insert(ty) {
         // Recursive occurrences are represented indirectly at runtime, so their
@@ -176,7 +177,7 @@ fn layout_for_value_type(
             drop(ty_data);
             let fields = member_tys
                 .into_iter()
-                .map(|member_ty| layout_for_value_type(member_ty, span, active))
+                .map(|member_ty| layout_for_value_type(member_ty, span, active, solver))
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::product(fields));
@@ -189,7 +190,7 @@ fn layout_for_value_type(
             drop(ty_data);
             let fields = field_tys
                 .into_iter()
-                .map(|field_ty| layout_for_value_type(field_ty, span, active))
+                .map(|field_ty| layout_for_value_type(field_ty, span, active, solver))
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::product(fields));
@@ -202,7 +203,7 @@ fn layout_for_value_type(
             drop(ty_data);
             let payloads = payload_tys
                 .into_iter()
-                .map(|payload_ty| layout_for_value_type(payload_ty, span, active))
+                .map(|payload_ty| layout_for_value_type(payload_ty, span, active, solver))
                 .collect::<Result<Vec<_>, _>>()?;
             active.remove(&ty);
             return Ok(ValueLayout::variant(payloads));
@@ -210,8 +211,8 @@ fn layout_for_value_type(
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = named.instantiated_shape();
-            let layout = layout_for_value_type(shape_ty, span, active)?;
+            let shape_ty = solver.type_def(named.def).instantiated_shape(&named.params);
+            let layout = layout_for_value_type(shape_ty, span, active, solver)?;
             active.remove(&ty);
             return Ok(layout);
         }
@@ -234,8 +235,10 @@ fn layout_for_value_type(
 pub(crate) fn value_layout_associated_const_values(
     ty: Type,
     span: Location,
+    solver: &TraitSolver<'_>,
 ) -> Result<[isize; 2], InternalCompilationError> {
-    layout_for_value_type(ty, span, &mut FxHashSet::default())?.associated_const_values(span)
+    layout_for_value_type(ty, span, &mut FxHashSet::default(), solver)?
+        .associated_const_values(span)
 }
 
 /// Return whether all unresolved variables in `ty` appear only in function types.
@@ -289,12 +292,11 @@ fn value_type_is_resolved_ignoring_function_surface(
             return resolved;
         }
         Named(named) => {
-            let named = named.clone();
+            let param_tys = named.params.clone();
             drop(ty_data);
-            let resolved = value_type_is_resolved_ignoring_function_surface(
-                named.instantiated_shape(),
-                active,
-            );
+            let resolved = param_tys
+                .into_iter()
+                .all(|param_ty| value_type_is_resolved_ignoring_function_surface(param_ty, active));
             active.remove(&ty);
             return resolved;
         }
@@ -685,17 +687,19 @@ fn derive_value_to_string_body(
         Type::unit(),
         EffType::empty(),
     );
-    let mut build_to_string = |arena: &mut NodeArena, value: NodeId, value_ty: Type| {
-        value_method_call_node(
-            ctx,
-            trait_ref,
-            value_ty,
-            VALUE_TO_STRING_METHOD_INDEX,
-            span,
-            arena,
-            vec![value],
-        )
-    };
+    macro_rules! build_to_string {
+        ($arena:expr, $value:expr, $value_ty:expr) => {
+            value_method_call_node(
+                ctx,
+                trait_ref,
+                $value_ty,
+                VALUE_TO_STRING_METHOD_INDEX,
+                span,
+                $arena,
+                vec![$value],
+            )
+        };
+    }
     let build_string_block = |arena: &mut NodeArena,
                               locals: &mut Vec<crate::module::LocalDecl>,
                               initial: &str,
@@ -751,7 +755,7 @@ fn derive_value_to_string_body(
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let member_str = build_to_string(arena, member, member_ty)?;
+                let member_str = build_to_string!(arena, member, member_ty)?;
                 pieces.push(member_str);
             }
             pieces.push(string_lit(arena, ")"));
@@ -774,7 +778,7 @@ fn derive_value_to_string_body(
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let member_str = build_to_string(arena, member, member_ty)?;
+                let member_str = build_to_string!(arena, member, member_ty)?;
                 pieces.push(member_str);
             }
             pieces.push(string_lit(arena, " }"));
@@ -798,7 +802,7 @@ fn derive_value_to_string_body(
                         project(self_value, ProjectionIndex::from_index(0)),
                         payload_ty,
                     );
-                    let payload_str = build_to_string(arena, payload, payload_ty)?;
+                    let payload_str = build_to_string!(arena, payload, payload_ty)?;
                     if payload_ty.data().is_tuple() {
                         build_string_block(
                             arena,
@@ -827,7 +831,9 @@ fn derive_value_to_string_body(
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = named.instantiated_shape();
+            let type_def = ctx.solver.type_def(named.def);
+            let type_name = type_def.name;
+            let shape_ty = type_def.instantiated_shape(&named.params);
             let load_self = n(arena, load(l_self_id), ty);
             let mut locals = locals;
             let shape_data = shape_ty.data();
@@ -845,10 +851,10 @@ fn derive_value_to_string_body(
                             project(load_self, ProjectionIndex::from_index(index)),
                             member_ty,
                         );
-                        pieces.push(build_to_string(arena, member, member_ty)?);
+                        pieces.push(build_to_string!(arena, member, member_ty)?);
                     }
                     pieces.push(string_lit(arena, ")"));
-                    build_string_block(arena, &mut locals, &format!("{} (", named.def.name), pieces)
+                    build_string_block(arena, &mut locals, &format!("{} (", type_name), pieces)
                 }
                 Record(fields) => {
                     let fields = fields.clone();
@@ -865,15 +871,10 @@ fn derive_value_to_string_body(
                             project(load_self, ProjectionIndex::from_index(index)),
                             member_ty,
                         );
-                        pieces.push(build_to_string(arena, member, member_ty)?);
+                        pieces.push(build_to_string!(arena, member, member_ty)?);
                     }
                     pieces.push(string_lit(arena, " }"));
-                    build_string_block(
-                        arena,
-                        &mut locals,
-                        &format!("{} {{ ", named.def.name),
-                        pieces,
-                    )
+                    build_string_block(arena, &mut locals, &format!("{} {{ ", type_name), pieces)
                 }
                 Variant(variants) => {
                     let variants = variants.clone();
@@ -883,7 +884,7 @@ fn derive_value_to_string_body(
                     for (tag, payload_ty) in variants {
                         let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
                         let rendered = if payload_ty == Type::unit() {
-                            string_lit(arena, &format!("{}::{}", named.def.name, tag))
+                            string_lit(arena, &format!("{}::{}", type_name, tag))
                         } else {
                             let self_value = n(arena, load(l_self_id), ty);
                             let payload = n(
@@ -891,12 +892,12 @@ fn derive_value_to_string_body(
                                 project(self_value, ProjectionIndex::from_index(0)),
                                 payload_ty,
                             );
-                            let payload_str = build_to_string(arena, payload, payload_ty)?;
+                            let payload_str = build_to_string!(arena, payload, payload_ty)?;
                             if payload_ty.data().is_tuple() {
                                 build_string_block(
                                     arena,
                                     &mut locals,
-                                    &format!("{}::{} ", named.def.name, tag),
+                                    &format!("{}::{} ", type_name, tag),
                                     vec![payload_str],
                                 )
                             } else {
@@ -904,7 +905,7 @@ fn derive_value_to_string_body(
                                 build_string_block(
                                     arena,
                                     &mut locals,
-                                    &format!("{}::{}(", named.def.name, tag),
+                                    &format!("{}::{}(", type_name, tag),
                                     vec![payload_str, close],
                                 )
                             }
@@ -916,16 +917,16 @@ fn derive_value_to_string_body(
                 }
                 Never => {
                     drop(shape_data);
-                    string_lit(arena, &format!("{}::<empty>", named.def.name))
+                    string_lit(arena, &format!("{}::<empty>", type_name))
                 }
                 _ => {
                     drop(shape_data);
                     let load_self = n(arena, load(l_self_id), shape_ty);
-                    let payload_str = build_to_string(arena, load_self, shape_ty)?;
+                    let payload_str = build_to_string!(arena, load_self, shape_ty)?;
                     build_string_block(
                         arena,
                         &mut locals,
-                        &format!("{} ", named.def.name),
+                        &format!("{} ", type_name),
                         vec![payload_str],
                     )
                 }
@@ -1072,7 +1073,10 @@ fn derive_value_eq_body(
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = named.instantiated_shape();
+            let shape_ty = ctx
+                .solver
+                .type_def(named.def)
+                .instantiated_shape(&named.params);
             let shape_data = shape_ty.data();
             match &*shape_data {
                 Tuple(member_tys) => {
@@ -1182,21 +1186,20 @@ fn derive_value_hash_body(
             unit_ty,
         )
     };
-    let mut build_hash_value = |arena: &mut NodeArena,
-                                value: NodeId,
-                                value_ty: Type|
-     -> Result<NodeId, InternalCompilationError> {
-        let state = n(arena, load(l_state_id), hasher_ty);
-        value_method_call_node(
-            ctx,
-            trait_ref,
-            value_ty,
-            VALUE_HASH_METHOD_INDEX,
-            span,
-            arena,
-            vec![value, state],
-        )
-    };
+    macro_rules! build_hash_value {
+        ($arena:expr, $value:expr, $value_ty:expr) => {{
+            let state = n($arena, load(l_state_id), hasher_ty);
+            value_method_call_node(
+                ctx,
+                trait_ref,
+                $value_ty,
+                VALUE_HASH_METHOD_INDEX,
+                span,
+                $arena,
+                vec![$value, state],
+            )
+        }};
+    }
 
     macro_rules! build_product_hash {
         ($arena:expr, $member_tys:expr) => {{
@@ -1208,7 +1211,7 @@ fn derive_value_hash_body(
                     project(load_self, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                statements.push(build_hash_value($arena, member, member_ty)?);
+                statements.push(build_hash_value!($arena, member, member_ty)?);
             }
             statements.push(n($arena, native(()), unit_ty));
             n($arena, block(statements), unit_ty)
@@ -1231,7 +1234,7 @@ fn derive_value_hash_body(
                         project(self_value, ProjectionIndex::from_index(0)),
                         payload_ty,
                     );
-                    statements.push(build_hash_value($arena, payload, payload_ty)?);
+                    statements.push(build_hash_value!($arena, payload, payload_ty)?);
                 }
                 statements.push(n($arena, native(()), unit_ty));
                 let branch = n($arena, block(statements), unit_ty);
@@ -1265,7 +1268,10 @@ fn derive_value_hash_body(
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = named.instantiated_shape();
+            let shape_ty = ctx
+                .solver
+                .type_def(named.def)
+                .instantiated_shape(&named.params);
             let shape_data = shape_ty.data();
             match &*shape_data {
                 Tuple(member_tys) => {
@@ -1290,7 +1296,7 @@ fn derive_value_hash_body(
                 _ => {
                     drop(shape_data);
                     let load_self = n(arena, load(l_self_id), shape_ty);
-                    Some((build_hash_value(arena, load_self, shape_ty)?, locals))
+                    Some((build_hash_value!(arena, load_self, shape_ty)?, locals))
                 }
             }
         }
@@ -1485,7 +1491,10 @@ fn derive_value_clone_body(
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = named.instantiated_shape();
+            let shape_ty = ctx
+                .solver
+                .type_def(named.def)
+                .instantiated_shape(&named.params);
             let shape_data = shape_ty.data();
             match &*shape_data {
                 Tuple(member_tys) => {
@@ -1630,7 +1639,10 @@ fn derive_value_drop_body(
         Named(named) => {
             let named = named.clone();
             drop(ty_data);
-            let shape_ty = named.instantiated_shape();
+            let shape_ty = ctx
+                .solver
+                .type_def(named.def)
+                .instantiated_shape(&named.params);
             let shape_data = shape_ty.data();
             match &*shape_data {
                 Tuple(member_tys) => {
@@ -1673,7 +1685,8 @@ fn derive_function_value_impl(
     arena: &mut NodeArena,
     solver: &mut TraitSolver<'_>,
 ) -> Result<TraitImplId, InternalCompilationError> {
-    let associated_const_values = value_layout_associated_const_values(input_types[0], span)?;
+    let associated_const_values =
+        value_layout_associated_const_values(input_types[0], span, solver)?;
     let methods = (0..trait_ref.methods.len())
         .map(TraitMethodIndex::from_index)
         .map(|method_index| function_value_method(solver, method_index, span, arena))
@@ -1731,7 +1744,8 @@ fn derive_structural_value_impl(
         )?));
     }
 
-    let associated_const_values = value_layout_associated_const_values(input_types[0], span)?;
+    let associated_const_values =
+        value_layout_associated_const_values(input_types[0], span, solver)?;
     let snapshot = solver.snapshot_derived_impl_state();
     let impl_id = solver.reserve_concrete_impl_from_code_entries(
         trait_ref,

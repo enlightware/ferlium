@@ -974,7 +974,11 @@ impl UnifiedTypeInference {
             let unify_to_ty = if ty_data.is_named() {
                 let named = ty_data.as_named().unwrap().clone();
                 drop(ty_data);
-                Some(named.instantiated_shape())
+                Some(
+                    trait_solver
+                        .type_def(named.def)
+                        .instantiated_shape(&named.params),
+                )
             } else if is_known_non_named_ty || is_ty_adt(input_ty) {
                 drop(ty_data);
                 Some(input_ty)

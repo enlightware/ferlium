@@ -256,7 +256,8 @@ fn value_dictionary_node_kind_from_methods(
         .into_iter()
         .map(|definition| Type::function_type(definition.ty_scheme.ty))
         .collect::<Vec<_>>();
-    let associated_const_values = value_layout_associated_const_values(input_tys[0], span)?;
+    let associated_const_values =
+        value_layout_associated_const_values(input_tys[0], span, ctx.trait_solver)?;
     let ty = trait_ref.get_dictionary_type_for_tys(input_tys, &[]);
     let dictionary_ty = TraitImpls::dictionary_ty(method_tys, associated_const_values.len());
     let dictionary_value = build_dictionary_value(methods, &associated_const_values);
@@ -981,8 +982,11 @@ impl Node {
                     &get_const.input_tys,
                     &get_const.output_tys,
                 ) {
-                    let values =
-                        value_layout_associated_const_values(get_const.input_tys[0], node_span)?;
+                    let values = value_layout_associated_const_values(
+                        get_const.input_tys[0],
+                        node_span,
+                        ctx.trait_solver,
+                    )?;
                     let value = values[usize::from(get_const.associated_const_index)];
                     kind = hir::hir_syn::native(value);
                 } else if resolved {
@@ -1088,7 +1092,10 @@ impl Node {
                 let ty_data = if let Some(named) = ty_data.as_named() {
                     let named = named.clone();
                     drop(ty_data);
-                    named.instantiated_shape().data()
+                    ctx.trait_solver
+                        .type_def(named.def)
+                        .instantiated_shape(&named.params)
+                        .data()
                 } else {
                     ty_data
                 };
@@ -1236,9 +1243,11 @@ mod tests {
             &mut fn_collector,
         );
         let modules = Modules::new();
+        let type_defs = Vec::new();
         let mut import_fn_slots = Vec::new();
         let mut import_impl_slots = Vec::new();
         let mut solver = TraitSolver::new(
+            crate::types::trait_solver::CurrentTypeDefs::new(ModuleId(0), &type_defs),
             &mut impls,
             FxHashMap::default(),
             &mut import_fn_slots,
@@ -1279,9 +1288,11 @@ mod tests {
 
         let mut impls = TraitImpls::new(ModuleId(0));
         let modules = Modules::new();
+        let type_defs = Vec::new();
         let mut import_fn_slots = Vec::new();
         let mut import_impl_slots = Vec::new();
         let mut solver = TraitSolver::new(
+            crate::types::trait_solver::CurrentTypeDefs::new(ModuleId(0), &type_defs),
             &mut impls,
             FxHashMap::default(),
             &mut import_fn_slots,

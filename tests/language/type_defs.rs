@@ -60,7 +60,8 @@ fn run_and_pretty_format(session: &mut TestSession, src: &str) -> String {
     )
     .unwrap()
     .into_value();
-    value.display_pretty(&expr.ty.ty).to_string()
+    let env = ferlium::module::ModuleEnv::new(module, session.session().modules());
+    value.display_pretty_with_env(&expr.ty.ty, &env).to_string()
 }
 
 fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
@@ -2634,6 +2635,77 @@ fn same_module_references() {
     session
         .fail_compilation("enum A { X(B) } struct B { a: A }")
         .expect_infinite_type_sum_cycle_without_terminating_variant("B");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn imported_type_def_diagnostics_use_module_qualified_names() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module(
+            "A",
+            indoc! { r#"
+                struct S(int)
+                struct Person { name: string }
+            "# },
+        )
+        .unwrap();
+    session.try_compile_module("B", "struct S(int)").unwrap();
+
+    match session
+        .try_compile_module(
+            "C_mismatch",
+            indoc! { r#"
+                fn take_a(value: A::S) {}
+                take_a(B::S(1))
+            "# },
+        )
+        .unwrap_err()
+        .into_inner()
+    {
+        CompilationErrorImpl::NamedTypeMismatch {
+            current_decl,
+            expected_decl,
+            ..
+        } => {
+            assert_eq!(current_decl.0, "B::S");
+            assert_eq!(expected_decl.0, "A::S");
+        }
+        error => panic!("expected named type mismatch, got {error:?}"),
+    }
+
+    match session
+        .try_compile_module("C_invalid_field", r#"A::Person { name: "Alice", age: 30 }"#)
+        .unwrap_err()
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidStructField { type_def, .. } => {
+            assert_eq!(type_def.0, "A::Person");
+        }
+        error => panic!("expected invalid struct field, got {error:?}"),
+    }
+
+    match session
+        .try_compile_module("C_missing_field", "A::Person {}")
+        .unwrap_err()
+        .into_inner()
+    {
+        CompilationErrorImpl::MissingStructField { type_def, .. } => {
+            assert_eq!(type_def.0, "A::Person");
+        }
+        error => panic!("expected missing struct field, got {error:?}"),
+    }
+
+    match session
+        .try_compile_module("C_wrong_product", r#"A::Person("Alice")"#)
+        .unwrap_err()
+        .into_inner()
+    {
+        CompilationErrorImpl::IsNotCorrectProductType { type_def, .. } => {
+            assert_eq!(type_def.0, "A::Person");
+        }
+        error => panic!("expected product type error, got {error:?}"),
+    }
 }
 
 #[test]

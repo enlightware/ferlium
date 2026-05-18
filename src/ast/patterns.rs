@@ -20,8 +20,9 @@ use crate::{
     format::{FormatWith, write_with_separator},
     hir::value::LiteralValue,
     module::ModuleEnv,
+    module::TypeDefId,
     types::mutability::MutVal,
-    types::r#type::{Type as IrType, TypeDefRef},
+    types::r#type::Type as IrType,
 };
 
 use super::{Desugared, Parsed, Path, Phase, TypeSpan, UstrSpan};
@@ -46,7 +47,7 @@ impl Display for LetBindingPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatternConstraintKind {
     ExactTuple(usize),
-    NamedType(TypeDefRef),
+    NamedType(TypeDefId),
 }
 
 impl Display for PatternConstraintKind {
@@ -56,7 +57,7 @@ impl Display for PatternConstraintKind {
                 write!(f, "exact {element_count}-tuple")
             }
             PatternConstraintKind::NamedType(type_def) => {
-                write!(f, "named type {}", type_def.name)
+                write!(f, "named type #{}:{}", type_def.module, type_def.index)
             }
         }
     }

@@ -106,6 +106,7 @@ pub(super) fn emitted_associated_const_values(
     input_tys: &[Type],
     ty_var_count: u32,
     span: Location,
+    solver: &TraitSolver<'_>,
 ) -> Result<Vec<isize>, InternalCompilationError> {
     if trait_ref.associated_const_count() == 0 {
         return Ok(Vec::new());
@@ -117,7 +118,7 @@ pub(super) fn emitted_associated_const_values(
         if ty_var_count != 0 {
             return Ok(Vec::new());
         }
-        return Ok(value_layout_associated_const_values(input_tys[0], span)?.into());
+        return Ok(value_layout_associated_const_values(input_tys[0], span, solver)?.into());
     }
 
     Err(internal_compilation_error!(Internal {
@@ -271,8 +272,10 @@ pub fn emit_module(
                 method_ids.push(output.add_function_anonymous(module_fn));
             }
             // Build the trait impl and fill it with placeholders.
-            let associated_const_values =
-                emitted_associated_const_values(&trait_ref, &input_tys, 0, imp.span)?;
+            let associated_const_values = {
+                let solver = trait_solver_from_module!(output, others);
+                emitted_associated_const_values(&trait_ref, &input_tys, 0, imp.span, &solver)?
+            };
             let dictionary_value = build_dictionary_value(&method_ids, &associated_const_values);
             let dictionary_ty =
                 output.computer_dictionary_ty(&method_ids, associated_const_values.len());
@@ -426,6 +429,7 @@ pub fn emit_module(
                 &emit_output.input_tys,
                 emit_output.ty_var_count,
                 imp.span,
+                &trait_solver_from_module!(output, others),
             )?;
             output.add_emitted_impl(
                 trait_ref,
@@ -483,6 +487,7 @@ where
     let mut impl_annotation_subst = None;
     let mut outer_annotation_var_count = 0;
     let mut explicit_trait_impl = None;
+    let module_env = ModuleEnv::new(output, others);
 
     // If we are emitting a trait implementation, create generics for the trait input and output types
     // and add the constraints from the trait definition to the type inference.
@@ -531,7 +536,7 @@ where
             let mut explicit_tys = input_tys.clone();
             explicit_tys.extend(output_tys.iter().copied());
             let explicit_constraints =
-                named_type_constraints_in_types(explicit_tys, trait_ctx.span);
+                named_type_constraints_in_types(explicit_tys, trait_ctx.span, &module_env);
             (input_tys, output_tys, explicit_constraints)
         });
         if let Some((explicit_input_tys, explicit_output_tys, explicit_constraints)) =

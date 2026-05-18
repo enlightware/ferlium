@@ -20,7 +20,7 @@ use ustr::Ustr;
 
 use crate::{
     containers::{B, IntoSVec2, SVec2, b},
-    format::{FormatWithData, write_with_separator, write_with_separator_and_format_fn},
+    format::{write_with_separator, write_with_separator_and_format_fn},
     module::{LocalFunctionId, ModuleEnv, ModuleId, TraitDictionaryId},
     types::r#type::{NativeType, Type, TypeKind},
 };
@@ -33,7 +33,12 @@ pub trait NativeDisplay {
     fn fmt_repr(&self, f: &mut fmt::Formatter) -> fmt::Result;
 
     /// Format the native value, given its type information.
-    fn fmt_pretty(&self, f: &mut fmt::Formatter, _ty: &NativeType) -> fmt::Result {
+    fn fmt_pretty(
+        &self,
+        f: &mut fmt::Formatter,
+        _ty: &NativeType,
+        _env: Option<&ModuleEnv<'_>>,
+    ) -> fmt::Result {
         self.fmt_repr(f)
     }
     /// Format the native value when converted to a string.
@@ -562,13 +567,43 @@ impl Value {
     /// Display this value in a pretty-printed way according to the provided type.
     /// This means that records will be displayed with their field names, etc.
     pub fn display_pretty<'a>(&'a self, ty: &'a Type) -> PrettyPrint<'a> {
-        PrettyPrint(FormatWithData {
+        PrettyPrint {
             value: self,
-            data: ty,
-        })
+            ty,
+            env: None,
+        }
     }
 
-    fn fmt_pretty(&self, f: &mut std::fmt::Formatter<'_>, ty: Type) -> std::fmt::Result {
+    pub fn display_pretty_with_env<'a>(
+        &'a self,
+        ty: &'a Type,
+        env: &'a ModuleEnv<'a>,
+    ) -> PrettyPrint<'a> {
+        PrettyPrint {
+            value: self,
+            ty,
+            env: Some(env),
+        }
+    }
+
+    pub(crate) fn display_pretty_env<'a>(
+        &'a self,
+        ty: &'a Type,
+        env: Option<&'a ModuleEnv<'a>>,
+    ) -> PrettyPrint<'a> {
+        PrettyPrint {
+            value: self,
+            ty,
+            env,
+        }
+    }
+
+    fn fmt_pretty(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        ty: Type,
+        env: Option<&ModuleEnv<'_>>,
+    ) -> std::fmt::Result {
         if matches!(self, Value::Uninit) {
             panic!("attempted to pretty-print an uninitialized value");
         }
@@ -583,7 +618,7 @@ impl Value {
             Native(ty) => {
                 let ty = ty.clone();
                 drop(ty_data);
-                self.as_native().unwrap().fmt_pretty(f, &ty)
+                self.as_native().unwrap().fmt_pretty(f, &ty, env)
             }
             Variant(types) => {
                 let variant = self.as_variant().unwrap();
@@ -594,7 +629,7 @@ impl Value {
                         f,
                         "{} {}",
                         variant.tag,
-                        variant.value.display_pretty(&inner_ty)
+                        variant.value.display_pretty_env(&inner_ty, env)
                     )
                 } else if variant.value.is_unit() {
                     write!(f, "{}", variant.tag)
@@ -603,7 +638,7 @@ impl Value {
                         f,
                         "{}({})",
                         variant.tag,
-                        variant.value.display_pretty(&inner_ty)
+                        variant.value.display_pretty_env(&inner_ty, env)
                     )
                 }
             }
@@ -615,7 +650,7 @@ impl Value {
                 write_with_separator(
                     data.iter()
                         .zip(tuple.iter())
-                        .map(|(item, ty)| item.display_pretty(ty)),
+                        .map(|(item, ty)| item.display_pretty_env(ty, env)),
                     ", ",
                     f,
                 )?;
@@ -627,9 +662,9 @@ impl Value {
                 let data = self.as_tuple().unwrap();
                 write!(f, "{{ ")?;
                 write_with_separator(
-                    data.iter()
-                        .zip(fields.iter())
-                        .map(|(item, (name, ty))| format!("{}: {}", name, item.display_pretty(ty))),
+                    data.iter().zip(fields.iter()).map(|(item, (name, ty))| {
+                        format!("{}: {}", name, item.display_pretty_env(ty, env))
+                    }),
                     ", ",
                     f,
                 )?;
@@ -645,14 +680,16 @@ impl Value {
             Named(named_type) => {
                 let named_type = named_type.clone();
                 drop(ty_data);
-                let shape = named_type.instantiated_shape();
+                let env = env.expect("pretty-printing named types requires a module environment");
+                let type_def = env.type_def(named_type.def);
+                let shape = type_def.instantiated_shape(&named_type.params);
                 let separator = if shape.data().is_variant() { "::" } else { " " };
                 write!(
                     f,
                     "{}{}{}",
-                    &named_type.def.name,
+                    type_def.name,
                     separator,
-                    self.display_pretty(&shape)
+                    self.display_pretty_with_env(&shape, env)
                 )
             }
             Never => panic!("A value of type Never cannot exist"),
@@ -675,11 +712,15 @@ fn take_nth_discarding_rest(values: B<SVec2<Value>>, index: usize) -> Option<Val
     result
 }
 
-pub struct PrettyPrint<'a>(FormatWithData<'a, Value, Type>);
+pub struct PrettyPrint<'a> {
+    value: &'a Value,
+    ty: &'a Type,
+    env: Option<&'a ModuleEnv<'a>>,
+}
 
 impl<'a> std::fmt::Display for PrettyPrint<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.value.fmt_pretty(f, *self.0.data)
+        self.value.fmt_pretty(f, *self.ty, self.env)
     }
 }
 

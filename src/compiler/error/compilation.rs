@@ -16,9 +16,9 @@ use crate::{
     containers::iterable_to_string,
     format::{FormatWith, write_with_separator, write_with_separator_and_format_fn},
     module::ModuleId,
+    module::TypeDefId,
     parser::location::{Location, SourceTable},
     types::r#trait::TraitRef,
-    types::r#type::TypeDefRef,
     types::type_inference::unify::SubOrSameType,
     types::type_scheme::PubTypeConstraint,
 };
@@ -321,7 +321,7 @@ impl InvalidEnumDefaultAttributeKind {
 pub trait Scope: Sized {
     type Type: Debug + Clone;
     type TypeVar: Debug + Clone;
-    type TypeDefRef: Debug + Clone;
+    type TypeDefId: Debug + Clone;
     type PubTypeConstraint: Debug + Clone;
     type TraitRef: Debug + Clone;
     type TraitImplHeader: Debug + Clone;
@@ -408,7 +408,7 @@ pub struct Internal;
 impl Scope for Internal {
     type Type = Type;
     type TypeVar = TypeVar;
-    type TypeDefRef = TypeDefRef;
+    type TypeDefId = TypeDefId;
     type PubTypeConstraint = PubTypeConstraint;
     type TraitRef = TraitRef;
     type TraitImplHeader = InternalTraitImplHeader;
@@ -422,7 +422,7 @@ pub struct External;
 impl Scope for External {
     type Type = String;
     type TypeVar = String;
-    type TypeDefRef = (String, Location);
+    type TypeDefId = (String, Location);
     type PubTypeConstraint = String;
     type TraitRef = String;
     type TraitImplHeader = ExternalTraitImplHeader;
@@ -551,9 +551,9 @@ pub enum CompilationErrorImpl<S: Scope> {
         sub_or_same: SubOrSameType,
     },
     NamedTypeMismatch {
-        current_decl: S::TypeDefRef,
+        current_decl: S::TypeDefId,
         current_span: Location,
-        expected_decl: S::TypeDefRef,
+        expected_decl: S::TypeDefId,
         expected_span: Location,
     },
     InfiniteType {
@@ -615,18 +615,18 @@ pub enum CompilationErrorImpl<S: Scope> {
     },
     IsNotCorrectProductType {
         which: WhichProductTypeIsNot,
-        type_def: S::TypeDefRef,
+        type_def: S::TypeDefId,
         what: WhatIsNotAProductType,
         instantiation_span: Location,
     },
     InvalidStructField {
-        type_def: S::TypeDefRef,
+        type_def: S::TypeDefId,
         field_name: Ustr,
         field_span: Location,
         instantiation_span: Location,
     },
     MissingStructField {
-        type_def: S::TypeDefRef,
+        type_def: S::TypeDefId,
         field_name: Ustr,
         instantiation_span: Location,
     },
@@ -905,6 +905,15 @@ fn external_trait_impl_header_from_internal(
             .module_id
             .and_then(|module_id| env.modules.get_name(module_id).map(ToString::to_string)),
     }
+}
+
+fn type_def_origin_from_internal(
+    type_def: TypeDefId,
+    fallback_span: Location,
+    env: &ModuleEnv<'_>,
+) -> <External as Scope>::TypeDefId {
+    let span = env.try_type_def_span(type_def).unwrap_or(fallback_span);
+    (type_def.format_with(env).to_string(), span)
 }
 
 pub type CompilationError = BoxedCompilationError<External>;
@@ -1731,12 +1740,17 @@ impl CompilationError {
                 current_span,
                 expected_decl,
                 expected_span,
-            } => compilation_error!(NamedTypeMismatch {
-                current_decl: (current_decl.name.to_string(), current_decl.span),
-                current_span,
-                expected_decl: (expected_decl.name.to_string(), expected_decl.span),
-                expected_span,
-            }),
+            } => {
+                let current_decl = type_def_origin_from_internal(current_decl, current_span, env);
+                let expected_decl =
+                    type_def_origin_from_internal(expected_decl, expected_span, env);
+                compilation_error!(NamedTypeMismatch {
+                    current_decl,
+                    current_span,
+                    expected_decl,
+                    expected_span,
+                })
+            }
             InfiniteType { kind, span } => {
                 let kind = match kind {
                     InfiniteTypeKind::TypeVariableCycle { ty_var, ty } => {
@@ -1846,32 +1860,41 @@ impl CompilationError {
                 type_def,
                 what,
                 instantiation_span,
-            } => compilation_error!(IsNotCorrectProductType {
-                which,
-                type_def: (type_def.name.to_string(), type_def.span),
-                what,
-                instantiation_span,
-            }),
+            } => {
+                let type_def = type_def_origin_from_internal(type_def, instantiation_span, env);
+                compilation_error!(IsNotCorrectProductType {
+                    which,
+                    type_def,
+                    what,
+                    instantiation_span,
+                })
+            }
             InvalidStructField {
                 type_def,
                 field_name,
                 field_span,
                 instantiation_span,
-            } => compilation_error!(InvalidStructField {
-                type_def: (type_def.name.to_string(), type_def.span),
-                field_name,
-                field_span,
-                instantiation_span,
-            }),
+            } => {
+                let type_def = type_def_origin_from_internal(type_def, instantiation_span, env);
+                compilation_error!(InvalidStructField {
+                    type_def,
+                    field_name,
+                    field_span,
+                    instantiation_span,
+                })
+            }
             MissingStructField {
                 type_def,
                 field_name,
                 instantiation_span,
-            } => compilation_error!(MissingStructField {
-                type_def: (type_def.name.to_string(), type_def.span),
-                field_name,
-                instantiation_span,
-            }),
+            } => {
+                let type_def = type_def_origin_from_internal(type_def, instantiation_span, env);
+                compilation_error!(MissingStructField {
+                    type_def,
+                    field_name,
+                    instantiation_span,
+                })
+            }
             InconsistentADT {
                 a_type,
                 a_span,

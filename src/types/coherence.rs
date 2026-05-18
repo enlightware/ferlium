@@ -164,7 +164,7 @@ fn has_local_named_head(current: &Module, ty: Type) -> bool {
     let ty_data = ty.data();
     ty_data
         .as_named()
-        .is_some_and(|named| current.owns_type_def(&named.def))
+        .is_some_and(|named| current.owns_type_def(named.def))
 }
 
 fn has_anonymous_structural_head(ty: Type) -> bool {
