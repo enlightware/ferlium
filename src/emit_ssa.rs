@@ -370,14 +370,14 @@ impl<'a> Emitter<'a> {
       }
 
       K::ExtractTag(n) => {
-        let m = &self.hir_arena[*n];
+        // TODO: N should be a variant, which will be lowered to either a `ssa::Value::Tuple` or to a new `ssa::Value::Variant`
+        // So we should either extract the tag with a fixed index for the tuple, or accessing a custom property of the variant.
+        todo!("Lowering for ExtractTag is unimplemented");
+      }
 
-        let s = self.lower_as_rvalue(m);
-
-        // Do we want to fix the index here ? Or what ?
-        self
-          .insert(ssa::Instruction::project(node.span, s, 1, node.ty))
-          .unwrap()
+      K::Variant(t, n) => {
+        // TODO: Implemented this either by lowering it to a `ssa::Value::Tuple`, a `ssa::Value::Variant`
+        todo!("Lowering for Variant is unimplemented");
       }
 
       _ => {
