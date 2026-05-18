@@ -19,6 +19,7 @@ use ferlium::compiler::error::{
     CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat,
 };
 use ferlium::format::FormatWith;
+use ferlium::ide::{AnnotationData, Compiler as IdeCompiler};
 use ferlium::module::id::Id;
 use ferlium::module::{
     LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
@@ -601,7 +602,43 @@ fn process_input(
     Ok(module_id)
 }
 
-fn process_pipe_input(print_module: bool) -> i32 {
+fn annotated_source(input: &str, annotations: &[AnnotationData]) -> String {
+    let char_to_byte = |char_pos: usize| {
+        input
+            .char_indices()
+            .map(|(index, _)| index)
+            .nth(char_pos)
+            .unwrap_or(input.len())
+    };
+    let mut grouped = Vec::<(usize, String)>::new();
+    for annotation in annotations {
+        if let Some((_, hint)) = grouped.last_mut().filter(|(pos, _)| *pos == annotation.pos) {
+            hint.push_str(&annotation.hint);
+        } else {
+            grouped.push((annotation.pos, annotation.hint.clone()));
+        }
+    }
+    let mut output = input.to_string();
+    for (pos, hint) in grouped.into_iter().rev() {
+        output.insert_str(char_to_byte(pos), &hint);
+    }
+    output
+}
+
+fn print_pipe_annotations(input: &str) -> i32 {
+    let mut compiler = IdeCompiler::new();
+    if let Some(errors) = compiler.compile(input) {
+        for error in errors {
+            eprintln!("{error}");
+        }
+        return 1;
+    }
+    let annotations = compiler.get_annotations();
+    println!("{}", annotated_source(input, &annotations));
+    0
+}
+
+fn process_pipe_input(print_module: bool, print_annotations: bool) -> i32 {
     // Read all input from stdin
     let mut input = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut input) {
@@ -612,6 +649,10 @@ fn process_pipe_input(print_module: bool) -> i32 {
     if input.trim().is_empty() {
         eprintln!("No input provided");
         return 1;
+    }
+
+    if print_annotations {
+        return print_pipe_annotations(&input);
     }
 
     // Initialize ferlium contexts
@@ -635,7 +676,8 @@ fn main() {
     if !io::stdin().is_terminal() {
         // Pipe mode: read from stdin, process, and exit
         let print_module = env::args().any(|arg| arg == "--print-module");
-        std::process::exit(process_pipe_input(print_module));
+        let print_annotations = env::args().any(|arg| arg == "--print-annotations");
+        std::process::exit(process_pipe_input(print_module, print_annotations));
     }
 
     // Check for help flag
@@ -659,6 +701,10 @@ fn main() {
         );
         println!(
             "  {} [--print-module]   Print the provided-code module (pipe mode only).",
+            args[0]
+        );
+        println!(
+            "  {} [--print-annotations] Print the IDE-annotated source (pipe mode only).",
             args[0]
         );
         println!("  echo 'code' | {}", args[0]);
