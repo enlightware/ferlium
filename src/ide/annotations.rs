@@ -17,7 +17,7 @@ use crate::{
     format::FormatWith,
     hir::{Node, NodeArena, NodeId, NodeKind},
     module::{LocalDecl, ModuleEnv, id::Id},
-    types::type_scheme::DisplayStyle,
+    types::{r#type::Type, type_scheme::DisplayStyle},
 };
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -65,12 +65,20 @@ pub(super) fn display_annotations(
             continue;
         }
         if let Some(script_fn) = function.code.as_script() {
+            let ty_var_names = function
+                .definition
+                .ty_scheme
+                .display_ty_var_names_with_source_params(&function.definition.generic_params);
+            let type_env = function
+                .definition
+                .ty_scheme
+                .type_display_env(&env, &ty_var_names);
             variable_type_annotations(
                 &module.ir_arena,
                 script_fn.entry_node_id,
                 &mut annotations,
                 &function.locals,
-                &env,
+                &type_env,
             );
         }
     }
@@ -96,6 +104,10 @@ pub(super) fn display_annotations(
         if spans.span.source_id != source_id {
             continue;
         }
+        let ty_scheme = &function.definition.ty_scheme;
+        let ty_var_names =
+            ty_scheme.display_ty_var_names_with_source_params(&function.definition.generic_params);
+        let type_env = ty_scheme.type_display_env(&env, &ty_var_names);
         if !function.definition.ty_scheme.is_just_type() {
             match style {
                 Mathematical => {
@@ -111,16 +123,42 @@ pub(super) fn display_annotations(
                     ));
                 }
                 Rust => {
-                    annotations.push((
-                        spans.name.end_usize(),
-                        format!(
-                            "{}",
-                            function
-                                .definition
-                                .ty_scheme
-                                .display_quantifiers_rust_style()
-                        ),
-                    ));
+                    let source_ty_vars = (0..function.definition.generic_params.len())
+                        .map(|index| crate::types::r#type::TypeVar::new(index as u32))
+                        .collect::<FxHashSet<_>>();
+                    let mut inserted_quantifiers = ty_scheme
+                        .display_ty_quantifiers_with_source_params(
+                            &function.definition.generic_params,
+                        )
+                        .into_iter()
+                        .filter(|ty_var| !source_ty_vars.contains(ty_var))
+                        .map(|ty_var| {
+                            ty_var_names
+                                .get(&ty_var)
+                                .map_or_else(|| format!("{ty_var}"), ToString::to_string)
+                        })
+                        .chain(ty_scheme.eff_quantifiers.iter().map(|q| format!("{q}")))
+                        .peekable();
+                    if inserted_quantifiers.peek().is_some() {
+                        let inserted_quantifiers =
+                            inserted_quantifiers.collect::<Vec<_>>().join(", ");
+                        if let Some((_, last_source_param_span)) = function
+                            .definition
+                            .generic_params
+                            .iter()
+                            .max_by_key(|(_, span)| span.end_usize())
+                        {
+                            annotations.push((
+                                last_source_param_span.end_usize(),
+                                format!(", {inserted_quantifiers}"),
+                            ));
+                        } else {
+                            annotations.push((
+                                spans.name.end_usize(),
+                                format!("<{inserted_quantifiers}>"),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -131,15 +169,15 @@ pub(super) fn display_annotations(
         {
             if let Some((ty_span, ty_constant)) = ty_span {
                 if !ty_constant {
-                    annotations.push((
-                        ty_span.end_usize(),
-                        format!(" ⇨ {}", arg_ty.format_with(&env)),
-                    ));
+                    let rendered = arg_ty.format_with(&type_env).to_string();
+                    if src[ty_span.as_range()].trim() != rendered {
+                        annotations.push((ty_span.end_usize(), format!(" ⇨ {rendered}")));
+                    }
                 }
             } else {
                 annotations.push((
                     name_span.end_usize(),
-                    format!(": {}", arg_ty.format_with(&env)),
+                    format!(": {}", arg_ty.format_with(&type_env)),
                 ));
             }
         }
@@ -151,28 +189,38 @@ pub(super) fn display_annotations(
             " "
         };
         let mut annotation = if function.definition.ty_scheme.ty.effects.is_empty() {
-            if let Some((_, ty_constant)) = spans.ret_ty {
+            if let Some((ret_span, ty_constant)) = spans.ret_ty {
                 if !ty_constant {
-                    Some(format!(
-                        "{start_space}⇨ {}",
-                        function.definition.ty_scheme.ty.ret.format_with(&env)
-                    ))
+                    let rendered = function
+                        .definition
+                        .ty_scheme
+                        .ty
+                        .ret
+                        .format_with(&type_env)
+                        .to_string();
+                    (src[ret_span.as_range()].trim() != rendered)
+                        .then(|| format!("{start_space}⇨ {rendered}"))
                 } else {
                     None
                 }
             } else {
                 Some(format!(
                     "{start_space}-> {}",
-                    function.definition.ty_scheme.ty.ret.format_with(&env)
+                    function.definition.ty_scheme.ty.ret.format_with(&type_env)
                 ))
             }
-        } else if let Some((_, ty_constant)) = spans.ret_ty {
+        } else if let Some((ret_span, ty_constant)) = spans.ret_ty {
             if !ty_constant {
-                Some(format!(
-                    "{start_space}⇨ {} ! {}",
-                    function.definition.ty_scheme.ty.ret.format_with(&env),
-                    function.definition.ty_scheme.ty.effects
-                ))
+                let rendered = function
+                    .definition
+                    .ty_scheme
+                    .ty
+                    .ret
+                    .format_with(&type_env)
+                    .to_string();
+                let effects = &function.definition.ty_scheme.ty.effects;
+                (src[ret_span.as_range()].trim() != rendered)
+                    .then(|| format!("{start_space}⇨ {rendered} ! {effects}"))
             } else {
                 Some(format!(
                     "{start_space}! {}",
@@ -182,7 +230,7 @@ pub(super) fn display_annotations(
         } else {
             Some(format!(
                 "{start_space}-> {} ! {}",
-                function.definition.ty_scheme.ty.ret.format_with(&env),
+                function.definition.ty_scheme.ty.ret.format_with(&type_env),
                 function.definition.ty_scheme.ty.effects
             ))
         };
@@ -194,7 +242,7 @@ pub(super) fn display_annotations(
                 function
                     .definition
                     .ty_scheme
-                    .display_constraints_rust_style(&env)
+                    .display_constraints_rust_style_with_type_env(&type_env)
             ));
         }
         if let Some(mut annotation) = annotation {
@@ -248,23 +296,27 @@ pub(super) fn display_annotations(
     annotations
 }
 
-fn variable_type_annotations(
+fn variable_type_annotations<Env>(
     arena: &NodeArena,
     id: NodeId,
     result: &mut Vec<(usize, String)>,
     locals: &[LocalDecl],
-    env: &ModuleEnv,
-) {
+    env: &Env,
+) where
+    Type: FormatWith<Env>,
+{
     node_variable_type_annotations(&arena[id], arena, result, locals, env)
 }
 
-fn node_variable_type_annotations(
+fn node_variable_type_annotations<Env>(
     node: &Node,
     arena: &NodeArena,
     result: &mut Vec<(usize, String)>,
     locals: &[LocalDecl],
-    env: &ModuleEnv,
-) {
+    env: &Env,
+) where
+    Type: FormatWith<Env>,
+{
     use NodeKind::*;
     match &node.kind {
         Immediate(_) | Uninit => {}

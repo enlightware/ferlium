@@ -22,6 +22,7 @@ use ferlium_macros::declare_native_fn_aliases;
 
 use crate::{
     Location,
+    ast::UstrSpan,
     compiler::error::RuntimeErrorKind,
     eval::{
         ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, ValOrMutArgs, cont,
@@ -40,14 +41,38 @@ use crate::{
 };
 
 /// The definition of a function, to be used in modules, traits and IDEs.
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone)]
 pub struct FunctionDefinition {
     pub ty_scheme: TypeScheme<FnType>,
+    pub generic_params: Vec<UstrSpan>,
     pub arg_names: Vec<Ustr>,
     pub doc: Option<String>,
 }
 
 impl FunctionDefinition {
+    pub fn new(ty_scheme: TypeScheme<FnType>, arg_names: Vec<Ustr>, doc: Option<String>) -> Self {
+        Self {
+            ty_scheme,
+            generic_params: vec![],
+            arg_names,
+            doc,
+        }
+    }
+
+    pub fn new_with_generic_params(
+        ty_scheme: TypeScheme<FnType>,
+        generic_params: Vec<UstrSpan>,
+        arg_names: Vec<Ustr>,
+        doc: Option<String>,
+    ) -> Self {
+        Self {
+            ty_scheme,
+            generic_params,
+            arg_names,
+            doc,
+        }
+    }
+
     pub fn new_infer_quantifiers<'s>(
         fn_ty: FnType,
         arg_names: impl IntoIterator<Item = &'s str>,
@@ -56,6 +81,7 @@ impl FunctionDefinition {
         let arg_names = arg_names.into_iter().map(Ustr::from).collect();
         FunctionDefinition {
             ty_scheme: TypeScheme::new_infer_quantifiers(fn_ty),
+            generic_params: vec![],
             arg_names,
             doc: Some(String::from(doc)),
         }
@@ -73,6 +99,7 @@ impl FunctionDefinition {
                 fn_ty,
                 constraints.into(),
             ),
+            generic_params: vec![],
             arg_names,
             doc: Some(String::from(doc)),
         }
@@ -124,11 +151,18 @@ impl FunctionDefinition {
             }
         }
         write!(f, "{prefix}fn {name}")?;
+        let ty_var_names = self
+            .ty_scheme
+            .display_ty_var_names_with_source_params(&self.generic_params);
         let mut quantifiers = self
             .ty_scheme
-            .ty_quantifiers
-            .iter()
-            .map(|q| format!("{q}"))
+            .display_ty_quantifiers_with_source_params(&self.generic_params)
+            .into_iter()
+            .map(|q| {
+                ty_var_names
+                    .get(&q)
+                    .map_or_else(|| format!("{q}"), ToString::to_string)
+            })
             .chain(
                 self.ty_scheme
                     .eff_quantifiers
@@ -139,9 +173,12 @@ impl FunctionDefinition {
         if quantifiers.peek().is_some() {
             write!(f, "<{}>", quantifiers.collect::<Vec<_>>().join(", "))?;
         }
-        fmt_fn_type_with_arg_names(&self.ty_scheme.ty, &self.arg_names, f, env)?;
+        let type_env = self.ty_scheme.type_display_env(env, &ty_var_names);
+        fmt_fn_type_with_arg_names(&self.ty_scheme.ty, &self.arg_names, f, &type_env)?;
         if !self.ty_scheme.is_just_type_and_effects() {
-            write!(f, " {}", self.ty_scheme.display_constraints_rust_style(env),)
+            write!(f, " ")?;
+            self.ty_scheme
+                .format_constraints_rust_style_with_type_env(f, &type_env)
         } else {
             Ok(())
         }
@@ -156,6 +193,7 @@ impl TypeLike for FunctionDefinition {
     fn map(&self, f: &mut impl TypeMapper) -> Self {
         FunctionDefinition {
             ty_scheme: self.ty_scheme.map(f),
+            generic_params: self.generic_params.clone(),
             arg_names: self.arg_names.clone(),
             doc: self.doc.clone(),
         }

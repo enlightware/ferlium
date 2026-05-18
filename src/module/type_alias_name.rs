@@ -27,17 +27,25 @@ pub(crate) fn find_generic_alias_name(
     ty: Type,
     env: &ModuleEnv<'_>,
 ) -> Option<GenericAliasName> {
+    find_generic_alias_name_with(module, ty, |ty| ty.format_with(env).to_string())
+}
+
+pub(crate) fn find_generic_alias_name_with(
+    module: &Module,
+    ty: Type,
+    mut format_type: impl FnMut(Type) -> String,
+) -> Option<GenericAliasName> {
     module.type_aliases.type_entries().find_map(|alias| {
-        (!alias.param_names.is_empty())
-            .then(|| render_generic_alias_name(alias, ty, env))
+        (!alias.generic_params.is_empty())
+            .then(|| render_generic_alias_name_with(alias, ty, &mut format_type))
             .flatten()
     })
 }
 
-pub(crate) fn render_generic_alias_name(
+pub(crate) fn render_generic_alias_name_with(
     alias: &TypeAliasEntry,
     ty: Type,
-    env: &ModuleEnv<'_>,
+    format_type: &mut impl FnMut(Type) -> String,
 ) -> Option<GenericAliasName> {
     let mut subst = TypeInstSubst::default();
     match_alias_type(alias.ty, ty, alias.ty_var_count, &mut subst).then(|| {
@@ -51,7 +59,7 @@ pub(crate) fn render_generic_alias_name(
                 "{}<{}>",
                 alias.name,
                 args.iter()
-                    .map(|ty| ty.format_with(env).to_string())
+                    .map(|ty| format_type(*ty))
                     .collect::<Vec<_>>()
                     .join(", ")
             )

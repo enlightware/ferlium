@@ -132,7 +132,6 @@ impl NamedTypeData {
                     GenericParamsOwner::TypeAlias { name: name.0 },
                 )?;
                 let ty_var_count = generic_params.len() as u32;
-                let param_names: Vec<_> = generic_params.iter().map(|(name, _)| *name).collect();
                 let ty = alias.0.desugar_with_ty_params(
                     alias.1,
                     false,
@@ -140,7 +139,7 @@ impl NamedTypeData {
                     &generic_ty_params,
                     modules_used,
                 )?;
-                DesugaredNamedType::Alias(*name, param_names, ty_var_count, ty)
+                DesugaredNamedType::Alias(*name, generic_params.clone(), ty_var_count, ty)
             }
             NamedTypeData::Def(def) => {
                 DesugaredNamedType::Def(def.name.0, def.desugar(env, modules_used)?)
@@ -509,8 +508,13 @@ impl NamedTypeGraph {
                 ty_refs[scc[0]].desugar_acyclic(&env, &mut modules_used)?
             };
             match desugared {
-                DesugaredNamedType::Alias(name, param_names, ty_var_count, ty) => {
-                    output.add_type_alias(name.0, param_names, ty_var_count, ty);
+                DesugaredNamedType::Alias(name, generic_params, ty_var_count, ty) => {
+                    output.add_type_alias_with_param_spans(
+                        name.0,
+                        generic_params,
+                        ty_var_count,
+                        ty,
+                    );
                 }
                 DesugaredNamedType::Def(name, type_def) => {
                     output.add_type_def(name, type_def);
@@ -611,8 +615,8 @@ fn predeclare_recursive_type_defs(
         .filter_map(|&index| match &ty_refs[index] {
             NamedTypeData::Alias(..) => None,
             NamedTypeData::Def(def) => {
-                let param_names = def.generic_params.iter().map(|(name, _)| *name).collect();
-                let type_def = output.reserve_type_def(def.name.0, param_names, def.span);
+                let type_def =
+                    output.reserve_type_def(def.name.0, def.generic_params.clone(), def.span);
                 Some((def.name.0, type_def))
             }
         })
@@ -722,12 +726,8 @@ fn desugar_recursive_named_type_scc(
             )?
         };
         for (name, generic_params, ty) in entries {
-            output.add_type_alias(
-                name.0,
-                generic_params.iter().map(|(name, _)| *name).collect(),
-                generic_params.len() as u32,
-                ty,
-            );
+            let ty_var_count = generic_params.len() as u32;
+            output.add_type_alias_with_param_spans(name.0, generic_params, ty_var_count, ty);
         }
     }
 
@@ -742,7 +742,7 @@ fn desugar_recursive_named_type_scc(
 }
 
 enum DesugaredNamedType {
-    Alias(UstrSpan, Vec<Ustr>, u32, Type),
+    Alias(UstrSpan, Vec<UstrSpan>, u32, Type),
     Def(Ustr, HirTypeDef),
 }
 

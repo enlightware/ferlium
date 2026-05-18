@@ -726,7 +726,7 @@ impl PTypeDef {
         Ok(HirTypeDef {
             name: self.name.0,
             doc: (!self.doc_comments.is_empty()).then(|| self.doc_comments.join("\n")),
-            param_names: self.generic_params.iter().map(|(name, _)| *name).collect(),
+            generic_params: self.generic_params.clone(),
             shape: TypeScheme {
                 ty_quantifiers,
                 eff_quantifiers: FxHashSet::default(),
@@ -1153,12 +1153,7 @@ fn desugar_resolved_type_without_args(
 ) -> Result<Type, InternalCompilationError> {
     match resolved {
         ResolvedTypePath::Alias(entry) => {
-            expect_type_argument_count(
-                entry.param_names.len(),
-                path.span().unwrap_or(span),
-                0,
-                span,
-            )?;
+            expect_type_argument_count(entry.param_count(), path.span().unwrap_or(span), 0, span)?;
             Ok(entry.ty)
         }
         ResolvedTypePath::TypeDef(type_def) => {
@@ -1184,7 +1179,7 @@ fn desugar_resolved_type_with_args(
     match resolved {
         ResolvedTypePath::Alias(entry) => {
             expect_type_argument_count(
-                entry.param_names.len(),
+                entry.param_count(),
                 path.span().unwrap_or(span),
                 args.len(),
                 span,

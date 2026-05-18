@@ -11,8 +11,10 @@ use crate::{
     ast::{self, UstrSpan},
     compiler::error::InternalCompilationError,
     module::{
-        Module, ModuleFunction, ModuleId, Modules, TypeDefId, id::Id, path::Path,
-        type_alias_name::find_generic_alias_name,
+        Module, ModuleFunction, ModuleId, Modules, TypeDefId,
+        id::Id,
+        path::Path,
+        type_alias_name::{find_generic_alias_name, find_generic_alias_name_with},
     },
     std::STD_MODULE_ID,
     types::r#trait::{TraitMethodIndex, TraitRef},
@@ -81,6 +83,45 @@ impl<'m> ModuleEnv<'m> {
         })
     }
 
+    pub fn type_alias_name_with(
+        &self,
+        ty: Type,
+        mut format_type: impl FnMut(Type) -> String,
+    ) -> Option<String> {
+        if let Some(name) = self.current.type_aliases.get_name(ty) {
+            return Some(name.to_string());
+        }
+        if let Some(alias_name) = find_generic_alias_name_with(self.current, ty, &mut format_type) {
+            return Some(alias_name.rendered);
+        }
+
+        self.modules.iter_named().find_map(|(mod_path, entry)| {
+            entry.module().and_then(|module| {
+                module
+                    .type_aliases
+                    .get_name(ty)
+                    .map(|ty_name| {
+                        if self.current.uses(mod_path, ty_name) {
+                            ty_name.to_string()
+                        } else {
+                            format!("{mod_path}::{ty_name}")
+                        }
+                    })
+                    .or_else(|| {
+                        find_generic_alias_name_with(module, ty, &mut format_type).map(
+                            |alias_name| {
+                                if self.current.uses(mod_path, alias_name.name) {
+                                    alias_name.rendered
+                                } else {
+                                    format!("{mod_path}::{}", alias_name.rendered)
+                                }
+                            },
+                        )
+                    })
+            })
+        })
+    }
+
     pub fn bare_native_name(&self, native: &BareNativeTypeB) -> Option<String> {
         self.current
             .type_aliases
@@ -114,7 +155,7 @@ impl<'m> ModuleEnv<'m> {
             .get_module_member(&path.segments, &|name, module| {
                 module.get_type_alias(ustr(name))
             })?
-            .and_then(|(_, entry)| entry.param_names.is_empty().then_some(entry.ty)))
+            .and_then(|(_, entry)| entry.generic_params.is_empty().then_some(entry.ty)))
     }
 
     /// Like [`type_alias_type`], but also returns the source [`ModuleId`] when the alias
@@ -190,14 +231,33 @@ impl<'m> ModuleEnv<'m> {
             .and_then(|module| module.try_type_def_name(id))
     }
 
-    pub fn type_def_param_names(&self, id: TypeDefId) -> &[Ustr] {
+    pub fn type_def_param_names(&self, id: TypeDefId) -> impl ExactSizeIterator<Item = Ustr> + '_ {
         self.try_type_def_param_names(id)
             .unwrap_or_else(|| unavailable_type_def(id))
     }
 
-    pub fn try_type_def_param_names(&self, id: TypeDefId) -> Option<&[Ustr]> {
+    pub fn try_type_def_param_names(
+        &self,
+        id: TypeDefId,
+    ) -> Option<impl ExactSizeIterator<Item = Ustr> + '_> {
         self.type_def_module(id)
             .and_then(|module| module.try_type_def_param_names(id))
+    }
+
+    pub fn type_def_param_spans(
+        &self,
+        id: TypeDefId,
+    ) -> impl ExactSizeIterator<Item = Location> + '_ {
+        self.try_type_def_param_spans(id)
+            .unwrap_or_else(|| unavailable_type_def(id))
+    }
+
+    pub fn try_type_def_param_spans(
+        &self,
+        id: TypeDefId,
+    ) -> Option<impl ExactSizeIterator<Item = Location> + '_> {
+        self.type_def_module(id)
+            .and_then(|module| module.try_type_def_param_spans(id))
     }
 
     pub fn type_def_span(&self, id: TypeDefId) -> Location {
@@ -267,9 +327,7 @@ impl<'m> ModuleEnv<'m> {
         path: &ast::Path,
     ) -> Result<Option<Type>, InternalCompilationError> {
         Ok(self.type_def_with_module(path)?.and_then(|(_, type_def)| {
-            self.type_def_param_names(type_def)
-                .is_empty()
-                .then(|| Type::named(type_def, vec![]))
+            (self.type_def_param_names(type_def).len() == 0).then(|| Type::named(type_def, vec![]))
         }))
     }
 
@@ -282,8 +340,7 @@ impl<'m> ModuleEnv<'m> {
         Ok(self
             .type_def_with_module(path)?
             .and_then(|(module_id, type_def)| {
-                self.type_def_param_names(type_def)
-                    .is_empty()
+                (self.type_def_param_names(type_def).len() == 0)
                     .then(|| (module_id, Type::named(type_def, vec![])))
             }))
     }

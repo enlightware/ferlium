@@ -376,7 +376,7 @@ fn generic_type_aliases() {
     let module = session.session().expect_fresh_module(module_id);
     let entry = module.get_type_alias(ustr("Pair"));
     assert!(entry.is_some());
-    assert_eq!(entry.unwrap().param_names.len(), 2);
+    assert_eq!(entry.unwrap().param_count(), 2);
     let rendered = module.format_with(session.session().modules()).to_string();
     assert!(rendered.contains("Pair<A, B>: (A, B)"));
 

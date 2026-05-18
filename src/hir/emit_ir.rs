@@ -750,7 +750,12 @@ where
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
-        let definition = FunctionDefinition::new(ty_scheme, arg_names, doc.clone());
+        let definition = FunctionDefinition::new_with_generic_params(
+            ty_scheme,
+            generic_params.clone(),
+            arg_names,
+            doc.clone(),
+        );
         let descr = ModuleFunction {
             definition,
             code: b(VoidFunction),
@@ -1265,12 +1270,27 @@ where
             solver.commit(&mut output.functions, &mut output.def_table);
 
             // Write the final type scheme.
+            let explicit_ty_vars = explicit_ty_vars
+                .iter()
+                .copied()
+                .unique()
+                .collect::<Vec<_>>();
+            quantifiers = explicit_ty_vars
+                .iter()
+                .copied()
+                .chain(
+                    quantifiers
+                        .into_iter()
+                        .filter(|ty_var| !explicit_ty_vars.contains(ty_var)),
+                )
+                .collect();
             apply_to_function_and_associated_lambdas!(id, |id: &LocalFunctionId| {
                 let descr = &mut output.functions[id.as_index()];
                 descr.definition.ty_scheme.ty_quantifiers = quantifiers.clone();
                 descr.definition.ty_scheme.eff_quantifiers =
                     descr.definition.ty_scheme.ty.input_effect_vars();
                 descr.definition.ty_scheme.constraints = constraints.clone();
+                descr.definition.generic_params = function.generic_params.clone();
             });
 
             // Log dropped constraints.

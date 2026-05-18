@@ -227,7 +227,7 @@ pub(super) fn emit_auto_value_impls(
 
         let type_def = output.type_def(type_def_id);
         let type_def_span = type_def.span;
-        let type_def_param_count = type_def.param_names.len();
+        let type_def_param_count = type_def.param_count();
         let input_ty = Type::named(
             type_def_id,
             (0..type_def_param_count)

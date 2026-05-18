@@ -36,7 +36,8 @@ use std::{fmt, hash::Hash, ops};
 use ustr::{Ustr, ustr};
 
 use crate::{
-    FxHashSet, Location, Modules,
+    FxHashMap, FxHashSet, Location, Modules,
+    ast::UstrSpan,
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     define_id_type,
     format::FormatWith,
@@ -46,7 +47,8 @@ use crate::{
     types::{
         r#trait::TraitRef,
         r#type::{
-            LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot, TypeVar,
+            LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
+            TypeDisplayEnv, TypeVar,
         },
     },
 };
@@ -435,8 +437,28 @@ impl Module {
         ty_var_count: u32,
         ty: Type,
     ) -> LocalTypeAliasId {
+        self.add_type_alias_with_param_spans(
+            name,
+            param_names
+                .into_iter()
+                .map(|param_name| (param_name, Location::new_synthesized()))
+                .collect(),
+            ty_var_count,
+            ty,
+        )
+    }
+
+    /// Add a type alias with source generic parameter spans to this module, returning its ID.
+    pub(crate) fn add_type_alias_with_param_spans(
+        &mut self,
+        name: Ustr,
+        generic_params: Vec<UstrSpan>,
+        ty_var_count: u32,
+        ty: Type,
+    ) -> LocalTypeAliasId {
         let id = LocalTypeAliasId::from_index(self.type_aliases.type_len());
-        self.type_aliases.set(name, param_names, ty_var_count, ty);
+        self.type_aliases
+            .set(name, generic_params, ty_var_count, ty);
         self.def_table.insert(name, DefKind::TypeAlias(id));
         id
     }
@@ -497,12 +519,12 @@ impl Module {
     pub fn reserve_type_def(
         &mut self,
         name: Ustr,
-        param_names: Vec<Ustr>,
+        generic_params: Vec<UstrSpan>,
         span: Location,
     ) -> TypeDefId {
         let id = LocalTypeDefId::from_index(self.type_defs.len());
         self.type_defs
-            .push(TypeDefSlot::reserved(name, param_names, span));
+            .push(TypeDefSlot::reserved(name, generic_params, span));
         self.def_table.insert(name, DefKind::TypeDef(id));
         TypeDefId::new(self.module_id(), id)
     }
@@ -536,16 +558,40 @@ impl Module {
         }
     }
 
-    pub fn type_def_param_names(&self, id: TypeDefId) -> &[Ustr] {
+    pub fn type_def_param_names(&self, id: TypeDefId) -> impl ExactSizeIterator<Item = Ustr> + '_ {
         assert_eq!(id.module, self.module_id());
         self.type_defs[id.index.as_index()].param_names()
     }
 
-    pub fn try_type_def_param_names(&self, id: TypeDefId) -> Option<&[Ustr]> {
+    pub fn try_type_def_param_names(
+        &self,
+        id: TypeDefId,
+    ) -> Option<impl ExactSizeIterator<Item = Ustr> + '_> {
         if id.module == self.module_id() {
             self.type_defs
                 .get(id.index.as_index())
                 .map(TypeDefSlot::param_names)
+        } else {
+            None
+        }
+    }
+
+    pub fn type_def_param_spans(
+        &self,
+        id: TypeDefId,
+    ) -> impl ExactSizeIterator<Item = Location> + '_ {
+        assert_eq!(id.module, self.module_id());
+        self.type_defs[id.index.as_index()].param_spans()
+    }
+
+    pub fn try_type_def_param_spans(
+        &self,
+        id: TypeDefId,
+    ) -> Option<impl ExactSizeIterator<Item = Location> + '_> {
+        if id.module == self.module_id() {
+            self.type_defs
+                .get(id.index.as_index())
+                .map(TypeDefSlot::param_spans)
         } else {
             None
         }
@@ -1130,10 +1176,22 @@ impl Module {
             writeln!(f, "Type aliases ({}):\n", self.type_aliases.type_len())?;
             for alias in self.type_aliases.type_entries() {
                 write!(f, "{}", alias.name)?;
-                if alias.ty_var_count > 0 {
+                let mut ty_var_names = FxHashMap::default();
+                if !alias.generic_params.is_empty() {
+                    write!(f, "<")?;
+                    for (index, (name, _)) in alias.generic_params.iter().enumerate() {
+                        if index > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{name}")?;
+                        ty_var_names.insert(TypeVar::new(index as u32), *name);
+                    }
+                    write!(f, ">")?;
+                } else if alias.ty_var_count > 0 {
                     fmt_ordered_quantifiers(f, alias.ty_var_count)?;
                 }
-                writeln!(f, ": {}", alias.ty.data().format_with(&env))?;
+                let type_env = TypeDisplayEnv::new(&env, &ty_var_names);
+                writeln!(f, ": {}", alias.ty.data().format_with(&type_env))?;
             }
             writeln!(f, "\n")?;
         }

@@ -94,10 +94,20 @@ impl Compiler {
             .flatten()
         {
             let module_env = ModuleEnv::new(module, self.session.modules());
-            Some(format!(
-                "{}",
-                func.definition.ty_scheme.display_rust_style(&module_env)
-            ))
+            let ty_scheme = &func.definition.ty_scheme;
+            let ty_var_names =
+                ty_scheme.display_ty_var_names_with_source_params(&func.definition.generic_params);
+            let type_env = ty_scheme.type_display_env(&module_env, &ty_var_names);
+            let mut signature = ty_scheme.ty.format_with(&type_env).to_string();
+            if !ty_scheme.constraints.is_empty() {
+                signature.push(' ');
+                signature.push_str(
+                    &ty_scheme
+                        .display_constraints_rust_style_with_type_env(&type_env)
+                        .to_string(),
+                );
+            }
+            Some(signature)
         } else {
             None
         }

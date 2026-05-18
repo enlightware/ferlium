@@ -16,8 +16,9 @@ use crate::{FxHashMap, FxHashSet};
 
 use crate::{
     Location,
+    ast::UstrSpan,
     compiler::error::InternalCompilationError,
-    format::{FormatWith, write_with_separator_and_format_fn},
+    format::{FormatWith, type_variable_index_to_string_latin, write_with_separator_and_format_fn},
     hir::dictionary_passing::ExtraParameters,
     parser::location::InstantiableLocation,
     std::{
@@ -43,7 +44,7 @@ use crate::{
     hir::dictionary_passing::{DictionaryReq, instantiate_dictionary_requirements},
     module::ModuleEnv,
     types::effects::{EffType, EffectVar, EffectsInstSubst},
-    types::r#type::{Type, TypeInstSubst, TypeVar},
+    types::r#type::{Type, TypeDisplayEnv, TypeInstSubst, TypeVar},
     types::type_inference::{expr::TypeInference, substitution::InstSubst},
 };
 
@@ -551,61 +552,82 @@ impl Hash for PubTypeConstraint {
 
 impl FormatWith<ModuleEnv<'_>> for PubTypeConstraint {
     fn fmt_with(&self, f: &mut std::fmt::Formatter, env: &ModuleEnv<'_>) -> std::fmt::Result {
-        use PubTypeConstraint::*;
-        match self {
-            TupleAtIndexIs {
-                tuple_ty,
+        format_pub_type_constraint(self, f, env)
+    }
+}
+
+impl FormatWith<TypeDisplayEnv<'_, '_>> for PubTypeConstraint {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter,
+        env: &TypeDisplayEnv<'_, '_>,
+    ) -> std::fmt::Result {
+        format_pub_type_constraint(self, f, env)
+    }
+}
+
+fn format_pub_type_constraint<Env>(
+    constraint: &PubTypeConstraint,
+    f: &mut std::fmt::Formatter,
+    env: &Env,
+) -> std::fmt::Result
+where
+    Type: FormatWith<Env>,
+{
+    use PubTypeConstraint::*;
+    match constraint {
+        TupleAtIndexIs {
+            tuple_ty,
+            index,
+            element_ty,
+            ..
+        } => {
+            write!(
+                f,
+                "{}.{} = {}",
+                tuple_ty.format_with(env),
                 index,
-                element_ty,
-                ..
-            } => {
-                write!(
-                    f,
-                    "{}.{} = {}",
-                    tuple_ty.format_with(env),
-                    index,
-                    element_ty.format_with(env)
-                )
-            }
-            RecordFieldIs {
-                record_ty,
-                field,
-                element_ty,
-                ..
-            } => {
-                write!(
-                    f,
-                    "{}.{} = {}",
-                    record_ty.format_with(env),
-                    field,
-                    element_ty.format_with(env)
-                )
-            }
-            TypeHasVariant {
-                variant_ty,
-                tag,
-                payload_ty,
-                ..
-            } => {
-                if *payload_ty == Type::unit() {
-                    write!(f, "{} ⊇ {}", variant_ty.format_with(env), tag,)
-                } else {
-                    write!(
-                        f,
-                        "{} ⊇ {} {}",
-                        variant_ty.format_with(env),
-                        tag,
-                        payload_ty.format_with(env)
-                    )
-                }
-            }
-            HaveTrait {
-                trait_ref,
-                input_tys,
-                output_tys,
-                ..
-            } => format_have_trait(trait_ref, input_tys, output_tys, f, env),
+                element_ty.format_with(env)
+            )
         }
+        RecordFieldIs {
+            record_ty,
+            field,
+            element_ty,
+            ..
+        } => {
+            write!(
+                f,
+                "{}.{} = {}",
+                record_ty.format_with(env),
+                field,
+                element_ty.format_with(env)
+            )
+        }
+        TypeHasVariant {
+            variant_ty,
+            tag,
+            payload_ty,
+            ..
+        } => {
+            if *payload_ty == Type::unit() {
+                write!(f, "{} ⊇ {}", variant_ty.format_with(env), tag,)
+            } else {
+                write!(
+                    f,
+                    "{} ⊇ {} {}",
+                    variant_ty.format_with(env),
+                    tag,
+                    payload_ty.format_with(env)
+                )
+            }
+        }
+        HaveTrait {
+            trait_ref,
+            input_tys,
+            output_tys,
+            ..
+        } => format_have_trait_with_env(trait_ref, input_tys, output_tys, f, env),
     }
 }
 
@@ -623,7 +645,7 @@ enum AggregatedConstraint {
 }
 
 /// A type, with quantified type variables and associated constraints.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct TypeScheme<Ty: TypeLike> {
     // for a compiled module, quantifiers should be equal to the type variables in the type
     // and the constraints.
@@ -632,6 +654,17 @@ pub struct TypeScheme<Ty: TypeLike> {
     pub ty: Ty,
     pub constraints: Vec<PubTypeConstraint>,
 }
+
+impl<Ty: TypeLike + PartialEq> PartialEq for TypeScheme<Ty> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ty_quantifiers == other.ty_quantifiers
+            && self.eff_quantifiers == other.eff_quantifiers
+            && self.ty == other.ty
+            && self.constraints == other.constraints
+    }
+}
+
+impl<Ty: TypeLike + Eq> Eq for TypeScheme<Ty> {}
 
 impl<Ty: TypeLike> TypeScheme<Ty> {
     /// Creates a new type scheme with no quantifier nor constraints.
@@ -669,6 +702,67 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
             ty,
             constraints,
         }
+    }
+
+    pub(crate) fn display_ty_var_names(&self) -> FxHashMap<TypeVar, Ustr> {
+        self.display_ty_var_names_with_source_params(&[])
+    }
+
+    pub(crate) fn display_ty_var_names_with_source_params(
+        &self,
+        source_generic_params: &[UstrSpan],
+    ) -> FxHashMap<TypeVar, Ustr> {
+        let mut names = FxHashMap::default();
+        let mut used = FxHashSet::default();
+        for (index, (name, _)) in source_generic_params.iter().enumerate() {
+            let ty_var = TypeVar::new(index as u32);
+            used.insert(*name);
+            if self.ty_quantifiers.contains(&ty_var) {
+                names.insert(ty_var, *name);
+            }
+        }
+        for quantifier in self.ty_quantifiers.iter().sorted() {
+            if names.contains_key(quantifier) {
+                continue;
+            }
+            let mut index = quantifier.name();
+            loop {
+                let candidate = Ustr::from(&type_variable_index_to_string_latin(index));
+                if !used.contains(&candidate) {
+                    names.insert(*quantifier, candidate);
+                    used.insert(candidate);
+                    break;
+                }
+                index += 1;
+            }
+        }
+        names
+    }
+
+    pub(crate) fn display_ty_quantifiers_with_source_params(
+        &self,
+        source_generic_params: &[UstrSpan],
+    ) -> Vec<TypeVar> {
+        (0..source_generic_params.len())
+            .map(|index| TypeVar::new(index as u32))
+            .filter(|ty_var| self.ty_quantifiers.contains(ty_var))
+            .chain(
+                self.ty_quantifiers
+                    .iter()
+                    .copied()
+                    .sorted()
+                    .filter(|ty_var| ty_var.name() as usize >= source_generic_params.len()),
+            )
+            .unique()
+            .collect()
+    }
+
+    pub(crate) fn type_display_env<'a, 'm>(
+        &'a self,
+        env: &'a ModuleEnv<'m>,
+        ty_var_names: &'a FxHashMap<TypeVar, Ustr>,
+    ) -> TypeDisplayEnv<'a, 'm> {
+        TypeDisplayEnv::new(env, ty_var_names)
     }
 
     /// Returns the type quantifiers of this type scheme.
@@ -858,60 +952,30 @@ impl<Ty: TypeLike> TypeScheme<Ty> {
         })
     }
 
-    pub(crate) fn format_quantifiers_rust_style(
+    pub(crate) fn format_constraints_rust_style_with_type_env(
         &self,
         f: &mut std::fmt::Formatter,
-    ) -> std::fmt::Result {
-        write!(f, "<")?;
-        let mut i = 0;
-        for quantifier in &self.ty_quantifiers {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            quantifier.format_rust_style(f)?;
-            i += 1;
-        }
-        for quantifier in self.eff_quantifiers.iter().sorted() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{quantifier}")?;
-            i += 1;
-        }
-        write!(f, ">")
-    }
-
-    pub(crate) fn display_quantifiers_rust_style(&self) -> FormatQuantifiersRustStyle<'_, Self> {
-        FormatQuantifiersRustStyle(FormatWithData {
-            value: self,
-            data: &(),
-        })
-    }
-
-    pub(crate) fn format_constraints_rust_style(
-        &self,
-        f: &mut std::fmt::Formatter,
-        env: &ModuleEnv<'_>,
+        env: &TypeDisplayEnv<'_, '_>,
     ) -> std::fmt::Result {
         if self.constraints.is_empty() {
             return Ok(());
         }
         write!(f, "where ")?;
-        self.format_constraints(DisplayStyle::Rust, f, env)
+        format_constraints_with_env(&self.constraints, DisplayStyle::Rust, f, env)
     }
 
-    pub(crate) fn display_constraints_rust_style<'m>(
-        &'m self,
-        env: &'m ModuleEnv<'m>,
-    ) -> FormatConstraintsRustStyle<'m, Self> {
-        FormatConstraintsRustStyle(FormatWithData {
-            value: self,
-            data: env,
-        })
+    pub(crate) fn display_constraints_rust_style_with_type_env<'a, 'm>(
+        &'a self,
+        env: &'a TypeDisplayEnv<'a, 'm>,
+    ) -> FormatConstraintsRustStyleWithTypeEnv<'a, 'm, Ty> {
+        FormatConstraintsRustStyleWithTypeEnv { value: self, env }
     }
 }
 
-impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> TypeScheme<Ty> {
+impl<'a, Ty> TypeScheme<Ty>
+where
+    Ty: TypeLike + FormatWith<ModuleEnv<'a>>,
+{
     pub(crate) fn format_math_style(
         &self,
         f: &mut std::fmt::Formatter,
@@ -930,7 +994,13 @@ impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> TypeScheme<Ty> {
             data: env,
         })
     }
+}
 
+impl<'a, Ty> TypeScheme<Ty>
+where
+    Ty: TypeLike + FormatWith<ModuleEnv<'a>>,
+    Ty: for<'b, 'm> FormatWith<TypeDisplayEnv<'b, 'm>>,
+{
     pub(crate) fn format_rust_style(
         &self,
         f: &mut std::fmt::Formatter,
@@ -940,10 +1010,13 @@ impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> TypeScheme<Ty> {
         // if has_constraints {
         //     write!(f, "{{")?;
         // }
-        write!(f, "{}", self.ty.format_with(env))?;
+        let ty_var_names = self.display_ty_var_names();
+        let type_env = self.type_display_env(env, &ty_var_names);
+        write!(f, "{}", self.ty.format_with(&type_env))?;
         if has_constraints {
             write!(f, " ")?;
-            self.format_constraints_rust_style(f, env)?;
+            write!(f, "where ")?;
+            format_constraints_with_env(&self.constraints, DisplayStyle::Rust, f, &type_env)?;
             // write!(f, "}}")?;
         }
         Ok(())
@@ -994,6 +1067,19 @@ pub fn format_have_trait(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
+    format_have_trait_with_env(trait_ref, input_tys, output_tys, f, env)
+}
+
+fn format_have_trait_with_env<Env>(
+    trait_ref: &TraitRef,
+    input_tys: &[Type],
+    output_tys: &[Type],
+    f: &mut std::fmt::Formatter,
+    env: &Env,
+) -> std::fmt::Result
+where
+    Type: FormatWith<Env>,
+{
     let trait_name = trait_ref.name;
     if input_tys.len() == 1 {
         write!(f, "{}: {}", input_tys[0].format_with(env), trait_name)?;
@@ -1149,9 +1235,22 @@ pub(crate) fn format_constraints(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
+    format_constraints_with_env(constraints, style, f, env)
+}
+
+fn format_constraints_with_env<Env>(
+    constraints: &[PubTypeConstraint],
+    style: DisplayStyle,
+    f: &mut std::fmt::Formatter,
+    env: &Env,
+) -> std::fmt::Result
+where
+    Type: FormatWith<Env>,
+    PubTypeConstraint: FormatWith<Env>,
+{
     use DisplayStyle::*;
     if style == Rust && !constraints.is_empty() {
-        return format_constraints_consolidated(constraints, f, env);
+        return format_constraints_consolidated_with_env(constraints, f, env);
     }
     for (i, constraint) in constraints.iter().enumerate() {
         if i > 0 {
@@ -1173,6 +1272,17 @@ pub(crate) fn format_constraints_consolidated(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
+    format_constraints_consolidated_with_env(constraints, f, env)
+}
+
+fn format_constraints_consolidated_with_env<Env>(
+    constraints: &[PubTypeConstraint],
+    f: &mut std::fmt::Formatter,
+    env: &Env,
+) -> std::fmt::Result
+where
+    Type: FormatWith<Env>,
+{
     let mut first_ty = true;
     // Build aggregated constraints, except for HaveTrait.
     let mut aggregated = BTreeMap::new();
@@ -1234,7 +1344,7 @@ pub(crate) fn format_constraints_consolidated(
                 } else {
                     f.write_str(", ")?;
                 }
-                format_have_trait(trait_ref, input_tys, output_tys, f, env)?;
+                format_have_trait_with_env(trait_ref, input_tys, output_tys, f, env)?;
             }
         }
     }
@@ -1309,26 +1419,24 @@ impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> std::fmt::Display
     }
 }
 
-pub(crate) struct FormatQuantifiersRustStyle<'a, T>(FormatWithData<'a, T, ()>);
-
-impl<Ty: TypeLike> std::fmt::Display for FormatQuantifiersRustStyle<'_, TypeScheme<Ty>> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.value.format_quantifiers_rust_style(f)
-    }
+pub(crate) struct FormatConstraintsRustStyleWithTypeEnv<'a, 'm, T: TypeLike> {
+    value: &'a TypeScheme<T>,
+    env: &'a TypeDisplayEnv<'a, 'm>,
 }
 
-pub(crate) struct FormatConstraintsRustStyle<'a, T>(FormatWithData<'a, T, ModuleEnv<'a>>);
-
-impl<Ty: TypeLike> std::fmt::Display for FormatConstraintsRustStyle<'_, TypeScheme<Ty>> {
+impl<Ty: TypeLike> std::fmt::Display for FormatConstraintsRustStyleWithTypeEnv<'_, '_, Ty> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.value.format_constraints_rust_style(f, self.0.data)
+        self.value
+            .format_constraints_rust_style_with_type_env(f, self.env)
     }
 }
 
 pub struct FormatRustStyle<'a, T>(FormatWithData<'a, T, ModuleEnv<'a>>);
 
-impl<'a, Ty: TypeLike + FormatWith<ModuleEnv<'a>>> std::fmt::Display
-    for FormatRustStyle<'a, TypeScheme<Ty>>
+impl<'a, Ty> std::fmt::Display for FormatRustStyle<'a, TypeScheme<Ty>>
+where
+    Ty: TypeLike + FormatWith<ModuleEnv<'a>>,
+    Ty: for<'b, 'm> FormatWith<TypeDisplayEnv<'b, 'm>>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.value.format_rust_style(f, self.0.data)

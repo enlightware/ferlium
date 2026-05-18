@@ -53,7 +53,7 @@ use crate::module::ModuleEnv;
 use crate::sync::SyncPhantomData;
 use crate::types::effects::{EffType, EffectVar, EffectsInstSubst};
 use crate::types::mutability::{MutType, MutVar};
-use crate::types::type_scheme::{DisplayStyle, TypeScheme};
+use crate::types::type_scheme::TypeScheme;
 
 // use crate::types::typing_env::Local;
 
@@ -231,18 +231,113 @@ impl NativeType {
 
 impl FormatWith<ModuleEnv<'_>> for NativeType {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        self.bare_ty.fmt_with(f, env)?;
-        if !self.arguments.is_empty() {
-            write!(f, "<")?;
-            for (i, ty) in self.arguments.iter().enumerate() {
-                if i > 0 {
-                    write!(f, ", ")?;
-                }
-                ty.fmt_with(f, env)?;
+        fmt_native_type_with_env(self, f, env)
+    }
+}
+
+impl FormatWith<TypeDisplayEnv<'_, '_>> for NativeType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
+        fmt_native_type_with_env(self, f, env)
+    }
+}
+
+fn fmt_native_type_with_env<Env>(
+    native: &NativeType,
+    f: &mut fmt::Formatter,
+    env: &Env,
+) -> fmt::Result
+where
+    Env: TypeFormatEnv,
+    Type: FormatWith<Env>,
+{
+    native.bare_ty.fmt_with(f, env.module_env())?;
+    if !native.arguments.is_empty() {
+        write!(f, "<")?;
+        for (i, ty) in native.arguments.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
             }
-            write!(f, ">")?;
+            ty.fmt_with(f, env)?;
         }
-        Ok(())
+        write!(f, ">")?;
+    }
+    Ok(())
+}
+
+pub struct TypeDisplayEnv<'a, 'm> {
+    pub module_env: &'a ModuleEnv<'m>,
+    pub ty_var_names: &'a FxHashMap<TypeVar, Ustr>,
+}
+
+impl<'a, 'm> TypeDisplayEnv<'a, 'm> {
+    pub fn new(module_env: &'a ModuleEnv<'m>, ty_var_names: &'a FxHashMap<TypeVar, Ustr>) -> Self {
+        Self {
+            module_env,
+            ty_var_names,
+        }
+    }
+
+    fn format_type(&self, ty: Type) -> String {
+        ty.format_with(self).to_string()
+    }
+}
+
+trait TypeFormatEnv {
+    fn module_env(&self) -> &ModuleEnv<'_>;
+
+    fn fmt_type_alias_name(&self, ty: Type, f: &mut fmt::Formatter<'_>)
+    -> Result<bool, fmt::Error>;
+
+    fn fmt_type_var(&self, var: TypeVar, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+
+impl TypeFormatEnv for ModuleEnv<'_> {
+    fn module_env(&self) -> &ModuleEnv<'_> {
+        self
+    }
+
+    fn fmt_type_alias_name(
+        &self,
+        ty: Type,
+        f: &mut fmt::Formatter<'_>,
+    ) -> Result<bool, fmt::Error> {
+        if let Some(name) = self.type_alias_name(ty) {
+            write!(f, "{name}")?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn fmt_type_var(&self, var: TypeVar, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{var}")
+    }
+}
+
+impl TypeFormatEnv for TypeDisplayEnv<'_, '_> {
+    fn module_env(&self) -> &ModuleEnv<'_> {
+        self.module_env
+    }
+
+    fn fmt_type_alias_name(
+        &self,
+        ty: Type,
+        f: &mut fmt::Formatter<'_>,
+    ) -> Result<bool, fmt::Error> {
+        if let Some(name) = self
+            .module_env
+            .type_alias_name_with(ty, |ty| self.format_type(ty))
+        {
+            write!(f, "{name}")?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn fmt_type_var(&self, var: TypeVar, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.ty_var_names.get(&var) {
+            Some(name) => write!(f, "{name}"),
+            None => write!(f, "{var}"),
+        }
     }
 }
 
@@ -266,9 +361,22 @@ impl FnArgType {
 }
 impl FormatWith<ModuleEnv<'_>> for FnArgType {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        self.mut_ty.format_in_fn_arg(f)?;
-        self.ty.fmt_with(f, env)
+        fmt_fn_arg_type_with_env(self, f, env)
     }
+}
+
+impl FormatWith<TypeDisplayEnv<'_, '_>> for FnArgType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
+        fmt_fn_arg_type_with_env(self, f, env)
+    }
+}
+
+fn fmt_fn_arg_type_with_env<Env>(arg: &FnArgType, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
+where
+    Type: FormatWith<Env>,
+{
+    arg.mut_ty.format_in_fn_arg(f)?;
+    arg.ty.fmt_with(f, env)
 }
 
 /// The type of a function
@@ -376,29 +484,47 @@ impl CastableToType for FnType {
 
 impl FormatWith<ModuleEnv<'_>> for FnType {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        write!(f, "(")?;
-        for (i, arg) in self.args.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            arg.fmt_with(f, env)?;
-        }
-        write!(f, ") -> ")?;
-        self.ret.fmt_with(f, env)?;
-        if self.effects.is_empty() {
-            Ok(())
-        } else {
-            write!(f, " ! {}", self.effects)
-        }
+        fmt_fn_type_with_env(self, f, env)
     }
 }
 
-pub fn fmt_fn_type_with_arg_names(
+impl FormatWith<TypeDisplayEnv<'_, '_>> for FnType {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
+        fmt_fn_type_with_env(self, f, env)
+    }
+}
+
+fn fmt_fn_type_with_env<Env>(function: &FnType, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
+where
+    FnArgType: FormatWith<Env>,
+    Type: FormatWith<Env>,
+{
+    write!(f, "(")?;
+    for (i, arg) in function.args.iter().enumerate() {
+        if i > 0 {
+            write!(f, ", ")?;
+        }
+        arg.fmt_with(f, env)?;
+    }
+    write!(f, ") -> ")?;
+    function.ret.fmt_with(f, env)?;
+    if function.effects.is_empty() {
+        Ok(())
+    } else {
+        write!(f, " ! {}", function.effects)
+    }
+}
+
+pub fn fmt_fn_type_with_arg_names<Env>(
     fn_ty: &FnType,
     arg_names: &[Ustr],
     f: &mut fmt::Formatter,
-    env: &ModuleEnv<'_>,
-) -> fmt::Result {
+    env: &Env,
+) -> fmt::Result
+where
+    FnArgType: FormatWith<Env>,
+    Type: FormatWith<Env>,
+{
     write!(f, "(")?;
     for (i, (arg_ty, arg_name)) in fn_ty.args.iter().zip(arg_names).enumerate() {
         if i > 0 {
@@ -662,17 +788,29 @@ impl CastableToType for Type {
 
 impl FormatWith<ModuleEnv<'_>> for Type {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        // If we have a name for this type, use it.
-        if let Some(name) = env.type_alias_name(*self) {
-            return write!(f, "{name}");
-        }
-        // Otherwise, format the type data, with cycle detection.
-        self.with_cycle_detection(
-            |ty, (f, env)| ty.data().fmt_with(f, env),
-            |_, (f, _)| write!(f, "Self"),
-            (f, env),
-        )
+        fmt_type_with_env(self, f, env)
     }
+}
+
+impl FormatWith<TypeDisplayEnv<'_, '_>> for Type {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
+        fmt_type_with_env(self, f, env)
+    }
+}
+
+fn fmt_type_with_env<Env>(ty: &Type, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
+where
+    Env: TypeFormatEnv,
+    TypeKind: FormatWith<Env>,
+{
+    if env.fmt_type_alias_name(*ty, f)? {
+        return Ok(());
+    }
+    ty.with_cycle_detection(
+        |ty, (f, env)| ty.data().fmt_with(f, env),
+        |_, (f, _)| write!(f, "Self"),
+        (f, env),
+    )
 }
 
 impl Ord for Type {
@@ -701,9 +839,15 @@ define_id_type!(
 #[derive(Debug, Clone)]
 pub struct TypeAliasEntry {
     pub name: Ustr,
-    pub param_names: Vec<Ustr>,
+    pub generic_params: Vec<UstrSpan>,
     pub ty_var_count: u32,
     pub ty: Type,
+}
+
+impl TypeAliasEntry {
+    pub fn param_count(&self) -> usize {
+        self.generic_params.len()
+    }
 }
 
 /// Aliased types
@@ -717,14 +861,15 @@ pub(crate) struct TypeAliases {
     name_to_bare_native: FxHashMap<Ustr, BareNativeTypeB>,
 }
 impl TypeAliases {
-    pub fn set(&mut self, alias: Ustr, param_names: Vec<Ustr>, ty_var_count: u32, ty: Type) {
+    pub fn set(&mut self, alias: Ustr, generic_params: Vec<UstrSpan>, ty_var_count: u32, ty: Type) {
         // Only register non-generic aliases in the reverse name lookup
-        if param_names.is_empty() {
+        if generic_params.is_empty() {
             self.type_to_name.insert(ty, alias);
         }
+        assert_eq!(generic_params.len(), ty_var_count as usize);
         self.entries.push(TypeAliasEntry {
             name: alias,
-            param_names,
+            generic_params,
             ty_var_count,
             ty,
         });
@@ -783,8 +928,8 @@ pub struct TypeDef {
     pub name: Ustr,
     /// Optional documentation for the type.
     pub doc: Option<String>,
-    /// The names of the generic parameters of this type, if any
-    pub param_names: Vec<Ustr>,
+    /// The generic parameters of this type, if any.
+    pub generic_params: Vec<UstrSpan>,
     /// The inner type data, possibly with generic arguments
     pub shape: TypeScheme<Type>,
     /// The location of the type declaration in the source code
@@ -796,13 +941,25 @@ pub struct TypeDef {
 }
 
 impl TypeDef {
+    pub fn param_names(&self) -> impl ExactSizeIterator<Item = Ustr> + '_ {
+        self.generic_params.iter().map(|(name, _)| *name)
+    }
+
+    pub fn param_spans(&self) -> impl ExactSizeIterator<Item = Location> + '_ {
+        self.generic_params.iter().map(|(_, span)| *span)
+    }
+
+    pub fn param_count(&self) -> usize {
+        self.generic_params.len()
+    }
+
     pub(crate) fn validate(&self) {
         assert_eq!(
-            self.param_names.len(),
+            self.param_count(),
             self.shape.ty_quantifiers.len(),
-            "Type definition `{}` has {} parameter names but {} type quantifiers",
+            "Type definition `{}` has {} generic parameters but {} type quantifiers",
             self.name,
-            self.param_names.len(),
+            self.param_count(),
             self.shape.ty_quantifiers.len(),
         );
         for (index, quantifier) in self.shape.ty_quantifiers.iter().enumerate() {
@@ -840,10 +997,10 @@ impl TypeDef {
     pub fn instantiated_shape(&self, params: &[Type]) -> Type {
         assert_eq!(
             params.len(),
-            self.param_names.len(),
+            self.param_count(),
             "Type definition `{}` expects {} parameters, got {}",
             self.name,
-            self.param_names.len(),
+            self.param_count(),
             params.len(),
         );
         let ty_subst = self
@@ -910,9 +1067,9 @@ impl TypeDef {
             write!(f, "enum")?;
         }
         write!(f, " {}", self.name)?;
-        if !self.param_names.is_empty() {
+        if !self.generic_params.is_empty() {
             write!(f, "<")?;
-            for (i, name) in self.param_names.iter().enumerate() {
+            for (i, (name, _)) in self.generic_params.iter().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
@@ -920,9 +1077,14 @@ impl TypeDef {
             }
             write!(f, ">")?;
         }
+        let ty_var_names = self
+            .shape
+            .display_ty_var_names_with_source_params(&self.generic_params);
+        let type_env = self.shape.type_display_env(env, &ty_var_names);
         if !self.shape.constraints.is_empty() {
-            write!(f, " where ")?;
-            self.shape.format_constraints(DisplayStyle::Rust, f, env)?;
+            write!(f, " ")?;
+            self.shape
+                .format_constraints_rust_style_with_type_env(f, &type_env)?;
         }
         write!(f, " ")?;
         if self.is_enum() {
@@ -944,13 +1106,13 @@ impl TypeDef {
                         write!(f, "{name}")?;
                     } else {
                         write!(f, "{name} ")?;
-                        ty.fmt_with(f, env)?;
+                        ty.fmt_with(f, &type_env)?;
                     }
                 }
             }
             write!(f, " }}")?;
         } else {
-            self.shape.ty.fmt_with(f, env)?;
+            self.shape.ty.fmt_with(f, &type_env)?;
         }
         Ok(())
     }
@@ -960,15 +1122,15 @@ impl TypeDef {
 #[derive(Debug, Clone)]
 pub(crate) struct TypeDefHeader {
     name: Ustr,
-    param_names: Vec<Ustr>,
+    generic_params: Vec<UstrSpan>,
     span: Location,
 }
 
 impl TypeDefHeader {
-    fn new(name: Ustr, param_names: Vec<Ustr>, span: Location) -> Self {
+    fn new(name: Ustr, generic_params: Vec<UstrSpan>, span: Location) -> Self {
         Self {
             name,
-            param_names,
+            generic_params,
             span,
         }
     }
@@ -987,8 +1149,8 @@ impl TypeDefSlot {
         Self::Resolved(def)
     }
 
-    pub(crate) fn reserved(name: Ustr, param_names: Vec<Ustr>, span: Location) -> Self {
-        Self::Reserved(TypeDefHeader::new(name, param_names, span))
+    pub(crate) fn reserved(name: Ustr, generic_params: Vec<UstrSpan>, span: Location) -> Self {
+        Self::Reserved(TypeDefHeader::new(name, generic_params, span))
     }
 
     pub(crate) fn fill(&mut self, def: TypeDef) {
@@ -996,7 +1158,7 @@ impl TypeDefSlot {
             panic!("Type definition `{}` was already filled", self.name())
         };
         assert_eq!(header.name, def.name);
-        assert_eq!(header.param_names, def.param_names);
+        assert_eq!(header.generic_params, def.generic_params);
         assert_eq!(header.span, def.span);
         def.validate();
         *self = Self::Resolved(def);
@@ -1009,11 +1171,19 @@ impl TypeDefSlot {
         }
     }
 
-    pub(crate) fn param_names(&self) -> &[Ustr] {
+    pub(crate) fn generic_params(&self) -> &[UstrSpan] {
         match self {
-            Self::Reserved(header) => &header.param_names,
-            Self::Resolved(def) => &def.param_names,
+            Self::Reserved(header) => &header.generic_params,
+            Self::Resolved(def) => &def.generic_params,
         }
+    }
+
+    pub(crate) fn param_names(&self) -> impl ExactSizeIterator<Item = Ustr> + '_ {
+        self.generic_params().iter().map(|(name, _)| *name)
+    }
+
+    pub(crate) fn param_spans(&self) -> impl ExactSizeIterator<Item = Location> + '_ {
+        self.generic_params().iter().map(|(_, span)| *span)
     }
 
     pub(crate) fn span(&self) -> Location {
@@ -1430,89 +1600,105 @@ impl TypeKind {
 
 impl FormatWith<ModuleEnv<'_>> for TypeKind {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv<'_>) -> fmt::Result {
-        use TypeKind::*;
-        match self {
-            Variable(var) => write!(f, "{var}"),
-            Native(native) => {
-                use crate::std::array::Array;
-                if native.bare_ty == bare_native_type::<Array>() {
-                    write!(f, "[")?;
-                    native.arguments[0].fmt_with(f, env)?;
-                    write!(f, "]")
-                } else {
-                    native.fmt_with(f, env)
-                }
+        fmt_type_kind_with_env(self, f, env)
+    }
+}
+
+impl FormatWith<TypeDisplayEnv<'_, '_>> for TypeKind {
+    fn fmt_with(&self, f: &mut fmt::Formatter, env: &TypeDisplayEnv<'_, '_>) -> fmt::Result {
+        fmt_type_kind_with_env(self, f, env)
+    }
+}
+
+fn fmt_type_kind_with_env<Env>(kind: &TypeKind, f: &mut fmt::Formatter, env: &Env) -> fmt::Result
+where
+    Env: TypeFormatEnv,
+    FnType: FormatWith<Env>,
+    NativeType: FormatWith<Env>,
+    Type: FormatWith<Env>,
+{
+    use TypeKind::*;
+    match kind {
+        Variable(var) => env.fmt_type_var(*var, f),
+        Native(native) => {
+            use crate::std::array::Array;
+            if native.bare_ty == bare_native_type::<Array>() {
+                write!(f, "[")?;
+                native.arguments[0].fmt_with(f, env)?;
+                write!(f, "]")
+            } else {
+                native.fmt_with(f, env)
             }
-            Variant(types) => {
-                for (i, (name, ty)) in types.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " | ")?;
-                    }
-                    if *ty == Type::unit() {
-                        write!(f, "{name}")?;
-                    } else {
-                        write!(f, "{name} ")?;
-                        let ty_data = ty.data();
-                        if let Tuple(tuple_ty) = &*ty_data {
-                            if tuple_ty.len() == 1 {
-                                // Special case to avoid the (X,) syntax for single-element tuples.
-                                write!(f, "(")?;
-                                tuple_ty[0].fmt_with(f, env)?;
-                                write!(f, ")")?;
-                            } else {
-                                ty.fmt_with(f, env)?;
-                            }
+        }
+        Variant(types) => {
+            for (i, (name, ty)) in types.iter().enumerate() {
+                if i > 0 {
+                    write!(f, " | ")?;
+                }
+                if *ty == Type::unit() {
+                    write!(f, "{name}")?;
+                } else {
+                    write!(f, "{name} ")?;
+                    let ty_data = ty.data();
+                    if let Tuple(tuple_ty) = &*ty_data {
+                        if tuple_ty.len() == 1 {
+                            // Special case to avoid the (X,) syntax for single-element tuples.
+                            write!(f, "(")?;
+                            tuple_ty[0].fmt_with(f, env)?;
+                            write!(f, ")")?;
                         } else {
                             ty.fmt_with(f, env)?;
                         }
-                    }
-                }
-                Ok(())
-            }
-            Tuple(elements) => {
-                write!(f, "(")?;
-                for (i, ty) in elements.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    ty.fmt_with(f, env)?;
-                    if elements.len() == 1 {
-                        write!(f, ",")?;
-                    }
-                }
-                write!(f, ")")
-            }
-            Record(fields) => {
-                write!(f, "{{ ")?;
-                for (i, (name, ty)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{name}: ")?;
-                    ty.fmt_with(f, env)?;
-                }
-                write!(f, " }}")
-            }
-            Function(function) => function.fmt_with(f, env),
-            Named(NamedType { def, params: args }) => {
-                match env.try_type_def_name(*def) {
-                    Some(name) => write!(f, "{name}")?,
-                    None => write!(f, "#{}:{}", def.module, def.index)?,
-                }
-                if !args.is_empty() {
-                    write!(f, "<")?;
-                    for (i, ty) in args.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
+                    } else {
                         ty.fmt_with(f, env)?;
                     }
-                    write!(f, ">")?;
                 }
-                Ok(())
             }
-            Never => write!(f, "never"),
+            Ok(())
         }
+        Tuple(elements) => {
+            write!(f, "(")?;
+            for (i, ty) in elements.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                ty.fmt_with(f, env)?;
+                if elements.len() == 1 {
+                    write!(f, ",")?;
+                }
+            }
+            write!(f, ")")
+        }
+        Record(fields) => {
+            write!(f, "{{ ")?;
+            for (i, (name, ty)) in fields.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{name}: ")?;
+                ty.fmt_with(f, env)?;
+            }
+            write!(f, " }}")
+        }
+        Function(function) => function.fmt_with(f, env),
+        Named(NamedType { def, params: args }) => {
+            match env.module_env().try_type_def_name(*def) {
+                Some(name) => write!(f, "{name}")?,
+                None => write!(f, "#{}:{}", def.module, def.index)?,
+            }
+            if !args.is_empty() {
+                write!(f, "<")?;
+                for (i, ty) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    ty.fmt_with(f, env)?;
+                }
+                write!(f, ">")?;
+            }
+            Ok(())
+        }
+        Never => write!(f, "never"),
     }
 }
 

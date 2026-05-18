@@ -266,7 +266,7 @@ fn option_type_def() -> TypeDef {
     TypeDef {
         name: ustr("Option"),
         doc: None,
-        param_names: vec![ustr("T")],
+        generic_params: vec![(ustr("T"), Location::new_synthesized())],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0)],
             eff_quantifiers: FxHashSet::default(),
@@ -286,7 +286,11 @@ fn map_iterator_type_def(iterator_trait: TraitRef) -> TypeDef {
     TypeDef {
         name: ustr("MapIterator"),
         doc: None,
-        param_names: vec![ustr("I"), ustr("T"), ustr("O")],
+        generic_params: vec![
+            (ustr("I"), Location::new_synthesized()),
+            (ustr("T"), Location::new_synthesized()),
+            (ustr("O"), Location::new_synthesized()),
+        ],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0), TypeVar::new(1), TypeVar::new(2)],
             eff_quantifiers: FxHashSet::default(),
@@ -314,7 +318,10 @@ fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDef {
     TypeDef {
         name: ustr("Witnessed"),
         doc: None,
-        param_names: vec![ustr("Input"), ustr("Output")],
+        generic_params: vec![
+            (ustr("Input"), Location::new_synthesized()),
+            (ustr("Output"), Location::new_synthesized()),
+        ],
         shape: TypeScheme {
             ty_quantifiers: vec![TypeVar::new(0), TypeVar::new(1)],
             eff_quantifiers: FxHashSet::default(),

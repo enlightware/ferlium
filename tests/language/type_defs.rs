@@ -1220,7 +1220,10 @@ fn user_defined_generic_type_defs_lower_to_type_schemes() {
     "# });
 
     let option_def = module.get_type_def(ustr("Option")).unwrap();
-    assert_eq!(option_def.param_names, vec![ustr("A")]);
+    assert_eq!(
+        option_def.param_names().collect::<Vec<_>>(),
+        vec![ustr("A")]
+    );
     assert_eq!(option_def.shape.ty_quantifiers, vec![TypeVar::new(0)]);
     assert!(option_def.shape.constraints.is_empty());
     let option_shape = option_def.shape_ty().data().clone().into_variant().unwrap();
@@ -1690,6 +1693,194 @@ fn compiled_type_defs_include_doc_comments() {
     assert!(
         rendered.contains("/// Stores one value.\nstruct Box<T>"),
         "expected struct doc comments in module formatting, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compiled_functions_preserve_source_generic_names() {
+    let mut session = TestSession::new();
+
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            fn f<X>(x: X, y) {
+                (x, y)
+            }
+        "# },
+    );
+    assert!(
+        rendered.contains("fn f<X, B>(x: X, y: B) -> (X, B) where ")
+            && rendered.contains("X: Value")
+            && rendered.contains("B: Value"),
+        "expected source generic name plus generated name in signature, got:\n{rendered}"
+    );
+
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            fn f<B>(x: B, y) {
+                (x, y)
+            }
+        "# },
+    );
+    assert!(
+        rendered.contains("fn f<B, C>(x: B, y: C) -> (B, C) where ")
+            && rendered.contains("B: Value")
+            && rendered.contains("C: Value"),
+        "expected generated generic name to skip the source name, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("fn f<B, B>"),
+        "generated generic name should not collide with source generic name:\n{rendered}"
+    );
+
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            fn f<X>(y, x: X) {
+                (y, x)
+            }
+        "# },
+    );
+    assert!(
+        rendered.contains("fn f<X, B>(y: B, x: X) -> (B, X) where ")
+            && rendered.contains("X: Value")
+            && rendered.contains("B: Value"),
+        "expected explicit generic to stay first even when inferred arguments appear first, got:\n{rendered}"
+    );
+
+    let function = session.compile_and_get_fn_def(
+        indoc! { r#"
+            fn f<X>(y, x: X) {
+                (y, x)
+            }
+        "# },
+        "f",
+    );
+    assert_eq!(function.generic_params[0].0, ustr("X"));
+    assert_eq!(function.ty_scheme.ty_quantifiers[0], TypeVar::new(0));
+    assert_eq!(function.ty_scheme.ty.args[1].ty, Type::variable_id(0));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compiled_aliases_and_type_defs_preserve_source_generic_names() {
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            type Pair<X, Y> = (X, Y);
+        "# },
+    );
+
+    assert!(
+        rendered.contains("Pair<X, Y>: (X, Y)"),
+        "expected alias display to preserve source generic names, got:\n{rendered}"
+    );
+
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            struct Boxed<Item>(Item)
+
+            enum Tree<T> {
+                Leaf(T),
+                Node(Tree<T>, Tree<T>),
+            }
+
+            struct Witnessed<Input, Output>
+            where
+                Input: Value
+            (Input)
+        "# },
+    );
+
+    assert!(
+        rendered.contains("struct Boxed<Item> (Item,)"),
+        "expected struct display to preserve source generic names, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("enum Tree<T> { Leaf (T,), Node (Tree<T>, Tree<T>) }"),
+        "expected enum display to preserve source generic names, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("struct Witnessed<Input, Output> where Input: Value (Input,)"),
+        "expected constrained struct display to preserve source generic names, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ide_annotations_preserve_and_extend_source_generic_names() {
+    let src = indoc! { r#"
+        fn f<X>(x: X, y) {
+            (x, y)
+        }
+    "# };
+    let mut compiler = IdeCompiler::new();
+    assert!(
+        compiler.compile(src).is_none(),
+        "source should compile successfully"
+    );
+    let annotations = compiler
+        .get_annotations()
+        .into_iter()
+        .map(|annotation| annotation.hint)
+        .collect::<String>();
+    assert!(
+        annotations.contains(", B")
+            && annotations.contains(": B")
+            && annotations.contains("-> (X, B)")
+            && !annotations.contains("<X, B>"),
+        "expected IDE annotations to extend `<X>` with generated `B`, got: {annotations}"
+    );
+
+    let src = indoc! { r#"
+        fn f<B>(x: B, y) {
+            (x, y)
+        }
+    "# };
+    let mut compiler = IdeCompiler::new();
+    assert!(
+        compiler.compile(src).is_none(),
+        "source should compile successfully"
+    );
+    let annotations = compiler
+        .get_annotations()
+        .into_iter()
+        .map(|annotation| annotation.hint)
+        .collect::<String>();
+    assert!(
+        annotations.contains(", C")
+            && annotations.contains(": C")
+            && annotations.contains("-> (B, C)")
+            && !annotations.contains(", B, B"),
+        "expected IDE annotations to skip source generic name collision, got: {annotations}"
+    );
+
+    let src = indoc! { r#"
+        fn f<X>(y, x: X) {
+            (y, x)
+        }
+    "# };
+    let mut compiler = IdeCompiler::new();
+    assert!(
+        compiler.compile(src).is_none(),
+        "source should compile successfully"
+    );
+    let annotations = compiler
+        .get_annotations()
+        .into_iter()
+        .map(|annotation| annotation.hint)
+        .collect::<String>();
+    assert!(
+        annotations.contains(", B")
+            && annotations.contains(": B")
+            && annotations.contains("-> (B, X)")
+            && !annotations.contains("<B, X>"),
+        "expected IDE annotations to keep explicit generic first even when inferred arguments appear first, got: {annotations}"
     );
 }
 
@@ -2242,7 +2433,7 @@ fn recursive_generic_alias_instantiation_preserves_arguments_on_cycle_edges() {
     );
 
     assert!(
-        rendered.contains("fn sum<A>(tree: Tree<A>) -> A"),
+        rendered.contains("fn sum<T>(tree: Tree<T>) -> T"),
         "recursive generic alias should keep a single type argument in the signature, got:\n{rendered}"
     );
     assert!(
@@ -2273,7 +2464,7 @@ fn recursive_generic_enum_instantiation_preserves_arguments_on_cycle_edges() {
     );
 
     assert!(
-        rendered.contains("Node (Tree<A>, Tree<A>)"),
+        rendered.contains("Node (Tree<T>, Tree<T>)"),
         "recursive generic enum should keep a single type argument on recursive edges, got:\n{rendered}"
     );
     assert!(
@@ -2308,12 +2499,16 @@ fn recursive_generic_alias_ide_annotations_preserve_arguments_on_cycle_edges() {
         .collect::<String>();
 
     assert!(
-        signature.contains("Tree<A>"),
+        signature.contains("Tree<T>"),
         "signature should render the recursive alias with a single argument, got: {signature}"
     );
     assert!(
-        annotations.contains("Tree<A>"),
+        annotations.contains("Tree<T>"),
         "IDE annotations should render the recursive alias with a single argument, got: {annotations}"
+    );
+    assert!(
+        annotations.contains(": T"),
+        "IDE local annotations should preserve the source type parameter name, got: {annotations}"
     );
     assert!(
         !signature.contains("Tree<G>") && !annotations.contains("Tree<G>"),
