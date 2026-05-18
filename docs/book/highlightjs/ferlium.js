@@ -17,6 +17,10 @@
 				hljs.C_LINE_COMMENT_MODE,
 				hljs.C_BLOCK_COMMENT_MODE,
 				{
+					className: "keyword",
+					begin: /\btype\b(?=\s+[a-zA-Z_][a-zA-Z0-9_]*(?:\s*<[^;\n>]+>\s*)?=)/,
+				},
+				{
 					className: "string",
 					begin: /f?"/,
 					end: /"/,
