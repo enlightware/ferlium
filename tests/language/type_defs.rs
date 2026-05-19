@@ -14,7 +14,6 @@ use ferlium::compiler::error::{
 use ferlium::eval::eval_node;
 use ferlium::format::FormatWith;
 use ferlium::hir::value::Value;
-use ferlium::ide::Compiler as IdeCompiler;
 use ferlium::module::id::Id;
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
@@ -69,30 +68,6 @@ fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
     let module_id = session.compile(src).module_id;
     let module = session.session().expect_fresh_module(module_id);
     module.format_with(session.session().modules()).to_string()
-}
-
-fn annotated_ide_source(compiler: &mut IdeCompiler, src: &str) -> String {
-    let char_to_byte = |char_pos: usize| {
-        src.char_indices()
-            .map(|(index, _)| index)
-            .nth(char_pos)
-            .unwrap_or(src.len())
-    };
-
-    let mut grouped = Vec::<(usize, String)>::new();
-    for annotation in compiler.get_annotations() {
-        if let Some((_, hint)) = grouped.last_mut().filter(|(pos, _)| *pos == annotation.pos) {
-            hint.push_str(&annotation.hint);
-        } else {
-            grouped.push((annotation.pos, annotation.hint));
-        }
-    }
-
-    let mut annotated = src.to_string();
-    for (pos, hint) in grouped.into_iter().rev() {
-        annotated.insert_str(char_to_byte(pos), &hint);
-    }
-    annotated
 }
 
 fn join_src(parts: &[&str]) -> String {
@@ -1907,79 +1882,6 @@ fn compiled_aliases_and_type_defs_preserve_source_generic_names() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn ide_annotations_preserve_and_extend_source_generic_names() {
-    let src = indoc! { r#"
-        fn f<X>(x: X, y) {
-            (x, y)
-        }
-    "# };
-    let mut compiler = IdeCompiler::new();
-    assert!(
-        compiler.compile(src).is_none(),
-        "source should compile successfully"
-    );
-    let annotations = compiler
-        .get_annotations()
-        .into_iter()
-        .map(|annotation| annotation.hint)
-        .collect::<String>();
-    assert!(
-        annotations.contains(", B")
-            && annotations.contains(": B")
-            && annotations.contains("-> (X, B)")
-            && !annotations.contains("<X, B>"),
-        "expected IDE annotations to extend `<X>` with generated `B`, got: {annotations}"
-    );
-
-    let src = indoc! { r#"
-        fn f<B>(x: B, y) {
-            (x, y)
-        }
-    "# };
-    let mut compiler = IdeCompiler::new();
-    assert!(
-        compiler.compile(src).is_none(),
-        "source should compile successfully"
-    );
-    let annotations = compiler
-        .get_annotations()
-        .into_iter()
-        .map(|annotation| annotation.hint)
-        .collect::<String>();
-    assert!(
-        annotations.contains(", C")
-            && annotations.contains(": C")
-            && annotations.contains("-> (B, C)")
-            && !annotations.contains(", B, B"),
-        "expected IDE annotations to skip source generic name collision, got: {annotations}"
-    );
-
-    let src = indoc! { r#"
-        fn f<X>(y, x: X) {
-            (y, x)
-        }
-    "# };
-    let mut compiler = IdeCompiler::new();
-    assert!(
-        compiler.compile(src).is_none(),
-        "source should compile successfully"
-    );
-    let annotations = compiler
-        .get_annotations()
-        .into_iter()
-        .map(|annotation| annotation.hint)
-        .collect::<String>();
-    assert!(
-        annotations.contains(", B")
-            && annotations.contains(": B")
-            && annotations.contains("-> (B, X)")
-            && !annotations.contains("<B, X>"),
-        "expected IDE annotations to keep explicit generic first even when inferred arguments appear first, got: {annotations}"
-    );
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn pretty_print_user_defined_generic_enum_values() {
     let mut session = TestSession::new();
     let src = join_src(&[
@@ -2577,95 +2479,6 @@ fn recursive_generic_enum_instantiation_preserves_arguments_on_cycle_edges() {
     assert!(
         !rendered.contains("Tree<G>"),
         "recursive edge kept an uninstantiated type variable:\n{rendered}"
-    );
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn recursive_generic_alias_ide_annotations_preserve_arguments_on_cycle_edges() {
-    let src = indoc! { r#"
-        type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
-
-        fn sum<T>(tree: Tree<T>) {
-            match tree {
-                Leaf(v) => v,
-                Node(l, r) => sum(l) + sum(r),
-            }
-        }
-    "# };
-    let mut compiler = IdeCompiler::new();
-    assert!(
-        compiler.compile(src).is_none(),
-        "source should compile successfully"
-    );
-    let signature = compiler.fn_signature("sum").unwrap();
-    let annotations = compiler
-        .get_annotations()
-        .into_iter()
-        .map(|annotation| annotation.hint)
-        .collect::<String>();
-
-    assert!(
-        signature.contains("Tree<T>"),
-        "signature should render the recursive alias with a single argument, got: {signature}"
-    );
-    assert!(
-        annotations.contains("Tree<T>"),
-        "IDE annotations should render the recursive alias with a single argument, got: {annotations}"
-    );
-    assert!(
-        annotations.contains(": T"),
-        "IDE local annotations should preserve the source type parameter name, got: {annotations}"
-    );
-    assert!(
-        !signature.contains("Tree<G>") && !annotations.contains("Tree<G>"),
-        "recursive edge kept an uninstantiated type variable; signature: {signature}; annotations: {annotations}"
-    );
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn recursive_generic_alias_ide_annotations_do_not_leak_borrowed_argument_temps() {
-    let src = indoc! { r#"
-        type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
-
-        fn sum<T>(tree: Tree<T>) {
-            match tree {
-                Leaf(v) => v,
-                Node(l, r) => sum(l) + sum(r)
-            }
-        }
-
-        sum(Node(Node(Leaf(2), Leaf(3)), Leaf(4)))
-    "# };
-    let expected = indoc! { r#"
-        type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
-
-        fn sum<T>(tree: Tree<T>) -> T where T: Num, T: Value {
-            match tree {
-                Leaf(v: T) => v,
-                Node(l: Tree<T>, r: Tree<T>) => sum(tree: l) + sum(tree: r)
-            }
-        }
-
-        sum(tree: Node(Node(Leaf(2), Leaf(3)), Leaf(4))): int
-    "# };
-    let mut compiler = IdeCompiler::new();
-    assert!(
-        compiler.compile(src).is_none(),
-        "source should compile successfully"
-    );
-
-    let annotated = annotated_ide_source(&mut compiler, src);
-
-    assert_eq!(annotated, expected);
-    assert!(
-        !annotated.contains("+:"),
-        "operator spans should not receive type annotations:\n{annotated}"
-    );
-    assert!(
-        !annotated.contains("tree: sum:"),
-        "borrowed argument temporaries should not move hints before the call:\n{annotated}"
     );
 }
 

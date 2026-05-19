@@ -14,6 +14,7 @@
 //! - Cross-module references go through import slots + a relink step
 //! - Call sites use local integer IDs for local calls or ImportFunctionSlotId/ImportTraitSlotId for external calls
 
+pub mod debug_info;
 pub mod function;
 pub mod id;
 pub mod module_env;
@@ -22,6 +23,7 @@ pub mod trait_impl;
 mod type_alias_name;
 pub mod uses;
 
+pub use debug_info::*;
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 pub use function::*;

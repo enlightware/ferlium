@@ -324,7 +324,9 @@ impl TraitImpls {
         let functions: Vec<_> = definitions
             .into_iter()
             .zip(functions.into())
-            .map(|(def, (function, locals))| ModuleFunction::new(def, function, None, locals))
+            .map(|(def, (function, locals))| {
+                ModuleFunction::new_without_debug_info(def, function, None, locals)
+            })
             .collect();
 
         // Add the impl, collecting new functions.
@@ -421,7 +423,9 @@ impl TraitImpls {
         let functions: Vec<_> = definitions
             .into_iter()
             .zip(functions.into())
-            .map(|(def, (function, locals))| ModuleFunction::new(def, function, None, locals))
+            .map(|(def, (function, locals))| {
+                ModuleFunction::new_without_debug_info(def, function, None, locals)
+            })
             .collect();
 
         // Add the impl, collecting new functions.

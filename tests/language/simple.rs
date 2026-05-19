@@ -19,6 +19,7 @@ use ferlium::{
         CompilationErrorImpl, DuplicatedVariantContext, MutabilityMustBeWhat, RuntimeErrorKind,
     },
     eval::{EvalCtx, eval_node_with_ctx},
+    format::FormatWith,
     hir::value::Value,
     std::{
         array::{Array, array_type_generic},
@@ -1794,6 +1795,66 @@ fn stack_limit_exceeded() {
     );
     assert_eq!(ctx.environment.len(), 0);
     assert_eq!(ctx.call_depth, 0);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn runtime_backtrace_recovers_user_locals_from_debug_info() {
+    let mut session = TestSession::new();
+    let error = session
+        .try_run(
+            "fn g(n: int) { let x = n + 1; let xs = [1]; xs[1] }
+             fn f(a: int) { let b = a + 2; g(b) }
+             f(1)",
+        )
+        .expect_err("evaluation should fail");
+    let rendered = format!(
+        "{}",
+        error.format_with(&(session.source_table(), session.session().modules()))
+    );
+
+    assert!(
+        rendered.contains("test::g"),
+        "backtrace should include the failing user function, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("locals: n, x, xs"),
+        "backtrace should recover locals visible in g, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("locals: a, b"),
+        "backtrace should recover locals visible in f at the call site, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn runtime_backtrace_debug_info_respects_local_scope() {
+    let mut session = TestSession::new();
+    let error = session
+        .try_run(
+            "fn f() {
+                { let hidden = 1; 0 };
+                let visible = 2;
+                let xs = [1];
+                xs[1]
+             }
+             f()",
+        )
+        .expect_err("evaluation should fail");
+    let rendered = format!(
+        "{}",
+        error.format_with(&(session.source_table(), session.session().modules()))
+    );
+
+    assert!(
+        rendered.contains("locals: visible, xs"),
+        "backtrace should show locals visible at the failure, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("hidden"),
+        "backtrace should not show locals outside their scope, got:\n{rendered}"
+    );
 }
 
 #[test]

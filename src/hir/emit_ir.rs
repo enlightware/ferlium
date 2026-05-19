@@ -149,6 +149,20 @@ fn instantiate_function_descr_in_place<M: TypeMapper>(
     }
 }
 
+fn refresh_debug_info_for_functions(
+    output: &mut Module,
+    associated_lambdas: &FxHashMap<LocalFunctionId, Vec<LocalFunctionId>>,
+    local_fns: &[LocalFunctionId],
+) {
+    for id in local_fns {
+        let function_and_lambdas =
+            std::iter::once(id).chain(associated_lambdas.get(id).into_iter().flatten());
+        for id in function_and_lambdas {
+            output.functions[id.as_index()].refresh_debug_info();
+        }
+    }
+}
+
 fn default_output_effects_in_functions(
     output: &mut Module,
     ir_arena: &mut NodeArena,
@@ -756,12 +770,12 @@ where
             arg_names,
             doc.clone(),
         );
-        let descr = ModuleFunction {
+        let descr = ModuleFunction::new_without_debug_info(
             definition,
-            code: b(VoidFunction),
-            spans: Some(spans),
-            locals: vec![],
-        };
+            b(VoidFunction),
+            Some(spans),
+            vec![],
+        );
         let id = if let Some(placeholder_ids) = trait_ctx
             .as_ref()
             .and_then(|tc| tc.stub_data.as_ref().map(|tys| &tys.method_ids))
@@ -1120,6 +1134,7 @@ where
             output.name_function(*id, name);
         }
 
+        refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
         Ok(Some(trait_output))
     } else {
         // We are emitting normal module functions.
@@ -1358,6 +1373,7 @@ where
             });
         }
 
+        refresh_debug_info_for_functions(output, &associated_lambdas, &local_fns);
         Ok(None)
     }
 }
@@ -1657,6 +1673,9 @@ fn emit_expr_unsafe_inner(
     }
     solver.commit(&mut module.functions, &mut module.def_table);
     assert_eq!(locals.len(), local_count);
+    for lambda_id in lambda_functions {
+        module.functions[lambda_id.as_index()].refresh_debug_info();
+    }
 
     Ok(CompiledExpr {
         expr: node_id,

@@ -22,7 +22,7 @@ use crate::{
     },
     hir::function::{Function, FunctionDefinition},
     hir::{NodeArena, NodeId},
-    module::{ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
+    module::{FunctionDebugInfo, ModuleEnv, ModuleId, TraitKey, format_impl_header_by_key, id::Id},
     types::mutability::MutType,
     types::r#trait::TraitMethodIndex,
     types::r#type::{FnArgType, Type},
@@ -40,6 +40,17 @@ define_id_type!(
     /// Import slot ID for cross-module function references
     ImportFunctionSlotId
 );
+
+define_id_type!(
+    /// Slot offset within a function call's local runtime frame.
+    LocalFrameSlot
+);
+
+impl Default for LocalFrameSlot {
+    fn default() -> Self {
+        Self::from_index(0)
+    }
+}
 
 /// An identifier for a function
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -138,9 +149,9 @@ pub struct LocalDecl {
     /// Whether this local owns storage that may be moved from or explicitly dropped by generated HIR.
     #[new(default)]
     pub owns_storage: bool,
-    ///  Slot offset within this function's lowered frame.
+    /// Slot offset within this function call's local runtime frame.
     #[new(default)]
-    pub slot: u32,
+    pub slot: LocalFrameSlot,
     /// How assignment through this local should treat the previous destination storage.
     #[new(default)]
     pub assignment_mode: LocalAssignmentMode,
@@ -161,7 +172,7 @@ impl LocalDecl {
 
     pub fn push_with_next_slot(locals: &mut Vec<LocalDecl>, mut local: LocalDecl) -> LocalDeclId {
         let id = LocalDeclId::from_index(locals.len());
-        local.slot = id.as_index() as u32;
+        local.slot = LocalFrameSlot::from_index(id.as_index());
         locals.push(local);
         id
     }
@@ -171,9 +182,9 @@ impl LocalDecl {
     }
 
     /// Assign slots `[prefix_count, prefix_count + locals.len())` to `locals` to make space for hidden dictionary parameters prepended to the frame.
-    pub fn assign_slots_with_prefix(locals: &mut [LocalDecl], prefix_count: u32) {
+    pub fn assign_slots_with_prefix(locals: &mut [LocalDecl], prefix_count: usize) {
         for (index, local) in locals.iter_mut().enumerate() {
-            local.slot = prefix_count + index as u32;
+            local.slot = LocalFrameSlot::from_index(prefix_count + index);
         }
     }
 }
@@ -225,22 +236,54 @@ define_id_type!(
 );
 
 /// A local function inside a module.
-#[derive(Debug, Clone, new)]
+#[derive(Debug, Clone)]
 pub struct ModuleFunction {
     pub definition: FunctionDefinition,
     pub code: Function,
     pub spans: Option<ModuleFunctionSpans>,
     /// Local variable declarations for the function body, including arguments and any variables declared within the function.
     pub locals: Vec<LocalDecl>,
+    pub debug_info: FunctionDebugInfo,
 }
 impl ModuleFunction {
-    pub fn new_without_spans_nor_locals(definition: FunctionDefinition, code: Function) -> Self {
+    pub fn new(
+        definition: FunctionDefinition,
+        code: Function,
+        spans: Option<ModuleFunctionSpans>,
+        locals: Vec<LocalDecl>,
+    ) -> Self {
+        let debug_info = FunctionDebugInfo::from_locals(&locals);
         Self {
             definition,
             code,
-            spans: None,
-            locals: Vec::new(),
+            spans,
+            locals,
+            debug_info,
         }
+    }
+
+    /// Constructs a function whose debug info will be populated by a later `refresh_debug_info` call after locals have reached their final form.
+    pub fn new_without_debug_info(
+        definition: FunctionDefinition,
+        code: Function,
+        spans: Option<ModuleFunctionSpans>,
+        locals: Vec<LocalDecl>,
+    ) -> Self {
+        Self {
+            definition,
+            code,
+            spans,
+            locals,
+            debug_info: FunctionDebugInfo::default(),
+        }
+    }
+
+    pub fn new_without_spans_nor_locals(definition: FunctionDefinition, code: Function) -> Self {
+        Self::new_without_debug_info(definition, code, None, Vec::new())
+    }
+
+    pub fn refresh_debug_info(&mut self) {
+        self.debug_info = FunctionDebugInfo::from_locals(&self.locals);
     }
 
     pub fn locals_ids(&self) -> Vec<LocalDeclId> {
@@ -298,7 +341,7 @@ impl ModuleFunction {
                 .map(|(i, r)| ustr(&r.to_dict_name(i))),
         );
         let scope = self.function_span();
-        let dictionary_count = ctx.dicts.requirements.len() as u32;
+        let dictionary_count = ctx.dicts.requirements.len();
         LocalDecl::assign_slots_with_prefix(&mut self.locals, dictionary_count);
         let local_count = self.locals.len();
         self.locals
@@ -310,7 +353,7 @@ impl ModuleFunction {
                     None,
                     scope,
                 );
-                local.slot = i as u32;
+                local.slot = LocalFrameSlot::from_index(i);
                 local
             }));
         elaborate_local_value_dispatches(arena, &mut self.locals, ctx)?;

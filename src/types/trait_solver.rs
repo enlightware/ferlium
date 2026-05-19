@@ -1189,9 +1189,10 @@ impl<'a> TraitSolver<'a> {
     /// This must be called after trait solving is done,
     /// otherwise the created functions will be lost.
     pub fn commit(mut self, functions: &mut Vec<ModuleFunction>, def_table: &mut DefTable) {
-        for (name, function) in self.fn_collector.new_elements.drain(..) {
+        for (name, mut function) in self.fn_collector.new_elements.drain(..) {
             let id = LocalFunctionId::from_index(functions.len());
             def_table.insert(name, DefKind::Function(id));
+            function.refresh_debug_info();
             functions.push(function);
         }
     }
@@ -1292,7 +1293,12 @@ impl<'a> TraitSolver<'a> {
                 .into();
             self.fn_collector.push(
                 name,
-                ModuleFunction::new(definition, b(VoidFunction) as Function, None, Vec::new()),
+                ModuleFunction::new_without_debug_info(
+                    definition,
+                    b(VoidFunction) as Function,
+                    None,
+                    Vec::new(),
+                ),
             );
             methods.push(id);
             tys.push(ty);
@@ -1333,7 +1339,7 @@ impl<'a> TraitSolver<'a> {
             let function = b(ScriptFunction::new(code_entry, arg_names)) as Function;
             self.fn_collector.replace(
                 method_id,
-                ModuleFunction::new(definition, function, None, locals),
+                ModuleFunction::new_without_debug_info(definition, function, None, locals),
             );
         }
     }
@@ -1730,7 +1736,8 @@ impl<'a> TraitSolver<'a> {
                             ));
                             let code: Function =
                                 b(ScriptFunction::new(apply_id, def.arg_names.clone()));
-                            let function = ModuleFunction::new(def, code, None, locals);
+                            let function =
+                                ModuleFunction::new_without_debug_info(def, code, None, locals);
                             let name = Ustr::from(&format!(
                                 "{}-thunk",
                                 trait_ref.qualified_method_name(method_index, input_tys)

@@ -368,8 +368,6 @@ impl Callable for ScriptFunction {
         let old_frame_base = ctx.frame_base;
         ctx.frame_base = ctx.environment.len();
         ctx.environment.extend(args.into_vec());
-        #[cfg(debug_assertions)]
-        ctx.environment_names.extend(self.arg_names.iter().copied());
         ctx.call_depth += 1;
 
         let ret = eval_node_with_ctx(arena, self.entry_node_id, ctx, locals_arg);
@@ -737,16 +735,16 @@ macro_rules! n_ary_native_fn {
             }
 
             pub fn description_with_ty_scheme(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, ty_scheme: TypeScheme<FnType>) -> ModuleFunction {
-                ModuleFunction {
-                    definition: FunctionDefinition::new(
+                ModuleFunction::new(
+                    FunctionDefinition::new(
                         ty_scheme,
                         arg_names.into_iter().map(Ustr::from).collect(),
                         Some(String::from(doc)),
                     ),
-                    code: Box::new(Self::new(f)),
-                    spans: None,
-                    locals: Vec::new(),
-                }
+                    Box::new(Self::new(f)),
+                    None,
+                    Vec::new(),
+                )
             }
 
             paste::paste! {

@@ -11,6 +11,7 @@
 #[path = "../harness/mod.rs"]
 mod harness;
 mod algorithm;
+mod annotations;
 mod bits;
 mod complex;
 mod effects;

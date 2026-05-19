@@ -654,7 +654,9 @@ pub(crate) fn function_value_method_function(
 
     let arg_names = definition.arg_names.clone();
     let code = b(ScriptFunction::new(root, arg_names)) as Function;
-    Ok(ModuleFunction::new(definition, code, None, locals))
+    Ok(ModuleFunction::new_without_debug_info(
+        definition, code, None, locals,
+    ))
 }
 
 fn derive_value_to_string_body(

@@ -12,7 +12,10 @@ use crate::{
     compiler::error::DuplicatedVariantContext,
     hir::hir_syn::store_new,
     internal_compilation_error,
-    module::{LocalDecl, LocalDeclId, ProjectionIndex, TypeDefId, TypeDefLookupResult, id::Id},
+    module::{
+        LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex, TypeDefId, TypeDefLookupResult,
+        id::Id,
+    },
     std::core::REPR_TRAIT,
     types::mutability::MutVal,
     types::r#type::TypeKind,
@@ -306,7 +309,7 @@ impl TypeInference {
                                     None,
                                     sp(*expr),
                                 );
-                                local.slot = id.as_index() as u32;
+                                local.slot = LocalFrameSlot::from_index(id.as_index());
                                 env.all_locals.push(local);
                                 env.cur_locals.push(id);
                                 id

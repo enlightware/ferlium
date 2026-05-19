@@ -24,7 +24,8 @@ use crate::{
     internal_compilation_error,
     module::{
         FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        LocalDropMode, ModuleEnv, ModuleFunction, ProjectionIndex, TypeDefLookupResult, id::Id,
+        LocalDropMode, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ProjectionIndex,
+        TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
     std::{
@@ -307,12 +308,20 @@ impl TypeInference {
         let arg_names: Vec<_> = args.iter().map(|(name, _)| *name).collect();
         let code = ScriptFunction::new(code_id, all_arg_names);
         let ty_scheme = TypeScheme::new_just_type(fn_ty);
-        let function = ModuleFunction {
-            definition: FunctionDefinition::new(ty_scheme, arg_names, None),
-            code: b(code) as Function,
-            spans: None, // FIXME: add spans
-            locals: fn_all_locals,
+        let body_span = env.ast_arena[body].span;
+        let spans = ModuleFunctionSpans {
+            name: Location::new_synthesized(),
+            args: args.iter().map(|(_, span)| (*span, None)).collect(),
+            args_span: Location::new(span.start(), body_span.start(), span.source_id()),
+            ret_ty: None,
+            span,
         };
+        let function = ModuleFunction::new_without_debug_info(
+            FunctionDefinition::new(ty_scheme, arg_names, None),
+            b(code) as Function,
+            Some(spans),
+            fn_all_locals,
+        );
         let function_id = env.collect_lambda_module_function(function);
         let fn_node_id = env.ir_arena.alloc(N::new(
             K::GetFunction(b(hir::GetFunction {

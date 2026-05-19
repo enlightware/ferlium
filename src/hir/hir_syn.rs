@@ -12,7 +12,8 @@ use crate::{
     hir::value::{LiteralNativeValue, LiteralValue},
     hir::{self, NodeArena, NodeId},
     module::{
-        FunctionId, LocalClone, LocalDecl, LocalDeclId, ProjectionIndex, TraitImplId, id::Id,
+        FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex,
+        TraitImplId, id::Id,
     },
     std::{math::int_type, string::String as FerliumString},
     types::effects::EffType,
@@ -102,7 +103,7 @@ pub fn store_new(
         Location::new_synthesized(),
     );
     local.owns_storage = true;
-    local.slot = index as u32;
+    local.slot = LocalFrameSlot::from_index(index);
     locals.push(local);
     (K::EnvStore(hir::EnvStore { value, id }), id)
 }

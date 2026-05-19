@@ -11,8 +11,6 @@ use std::{collections::VecDeque, mem};
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
 use ustr::Ustr;
-#[cfg(debug_assertions)]
-use ustr::ustr;
 
 use crate::module::id::Id;
 use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT};
@@ -23,9 +21,9 @@ use crate::{
     hir::function::{ArgPassing, TrivialCopy},
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
-        ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        LocalFunctionId, LocalValueMethodDispatch, ModuleFunction, ModuleId, ProjectionIndex,
-        TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        ExtraParameterId, FunctionId, LocalClone, LocalDebugVisibility, LocalDecl, LocalDeclId,
+        LocalDrop, LocalFunctionId, LocalValueMethodDispatch, ModuleFunction, ModuleId,
+        ProjectionIndex, TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
     std::array,
     types::{
@@ -183,14 +181,6 @@ fn hidden_arg_to_val_or_mut(arg: FunctionHiddenArgValue) -> ValOrMut {
     }
 }
 
-#[cfg(debug_assertions)]
-#[derive(Debug, Clone, new)]
-struct StackEntry {
-    local_id: LocalFunctionId,
-    module_id: ModuleId,
-    frame_base: usize,
-}
-
 /// Along with the Rust native stack, corresponds to the Zinc Abstract Machine of Caml language family
 /// with the addition of Mutable Value Semantics through references to earlier stack frames
 pub struct EvalCtx<'a> {
@@ -210,10 +200,6 @@ pub struct EvalCtx<'a> {
     pub module_id: ModuleId,
     /// session holding sources and other modules for error reporting and import resolution
     compiler_session: &'a CompilerSession,
-    #[cfg(debug_assertions)]
-    stack_trace: Vec<StackEntry>,
-    #[cfg(debug_assertions)]
-    pub environment_names: Vec<Ustr>,
 }
 
 impl<'a> EvalCtx<'a> {
@@ -230,10 +216,6 @@ impl<'a> EvalCtx<'a> {
             break_loop: false,
             module_id,
             compiler_session,
-            #[cfg(debug_assertions)]
-            stack_trace: Vec::new(),
-            #[cfg(debug_assertions)]
-            environment_names: Vec::new(),
         }
     }
 
@@ -243,8 +225,6 @@ impl<'a> EvalCtx<'a> {
     }
 
     pub fn pop_environment_entry(&mut self) -> Option<ValOrMut> {
-        #[cfg(debug_assertions)]
-        self.environment_names.pop();
         self.environment.pop()
     }
 
@@ -260,24 +240,16 @@ impl<'a> EvalCtx<'a> {
         }
     }
 
-    fn ensure_environment_slot(&mut self, index: usize, name: Ustr) {
-        #[cfg(not(debug_assertions))]
-        let _ = name;
+    fn ensure_environment_slot(&mut self, index: usize) {
         while self.environment.len() <= index {
             self.environment.push(ValOrMut::Val(Value::uninit()));
-            #[cfg(debug_assertions)]
-            self.environment_names.push(name);
         }
     }
 
-    fn set_environment_entry(&mut self, index: usize, value: ValOrMut, name: Ustr) {
-        self.ensure_environment_slot(index, name);
+    fn set_environment_entry(&mut self, index: usize, value: ValOrMut) {
+        self.ensure_environment_slot(index);
         let old = mem::replace(&mut self.environment[index], value);
         old.discard_storage();
-        #[cfg(debug_assertions)]
-        {
-            self.environment_names[index] = name;
-        }
     }
 
     pub fn with_environment(
@@ -285,8 +257,6 @@ impl<'a> EvalCtx<'a> {
         environment: Vec<ValOrMut>,
         compiler_session: &'a CompilerSession,
     ) -> EvalCtx<'a> {
-        #[cfg(debug_assertions)]
-        let environment_names = vec![ustr("<unknown>"); environment.len()];
         EvalCtx {
             environment,
             frame_base: 0,
@@ -296,34 +266,6 @@ impl<'a> EvalCtx<'a> {
             break_loop: false,
             module_id: module,
             compiler_session,
-            #[cfg(debug_assertions)]
-            stack_trace: Vec::new(),
-            #[cfg(debug_assertions)]
-            environment_names,
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    pub fn print_environment(&self) {
-        assert_eq!(self.environment.len(), self.environment_names.len());
-        eprintln!(
-            "frame base: {}, fn stack depth: {}",
-            self.frame_base, self.call_depth
-        );
-        eprintln!("Environment:");
-        let mut i = self.environment_names.len();
-        for entry in self.stack_trace.iter().rev() {
-            while i > entry.frame_base {
-                i -= 1;
-                eprintln!("  {}", self.environment_names[i]);
-            }
-            let module = self.compiler_session.expect_fresh_module(entry.module_id);
-            let fn_name = module.get_function_name_by_id(entry.local_id).unwrap();
-            eprintln!("- {}::{}", entry.module_id, fn_name);
-        }
-        while i > 0 {
-            i -= 1;
-            eprintln!("  {}", self.environment_names[i]);
         }
     }
 
@@ -461,10 +403,6 @@ impl<'a> EvalCtx<'a> {
         let local_id = function_value.function_id;
         let module_id = function_value.module_id;
 
-        #[cfg(debug_assertions)]
-        self.stack_trace
-            .push(StackEntry::new(local_id, module_id, self.environment.len()));
-
         let closure_env_dictionary = function_value
             .closure_env_value_dictionary
             .as_ref()
@@ -482,8 +420,6 @@ impl<'a> EvalCtx<'a> {
             )?;
             let index = self.environment.len();
             self.environment.push(ValOrMut::Val(closure_env));
-            #[cfg(debug_assertions)]
-            self.environment_names.push(ustr("$closure_env_call"));
             Some(index)
         };
 
@@ -544,13 +480,8 @@ impl<'a> EvalCtx<'a> {
                 }
                 (Err(err), _) => Err(err),
             };
-            #[cfg(debug_assertions)]
-            self.stack_trace.pop();
             return result;
         }
-
-        #[cfg(debug_assertions)]
-        self.stack_trace.pop();
 
         result
     }
@@ -564,25 +495,15 @@ impl<'a> EvalCtx<'a> {
     ) -> EvalControlFlowResult {
         let (local_id, module_id) = self.get_function_local_id(function_id);
 
-        #[cfg(debug_assertions)]
-        self.stack_trace
-            .push(StackEntry::new(local_id, module_id, self.environment.len()));
-
-        let result = self
-            .call_function(local_id, module_id, arguments)
+        self.call_function(local_id, module_id, arguments)
             .map_err(|err| {
                 err.with_frame(
-                    self.module_id,
-                    function_id,
+                    module_id,
+                    FunctionId::Local(local_id),
                     self.environment.len(),
                     location,
                 )
-            });
-
-        #[cfg(debug_assertions)]
-        self.stack_trace.pop();
-
-        result
+            })
     }
 
     /// Call a function along with its correct module context.
@@ -780,13 +701,14 @@ pub struct BacktraceFrame {
     function_id: FunctionId,
     #[allow(dead_code)]
     frame_base: usize,
-    location: Location,
+    call_site: Location,
 }
-impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
-    fn fmt_with(
+impl BacktraceFrame {
+    fn fmt_with_suspended_at(
         &self,
         f: &mut std::fmt::Formatter<'_>,
         data: &(&SourceTable, &Modules),
+        suspended_at: Option<Location>,
     ) -> std::fmt::Result {
         let (source_table, modules) = data;
         let mut module_path = modules
@@ -821,7 +743,28 @@ impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
                 }
             }
         };
-        write!(f, " at {}", self.location.format_with(source_table))
+        write!(f, " at {}", self.call_site.format_with(source_table))?;
+        if let (FunctionId::Local(id), Some(suspended_at)) = (self.function_id, suspended_at)
+            && let Some(function) = module.get_function_by_id(id)
+        {
+            let locals = function
+                .debug_info
+                .locals_at_source(suspended_at, LocalDebugVisibility::User);
+            if !locals.is_empty() {
+                write!(f, "\n     locals: ")?;
+                write_with_separator(locals.iter().map(|local| local.name), ", ", f)?;
+            }
+        }
+        Ok(())
+    }
+}
+impl FormatWith<(&SourceTable, &Modules)> for BacktraceFrame {
+    fn fmt_with(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+        data: &(&SourceTable, &Modules),
+    ) -> std::fmt::Result {
+        self.fmt_with_suspended_at(f, data, None)
     }
 }
 
@@ -857,7 +800,7 @@ impl RuntimeError {
             module_id,
             function_id,
             frame_base,
-            location,
+            call_site: location,
         });
         Self {
             kind: self.kind,
@@ -885,8 +828,8 @@ impl RuntimeError {
             return Some(location);
         }
         for frame in &self.backtrace {
-            if frame.location.source_id == source_id {
-                return Some(frame.location);
+            if frame.call_site.source_id == source_id {
+                return Some(frame.call_site);
             }
         }
         None
@@ -906,8 +849,12 @@ impl FormatWith<(&SourceTable, &Modules)> for RuntimeError {
         writeln!(f)?;
         if !self.backtrace.is_empty() {
             writeln!(f, "stack backtrace:")?;
+            let mut suspended_at = self.location;
             for (i, frame) in self.backtrace.iter().enumerate() {
-                writeln!(f, "  {i}: {}", frame.format_with(data))?;
+                write!(f, "  {i}: ")?;
+                frame.fmt_with_suspended_at(f, data, suspended_at)?;
+                writeln!(f)?;
+                suspended_at = Some(frame.call_site);
             }
         }
         Ok(())
@@ -1280,8 +1227,6 @@ fn call_value_clone_with(
 ) -> Result<Value, RuntimeError> {
     let target_index = ctx.environment.len();
     ctx.environment.push(ValOrMut::Val(Value::uninit()));
-    #[cfg(debug_assertions)]
-    ctx.environment_names.push(ustr("$function_clone_target"));
     let target = Place {
         target: target_index,
         path: Vec::new(),
@@ -1362,8 +1307,6 @@ pub(crate) fn call_value_drop_for_temp(
         ValOrMut::Val(value) => {
             let target_index = ctx.environment.len();
             ctx.environment.push(ValOrMut::Val(value));
-            #[cfg(debug_assertions)]
-            ctx.environment_names.push(ustr("$function_drop_target"));
             let place = Place {
                 target: target_index,
                 path: Vec::new(),
@@ -1439,14 +1382,14 @@ fn place_contains_uninit(
 fn scratch_environment_index_after_locals(ctx: &EvalCtx, locals: &[LocalDecl]) -> usize {
     let local_limit = locals
         .iter()
-        .map(|local| ctx.frame_base + local.slot as usize + 1)
+        .map(|local| ctx.frame_base + local.slot.as_index() + 1)
         .max()
         .unwrap_or(ctx.frame_base);
     ctx.environment.len().max(local_limit)
 }
 
 fn local_environment_index(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> usize {
-    ctx.frame_base + locals[id.as_index()].slot as usize
+    ctx.frame_base + locals[id.as_index()].slot.as_index()
 }
 
 fn extra_parameter_environment_index(ctx: &EvalCtx, id: ExtraParameterId) -> usize {
@@ -1668,9 +1611,8 @@ fn eval_env_store(
             Some(span),
         ));
     }
-    let local_name = locals[node.id.as_index()].name.0;
     if let Some(clone) = &locals[node.id.as_index()].clone {
-        ctx.ensure_environment_slot(target_index, local_name);
+        ctx.ensure_environment_slot(target_index);
         let target = Place {
             target: target_index,
             path: Vec::new(),
@@ -1733,7 +1675,7 @@ fn eval_env_store(
                 }
             }
         };
-        ctx.set_environment_entry(target_index, entry, local_name);
+        ctx.set_environment_entry(target_index, entry);
     } else {
         let entry = if matches!(arena[node.value].kind, NodeKind::GetDictionary(_)) {
             let dictionary = eval_or_return!(eval_dictionary_metadata_node(
@@ -1744,7 +1686,7 @@ fn eval_env_store(
             let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
             ValOrMut::Val(value)
         };
-        ctx.set_environment_entry(target_index, entry, local_name);
+        ctx.set_environment_entry(target_index, entry);
     }
     cont(Value::unit())
 }
@@ -1822,14 +1764,6 @@ fn copy_trivial_value_from_place(
     // interpreter. This should collapse into the backend implementation of HIR
     // `TrivialCopy` once values are stored in copyable slots.
     try_copy_trivial_value_from_place(place, ty, ctx, span)?.ok_or_else(|| {
-        #[cfg(debug_assertions)]
-        panic!(
-            "attempted to materialize non-TrivialCopy local value without Value::clone: type {:?}, place {:?}, name {:?}",
-            ty,
-            place,
-            ctx.environment_names.get(place.target)
-        );
-        #[cfg(not(debug_assertions))]
         panic!(
             "attempted to materialize non-TrivialCopy local value without Value::clone: type {:?}, place {:?}",
             ty, place
@@ -2148,11 +2082,7 @@ fn eval_index(
                 Some(arena[id].span),
             ));
         }
-        ctx.set_environment_entry(
-            target,
-            ValOrMut::Val(array),
-            Ustr::from("$array_index_source"),
-        );
+        ctx.set_environment_entry(target, ValOrMut::Val(array));
         temp_array_env_len = Some(old_len);
         array_place = Some(Place {
             target,

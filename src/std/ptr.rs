@@ -126,16 +126,16 @@ fn native_function(
     doc: &'static str,
     code: impl Callable + Clone + 'static,
 ) -> ModuleFunction {
-    ModuleFunction {
-        definition: FunctionDefinition::new(
+    ModuleFunction::new(
+        FunctionDefinition::new(
             TypeScheme::new_infer_quantifiers_with_constraints(ty, constraints.into()),
             arg_names.into_iter().map(ustr::Ustr::from).collect(),
             Some(String::from(doc)),
         ),
-        code: Box::new(code),
-        spans: None,
-        locals: Vec::new(),
-    }
+        Box::new(code),
+        None,
+        Vec::new(),
+    )
 }
 
 fn dictionary_from_arg(

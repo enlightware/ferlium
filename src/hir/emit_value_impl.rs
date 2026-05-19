@@ -96,7 +96,7 @@ pub(crate) fn generic_value_methods_for_type(
 
         let arg_names = definition.arg_names.clone();
         let code: hir::function::Function = b(ScriptFunction::new(code_entry, arg_names));
-        let function = ModuleFunction::new(definition, code, None, locals);
+        let function = ModuleFunction::new_without_debug_info(definition, code, None, locals);
         let id = solver.fn_collector.next_id();
         solver.fn_collector.push(name, function);
         methods.push(id);
@@ -290,13 +290,15 @@ pub(super) fn emit_auto_value_impls(
             definition.ty_scheme.constraints = constraints.clone();
             let arg_names = definition.arg_names.clone();
             let code = b(ScriptFunction::new(root, arg_names)) as hir::function::Function;
-            let mut function = ModuleFunction::new(definition, code, None, locals);
+            let mut function =
+                ModuleFunction::new_without_debug_info(definition, code, None, locals);
             {
                 let mut solver = trait_solver_from_module!(output, others);
                 let mut ctx = DictElaborationCtx::new(&dicts, None, &mut solver);
                 function.check_borrows_and_elaborate_dictionaries(ir_arena, &mut ctx)?;
                 solver.commit(&mut output.functions, &mut output.def_table);
             }
+            function.refresh_debug_info();
             let id = output.add_function_anonymous(function);
             output.name_function(
                 id,
