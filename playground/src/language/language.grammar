@@ -564,9 +564,9 @@ MatchBranch {
 
 Pattern {
     literalPattern
-    | TagName { Identifier }
-    | TagName { Identifier } '(' identifiersOrMoreOptComma ')'
-    | TagName { Identifier } '{' identifiersOrMoreOptComma '}'
+    | TagName { Path }
+    | TagName { Path } '(' identifiersOrMoreOptComma ')'
+    | TagName { Path } '{' identifiersOrMoreOptComma '}'
 }
 
 PropertyPath {

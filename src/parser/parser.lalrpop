@@ -763,15 +763,15 @@ Pattern: Pattern = {
 }
 
 NullaryVariantPattern: PatK = {
-    Sp<UIdentifier> => PatK::empty_tuple_variant(<>),
+    Path => PatK::empty_tuple_variant_path(<>),
 }
 
 NAryVariantPattern: PatK = {
-    <tag:Sp<UIdentifier>> "(" <vars:StrOrMoreArgs> ")" => PatK::tuple_variant(tag, vars),
+    <path:Path> "(" <vars:StrOrMoreArgs> ")" => PatK::tuple_variant_path(path, vars),
 }
 
 StructVariantPattern: PatK = {
-    <tag:Sp<UIdentifier>> "{" <vars:StrOrMoreArgs> "}" => PatK::struct_variant(tag, vars),
+    <path:Path> "{" <vars:StrOrMoreArgs> "}" => PatK::struct_variant_path(path, vars),
 }
 
 LiteralPatternKind: PatK = {

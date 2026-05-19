@@ -15,6 +15,7 @@ use ferlium::{
     module::{ModuleId, id::Id},
     types::r#type::Type,
 };
+use indoc::indoc;
 
 use crate::harness::{TestSession, int};
 
@@ -68,6 +69,21 @@ fn break_module(session: &mut TestSession, name: &str) {
             .is_err(),
         "breaking module {name:?} should produce a compilation error"
     );
+}
+
+fn tree_module_src() -> &'static str {
+    indoc! { r#"
+        enum Tree<T> {
+            Leaf(T),
+            Node(Tree<T>, Tree<T>),
+        }
+    "# }
+}
+
+fn tree_sum_call_src(module_name: &str) -> String {
+    format!(
+        "{module_name}::sum(data::Tree::Node(data::Tree::Node(data::Tree::Leaf(2), data::Tree::Leaf(3)), data::Tree::Leaf(4)))"
+    )
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -317,6 +333,50 @@ fn no_infinite_recursion_on_circular_dep() {
         session.session().get_module_entry_by_id(b_id).is_some(),
         "b's entry must still exist after rejected circular recompile"
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn qualified_enum_patterns_resolve_direct_foreign_module_path() {
+    let mut session = TestSession::new();
+    compile_module(&mut session, "data", tree_module_src());
+    compile_module(
+        &mut session,
+        "direct",
+        indoc! { r#"
+            fn sum(tree) {
+                match tree {
+                    data::Tree::Leaf(v) => v,
+                    data::Tree::Node(l, r) => sum(l) + sum(r),
+                }
+            }
+        "# },
+    );
+
+    assert_val_eq!(session.run(&tree_sum_call_src("direct")), int(9));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn qualified_enum_patterns_resolve_imported_foreign_type() {
+    let mut session = TestSession::new();
+    compile_module(&mut session, "data", tree_module_src());
+    compile_module(
+        &mut session,
+        "through_use",
+        indoc! { r#"
+            use data::Tree;
+
+            fn sum(tree) {
+                match tree {
+                    Tree::Leaf(v) => v,
+                    Tree::Node(l, r) => sum(l) + sum(r),
+                }
+            }
+        "# },
+    );
+
+    assert_val_eq!(session.run(&tree_sum_call_src("through_use")), int(9));
 }
 
 #[test]

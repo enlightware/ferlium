@@ -356,7 +356,7 @@ pub(super) fn compilation_error_to_data(
         InvalidVariantConstructor { span } => {
             vec![error_data_from_location(
                 span,
-                "Variant constructor cannot be a path".to_string(),
+                "Invalid variant constructor path".to_string(),
             )]
         }
         ReturnOutsideFunction { span } => {

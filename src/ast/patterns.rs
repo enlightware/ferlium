@@ -235,12 +235,46 @@ impl Display for PatternVar {
     }
 }
 
+/// A variant constructor path used by match patterns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternVariantPath {
+    pub path: Path,
+}
+
+impl PatternVariantPath {
+    pub fn new(path: Path) -> Self {
+        Self { path }
+    }
+
+    pub fn single(tag: UstrSpan) -> Self {
+        Self::new(Path::single_tuple(tag))
+    }
+
+    pub fn is_qualified(&self) -> bool {
+        self.path.segments.len() > 1
+    }
+
+    pub fn tag(&self) -> UstrSpan {
+        *self
+            .path
+            .segments
+            .last()
+            .expect("pattern variant path cannot be empty")
+    }
+}
+
+impl Display for PatternVariantPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.path, f)
+    }
+}
+
 /// The kind-specific part of an expression as an Abstract Syntax Tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum PatternKind {
     Literal(LiteralValue, IrType),
     Variant {
-        tag: UstrSpan,
+        path: PatternVariantPath,
         kind: PatternVariantKind,
         vars: Vec<PatternVar>,
     },
@@ -248,24 +282,44 @@ pub enum PatternKind {
 }
 impl PatternKind {
     pub fn tuple_variant(tag: UstrSpan, vars: Vec<PatternVar>) -> Self {
+        Self::tuple_variant_path_ref(PatternVariantPath::single(tag), vars)
+    }
+
+    pub fn tuple_variant_path(path: Path, vars: Vec<PatternVar>) -> Self {
+        Self::tuple_variant_path_ref(PatternVariantPath::new(path), vars)
+    }
+
+    pub fn tuple_variant_path_ref(path: PatternVariantPath, vars: Vec<PatternVar>) -> Self {
         PatternKind::Variant {
-            tag,
+            path,
             kind: PatternVariantKind::Tuple,
             vars,
         }
     }
 
     pub fn struct_variant(tag: UstrSpan, vars: Vec<PatternVar>) -> Self {
+        Self::struct_variant_path_ref(PatternVariantPath::single(tag), vars)
+    }
+
+    pub fn struct_variant_path(path: Path, vars: Vec<PatternVar>) -> Self {
+        Self::struct_variant_path_ref(PatternVariantPath::new(path), vars)
+    }
+
+    pub fn struct_variant_path_ref(path: PatternVariantPath, vars: Vec<PatternVar>) -> Self {
         PatternKind::Variant {
-            tag,
+            path,
             kind: PatternVariantKind::Record,
             vars,
         }
     }
 
     pub fn empty_tuple_variant(tag: UstrSpan) -> Self {
+        Self::empty_tuple_variant_path(Path::single_tuple(tag))
+    }
+
+    pub fn empty_tuple_variant_path(path: Path) -> Self {
         PatternKind::Variant {
-            tag,
+            path: PatternVariantPath::new(path),
             kind: PatternVariantKind::Tuple,
             vars: Vec::new(),
         }
@@ -311,8 +365,8 @@ impl Pattern {
         use PatternKind::*;
         match &self.kind {
             Literal(value, _) => writeln!(f, "{indent_str}{value}"),
-            Variant { tag, vars, .. } => {
-                write!(f, "{indent_str}{} ", tag.0)?;
+            Variant { path, vars, .. } => {
+                write!(f, "{indent_str}{path} ")?;
                 if !vars.is_empty() {
                     write!(f, "(")?;
                     write_with_separator(vars.iter(), ", ", f)?;

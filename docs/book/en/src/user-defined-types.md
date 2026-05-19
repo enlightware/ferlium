@@ -195,6 +195,22 @@ let m2 = Message::Write("hello");
 let m3 = Message::Move { x: 10, y: 20 };
 ```
 
+The same qualified variant names can be used in `match` patterns:
+
+```ferlium
+# enum Message {
+#     Quit,
+#     Write(string),
+#     Move { x: int, y: int }
+# }
+# let message = Message::Move { x: 10, y: 20 };
+match message {
+    Message::Quit => 0,
+    Message::Write(text) => len(text),
+    Message::Move { x, y } => x + y,
+}
+```
+
 ## Generic named types
 
 Named types can also be generic.

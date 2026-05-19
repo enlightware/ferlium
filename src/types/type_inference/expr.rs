@@ -492,7 +492,7 @@ impl TypeInference {
                 }
                 // Otherwise, the name is neither a known variable or function, assume it to be a variant constructor
                 else {
-                    // Variants cannot be paths
+                    // Unresolved structural variants cannot be paths.
                     if path.segments.len() > 1 {
                         return Err(internal_compilation_error!(InvalidVariantConstructor {
                             span: expr_span,

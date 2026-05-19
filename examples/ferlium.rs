@@ -350,7 +350,7 @@ fn pretty_print_checking_error(error: &CompilationError, src: &str, source_table
             let span = Span(*span);
             Report::build(ReportKind::Error, span)
                 .with_message(format!(
-                    "Variant constructor cannot be a path, but {} is.",
+                    "Invalid variant constructor path {}.",
                     name.fg(Color::Blue)
                 ))
                 .with_label(Label::new(span).with_color(Color::Blue))

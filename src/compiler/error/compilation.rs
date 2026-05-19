@@ -611,7 +611,7 @@ pub enum CompilationErrorImpl<S: Scope> {
     },
     InvalidVariantConstructor {
         span: Location,
-        // Only one error type for now: a path was used as a variant constructor
+        // The constructor path does not resolve to an enum variant.
     },
     IsNotCorrectProductType {
         which: WhichProductTypeIsNot,
@@ -1184,11 +1184,7 @@ impl FormatWith<SourceTable> for CompilationError {
                 )
             }
             InvalidVariantConstructor { span } => {
-                write!(
-                    f,
-                    "Variant constructor cannot be paths, but {} is",
-                    fmt_span(span)
-                )
+                write!(f, "Invalid variant constructor path {}", fmt_span(span))
             }
             ReturnOutsideFunction { span } => {
                 write!(

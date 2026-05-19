@@ -291,7 +291,7 @@ pub(crate) fn desugar(
                     .into_iter()
                     .map(|(pat, expr_id)| {
                         let env_size = ctx.locals.len();
-                        if let Some((_tag, _kind, vars)) = pat.kind.as_variant() {
+                        if let Some((_path, _kind, vars)) = pat.kind.as_variant() {
                             for var in vars {
                                 if let Some(name) = var.as_named() {
                                     ctx.locals.push(name.0);

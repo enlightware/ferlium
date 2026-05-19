@@ -1310,6 +1310,76 @@ fn generic_named_type_from_user_definition() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn qualified_enum_patterns_infer_named_generic_type() {
+    let mut session = TestSession::new();
+
+    let unwrap_or_src = join_src(&[
+        option_type_def_src(),
+        indoc! { r#"
+            fn unwrap_or(default, value) {
+                match value {
+                    Option::Some(inner) => inner,
+                    Option::None => default,
+                }
+            }
+
+            unwrap_or(0, Option::Some(41))
+        "# },
+    ]);
+    assert_val_eq!(session.run(&unwrap_or_src), int(41));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn qualified_enum_patterns_infer_named_recursive_type() {
+    let mut session = TestSession::new();
+
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            enum Tree<T> {
+                Leaf(T),
+                Node(Tree<T>, Tree<T>),
+            }
+
+            fn sum(tree) {
+                match tree {
+                    Tree::Leaf(v) => v,
+                    Tree::Node(l, r) => sum(l) + sum(r),
+                }
+            }
+
+            sum(Tree::Node(Tree::Node(Tree::Leaf(2), Tree::Leaf(3)), Tree::Leaf(4)))
+        "# }),
+        int(9)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn qualified_enum_pattern_rejects_unknown_variant() {
+    let mut session = TestSession::new();
+
+    match session
+        .fail_compilation(indoc! { r#"
+            enum Option<T> {
+                None,
+                Some(T),
+            }
+
+            match Option::Some(1) {
+                Option::Missing => 0,
+                _ => 1,
+            }
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidVariantConstructor { .. } => {}
+        error => panic!("expected invalid variant constructor, got {error:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn constrained_named_type_from_user_definition() {
     let mut session = TestSession::new();
 
@@ -1979,6 +2049,19 @@ fn generic_named_type_from_rust_definition() {
             unwrap_or_zero(testing::Option::None)
         "# }),
         int(0)
+    );
+    assert_val_eq!(
+        session.run(indoc! { r#"
+            fn unwrap_or_zero(value) {
+                match value {
+                    testing::Option::Some(inner) => inner,
+                    testing::Option::None => 0,
+                }
+            }
+
+            unwrap_or_zero(testing::Option::Some(41))
+        "# }),
+        int(41)
     );
 }
 

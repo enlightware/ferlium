@@ -116,6 +116,23 @@ fn f(a) {
 f(Action::Move { x: 30.0, y: 40.0 })
 ```
 
+For named enums, patterns may also qualify the variant with the enum name.
+This can help type inference when the matched value has no explicit type annotation:
+
+```ferlium
+# enum Action {
+#     Quit,
+#     Jump(float),
+#     Move { x: float, y: float },
+# }
+# let action = Action::Move { x: 30.0, y: 40.0 };
+match action {
+    Action::Quit => 0.0,
+    Action::Jump(h) => h,
+    Action::Move { y, x } => x + y,
+}
+```
+
 In record-style patterns, `..` can be used to ignore remaining fields.
 
 ```ferlium

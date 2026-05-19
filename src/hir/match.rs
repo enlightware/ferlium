@@ -12,7 +12,7 @@ use crate::{
     compiler::error::DuplicatedVariantContext,
     hir::hir_syn::store_new,
     internal_compilation_error,
-    module::{LocalDecl, LocalDeclId, ProjectionIndex, id::Id},
+    module::{LocalDecl, LocalDeclId, ProjectionIndex, TypeDefId, TypeDefLookupResult, id::Id},
     std::core::REPR_TRAIT,
     types::mutability::MutVal,
     types::r#type::TypeKind,
@@ -35,6 +35,11 @@ use crate::{
 };
 
 impl TypeInference {
+    fn fresh_named_type_instance(&mut self, type_def: TypeDefId, env: &TypingEnv) -> Type {
+        let param_count = env.module_env.type_def(type_def).param_count();
+        Type::named(type_def, self.fresh_type_var_tys(param_count))
+    }
+
     pub(crate) fn infer_match(
         &mut self,
         env: &mut TypingEnv,
@@ -68,6 +73,8 @@ impl TypeInference {
         // Currently the type must be the same for all alternatives.
         let (condition_node_id, _) = self.infer_expr(env, cond_expr)?;
         let condition_node = &env.ir_arena[condition_node_id];
+        let condition_ty = condition_node.ty;
+        let condition_span = condition_node.span;
         let cond_eff = condition_node.effects.clone();
         if condition_node.ty == Type::never() {
             return Ok(Self::diverging_prefix_result([condition_node_id], cond_eff));
@@ -98,16 +105,45 @@ impl TypeInference {
 
             // Create a fresh type variable for the inner types, when there is a variable binding.
             let mut seen_tags = FxHashMap::default();
+            let mut qualified_pattern_tys = FxHashMap::default();
             let (types, exprs): (Vec<_>, Vec<_>) = alternatives
                 .iter()
                 .map(|(pattern, expr)| {
                     if let Some(variant) = pattern.kind.as_variant() {
-                        let ((tag, tag_span), kind, vars) = variant;
+                        let (path, kind, vars) = variant;
+                        let (tag, tag_span) = path.tag();
+                        if path.is_qualified() {
+                            let path_span = path.path.span().unwrap_or(pattern.span);
+                            match env.get_type_def(&path.path)? {
+                                Some(TypeDefLookupResult::Enum(type_def, resolved_tag)) => {
+                                    debug_assert_eq!(tag, resolved_tag);
+                                    let named_ty =
+                                        if let Some(ty) = qualified_pattern_tys.get(&type_def) {
+                                            *ty
+                                        } else {
+                                            let ty = self.fresh_named_type_instance(type_def, env);
+                                            qualified_pattern_tys.insert(type_def, ty);
+                                            ty
+                                        };
+                                    self.add_sub_type_constraint(
+                                        condition_ty,
+                                        condition_span,
+                                        named_ty,
+                                        path_span,
+                                    );
+                                }
+                                Some(TypeDefLookupResult::Struct(_)) | None => {
+                                    return Err(internal_compilation_error!(
+                                        InvalidVariantConstructor { span: path_span }
+                                    ));
+                                }
+                            }
+                        }
                         // Detect duplicate variant tags.
                         if let Some(old_tag_span) = seen_tags.insert(tag, tag_span) {
                             return Err(internal_compilation_error!(DuplicatedVariant {
-                                first_occurrence: *old_tag_span,
-                                second_occurrence: *tag_span,
+                                first_occurrence: old_tag_span,
+                                second_occurrence: tag_span,
                                 ctx_span: match_span,
                                 ctx: DuplicatedVariantContext::Match,
                             }));
@@ -195,7 +231,7 @@ impl TypeInference {
                                 (inner_tys, variant_inner_ty)
                             }
                         };
-                        Ok(((*tag, inner_tys, variant_inner_ty), (expr, named_vars)))
+                        Ok(((tag, inner_tys, variant_inner_ty), (expr, named_vars)))
                     } else {
                         Err(internal_compilation_error!(InconsistentPattern {
                             a_type: PatternType::Variant,
