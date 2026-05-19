@@ -315,6 +315,130 @@ fn non_recursive_phantom_alias_does_not_capture_plain_type_formatting() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_alias_recovery_prefers_concrete_arguments_earlier() {
+    let src = indoc! { r#"
+        type Tree<A, B> = Leaf(A) | Node2(Tree<A, B>, Tree<A, B>);
+        type Tra<C, D> = Node2(Tra<C, D>, Tra<C, D>) | Leaf(D);
+        let a: Tree<_, _> = Leaf(1);
+        let b: Tra<_, _> = a;
+        a
+    "# };
+    let mut compiler = IdeCompiler::new();
+    assert!(
+        compiler.compile(src).is_none(),
+        "source should compile successfully"
+    );
+    let annotated = annotated_ide_source(&mut compiler, src);
+
+    assert!(
+        annotated.contains("let a: Tree<_, _> ⇨ Tree<int, _> = Leaf(1);"),
+        "alias recovery should prefer the alias with concrete arguments earlier, got:\n{annotated}"
+    );
+    assert!(
+        annotated.contains("a: Tree<int, _>"),
+        "final expression should use the same preferred alias spelling, got:\n{annotated}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_alias_recovery_prefers_shorter_name_then_alphabetic_name() {
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            type Longer<A> = Leaf(A) | Node(Longer<A>);
+            type B<A> = Leaf(A) | Node(B<A>);
+
+            fn id(x: Longer<int>) {
+                x
+            }
+        "# },
+    );
+
+    assert!(
+        rendered.contains("fn id(x: B<int>) -> B<int>"),
+        "equally informative aliases should prefer the shorter name, got:\n{rendered}"
+    );
+
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            type Zed<A> = Leaf(A) | Node(Zed<A>);
+            type Aaa<A> = Leaf(A) | Node(Aaa<A>);
+
+            fn id(x: Zed<int>) {
+                x
+            }
+        "# },
+    );
+
+    assert!(
+        rendered.contains("fn id(x: Aaa<int>) -> Aaa<int>"),
+        "equally informative aliases with equal-length names should prefer alphabetic order, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_alias_recovery_prefers_current_module_over_imported_modules() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module("dep", "type A<T> = Leaf(T) | Node(A<T>);")
+        .expect("dependency module should compile");
+    let module_id = session
+        .try_compile_module(
+            "user",
+            indoc! { r#"
+                type Longer<T> = Leaf(T) | Node(Longer<T>);
+
+                fn id(x: Longer<int>) {
+                    x
+                }
+            "# },
+        )
+        .expect("user module should compile")
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    let rendered = module.format_with(session.session().modules()).to_string();
+
+    assert!(
+        rendered.contains("fn id(x: Longer<int>) -> Longer<int>"),
+        "current-module aliases should beat shorter imported aliases, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generic_alias_recovery_handles_alias_to_imported_alias() {
+    let mut session = TestSession::new();
+    session
+        .try_compile_module("dep", "type A<T> = Leaf(T) | Node(A<T>);")
+        .expect("dependency module should compile");
+    let module_id = session
+        .try_compile_module(
+            "user",
+            indoc! { r#"
+                type Longer<T> = dep::A<T>;
+
+                fn id(x: Longer<int>) {
+                    x
+                }
+            "# },
+        )
+        .expect("user module should compile")
+        .module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    let rendered = module.format_with(session.session().modules()).to_string();
+
+    assert!(
+        rendered.contains("fn id(x: Longer<int>) -> Longer<int>"),
+        "current-module alias-to-alias definitions should keep the local alias spelling, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn generic_type_aliases() {
     let mut session = TestSession::new();
 

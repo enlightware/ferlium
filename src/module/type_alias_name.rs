@@ -7,6 +7,8 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
+use std::cmp::Ordering;
+
 use ustr::Ustr;
 
 use crate::{
@@ -20,6 +22,56 @@ use crate::{
 pub(crate) struct GenericAliasName {
     pub name: Ustr,
     pub rendered: String,
+    pub score: GenericAliasScore,
+}
+
+/// Data used to rank competing type alias for display
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct GenericAliasScore {
+    /// One entry per alias parameter; `true` means the parameter was recovered
+    /// from the structural type, `false` means it will be rendered as `_`.
+    concrete_args: Vec<bool>,
+    /// Used only after type-argument quality ties: shorter names win, then
+    /// alphabetic order.
+    alias_name: Ustr,
+}
+
+impl GenericAliasScore {
+    fn new(alias_name: Ustr, concrete_args: Vec<bool>) -> Self {
+        Self {
+            concrete_args,
+            alias_name,
+        }
+    }
+
+    fn concrete_arg_count(&self) -> usize {
+        self.concrete_args
+            .iter()
+            .filter(|&&is_concrete| is_concrete)
+            .count()
+    }
+}
+
+impl Ord for GenericAliasScore {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.concrete_arg_count()
+            .cmp(&other.concrete_arg_count())
+            .then_with(|| self.concrete_args.cmp(&other.concrete_args))
+            .then_with(|| {
+                other
+                    .alias_name
+                    .as_str()
+                    .len()
+                    .cmp(&self.alias_name.as_str().len())
+            })
+            .then_with(|| other.alias_name.as_str().cmp(self.alias_name.as_str()))
+    }
+}
+
+impl PartialOrd for GenericAliasScore {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 pub(crate) fn find_generic_alias_name(
@@ -35,11 +87,15 @@ pub(crate) fn find_generic_alias_name_with(
     ty: Type,
     mut format_type: impl FnMut(Type) -> String,
 ) -> Option<GenericAliasName> {
-    module.type_aliases.type_entries().find_map(|alias| {
-        (!alias.generic_params.is_empty())
-            .then(|| render_generic_alias_name_with(alias, ty, &mut format_type))
-            .flatten()
-    })
+    module
+        .type_aliases
+        .type_entries()
+        .filter_map(|alias| {
+            (!alias.generic_params.is_empty())
+                .then(|| render_generic_alias_name_with(alias, ty, &mut format_type))
+                .flatten()
+        })
+        .max_by(|left, right| left.score.cmp(&right.score))
 }
 
 pub(crate) fn render_generic_alias_name_with(
@@ -55,6 +111,9 @@ pub(crate) fn render_generic_alias_name_with(
             return None;
         }
         let is_alias_definition_self_reference = ty == alias.ty;
+        let concrete_args = (0..alias.ty_var_count)
+            .map(|i| subst.contains_key(&TypeVar::new(i)))
+            .collect::<Vec<_>>();
         let args = (0..alias.ty_var_count)
             .map(|i| {
                 let var = TypeVar::new(i);
@@ -78,6 +137,7 @@ pub(crate) fn render_generic_alias_name_with(
         Some(GenericAliasName {
             name: alias.name,
             rendered,
+            score: GenericAliasScore::new(alias.name, concrete_args),
         })
     })?
 }

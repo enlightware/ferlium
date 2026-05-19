@@ -58,29 +58,35 @@ impl<'m> ModuleEnv<'m> {
             return Some(alias_name.rendered);
         }
 
-        self.modules.iter_named().find_map(|(mod_path, entry)| {
+        if let Some(name) = self.modules.iter_named().find_map(|(mod_path, entry)| {
             entry.module().and_then(|module| {
-                module
-                    .type_aliases
-                    .get_name(ty)
-                    .map(|ty_name| {
-                        if self.current.uses(mod_path, ty_name) {
-                            ty_name.to_string()
-                        } else {
-                            format!("{mod_path}::{ty_name}")
-                        }
-                    })
-                    .or_else(|| {
-                        find_generic_alias_name(module, ty, self).map(|alias_name| {
-                            if self.current.uses(mod_path, alias_name.name) {
-                                alias_name.rendered
-                            } else {
-                                format!("{mod_path}::{}", alias_name.rendered)
-                            }
-                        })
-                    })
+                module.type_aliases.get_name(ty).map(|ty_name| {
+                    if self.current.uses(mod_path, ty_name) {
+                        ty_name.to_string()
+                    } else {
+                        format!("{mod_path}::{ty_name}")
+                    }
+                })
             })
-        })
+        }) {
+            return Some(name);
+        }
+
+        self.modules
+            .iter_named()
+            .filter_map(|(mod_path, entry)| {
+                let module = entry.module()?;
+                find_generic_alias_name(module, ty, self).map(|alias_name| {
+                    let rendered = if self.current.uses(mod_path, alias_name.name) {
+                        alias_name.rendered
+                    } else {
+                        format!("{mod_path}::{}", alias_name.rendered)
+                    };
+                    (alias_name.score, rendered)
+                })
+            })
+            .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+            .map(|(_, rendered)| rendered)
     }
 
     pub fn type_alias_name_with(
@@ -95,31 +101,35 @@ impl<'m> ModuleEnv<'m> {
             return Some(alias_name.rendered);
         }
 
-        self.modules.iter_named().find_map(|(mod_path, entry)| {
+        if let Some(name) = self.modules.iter_named().find_map(|(mod_path, entry)| {
             entry.module().and_then(|module| {
-                module
-                    .type_aliases
-                    .get_name(ty)
-                    .map(|ty_name| {
-                        if self.current.uses(mod_path, ty_name) {
-                            ty_name.to_string()
-                        } else {
-                            format!("{mod_path}::{ty_name}")
-                        }
-                    })
-                    .or_else(|| {
-                        find_generic_alias_name_with(module, ty, &mut format_type).map(
-                            |alias_name| {
-                                if self.current.uses(mod_path, alias_name.name) {
-                                    alias_name.rendered
-                                } else {
-                                    format!("{mod_path}::{}", alias_name.rendered)
-                                }
-                            },
-                        )
-                    })
+                module.type_aliases.get_name(ty).map(|ty_name| {
+                    if self.current.uses(mod_path, ty_name) {
+                        ty_name.to_string()
+                    } else {
+                        format!("{mod_path}::{ty_name}")
+                    }
+                })
             })
-        })
+        }) {
+            return Some(name);
+        }
+
+        self.modules
+            .iter_named()
+            .filter_map(|(mod_path, entry)| {
+                let module = entry.module()?;
+                find_generic_alias_name_with(module, ty, &mut format_type).map(|alias_name| {
+                    let rendered = if self.current.uses(mod_path, alias_name.name) {
+                        alias_name.rendered
+                    } else {
+                        format!("{mod_path}::{}", alias_name.rendered)
+                    };
+                    (alias_name.score, rendered)
+                })
+            })
+            .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+            .map(|(_, rendered)| rendered)
     }
 
     pub fn bare_native_name(&self, native: &BareNativeTypeB) -> Option<String> {
