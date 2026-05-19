@@ -251,6 +251,9 @@ For example, `struct Node { next: Node }` has no finite value, while `Tree` work
 For generic recursive types, recursive references must pass the type parameters through unchanged.
 For example, `Tree<T>` is supported, but `Tree<(T, T)>` in the recursive position is rejected.
 
+Recursive types currently need to be declared explicitly, or supplied through a type annotation/ascription.
+Ferlium does not yet infer a new structural recursive type from an unannotated recursive function body.
+
 ## Destructuring structured values
 
 Tuples, records, and nominal product types can also be destructured in `let` bindings.
