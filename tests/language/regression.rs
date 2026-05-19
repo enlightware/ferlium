@@ -209,7 +209,7 @@ fn pretty_print_unknown_variant_with_named_payload_does_not_crash() {
     .unwrap()
     .into_value();
     let env = ferlium::module::ModuleEnv::new(module, session.session().modules());
-    let formatted = value.display_pretty_with_env(&expr.ty.ty, &env).to_string();
+    let formatted = value.display_pretty(&expr.ty.ty, &env).to_string();
     assert!(formatted.starts_with("missing_collect (MapIterator { "));
 }
 

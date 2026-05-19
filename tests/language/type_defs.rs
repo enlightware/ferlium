@@ -62,7 +62,7 @@ fn run_and_pretty_format(session: &mut TestSession, src: &str) -> String {
     .unwrap()
     .into_value();
     let env = ferlium::module::ModuleEnv::new(module, session.session().modules());
-    value.display_pretty_with_env(&expr.ty.ty, &env).to_string()
+    value.display_pretty(&expr.ty.ty, &env).to_string()
 }
 
 fn format_compiled_module(session: &mut TestSession, src: &str) -> String {

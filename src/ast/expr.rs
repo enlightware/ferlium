@@ -457,7 +457,7 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
             Literal(value, ty) => writeln!(
                 f,
                 "{indent_str}{}",
-                value.clone().into_value().display_pretty_with_env(ty, env)
+                value.clone().into_value().display_pretty(ty, env)
             ),
             FormattedString(string) => writeln!(f, "{indent_str}f\"{string}\""),
             Identifier(path) => writeln!(f, "{indent_str}{path}"),

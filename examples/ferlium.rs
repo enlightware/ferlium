@@ -578,7 +578,7 @@ fn process_input(
                 let module_env = ModuleEnv::new(module, session.modules());
                 println!(
                     "{}: {}",
-                    value.display_pretty(&expr.ty.ty),
+                    value.display_pretty(&expr.ty.ty, &module_env),
                     expr.ty.display_rust_style(&module_env)
                 );
             }

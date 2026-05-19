@@ -394,7 +394,7 @@ impl NativeDisplay for Array {
         &self,
         f: &mut fmt::Formatter,
         ty: &NativeType,
-        env: Option<&ModuleEnv<'_>>,
+        env: &ModuleEnv<'_>,
     ) -> fmt::Result {
         write!(f, "[")?;
         let inner_ty = ty.arguments[0];

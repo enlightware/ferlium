@@ -37,7 +37,7 @@ pub trait NativeDisplay {
         &self,
         f: &mut fmt::Formatter,
         _ty: &NativeType,
-        _env: Option<&ModuleEnv<'_>>,
+        _env: &ModuleEnv<'_>,
     ) -> fmt::Result {
         self.fmt_repr(f)
     }
@@ -564,32 +564,20 @@ impl Value {
         }
     }
 
-    /// Display this value in a pretty-printed way according to the provided type.
-    /// This means that records will be displayed with their field names, etc.
-    pub fn display_pretty<'a>(&'a self, ty: &'a Type) -> PrettyPrint<'a> {
+    /// Display this value in a pretty-printed way according to the provided type and module environment.
+    /// This means that records will be displayed with their field names, named types with their names, etc.
+    pub fn display_pretty<'a>(&'a self, ty: &'a Type, env: &'a ModuleEnv<'a>) -> PrettyPrint<'a> {
         PrettyPrint {
             value: self,
             ty,
-            env: None,
-        }
-    }
-
-    pub fn display_pretty_with_env<'a>(
-        &'a self,
-        ty: &'a Type,
-        env: &'a ModuleEnv<'a>,
-    ) -> PrettyPrint<'a> {
-        PrettyPrint {
-            value: self,
-            ty,
-            env: Some(env),
+            env,
         }
     }
 
     pub(crate) fn display_pretty_env<'a>(
         &'a self,
         ty: &'a Type,
-        env: Option<&'a ModuleEnv<'a>>,
+        env: &'a ModuleEnv<'a>,
     ) -> PrettyPrint<'a> {
         PrettyPrint {
             value: self,
@@ -602,7 +590,7 @@ impl Value {
         &self,
         f: &mut std::fmt::Formatter<'_>,
         ty: Type,
-        env: Option<&ModuleEnv<'_>>,
+        env: &ModuleEnv<'_>,
     ) -> std::fmt::Result {
         if matches!(self, Value::Uninit) {
             panic!("attempted to pretty-print an uninitialized value");
@@ -680,7 +668,6 @@ impl Value {
             Named(named_type) => {
                 let named_type = named_type.clone();
                 drop(ty_data);
-                let env = env.expect("pretty-printing named types requires a module environment");
                 let type_def = env.type_def(named_type.def);
                 let shape = type_def.instantiated_shape(&named_type.params);
                 let separator = if shape.data().is_variant() { "::" } else { " " };
@@ -689,7 +676,7 @@ impl Value {
                     "{}{}{}",
                     type_def.name,
                     separator,
-                    self.display_pretty_with_env(&shape, env)
+                    self.display_pretty(&shape, env)
                 )
             }
             Never => panic!("A value of type Never cannot exist"),
@@ -715,7 +702,7 @@ fn take_nth_discarding_rest(values: B<SVec2<Value>>, index: usize) -> Option<Val
 pub struct PrettyPrint<'a> {
     value: &'a Value,
     ty: &'a Type,
-    env: Option<&'a ModuleEnv<'a>>,
+    env: &'a ModuleEnv<'a>,
 }
 
 impl<'a> std::fmt::Display for PrettyPrint<'a> {
