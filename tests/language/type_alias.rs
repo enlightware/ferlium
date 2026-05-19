@@ -11,12 +11,44 @@
 use indoc::indoc;
 use ustr::ustr;
 
-use ferlium::{format::FormatWith, module::ModuleEnv, std::option::some};
+use ferlium::{
+    format::FormatWith, ide::Compiler as IdeCompiler, module::ModuleEnv, std::option::some,
+};
 
 use crate::harness::{TestSession, float, int, string};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::*;
+
+fn format_compiled_module(session: &mut TestSession, src: &str) -> String {
+    let module_id = session.compile(src).module_id;
+    let module = session.session().expect_fresh_module(module_id);
+    module.format_with(session.session().modules()).to_string()
+}
+
+fn annotated_ide_source(compiler: &mut IdeCompiler, src: &str) -> String {
+    let char_to_byte = |char_pos: usize| {
+        src.char_indices()
+            .map(|(index, _)| index)
+            .nth(char_pos)
+            .unwrap_or(src.len())
+    };
+
+    let mut grouped = Vec::<(usize, String)>::new();
+    for annotation in compiler.get_annotations() {
+        if let Some((_, hint)) = grouped.last_mut().filter(|(pos, _)| *pos == annotation.pos) {
+            hint.push_str(&annotation.hint);
+        } else {
+            grouped.push((annotation.pos, annotation.hint));
+        }
+    }
+
+    let mut annotated = src.to_string();
+    for (pos, hint) in grouped.into_iter().rev() {
+        annotated.insert_str(char_to_byte(pos), &hint);
+    }
+    annotated
+}
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -209,6 +241,76 @@ fn recursive_type_aliases() {
     session
         .fail_compilation("type Weird<T> = Done | Next(Weird<(T, T)>);")
         .expect_non_regular_recursive_generic_shape("Weird");
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_generic_alias_ide_annotations_preserve_recursive_only_arguments() {
+    let src = indoc! { r#"
+        type Tree<A, B> = Leaf(A) | Node2(Tree<A, B>, Tree<A, B>);
+        let a: Tree<_, _> = Leaf(1);
+    "# };
+    let mut compiler = IdeCompiler::new();
+    assert!(
+        compiler.compile(src).is_none(),
+        "source should compile successfully"
+    );
+    let annotated = annotated_ide_source(&mut compiler, src);
+
+    assert!(
+        annotated.contains("let a: Tree<_, _> ⇨ Tree<int, _> = Leaf(1);"),
+        "IDE annotation should preserve the recursive alias and show a placeholder for the erased recursive-only argument, got:\n{annotated}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_generic_alias_formatting_preserves_recursive_only_arguments() {
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            type Tree<A, B> = Leaf(A) | Node2(Tree<A, B>, Tree<A, B>);
+
+            fn id(tree: Tree<int, string>) {
+                tree
+            }
+        "# },
+    );
+
+    assert!(
+        rendered.contains("Tree<A, B>: Leaf (A) | Node2 (Tree<A, B>, Tree<A, B>)"),
+        "recursive alias body should keep recursive-only arguments, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("fn id(tree: Tree<int, _>) -> Tree<int, _>"),
+        "recursive alias use should keep a placeholder for the erased recursive-only argument, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn non_recursive_phantom_alias_does_not_capture_plain_type_formatting() {
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            type Phantom<T> = int;
+
+            fn id(x: int) {
+                x
+            }
+        "# },
+    );
+
+    assert!(
+        rendered.contains("fn id(x: int) -> int"),
+        "non-recursive phantom aliases should not rename plain concrete types, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("fn id(x: Phantom"),
+        "non-recursive phantom alias unexpectedly captured int formatting, got:\n{rendered}"
+    );
 }
 
 #[test]

@@ -49,20 +49,31 @@ pub(crate) fn render_generic_alias_name_with(
 ) -> Option<GenericAliasName> {
     let mut subst = TypeInstSubst::default();
     match_alias_type(alias.ty, ty, alias.ty_var_count, &mut subst).then(|| {
+        let has_unmatched_params =
+            (0..alias.ty_var_count).any(|i| !subst.contains_key(&TypeVar::new(i)));
+        if has_unmatched_params && !alias.ty.is_global_recursive() {
+            return None;
+        }
+        let is_alias_definition_self_reference = ty == alias.ty;
         let args = (0..alias.ty_var_count)
-            .map(|i| subst.get(&TypeVar::new(i)).copied())
-            .collect::<Option<Vec<_>>>()?;
+            .map(|i| {
+                let var = TypeVar::new(i);
+                subst.get(&var).map_or_else(
+                    || {
+                        if is_alias_definition_self_reference {
+                            alias.generic_params[i as usize].0.to_string()
+                        } else {
+                            "_".to_string()
+                        }
+                    },
+                    |ty| format_type(*ty),
+                )
+            })
+            .collect::<Vec<_>>();
         let rendered = if args.is_empty() {
             alias.name.to_string()
         } else {
-            format!(
-                "{}<{}>",
-                alias.name,
-                args.iter()
-                    .map(|ty| format_type(*ty))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            format!("{}<{}>", alias.name, args.join(", "))
         };
         Some(GenericAliasName {
             name: alias.name,
