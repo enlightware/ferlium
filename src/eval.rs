@@ -1416,15 +1416,15 @@ fn eval_function_clone(
             owned_source = eval_or_return!(eval_node_with_ctx(arena, node.source, ctx, locals));
             owned_source.as_function().unwrap()
         };
-        let result = (
+
+        (
             source.function_id,
             source.module_id,
             source.hidden_args.clone(),
             &source.closure_env as *const Value,
             source.closure_env_len,
             source.closure_env_value_dictionary,
-        );
-        result
+        )
     };
     let closure_env = if let Some(dictionary) = closure_env_value_dictionary {
         call_value_clone_for_temp(ctx, dictionary, ValOrMut::Ref(closure_env_ptr), span)?
@@ -2094,11 +2094,10 @@ fn eval_case(
     let value = if let Some(place) =
         eval_or_return!(try_resolve_node_place(arena, case.value, ctx, locals))
     {
-        let value = place
+        place
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[case.value].span)))?
-            .to_literal_value();
-        value
+            .to_literal_value()
     } else {
         eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals)).to_literal_value()
     };

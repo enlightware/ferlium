@@ -1408,6 +1408,7 @@ impl TypeInference {
         NodeKind::Block(b(SVec2::from_vec(prefix)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn wrap_owned_value_with_temp_drops(
         &mut self,
         env: &mut TypingEnv,
