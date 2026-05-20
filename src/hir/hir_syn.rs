@@ -129,16 +129,8 @@ pub fn project(tuple: NodeId, index: ProjectionIndex) -> NodeKind {
     K::Project(tuple, index)
 }
 
-/// Build an owned array indexing node for generated HIR.
-///
-/// Generated HIR bypasses expression type inference, so callers must provide the
-/// `Value::clone` dispatch that materializes the indexed element.
-pub fn index_immediate(
-    arena: &mut NodeArena,
-    array: NodeId,
-    index: isize,
-    clone: LocalClone,
-) -> NodeKind {
+/// Build an array indexing place node for generated HIR.
+pub fn index_immediate(arena: &mut NodeArena, array: NodeId, index: isize) -> NodeKind {
     let array_span = arena[array].span;
     let index_node = arena.alloc(hir::Node::new(
         immediate(LiteralValue::new_native(index)),
@@ -149,6 +141,22 @@ pub fn index_immediate(
     K::Index(hir::ArrayIndex {
         array,
         index: index_node,
+    })
+}
+
+/// Build an owned array indexing node for generated HIR.
+pub fn index_immediate_clone(
+    arena: &mut NodeArena,
+    array: NodeId,
+    index: isize,
+    clone: LocalClone,
+    element_ty: Type,
+) -> NodeKind {
+    let span = arena[array].span;
+    let index = index_immediate(arena, array, index);
+    let index_place = arena.alloc(hir::Node::new(index, element_ty, EffType::empty(), span));
+    K::ValueClone(hir::ValueClone {
+        source: index_place,
         clone: Some(clone),
     })
 }

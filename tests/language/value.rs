@@ -483,6 +483,66 @@ fn unused_owned_temporary_is_dropped() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_array_index_shared_ref_base_is_dropped() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn payload(value: Probe) -> int {{
+            value.0
+        }}
+
+        testing::reset_tracked_drops();
+        let observed = payload([Probe(3)][0]);
+        observed * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(33));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_tuple_projection_shared_ref_base_is_dropped() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn payload(value: Probe) -> int {{
+            value.0
+        }}
+
+        testing::reset_tracked_drops();
+        let observed = payload((Probe(4),).0);
+        observed * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(44));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_record_projection_shared_ref_base_is_dropped() {
+    let mut session = TestSession::new();
+    let source = format!(
+        r#"
+        {}
+        fn payload(value: Probe) -> int {{
+            value.0
+        }}
+
+        testing::reset_tracked_drops();
+        let observed = payload({{item: Probe(5)}}.item);
+        observed * 10 + testing::tracked_drop_log()
+        "#,
+        tracked_probe_value_impl()
+    );
+    assert_val_eq!(session.run(&source), int(55));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn lexical_drop_runs_on_runtime_error() {
     let mut session = TestSession::new();
     let source = format!(

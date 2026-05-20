@@ -1706,6 +1706,13 @@ fn execution_errors() {
         session.fail_run("fn i(x) { let y = x + x; if y == 2 { panic(\"2\") } } i(1) "),
         Aborted(Some("2".into()))
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn arithmetic_execution_errors() {
+    let mut session = TestSession::new();
+    use RuntimeErrorKind::*;
     assert_eq!(session.fail_run("1.0 / 0.0"), DivisionByZero);
     assert_eq!(
         session.fail_run("let v = || 0.0; 1.0 / v()"),
@@ -1726,6 +1733,13 @@ fn execution_errors() {
         session.fail_run("let v = || 0; mod(1, v())"),
         RemainderByZero
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_execution_errors() {
+    let mut session = TestSession::new();
+    use RuntimeErrorKind::*;
     assert_eq!(
         session.fail_run("[1][1]"),
         ArrayAccessOutOfBounds { index: 1, len: 1 }
@@ -1766,10 +1780,23 @@ fn execution_errors() {
         session.fail_run("let i = || -3; let mut a = [1, 2]; a[i()] = 0"),
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_execution_succeeds_below_limit() {
+    let mut session = TestSession::new();
     assert_val_eq!(
         session.run("fn down(n) { if n == 0 { 0 } else { down(n - 1) } } down(128)"),
         int(0)
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn recursive_execution_errors() {
+    let mut session = TestSession::new();
+    use RuntimeErrorKind::*;
     assert_eq!(
         session.fail_run("fn rf() { rf() } rf() + 0"),
         CallDepthLimitExceeded { limit: 192 }

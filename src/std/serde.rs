@@ -404,8 +404,13 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     // get the array payload of the array variant
                     let get_array = n(arena, load(l_array_id), array_ty);
                     // get the i-th element
-                    let index_kind =
-                        index_immediate(arena, get_array, i as isize, variant_clone.clone());
+                    let index_kind = index_immediate_clone(
+                        arena,
+                        get_array,
+                        i as isize,
+                        variant_clone.clone(),
+                        variant_ty,
+                    );
                     let index_node = n(arena, index_kind, variant_ty);
                     // deserialize the i-th element
                     build_deserialize(arena, solver, index_node, ty_i)

@@ -1379,15 +1379,6 @@ fn place_contains_uninit(
     Ok(matches!(target, Value::Uninit))
 }
 
-fn scratch_environment_index_after_locals(ctx: &EvalCtx, locals: &[LocalDecl]) -> usize {
-    let local_limit = locals
-        .iter()
-        .map(|local| ctx.frame_base + local.slot.as_index() + 1)
-        .max()
-        .unwrap_or(ctx.frame_base);
-    ctx.environment.len().max(local_limit)
-}
-
 fn local_environment_index(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId) -> usize {
     ctx.frame_base + locals[id.as_index()].slot.as_index()
 }
@@ -1425,14 +1416,15 @@ fn eval_function_clone(
             owned_source = eval_or_return!(eval_node_with_ctx(arena, node.source, ctx, locals));
             owned_source.as_function().unwrap()
         };
-        (
+        let result = (
             source.function_id,
             source.module_id,
             source.hidden_args.clone(),
             &source.closure_env as *const Value,
             source.closure_env_len,
             source.closure_env_value_dictionary,
-        )
+        );
+        result
     };
     let closure_env = if let Some(dictionary) = closure_env_value_dictionary {
         call_value_clone_for_temp(ctx, dictionary, ValOrMut::Ref(closure_env_ptr), span)?
@@ -1464,7 +1456,7 @@ fn eval_function_drop(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let target = eval_or_return!(resolve_node_place(arena, node.target, ctx, locals));
-    let Some((dictionary, captures)) = ({
+    let captured_env = {
         let target = target
             .target_mut(ctx)
             .map_err(|err| RuntimeError::new(err, Some(span)))?;
@@ -1478,7 +1470,8 @@ fn eval_function_drop(
                 mem::replace(&mut function.closure_env, Value::uninit()),
             )
         })
-    }) else {
+    };
+    let Some((dictionary, captures)) = captured_env else {
         return cont(Value::unit());
     };
     call_value_drop_for_temp(ctx, dictionary, ValOrMut::Val(captures), span)
@@ -1493,7 +1486,12 @@ fn eval_value_clone(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let source = match eval_or_return!(try_resolve_node_place(arena, node.source, ctx, locals)) {
-        Some(place) => ValOrMut::Mut(place),
+        Some(place) => {
+            place
+                .target_ref(ctx)
+                .map_err(|err| RuntimeError::new(err, Some(arena[node.source].span)))?;
+            ValOrMut::Mut(place)
+        }
         None => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
             arena,
             node.source,
@@ -1618,7 +1616,12 @@ fn eval_env_store(
             path: Vec::new(),
         };
         let source = match eval_or_return!(try_resolve_node_place(arena, node.value, ctx, locals)) {
-            Some(place) => ValOrMut::Mut(place),
+            Some(place) => {
+                place
+                    .target_ref(ctx)
+                    .map_err(|err| RuntimeError::new(err, Some(arena[node.value].span)))?;
+                ValOrMut::Mut(place)
+            }
             None => ValOrMut::Val(eval_or_return!(eval_node_with_ctx(
                 arena, node.value, ctx, locals
             ))),
@@ -2040,7 +2043,8 @@ fn eval_extract_tag(
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[node].span)))?;
         let variant = value.as_variant().unwrap();
-        return cont(Value::native(variant.tag_as_isize()));
+        let tag = variant.tag_as_isize();
+        return cont(Value::native(tag));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
     let variant = value.into_variant().unwrap();
@@ -2062,54 +2066,21 @@ fn eval_array(
 fn eval_index(
     arena: &NodeArena,
     id: NodeId,
-    index: &hir::ArrayIndex,
+    _index: &hir::ArrayIndex,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    // Evaluate left-to-right: array first, then index (matches Rust semantics).
-    let mut array_place = eval_or_return!(try_resolve_node_place(arena, index.array, ctx, locals));
-    let mut temp_array_env_len = None;
-    if array_place.is_none() {
-        let array = eval_or_return!(eval_node_with_ctx(arena, index.array, ctx, locals));
-        let old_len = ctx.environment.len();
-        let target = scratch_environment_index_after_locals(ctx, locals);
-        if target >= ctx.stack_limit {
-            array.discard_storage();
-            return Err(RuntimeError::new(
-                RuntimeErrorKind::StackLimitExceeded {
-                    limit: ctx.stack_limit,
-                },
-                Some(arena[id].span),
-            ));
-        }
-        ctx.set_environment_entry(target, ValOrMut::Val(array));
-        temp_array_env_len = Some(old_len);
-        array_place = Some(Place {
-            target,
-            path: Vec::new(),
-        });
-    }
-    let mut element_place = array_place.unwrap();
-    let index_value = eval_or_return!(eval_node_with_ctx(arena, index.index, ctx, locals))
-        .into_primitive_ty::<isize>()
-        .unwrap();
-    element_place.path.push(index_value);
-
-    let clone = index
-        .clone
-        .as_ref()
-        .expect("ArrayIndex clone dispatch should have been resolved before evaluation");
-    let result = call_value_clone_dispatch_for_temp(
-        ctx,
-        clone,
-        ValOrMut::Mut(element_place.clone()),
-        arena[id].span,
-    );
-
-    if let Some(old_len) = temp_array_env_len {
-        ctx.truncate_environment_storage(old_len);
-    }
-
+    let place = eval_or_return!(resolve_node_place(arena, id, ctx, locals));
+    let result = if let Some(value) =
+        try_copy_trivial_value_from_place(&place, arena[id].ty, ctx, arena[id].span)?
+    {
+        Ok(value)
+    } else {
+        place
+            .target_ref(ctx)
+            .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?;
+        Ok(Value::unit())
+    };
     result.map(ControlFlow::Continue)
 }
 
@@ -2123,10 +2094,11 @@ fn eval_case(
     let value = if let Some(place) =
         eval_or_return!(try_resolve_node_place(arena, case.value, ctx, locals))
     {
-        place
+        let value = place
             .target_ref(ctx)
             .map_err(|err| RuntimeError::new(err, Some(arena[case.value].span)))?
-            .to_literal_value()
+            .to_literal_value();
+        value
     } else {
         eval_or_return!(eval_node_with_ctx(arena, case.value, ctx, locals)).to_literal_value()
     };
@@ -2266,9 +2238,10 @@ fn eval_owned_arg(
         // If the expression is a place, materialize the by-value argument using
         // the expected callee type. For dictionary-projected concrete methods,
         // the place node can still carry the caller's generic surface type.
-        Ok(ControlFlow::Continue(Some(place))) => Ok(ControlFlow::Continue(ValOrMut::Val(
-            copy_trivial_value_from_place(&place, ty, ctx, arena[arg].span)?,
-        ))),
+        Ok(ControlFlow::Continue(Some(place))) => {
+            let value = copy_trivial_value_from_place(&place, ty, ctx, arena[arg].span);
+            Ok(ControlFlow::Continue(ValOrMut::Val(value?)))
+        }
         Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, arg, ctx, locals)
             .map(|result| result.map_continue(ValOrMut::Val)),
         Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
@@ -2296,9 +2269,8 @@ fn is_dictionary_entry_projection(
     let Some(place) = eval_or_return!(try_resolve_node_place(arena, data, ctx, locals)) else {
         return Ok(ControlFlow::Continue(false));
     };
-    Ok(ControlFlow::Continue(
-        try_dictionary_from_place(&place, ctx).is_some(),
-    ))
+    let result = try_dictionary_from_place(&place, ctx).is_some();
+    Ok(ControlFlow::Continue(result))
 }
 
 fn default_argument_passing(arg: &FnArgType) -> ArgPassing {
@@ -2378,7 +2350,7 @@ fn try_resolve_node_place(
         }
         EnvLoad(node) => Place {
             // By using frame_base here, we allow to access parent frames
-            // when the ResolvedPlace is used in a child function.
+            // when the Place is used in a child function.
             target: local_environment_index(ctx, locals, node.id),
             path: Vec::new(),
         },

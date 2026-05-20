@@ -309,6 +309,111 @@ fn array_index_shared_ref_call_does_not_clone() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_array_index_shared_ref_call_does_not_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            testing::clone_tracked_payload([value][0]) * 10
+                + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(71)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_array_index_let_uses_value_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            let item = [value][0];
+            testing::clone_tracked_payload(item) * 10
+                + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(72)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_tuple_projection_shared_ref_call_does_not_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            testing::clone_tracked_payload((value,).0) * 10
+                + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(71)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_tuple_projection_let_uses_value_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            let item = (value,).0;
+            testing::clone_tracked_payload(item) * 10
+                + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(72)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_record_projection_shared_ref_call_does_not_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            testing::clone_tracked_payload({item: value}.item) * 10
+                + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(71)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn temporary_record_projection_let_uses_value_clone() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(
+            r#"
+            let value = testing::make_clone_tracked();
+            testing::reset_clone_tracked_clones();
+            let item = {item: value}.item;
+            testing::clone_tracked_payload(item) * 10
+                + testing::clone_tracked_clone_count()
+            "#
+        ),
+        int(72)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_append_and_concat_use_value_clone() {
     let mut session = TestSession::new();
     assert_val_eq!(

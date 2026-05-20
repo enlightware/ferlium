@@ -214,9 +214,6 @@ pub struct Assignment {
 pub struct ArrayIndex {
     pub array: NodeId,
     pub index: NodeId,
-    /// Dispatch used to clone the indexed element into the owned result.
-    /// `None` is only valid before dictionary passing.
-    pub clone: Option<LocalClone>,
 }
 
 #[derive(Debug, Clone)]

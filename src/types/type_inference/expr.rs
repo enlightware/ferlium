@@ -93,6 +93,11 @@ pub struct TypeInference {
     trivial_copy_cache: FxHashMap<Type, bool>,
 }
 
+struct PreparedPlace {
+    prefix: Vec<NodeId>,
+    place: NodeId,
+}
+
 impl TypeInference {
     pub fn new_empty() -> Self {
         Self::default()
@@ -533,13 +538,17 @@ impl TypeInference {
                 let node_ty = env.ir_arena[node_id].ty;
                 let initializer_is_borrow =
                     initializer_needs_mut_binding_clone(env.ir_arena, node_id);
+                let initializer_place_needs_temp =
+                    place_resolution_may_create_temp(env.ir_arena, node_id);
                 let initializer_is_known_immutable = matches!(
                     initializer_mut_ty,
                     MutType::Resolved(mut_ty) if !mut_ty.is_mutable()
                 );
                 let initializer_is_known_trivial_copy =
                     self.type_has_concrete_trivial_copy_impl(env, node_ty, expr_span);
-                let needs_clone = (mut_val.is_mutable() || !initializer_is_known_immutable)
+                let needs_clone = (initializer_place_needs_temp
+                    || mut_val.is_mutable()
+                    || !initializer_is_known_immutable)
                     && node_ty != Type::never()
                     && initializer_is_borrow
                     && !initializer_is_known_trivial_copy;
@@ -564,14 +573,14 @@ impl TypeInference {
                 if owns_storage && self.type_needs_semantic_drop(env, node_ty, expr_span) {
                     local.drop_mode = LocalDropMode::Value;
                 }
-                if needs_clone {
+                if needs_clone && !initializer_place_needs_temp {
                     local.clone = Some(LocalClone::Required);
                 }
                 let value_id = if node_ty != Type::never()
                     && initializer_is_borrow
-                    && initializer_is_known_trivial_copy
+                    && (initializer_place_needs_temp || initializer_is_known_trivial_copy)
                 {
-                    self.trivial_copy_value(env, node_id, expr_span)
+                    self.materialize_owned_value(env, node_id, expr_span)
                 } else {
                     node_id
                 };
@@ -725,7 +734,10 @@ impl TypeInference {
                         let temp_start_index = env.cur_locals.len();
                         let mut temp_stores = Vec::new();
                         let function = if node_is_place_reference(env.ir_arena, func_node_id) {
-                            func_node_id
+                            let prepared =
+                                self.prepare_place_for_consumer(env, func_node_id, expr_span);
+                            temp_stores.extend(prepared.prefix);
+                            prepared.place
                         } else {
                             let (store, load) = self.store_owned_temp(
                                 env,
@@ -845,6 +857,10 @@ impl TypeInference {
                         let effects = self.make_dependent_effect([&place_effects, &value_effects]);
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
+                        let temp_start_index = env.cur_locals.len();
+                        let prepared_place =
+                            self.prepare_place_for_consumer(env, place_id, expr_span);
+                        let place_id = prepared_place.place;
                         let value_id = self.materialize_owned_value(env, value_id, expr_span);
                         let initializes_storage =
                             assignment_initializes_storage(env.ir_arena, place_id, env);
@@ -870,6 +886,12 @@ impl TypeInference {
                             value: value_id,
                             drop,
                         });
+                        let node = self.wrap_unit_with_temp_drops(
+                            env,
+                            temp_start_index,
+                            prepared_place.prefix,
+                            hir::Node::new(node, Type::unit(), combined_effects.clone(), expr_span),
+                        );
                         (node, Type::unit(), MutType::constant(), combined_effects)
                     }
                 }
@@ -1159,21 +1181,9 @@ impl TypeInference {
                             &array_effects,
                             &index_effects,
                         ]);
-                        let clone = if node_is_place_reference(env.ir_arena, array_node_id) {
-                            None
-                        } else {
-                            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                                VALUE_TRAIT.clone(),
-                                vec![element_ty],
-                                vec![],
-                                sp(data.array),
-                            ));
-                            Some(LocalClone::Required)
-                        };
                         let node = K::Index(hir::ArrayIndex {
                             array: array_node_id,
                             index: index_node_id,
-                            clone,
                         });
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
@@ -1339,24 +1349,25 @@ impl TypeInference {
         arg_passing: Option<&[ArgPassing]>,
         span: Location,
     ) -> Vec<NodeId> {
-        args.iter_mut()
-            .zip(arg_tys)
-            .enumerate()
-            .filter_map(|(index, (arg, arg_ty))| {
-                if !self.argument_is_passed_by_shared_ref(
-                    env,
-                    arg_ty,
-                    arg_passing.and_then(|passing| passing.get(index)).copied(),
-                    span,
-                ) || node_is_place_reference(env.ir_arena, *arg)
-                {
-                    return None;
-                }
+        let mut stores = Vec::new();
+        for (index, (arg, arg_ty)) in args.iter_mut().zip(arg_tys).enumerate() {
+            let passing = arg_passing.and_then(|passing| passing.get(index)).copied();
+            let by_shared_ref = self.argument_is_passed_by_shared_ref(env, arg_ty, passing, span);
+            let by_mut_ref = self.argument_is_passed_by_mut_ref(arg_ty, passing);
+            if !by_shared_ref && !by_mut_ref {
+                continue;
+            }
+            if node_is_place_reference(env.ir_arena, *arg) {
+                let prepared = self.prepare_place_for_consumer(env, *arg, span);
+                stores.extend(prepared.prefix);
+                *arg = prepared.place;
+            } else if by_shared_ref {
                 let (store, load) = self.store_owned_temp(env, *arg, arg_ty.ty, span, ustr("$arg"));
+                stores.push(store);
                 *arg = load;
-                Some(store)
-            })
-            .collect()
+            }
+        }
+        stores
     }
 
     fn wrap_call_with_temp_drops(
@@ -1376,6 +1387,72 @@ impl TypeInference {
         prefix.extend(self.drop_nodes_for_locals(env, temp_start_index, None, span));
         env.cur_locals.truncate(temp_start_index);
         NodeKind::Block(b(SVec2::from_vec(prefix)))
+    }
+
+    fn wrap_unit_with_temp_drops(
+        &mut self,
+        env: &mut TypingEnv,
+        temp_start_index: usize,
+        mut prefix: Vec<NodeId>,
+        node: hir::Node,
+    ) -> NodeKind {
+        if prefix.is_empty() {
+            return node.kind;
+        }
+
+        let span = node.span;
+        let node = env.ir_arena.alloc(node);
+        prefix.push(node);
+        prefix.extend(self.drop_nodes_for_locals(env, temp_start_index, None, span));
+        env.cur_locals.truncate(temp_start_index);
+        NodeKind::Block(b(SVec2::from_vec(prefix)))
+    }
+
+    fn wrap_owned_value_with_temp_drops(
+        &mut self,
+        env: &mut TypingEnv,
+        temp_start_index: usize,
+        mut prefix: Vec<NodeId>,
+        value: NodeId,
+        ty: Type,
+        value_effects: EffType,
+        span: Location,
+    ) -> NodeId {
+        if prefix.is_empty() {
+            return value;
+        }
+
+        let mut effect_deps = prefix
+            .iter()
+            .map(|node| &env.ir_arena[*node].effects)
+            .collect::<Vec<_>>();
+        effect_deps.push(&value_effects);
+        let effects = self.make_dependent_effect(effect_deps);
+
+        let (store_result, result_load) =
+            self.store_owned_temp(env, value, ty, span, ustr("$result"));
+        let result_id = match &env.ir_arena[result_load].kind {
+            NodeKind::EnvLoad(load) => load.id,
+            _ => panic!("store_owned_temp should return an EnvLoad"),
+        };
+        let result_move = env.ir_arena.alloc(hir::Node::new(
+            NodeKind::EnvMove(hir::EnvMove { id: result_id }),
+            ty,
+            no_effects(),
+            span,
+        ));
+
+        prefix.push(store_result);
+        prefix.extend(self.drop_nodes_for_locals(env, temp_start_index, Some(result_id), span));
+        prefix.push(result_move);
+        env.cur_locals.truncate(temp_start_index);
+
+        env.ir_arena.alloc(hir::Node::new(
+            NodeKind::Block(b(SVec2::from_vec(prefix))),
+            ty,
+            effects,
+            span,
+        ))
     }
 
     fn drop_nodes_for_locals(
@@ -1489,6 +1566,32 @@ impl TypeInference {
             return value;
         }
 
+        if place_resolution_may_create_temp(env.ir_arena, value) {
+            let temp_start_index = env.cur_locals.len();
+            let prepared = self.prepare_place_for_consumer(env, value, span);
+            let value = self.materialize_owned_stable_place(env, prepared.place, span);
+            let ty = env.ir_arena[value].ty;
+            let effects = env.ir_arena[value].effects.clone();
+            return self.wrap_owned_value_with_temp_drops(
+                env,
+                temp_start_index,
+                prepared.prefix,
+                value,
+                ty,
+                effects,
+                span,
+            );
+        }
+
+        self.materialize_owned_stable_place(env, value, span)
+    }
+
+    fn materialize_owned_stable_place(
+        &mut self,
+        env: &mut TypingEnv,
+        value: NodeId,
+        span: Location,
+    ) -> NodeId {
         let ty = env.ir_arena[value].ty;
         if self.type_has_concrete_trivial_copy_impl(env, ty, span) {
             return self.trivial_copy_value(env, value, span);
@@ -1511,6 +1614,87 @@ impl TypeInference {
             ty,
             effects,
             span,
+        ))
+    }
+
+    fn prepare_place_for_consumer(
+        &mut self,
+        env: &mut TypingEnv,
+        place: NodeId,
+        span: Location,
+    ) -> PreparedPlace {
+        match env.ir_arena[place].kind.clone() {
+            NodeKind::Project(base, index) => {
+                self.prepare_projection_place(env, place, base, span, |base| {
+                    NodeKind::Project(base, index)
+                })
+            }
+            NodeKind::FieldAccess(base, field) => {
+                self.prepare_projection_place(env, place, base, span, |base| {
+                    NodeKind::FieldAccess(base, field)
+                })
+            }
+            NodeKind::ProjectAt(base, index) => {
+                self.prepare_projection_place(env, place, base, span, |base| {
+                    NodeKind::ProjectAt(base, index)
+                })
+            }
+            NodeKind::Index(index) => {
+                self.prepare_projection_place(env, place, index.array, span, |base| {
+                    NodeKind::Index(hir::ArrayIndex {
+                        array: base,
+                        index: index.index,
+                    })
+                })
+            }
+            _ => PreparedPlace {
+                prefix: Vec::new(),
+                place,
+            },
+        }
+    }
+
+    fn prepare_projection_place(
+        &mut self,
+        env: &mut TypingEnv,
+        original: NodeId,
+        base: NodeId,
+        span: Location,
+        make_kind: impl FnOnce(NodeId) -> NodeKind,
+    ) -> PreparedPlace {
+        let mut prepared = self.prepare_place_base_for_projection(env, base, span);
+        prepared.place = self.rebuild_place_node(env, original, make_kind(prepared.place));
+        prepared
+    }
+    fn prepare_place_base_for_projection(
+        &mut self,
+        env: &mut TypingEnv,
+        base: NodeId,
+        span: Location,
+    ) -> PreparedPlace {
+        if node_is_place_reference(env.ir_arena, base) {
+            self.prepare_place_for_consumer(env, base, span)
+        } else {
+            let ty = env.ir_arena[base].ty;
+            let (store, load) = self.store_owned_temp(env, base, ty, span, ustr("$place"));
+            PreparedPlace {
+                prefix: vec![store],
+                place: load,
+            }
+        }
+    }
+
+    fn rebuild_place_node(
+        &mut self,
+        env: &mut TypingEnv,
+        original: NodeId,
+        kind: NodeKind,
+    ) -> NodeId {
+        env.ir_arena.alloc(hir::Node::new(
+            kind,
+            env.ir_arena[original].ty,
+            env.ir_arena[original].effects.clone(),
+            env.ir_arena[original].span,
         ))
     }
 
@@ -1630,8 +1814,7 @@ impl TypeInference {
         }
 
         if place_evaluation_depends_on_array_index(env.ir_arena, value) {
-            let materialized = self.materialize_owned_value(env, value, span);
-            return self.discard_unused_value(env, materialized, span);
+            return value;
         }
 
         let prefix = self.value_evaluation_prefix_nodes(env.ir_arena, value);
@@ -2560,10 +2743,25 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
     match &arena[node_id].kind {
         EnvLoad(_) => true,
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
+        Project(_, _) | FieldAccess(_, _) | ProjectAt(_, _) => true,
+        Index(_) => true,
+        _ => false,
+    }
+}
+
+fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeId) -> bool {
+    use NodeKind::*;
+
+    match &arena[node_id].kind {
+        EnvLoad(_) => false,
+        GetTraitMethod(_) => false,
         Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
-            initializer_needs_mut_binding_clone(arena, *base)
+            !node_is_place_reference(arena, *base) || place_resolution_may_create_temp(arena, *base)
         }
-        Index(index) => initializer_needs_mut_binding_clone(arena, index.array),
+        Index(index) => {
+            !node_is_place_reference(arena, index.array)
+                || place_resolution_may_create_temp(arena, index.array)
+        }
         _ => false,
     }
 }
@@ -2640,6 +2838,17 @@ impl TypeInference {
                     .is_some_and(|mut_ty| mut_ty.is_mutable())
                     && !self.type_has_concrete_trivial_copy_impl(env, arg.ty, span)
             }
+        }
+    }
+
+    fn argument_is_passed_by_mut_ref(&self, arg: &FnArgType, passing: Option<ArgPassing>) -> bool {
+        match passing {
+            Some(ArgPassing::MutableRef) => true,
+            Some(ArgPassing::OwnedValue | ArgPassing::SharedRef) => false,
+            None => arg
+                .mut_ty
+                .as_resolved()
+                .is_some_and(|mut_ty| mut_ty.is_mutable()),
         }
     }
 }
