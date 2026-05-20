@@ -16,6 +16,9 @@ SSA must not treat every `EnvLoad` as an owned read: ownership transfer, clone, 
 When a projection or index needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
 The consumer then uses a normal place rooted at that temporary, and ordinary `EnvDrop` cleanup releases the temporary after the consumer.
 
+Std-only functions marked with `#[place_result]` are metadata for future place-producing lowering.
+Their source type still returns an ordinary value type; until the dedicated lowering exists, SSA should treat calls normally and rely only on existing place-like HIR nodes.
+
 `LocalDecl` is the ownership metadata for a local:
 
 | Field | SSA-facing meaning |

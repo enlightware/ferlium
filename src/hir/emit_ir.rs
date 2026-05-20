@@ -22,14 +22,16 @@ use crate::{
 use indexmap::IndexMap;
 use itertools::Itertools;
 use log::log_enabled;
-use ustr::Ustr;
+use ustr::{Ustr, ustr};
 
 use super::emit_value_impl::emit_auto_value_impls;
 
 use crate::{
     Location,
     ast::{self, *},
-    compiler::error::InternalCompilationError,
+    compiler::error::{
+        AttributeTarget, InternalCompilationError, InvalidAttributeKind, UnsafeFeature,
+    },
     containers::{b, iterable_to_string},
     desugar::desugar_expr_with_empty_ctx,
     format::FormatWith,
@@ -45,7 +47,7 @@ use crate::{
         build_dictionary_value, id::Id,
     },
     std::{
-        new_module_using_std,
+        STD_MODULE_ID, new_module_using_std,
         value::{
             VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT,
             is_function_surface_only_value_trait_application, is_value_trait_for_function_type,
@@ -484,6 +486,49 @@ pub(crate) struct EmitTraitOutput {
     pub(crate) functions: Vec<LocalFunctionId>,
 }
 
+fn validate_function_attributes(
+    attributes: &[ast::Attribute],
+    function_name: Ustr,
+    is_std_module: bool,
+) -> Result<bool, InternalCompilationError> {
+    let mut returns_place = false;
+    for attribute in attributes {
+        if attribute.path.0 != ustr("place_result") {
+            continue;
+        }
+        if !is_std_module {
+            return Err(
+                InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                    UnsafeFeature::FunctionAttribute(attribute.path.0),
+                    attribute.span,
+                ),
+            );
+        }
+        if !attribute.items.is_empty() {
+            return Err(internal_compilation_error!(InvalidAttribute {
+                attribute_name: attribute.path.0,
+                target: AttributeTarget::Function {
+                    name: function_name,
+                },
+                kind: InvalidAttributeKind::HasArguments,
+                span: attribute.span,
+            }));
+        }
+        if returns_place {
+            return Err(internal_compilation_error!(InvalidAttribute {
+                attribute_name: attribute.path.0,
+                target: AttributeTarget::Function {
+                    name: function_name,
+                },
+                kind: InvalidAttributeKind::Duplicate,
+                span: attribute.span,
+            }));
+        }
+        returns_place = true;
+    }
+    Ok(returns_place)
+}
+
 fn emit_functions<'a, F, I>(
     output: &mut Module,
     ir_arena: &mut NodeArena,
@@ -765,12 +810,15 @@ where
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
+        let returns_place =
+            validate_function_attributes(&attributes, name.0, output.module_id() == STD_MODULE_ID)?;
         let definition = FunctionDefinition::new_with_generic_params_and_attributes(
             ty_scheme,
             generic_params.clone(),
             arg_names,
             doc.clone(),
             attributes.clone(),
+            returns_place,
         );
         let descr = ModuleFunction::new_without_debug_info(
             definition,

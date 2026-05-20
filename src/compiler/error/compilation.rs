@@ -480,6 +480,7 @@ pub enum UnsafeFeature {
     EffectsUnsafe,
     Function(Ustr),
     TypeAlias(Ustr),
+    FunctionAttribute(Ustr),
 }
 
 impl Display for UnsafeFeature {
@@ -488,6 +489,7 @@ impl Display for UnsafeFeature {
             UnsafeFeature::EffectsUnsafe => write!(f, "`effects_unsafe`"),
             UnsafeFeature::Function(name) => write!(f, "function `{name}`"),
             UnsafeFeature::TypeAlias(name) => write!(f, "type alias `{name}`"),
+            UnsafeFeature::FunctionAttribute(name) => write!(f, "function attribute `#[{name}]`"),
         }
     }
 }

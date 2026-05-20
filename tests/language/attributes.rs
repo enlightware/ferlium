@@ -7,7 +7,13 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 
-use ferlium::{SourceId, ast, module::id::Id, parse_module_and_expr};
+use ferlium::{
+    SourceId, ast,
+    compiler::error::{AttributeTarget, CompilationErrorImpl, InvalidAttributeKind, UnsafeFeature},
+    hir::emit_ir::{EmitModuleFrom, emit_module},
+    module::{ModuleId, Uses, id::Id},
+    parse_module_and_expr,
+};
 use indoc::indoc;
 use test_log::test;
 use ustr::ustr;
@@ -21,6 +27,22 @@ fn parse_module_ast(src: &str) -> ast::PModule {
     parse_module_and_expr(src, SourceId::from_index(1), true)
         .unwrap_or_else(|errors| panic!("module should parse cleanly, got {errors:?}"))
         .0
+}
+
+fn compile_std_module(src: &str) -> ferlium::module::Module {
+    let session = TestSession::new();
+    let source_id = session.source_table().next_id();
+    let (module_ast, _, arena) =
+        parse_module_and_expr(src, source_id, true).expect("std-context module should parse");
+    let module_id = ModuleId(0);
+    emit_module(
+        module_ast,
+        &arena,
+        module_id,
+        session.session().modules(),
+        EmitModuleFrom::Uses(Uses::default()),
+    )
+    .expect("std-context module should compile")
 }
 
 #[test]
@@ -168,4 +190,115 @@ fn function_attributes_are_preserved_in_hir_metadata() {
 
     assert_eq!(attributes.len(), 1);
     assert_eq!(attributes[0].path.0, ustr("flag"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_is_rejected_in_user_code() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            #[place_result]
+            fn f() {}
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::UnsafeFeatureUseNotAllowed { feature, .. } => {
+            assert_eq!(
+                feature,
+                UnsafeFeature::FunctionAttribute(ustr("place_result"))
+            );
+        }
+        other => panic!("expected unsafe feature error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_is_preserved_as_function_flag_in_std_context() {
+    let module = compile_std_module(indoc! { r#"
+        #[place_result]
+        fn f() {}
+    "# });
+    let definition = &module.get_function(ustr("f")).unwrap().definition;
+    assert!(definition.returns_place);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_rejects_arguments_in_std_context() {
+    let session = TestSession::new();
+    let source_id = session.source_table().next_id();
+    let (module_ast, _, arena) = parse_module_and_expr(
+        indoc! { r#"
+            #[place_result(note = "nope")]
+            fn f() {}
+        "# },
+        source_id,
+        true,
+    )
+    .expect("std-context module should parse");
+    let module_id = ModuleId(0);
+    match emit_module(
+        module_ast,
+        &arena,
+        module_id,
+        session.session().modules(),
+        EmitModuleFrom::Uses(Uses::default()),
+    )
+    .unwrap_err()
+    .into_inner()
+    {
+        CompilationErrorImpl::InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            ..
+        } => {
+            assert_eq!(attribute_name, ustr("place_result"));
+            assert_eq!(target, AttributeTarget::Function { name: ustr("f") });
+            assert_eq!(kind, InvalidAttributeKind::HasArguments);
+        }
+        other => panic!("expected invalid attribute error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn place_result_attribute_rejects_duplicates_in_std_context() {
+    let session = TestSession::new();
+    let source_id = session.source_table().next_id();
+    let (module_ast, _, arena) = parse_module_and_expr(
+        indoc! { r#"
+            #[place_result]
+            #[place_result]
+            fn f() {}
+        "# },
+        source_id,
+        true,
+    )
+    .expect("std-context module should parse");
+    let module_id = ModuleId(0);
+    match emit_module(
+        module_ast,
+        &arena,
+        module_id,
+        session.session().modules(),
+        EmitModuleFrom::Uses(Uses::default()),
+    )
+    .unwrap_err()
+    .into_inner()
+    {
+        CompilationErrorImpl::InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            ..
+        } => {
+            assert_eq!(attribute_name, ustr("place_result"));
+            assert_eq!(target, AttributeTarget::Function { name: ustr("f") });
+            assert_eq!(kind, InvalidAttributeKind::Duplicate);
+        }
+        other => panic!("expected invalid attribute error, got {other:?}"),
+    }
 }
