@@ -1,5 +1,7 @@
 use super::*;
-use crate::compiler::error::{InvalidRecursiveTypeKind, UnsafeFeature};
+use crate::compiler::error::{
+    AttributeTarget, InvalidAttributeKind, InvalidRecursiveTypeKind, UnsafeFeature,
+};
 use crate::std::array::Array as FerliumArray;
 use crate::types::r#type::{
     BareNativeTypeB, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind, bare_native_type, store_types,
@@ -426,20 +428,24 @@ fn desugar_default_variant(
                 continue;
             }
             if !attribute.items.is_empty() {
-                return Err(internal_compilation_error!(InvalidEnumDefaultAttribute {
-                    type_name: type_def.name.0,
-                    kind: InvalidEnumDefaultAttributeKind::HasArguments {
+                return Err(internal_compilation_error!(InvalidAttribute {
+                    attribute_name: attribute.path.0,
+                    target: AttributeTarget::EnumVariant {
+                        type_name: type_def.name.0,
                         variant_name: *variant_name,
                     },
+                    kind: InvalidAttributeKind::HasArguments,
                     span: attribute.span,
                 }));
             }
             if variant_has_default {
-                return Err(internal_compilation_error!(InvalidEnumDefaultAttribute {
-                    type_name: type_def.name.0,
-                    kind: InvalidEnumDefaultAttributeKind::DuplicateOnVariant {
+                return Err(internal_compilation_error!(InvalidAttribute {
+                    attribute_name: attribute.path.0,
+                    target: AttributeTarget::EnumVariant {
+                        type_name: type_def.name.0,
                         variant_name: *variant_name,
                     },
+                    kind: InvalidAttributeKind::Duplicate,
                     span: attribute.span,
                 }));
             }

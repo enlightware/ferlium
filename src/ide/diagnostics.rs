@@ -186,6 +186,15 @@ pub(super) fn compilation_error_to_data(
             kind,
             span,
         } => vec![error_data_from_location(span, kind.message(*type_name))],
+        InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            span,
+        } => vec![error_data_from_location(
+            span,
+            kind.message(*attribute_name, target),
+        )],
         WrongNumberOfArguments {
             expected,
             expected_span,

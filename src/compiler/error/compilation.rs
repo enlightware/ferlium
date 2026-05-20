@@ -286,12 +286,6 @@ impl UnsupportedTraitDefinitionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidEnumDefaultAttributeKind {
-    HasArguments {
-        variant_name: Ustr,
-    },
-    DuplicateOnVariant {
-        variant_name: Ustr,
-    },
     MultipleDefaultVariants {
         first_variant: Ustr,
         second_variant: Ustr,
@@ -301,18 +295,52 @@ pub enum InvalidEnumDefaultAttributeKind {
 impl InvalidEnumDefaultAttributeKind {
     pub fn message(&self, type_name: Ustr) -> String {
         match self {
-            Self::HasArguments { variant_name } => format!(
-                "Enum variant attribute `#[default]` does not accept arguments on `{type_name}::{variant_name}`"
-            ),
-            Self::DuplicateOnVariant { variant_name } => format!(
-                "Enum variant `{type_name}::{variant_name}` declares `#[default]` more than once"
-            ),
             Self::MultipleDefaultVariants {
                 first_variant,
                 second_variant,
             } => format!(
                 "Enum `{type_name}` has multiple variants marked with `#[default]`: `{first_variant}` and `{second_variant}`"
             ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttributeTarget {
+    Function { name: Ustr },
+    TypeDef { name: Ustr },
+    EnumVariant { type_name: Ustr, variant_name: Ustr },
+}
+
+impl AttributeTarget {
+    fn message(&self) -> String {
+        match self {
+            Self::Function { name } => format!("function `{name}`"),
+            Self::TypeDef { name } => format!("type definition `{name}`"),
+            Self::EnumVariant {
+                type_name,
+                variant_name,
+            } => format!("enum variant `{type_name}::{variant_name}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidAttributeKind {
+    HasArguments,
+    Duplicate,
+}
+
+impl InvalidAttributeKind {
+    pub fn message(&self, attribute_name: Ustr, target: &AttributeTarget) -> String {
+        let target = target.message();
+        match self {
+            Self::HasArguments => {
+                format!("Attribute `#[{attribute_name}]` does not accept arguments on {target}")
+            }
+            Self::Duplicate => {
+                format!("{target} declares `#[{attribute_name}]` more than once")
+            }
         }
     }
 }
@@ -529,6 +557,12 @@ pub enum CompilationErrorImpl<S: Scope> {
     InvalidEnumDefaultAttribute {
         type_name: Ustr,
         kind: InvalidEnumDefaultAttributeKind,
+        span: Location,
+    },
+    InvalidAttribute {
+        attribute_name: Ustr,
+        target: AttributeTarget,
+        kind: InvalidAttributeKind,
         span: Location,
     },
     WrongNumberOfArguments {
@@ -992,6 +1026,19 @@ impl FormatWith<SourceTable> for CompilationError {
                 span,
             } => {
                 write!(f, "{} in {}", kind.message(*type_name), fmt_span(span))
+            }
+            InvalidAttribute {
+                attribute_name,
+                target,
+                kind,
+                span,
+            } => {
+                write!(
+                    f,
+                    "{} in {}",
+                    kind.message(*attribute_name, target),
+                    fmt_span(span)
+                )
             }
             WrongNumberOfArguments {
                 expected,
@@ -1689,6 +1736,17 @@ impl CompilationError {
                 span,
             } => compilation_error!(InvalidEnumDefaultAttribute {
                 type_name,
+                kind,
+                span,
+            }),
+            InvalidAttribute {
+                attribute_name,
+                target,
+                kind,
+                span,
+            } => compilation_error!(InvalidAttribute {
+                attribute_name,
+                target,
                 kind,
                 span,
             }),

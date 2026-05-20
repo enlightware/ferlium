@@ -8,8 +8,9 @@
 //
 
 use ferlium::compiler::error::{
-    CompilationErrorImpl, DuplicatedFieldContext, DuplicatedVariantContext, GenericParamsOwner,
-    InvalidEnumDefaultAttributeKind, InvalidGenericParamsKind, InvalidTraitConstraintKind,
+    AttributeTarget, CompilationErrorImpl, DuplicatedFieldContext, DuplicatedVariantContext,
+    GenericParamsOwner, InvalidAttributeKind, InvalidEnumDefaultAttributeKind,
+    InvalidGenericParamsKind, InvalidTraitConstraintKind,
 };
 use ferlium::eval::eval_node;
 use ferlium::format::FormatWith;
@@ -3061,17 +3062,57 @@ fn enum_default_attribute_rejects_arguments() {
         "# })
         .into_inner()
     {
-        CompilationErrorImpl::InvalidEnumDefaultAttribute {
-            type_name, kind, ..
+        CompilationErrorImpl::InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            ..
         } => {
-            assert_eq!(type_name, ustr("SimpleColor"));
+            assert_eq!(attribute_name, ustr("default"));
             assert_eq!(
-                kind,
-                InvalidEnumDefaultAttributeKind::HasArguments {
+                target,
+                AttributeTarget::EnumVariant {
+                    type_name: ustr("SimpleColor"),
                     variant_name: ustr("Red"),
                 }
             );
+            assert_eq!(kind, InvalidAttributeKind::HasArguments);
         }
-        other => panic!("expected invalid enum default attribute error, got {other:?}"),
+        other => panic!("expected invalid attribute error, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn enum_default_attribute_rejects_duplicate_on_variant() {
+    let mut session = TestSession::new();
+    match session
+        .fail_compilation(indoc! { r#"
+            enum SimpleColor {
+                #[default]
+                #[default]
+                Red,
+                Green,
+            }
+        "# })
+        .into_inner()
+    {
+        CompilationErrorImpl::InvalidAttribute {
+            attribute_name,
+            target,
+            kind,
+            ..
+        } => {
+            assert_eq!(attribute_name, ustr("default"));
+            assert_eq!(
+                target,
+                AttributeTarget::EnumVariant {
+                    type_name: ustr("SimpleColor"),
+                    variant_name: ustr("Red"),
+                }
+            );
+            assert_eq!(kind, InvalidAttributeKind::Duplicate);
+        }
+        other => panic!("expected invalid attribute error, got {other:?}"),
     }
 }
