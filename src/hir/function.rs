@@ -22,7 +22,7 @@ use ferlium_macros::declare_native_fn_aliases;
 
 use crate::{
     Location,
-    ast::UstrSpan,
+    ast::{Attribute, UstrSpan},
     compiler::error::RuntimeErrorKind,
     eval::{
         ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, ValOrMutArgs, cont,
@@ -47,6 +47,7 @@ pub struct FunctionDefinition {
     pub generic_params: Vec<UstrSpan>,
     pub arg_names: Vec<Ustr>,
     pub doc: Option<String>,
+    pub attributes: Vec<Attribute>,
 }
 
 impl FunctionDefinition {
@@ -56,6 +57,7 @@ impl FunctionDefinition {
             generic_params: vec![],
             arg_names,
             doc,
+            attributes: vec![],
         }
     }
 
@@ -70,6 +72,23 @@ impl FunctionDefinition {
             generic_params,
             arg_names,
             doc,
+            attributes: vec![],
+        }
+    }
+
+    pub fn new_with_generic_params_and_attributes(
+        ty_scheme: TypeScheme<FnType>,
+        generic_params: Vec<UstrSpan>,
+        arg_names: Vec<Ustr>,
+        doc: Option<String>,
+        attributes: Vec<Attribute>,
+    ) -> Self {
+        Self {
+            ty_scheme,
+            generic_params,
+            arg_names,
+            doc,
+            attributes,
         }
     }
 
@@ -84,6 +103,7 @@ impl FunctionDefinition {
             generic_params: vec![],
             arg_names,
             doc: Some(String::from(doc)),
+            attributes: vec![],
         }
     }
 
@@ -102,6 +122,7 @@ impl FunctionDefinition {
             generic_params: vec![],
             arg_names,
             doc: Some(String::from(doc)),
+            attributes: vec![],
         }
     }
 
@@ -196,6 +217,7 @@ impl TypeLike for FunctionDefinition {
             generic_params: self.generic_params.clone(),
             arg_names: self.arg_names.clone(),
             doc: self.doc.clone(),
+            attributes: self.attributes.clone(),
         }
     }
 }

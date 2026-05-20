@@ -170,7 +170,7 @@ UseTree: UseTree = {
 }
 
 Function: ModuleFunction = {
-    <doc:DOC_COMMENT*> <l:@L> "fn" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:WhereClause?> <ar:@R> <body:Es<Block>> <r:@R> =>
+    <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "fn" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:WhereClause?> <ar:@R> <body:Es<Block>> <r:@R> =>
         ModuleFunction::new(
             name,
             generic_params.unwrap_or_default(),
@@ -178,6 +178,7 @@ Function: ModuleFunction = {
             span(al, ar, source_id),
             ret,
             where_clause.unwrap_or_default(),
+            attributes,
             body,
             span(l, r, source_id),
             parse_doc_comments(doc),

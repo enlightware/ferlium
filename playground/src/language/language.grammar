@@ -63,7 +63,7 @@ traitOutputParams {
 }
 
 Function {
-    kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
+    Attribute* kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
 }
 
 TraitMethod {

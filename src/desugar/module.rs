@@ -1064,6 +1064,7 @@ impl PModuleFunction {
             args_span: self.args_span,
             ret_ty,
             where_clause,
+            attributes: self.attributes,
             body,
             span: self.span,
             doc: self.doc,

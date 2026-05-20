@@ -646,6 +646,7 @@ where
         args_span,
         ret_ty,
         where_clause,
+        attributes,
         span,
         doc,
         ..
@@ -764,11 +765,12 @@ where
             span: *span,
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
-        let definition = FunctionDefinition::new_with_generic_params(
+        let definition = FunctionDefinition::new_with_generic_params_and_attributes(
             ty_scheme,
             generic_params.clone(),
             arg_names,
             doc.clone(),
+            attributes.clone(),
         );
         let descr = ModuleFunction::new_without_debug_info(
             definition,

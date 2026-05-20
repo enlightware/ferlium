@@ -25,8 +25,8 @@ use crate::{
 
 use super::expr::ErrorCollector;
 use super::{
-    Desugared, ExprArena, ExprId, ExprVisitor, FormatWithIndent, MutTypeTypeSpan, PFnArgType,
-    PFnEffects, PTypeConstraint, PTypeSpan, Parsed, Phase, TypeConstraintInput,
+    Attribute, Desugared, ExprArena, ExprId, ExprVisitor, FormatWithIndent, MutTypeTypeSpan,
+    PFnArgType, PFnEffects, PTypeConstraint, PTypeSpan, Parsed, Phase, TypeConstraintInput,
     TypeConstraintOutput, TypeSpan, UseTree, UstrSpan, VisitExpr,
 };
 
@@ -63,6 +63,7 @@ pub struct ModuleFunction<P: Phase> {
     pub args_span: Location,
     pub ret_ty: Option<TypeSpan<P>>,
     pub where_clause: Vec<P::WhereClause>,
+    pub attributes: Vec<Attribute>,
     pub body: ExprId<P>,
     pub span: Location,
     pub doc: Option<String>,

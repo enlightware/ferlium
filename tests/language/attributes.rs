@@ -1,0 +1,171 @@
+// Copyright 2026 Enlightware GmbH
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+//
+
+use ferlium::{SourceId, ast, module::id::Id, parse_module_and_expr};
+use indoc::indoc;
+use test_log::test;
+use ustr::ustr;
+
+use crate::harness::TestSession;
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_test::*;
+
+fn parse_module_ast(src: &str) -> ast::PModule {
+    parse_module_and_expr(src, SourceId::from_index(1), true)
+        .unwrap_or_else(|errors| panic!("module should parse cleanly, got {errors:?}"))
+        .0
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_def_attributes_are_preserved_in_hir_metadata() {
+    let mut session = TestSession::new();
+    let mut attrs = |code, name| {
+        session
+            .compile_and_get_module(code)
+            .get_type_def(ustr(name))
+            .unwrap()
+            .attributes
+            .clone()
+    };
+
+    let attributes = attrs(
+        indoc! { r#"
+            enum SimpleColor { Red, Green, Blue }
+        "# },
+        "SimpleColor",
+    );
+    assert!(attributes.is_empty());
+
+    let attributes = attrs(
+        indoc! { r#"
+            #[flag]
+            enum SimpleColor { Red, Green, Blue }
+        "# },
+        "SimpleColor",
+    );
+    assert_eq!(attributes.len(), 1);
+    assert_eq!(attributes[0].path.0, ustr("flag"));
+
+    let attributes = attrs(
+        indoc! { r#"
+            #[flag]
+            #[path(name = "value")]
+            #[multi(name1 = "value1", name2 = "value2")]
+            enum SimpleColor { Red, Green, Blue }
+        "# },
+        "SimpleColor",
+    );
+    assert_multi_attributes(&attributes);
+
+    let attributes = attrs(
+        indoc! { r#"
+            #[flag]
+            #[path(name = "value")]
+            #[multi(name1 = "value1", name2 = "value2")]
+            struct Person {
+                name: string,
+                age: int,
+                is_active: bool
+            }
+        "# },
+        "Person",
+    );
+    assert_multi_attributes(&attributes);
+}
+
+fn assert_multi_attributes(attributes: &[ast::Attribute]) {
+    assert_eq!(attributes.len(), 3);
+    assert_eq!(attributes[0].path.0, ustr("flag"));
+    assert_eq!(attributes[1].path.0, ustr("path"));
+    assert_eq!(attributes[1].items.len(), 1);
+    assert_eq!(
+        attributes[1].items[0].as_name_value().unwrap().0.0,
+        ustr("name")
+    );
+    assert_eq!(
+        attributes[1].items[0].as_name_value().unwrap().1.0,
+        ustr("value")
+    );
+    assert_eq!(attributes[2].path.0, ustr("multi"));
+    assert_eq!(attributes[2].items.len(), 2);
+    let item1 = attributes[2].items[0].as_name_value().unwrap();
+    assert_eq!(item1.0.0, ustr("name1"));
+    assert_eq!(item1.1.0, ustr("value1"));
+    let item2 = attributes[2].items[1].as_name_value().unwrap();
+    assert_eq!(item2.0.0, ustr("name2"));
+    assert_eq!(item2.1.0, ustr("value2"));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn enum_variant_attributes_are_parsed() {
+    let module = parse_module_ast(indoc! { r#"
+        enum TrafficLight {
+            #[default]
+            Red,
+            #[doc(name = "ignored")]
+            Yellow,
+            Green,
+        }
+    "# });
+
+    let type_def = &module.type_defs[0];
+    assert_eq!(type_def.variant_attributes.len(), 3);
+    assert_eq!(type_def.variant_attributes[0].len(), 1);
+    assert_eq!(type_def.variant_attributes[0][0].path.0, ustr("default"));
+    assert!(type_def.variant_attributes[0][0].items.is_empty());
+    assert_eq!(type_def.variant_attributes[1].len(), 1);
+    assert_eq!(type_def.variant_attributes[1][0].path.0, ustr("doc"));
+    assert_eq!(type_def.variant_attributes[2].len(), 0);
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn function_attributes_are_parsed() {
+    let module = parse_module_ast(indoc! { r#"
+        #[flag]
+        #[path(name = "value")]
+        fn with_attributes() {}
+    "# });
+
+    let attributes = &module.functions[0].attributes;
+    assert_eq!(attributes.len(), 2);
+    assert_eq!(attributes[0].path.0, ustr("flag"));
+    assert_eq!(attributes[1].path.0, ustr("path"));
+    assert_eq!(attributes[1].items.len(), 1);
+    assert_eq!(
+        attributes[1].items[0].as_name_value().unwrap().0.0,
+        ustr("name")
+    );
+    assert_eq!(
+        attributes[1].items[0].as_name_value().unwrap().1.0,
+        ustr("value")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn function_attributes_are_preserved_in_hir_metadata() {
+    let mut session = TestSession::new();
+    let attributes = session
+        .compile_and_get_module(indoc! { r#"
+            #[flag]
+            fn with_attributes() {}
+        "# })
+        .get_function(ustr("with_attributes"))
+        .unwrap()
+        .definition
+        .attributes
+        .clone();
+
+    assert_eq!(attributes.len(), 1);
+    assert_eq!(attributes[0].path.0, ustr("flag"));
+}

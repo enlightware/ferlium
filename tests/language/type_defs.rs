@@ -749,29 +749,6 @@ fn parse_doc_commented_type_definitions() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn parse_enum_variant_attributes() {
-    let module = parse_module_ast(indoc! { r#"
-        enum TrafficLight {
-            #[default]
-            Red,
-            #[doc(name = "ignored")]
-            Yellow,
-            Green,
-        }
-    "# });
-
-    let type_def = &module.type_defs[0];
-    assert_eq!(type_def.variant_attributes.len(), 3);
-    assert_eq!(type_def.variant_attributes[0].len(), 1);
-    assert_eq!(type_def.variant_attributes[0][0].path.0, ustr("default"));
-    assert!(type_def.variant_attributes[0][0].items.is_empty());
-    assert_eq!(type_def.variant_attributes[1].len(), 1);
-    assert_eq!(type_def.variant_attributes[1][0].path.0, ustr("doc"));
-    assert_eq!(type_def.variant_attributes[2].len(), 0);
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn parse_generic_types_in_function_signatures() {
     let module = parse_module_ast(indoc! { r#"
         fn demo(value: Option<string>) -> Pair<int, string> {
@@ -3023,104 +3000,8 @@ fn double_newtype() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn attributes() {
+fn enum_default_attribute_selects_default_variant() {
     let mut session = TestSession::new();
-    // Helper to get attributes of a type definition
-    let mut attrs = |code, name| {
-        session
-            .compile_and_get_module(code)
-            .get_type_def(ustr(name))
-            .unwrap()
-            .attributes
-            .clone()
-    };
-
-    // No attributes by default
-    let attributes = attrs(
-        indoc! { r#"
-            enum SimpleColor { Red, Green, Blue }
-        "# },
-        "SimpleColor",
-    );
-    assert!(attributes.is_empty());
-
-    // Flag attribute
-    let attributes = attrs(
-        indoc! { r#"
-            #[flag]
-            enum SimpleColor { Red, Green, Blue }
-        "# },
-        "SimpleColor",
-    );
-    assert_eq!(attributes.len(), 1);
-    assert_eq!(attributes[0].path.0, ustr("flag"));
-
-    // Multiple attributes
-    let attributes = attrs(
-        indoc! { r#"
-            #[flag]
-            #[path(name = "value")]
-            #[multi(name1 = "value1", name2 = "value2")]
-            enum SimpleColor { Red, Green, Blue }
-        "# },
-        "SimpleColor",
-    );
-    assert_eq!(attributes.len(), 3);
-    assert_eq!(attributes[0].path.0, ustr("flag"));
-    assert_eq!(attributes[1].path.0, ustr("path"));
-    assert_eq!(attributes[1].items.len(), 1);
-    assert_eq!(
-        attributes[1].items[0].as_name_value().unwrap().0.0,
-        ustr("name")
-    );
-    assert_eq!(
-        attributes[1].items[0].as_name_value().unwrap().1.0,
-        ustr("value")
-    );
-    assert_eq!(attributes[2].path.0, ustr("multi"));
-    assert_eq!(attributes[2].items.len(), 2);
-    let item1 = attributes[2].items[0].as_name_value().unwrap();
-    assert_eq!(item1.0.0, ustr("name1"));
-    assert_eq!(item1.1.0, ustr("value1"));
-    let item2 = attributes[2].items[1].as_name_value().unwrap();
-    assert_eq!(item2.0.0, ustr("name2"));
-    assert_eq!(item2.1.0, ustr("value2"));
-
-    // Also works on structs
-    let attributes = attrs(
-        indoc! { r#"
-            #[flag]
-            #[path(name = "value")]
-            #[multi(name1 = "value1", name2 = "value2")]
-            struct Person {
-                name: string,
-                age: int,
-                is_active: bool
-            }
-        "# },
-        "Person",
-    );
-    assert_eq!(attributes.len(), 3);
-    assert_eq!(attributes[0].path.0, ustr("flag"));
-    assert_eq!(attributes[1].path.0, ustr("path"));
-    assert_eq!(attributes[1].items.len(), 1);
-    assert_eq!(
-        attributes[1].items[0].as_name_value().unwrap().0.0,
-        ustr("name")
-    );
-    assert_eq!(
-        attributes[1].items[0].as_name_value().unwrap().1.0,
-        ustr("value")
-    );
-    assert_eq!(attributes[2].path.0, ustr("multi"));
-    assert_eq!(attributes[2].items.len(), 2);
-    let item1 = attributes[2].items[0].as_name_value().unwrap();
-    assert_eq!(item1.0.0, ustr("name1"));
-    assert_eq!(item1.1.0, ustr("value1"));
-    let item2 = attributes[2].items[1].as_name_value().unwrap();
-    assert_eq!(item2.0.0, ustr("name2"));
-    assert_eq!(item2.1.0, ustr("value2"));
-
     let type_def = session
         .compile_and_get_module(indoc! { r#"
             enum SimpleColor {

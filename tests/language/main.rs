@@ -12,6 +12,7 @@
 mod harness;
 mod algorithm;
 mod annotations;
+mod attributes;
 mod bits;
 mod complex;
 mod effects;
