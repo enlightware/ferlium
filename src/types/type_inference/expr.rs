@@ -1159,16 +1159,21 @@ impl TypeInference {
                             &array_effects,
                             &index_effects,
                         ]);
-                        self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                            VALUE_TRAIT.clone(),
-                            vec![element_ty],
-                            vec![],
-                            sp(data.array),
-                        ));
+                        let clone = if node_is_place_reference(env.ir_arena, array_node_id) {
+                            None
+                        } else {
+                            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                                VALUE_TRAIT.clone(),
+                                vec![element_ty],
+                                vec![],
+                                sp(data.array),
+                            ));
+                            Some(LocalClone::Required)
+                        };
                         let node = K::Index(hir::ArrayIndex {
                             array: array_node_id,
                             index: index_node_id,
-                            clone: Some(LocalClone::Required),
+                            clone,
                         });
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
@@ -1622,6 +1627,11 @@ impl TypeInference {
                 ));
             }
             return value;
+        }
+
+        if place_evaluation_depends_on_array_index(env.ir_arena, value) {
+            let materialized = self.materialize_owned_value(env, value, span);
+            return self.discard_unused_value(env, materialized, span);
         }
 
         let prefix = self.value_evaluation_prefix_nodes(env.ir_arena, value);
@@ -2552,6 +2562,19 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
         Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
             initializer_needs_mut_binding_clone(arena, *base)
+        }
+        Index(index) => initializer_needs_mut_binding_clone(arena, index.array),
+        _ => false,
+    }
+}
+
+fn place_evaluation_depends_on_array_index(arena: &NodeArena, node_id: NodeId) -> bool {
+    use NodeKind::*;
+
+    match &arena[node_id].kind {
+        Index(_) => true,
+        Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
+            place_evaluation_depends_on_array_index(arena, *base)
         }
         _ => false,
     }

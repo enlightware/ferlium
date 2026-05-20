@@ -1139,10 +1139,7 @@ impl Node {
             Index(index) => {
                 elaborate_dictionaries(arena, index.array, ctx, local_count)?;
                 elaborate_dictionaries(arena, index.index, ctx, local_count)?;
-                if !matches!(
-                    index.clone,
-                    Some(LocalClone::Static(_)) | Some(LocalClone::Dictionary(_))
-                ) {
+                if matches!(index.clone, Some(LocalClone::Required)) {
                     index.clone = Some(resolve_local_value_dispatch(
                         arena,
                         ctx,

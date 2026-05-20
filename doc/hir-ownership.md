@@ -10,7 +10,7 @@ This document is about source-level ownership semantics and the HIR operations t
 # Values, Places, and Locals
 
 A HIR expression either produces an owned value or denotes a place in existing storage.
-Place-like nodes include `EnvLoad` and projections from it (`Project`, `ProjectAt`, field projections before elaboration).
+Place-like nodes include `EnvLoad` and projections from it (`Project`, `ProjectAt`, field projections before elaboration), plus array `Index` nodes whose array operand is itself place-like.
 SSA must not treat every `EnvLoad` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 `LocalDecl` is the ownership metadata for a local:
@@ -44,7 +44,12 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 - Closure captures are materialized as owned values before `BuildClosure`.
 - Function returns move an owned local with `EnvMove` when returning that local out of the current scope.
 - Non-place arguments passed by shared-reference ABI are stored in owned temporaries; the call receives places to those temporaries and the temporaries are dropped after the call.
-- Array indexing returns an owned element clone through the array element `Value::clone` dispatch.
+- Place-backed array indexing denotes an element place. If an owned element value is needed, the normal `TrivialCopy` or `ValueClone` materialization wraps that `Index`.
+
+This place-backed indexing rule currently applies only when the indexed array operand is itself place-like.
+For example, `xs[i]` can denote an element place when `xs` is a local/place, and `matrix[x][y][z]` can extend that place path through nested indexes.
+An index into a non-place array expression such as `make_array()[i]` or `[a, b][i]` still uses direct array-index materialization in the boxed interpreter.
+Making those expressions fully place-backed requires place resolution to carry temporary-array lifetime cleanup alongside the returned place.
 
 # Drops and Cleanup
 
@@ -88,9 +93,11 @@ Dispatch sites are:
 
 - `EnvStore` with `LocalDecl::clone`: clone into the local's uninitialized target storage.
 - `ValueClone`: clone a place into a fresh owned temporary result.
-- `ArrayIndex::clone`: clone the selected array element into an owned result.
 - `EnvDrop` with `LocalDecl::drop`: drop an owned local.
 - `Assignment::drop`: drop the overwritten destination value.
+
+The boxed interpreter still accepts a transitional direct `ArrayIndex::clone` fallback for indexes whose array operand is not place-like.
+SSA lowering should prefer the place/materialization split above: resolve an element place first, then materialize only when an owned value is required.
 
 # Function Values
 

@@ -1735,6 +1735,10 @@ fn execution_errors() {
         ArrayAccessOutOfBounds { index: 3, len: 2 }
     );
     assert_eq!(
+        session.fail_run("let a = [1, 2]; a[3]; 0"),
+        ArrayAccessOutOfBounds { index: 3, len: 2 }
+    );
+    assert_eq!(
         session.fail_run("let a = [1, 2]; a[-3]"),
         ArrayAccessOutOfBounds { index: -3, len: 2 }
     );
