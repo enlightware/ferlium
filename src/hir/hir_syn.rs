@@ -51,6 +51,7 @@ pub fn static_apply(
         function,
         function_path: None,
         function_span: span,
+        extra_arguments: Vec::new(),
         argument_names: (0..arguments.len())
             .map(|i| ustr(&format!("arg{i}")))
             .collect(),

@@ -451,14 +451,11 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             function: array_index,
                             function_path: None,
                             function_span: span,
-                            arguments: vec![dictionary_node, get_array, index_node],
-                            argument_names: vec![
-                                ustr("_d0_impl_Value"),
-                                ustr("array"),
-                                ustr("index"),
-                            ],
+                            extra_arguments: vec![dictionary_node],
+                            arguments: vec![get_array, index_node],
+                            argument_names: vec![ustr("array"), ustr("index")],
                             ty: FnType::new_by_val(
-                                [variant_value_dictionary_ty, array_ty, int_type()],
+                                [array_ty, int_type()],
                                 variant_ty,
                                 EffType::empty(),
                             ),

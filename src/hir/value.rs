@@ -117,7 +117,10 @@ impl VariantValue {
     }
 }
 
-/// Hidden compiler metadata captured by first-class generic functions.
+/// Hidden constraint evidence captured by first-class generic functions.
+///
+/// Typeclass constraints are represented as dictionaries. Field indices are
+/// also passed here because they are hidden evidence for generic projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FunctionHiddenArgValue {
     TraitDictionary(TraitDictionaryId),
@@ -127,14 +130,15 @@ pub enum FunctionHiddenArgValue {
 /// Runtime representation of a first-class function.
 ///
 /// Function values carry a code identity plus two hidden argument groups:
-/// compiler metadata captured while instantiating generic functions, and the
+/// constraint evidence captured while instantiating generic functions, and the
 /// owned source-level closure environment. Only the closure environment is
-/// managed by `Value::clone`/`Value::drop`; hidden arguments are call metadata.
+/// managed by `Value::clone`/`Value::drop`; hidden evidence arguments are not
+/// Ferlium values.
 #[derive(Debug)]
 pub struct FunctionValue {
     pub function_id: LocalFunctionId,
     pub module_id: ModuleId,
-    /// Hidden compiler metadata arguments prepended when calling the function.
+    /// Hidden dictionary/evidence arguments supplied separately from value arguments.
     pub hidden_args: Vec<FunctionHiddenArgValue>,
     /// Owned source-level closure environment, stored as a tuple value.
     pub closure_env: Value,
@@ -482,7 +486,7 @@ impl Value {
                 } else {
                     write!(
                         f,
-                        "closure of function {} in {} with {} dictionary captures and captured values [",
+                        "closure of function {} in {} with {} evidence captures and captured values [",
                         fv.function_id,
                         fv.module_id,
                         fv.hidden_args.len()
@@ -550,7 +554,7 @@ impl Value {
                 } else {
                     writeln!(
                         f,
-                        "closure of function {} in {} with {} dictionary captures and captured values [",
+                        "closure of function {} in {} with {} evidence captures and captured values [",
                         fv.function_id,
                         fv.module_id,
                         fv.hidden_args.len()

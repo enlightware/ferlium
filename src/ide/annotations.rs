@@ -368,6 +368,7 @@ fn node_variable_type_annotations<Env>(
         EnvDrop(_) => {}
         EnvMove(_) => {}
         EnvLoad(_) => {}
+        ExtraParameter(_) => {}
         Return(node) => variable_type_annotations(arena, *node, result, locals, env),
         Block(nodes) => nodes
             .iter()

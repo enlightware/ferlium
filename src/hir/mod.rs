@@ -157,6 +157,7 @@ pub struct StaticApplication {
     pub function: FunctionId,
     pub function_path: Option<ast::Path>,
     pub function_span: Location,
+    pub extra_arguments: Vec<NodeId>,
     pub arguments: Vec<NodeId>,
     pub argument_names: Vec<Ustr>,
     pub ty: FnType,
@@ -287,6 +288,7 @@ pub enum NodeKind {
     EnvDrop(EnvDrop),
     EnvMove(EnvMove),
     EnvLoad(EnvLoad),
+    ExtraParameter(ExtraParameterId),
     Return(NodeId),
     Block(B<SVec2<NodeId>>),
     Assign(Assignment),
@@ -323,6 +325,7 @@ impl NodeKind {
             | EnvDrop(_)
             | EnvMove(_)
             | EnvLoad(_)
+            | ExtraParameter(_)
             | SoftBreak
             | Unimplemented => smallvec![],
             BuildClosure(bc) => {
@@ -343,7 +346,12 @@ impl NodeKind {
             FunctionDrop(node) => smallvec![node.target],
             ValueClone(node) => smallvec![node.source],
             TrivialCopy(node) => smallvec![node.source],
-            StaticApply(app) => app.arguments.iter().copied().collect(),
+            StaticApply(app) => app
+                .extra_arguments
+                .iter()
+                .chain(app.arguments.iter())
+                .copied()
+                .collect(),
             TraitMethodApply(app) => app.arguments.iter().copied().collect(),
             EnvStore(store) => smallvec![store.value],
             Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
@@ -441,7 +449,7 @@ impl Node {
                     indent + 1,
                 )?;
                 if !build_closure.dictionary_captures.is_empty() {
-                    writeln!(f, "{indent_str}with dictionary captures [")?;
+                    writeln!(f, "{indent_str}with dictionary/evidence captures [")?;
                     for &capture in &build_closure.dictionary_captures {
                         format_ind(arena, capture, f, locals, env, spacing, indent + 1)?;
                     }
@@ -492,6 +500,13 @@ impl Node {
                 writeln!(f, "{indent_str}static apply")?;
                 let ty = app.ty.format_with(env);
                 writeln!(f, "{indent_str}  {}: {ty}", app.function.format_with(env))?;
+                if !app.extra_arguments.is_empty() {
+                    writeln!(f, "{indent_str}with dictionary/evidence (")?;
+                    for &arg in &app.extra_arguments {
+                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
+                    }
+                    writeln!(f, "{indent_str})")?;
+                }
                 if app.arguments.is_empty() {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
@@ -591,6 +606,9 @@ impl Node {
             EnvLoad(node) => {
                 let local = &locals[node.id.as_index()];
                 writeln!(f, "{indent_str}load {} as \"{}\"", local.slot, local.name.0)?;
+            }
+            ExtraParameter(id) => {
+                writeln!(f, "{indent_str}extra parameter {}", id.as_index())?;
             }
             Return(node) => {
                 writeln!(f, "{indent_str}return")?;
@@ -789,6 +807,7 @@ impl Node {
             EnvDrop(_) => {}
             EnvMove(_) => {}
             EnvLoad(_) => {}
+            ExtraParameter(_) => {}
             Return(node) => {
                 if let Some(ty) = type_at(arena, *node, pos) {
                     return Some(ty);
@@ -947,6 +966,7 @@ impl Node {
             EnvDrop(_) => {}
             EnvMove(_) => {}
             EnvLoad(_) => {}
+            ExtraParameter(_) => {}
             Return(node) => unbound_ty_vars(arena, *node, result, ignore),
             Block(nodes) => nodes
                 .iter()

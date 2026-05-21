@@ -1196,6 +1196,7 @@ impl TypeInference {
                             function,
                             function_path: Some(path),
                             function_span: expr_span,
+                            extra_arguments: Vec::new(),
                             arguments: vec![array_node_id, index_node_id],
                             argument_names: vec![ustr("array"), ustr("index")],
                             ty: inst_fn_ty,
@@ -2022,8 +2023,15 @@ impl TypeInference {
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
                     let visible_arg_passing = arg_passing.map(|passing| {
                         let hidden_dict_arg_count = inst_data.dicts_req.len();
-                        assert!(passing.len() >= hidden_dict_arg_count);
-                        &passing[hidden_dict_arg_count..]
+                        if hidden_dict_arg_count == 0 {
+                            passing
+                        } else {
+                            assert!(
+                                passing.len() >= hidden_dict_arg_count
+                                    && passing.len() <= hidden_dict_arg_count + args_node_ids.len()
+                            );
+                            &passing[hidden_dict_arg_count..]
+                        }
                     });
                     let temp_start_index = env.cur_locals.len();
                     let temp_stores = self.borrowed_argument_temp_stores(
@@ -2037,6 +2045,7 @@ impl TypeInference {
                         function,
                         function_path: Some(path.clone()),
                         function_span: path_span,
+                        extra_arguments: Vec::new(),
                         arguments: args_node_ids,
                         argument_names,
                         ty: inst_fn_ty,

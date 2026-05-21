@@ -175,7 +175,7 @@ impl FormatWith<EvalCtx<'_>> for ValOrMut {
     }
 }
 
-fn hidden_arg_to_val_or_mut(arg: FunctionHiddenArgValue) -> ValOrMut {
+fn evidence_arg_to_val_or_mut(arg: FunctionHiddenArgValue) -> ValOrMut {
     match arg {
         FunctionHiddenArgValue::TraitDictionary(dictionary) => ValOrMut::Dictionary(dictionary),
         FunctionHiddenArgValue::FieldIndex(index) => ValOrMut::Val(Value::native(index)),
@@ -189,6 +189,10 @@ pub struct EvalCtx<'a> {
     pub environment: Vec<ValOrMut>,
     /// base of current stack frame in `environment`
     pub frame_base: usize,
+    /// hidden dictionary/evidence parameters for all stack frames
+    extra_parameters: Vec<FunctionHiddenArgValue>,
+    /// base of current stack frame in `extra_parameters`
+    extra_frame_base: usize,
     /// current function call depth
     pub call_depth: usize,
     /// maximum function call depth
@@ -213,6 +217,8 @@ impl<'a> EvalCtx<'a> {
         EvalCtx {
             environment: Vec::new(),
             frame_base: 0,
+            extra_parameters: Vec::new(),
+            extra_frame_base: 0,
             call_depth: 0,
             call_depth_limit: Self::DEFAULT_CALL_DEPTH_LIMIT,
             stack_limit: Self::DEFAULT_STACK_LIMIT,
@@ -264,6 +270,8 @@ impl<'a> EvalCtx<'a> {
         EvalCtx {
             environment,
             frame_base: 0,
+            extra_parameters: Vec::new(),
+            extra_frame_base: 0,
             call_depth: 0,
             call_depth_limit: Self::DEFAULT_CALL_DEPTH_LIMIT,
             stack_limit: Self::DEFAULT_STACK_LIMIT,
@@ -346,7 +354,7 @@ impl<'a> EvalCtx<'a> {
     ) -> Option<&'static [ArgPassing]> {
         let passing =
             self.function_argument_passing(function_value.function_id, function_value.module_id)?;
-        Some(&passing[function_value.hidden_args.len() + function_value.closure_env_len..])
+        Some(&passing[function_value.closure_env_len..])
     }
 
     fn function_value_visible_argument_types(
@@ -428,21 +436,10 @@ impl<'a> EvalCtx<'a> {
             Some(index)
         };
 
-        let arguments = if function_value.hidden_args.is_empty()
-            && function_value.closure_env_len == 0
-        {
+        let arguments = if function_value.closure_env_len == 0 {
             arguments
         } else {
-            let mut prepared = Vec::with_capacity(
-                function_value.hidden_args.len() + function_value.closure_env_len + arguments.len(),
-            );
-            prepared.extend(
-                function_value
-                    .hidden_args
-                    .iter()
-                    .copied()
-                    .map(hidden_arg_to_val_or_mut),
-            );
+            let mut prepared = Vec::with_capacity(function_value.closure_env_len + arguments.len());
             if let Some(target) = closure_env_temp {
                 prepared.extend((0..function_value.closure_env_len).map(|index| {
                     ValOrMut::Mut(Place {
@@ -456,7 +453,12 @@ impl<'a> EvalCtx<'a> {
         };
 
         let result = self
-            .call_function(local_id, module_id, arguments)
+            .call_function(
+                local_id,
+                module_id,
+                function_value.hidden_args.clone(),
+                arguments,
+            )
             .map_err(|err| {
                 err.with_frame(
                     module_id,
@@ -498,9 +500,20 @@ impl<'a> EvalCtx<'a> {
         arguments: Vec<ValOrMut>,
         location: Location,
     ) -> EvalControlFlowResult {
+        self.call_function_id_with_extra(function_id, Vec::new(), arguments, location)
+    }
+
+    /// Call a function by its id with hidden dictionary/evidence parameters.
+    pub fn call_function_id_with_extra(
+        &mut self,
+        function_id: FunctionId,
+        extra_arguments: Vec<FunctionHiddenArgValue>,
+        arguments: Vec<ValOrMut>,
+        location: Location,
+    ) -> EvalControlFlowResult {
         let (local_id, module_id) = self.get_function_local_id(function_id);
 
-        self.call_function(local_id, module_id, arguments)
+        self.call_function(local_id, module_id, extra_arguments, arguments)
             .map_err(|err| {
                 err.with_frame(
                     module_id,
@@ -516,6 +529,7 @@ impl<'a> EvalCtx<'a> {
         &mut self,
         local_id: LocalFunctionId,
         mut module_id: ModuleId,
+        extra_arguments: Vec<FunctionHiddenArgValue>,
         arguments: Vec<ValOrMut>,
     ) -> EvalControlFlowResult {
         // Use the new module for the duration of the function call.
@@ -529,7 +543,23 @@ impl<'a> EvalCtx<'a> {
             &mut self.returns_place,
             function_data.definition.returns_place,
         );
+        let old_extra_frame_base = self.extra_frame_base;
+        let extra_start = self.extra_parameters.len();
+        self.extra_frame_base = extra_start;
+        self.extra_parameters
+            .extend(extra_arguments.iter().copied());
+        let arguments = if function_data.code.as_script().is_none() {
+            extra_arguments
+                .into_iter()
+                .map(evidence_arg_to_val_or_mut)
+                .chain(arguments)
+                .collect()
+        } else {
+            arguments
+        };
         let result = function_data.code.call(arguments, self, locals);
+        self.extra_parameters.truncate(extra_start);
+        self.extra_frame_base = old_extra_frame_base;
         self.returns_place = previous_returns_place;
 
         // Restore the previous module.
@@ -984,6 +1014,9 @@ pub fn eval_node_with_ctx(
         EnvDrop(node) => eval_env_drop(node, arena[id].span, ctx, locals),
         EnvMove(node) => eval_env_move(node, arena[id].span, ctx, locals),
         EnvLoad(node) => eval_env_load(arena, id, node, ctx, locals),
+        ExtraParameter(_) => {
+            panic!("ExtraParameter is hidden evidence and should not be evaluated as a Value")
+        }
         Return(node) => eval_return(arena, *node, ctx, locals),
         Block(nodes) => eval_block(arena, nodes, ctx, locals),
         Assign(assignment) => eval_assign(arena, id, assignment, ctx, locals),
@@ -1049,6 +1082,9 @@ fn eval_function_hidden_arg_node(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<FunctionHiddenArgValue>, RuntimeError> {
+    if let NodeKind::ExtraParameter(id) = &arena[node].kind {
+        return Ok(ControlFlow::Continue(extra_parameter_value(ctx, *id)));
+    }
     if let Some(dictionary) =
         eval_or_return!(try_dictionary_metadata_node(arena, node, ctx, locals))
     {
@@ -1058,11 +1094,28 @@ fn eval_function_hidden_arg_node(
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
     let Some(index) = value.into_primitive_ty::<isize>() else {
-        panic!("expected hidden function metadata to be a trait dictionary or field index");
+        panic!("expected hidden function evidence to be a trait dictionary or field index");
     };
     Ok(ControlFlow::Continue(FunctionHiddenArgValue::FieldIndex(
         index,
     )))
+}
+
+fn eval_function_hidden_arg_nodes(
+    arena: &NodeArena,
+    nodes: &[NodeId],
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<Vec<FunctionHiddenArgValue>>, RuntimeError> {
+    let mut results = Vec::with_capacity(nodes.len());
+    for &node in nodes {
+        match eval_function_hidden_arg_node(arena, node, ctx, locals) {
+            Ok(ControlFlow::Continue(value)) => results.push(value),
+            Ok(ControlFlow::Return(value)) => return Ok(ControlFlow::Return(value)),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(ControlFlow::Continue(results))
 }
 
 fn eval_dictionary_metadata_node(
@@ -1097,6 +1150,12 @@ fn try_dictionary_metadata_node(
         NodeKind::GetDictionary(get_dict) => Ok(ControlFlow::Continue(Some(
             ctx.get_dictionary_id(get_dict.dictionary),
         ))),
+        NodeKind::ExtraParameter(id) => match extra_parameter_value(ctx, *id) {
+            FunctionHiddenArgValue::TraitDictionary(dictionary) => {
+                Ok(ControlFlow::Continue(Some(dictionary)))
+            }
+            FunctionHiddenArgValue::FieldIndex(_) => Ok(ControlFlow::Continue(None)),
+        },
         _ => Ok(ControlFlow::Continue(None)),
     }
 }
@@ -1125,14 +1184,30 @@ fn dictionary_from_extra_parameter(
     extra_parameter: ExtraParameterId,
     _span: Location,
 ) -> TraitDictionaryId {
-    let local_index = extra_parameter.as_index();
-    let place = Place {
-        target: ctx.frame_base + local_index,
-        path: Vec::new(),
-    };
-    try_dictionary_from_place(&place, ctx).unwrap_or_else(|| {
-        panic!("expected local {local_index} to contain trait dictionary metadata")
-    })
+    match extra_parameter_value(ctx, extra_parameter) {
+        FunctionHiddenArgValue::TraitDictionary(dictionary) => dictionary,
+        FunctionHiddenArgValue::FieldIndex(_) => panic!(
+            "expected extra parameter {} to contain trait dictionary metadata",
+            extra_parameter.as_index()
+        ),
+    }
+}
+
+fn field_index_from_extra_parameter(ctx: &EvalCtx, extra_parameter: ExtraParameterId) -> isize {
+    match extra_parameter_value(ctx, extra_parameter) {
+        FunctionHiddenArgValue::FieldIndex(index) => index,
+        FunctionHiddenArgValue::TraitDictionary(_) => panic!(
+            "expected extra parameter {} to contain a field index",
+            extra_parameter.as_index()
+        ),
+    }
+}
+
+fn extra_parameter_value(
+    ctx: &EvalCtx,
+    extra_parameter: ExtraParameterId,
+) -> FunctionHiddenArgValue {
+    ctx.extra_parameters[ctx.extra_frame_base + extra_parameter.as_index()]
 }
 
 fn dictionary_entry_value(
@@ -1416,10 +1491,6 @@ fn local_environment_index(ctx: &EvalCtx, locals: &[LocalDecl], id: LocalDeclId)
     ctx.frame_base + locals[id.as_index()].slot.as_index()
 }
 
-fn extra_parameter_environment_index(ctx: &EvalCtx, id: ExtraParameterId) -> usize {
-    ctx.frame_base + id.as_index()
-}
-
 #[inline(never)]
 fn eval_function_clone(
     arena: &NodeArena,
@@ -1613,8 +1684,18 @@ fn eval_static_apply(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let arg_passing = ctx.function_id_argument_passing(app.function);
+    let arg_passing = visible_arg_passing(
+        ctx.function_id_argument_passing(app.function),
+        app.extra_arguments.len(),
+        app.arguments.len(),
+    );
     let temp_start = ctx.environment.len();
+    let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
+        arena,
+        &app.extra_arguments,
+        ctx,
+        locals,
+    ));
     let arguments = eval_or_return!(eval_args(
         arena,
         &app.arguments,
@@ -1623,7 +1704,7 @@ fn eval_static_apply(
         ctx,
         locals
     ));
-    let result = ctx.call_function_id(app.function, arguments, span);
+    let result = ctx.call_function_id_with_extra(app.function, extra_arguments, arguments, span);
     ctx.truncate_environment_storage(temp_start);
     result
 }
@@ -1635,8 +1716,18 @@ fn eval_place_result_static_apply(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    let arg_passing = ctx.function_id_argument_passing(app.function);
+    let arg_passing = visible_arg_passing(
+        ctx.function_id_argument_passing(app.function),
+        app.extra_arguments.len(),
+        app.arguments.len(),
+    );
     let temp_start = ctx.environment.len();
+    let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
+        arena,
+        &app.extra_arguments,
+        ctx,
+        locals,
+    ));
     let arguments = eval_or_return!(eval_place_result_args(
         arena,
         &app.arguments,
@@ -1645,12 +1736,29 @@ fn eval_place_result_static_apply(
         ctx,
         locals,
     ));
-    match ctx.call_function_id(app.function, arguments, span) {
+    match ctx.call_function_id_with_extra(app.function, extra_arguments, arguments, span) {
         Ok(result) => Ok(result),
         Err(err) => {
             ctx.truncate_environment_storage(temp_start);
             Err(err)
         }
+    }
+}
+
+fn visible_arg_passing(
+    passing: Option<&'static [ArgPassing]>,
+    extra_arg_count: usize,
+    visible_arg_count: usize,
+) -> Option<&'static [ArgPassing]> {
+    let passing = passing?;
+    if extra_arg_count == 0 {
+        Some(passing)
+    } else {
+        assert!(
+            passing.len() >= extra_arg_count
+                && passing.len() <= extra_arg_count + visible_arg_count
+        );
+        Some(&passing[extra_arg_count..])
     }
 }
 
@@ -2137,11 +2245,7 @@ fn eval_project_at(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     if let Some(mut place) = eval_or_return!(try_resolve_node_place(arena, data, ctx, locals)) {
-        let index = extra_parameter_environment_index(ctx, index);
-        let index = *ctx.environment[index]
-            .as_primitive::<isize>(ctx)
-            .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
-            .unwrap();
+        let index = field_index_from_extra_parameter(ctx, index);
         if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
             return cont(dictionary_entry_value(
                 ctx,
@@ -2161,11 +2265,7 @@ fn eval_project_at(
     }
     if is_dictionary_metadata_node(arena, data) {
         let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, data, ctx, locals));
-        let index = extra_parameter_environment_index(ctx, index);
-        let index = *ctx.environment[index]
-            .as_primitive::<isize>(ctx)
-            .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
-            .unwrap();
+        let index = field_index_from_extra_parameter(ctx, index);
         return cont(dictionary_entry_value(
             ctx,
             dictionary,
@@ -2173,11 +2273,7 @@ fn eval_project_at(
         ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, data, ctx, locals));
-    let index = extra_parameter_environment_index(ctx, index);
-    let index = *ctx.environment[index]
-        .as_primitive::<isize>(ctx)
-        .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
-        .unwrap();
+    let index = field_index_from_extra_parameter(ctx, index);
     cont(
         value
             .into_tuple_element(index as usize)
@@ -2417,7 +2513,10 @@ fn eval_owned_arg(
 }
 
 fn is_dictionary_metadata_node(arena: &NodeArena, node: NodeId) -> bool {
-    matches!(arena[node].kind, NodeKind::GetDictionary(_))
+    matches!(
+        arena[node].kind,
+        NodeKind::GetDictionary(_) | NodeKind::ExtraParameter(_)
+    )
 }
 
 fn is_dictionary_entry_projection(
@@ -2493,11 +2592,7 @@ fn try_resolve_node_place(
             else {
                 return Ok(ControlFlow::Continue(None));
             };
-            let index = extra_parameter_environment_index(ctx, *index);
-            let index = *ctx.environment[index]
-                .as_primitive::<isize>(ctx)
-                .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?
-                .unwrap();
+            let index = field_index_from_extra_parameter(ctx, *index);
             if try_dictionary_from_place(&place, ctx).is_some() {
                 return Ok(ControlFlow::Continue(None));
             }

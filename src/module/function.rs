@@ -29,7 +29,7 @@ use crate::{
 };
 
 use derive_new::new;
-use ustr::{Ustr, ustr};
+use ustr::Ustr;
 
 define_id_type!(
     /// Local function ID within a module
@@ -181,7 +181,7 @@ impl LocalDecl {
         Self::assign_slots_with_prefix(locals, 0);
     }
 
-    /// Assign slots `[prefix_count, prefix_count + locals.len())` to `locals` to make space for hidden dictionary parameters prepended to the frame.
+    /// Assign slots `[prefix_count, prefix_count + locals.len())` to `locals`.
     pub fn assign_slots_with_prefix(locals: &mut [LocalDecl], prefix_count: usize) {
         for (index, local) in locals.iter_mut().enumerate() {
             local.slot = LocalFrameSlot::from_index(prefix_count + index);
@@ -328,34 +328,8 @@ impl ModuleFunction {
     ) -> Result<(), InternalCompilationError> {
         let root = self.get_code_entry().unwrap();
         check_borrows(arena, root)?;
-        // Extend the argument list and the local variable declarations with the dictionaries
-        // for the requirements, which are passed as extra arguments to the function.
-        // The dictionaries are added at the beginning of the argument list, before the user-defined arguments.
-        let script_fn = self.code.as_script_mut().unwrap();
-        script_fn.arg_names.splice(
-            0..0,
-            ctx.dicts
-                .requirements
-                .iter()
-                .enumerate()
-                .map(|(i, r)| ustr(&r.to_dict_name(i))),
-        );
-        let scope = self.function_span();
-        let dictionary_count = ctx.dicts.requirements.len();
-        LocalDecl::assign_slots_with_prefix(&mut self.locals, dictionary_count);
+        LocalDecl::assign_sequential_slots(&mut self.locals);
         let local_count = self.locals.len();
-        self.locals
-            .extend(ctx.dicts.requirements.iter().enumerate().map(|(i, r)| {
-                let mut local = LocalDecl::new(
-                    (ustr(&r.to_dict_name(i)), Location::new_synthesized()),
-                    MutType::constant(),
-                    r.to_dict_type(),
-                    None,
-                    scope,
-                );
-                local.slot = LocalFrameSlot::from_index(i);
-                local
-            }));
         elaborate_local_value_dispatches(arena, &mut self.locals, ctx)?;
         elaborate_dictionaries(arena, root, ctx, local_count)
     }

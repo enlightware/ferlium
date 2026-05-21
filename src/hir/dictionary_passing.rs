@@ -16,11 +16,10 @@ use crate::{
     compiler::error::InternalCompilationError,
     format::FormatWith,
     module::{
-        ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId,
-        LocalDrop, LocalFunctionId, LocalValueMethodDispatch, ModuleEnv, ProjectionIndex,
-        TraitImpl, TraitImplId, TraitImpls, build_dictionary_value, id::Id,
+        ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
+        LocalFunctionId, LocalValueMethodDispatch, ModuleEnv, ProjectionIndex, TraitImpl,
+        TraitImplId, TraitImpls, build_dictionary_value, id::Id,
     },
-    parser::helpers::EMPTY_USTR,
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef},
     types::trait_solver::TraitSolver,
     types::r#type::TypeVar,
@@ -325,7 +324,6 @@ fn trait_dictionary_node_kind(
     output_tys: &[Type],
     span: Location,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    local_count: usize,
 ) -> Result<(NodeKind, Type), InternalCompilationError> {
     if is_value_trait_for_function_type(trait_ref, input_tys, output_tys) {
         return function_value_dictionary_node_kind(arena, trait_ref, input_tys, span, ctx);
@@ -342,8 +340,7 @@ fn trait_dictionary_node_kind(
     } else {
         let index = find_trait_impl_dict_index(ctx.dicts, trait_ref, input_tys)
             .expect("Dictionary for trait impl not found, type inference should have failed");
-        let id = LocalDeclId::from_index(local_count + index);
-        hir::hir_syn::load(id)
+        NodeKind::ExtraParameter(ExtraParameterId::from_index(index))
     };
     let ty = trait_ref.get_dictionary_type_for_tys(input_tys, output_tys);
     Ok((node_kind, ty))
@@ -397,7 +394,6 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
     inst_data: &hir::FnInstData,
     span: Location,
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
-    local_count: usize,
 ) -> Result<(Vec<NodeId>, Vec<FnArgType>), InternalCompilationError> {
     use NodeKind as K;
     use TypeKind::*;
@@ -426,8 +422,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                             let index = find_field_dict_index(ctx.dicts, var, name).unwrap_or_else(
                                 || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                             );
-                            let id = LocalDeclId::from_index(local_count + index);
-                            K::EnvLoad(hir::EnvLoad { id })
+                            K::ExtraParameter(ExtraParameterId::from_index(index))
                         }
                         _ => {
                             panic!("FieldIndex dictionary should have a variable or record type");
@@ -443,7 +438,6 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                         output_tys,
                         span,
                         ctx,
-                        local_count,
                     )?;
                     (node_kind, ty)
                 }
@@ -461,7 +455,6 @@ fn extra_args_for_module_function(
     inst_data: &DictionariesReq,
     span: Location,
     dicts: &ExtraParameters,
-    local_count: usize,
 ) -> (Vec<NodeId>, Vec<FnArgType>) {
     inst_data
         .iter()
@@ -475,10 +468,9 @@ fn extra_args_for_module_function(
                 .position(|d| d == dict)
                 .expect("Target dictionary not found in ours");
             let ty = dict.to_dict_type();
-            let id = LocalDeclId::from_index(local_count + index);
             (
                 arena.alloc(Node::new(
-                    NodeKind::EnvLoad(hir::EnvLoad { id }),
+                    NodeKind::ExtraParameter(ExtraParameterId::from_index(index)),
                     ty,
                     no_effects(),
                     span,
@@ -518,7 +510,7 @@ pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
     Node::elaborate_dictionaries(arena, node_id, ctx, local_count)
 }
 
-/// Resolve local clone/drop placeholders into static calls or hidden dictionary slots.
+/// Resolve local clone/drop placeholders into static calls or hidden dictionary parameters.
 pub fn elaborate_local_value_dispatches<'d, 'sr, 'sm>(
     arena: &mut NodeArena,
     locals: &mut [LocalDecl],
@@ -603,7 +595,7 @@ impl Node {
         match &mut kind {
             Immediate(_) | Uninit => {}
             BuildClosure(build_closure) => {
-                // Elaborate hidden dictionary captures first (they are metadata).
+                // Elaborate hidden dictionary/evidence captures first.
                 for &capture_id in &build_closure.dictionary_captures {
                     elaborate_dictionaries(arena, capture_id, ctx, local_count)?;
                 }
@@ -631,7 +623,7 @@ impl Node {
                     let inner_build = inner_kind
                         .into_build_closure()
                         .expect("is_nested check failed");
-                    // inner_build.captures are the dictionary captures (should be first)
+                    // inner_build.captures are the dictionary/evidence captures (should be first)
                     // build_closure.captures are the variable captures (should be second)
                     let mut new_dictionary_captures = inner_build.dictionary_captures;
                     new_dictionary_captures.append(&mut build_closure.dictionary_captures);
@@ -680,20 +672,19 @@ impl Node {
                 elaborate_dictionaries(arena, node.source, ctx, local_count)?;
             }
             StaticApply(app) => {
+                for &arg_id in &app.extra_arguments {
+                    elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
+                }
                 for &arg_id in &app.arguments {
                     elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
                 }
                 if !app.inst_data.dicts_req.is_empty() {
-                    // Build the dictionary requirements for the function by adding extra arguments before normal arguments.
+                    // Build the dictionary requirements for the function as evidence arguments.
                     let span = app.function_span;
                     let (extra_args, extra_args_ty) =
-                        extra_args_from_inst_data(arena, &app.inst_data, span, ctx, local_count)?;
-                    // First add the extra parameters, then the original arguments.
-                    app.argument_names
-                        .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
-                    app.arguments.splice(0..0, extra_args);
-                    // Adapt real function type as well
-                    app.ty.args.splice(0..0, extra_args_ty);
+                        extra_args_from_inst_data(arena, &app.inst_data, span, ctx)?;
+                    let _ = extra_args_ty;
+                    app.extra_arguments.splice(0..0, extra_args);
                 } else {
                     // Is the called function part of the current module being compiled?
                     if let FunctionId::Local(id) = app.function {
@@ -704,16 +695,10 @@ impl Node {
                             let inst_data = &inst_data.requirements;
                             // Yes, build the dictionary requirements for the function.
                             let (extra_args, extra_args_ty) = extra_args_for_module_function(
-                                arena,
-                                inst_data,
-                                node_span,
-                                ctx.dicts,
-                                local_count,
+                                arena, inst_data, node_span, ctx.dicts,
                             );
-                            app.argument_names
-                                .splice(0..0, extra_args.iter().map(|_| *EMPTY_USTR));
-                            app.arguments.splice(0..0, extra_args);
-                            app.ty.args.splice(0..0, extra_args_ty);
+                            let _ = extra_args_ty;
+                            app.extra_arguments.splice(0..0, extra_args);
                         }
                     }
                 }
@@ -744,6 +729,7 @@ impl Node {
                         function,
                         function_path,
                         function_span,
+                        extra_arguments: Vec::new(),
                         arguments,
                         argument_names,
                         ty,
@@ -769,6 +755,7 @@ impl Node {
                         function,
                         function_path,
                         function_span,
+                        extra_arguments: Vec::new(),
                         arguments,
                         argument_names,
                         ty,
@@ -791,7 +778,6 @@ impl Node {
                         &[],
                         function_span,
                         ctx,
-                        local_count,
                     )?;
                     let dict_id =
                         arena.alloc(Node::new(dict_kind, dict_ty, no_effects(), function_span));
@@ -822,9 +808,8 @@ impl Node {
                     let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
                     let function_span = app.method_span;
                     // Load that dictionary from the correct local variable.
-                    let load_id = LocalDeclId::from_index(local_count + dict_index);
                     let load_dict_id = arena.alloc(Node::new(
-                        hir::hir_syn::load(load_id),
+                        NodeKind::ExtraParameter(ExtraParameterId::from_index(dict_index)),
                         dict_ty,
                         no_effects(),
                         function_span,
@@ -861,11 +846,7 @@ impl Node {
                                 let inst_data = &inst_data.requirements;
                                 // We have an instantiation, so we need a closure to pass dictionary requirements.
                                 let (captures, _) = extra_args_for_module_function(
-                                    arena,
-                                    inst_data,
-                                    node_span,
-                                    ctx.dicts,
-                                    local_count,
+                                    arena, inst_data, node_span, ctx.dicts,
                                 );
                                 assert!(get_fn.inst_data.dicts_req.is_empty());
                                 let node_effects = arena[node_id].effects.clone();
@@ -888,13 +869,8 @@ impl Node {
                     }
                 } else {
                     // We have an instantiation, so we need a closure to pass dictionary requirements.
-                    let (captures, _) = extra_args_from_inst_data(
-                        arena,
-                        &get_fn.inst_data,
-                        node_span,
-                        ctx,
-                        local_count,
-                    )?;
+                    let (captures, _) =
+                        extra_args_from_inst_data(arena, &get_fn.inst_data, node_span, ctx)?;
                     get_fn.inst_data.dicts_req.clear();
                     let node_effects = arena[node_id].effects.clone();
                     let original_kind = mem::replace(&mut kind, NodeKind::Unimplemented);
@@ -956,7 +932,6 @@ impl Node {
                         &get_method.output_tys,
                         get_method.method_span,
                         ctx,
-                        local_count,
                     )?;
                     let dict_id = arena.alloc(Node::new(
                         dict_kind,
@@ -1012,9 +987,8 @@ impl Node {
                         "Dictionary for trait impl not found, type inference should have failed",
                     );
                     let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
-                    let load_id = LocalDeclId::from_index(local_count + dict_index);
                     let load_dict_id = arena.alloc(Node::new(
-                        hir::hir_syn::load(load_id),
+                        NodeKind::ExtraParameter(ExtraParameterId::from_index(dict_index)),
                         dict_ty,
                         no_effects(),
                         get_const.associated_const_span,
@@ -1037,7 +1011,6 @@ impl Node {
                     &get_dict.output_tys,
                     node_span,
                     ctx,
-                    local_count,
                 )?;
                 kind = node_kind;
             }
@@ -1050,6 +1023,7 @@ impl Node {
             EnvDrop(_) => {}
             EnvMove(_) => {}
             EnvLoad(_) => {}
+            ExtraParameter(_) => {}
             Return(node_id) => {
                 elaborate_dictionaries(arena, *node_id, ctx, local_count)?;
             }
@@ -1303,9 +1277,9 @@ mod tests {
             panic!("expected associated const to elaborate to a dictionary projection");
         };
         assert_eq!(index.as_index(), 1);
-        let NodeKind::EnvLoad(load) = &arena[dictionary_node].kind else {
-            panic!("expected dictionary projection source to load a dictionary");
+        let NodeKind::ExtraParameter(id) = &arena[dictionary_node].kind else {
+            panic!("expected dictionary projection source to load an extra parameter");
         };
-        assert_eq!(load.id.as_index(), 3);
+        assert_eq!(id.as_index(), 0);
     }
 }

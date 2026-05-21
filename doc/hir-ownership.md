@@ -24,8 +24,8 @@ HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like ot
 
 | Field | SSA-facing meaning |
 |-------|--------------------|
-| `slot` | Frame slot offset. Hidden extra parameters are prepended to the frame, so do not derive physical slot order from `LocalDeclId`. |
-| `owns_storage` | This local owns storage that may be moved from and whose storage must be reclaimed. Non-owning locals are aliases or metadata. |
+| `slot` | Frame slot offset within the local value frame. Extra dictionary/evidence parameters use a separate index space. |
+| `owns_storage` | This local owns storage that may be moved from and whose storage must be reclaimed. Non-owning locals are aliases. |
 | `clone` | If present, `EnvStore` initializes the local by calling `Value::clone(source, &mut target)`. |
 | `drop_mode` | `Value` means lexical release must run semantic `Value::drop`; `StorageOnly` only reclaims storage. |
 | `drop` | Resolved dispatch for the local's semantic drop. It is meaningful only when a semantic drop is emitted or run during cleanup. |
@@ -75,7 +75,7 @@ SSA must preserve the same cleanup behavior on all exits:
 Resolved clone/drop dispatch is represented by `LocalValueMethodDispatch`:
 
 - `Static(FunctionId)` calls a concrete generated or user-provided `Value` method.
-- `Dictionary(ExtraParameterId)` loads the `Value` method from a hidden trait dictionary parameter.
+- `Dictionary(ExtraParameterId)` loads the `Value` method from a hidden dictionary parameter.
 - `Required` is a pre-elaboration placeholder and is not valid input to SSA lowering.
 
 The `Value` method signatures are:
@@ -87,9 +87,10 @@ Both methods have an empty effect type.
 In particular, semantic drop cleanup does not add source-level fallibility.
 The clone target is allocated but uninitialized before the call and becomes initialized only if `clone` returns normally.
 
-For `Dictionary(id)`, `id` indexes the hidden extra parameters prepended to the lowered function frame.
+For `Dictionary(id)`, `id` indexes the function's extra dictionary/evidence parameter list.
 The dictionary entry is selected with `VALUE_TRAIT.dictionary_method_index(...)`.
-The matching hidden dictionary also has a `LocalDecl`, but its physical slot is its `ExtraParameterId`; source-level locals have their `slot` shifted after those extra parameters.
+Extra dictionary/evidence parameters do not have matching `LocalDecl`s and do not affect source-level local slots.
+SSA lowering may choose a physical ABI layout that packs evidence and values together, but that packing is not part of HIR ownership semantics.
 
 Dispatch sites are:
 
@@ -109,7 +110,7 @@ If a function value has no owned closure environment, these operations are no-op
 
 For closures with captures, `BuildClosure` stores:
 
-- hidden dictionary captures, which are metadata and are not semantically dropped as `Value`s;
+- hidden dictionary/evidence captures, which are not semantically dropped as `Value`s;
 - owned value captures, already materialized by the rules above;
 - a `captures_value_dictionary`, the `Value` dictionary for the tuple of owned captures.
 

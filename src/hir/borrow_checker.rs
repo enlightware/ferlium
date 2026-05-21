@@ -220,6 +220,7 @@ impl Node {
             EnvDrop(_) => {}
             EnvMove(_) => {}
             EnvLoad(_) => {}
+            ExtraParameter(_) => {}
             Return(node_id) => {
                 check_borrows(arena, *node_id)?;
             }

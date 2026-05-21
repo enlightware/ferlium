@@ -19,8 +19,8 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::function::{Function, ScriptFunction, VoidFunction},
-    hir::hir_syn::{get_dictionary, load, static_apply},
-    hir::{self, Node, NodeArena},
+    hir::hir_syn::{get_dictionary, load},
+    hir::{self, FnInstData, Node, NodeArena, NodeKind, StaticApplication},
     internal_compilation_error,
     module::{
         self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind,
@@ -35,9 +35,8 @@ use crate::{
         value::{VALUE_TRAIT, value_layout_associated_const_values},
     },
     types::effects::EffType,
-    types::mutability::MutType,
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
-    types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot},
+    types::r#type::{Type, TypeDef, TypeDefSlot},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::BitmapInstantiationMapper,
@@ -1700,34 +1699,37 @@ impl<'a> TraitSolver<'a> {
                                 })
                                 .collect();
 
-                            // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
-                            let arguments: Vec<_> = constraint_dict_nodes
+                            // Build the value arguments for the call. Constraint dictionaries are
+                            // evidence arguments and stay separate from source-level values.
+                            let arguments: Vec<_> = def
+                                .ty_scheme
+                                .ty
+                                .args
                                 .iter()
-                                .copied()
-                                .chain(def.ty_scheme.ty.args.iter().enumerate().map(
-                                    |(arg_i, arg_ty)| {
-                                        let id = LocalDeclId::from_index(arg_i);
-                                        arena.alloc(Node::new(
-                                            load(id),
-                                            arg_ty.ty,
-                                            EffType::empty(),
-                                            fn_span,
-                                        ))
-                                    },
-                                ))
+                                .enumerate()
+                                .map(|(arg_i, arg_ty)| {
+                                    let id = LocalDeclId::from_index(arg_i);
+                                    arena.alloc(Node::new(
+                                        load(id),
+                                        arg_ty.ty,
+                                        EffType::empty(),
+                                        fn_span,
+                                    ))
+                                })
                                 .collect();
 
-                            // Build the function type with added constraint dictionary arguments.
-                            let mut ext_fn_ty = def.ty_scheme.ty.clone();
-                            ext_fn_ty.args.splice(
-                                0..0,
-                                constraint_dict_infos
-                                    .iter()
-                                    .map(|(_, ty)| FnArgType::new(*ty, MutType::constant())),
-                            );
-
                             // Build the application node.
-                            let apply = static_apply(function_id, ext_fn_ty, arguments, fn_span);
+                            let apply = NodeKind::StaticApply(b(StaticApplication {
+                                function: function_id,
+                                function_path: None,
+                                function_span: fn_span,
+                                extra_arguments: constraint_dict_nodes,
+                                argument_names: def.arg_names.clone(),
+                                arguments,
+                                ty: def.ty_scheme.ty.clone(),
+                                inst_data: FnInstData::none(),
+                                returns_place: false,
+                            }));
                             let apply_id = arena.alloc(Node::new(
                                 apply,
                                 def.ty_scheme.ty.ret,
@@ -1894,34 +1896,37 @@ impl<'a> TraitSolver<'a> {
                             })
                             .collect();
 
-                        // Build the arguments for the call: first the constraint dictionaries, then the original arguments.
-                        let arguments: Vec<_> = constraint_dict_nodes
+                        // Build the value arguments for the call. Constraint dictionaries are
+                        // evidence arguments and stay separate from source-level values.
+                        let arguments: Vec<_> = def
+                            .ty_scheme
+                            .ty
+                            .args
                             .iter()
-                            .copied()
-                            .chain(def.ty_scheme.ty.args.iter().enumerate().map(
-                                |(arg_i, arg_ty)| {
-                                    let id = LocalDeclId::from_index(arg_i);
-                                    arena.alloc(Node::new(
-                                        load(id),
-                                        arg_ty.ty,
-                                        EffType::empty(),
-                                        fn_span,
-                                    ))
-                                },
-                            ))
+                            .enumerate()
+                            .map(|(arg_i, arg_ty)| {
+                                let id = LocalDeclId::from_index(arg_i);
+                                arena.alloc(Node::new(
+                                    load(id),
+                                    arg_ty.ty,
+                                    EffType::empty(),
+                                    fn_span,
+                                ))
+                            })
                             .collect();
 
-                        // Build the function type with added constraint dictionary arguments.
-                        let mut ext_fn_ty = def.ty_scheme.ty.clone();
-                        ext_fn_ty.args.splice(
-                            0..0,
-                            constraint_dict_infos
-                                .iter()
-                                .map(|(_, ty)| FnArgType::new(*ty, MutType::constant())),
-                        );
-
                         // Build the application node.
-                        let apply = static_apply(function_id, ext_fn_ty, arguments, fn_span);
+                        let apply = NodeKind::StaticApply(b(StaticApplication {
+                            function: function_id,
+                            function_path: None,
+                            function_span: fn_span,
+                            extra_arguments: constraint_dict_nodes,
+                            argument_names: def.arg_names.clone(),
+                            arguments,
+                            ty: def.ty_scheme.ty.clone(),
+                            inst_data: FnInstData::none(),
+                            returns_place: false,
+                        }));
                         let apply_id = arena.alloc(Node::new(
                             apply,
                             def.ty_scheme.ty.ret,
