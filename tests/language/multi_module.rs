@@ -239,6 +239,60 @@ fn impl_for_private_type_is_not_visible_across_modules() {
     );
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn public_impl_can_use_private_helper_impls_from_defining_module() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            trait Hidden<Self> {
+                fn hidden_value(value: Self) -> int;
+            }
+
+            pub trait Public<Self> {
+                fn public_value(value: Self) -> int;
+            }
+
+            pub struct Wrapper<T>(T)
+
+            impl<T> Hidden for Wrapper<T> {
+                fn hidden_value(value: Wrapper<T>) -> int {
+                    7
+                }
+            }
+
+            impl<T> Public for Wrapper<T> {
+                fn public_value(value: Wrapper<T>) -> int {
+                    hidden_value(value)
+                }
+            }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "user",
+        indoc! { r#"
+            pub fn result() -> int {
+                base::public_value(base::Wrapper(1))
+            }
+        "# },
+    );
+
+    assert_val_eq!(session.run("user::result()"), int(7));
+    assert!(
+        session
+            .try_compile_module(
+                "hidden_user",
+                "pub fn result() -> int { base::hidden_value(base::Wrapper(1)) }",
+            )
+            .is_err(),
+        "private helper trait methods should remain hidden across modules"
+    );
+}
+
 /// When a dependency fails to (re)compile, the failing module *and* every
 /// module that (directly or transitively) depends on it must be marked stale.
 #[test]

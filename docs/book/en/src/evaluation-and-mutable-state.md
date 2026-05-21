@@ -130,7 +130,7 @@ fn partition(a, lo, hi) {
 }
 
 let mut a = [5, 4, 11, 3, 2, 1, 0, 7];
-quicksort(a, 0, array_len(a) - 1);
+quicksort(a, 0, len(a) - 1);
 a
 ```
 

@@ -94,6 +94,10 @@ pub struct TraitSolver<'a> {
     /// Partially known trait applications currently being improved, for cycle detection.
     #[new(default)]
     active_improvements: FxHashSet<TraitImprovementKey>,
+    /// Stack of defining modules for imported blanket impls currently being materialized.
+    /// Only the top module's private impls are visible.
+    #[new(default)]
+    private_impl_scope: Vec<ModuleId>,
 }
 
 const TRAIT_SOLVER_RECURSION_LIMIT: usize = 128;
@@ -158,6 +162,7 @@ pub(crate) struct TraitSolverProbe<'a> {
     import_impl_slots: Vec<ImportImplSlot>,
     fn_collector: FunctionCollector,
     active_improvements: FxHashSet<TraitImprovementKey>,
+    private_impl_scope: Vec<ModuleId>,
     others: &'a Modules,
 }
 
@@ -346,6 +351,7 @@ impl<'a> TraitSolverProbe<'a> {
             import_impl_slots: module.import_impl_slots.clone(),
             fn_collector: FunctionCollector::new(module.functions.len()),
             active_improvements: FxHashSet::default(),
+            private_impl_scope: Vec::new(),
             others,
         }
     }
@@ -363,6 +369,7 @@ impl<'a> TraitSolverProbe<'a> {
             import_impl_slots: solver.import_impl_slots.clone(),
             fn_collector: solver.fn_collector.clone(),
             active_improvements: solver.active_improvements.clone(),
+            private_impl_scope: solver.private_impl_scope.clone(),
             others: solver.others,
         }
     }
@@ -383,8 +390,10 @@ impl<'a> TraitSolverProbe<'a> {
             self.others,
         );
         solver.active_improvements = mem::take(&mut self.active_improvements);
+        solver.private_impl_scope = self.private_impl_scope.clone();
         let result = f(&mut solver);
         self.active_improvements = mem::take(&mut solver.active_improvements);
+        self.private_impl_scope = mem::take(&mut solver.private_impl_scope);
         self.current_functions = mem::take(&mut solver.current_functions);
         self.fn_collector = mem::replace(
             &mut solver.fn_collector,
@@ -517,6 +526,10 @@ enum BlanketImplMatch {
 }
 
 impl<'a> TraitSolver<'a> {
+    fn can_use_other_impl(&self, module_id: ModuleId, imp: &TraitImpl) -> bool {
+        imp.public || self.private_impl_scope.last().copied() == Some(module_id)
+    }
+
     pub fn type_def(&self, id: TypeDefId) -> &TypeDef {
         self.current_type_defs.get(id).unwrap_or_else(|| {
             self.others
@@ -567,7 +580,7 @@ impl<'a> TraitSolver<'a> {
             for (key, id) in &module.impls.concrete_key_to_id {
                 if &key.trait_ref == trait_ref {
                     let imp = &module.impls.data[id.as_index()];
-                    if imp.public {
+                    if self.can_use_other_impl(module.module_id(), imp) {
                         candidates.push(TraitImprovementCandidate::Concrete {
                             input_tys: key.input_tys.clone(),
                             output_tys: imp.output_tys.clone(),
@@ -579,7 +592,7 @@ impl<'a> TraitSolver<'a> {
             if let Some(blankets) = module.impls.blanket_key_to_id.get(trait_ref) {
                 for (sub_key, id) in blankets {
                     let imp = &module.impls.data[id.as_index()];
-                    if imp.public {
+                    if self.can_use_other_impl(module.module_id(), imp) {
                         candidates.push(TraitImprovementCandidate::Blanket {
                             input_tys: sub_key.input_tys.clone(),
                             output_tys: imp.output_tys.clone(),
@@ -1353,7 +1366,7 @@ impl<'a> TraitSolver<'a> {
                     let impls = &module.impls;
                     let id = impls.concrete_key_to_id.get(key);
                     if let Some(id) = id {
-                        impls.data[id.as_index()].public
+                        self.can_use_other_impl(module.module_id(), &impls.data[id.as_index()])
                     } else {
                         false
                     }
@@ -1375,7 +1388,7 @@ impl<'a> TraitSolver<'a> {
                 let impls = &module.impls;
                 impls.concrete_key_to_id.get(key).and_then(|id| {
                     let imp = &impls.data[id.as_index()];
-                    if imp.public {
+                    if self.can_use_other_impl(module_id, imp) {
                         Some((module_id, TraitKey::Concrete(key.clone())))
                     } else {
                         None
@@ -1535,20 +1548,37 @@ impl<'a> TraitSolver<'a> {
                 let imp_input_tys = &sub_key.input_tys;
                 let imp_ty_var_count = sub_key.ty_var_count;
                 let imp_constraints = &sub_key.constraints;
-                let imp_output_tys = if let Some(module_id) = imp_module_id {
-                    self.others
+                let (imp_public, imp_output_tys) = if let Some(module_id) = imp_module_id {
+                    let imp = &self
+                        .others
                         .get(module_id)
                         .unwrap()
                         .module
                         .as_ref()
                         .unwrap()
                         .impls
-                        .data[impl_id.as_index()]
-                    .output_tys
-                    .clone()
+                        .data[impl_id.as_index()];
+                    (
+                        self.can_use_other_impl(module_id, imp),
+                        imp.output_tys.clone(),
+                    )
                 } else {
-                    self.impls.data[impl_id.as_index()].output_tys.clone()
+                    (true, self.impls.data[impl_id.as_index()].output_tys.clone())
                 };
+                if !imp_public {
+                    continue 'impl_loop;
+                }
+                if let Some(module_id) = imp_module_id {
+                    self.private_impl_scope.push(module_id);
+                }
+                macro_rules! continue_impl_loop {
+                    () => {{
+                        if imp_module_id.is_some() {
+                            self.private_impl_scope.pop();
+                        }
+                        continue 'impl_loop;
+                    }};
+                }
 
                 // Sanity checks
                 #[cfg(debug_assertions)]
@@ -1586,7 +1616,7 @@ impl<'a> TraitSolver<'a> {
                     resolved_constraints,
                 } = blanket_match
                 else {
-                    continue 'impl_loop;
+                    continue_impl_loop!();
                 };
 
                 // Non-Value blanket impls can materialize all constraint dictionaries up front.
@@ -1607,7 +1637,7 @@ impl<'a> TraitSolver<'a> {
                             arena,
                         ) {
                             Ok(functions) => functions,
-                            Err(_) => continue 'impl_loop,
+                            Err(_) => continue_impl_loop!(),
                         };
                         constraint_dict_ids.push(dict_id);
                     }
@@ -1770,6 +1800,9 @@ impl<'a> TraitSolver<'a> {
                     let key = ConcreteTraitImplKey::new(trait_ref.clone(), input_tys.to_vec());
                     let local_impl_id = self.impls.add_concrete_struct(key, imp);
 
+                    if imp_module_id.is_some() {
+                        self.private_impl_scope.pop();
+                    }
                     return Ok(TraitImplId::Local(local_impl_id));
                 }
 
@@ -1832,14 +1865,14 @@ impl<'a> TraitSolver<'a> {
                                 err
                             );
                             self.rollback_derived_impl_state(materialization_snapshot);
-                            continue 'impl_loop;
+                            continue_impl_loop!();
                         }
                     };
                     if self.get_impl_data_by_id(dict_id).output_tys
                         != resolved_constraint.output_tys
                     {
                         self.rollback_derived_impl_state(materialization_snapshot);
-                        continue 'impl_loop;
+                        continue_impl_loop!();
                     }
                     constraint_dict_ids.push(dict_id);
                 }
@@ -1945,6 +1978,9 @@ impl<'a> TraitSolver<'a> {
                     code_entries,
                 );
 
+                if imp_module_id.is_some() {
+                    self.private_impl_scope.pop();
+                }
                 return Ok(TraitImplId::Local(local_impl_id));
             }
         }

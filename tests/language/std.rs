@@ -454,7 +454,7 @@ fn array_append_and_concat_use_value_clone() {
             let array = [value];
             testing::reset_clone_tracked_clones();
             let combined = concat(array, array);
-            array_len(combined) * 10 + testing::clone_tracked_clone_count()
+            len(combined) * 10 + testing::clone_tracked_clone_count()
             "#
         ),
         int(22)
@@ -472,7 +472,7 @@ fn array_value_clone_uses_element_value_clone() {
             let array = [value];
             testing::reset_clone_tracked_clones();
             let mut cloned = array;
-            array_len(cloned) * 10 + testing::clone_tracked_clone_count()
+            len(cloned) * 10 + testing::clone_tracked_clone_count()
             "#
         ),
         int(11)
@@ -678,15 +678,15 @@ fn array_pop_front() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn array_len() {
+fn len_on_arrays() {
     let mut session = TestSession::new();
     session
-        .fail_compilation("let a = []; array_len(a)")
+        .fail_compilation("let a = []; len(a)")
         .expect_unbound_ty_var();
-    assert_val_eq!(session.run("let a = [1]; array_len(a)"), int(1));
-    assert_val_eq!(session.run("let a = [1, 2]; array_len(a)"), int(2));
-    assert_val_eq!(session.run("let a = [[1], [1, 1]]; array_len(a)"), int(2));
-    assert_val_eq!(session.run("let a = [1, 1, 1]; array_len(a)"), int(3));
+    assert_val_eq!(session.run("let a = [1]; len(a)"), int(1));
+    assert_val_eq!(session.run("let a = [1, 2]; len(a)"), int(2));
+    assert_val_eq!(session.run("let a = [[1], [1, 1]]; len(a)"), int(2));
+    assert_val_eq!(session.run("let a = [1, 1, 1]; len(a)"), int(3));
 }
 
 #[test]

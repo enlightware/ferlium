@@ -7,11 +7,11 @@ pub struct array<A> {
 	start: int,
 }
 
-pub fn array_len<A>(array: [A]) -> int {
+fn array_len<A>(array: [A]) -> int {
 	array.len
 }
 
-pub fn array_wrap_index(capacity: int, index: int) -> int {
+fn array_wrap_index(capacity: int, index: int) -> int {
 	if index >= capacity {
 		index - capacity
 	} else {
@@ -19,7 +19,7 @@ pub fn array_wrap_index(capacity: int, index: int) -> int {
 	}
 }
 
-pub fn array_signed_index_to_offset(index: int, len: int) -> int {
+fn array_signed_index_to_offset(index: int, len: int) -> int {
 	if index < 0 {
 		len + index
 	} else {
@@ -27,7 +27,7 @@ pub fn array_signed_index_to_offset(index: int, len: int) -> int {
 	}
 }
 
-pub fn array_resolve_index(index: int, len: int) -> int {
+fn array_resolve_index(index: int, len: int) -> int {
 	let resolved = array_signed_index_to_offset(index, len);
 	if resolved < 0 or resolved >= len {
 		panic(f"Array access out of bounds: index {index} for length {len}");
@@ -35,25 +35,25 @@ pub fn array_resolve_index(index: int, len: int) -> int {
 	resolved
 }
 
-pub fn array_physical_index<A>(array: [A], index: int) -> int {
+fn array_physical_index<A>(array: [A], index: int) -> int {
 	let resolved = array_resolve_index(index, array.len);
 	array_wrap_index(array.capacity, array.start + resolved)
 }
 
-pub fn array_physical_index_unchecked<A>(array: [A], index: int) -> int {
+fn array_physical_index_unchecked<A>(array: [A], index: int) -> int {
 	let resolved = array_signed_index_to_offset(index, array.len);
 	array_wrap_index(array.capacity, array.start + resolved)
 }
 
 #[place_result]
-pub fn array_index<A>(array: [A], index: int) -> A
+fn array_index<A>(array: [A], index: int) -> A
 {
 	let len = array_len(array);
 	let resolved = array_resolve_index(index, len);
 	return effects_unsafe { buffer_slot(array.data, array_wrap_index(array.capacity, array.start + resolved)) };
 }
 
-pub fn array_with_capacity<A>(capacity: int) -> [A] {
+fn array_with_capacity<A>(capacity: int) -> [A] {
 	let capacity = if capacity < 0 { 0 } else { capacity };
 	array {
 		data: buffer_with_capacity(capacity),
@@ -63,7 +63,7 @@ pub fn array_with_capacity<A>(capacity: int) -> [A] {
 	}
 }
 
-pub fn array_ensure_capacity<A>(array: &mut [A], len: int)
+fn array_ensure_capacity<A>(array: &mut [A], len: int)
 {
 	if array.capacity >= len {
 		return ();

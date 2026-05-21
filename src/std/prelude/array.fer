@@ -166,7 +166,7 @@ where
 	}
 }
 
-pub fn array_slice_bound(len: int, index: int) -> int {
+fn array_slice_bound(len: int, index: int) -> int {
 	let resolved = array_signed_index_to_offset(index, len);
 	if resolved < 0 {
 		len

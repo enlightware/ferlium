@@ -289,7 +289,7 @@ pub fn emit_module(
             }
             // Build the trait impl and fill it with placeholders.
             let public =
-                output.is_trait_impl_exportable(&trait_ref, &input_tys, &output_tys, &[], others);
+                output.is_trait_impl_exportable(&trait_ref, &input_tys, &output_tys, others);
             let associated_const_values = {
                 let solver = trait_solver_from_module!(output, others);
                 emitted_associated_const_values(&trait_ref, &input_tys, 0, imp.span, &solver)?
@@ -453,7 +453,6 @@ pub fn emit_module(
                 &trait_ref,
                 &emit_output.input_tys,
                 &emit_output.output_tys,
-                &emit_output.constraints,
                 others,
             );
             output.add_emitted_impl(

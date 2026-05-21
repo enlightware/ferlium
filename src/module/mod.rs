@@ -1139,15 +1139,6 @@ impl Module {
             .is_some_and(|module| is_named_trait_visible(module, trait_ref.name))
     }
 
-    fn is_trait_constraint_public(&self, constraint: &PubTypeConstraint, others: &Modules) -> bool {
-        self.is_trait_constraint_visible_by(
-            constraint,
-            others,
-            Module::is_symbol_public,
-            Module::is_type_def_public,
-        )
-    }
-
     fn is_trait_constraint_visible_by(
         &self,
         constraint: &PubTypeConstraint,
@@ -1201,7 +1192,6 @@ impl Module {
         trait_ref: &TraitRef,
         input_tys: &[Type],
         output_tys: &[Type],
-        constraints: &[PubTypeConstraint],
         others: &Modules,
     ) -> bool {
         self.is_trait_public(trait_ref, others)
@@ -1209,9 +1199,6 @@ impl Module {
                 .iter()
                 .chain(output_tys)
                 .all(|ty| self.is_type_public(*ty, others))
-            && constraints
-                .iter()
-                .all(|constraint| self.is_trait_constraint_public(constraint, others))
     }
 
     /// Return all own definitions in this module.

@@ -94,17 +94,17 @@ If two `use` declarations bring in the same name, or if a `use` collides with a 
 ## The standard library is a module
 
 You have already been using a module without knowing it.
-Functions like `map`, `filter`, `array_len`, and `idiv` come from `std`, which Ferlium pre-imports into every module with an implicit wildcard `use std::*;`.
+Functions like `map`, `filter`, `len`, and `idiv` come from `std`, which Ferlium pre-imports into every module with an implicit wildcard `use std::*;`.
 You can still write the long form when it helps clarity:
 
 ```ferlium
-std::array_len([1, 2, 3])
+std::len([1, 2, 3])
 ```
 
 is exactly the same as:
 
 ```ferlium
-array_len([1, 2, 3])
+len([1, 2, 3])
 ```
 
 ## The host decides how modules are organised
@@ -145,4 +145,4 @@ These are language-level limits today, not host-level ones: a host can still exp
 
 ## What comes next
 
-The next section of the book covers Ferlium's standard library — `std` is the first module you have been using all along, and you can now read paths like `std::array_len` fluently.
+The next section of the book covers Ferlium's standard library — `std` is the first module you have been using all along, and you can now read paths like `std::len` fluently.

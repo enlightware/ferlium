@@ -293,7 +293,7 @@ where
 
 // Sort for arrays
 
-pub fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: ((A, A) -> Ordering !)) {
+fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: ((A, A) -> Ordering !)) {
 	let mut left = start;
 	let mut right = middle;
 
@@ -320,7 +320,7 @@ pub fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, 
 	};
 }
 
-pub fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: ((A, A) -> Ordering !)) {
+fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: ((A, A) -> Ordering !)) {
 	if end - start > 1 {
 		let middle = shift_right(start + end, 1);
 		array_split_merge_by(target, source, start, middle, compare);
@@ -330,7 +330,7 @@ pub fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, e
 }
 
 /// Sorts `value` in place with a stable merge sort using `compare`.
-pub fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering !)) {
+fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering !)) {
 	let size = len(value);
 	if size > 1 {
 		// Use one full-size scratch array and alternate source/target roles recursively.
