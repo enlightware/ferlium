@@ -15,7 +15,11 @@ use ferlium::{
     hir::value::Value,
     module::ModuleId,
     run_fn_native,
-    std::{array::array_type, math::int_type, string::String as Str},
+    std::{
+        array::{array_type, array_value_from_vec},
+        math::int_type,
+        string::String as Str,
+    },
 };
 
 // --- User-code corpus ---
@@ -244,9 +248,7 @@ fn bench_calculator_run((session, module_id, expr): (CompilerSession, ModuleId, 
 // --- Support functions ---
 
 fn int_a(values: impl Into<Vec<isize>>) -> Value {
-    Value::native(ferlium::std::array::Array::from_vec(
-        values.into().into_iter().map(Value::native).collect(),
-    ))
+    array_value_from_vec(values.into().into_iter().map(Value::native).collect())
 }
 
 fn lcg_seq(n: usize, seed: usize) -> Vec<isize> {
