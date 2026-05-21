@@ -87,6 +87,7 @@ where
 	}
 }
 
+/// Append a value to the end of an array.
 fn array_append<A>(array: &mut [A], value: A)
 where
 	A: Value
@@ -97,6 +98,7 @@ where
 	array.len += 1;
 }
 
+/// Prepend a value to the start of an array.
 fn array_prepend<A>(array: &mut [A], value: A)
 where
 	A: Value
@@ -113,6 +115,7 @@ where
 	array.len += 1;
 }
 
+/// Remove and return the last element of an array, or None if it is empty.
 fn array_pop_back<A>(array: &mut [A]) -> None | Some(A)
 where
 	A: Value
@@ -127,6 +130,7 @@ where
 	}
 }
 
+/// Remove and return the first element of an array, or None if it is empty.
 fn array_pop_front<A>(array: &mut [A]) -> None | Some(A)
 where
 	A: Value

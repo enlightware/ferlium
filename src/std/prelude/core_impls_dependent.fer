@@ -121,6 +121,7 @@ where
 	from_iter(split_iterator(value, separator))
 }
 
+/// An iterator over array parts split around a single element separator.
 struct ArraySplitElementIterator<A>
 	where A: Value
 {
@@ -156,6 +157,7 @@ where
 	}
 }
 
+/// An iterator over array parts split around an array separator.
 struct ArraySplitIterator<A>
 	where A: Value
 {
