@@ -799,6 +799,7 @@ mod tests {
         let mut a = Value::native(v);
         let mut b = v;
         assert_eq!(a.as_primitive_ty_mut::<isize>(), Some(&mut b));
+        a.discard_storage();
     }
 
     #[test]
