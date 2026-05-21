@@ -30,7 +30,7 @@ impl ModulesResolver<'_> {
         if let Some(entry) = self.modules.get_value_by_name(module)
             && let Some(module) = &entry.module
         {
-            module.own_symbols().any(|n| n == symbol)
+            module.public_symbols().any(|n| n == symbol)
         } else {
             false
         }

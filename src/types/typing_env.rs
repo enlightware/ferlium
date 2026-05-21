@@ -15,9 +15,9 @@ use crate::{
     hir::NodeArena,
     hir::function::{ArgPassing, FunctionDefinition},
     module::{
-        self, FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget,
-        LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
-        TypeDefLookupResult, id::Id,
+        FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, LocalDecl,
+        LocalDeclId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TypeDefLookupResult,
+        id::Id,
     },
     std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::r#trait::{TraitMethodIndex, TraitRef},
@@ -148,46 +148,11 @@ impl<'m> TypingEnv<'m> {
             return Ok(None);
         }
 
-        // Resolve the symbol in the module environment, to (Option<module path>, function name)
-        let segments = &path.segments;
-        let fn_name = segments.last().unwrap().0;
-        let is_local = segments.len() == 1
-            || (segments.len() == 2
-                && self.current_module_id() == STD_MODULE_ID
-                && segments[0].0 == "std");
-        let key = if is_local {
-            let get_fn = |name: &str, m: &Module| {
-                let name = ustr(name);
-                if m.get_local_function_id(name).is_some() {
-                    Some(name)
-                } else {
-                    None
-                }
+        let (module_id_opt, function_name) =
+            match self.module_env.function_name_with_module(path)? {
+                Some(k) => k,
+                None => return Ok(None),
             };
-            self.module_env
-                .current
-                .get_member(&fn_name, self.module_env.modules, &get_fn)?
-        } else {
-            let module_path = module::Path::from_ast_segments(&segments[..segments.len() - 1]);
-            self.module_env
-                .modules
-                .get_by_name(&module_path)
-                .and_then(|(module_id, entry)| {
-                    if let Some(module) = entry.module()
-                        && module.get_local_function_id(fn_name).is_some()
-                    {
-                        Some((Some(module_id), fn_name))
-                    } else {
-                        None
-                    }
-                })
-        };
-
-        // Create the GetFunctionData from the resolved key
-        let (module_id_opt, function_name) = match key {
-            Some(k) => k,
-            None => return Ok(None),
-        };
         if self
             .module_env
             .is_unsafe_item_unavailable_in_current_context(module_id_opt, function_name)

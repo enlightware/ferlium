@@ -3,6 +3,7 @@ use crate::ast::{UstrSpan, Path, UseTree, PTypeSpan as TypeSpan, PMutTypeTypeSpa
 use crate::types::effects::PrimitiveEffect;
 use crate::hir::value::LiteralValue;
 use crate::types::r#type::Type as IrType;
+use crate::module::Visibility;
 use crate::parser::helpers::*;
 use crate::std::{math::int_type, string::string_type};
 use crate::containers::SVec2;
@@ -67,8 +68,9 @@ ModuleTraitImpl: Module = {
 }
 
 TraitDefinition: TraitDefinition = {
-    <doc:DOC_COMMENT*> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <where_clause:WhereClause?> "{" <methods:TraitMethod*> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <where_clause:WhereClause?> "{" <methods:TraitMethod*> "}" <r:@R> => {
         TraitDefinition {
+            visibility,
             name,
             input_type_names: header.0,
             output_type_names: header.1,
@@ -156,6 +158,11 @@ UseDeclaration: UseTree = {
     "use" <u:UseTree> ";" => u
 }
 
+Visibility: Visibility = {
+    "pub" => Visibility::Public,
+    => Visibility::Module,
+}
+
 UseTree: UseTree = {
     <p:(<Path> "::")?> <w:Sp<"*">> => {
         UseTree::Glob(p, w.1)
@@ -170,8 +177,9 @@ UseTree: UseTree = {
 }
 
 Function: ModuleFunction = {
-    <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "fn" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:WhereClause?> <ar:@R> <body:Es<Block>> <r:@R> =>
+    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "fn" <name:Sp<UIdentifier>> <generic_params:GenericParams?> <al:@L> "(" <args:ModuleFunctionArgs> ")" <ret:SpFnRet<"P">?> <where_clause:WhereClause?> <ar:@R> <body:Es<Block>> <r:@R> =>
         ModuleFunction::new(
+            visibility,
             name,
             generic_params.unwrap_or_default(),
             args,
@@ -378,14 +386,15 @@ TypeDefinition: TypeDef = {
 }
 
 TypeAliasDefinition: TypeAlias = {
-    <l:@L> "type" <name:Sp<UIdentifier>> <generics:GenericParams?> "=" <ty:Sp<DefinedType>> <r:@R> ";" => {
-        TypeAlias::new(name, generics.unwrap_or_default(), ty)
+    <visibility:Visibility> <l:@L> "type" <name:Sp<UIdentifier>> <generics:GenericParams?> "=" <ty:Sp<DefinedType>> <r:@R> ";" => {
+        TypeAlias::new(visibility, name, generics.unwrap_or_default(), ty)
     }
 }
 
 StructDefinition: TypeDef = {
-    <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> <shape:StructBody> <r:@R> => {
+    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "struct" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> <shape:StructBody> <r:@R> => {
         TypeDef {
+            visibility,
             name,
             generic_params: generics.unwrap_or_default(),
             shape,
@@ -417,8 +426,9 @@ StructTupleFields: Vec<TypeSpan> = {
 }
 
 EnumDefinition: TypeDef = {
-    <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" "}" <r:@R> => {
         TypeDef {
+            visibility,
             name,
             generic_params: generics.unwrap_or_default(),
             shape: Type::Never,
@@ -429,11 +439,12 @@ EnumDefinition: TypeDef = {
             doc_comments: parse_doc_comments(doc).into_iter().collect(),
         }
     },
-    <doc:DOC_COMMENT*> <l:@L> <attributes:(Attribute)*> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" <variants:EnumVariants> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <attributes:(Attribute)*> <visibility:Visibility> <l:@L> "enum" <name:Sp<UIdentifier>> <generics:GenericParams?> <where_clause:WhereClause?> "{" <variants:EnumVariants> "}" <r:@R> => {
         let (variants, variant_attributes): (Vec<_>, Vec<_>) =
             variants.into_iter().map(|(name, ty, attrs)| ((name, ty), attrs)).unzip();
         let variant_ty = Type::Variant(variants);
         TypeDef {
+            visibility,
             name,
             generic_params: generics.unwrap_or_default(),
             shape: variant_ty,

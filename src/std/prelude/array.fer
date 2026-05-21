@@ -75,7 +75,7 @@ impl<A> Value for [A] where A: Value {
 }
 
 /// Return the last element of an array, or None if the array is empty.
-fn array_peek_back<A>(array: [A]) -> Option<A>
+pub fn array_peek_back<A>(array: [A]) -> Option<A>
 where
 	A: Value
 {
@@ -88,7 +88,7 @@ where
 }
 
 /// Return the first element of an array, or None if the array is empty.
-fn array_peek_front<A>(array: [A]) -> Option<A>
+pub fn array_peek_front<A>(array: [A]) -> Option<A>
 where
 	A: Value
 {
@@ -101,7 +101,7 @@ where
 }
 
 /// Append a value to the end of an array.
-fn array_append<A>(array: &mut [A], value: A)
+pub fn array_append<A>(array: &mut [A], value: A)
 where
 	A: Value
 {
@@ -112,7 +112,7 @@ where
 }
 
 /// Prepend a value to the start of an array.
-fn array_prepend<A>(array: &mut [A], value: A)
+pub fn array_prepend<A>(array: &mut [A], value: A)
 where
 	A: Value
 {
@@ -129,7 +129,7 @@ where
 }
 
 /// Remove and return the last element of an array, or None if it is empty.
-fn array_pop_back<A>(array: &mut [A]) -> Option<A>
+pub fn array_pop_back<A>(array: &mut [A]) -> Option<A>
 where
 	A: Value
 {
@@ -144,7 +144,7 @@ where
 }
 
 /// Remove and return the first element of an array, or None if it is empty.
-fn array_pop_front<A>(array: &mut [A]) -> Option<A>
+pub fn array_pop_front<A>(array: &mut [A]) -> Option<A>
 where
 	A: Value
 {
@@ -166,7 +166,7 @@ where
 	}
 }
 
-fn array_slice_bound(len: int, index: int) -> int {
+pub fn array_slice_bound(len: int, index: int) -> int {
 	let resolved = array_signed_index_to_offset(index, len);
 	if resolved < 0 {
 		len
@@ -177,7 +177,7 @@ fn array_slice_bound(len: int, index: int) -> int {
 	}
 }
 
-fn array_slice<A>(array: [A], start: int, end: int) -> [A]
+pub fn array_slice<A>(array: [A], start: int, end: int) -> [A]
 where
 	A: Value
 {
@@ -230,7 +230,7 @@ impl Concat {
 }
 
 // Iterator and Seq for array
-struct ArrayIterator<A>
+pub struct ArrayIterator<A>
 where
 	A: Value
 {

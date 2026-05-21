@@ -19,8 +19,7 @@ use crate::{
     format::write_with_separator_and_format_fn,
     format::{FormatWith, write_with_separator},
     hir::value::LiteralValue,
-    module::ModuleEnv,
-    module::TypeDefId,
+    module::{ModuleEnv, TypeDefId, Visibility},
     types::mutability::MutVal,
     types::r#type::Type as IrType,
 };
@@ -538,6 +537,7 @@ impl TypeConstraint<Parsed> {
 /// A type definition with common metadata
 #[derive(Debug, Clone)]
 pub struct TypeDef<P: Phase> {
+    pub visibility: Visibility,
     pub name: UstrSpan,
     pub generic_params: Vec<UstrSpan>,
     // The structural shape of the type (record, tuple, or unit)

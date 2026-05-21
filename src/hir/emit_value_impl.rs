@@ -327,6 +327,7 @@ pub(super) fn emit_auto_value_impls(
                 functions: function_ids,
             },
             associated_const_values,
+            false,
             Some(type_def_span),
         );
     }

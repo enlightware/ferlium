@@ -26,6 +26,33 @@ geometry::area(2.0)
 The `::` separator joins module names and item names.
 Paths can have any depth — a host may organise its API as `physics::collision::detect(...)` or `engine::input::mouse_position()`.
 
+## Public and module-local definitions
+
+Definitions are module-local by default.
+Another module can only refer to a definition if it is marked `pub`:
+
+```ferlium
+pub fn area(r: float) -> float {
+    3.14 * r * r
+}
+
+pub type Point = (float, float);
+
+pub struct Circle {
+    radius: float,
+}
+
+pub trait HasArea<Self> {
+    fn area(value: Self) -> float;
+}
+```
+
+The `pub` modifier can be used on functions, type aliases, structs, enums, and traits.
+Trait implementations do not have their own visibility modifier: an implementation is available across modules only when the trait and the types involved are themselves visible.
+
+Private definitions are still visible inside their own module.
+This also applies when the host evaluates an expression in the context of an existing module.
+
 ## `use` declarations
 
 Repeating long paths becomes noisy.

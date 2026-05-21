@@ -23,8 +23,8 @@ use crate::{
     hir::{self, FnInstData, Node, NodeArena, NodeKind, StaticApplication},
     internal_compilation_error,
     module::{
-        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, DefKind,
-        DefTable, FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
+        self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, Def,
+        DefKind, DefTable, FunctionCollector, FunctionId, ImportFunctionSlot, ImportFunctionSlotId,
         ImportFunctionTarget, ImportImplSlot, ImportImplSlotId, LocalDecl, LocalDeclId,
         LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleId, TraitDictionary,
         TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value, id::Id,
@@ -171,9 +171,9 @@ struct TraitImprovementKey {
 pub(crate) fn current_function_map(def_table: &DefTable) -> FxHashMap<Ustr, LocalFunctionId> {
     def_table
         .iter()
-        .filter_map(|(def_kind, name)| {
+        .filter_map(|(def, name)| {
             let name = name.as_ref()?;
-            let local_id = def_kind.as_function().copied()?;
+            let local_id = def.kind.as_function().copied()?;
             Some((*name, local_id))
         })
         .collect()
@@ -1190,7 +1190,7 @@ impl<'a> TraitSolver<'a> {
     pub fn commit(mut self, functions: &mut Vec<ModuleFunction>, def_table: &mut DefTable) {
         for (name, mut function) in self.fn_collector.new_elements.drain(..) {
             let id = LocalFunctionId::from_index(functions.len());
-            def_table.insert(name, DefKind::Function(id));
+            def_table.insert(name, Def::public(DefKind::Function(id)));
             function.refresh_debug_info();
             functions.push(function);
         }

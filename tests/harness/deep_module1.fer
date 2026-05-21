@@ -1,9 +1,9 @@
-fn level() -> int {
+pub fn level() -> int {
 	1
 }
 
-struct Pair(int, int)
+pub struct Pair(int, int)
 
-fn sender() {
+pub fn sender() {
 	|x| { x + 1 }
 }

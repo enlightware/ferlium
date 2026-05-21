@@ -311,7 +311,7 @@ fn generic_alias_recovery_prefers_shorter_name_then_alphabetic_name() {
 fn generic_alias_recovery_prefers_current_module_over_imported_modules() {
     let mut session = TestSession::new();
     session
-        .try_compile_module("dep", "type A<T> = Leaf(T) | Node(A<T>);")
+        .try_compile_module("dep", "pub type A<T> = Leaf(T) | Node(A<T>);")
         .expect("dependency module should compile");
     let module_id = session
         .try_compile_module(
@@ -340,7 +340,7 @@ fn generic_alias_recovery_prefers_current_module_over_imported_modules() {
 fn generic_alias_recovery_handles_alias_to_imported_alias() {
     let mut session = TestSession::new();
     session
-        .try_compile_module("dep", "type A<T> = Leaf(T) | Node(A<T>);")
+        .try_compile_module("dep", "pub type A<T> = Leaf(T) | Node(A<T>);")
         .expect("dependency module should compile");
     let module_id = session
         .try_compile_module(

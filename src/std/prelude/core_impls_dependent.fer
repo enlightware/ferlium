@@ -1,7 +1,7 @@
 // Serde derive helper
 
 /// Downcasts a variant to an array, panicking if the variant is not an array.
-fn variant_to_array(v: Variant) {
+pub fn variant_to_array(v: Variant) {
 	match (v) {
 		Array(a) => a,
 		_ => panic("Expected Array variant")
@@ -9,7 +9,7 @@ fn variant_to_array(v: Variant) {
 }
 
 /// Downcasts a variant to an object payload, panicking if the variant is not an object.
-fn variant_to_object(v: Variant) {
+pub fn variant_to_object(v: Variant) {
 	match (v) {
 		Object(o) => o,
 		_ => panic("Expected Object variant")
@@ -17,7 +17,7 @@ fn variant_to_object(v: Variant) {
 }
 
 /// Gets an entry from a Variant Object by name, returning None if not found.
-fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Option<Variant> {
+pub fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Option<Variant> {
 	for entry in entries {
 		if entry.0 == name {
 			return Some(entry.1);
@@ -27,7 +27,7 @@ fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Optio
 }
 
 /// Gets an entry from a Variant Object by name, panicking if not found.
-fn expect_variant_object_entry(entries: [(string, Variant)], name: string) -> Variant {
+pub fn expect_variant_object_entry(entries: [(string, Variant)], name: string) -> Variant {
 	for entry in entries {
 		if entry.0 == name {
 			return entry.1;
@@ -91,7 +91,7 @@ impl Contains {
 
 /// Concatenates the elements of a sequence, inserting `separator` between them.
 /// Returns `empty()` when the sequence is empty.
-fn join(seq, separator) {
+pub fn join(seq, separator) {
 	// Note: we do not use fold to save one concatenation operation.
 	let mut it = iter(seq);
 	match next(it) {
@@ -113,7 +113,7 @@ fn join(seq, separator) {
 // Split implementations
 
 /// Splits `value` around a non-empty `separator` and collects the parts into an array.
-fn split<S, Sep, Part, I, Out>(value: S, separator: Sep) -> Out
+pub fn split<S, Sep, Part, I, Out>(value: S, separator: Sep) -> Out
 where
 	Split<Self = S, Separator = Sep |-> Part = Part, Iter = I, Output = Out>,
 	FromIterator<Self = Out, Iter = I>
@@ -122,7 +122,7 @@ where
 }
 
 /// An iterator over array parts split around a single element separator.
-struct ArraySplitElementIterator<A>
+pub struct ArraySplitElementIterator<A>
 	where A: Value
 {
 	array: [A],
@@ -158,7 +158,7 @@ where
 }
 
 /// An iterator over array parts split around an array separator.
-struct ArraySplitIterator<A>
+pub struct ArraySplitIterator<A>
 	where A: Value
 {
 	array: [A],
@@ -282,7 +282,7 @@ impl<A> Reverse for <Self = [A]> {
 }
 
 /// Returns a reversed copy of `value`.
-fn reversed<S>(value: S) -> S
+pub fn reversed<S>(value: S) -> S
 where
 	Reverse<Self = S>
 {
@@ -293,7 +293,7 @@ where
 
 // Sort for arrays
 
-fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: ((A, A) -> Ordering !)) {
+pub fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, middle: int, end: int, compare: ((A, A) -> Ordering !)) {
 	let mut left = start;
 	let mut right = middle;
 
@@ -320,7 +320,7 @@ fn array_merge_ranges_by<A>(source: &mut [A], target: &mut [A], start: int, midd
 	};
 }
 
-fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: ((A, A) -> Ordering !)) {
+pub fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: int, compare: ((A, A) -> Ordering !)) {
 	if end - start > 1 {
 		let middle = shift_right(start + end, 1);
 		array_split_merge_by(target, source, start, middle, compare);
@@ -330,7 +330,7 @@ fn array_split_merge_by<A>(source: &mut [A], target: &mut [A], start: int, end: 
 }
 
 /// Sorts `value` in place with a stable merge sort using `compare`.
-fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering !)) {
+pub fn array_merge_sort_by<A>(value: &mut [A], compare: ((A, A) -> Ordering !)) {
 	let size = len(value);
 	if size > 1 {
 		// Use one full-size scratch array and alternate source/target roles recursively.
@@ -346,7 +346,7 @@ impl<A> SortBy for <Self = [A] |-> Item = A> {
 }
 
 /// Sorts `value` in place using its default ordering.
-fn sort<S, A>(value: &mut S)
+pub fn sort<S, A>(value: &mut S)
 where
 	SortBy<Self = S |-> Item = A>,
 	A: Ord
@@ -355,7 +355,7 @@ where
 }
 
 /// Returns a sorted copy of `value` using `compare`.
-fn sorted_by<S, A>(value: S, compare: ((A, A) -> Ordering !)) -> S
+pub fn sorted_by<S, A>(value: S, compare: ((A, A) -> Ordering !)) -> S
 where
 	SortBy<Self = S |-> Item = A>
 {
@@ -365,7 +365,7 @@ where
 }
 
 /// Returns a sorted copy of `value` using its default ordering.
-fn sorted<S, A>(value: S) -> S
+pub fn sorted<S, A>(value: S) -> S
 where
 	SortBy<Self = S |-> Item = A>,
 	A: Ord

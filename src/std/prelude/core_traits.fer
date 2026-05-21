@@ -1,14 +1,14 @@
-type Option<T> = Some(T) | None;
-type Ordering = Less | Equal | Greater;
+pub type Option<T> = Some(T) | None;
+pub type Ordering = Less | Equal | Greater;
 
 /// A type that has a total ordering.
-trait Ord<Self> {
+pub trait Ord<Self> {
     /// Returns an `Ordering` between `left` and `right`.
     fn cmp(left: Self, right: Self) -> Ordering;
 }
 
 /// A numeric type supporting basic arithmetic operations.
-trait Num<Self> {
+pub trait Num<Self> {
     /// Adds two numbers.
     fn add(left: Self, right: Self) -> Self;
 
@@ -32,13 +32,13 @@ trait Num<Self> {
 }
 
 /// A type that supports division.
-trait Div<Self> {
+pub trait Div<Self> {
     /// Divides `left` by `right`.
     fn div(left: Self, right: Self) -> Self ! fallible;
 }
 
 /// A type that has bitwise operations.
-trait Bits<Self> {
+pub trait Bits<Self> {
     /// Returns the bitwise AND of `left` and `right`.
     fn bit_and(left: Self, right: Self) -> Self;
 
@@ -83,13 +83,13 @@ trait Bits<Self> {
 }
 
 /// An iterator that can produce a sequence of values.
-trait Iterator<Self |-> Item> {
+pub trait Iterator<Self |-> Item> {
 	/// Returns the next item from the iterator, or `None` if the iterator is exhausted.
 	fn next(iterator: &mut Self) -> Option<Item>;
 }
 
 /// A sequence of elements that can produce an iterator over its elements.
-trait Seq<Self |-> Item, Iter>
+pub trait Seq<Self |-> Item, Iter>
     where Iter: Iterator<Item = Item>
 {
     /// Gets an iterator over the elements of this sequence.
@@ -97,7 +97,7 @@ trait Seq<Self |-> Item, Iter>
 }
 
 /// A collection that can be built from an iterator.
-trait FromIterator<Self, Iter>
+pub trait FromIterator<Self, Iter>
     where
         Iter: Value
 {
@@ -106,40 +106,40 @@ trait FromIterator<Self, Iter>
 }
 
 /// Marker trait that relates a collection family to the collection obtained by replacing its element type.
-trait RebindItem<Self, Item |-> Output> {}
+pub trait RebindItem<Self, Item |-> Output> {}
 
 /// Maps a function over a value, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
-trait Map<Self, Mapped |-> Item, Output> {
+pub trait Map<Self, Mapped |-> Item, Output> {
     /// Maps `mapper` over `value`.
     fn map(value: Self, mapper: (Item) -> Mapped) -> Output;
 }
 
 /// Filters a value with a predicate, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
-trait Filter<Self |-> Item, Output> {
+pub trait Filter<Self |-> Item, Output> {
     /// Keeps only the elements of `value` that satisfy `predicate`.
     fn filter(value: Self, predicate: (Item) -> bool) -> Output;
 }
 
 /// Filters and maps a value in one pass, producing either a lazy iterator adaptor or an eagerly rebuilt collection depending on the input type.
-trait FilterMap<Self, Mapped |-> Item, Output> {
+pub trait FilterMap<Self, Mapped |-> Item, Output> {
     /// Applies `mapper` to each element, keeping only `Some` results.
     fn filter_map(value: Self, mapper: (Item) -> Option<Mapped>) -> Output;
 }
 
 /// A sequence with a known, fixed size.
-trait SizedSeq<Self> {
+pub trait SizedSeq<Self> {
     /// Returns the number of elements in this sequence.
     fn len(seq: Self) -> int;
 }
 
 /// A value that can be concatenated.
-trait Concat<Self> {
+pub trait Concat<Self> {
     /// Concatenates `left` and `right`.
     fn concat(left: Self, right: Self) -> Self;
 }
 
 /// A sequence-like value that can be split around a non-empty separator, yielding parts lazily.
-trait Split<Self, Separator |-> Part, Iter, Output>
+pub trait Split<Self, Separator |-> Part, Iter, Output>
     where Iterator<Self = Iter |-> Item = Part>
 {
     /// Returns an iterator that yields the parts of `value` split around `separator`.
@@ -147,25 +147,25 @@ trait Split<Self, Separator |-> Part, Iter, Output>
 }
 
 /// A sequence-like value that can extract a subrange.
-trait Slice<Self |-> Output> {
+pub trait Slice<Self |-> Output> {
     /// Returns the slice of `value` from `start` to `end` (end-exclusive). Negative indices count from the end.
     fn slice(value: Self, start: int, end: int) -> Output;
 }
 
 /// A type that can be checked for the presence of an element.
-trait Contains<Self |-> Element> {
+pub trait Contains<Self |-> Element> {
     /// Returns true if `container` contains `element`.
     fn contains(container: Self, element: Element) -> bool;
 }
 
 /// A container whose elements can be reversed in place.
-trait Reverse<Self> {
+pub trait Reverse<Self> {
     /// Reverses the elements of `value` in place.
     fn reverse(value: &mut Self) -> ();
 }
 
 /// A container that can be sorted in place with a custom comparator.
-trait SortBy<Self |-> Item> {
+pub trait SortBy<Self |-> Item> {
     /// Sorts `value` in place using `compare`.
     fn sort_by(self: &mut Self, comparator: (Item, Item) -> Ordering);
 }

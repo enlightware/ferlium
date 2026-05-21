@@ -724,7 +724,12 @@ fn main() {
     if args.len() > 1 {
         if args[1] == "--print-std" {
             let session = CompilerSession::new();
-            println!("{}", session.std_module().format_with(session.modules()));
+            println!(
+                "{}",
+                session
+                    .std_module()
+                    .format_with(&ShowModuleWithOptions::public(session.modules()))
+            );
             return;
         }
         if args[1] == "--print-std-all" {

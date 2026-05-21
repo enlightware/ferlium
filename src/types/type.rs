@@ -900,10 +900,6 @@ impl TypeAliases {
         self.name_to_bare_native.get(&name)
     }
 
-    pub fn bare_native_len(&self) -> usize {
-        self.bare_native_to_name.len()
-    }
-
     pub fn bare_native_iter(&self) -> impl Iterator<Item = (Ustr, &BareNativeTypeB)> {
         self.bare_native_to_name
             .iter()

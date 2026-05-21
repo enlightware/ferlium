@@ -73,7 +73,7 @@ fn break_module(session: &mut TestSession, name: &str) {
 
 fn tree_module_src() -> &'static str {
     indoc! { r#"
-        enum Tree<T> {
+        pub enum Tree<T> {
             Leaf(T),
             Node(Tree<T>, Tree<T>),
         }
@@ -88,6 +88,157 @@ fn tree_sum_call_src(module_name: &str) -> String {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_function_is_hidden_across_modules_by_default() {
+    let mut session = TestSession::new();
+
+    compile_module(&mut session, "base", "fn val() -> int { 1 }");
+    assert!(
+        session
+            .try_compile_module("user", "pub fn result() -> int { base::val() }")
+            .is_err(),
+        "module-local functions should not be callable from another module"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn pub_function_is_visible_across_modules() {
+    let mut session = TestSession::new();
+
+    compile_module(&mut session, "base", "pub fn val() -> int { 1 }");
+    compile_module(
+        &mut session,
+        "user",
+        "pub fn result() -> int { base::val() }",
+    );
+
+    assert_val_eq!(session.run("user::result()"), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn public_trait_method_is_visible_across_modules() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            pub trait ToInt<Self> {
+                fn to_int(value: Self) -> int;
+            }
+
+            impl ToInt for int {
+                fn to_int(value: int) -> int {
+                    value
+                }
+            }
+        "# },
+    );
+    compile_module(
+        &mut session,
+        "user",
+        "pub fn result() -> int { base::to_int(42) }",
+    );
+
+    assert_val_eq!(session.run("user::result()"), int(42));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn private_trait_method_is_hidden_across_modules() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            trait Hidden<Self> {
+                fn hidden(value: Self) -> Self;
+            }
+        "# },
+    );
+    assert!(
+        session
+            .try_compile_module("user", "pub fn result() -> int { let f = base::hidden; 0 }",)
+            .is_err(),
+        "methods of module-local traits should not be visible across modules"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn eval_expression_in_module_can_use_private_members() {
+    let mut session = CompilerSession::new();
+    let module_id = session
+        .compile(
+            "fn add_one(x) { x + 1 }",
+            "<test>",
+            Path::single_str("test"),
+        )
+        .unwrap()
+        .module_id;
+
+    let (value, ty) = session
+        .eval_expression_in_module(
+            module_id,
+            "<test_expr>",
+            "test::add_one((arg0: int))",
+            vec![(
+                "arg0",
+                Type::primitive::<isize>(),
+                ValOrMut::Val(Value::native(5isize)),
+            )],
+        )
+        .unwrap();
+
+    assert_eq!(value.as_primitive_ty::<isize>().copied(), Some(6));
+    assert_eq!(ty, Type::primitive::<isize>());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn impl_for_private_type_is_not_visible_across_modules() {
+    let mut session = TestSession::new();
+
+    compile_module(
+        &mut session,
+        "base",
+        indoc! { r#"
+            pub trait ToInt<Self> {
+                fn to_int(value: Self) -> int;
+            }
+
+            struct Hidden;
+
+            pub fn make_hidden() -> Hidden {
+                Hidden
+            }
+
+            impl ToInt for Hidden {
+                fn to_int(value: Hidden) -> int {
+                    1
+                }
+            }
+        "# },
+    );
+    assert!(
+        session
+            .try_compile_module(
+                "user",
+                indoc! { r#"
+                    pub fn result() -> int {
+                        base::to_int(base::make_hidden())
+                    }
+                "# },
+            )
+            .is_err(),
+        "impls involving private types should not be visible across modules"
+    );
+}
+
 /// When a dependency fails to (re)compile, the failing module *and* every
 /// module that (directly or transitively) depends on it must be marked stale.
 #[test]
@@ -95,8 +246,12 @@ fn tree_sum_call_src(module_name: &str) -> String {
 fn stale_propagates_on_dep_failure() {
     let mut session = TestSession::new();
 
-    let base_id = compile_module(&mut session, "base", "fn val() -> int { 1 }");
-    let user_id = compile_module(&mut session, "user", "fn result() -> int { base::val() }");
+    let base_id = compile_module(&mut session, "base", "pub fn val() -> int { 1 }");
+    let user_id = compile_module(
+        &mut session,
+        "user",
+        "pub fn result() -> int { base::val() }",
+    );
 
     assert_fresh(&session, base_id, "base (initial)");
     assert_fresh(&session, user_id, "user (initial)");
@@ -115,8 +270,12 @@ fn stale_propagates_on_dep_failure() {
 fn cascade_recompile_direct_dep() {
     let mut session = TestSession::new();
 
-    let base_id = compile_module(&mut session, "base", "fn val() -> int { 1 }");
-    let user_id = compile_module(&mut session, "user", "fn result() -> int { base::val() }");
+    let base_id = compile_module(&mut session, "base", "pub fn val() -> int { 1 }");
+    let user_id = compile_module(
+        &mut session,
+        "user",
+        "pub fn result() -> int { base::val() }",
+    );
 
     break_module(&mut session, "base");
     assert_stale(&session, base_id, "base");
@@ -124,7 +283,7 @@ fn cascade_recompile_direct_dep() {
 
     // Fix base — user must be cascade-recompiled automatically.
     session
-        .try_compile_module("base", "fn val() -> int { 1 }")
+        .try_compile_module("base", "pub fn val() -> int { 1 }")
         .expect("fixing base should succeed");
 
     assert_fresh(&session, base_id, "base after fix");
@@ -152,9 +311,9 @@ fn cascade_recompile_direct_dep() {
 fn cascade_recompile_chain() {
     let mut session = TestSession::new();
 
-    let a_id = compile_module(&mut session, "a", "fn val() -> int { 1 }");
-    let b_id = compile_module(&mut session, "b", "fn val() -> int { a::val() + 1 }");
-    let c_id = compile_module(&mut session, "c", "fn val() -> int { b::val() + 1 }");
+    let a_id = compile_module(&mut session, "a", "pub fn val() -> int { 1 }");
+    let b_id = compile_module(&mut session, "b", "pub fn val() -> int { a::val() + 1 }");
+    let c_id = compile_module(&mut session, "c", "pub fn val() -> int { b::val() + 1 }");
 
     assert_fresh(&session, a_id, "a (initial)");
     assert_fresh(&session, b_id, "b (initial)");
@@ -167,7 +326,7 @@ fn cascade_recompile_chain() {
 
     // Fix a — b is recompiled (a is fresh), which then recompiles c.
     session
-        .try_compile_module("a", "fn val() -> int { 1 }")
+        .try_compile_module("a", "pub fn val() -> int { 1 }")
         .expect("fixing a should succeed");
 
     assert_fresh(&session, a_id, "a after fix");
@@ -185,10 +344,14 @@ fn cascade_recompile_chain() {
 fn cascade_recompile_diamond() {
     let mut session = TestSession::new();
 
-    let base_id = compile_module(&mut session, "base", "fn val() -> int { 1 }");
-    let b_id = compile_module(&mut session, "b", "fn val() -> int { base::val() }");
-    let c_id = compile_module(&mut session, "c", "fn val() -> int { base::val() }");
-    let d_id = compile_module(&mut session, "d", "fn val() -> int { b::val() + c::val() }");
+    let base_id = compile_module(&mut session, "base", "pub fn val() -> int { 1 }");
+    let b_id = compile_module(&mut session, "b", "pub fn val() -> int { base::val() }");
+    let c_id = compile_module(&mut session, "c", "pub fn val() -> int { base::val() }");
+    let d_id = compile_module(
+        &mut session,
+        "d",
+        "pub fn val() -> int { b::val() + c::val() }",
+    );
 
     assert_fresh(&session, base_id, "base (initial)");
     assert_fresh(&session, b_id, "b (initial)");
@@ -202,7 +365,7 @@ fn cascade_recompile_diamond() {
     assert_stale(&session, d_id, "d");
 
     session
-        .try_compile_module("base", "fn val() -> int { 1 }")
+        .try_compile_module("base", "pub fn val() -> int { 1 }")
         .expect("fixing base should succeed");
 
     assert_fresh(&session, base_id, "base after fix");
@@ -221,7 +384,7 @@ fn cascade_recompile_diamond() {
 fn cascade_recompile_first_compile_with_stale_dep() {
     let mut session = TestSession::new();
 
-    let base_id = compile_module(&mut session, "base", "fn val() -> int { 42 }");
+    let base_id = compile_module(&mut session, "base", "pub fn val() -> int { 42 }");
 
     // Break base (old module is preserved inside the entry, so user can still
     // be compiled against it — but will be marked stale due to stale dep).
@@ -229,12 +392,16 @@ fn cascade_recompile_first_compile_with_stale_dep() {
     assert_stale(&session, base_id, "base");
 
     // Compile user for the first time while base is stale.
-    let user_id = compile_module(&mut session, "user", "fn result() -> int { base::val() }");
+    let user_id = compile_module(
+        &mut session,
+        "user",
+        "pub fn result() -> int { base::val() }",
+    );
     assert_stale(&session, user_id, "user (first compile with stale dep)");
 
     // Fix base — user should be cascade-recompiled.
     session
-        .try_compile_module("base", "fn val() -> int { 42 }")
+        .try_compile_module("base", "pub fn val() -> int { 42 }")
         .expect("fixing base should succeed");
 
     assert_fresh(&session, base_id, "base after fix");
@@ -251,11 +418,11 @@ fn cascade_recompile_first_compile_with_stale_dep() {
 fn stale_propagates_when_new_dep_introduced() {
     let mut session = TestSession::new();
 
-    let base_id = compile_module(&mut session, "base", "fn val() -> int { 1 }");
+    let base_id = compile_module(&mut session, "base", "pub fn val() -> int { 1 }");
     // mid initially has NO dependency on base.
-    let mid_id = compile_module(&mut session, "mid", "fn val() -> int { 2 }");
+    let mid_id = compile_module(&mut session, "mid", "pub fn val() -> int { 2 }");
     // top depends on mid.
-    let top_id = compile_module(&mut session, "top", "fn val() -> int { mid::val() }");
+    let top_id = compile_module(&mut session, "top", "pub fn val() -> int { mid::val() }");
 
     assert_fresh(&session, base_id, "base (initial)");
     assert_fresh(&session, mid_id, "mid (initial)");
@@ -268,7 +435,7 @@ fn stale_propagates_when_new_dep_introduced() {
     assert_fresh(&session, top_id, "top (no base dep yet)");
 
     // Re-compile mid so it NOW depends on the stale base.
-    compile_module(&mut session, "mid", "fn val() -> int { base::val() }");
+    compile_module(&mut session, "mid", "pub fn val() -> int { base::val() }");
 
     // mid is stale because base is stale; top must also be stale because it
     // depends on mid which just became stale.
@@ -277,7 +444,7 @@ fn stale_propagates_when_new_dep_introduced() {
 
     // Fix base — mid and top should both be cascade-recompiled.
     session
-        .try_compile_module("base", "fn val() -> int { 1 }")
+        .try_compile_module("base", "pub fn val() -> int { 1 }")
         .expect("fixing base should succeed");
 
     assert_fresh(&session, base_id, "base after fix");
@@ -300,8 +467,8 @@ fn no_infinite_recursion_on_circular_dep() {
     let mut session = TestSession::new();
 
     // Establish a linear chain: b depends on a.
-    let a_id = compile_module(&mut session, "a", "fn val() -> int { 1 }");
-    let b_id = compile_module(&mut session, "b", "fn val() -> int { a::val() + 1 }");
+    let a_id = compile_module(&mut session, "a", "pub fn val() -> int { 1 }");
+    let b_id = compile_module(&mut session, "b", "pub fn val() -> int { a::val() + 1 }");
 
     assert_fresh(&session, a_id, "a (initial)");
     assert_fresh(&session, b_id, "b (initial)");
@@ -310,7 +477,7 @@ fn no_infinite_recursion_on_circular_dep() {
     // cycle a → b → a.  The compiler must reject this with a
     // CircularImportDependency error rather than entering infinite recursion.
     let err = session
-        .try_compile_module("a", "fn val() -> int { b::val() }")
+        .try_compile_module("a", "pub fn val() -> int { b::val() }")
         .unwrap_err();
 
     // The error must be the cycle-detection variant.
@@ -344,7 +511,7 @@ fn qualified_enum_patterns_resolve_direct_foreign_module_path() {
         &mut session,
         "direct",
         indoc! { r#"
-            fn sum(tree) {
+            pub fn sum(tree) {
                 match tree {
                     data::Tree::Leaf(v) => v,
                     data::Tree::Node(l, r) => sum(l) + sum(r),
@@ -367,7 +534,7 @@ fn qualified_enum_patterns_resolve_imported_foreign_type() {
         indoc! { r#"
             use data::Tree;
 
-            fn sum(tree) {
+            pub fn sum(tree) {
                 match tree {
                     Tree::Leaf(v) => v,
                     Tree::Node(l, r) => sum(l) + sum(r),
@@ -463,12 +630,16 @@ fn failed_module_source_update_records_diagnostics_and_keeps_last_good_module() 
 fn dependency_query_apis_report_direct_reverse_and_affected_modules() {
     let mut session = CompilerSession::new();
     let base_id = session
-        .compile("fn val() -> int { 1 }", "base", Path::single_str("base"))
+        .compile(
+            "pub fn val() -> int { 1 }",
+            "base",
+            Path::single_str("base"),
+        )
         .expect("base should compile")
         .module_id;
     let mid_id = session
         .compile(
-            "fn val() -> int { base::val() }",
+            "pub fn val() -> int { base::val() }",
             "mid",
             Path::single_str("mid"),
         )
@@ -476,7 +647,7 @@ fn dependency_query_apis_report_direct_reverse_and_affected_modules() {
         .module_id;
     let top_id = session
         .compile(
-            "fn val() -> int { mid::val() }",
+            "pub fn val() -> int { mid::val() }",
             "top",
             Path::single_str("top"),
         )

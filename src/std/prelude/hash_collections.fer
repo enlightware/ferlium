@@ -1,5 +1,5 @@
 /// Computes the hash of a value.
-fn value_hash<V>(value: V) -> hash
+pub fn value_hash<V>(value: V) -> hash
 where
 	V: Value
 {
@@ -10,7 +10,7 @@ where
 
 // Hash sets
 
-struct HashSetSlot<V>
+pub struct HashSetSlot<V>
 where
 	V: Value
 {
@@ -19,7 +19,7 @@ where
 }
 
 /// A set storing unique, unordered elements of type `V`.
-struct HashSet<V>
+pub struct HashSet<V>
 where
 	V: Value
 {
@@ -27,9 +27,9 @@ where
 	len: int,
 }
 
-type set<V> = HashSet<V>;
+pub type set<V> = HashSet<V>;
 
-struct HashSetIterator<V>
+pub struct HashSetIterator<V>
 where
 	V: Value
 {
@@ -37,7 +37,7 @@ where
 	index: int,
 }
 
-fn hash_set_new<V>() -> HashSet<V>
+pub fn hash_set_new<V>() -> HashSet<V>
 where
 	V: Value
 {
@@ -45,7 +45,7 @@ where
 }
 
 /// Inserts `value` into `collection`, returning `true` if the value was not already present.
-fn set_insert<V>(collection: &mut HashSet<V>, value: V) -> bool
+pub fn set_insert<V>(collection: &mut HashSet<V>, value: V) -> bool
 where
 	V: Value
 {
@@ -63,7 +63,7 @@ where
 }
 
 /// Returns `true` if `value` is present in `collection`, otherwise `false`.
-fn set_contains<V>(collection: HashSet<V>, value: V) -> bool
+pub fn set_contains<V>(collection: HashSet<V>, value: V) -> bool
 where
 	V: Value
 {
@@ -179,7 +179,7 @@ where
 
 // Hash maps
 
-struct HashMapEntry<K, V>
+pub struct HashMapEntry<K, V>
 where
 	K: Value,
 	V: Value
@@ -223,7 +223,7 @@ where
 }
 
 /// A map storing unique, unordered key-value pairs of types `K` and `V`.
-struct HashMap<K, V>
+pub struct HashMap<K, V>
 where
 	K: Value,
 	V: Value
@@ -232,9 +232,9 @@ where
 	len: int,
 }
 
-type map<K, V> = HashMap<K, V>;
+pub type map<K, V> = HashMap<K, V>;
 
-struct HashMapIterator<K, V>
+pub struct HashMapIterator<K, V>
 where
 	K: Value,
 	V: Value
@@ -243,7 +243,7 @@ where
 	index: int,
 }
 
-fn hash_map_new<K, V>() -> HashMap<K, V>
+pub fn hash_map_new<K, V>() -> HashMap<K, V>
 where
 	K: Value,
 	V: Value
@@ -252,7 +252,7 @@ where
 }
 
 /// Inserts `value` into `collection` with the given `key`, returning the previous value if the key was already present.
-fn map_insert<K, V>(collection: &mut HashMap<K, V>, key: K, value: V) -> Option<V>
+pub fn map_insert<K, V>(collection: &mut HashMap<K, V>, key: K, value: V) -> Option<V>
 where
 	K: Value,
 	V: Value
@@ -284,7 +284,7 @@ where
 }
 
 /// Gets the value associated with `key` in `collection`, or `None` if the key is not present.
-fn map_get<K, V>(collection: HashMap<K, V>, key: K) -> Option<V>
+pub fn map_get<K, V>(collection: HashMap<K, V>, key: K) -> Option<V>
 where
 	K: Value,
 	V: Value
@@ -301,7 +301,7 @@ where
 }
 
 /// Returns `true` if `key` is present in `collection`, otherwise `false`.
-fn map_contains_key<K, V>(collection: HashMap<K, V>, key: K) -> bool
+pub fn map_contains_key<K, V>(collection: HashMap<K, V>, key: K) -> bool
 where
 	K: Value,
 	V: Value
@@ -316,7 +316,7 @@ where
 }
 
 /// Returns `true` if `collection` contains an entry with the given `key` and `value`, otherwise `false`.
-fn map_contains_key_value<K, V>(collection: HashMap<K, V>, key: K, value: V) -> bool
+pub fn map_contains_key_value<K, V>(collection: HashMap<K, V>, key: K, value: V) -> bool
 where
     K: Value,
     V: Value
@@ -327,7 +327,7 @@ where
     }
 }
 
-fn hash_map_contains_entry<K, V>(collection: HashMap<K, V>, entry: HashMapEntry<K, V>) -> bool
+pub fn hash_map_contains_entry<K, V>(collection: HashMap<K, V>, entry: HashMapEntry<K, V>) -> bool
 where
     K: Value,
     V: Value
@@ -450,11 +450,11 @@ where
 
 // Common hash collection machinery functions
 
-fn hash_collection_bucket_index(slot_hash: hash, capacity: int) -> int {
+pub fn hash_collection_bucket_index(slot_hash: hash, capacity: int) -> int {
 	bit_and(slot_hash as int, capacity - 1)
 }
 
-fn hash_collection_empty_buckets(capacity: int) {
+pub fn hash_collection_empty_buckets(capacity: int) {
 	let mut buckets = [];
 	for index in 0..capacity {
 		array_append(buckets, None);
@@ -462,7 +462,7 @@ fn hash_collection_empty_buckets(capacity: int) {
 	buckets
 }
 
-fn hash_collection_insert_entry<K, V>(buckets, entry, key_getter) -> int {
+pub fn hash_collection_insert_entry<K, V>(buckets, entry, key_getter) -> int {
 	let capacity = len(buckets);
 	let mut index = hash_collection_bucket_index(entry.hash, capacity);
 	loop {
@@ -483,7 +483,7 @@ fn hash_collection_insert_entry<K, V>(buckets, entry, key_getter) -> int {
 	}
 }
 
-fn hash_collection_rehash(collection, key_getter, new_capacity) {
+pub fn hash_collection_rehash(collection, key_getter, new_capacity) {
 	let old_buckets = collection.buckets;
 	let mut new_buckets = hash_collection_empty_buckets(new_capacity);
 	for bucket in old_buckets {
@@ -497,7 +497,7 @@ fn hash_collection_rehash(collection, key_getter, new_capacity) {
 	collection.buckets = new_buckets;
 }
 
-fn hash_collection_reserve_for_insert(collection, key_getter) {
+pub fn hash_collection_reserve_for_insert(collection, key_getter) {
 	let capacity = len(collection.buckets);
 	if capacity <= 0 {
 		hash_collection_rehash(collection, key_getter, 8);
@@ -506,7 +506,7 @@ fn hash_collection_reserve_for_insert(collection, key_getter) {
 	}
 }
 
-fn hash_collection_find_index_with_hash(collection, entry_hash: hash, value, key_getter) -> Option<int> {
+pub fn hash_collection_find_index_with_hash(collection, entry_hash: hash, value, key_getter) -> Option<int> {
 	let capacity = len(collection.buckets);
 	if capacity <= 0 {
 		return None;
@@ -533,7 +533,7 @@ fn hash_collection_find_index_with_hash(collection, entry_hash: hash, value, key
 	}
 }
 
-fn hash_collection_eq(left, right, contain_fn) -> bool {
+pub fn hash_collection_eq(left, right, contain_fn) -> bool {
     if left.len != right.len {
 		return false;
 	};
@@ -546,7 +546,7 @@ fn hash_collection_eq(left, right, contain_fn) -> bool {
 	true
 }
 
-fn hash_collection_to_string(collection) -> string {
+pub fn hash_collection_to_string(collection) -> string {
     let mut rendered = "{ ";
 	let mut first = true;
 	for element in collection {
@@ -561,7 +561,7 @@ fn hash_collection_to_string(collection) -> string {
 	rendered
 }
 
-fn hash_collection_hash(collection, tag, state: &mut hasher) {
+pub fn hash_collection_hash(collection, tag, state: &mut hasher) {
     hasher_write_string(state, tag);
 	let mut acc = unordered_hasher_new();
 	for entry in collection {

@@ -19,7 +19,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::{B, b},
     format::{FormatWith, write_with_separator},
-    module::ModuleEnv,
+    module::{ModuleEnv, Visibility},
     types::effects::PrimitiveEffect,
     types::mutability::FormatInFnArg,
     types::r#type::Type as IrType,
@@ -32,10 +32,14 @@ pub type TypeSpan<P> = (<P as Phase>::Type, Location);
 /// A spanned type alias during parsing
 #[derive(Debug, Clone, new)]
 pub struct TypeAlias {
+    pub visibility: Visibility,
     pub name: UstrSpan,
     pub generic_params: Vec<UstrSpan>,
     pub ty: TypeSpan<Parsed>,
 }
+
+pub type PTypeAlias = TypeAlias;
+
 impl FormatWith<ModuleEnv<'_>> for TypeAlias {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
         write!(f, "{}", self.name.0)?;

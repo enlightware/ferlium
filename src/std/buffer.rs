@@ -517,15 +517,15 @@ pub fn add_to_module(to: &mut Module) {
             Box::new(UnaryNativeFnMN::new(buffer_drop)) as Function,
         ],
     );
-    to.add_unsafe_function(ustr("buffer_slot"), buffer_slot_descr());
-    to.add_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());
-    to.add_unsafe_function(
+    to.add_private_unsafe_function(ustr("buffer_slot"), buffer_slot_descr());
+    to.add_private_unsafe_function(ustr("buffer_with_capacity"), buffer_with_capacity_descr());
+    to.add_private_unsafe_function(
         ustr("buffer_clone_value_into"),
         buffer_clone_value_into_descr(),
     );
-    to.add_unsafe_function(ustr("buffer_clone_into"), buffer_clone_into_descr());
-    to.add_unsafe_function(ustr("buffer_move"), buffer_move_descr());
-    to.add_unsafe_function(ustr("buffer_move_into"), buffer_move_into_descr());
-    to.add_unsafe_function(ustr("buffer_take"), buffer_take_descr());
-    to.add_unsafe_function(ustr("buffer_drop_at"), buffer_drop_at_descr());
+    to.add_private_unsafe_function(ustr("buffer_clone_into"), buffer_clone_into_descr());
+    to.add_private_unsafe_function(ustr("buffer_move"), buffer_move_descr());
+    to.add_private_unsafe_function(ustr("buffer_move_into"), buffer_move_into_descr());
+    to.add_private_unsafe_function(ustr("buffer_take"), buffer_take_descr());
+    to.add_private_unsafe_function(ustr("buffer_drop_at"), buffer_drop_at_descr());
 }

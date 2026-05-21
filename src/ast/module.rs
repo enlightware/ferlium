@@ -18,7 +18,7 @@ use crate::{
     compiler::error::LocatedError,
     format::write_with_separator_and_format_fn,
     format::{FormatWith, write_with_separator},
-    module::ModuleEnv,
+    module::{ModuleEnv, Visibility},
     types::mutability::FormatInFnArg,
     types::type_like::TypeLike,
 };
@@ -57,6 +57,7 @@ impl DModuleFunctionArg {
 #[derive(Debug, Clone, new)]
 #[allow(clippy::too_many_arguments)]
 pub struct ModuleFunction<P: Phase> {
+    pub visibility: Visibility,
     pub name: UstrSpan,
     pub generic_params: Vec<UstrSpan>,
     pub args: Vec<ModuleFunctionArg<P>>,
@@ -99,6 +100,7 @@ pub struct TraitMethod {
 
 #[derive(Debug, Clone)]
 pub struct TraitDefinition {
+    pub visibility: Visibility,
     pub name: UstrSpan,
     pub input_type_names: Vec<UstrSpan>,
     pub output_type_names: Vec<UstrSpan>,

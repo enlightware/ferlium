@@ -16,7 +16,7 @@ use crate::harness::{
 };
 use ferlium::{
     SourceTable,
-    compiler::error::{CompilationErrorImpl, RuntimeErrorKind, UnsafeFeature},
+    compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     hir::value::Value,
     module::{ConcreteTraitImplKey, Module, TraitDictionaryEntry},
     std::{
@@ -315,12 +315,13 @@ fn array_index_shared_ref_call_does_not_clone() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_index_function_is_std_internal() {
     let mut session = TestSession::new();
-    for source in ["array_index([1], 0)", "let f = array_index; f([1], 0)"] {
+    for source in [
+        "std::array_index([1], 0)",
+        "let f = std::array_index; f([1], 0)",
+    ] {
         match session.fail_compilation(source).into_inner() {
-            CompilationErrorImpl::UnsafeFeatureUseNotAllowed { feature, .. } => {
-                assert_eq!(feature, UnsafeFeature::Function(ustr("array_index")));
-            }
-            other => panic!("expected unsafe feature error, got {other:?}"),
+            CompilationErrorImpl::InvalidVariantConstructor { .. } => {}
+            other => panic!("expected hidden std function to be rejected, got {other:?}"),
         }
     }
 }

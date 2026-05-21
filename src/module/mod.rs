@@ -50,10 +50,13 @@ use crate::{
         r#trait::TraitRef,
         r#type::{
             LocalTypeAliasId, Type, TypeAliasEntry, TypeAliases, TypeDef, TypeDefSlot,
-            TypeDisplayEnv, TypeVar,
+            TypeDisplayEnv, TypeKind, TypeVar,
         },
+        type_scheme::PubTypeConstraint,
     },
 };
+
+pub(crate) const GENERATED_LAMBDA_PREFIX: &str = "$lambda$";
 
 define_id_type!(
     /// ID of a module within a CompilerSession
@@ -67,6 +70,20 @@ define_id_type!(
 
 /// A reference to a definition, consisting of the module ID and the definition index within that module.
 pub type DefId = (ModuleId, LocalDefId);
+
+/// Item visibility
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    #[default]
+    Module,
+    Public,
+}
+
+impl Visibility {
+    pub fn is_public(self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
 
 define_id_type!(
     /// ID of a type definition within a module
@@ -108,11 +125,26 @@ pub enum DefKind {
     Function(LocalFunctionId),
     TypeDef(LocalTypeDefId),
     TypeAlias(LocalTypeAliasId),
+    BareNativeTypeAlias,
     Trait(LocalTraitId),
     // Impl(LocalImplId), currently not accessed by name, if we want to add it, we must take care in trait solver to register the ones it adds
 }
 
-pub type DefTable = NamedIndexed<Ustr, LocalDefId, DefKind>;
+/// A symbol definition along with its visibility
+#[derive(Debug, Clone, Copy, PartialEq, Eq, new)]
+pub struct Def {
+    pub kind: DefKind,
+    pub visibility: Visibility,
+}
+
+impl Def {
+    pub fn public(kind: DefKind) -> Self {
+        Self::new(kind, Visibility::Public)
+    }
+}
+
+/// The symbol definition table
+pub type DefTable = NamedIndexed<Ustr, LocalDefId, Def>;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TypeDefSlots(Vec<TypeDefSlot>);
@@ -292,19 +324,30 @@ impl Module {
 
     /// Add a function to this module, returning its ID.
     pub fn add_function(&mut self, name: Ustr, function: ModuleFunction) -> LocalFunctionId {
+        self.add_function_with_visibility(name, function, Visibility::Public)
+    }
+
+    /// Add a function to this module with explicit source visibility.
+    pub fn add_function_with_visibility(
+        &mut self,
+        name: Ustr,
+        function: ModuleFunction,
+        visibility: Visibility,
+    ) -> LocalFunctionId {
         let id = LocalFunctionId::from_index(self.functions.len());
         self.functions.push(function);
-        self.def_table.insert(name, DefKind::Function(id));
+        self.def_table
+            .insert(name, Def::new(DefKind::Function(id), visibility));
         id
     }
 
-    /// Add an unsafe function whose use is controlled by compiler policy.
-    pub(crate) fn add_unsafe_function(
+    /// Add a private unsafe function whose use is controlled by compiler policy.
+    pub(crate) fn add_private_unsafe_function(
         &mut self,
         name: Ustr,
         function: ModuleFunction,
     ) -> LocalFunctionId {
-        let id = self.add_function(name, function);
+        let id = self.add_function_with_visibility(name, function, Visibility::Module);
         self.unsafe_items.insert(name);
         id
     }
@@ -319,7 +362,8 @@ impl Module {
 
     /// Name a previously added anonymous function.
     pub(crate) fn name_function(&mut self, id: LocalFunctionId, new_name: Ustr) {
-        self.def_table.insert(new_name, DefKind::Function(id));
+        self.def_table
+            .insert(new_name, Def::public(DefKind::Function(id)));
     }
 
     /// Add collected functions from a FunctionCollector to this module.
@@ -332,7 +376,8 @@ impl Module {
                 .enumerate()
                 .map(|(i, (name, function))| {
                     let local_id = LocalFunctionId::from_index(start_id + i);
-                    self.def_table.insert(name, DefKind::Function(local_id));
+                    self.def_table
+                        .insert(name, Def::public(DefKind::Function(local_id)));
                     function
                 });
         self.functions.extend(functions);
@@ -373,8 +418,8 @@ impl Module {
     pub fn get_function_name_by_id(&self, id: LocalFunctionId) -> Option<Ustr> {
         self.def_table
             .iter()
-            .find(|(def_kind, _)| {
-                def_kind
+            .find(|(def, _)| {
+                def.kind
                     .as_function()
                     .is_some_and(|function_id| *function_id == id)
             })
@@ -398,9 +443,9 @@ impl Module {
 
     /// Iterate over all named local functions in this module, returning their name and data.
     pub fn iter_named_functions(&self) -> impl Iterator<Item = (Ustr, &ModuleFunction)> {
-        self.def_table.iter().filter_map(|(def_kind, name_opt)| {
+        self.def_table.iter().filter_map(|(def, name_opt)| {
             let name = (*name_opt)?;
-            def_kind.as_function().map(|function_id| {
+            def.kind.as_function().map(|function_id| {
                 let function = &self.functions[function_id.as_index()];
                 (name, function)
             })
@@ -458,10 +503,28 @@ impl Module {
         ty_var_count: u32,
         ty: Type,
     ) -> LocalTypeAliasId {
+        self.add_type_alias_with_param_spans_and_visibility(
+            name,
+            generic_params,
+            ty_var_count,
+            ty,
+            Visibility::Public,
+        )
+    }
+
+    pub(crate) fn add_type_alias_with_param_spans_and_visibility(
+        &mut self,
+        name: Ustr,
+        generic_params: Vec<UstrSpan>,
+        ty_var_count: u32,
+        ty: Type,
+        visibility: Visibility,
+    ) -> LocalTypeAliasId {
         let id = LocalTypeAliasId::from_index(self.type_aliases.type_len());
         self.type_aliases
             .set(name, generic_params, ty_var_count, ty);
-        self.def_table.insert(name, DefKind::TypeAlias(id));
+        self.def_table
+            .insert(name, Def::new(DefKind::TypeAlias(id), visibility));
         id
     }
 
@@ -482,32 +545,25 @@ impl Module {
         self.type_aliases.get_bare_native_by_name(name).cloned()
     }
 
-    /// Add a bare native type alias to this module, name by &str.
-    pub(crate) fn add_bare_native_type_alias_str(
-        &mut self,
-        name: &str,
-        native: Box<dyn crate::types::r#type::BareNativeType>,
-    ) {
-        self.add_bare_native_type_alias(ustr(name), native)
-    }
-
     /// Add an unsafe bare native type alias whose use is controlled by compiler policy.
     pub(crate) fn add_unsafe_bare_native_type_alias_str(
         &mut self,
         name: &str,
         native: Box<dyn crate::types::r#type::BareNativeType>,
     ) {
-        self.add_bare_native_type_alias_str(name, native);
+        self.add_bare_native_type_alias_with_visibility(ustr(name), native, Visibility::Module);
         self.unsafe_items.insert(ustr(name));
     }
 
-    /// Add a bare native type alias to this module.
-    pub(crate) fn add_bare_native_type_alias(
+    fn add_bare_native_type_alias_with_visibility(
         &mut self,
         name: Ustr,
         native: Box<dyn crate::types::r#type::BareNativeType>,
+        visibility: Visibility,
     ) {
         self.type_aliases.set_bare_native(name, native);
+        self.def_table
+            .insert(name, Def::new(DefKind::BareNativeTypeAlias, visibility));
     }
 
     /// Return whether a named item is an unsafe implementation detail.
@@ -524,18 +580,39 @@ impl Module {
         generic_params: Vec<UstrSpan>,
         span: Location,
     ) -> TypeDefId {
+        self.reserve_type_def_with_visibility(name, generic_params, span, Visibility::Public)
+    }
+
+    pub fn reserve_type_def_with_visibility(
+        &mut self,
+        name: Ustr,
+        generic_params: Vec<UstrSpan>,
+        span: Location,
+        visibility: Visibility,
+    ) -> TypeDefId {
         let id = LocalTypeDefId::from_index(self.type_defs.len());
         self.type_defs
             .push(TypeDefSlot::reserved(name, generic_params, span));
-        self.def_table.insert(name, DefKind::TypeDef(id));
+        self.def_table
+            .insert(name, Def::new(DefKind::TypeDef(id), visibility));
         TypeDefId::new(self.module_id(), id)
     }
 
     /// Add a type definition to this module, returning its ID.
     pub fn add_type_def(&mut self, name: Ustr, type_def: TypeDef) -> TypeDefId {
+        self.add_type_def_with_visibility(name, type_def, Visibility::Public)
+    }
+
+    pub fn add_type_def_with_visibility(
+        &mut self,
+        name: Ustr,
+        type_def: TypeDef,
+        visibility: Visibility,
+    ) -> TypeDefId {
         let id = LocalTypeDefId::from_index(self.type_defs.len());
         self.type_defs.push(TypeDefSlot::resolved(type_def));
-        self.def_table.insert(name, DefKind::TypeDef(id));
+        self.def_table
+            .insert(name, Def::new(DefKind::TypeDef(id), visibility));
         TypeDefId::new(self.module_id(), id)
     }
 
@@ -661,7 +738,15 @@ impl Module {
     // Trait definitions and implementations
 
     /// Add a trait definition to this module, returning its ID.
-    pub fn add_trait(&mut self, mut trait_ref: TraitRef) -> LocalTraitId {
+    pub fn add_trait(&mut self, trait_ref: TraitRef) -> LocalTraitId {
+        self.add_trait_with_visibility(trait_ref, Visibility::Public)
+    }
+
+    pub fn add_trait_with_visibility(
+        &mut self,
+        mut trait_ref: TraitRef,
+        visibility: Visibility,
+    ) -> LocalTraitId {
         if let Some(module_id) = trait_ref.module_id() {
             assert_eq!(
                 module_id,
@@ -679,7 +764,8 @@ impl Module {
         self.traits.push(trait_ref.clone());
         // Trait names are module-level symbols, so they must remain unique.
         assert!(self.def_table.get_by_name(&trait_ref.name).is_none());
-        self.def_table.insert(trait_ref.name, DefKind::Trait(id));
+        self.def_table
+            .insert(trait_ref.name, Def::new(DefKind::Trait(id), visibility));
         id
     }
 
@@ -823,6 +909,7 @@ impl Module {
         trait_ref: TraitRef,
         emit_output: EmitTraitOutput,
         associated_const_values: impl Into<Vec<isize>>,
+        public: bool,
         source_span: Option<Location>,
     ) -> LocalImplId {
         let associated_const_values = associated_const_values.into();
@@ -835,7 +922,7 @@ impl Module {
             emit_output.functions,
             dictionary_value,
             dictionary_ty,
-            true,
+            public,
             source_span,
         )
         .with_associated_const_values(associated_const_values);
@@ -905,13 +992,235 @@ impl Module {
         self.def_table.iter_names().copied()
     }
 
+    /// Return an iterator over public own symbols in this module.
+    pub fn public_symbols(&self) -> impl Iterator<Item = Ustr> + use<'_> {
+        self.def_table
+            .iter_named()
+            .filter_map(|(name, def)| def.visibility.is_public().then_some(*name))
+    }
+
+    /// Return the declared visibility for a module-level symbol.
+    pub fn symbol_visibility(&self, name: Ustr) -> Option<Visibility> {
+        self.def_table
+            .get_by_name(&name)
+            .map(|(_, def)| def.visibility)
+    }
+
+    /// Return whether a symbol can be named from the given module.
+    pub fn is_symbol_accessible_from(&self, name: Ustr, from_module: ModuleId) -> bool {
+        self.symbol_visibility(name)
+            .is_some_and(|visibility| self.module_id() == from_module || visibility.is_public())
+    }
+
+    /// Return whether a type definition owned by this module is accessible from the given module.
+    pub fn is_type_def_accessible_from(&self, id: TypeDefId, from_module: ModuleId) -> bool {
+        if id.module != self.module_id() {
+            return false;
+        }
+        self.try_type_def_name(id)
+            .is_some_and(|name| self.is_symbol_accessible_from(name, from_module))
+    }
+
+    /// Return whether all named types in a type are accessible from the given module.
+    pub fn is_type_accessible_from(
+        &self,
+        ty: Type,
+        from_module: ModuleId,
+        others: &Modules,
+    ) -> bool {
+        self.is_type_visible_by(ty, others, |module, type_def| {
+            module.is_type_def_accessible_from(type_def, from_module)
+        })
+    }
+
+    fn module_for<'a>(&'a self, module_id: ModuleId, others: &'a Modules) -> Option<&'a Module> {
+        if module_id == self.module_id() {
+            return Some(self);
+        }
+        others.get(module_id).and_then(|entry| entry.module())
+    }
+
+    fn is_type_visible_by(
+        &self,
+        ty: Type,
+        others: &Modules,
+        is_named_type_visible: impl Fn(&Module, TypeDefId) -> bool + Copy,
+    ) -> bool {
+        use TypeKind::*;
+        match &*ty.data() {
+            Variable(_) | Native(_) | Never => true,
+            Variant(fields) | Record(fields) => fields
+                .iter()
+                .all(|(_, ty)| self.is_type_visible_by(*ty, others, is_named_type_visible)),
+            Tuple(fields) => fields
+                .iter()
+                .all(|ty| self.is_type_visible_by(*ty, others, is_named_type_visible)),
+            Function(function) => {
+                function
+                    .args
+                    .iter()
+                    .all(|arg| self.is_type_visible_by(arg.ty, others, is_named_type_visible))
+                    && self.is_type_visible_by(function.ret, others, is_named_type_visible)
+            }
+            Named(named) => {
+                self.is_type_def_ref_visible_by(named.def, others, is_named_type_visible)
+                    && named
+                        .params
+                        .iter()
+                        .all(|ty| self.is_type_visible_by(*ty, others, is_named_type_visible))
+            }
+        }
+    }
+
+    fn is_type_def_ref_visible_by(
+        &self,
+        id: TypeDefId,
+        others: &Modules,
+        is_named_type_visible: impl Fn(&Module, TypeDefId) -> bool + Copy,
+    ) -> bool {
+        self.module_for(id.module, others)
+            .is_some_and(|module| is_named_type_visible(module, id))
+    }
+
+    /// Return whether a trait can be named from the given module.
+    pub fn is_trait_accessible_from(
+        &self,
+        trait_ref: &TraitRef,
+        from_module: ModuleId,
+        others: &Modules,
+    ) -> bool {
+        self.is_trait_visible_by(trait_ref, others, |module, trait_name| {
+            module.is_symbol_accessible_from(trait_name, from_module)
+        })
+    }
+
+    /// Return whether all named items in a trait constraint are accessible from the given module.
+    pub fn is_trait_constraint_accessible_from(
+        &self,
+        constraint: &PubTypeConstraint,
+        from_module: ModuleId,
+        others: &Modules,
+    ) -> bool {
+        self.is_trait_constraint_visible_by(
+            constraint,
+            others,
+            |module, trait_name| module.is_symbol_accessible_from(trait_name, from_module),
+            |module, type_def| module.is_type_def_accessible_from(type_def, from_module),
+        )
+    }
+
+    fn is_type_public(&self, ty: Type, others: &Modules) -> bool {
+        self.is_type_visible_by(ty, others, Module::is_type_def_public)
+    }
+
+    fn is_type_def_public(&self, id: TypeDefId) -> bool {
+        self.try_type_def_name(id)
+            .is_some_and(|name| self.is_symbol_public(name))
+    }
+
+    fn is_symbol_public(&self, name: Ustr) -> bool {
+        self.symbol_visibility(name)
+            .is_some_and(Visibility::is_public)
+    }
+
+    fn is_trait_public(&self, trait_ref: &TraitRef, others: &Modules) -> bool {
+        self.is_trait_visible_by(trait_ref, others, Module::is_symbol_public)
+    }
+
+    fn is_trait_visible_by(
+        &self,
+        trait_ref: &TraitRef,
+        others: &Modules,
+        is_named_trait_visible: impl Fn(&Module, Ustr) -> bool + Copy,
+    ) -> bool {
+        trait_ref
+            .module_id()
+            .and_then(|module_id| self.module_for(module_id, others))
+            .is_some_and(|module| is_named_trait_visible(module, trait_ref.name))
+    }
+
+    fn is_trait_constraint_public(&self, constraint: &PubTypeConstraint, others: &Modules) -> bool {
+        self.is_trait_constraint_visible_by(
+            constraint,
+            others,
+            Module::is_symbol_public,
+            Module::is_type_def_public,
+        )
+    }
+
+    fn is_trait_constraint_visible_by(
+        &self,
+        constraint: &PubTypeConstraint,
+        others: &Modules,
+        is_named_trait_visible: impl Fn(&Module, Ustr) -> bool + Copy,
+        is_named_type_visible: impl Fn(&Module, TypeDefId) -> bool + Copy,
+    ) -> bool {
+        match constraint {
+            PubTypeConstraint::TupleAtIndexIs {
+                tuple_ty,
+                element_ty,
+                ..
+            } => {
+                self.is_type_visible_by(*tuple_ty, others, is_named_type_visible)
+                    && self.is_type_visible_by(*element_ty, others, is_named_type_visible)
+            }
+            PubTypeConstraint::RecordFieldIs {
+                record_ty,
+                element_ty,
+                ..
+            } => {
+                self.is_type_visible_by(*record_ty, others, is_named_type_visible)
+                    && self.is_type_visible_by(*element_ty, others, is_named_type_visible)
+            }
+            PubTypeConstraint::TypeHasVariant {
+                variant_ty,
+                payload_ty,
+                ..
+            } => {
+                self.is_type_visible_by(*variant_ty, others, is_named_type_visible)
+                    && self.is_type_visible_by(*payload_ty, others, is_named_type_visible)
+            }
+            PubTypeConstraint::HaveTrait {
+                trait_ref,
+                input_tys,
+                output_tys,
+                ..
+            } => {
+                self.is_trait_visible_by(trait_ref, others, is_named_trait_visible)
+                    && input_tys
+                        .iter()
+                        .chain(output_tys)
+                        .all(|ty| self.is_type_visible_by(*ty, others, is_named_type_visible))
+            }
+        }
+    }
+
+    /// Return whether a trait implementation can be exported outside this module.
+    pub fn is_trait_impl_exportable(
+        &self,
+        trait_ref: &TraitRef,
+        input_tys: &[Type],
+        output_tys: &[Type],
+        constraints: &[PubTypeConstraint],
+        others: &Modules,
+    ) -> bool {
+        self.is_trait_public(trait_ref, others)
+            && input_tys
+                .iter()
+                .chain(output_tys)
+                .all(|ty| self.is_type_public(*ty, others))
+            && constraints
+                .iter()
+                .all(|constraint| self.is_trait_constraint_public(constraint, others))
+    }
+
     /// Return all own definitions in this module.
     pub fn iter_definitions(
         &self,
     ) -> impl Iterator<Item = (LocalDefId, Option<Ustr>, DefKind)> + '_ {
         self.def_table
             .enumerates()
-            .map(|(id, kind, name)| (id, *name, *kind))
+            .map(|(id, def, name)| (id, *name, def.kind))
     }
 
     /// Return the type for the source pos, if any.
@@ -930,9 +1239,7 @@ impl Module {
 
     /// Look-up a definition by name in this module.
     pub fn get_definition(&self, name: Ustr) -> Option<DefKind> {
-        self.def_table
-            .get_by_name(&name)
-            .map(|(_, def_kind)| *def_kind)
+        self.def_table.get_by_name(&name).map(|(_, def)| def.kind)
     }
 
     /// Look-up a member by name in this module or in any of the modules this module uses.
@@ -944,7 +1251,23 @@ impl Module {
         others: &'a Modules,
         getter: &impl Fn(&'a str, &'a Self) -> Option<T>,
     ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
-        if let Some(t) = getter(name, self) {
+        self.find_member(name, others, &|name, module, require_accessible| {
+            if require_accessible && !module.is_symbol_accessible_from(ustr(name), self.module_id())
+            {
+                return None;
+            }
+            getter(name, module)
+        })
+    }
+
+    /// Look up an unqualified local or imported member, letting the getter enforce item visibility.
+    pub(crate) fn find_member<'a, T>(
+        &'a self,
+        name: &'a str,
+        others: &'a Modules,
+        getter: &impl Fn(&'a str, &'a Self, bool) -> Option<T>,
+    ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
+        if let Some(t) = getter(name, self, false) {
             return Ok(Some((None, t)));
         }
 
@@ -952,7 +1275,7 @@ impl Module {
         if let Some(use_data) = self.uses.explicits.get(&u_name)
             && let Some((module_id, entry)) = others.get_by_name(&use_data.module)
             && let Some(module) = entry.module()
-            && let Some(t) = getter(name, module)
+            && let Some(t) = getter(name, module, true)
         {
             return Ok(Some((Some(module_id), t)));
         }
@@ -961,7 +1284,7 @@ impl Module {
         for wildcard_use in &self.uses.wildcards {
             if let Some((module_id, entry)) = others.get_by_name(&wildcard_use.module)
                 && let Some(module) = entry.module()
-                && let Some(t) = getter(name, module)
+                && let Some(t) = getter(name, module, true)
             {
                 matches.push((wildcard_use, module_id, t));
             }
@@ -1030,8 +1353,8 @@ impl Module {
             let named_count = self
                 .def_table
                 .iter()
-                .filter(|(kind, name)| {
-                    if !kind.is_function() {
+                .filter(|(def, name)| {
+                    if !def.kind.is_function() {
                         false
                     } else {
                         name.is_some_and(|name| self.is_non_trait_local_function(name))
@@ -1133,12 +1456,39 @@ impl Module {
         TraitImpls::dictionary_ty(tys, associated_const_count)
     }
 
+    fn should_show_symbol(&self, name: Ustr, show_private_items: bool) -> bool {
+        show_private_items
+            || self
+                .symbol_visibility(name)
+                .is_some_and(Visibility::is_public)
+    }
+
+    pub fn is_generated_lambda_name(name: Ustr) -> bool {
+        name.as_str().starts_with(GENERATED_LAMBDA_PREFIX)
+    }
+
+    fn should_show_named_function(
+        &self,
+        name: Ustr,
+        show_all_functions: bool,
+        show_private_items: bool,
+    ) -> bool {
+        if !self.should_show_symbol(name, show_private_items) {
+            return false;
+        }
+        if Self::is_generated_lambda_name(name) {
+            return show_all_functions;
+        }
+        show_all_functions || self.is_non_trait_local_function(name)
+    }
+
     fn format_with_modules(
         &self,
         f: &mut fmt::Formatter,
         modules: &Modules,
         show_details: bool,
         show_all_functions: bool,
+        show_private_items: bool,
     ) -> fmt::Result {
         let env = ModuleEnv::new(self, modules);
         if !self.uses.explicits.is_empty() {
@@ -1163,9 +1513,14 @@ impl Module {
             }
             writeln!(f, "\n")?;
         }
-        if self.type_aliases.type_len() > 0 {
-            writeln!(f, "Type aliases ({}):\n", self.type_aliases.type_len())?;
-            for alias in self.type_aliases.type_entries() {
+        let type_aliases = self
+            .type_aliases
+            .type_entries()
+            .filter(|alias| self.should_show_symbol(alias.name, show_private_items))
+            .collect::<Vec<_>>();
+        if !type_aliases.is_empty() {
+            writeln!(f, "Type aliases ({}):\n", type_aliases.len())?;
+            for alias in type_aliases {
                 write!(f, "{}", alias.name)?;
                 let mut ty_var_names = FxHashMap::default();
                 if !alias.generic_params.is_empty() {
@@ -1186,50 +1541,79 @@ impl Module {
             }
             writeln!(f, "\n")?;
         }
-        if self.type_aliases.bare_native_len() > 0 {
+        let bare_native_aliases = self
+            .type_aliases
+            .bare_native_iter()
+            .filter(|(name, _)| self.should_show_symbol(*name, show_private_items))
+            .collect::<Vec<_>>();
+        if !bare_native_aliases.is_empty() {
             writeln!(
                 f,
                 "Bare native type aliases ({}):\n",
-                self.type_aliases.bare_native_len()
+                bare_native_aliases.len()
             )?;
-            for (name, native) in self.type_aliases.bare_native_iter() {
+            for (name, native) in bare_native_aliases {
                 writeln!(f, "{}: {}", name, native.type_name())?;
             }
             writeln!(f, "\n")?;
         }
-        if !self.type_defs.is_empty() {
-            writeln!(f, "New types ({}):\n", self.type_defs.len())?;
-            for decl in self.type_defs.iter() {
+        let type_defs = self
+            .type_defs
+            .iter()
+            .filter(|decl| self.should_show_symbol(decl.name(), show_private_items))
+            .collect::<Vec<_>>();
+        if !type_defs.is_empty() {
+            writeln!(f, "New types ({}):\n", type_defs.len())?;
+            for decl in type_defs {
                 decl.def().format_details(&env, f)?;
                 writeln!(f)?;
             }
             writeln!(f, "\n")?;
         }
-        if !self.traits.is_empty() {
-            writeln!(f, "Traits ({}):\n", self.traits.len())?;
-            for trait_ref in self.traits.iter() {
+        let traits = self
+            .traits
+            .iter()
+            .filter(|trait_ref| self.should_show_symbol(trait_ref.name, show_private_items))
+            .collect::<Vec<_>>();
+        if !traits.is_empty() {
+            writeln!(f, "Traits ({}):\n", traits.len())?;
+            for trait_ref in traits {
                 writeln!(f, "{}", trait_ref.format_with(&env))?;
             }
             writeln!(f)?;
         }
-        if !self.impls.is_empty() {
-            writeln!(f, "Trait implementations ({}):\n", self.impls.len())?;
+        let shown_impl_count = self
+            .impls
+            .data
+            .iter()
+            .filter(|imp| show_private_items || imp.public)
+            .count();
+        if shown_impl_count > 0 {
+            writeln!(f, "Trait implementations ({}):\n", shown_impl_count)?;
             let level = if show_details {
                 DisplayFilter::MethodCode
             } else {
                 DisplayFilter::MethodDefinitions
             };
-            let filter = |_: &TraitRef, _: LocalImplId| level;
+            let filter = |_: &TraitRef, id: LocalImplId| {
+                if show_private_items || self.impls.get_impl_by_local_id(id).public {
+                    level
+                } else {
+                    DisplayFilter::Hide
+                }
+            };
             self.impls.fmt_with_filter(f, &env, filter)?;
         }
         if !self.functions.is_empty() {
             let named_count = self
                 .iter_named_functions()
-                .filter(|&(name, _)| self.is_non_trait_local_function(name))
+                .filter(|&(name, _)| {
+                    self.should_show_named_function(name, show_all_functions, show_private_items)
+                })
                 .count();
             writeln!(f, "Non-trait impl functions ({}):\n", named_count)?;
             for (i, (name, function)) in self.iter_named_functions().enumerate() {
-                if !show_all_functions && !self.is_non_trait_local_function(name) {
+                if !self.should_show_named_function(name, show_all_functions, show_private_items) {
                     continue;
                 }
                 function
@@ -1241,9 +1625,44 @@ impl Module {
                     writeln!(f)?;
                 }
             }
-            let unnamed_count = self.functions.len() - named_count;
-            if !show_all_functions && unnamed_count > 0 {
-                writeln!(f, "\nNot showing {} trait impl functions.", unnamed_count)?;
+            let mut hidden_trait_functions = 0;
+            let mut hidden_lambdas = 0;
+            let mut hidden_private_functions = 0;
+            let mut hidden_anonymous_functions = self.functions.len();
+            for (name, _) in self.iter_named_functions() {
+                hidden_anonymous_functions -= 1;
+                if self.should_show_named_function(name, show_all_functions, show_private_items) {
+                    continue;
+                }
+                if Self::is_generated_lambda_name(name) {
+                    hidden_lambdas += 1;
+                } else if !self.is_non_trait_local_function(name) {
+                    hidden_trait_functions += 1;
+                } else if !self.should_show_symbol(name, show_private_items) {
+                    hidden_private_functions += 1;
+                }
+            }
+            let hidden_private_items = if show_private_items {
+                0
+            } else {
+                self.def_table
+                    .iter_named()
+                    .filter(|(_, def)| !def.kind.is_function() && !def.visibility.is_public())
+                    .count()
+            };
+            let hidden = [
+                (hidden_trait_functions, "trait impl functions"),
+                (hidden_lambdas, "generated lambda functions"),
+                (hidden_private_functions, "private functions"),
+                (hidden_private_items, "private items"),
+                (hidden_anonymous_functions, "anonymous functions"),
+            ]
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .map(|(count, label)| format!("{count} {label}"))
+            .join(", ");
+            if !hidden.is_empty() {
+                writeln!(f, "\nNot showing {hidden}.")?;
             }
         }
         Ok(())
@@ -1252,15 +1671,35 @@ impl Module {
 
 impl FormatWith<Modules> for Module {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, data: &Modules) -> fmt::Result {
-        self.format_with_modules(f, data, false, false)
+        self.format_with_modules(f, data, false, false, true)
     }
 }
 
-#[derive(new)]
 pub struct ShowModuleWithOptions<'a> {
     pub modules: &'a Modules,
     pub show_details: bool,
     pub show_all_functions: bool,
+    pub show_private_items: bool,
+}
+
+impl<'a> ShowModuleWithOptions<'a> {
+    pub fn new(modules: &'a Modules, show_details: bool, show_all_functions: bool) -> Self {
+        Self {
+            modules,
+            show_details,
+            show_all_functions,
+            show_private_items: show_details,
+        }
+    }
+
+    pub fn public(modules: &'a Modules) -> Self {
+        Self {
+            modules,
+            show_details: false,
+            show_all_functions: false,
+            show_private_items: false,
+        }
+    }
 }
 
 impl FormatWith<ShowModuleWithOptions<'_>> for Module {
@@ -1270,6 +1709,7 @@ impl FormatWith<ShowModuleWithOptions<'_>> for Module {
             options.modules,
             options.show_details,
             options.show_all_functions,
+            options.show_private_items,
         )
     }
 }

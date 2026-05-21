@@ -2883,12 +2883,14 @@ fn imported_type_def_diagnostics_use_module_qualified_names() {
         .try_compile_module(
             "A",
             indoc! { r#"
-                struct S(int)
-                struct Person { name: string }
+                pub struct S(int)
+                pub struct Person { name: string }
             "# },
         )
         .unwrap();
-    session.try_compile_module("B", "struct S(int)").unwrap();
+    session
+        .try_compile_module("B", "pub struct S(int)")
+        .unwrap();
 
     match session
         .try_compile_module(

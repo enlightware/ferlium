@@ -1,4 +1,4 @@
-struct Account {
+pub struct Account {
 	name: string,
 	birthdate: int,
 	amount: int,
@@ -36,7 +36,7 @@ fn most_active(accounts) {
 	name
 }
 
-fn test_data() {
+pub fn test_data() {
 	[
 		Account {
 			name: "Bob",
@@ -49,19 +49,19 @@ fn test_data() {
 				{ type: Credit, amount: 7 },
 			]
 		},
-        Account {
+		Account {
 			name: "Eve",
 			birthdate: 1984,
 			amount: 1,
 			transactions: [
 				{ type: Credit, amount: 15 },
 				{ type: Debit, amount: 2 },
-                { type: Debit, amount: 3 },
-                { type: Debit, amount: 4 },
-                { type: Debit, amount: 5 },
+				{ type: Debit, amount: 3 },
+				{ type: Debit, amount: 4 },
+				{ type: Debit, amount: 5 },
 			]
 		},
-        Account {
+		Account {
 			name: "Alice",
 			birthdate: 1982,
 			amount: 2,
@@ -73,26 +73,26 @@ fn test_data() {
 	]
 }
 
-fn richest_person() {
+pub fn richest_person() {
 	richest(test_data())
 }
 
-fn most_active_person() {
+pub fn most_active_person() {
 	most_active(test_data())
 }
 
-fn assert_consistency() {
-    for account in test_data() {
-        let mut balance = 0;
-        for transaction in account.transactions {
-            match transaction.type {
-                Credit => balance = balance + transaction.amount,
-                Debit => balance = balance - transaction.amount,
-            }
-        };
-        if balance != account.amount {
-            let name = account.name;
-            panic(f"Inconsistent account data for {name}")
-        }
-    };
+pub fn assert_consistency() {
+	for account in test_data() {
+		let mut balance = 0;
+		for transaction in account.transactions {
+			match transaction.type {
+				Credit => balance = balance + transaction.amount,
+				Debit => balance = balance - transaction.amount,
+			}
+		};
+		if balance != account.amount {
+			let name = account.name;
+			panic(f"Inconsistent account data for {name}")
+		}
+	};
 }

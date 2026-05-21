@@ -1,10 +1,10 @@
 /// Returns `true` if `left` is NOT equal to `right`, otherwise `false`.
-fn ne(left, right) {
+pub fn ne(left, right) {
 	not eq(left, right)
 }
 
 /// Tests less than (for `left` and `right`) and is used by the < operator.
-fn lt(left, right) {
+pub fn lt(left, right) {
 	match cmp(left, right) {
 		Less => true,
 		_ => false,
@@ -12,7 +12,7 @@ fn lt(left, right) {
 }
 
 /// Tests less than or equal to (for `left` and `right`) and is used by the <= operator.
-fn le(left, right) {
+pub fn le(left, right) {
 	match cmp(left, right) {
 		Greater => false,
 		_ => true,
@@ -20,7 +20,7 @@ fn le(left, right) {
 }
 
 /// Tests greater than (for `left` and `right`) and is used by the > operator.
-fn gt(left, right) {
+pub fn gt(left, right) {
 	match cmp(left, right) {
 		Greater => true,
 		_ => false,
@@ -28,7 +28,7 @@ fn gt(left, right) {
 }
 
 /// Tests greater than or equal to (for `left` and `right`) and is used by the >= operator.
-fn ge(left, right) {
+pub fn ge(left, right) {
 	match cmp(left, right) {
 		Less => false,
 		_ => true,
@@ -36,7 +36,7 @@ fn ge(left, right) {
 }
 
 /// Returns the minimum of two values.
-fn min(left, right) {
+pub fn min(left, right) {
 	match cmp(left, right) {
 		Less => left,
 		_ => right,
@@ -44,7 +44,7 @@ fn min(left, right) {
 }
 
 /// Returns the maximum of two values.
-fn max(left, right) {
+pub fn max(left, right) {
 	match cmp(left, right) {
 		Greater => left,
 		_ => right,

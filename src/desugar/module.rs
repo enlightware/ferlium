@@ -3,6 +3,7 @@ use crate::desugar::types::{
     RecursiveAliasRef, RecursiveTypeBuilder, desugar_type_constraints, extend_generic_ty_params,
 };
 use crate::hir::function::FunctionDefinition;
+use crate::module::Visibility;
 use crate::types::r#trait::{Trait, TraitMethodSpans, TraitRef, TraitSpans, TraitValidationError};
 
 use super::expr::desugar;
@@ -10,28 +11,28 @@ use super::*;
 
 /// A reference to name of a type, either an alias or a definition, in parsed AST.
 enum NamedTypeData {
-    Alias(UstrSpan, Vec<UstrSpan>, PTypeSpan),
+    Alias(PTypeAlias),
     Def(PTypeDef),
 }
 impl NamedTypeData {
     fn name(&self) -> Ustr {
         use NamedTypeData::*;
         match self {
-            Alias(name, _, _) => name.0,
+            Alias(alias) => alias.name.0,
             Def(def) => def.name.0,
         }
     }
     fn name_span(&self) -> Location {
         use NamedTypeData::*;
         match self {
-            Alias(name, _, _) => name.1,
+            Alias(alias) => alias.name.1,
             Def(def) => def.name.1,
         }
     }
     fn generic_params(&self) -> &[UstrSpan] {
         use NamedTypeData::*;
         match self {
-            Alias(_, generic_params, _) => generic_params,
+            Alias(alias) => &alias.generic_params,
             Def(def) => &def.generic_params,
         }
     }
@@ -40,8 +41,8 @@ impl NamedTypeData {
     fn cycle_info(&self, ty_names: &FxHashMap<Ustr, usize>) -> TypeCycleInfo {
         let mut info = TypeCycleInfo::default();
         match self {
-            NamedTypeData::Alias(_, _, alias) => {
-                info.collect_from_type(&alias.0, ty_names, false);
+            NamedTypeData::Alias(alias) => {
+                info.collect_from_type(&alias.ty.0, ty_names, false);
             }
             NamedTypeData::Def(def) => {
                 // Type definitions depend on both their shape and their where-clause
@@ -69,16 +70,14 @@ impl NamedTypeData {
         ty_refs: &[NamedTypeData],
     ) -> Result<(), InternalCompilationError> {
         match self {
-            NamedTypeData::Alias(_, generic_params, alias) => {
-                validate_regular_generic_refs_in_type(
-                    &alias.0,
-                    alias.1,
-                    generic_params,
-                    scc_set,
-                    ty_names,
-                    ty_refs,
-                )
-            }
+            NamedTypeData::Alias(alias) => validate_regular_generic_refs_in_type(
+                &alias.ty.0,
+                alias.ty.1,
+                &alias.generic_params,
+                scc_set,
+                ty_names,
+                ty_refs,
+            ),
             NamedTypeData::Def(def) => {
                 validate_regular_generic_refs_in_type(
                     &def.shape,
@@ -125,25 +124,32 @@ impl NamedTypeData {
         // guarantees that every local dependency has already been inserted into the
         // output module.
         Ok(match self {
-            NamedTypeData::Alias(name, generic_params, alias) => {
+            NamedTypeData::Alias(alias) => {
                 let generic_ty_params = extend_generic_ty_params(
                     &GenericTyParams::default(),
-                    generic_params,
-                    GenericParamsOwner::TypeAlias { name: name.0 },
+                    &alias.generic_params,
+                    GenericParamsOwner::TypeAlias { name: alias.name.0 },
                 )?;
-                let ty_var_count = generic_params.len() as u32;
-                let ty = alias.0.desugar_with_ty_params(
-                    alias.1,
+                let ty_var_count = alias.generic_params.len() as u32;
+                let ty = alias.ty.0.desugar_with_ty_params(
+                    alias.ty.1,
                     false,
                     env,
                     &generic_ty_params,
                     modules_used,
                 )?;
-                DesugaredNamedType::Alias(*name, generic_params.clone(), ty_var_count, ty)
+                DesugaredNamedType::Alias(DesugaredTypeAlias {
+                    visibility: alias.visibility,
+                    name: alias.name,
+                    generic_params: alias.generic_params.clone(),
+                    ty_var_count,
+                    ty,
+                })
             }
-            NamedTypeData::Def(def) => {
-                DesugaredNamedType::Def(def.name.0, def.desugar(env, modules_used)?)
-            }
+            NamedTypeData::Def(def) => DesugaredNamedType::Def(
+                (def.name.0, def.visibility),
+                def.desugar(env, modules_used)?,
+            ),
         })
     }
 }
@@ -508,16 +514,17 @@ impl NamedTypeGraph {
                 ty_refs[scc[0]].desugar_acyclic(&env, &mut modules_used)?
             };
             match desugared {
-                DesugaredNamedType::Alias(name, generic_params, ty_var_count, ty) => {
-                    output.add_type_alias_with_param_spans(
-                        name.0,
-                        generic_params,
-                        ty_var_count,
-                        ty,
+                DesugaredNamedType::Alias(alias) => {
+                    output.add_type_alias_with_param_spans_and_visibility(
+                        alias.name.0,
+                        alias.generic_params,
+                        alias.ty_var_count,
+                        alias.ty,
+                        alias.visibility,
                     );
                 }
                 DesugaredNamedType::Def(name, type_def) => {
-                    output.add_type_def(name, type_def);
+                    output.add_type_def_with_visibility(name.0, type_def, name.1);
                 }
             }
         }
@@ -526,7 +533,7 @@ impl NamedTypeGraph {
 }
 
 fn build_named_type_graph(
-    type_aliases: Vec<ast::TypeAlias>,
+    type_aliases: Vec<PTypeAlias>,
     type_defs: Vec<PTypeDef>,
 ) -> Result<NamedTypeGraph, InternalCompilationError> {
     // First gather all local aliases and type definitions into a single indexed
@@ -535,12 +542,7 @@ fn build_named_type_graph(
     // partially built output module.
     let (ty_names, ty_refs): (FxHashMap<_, _>, Vec<_>) = type_aliases
         .into_iter()
-        .map(|alias| {
-            (
-                alias.name.0,
-                NamedTypeData::Alias(alias.name, alias.generic_params, alias.ty),
-            )
-        })
+        .map(|alias| (alias.name.0, NamedTypeData::Alias(alias)))
         .chain(
             type_defs
                 .into_iter()
@@ -586,7 +588,7 @@ fn build_recursive_alias_refs(
 ) -> FxHashMap<Ustr, RecursiveAliasRef> {
     scc.iter()
         .filter_map(|&index| match &ty_refs[index] {
-            NamedTypeData::Alias(name, generic_params, _) => Some((*name, generic_params)),
+            NamedTypeData::Alias(alias) => Some((alias.name, &alias.generic_params)),
             NamedTypeData::Def(_) => None,
         })
         .enumerate()
@@ -613,10 +615,14 @@ fn predeclare_recursive_type_defs(
 ) -> FxHashMap<Ustr, TypeDefId> {
     scc.iter()
         .filter_map(|&index| match &ty_refs[index] {
-            NamedTypeData::Alias(..) => None,
+            NamedTypeData::Alias(_) => None,
             NamedTypeData::Def(def) => {
-                let type_def =
-                    output.reserve_type_def(def.name.0, def.generic_params.clone(), def.span);
+                let type_def = output.reserve_type_def_with_visibility(
+                    def.name.0,
+                    def.generic_params.clone(),
+                    def.span,
+                    def.visibility,
+                );
                 Some((def.name.0, type_def))
             }
         })
@@ -631,35 +637,43 @@ fn desugar_recursive_aliases_in_scc(
     modules_used: &mut FxHashSet<ModuleId>,
     alias_refs: &FxHashMap<Ustr, RecursiveAliasRef>,
     type_defs: &FxHashMap<Ustr, TypeDefId>,
-) -> Result<Vec<(UstrSpan, Vec<UstrSpan>, Type)>, InternalCompilationError> {
+) -> Result<Vec<DesugaredTypeAlias>, InternalCompilationError> {
     let mut root_tys = Vec::with_capacity(alias_refs.len());
     let mut root_entries = Vec::with_capacity(alias_refs.len());
     let mut builder =
         RecursiveTypeBuilder::new(alias_refs.len(), env, modules_used, alias_refs, type_defs);
     for &index in scc {
-        let NamedTypeData::Alias(name, generic_params, alias) = &ty_refs[index] else {
+        let NamedTypeData::Alias(alias) = &ty_refs[index] else {
             continue;
         };
-        let alias_ref = &alias_refs[&name.0];
+        let alias_ref = &alias_refs[&alias.name.0];
         // Each alias root gets its own generic parameter environment. Recursive
         // generic references are accepted only when they use that alias's own
         // parameters unchanged; non-regular recursive generic shapes are rejected
         // by `RecursiveTypeBuilder`.
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
-            generic_params,
-            GenericParamsOwner::TypeAlias { name: name.0 },
+            &alias.generic_params,
+            GenericParamsOwner::TypeAlias { name: alias.name.0 },
         )?;
         builder.set_generic_ty_params(generic_ty_params);
-        let ty = builder.desugar_root(alias_ref.index, &alias.0, alias.1)?;
+        let ty = builder.desugar_root(alias_ref.index, &alias.ty.0, alias.ty.1)?;
         root_tys.push(ty);
-        root_entries.push((*name, generic_params.clone()));
+        root_entries.push((alias.visibility, alias.name, alias.generic_params.clone()));
     }
     let root_tys = builder.finish(&root_tys);
     Ok(root_entries
         .into_iter()
         .zip(root_tys)
-        .map(|((name, generic_params), ty)| (name, generic_params, ty))
+        .map(
+            |((visibility, name, generic_params), ty)| DesugaredTypeAlias {
+                visibility,
+                name,
+                ty_var_count: generic_params.len() as u32,
+                generic_params,
+                ty,
+            },
+        )
         .collect())
 }
 
@@ -725,9 +739,14 @@ fn desugar_recursive_named_type_scc(
                 &type_defs,
             )?
         };
-        for (name, generic_params, ty) in entries {
-            let ty_var_count = generic_params.len() as u32;
-            output.add_type_alias_with_param_spans(name.0, generic_params, ty_var_count, ty);
+        for alias in entries {
+            output.add_type_alias_with_param_spans_and_visibility(
+                alias.name.0,
+                alias.generic_params,
+                alias.ty_var_count,
+                alias.ty,
+                alias.visibility,
+            );
         }
     }
 
@@ -741,9 +760,17 @@ fn desugar_recursive_named_type_scc(
     Ok(())
 }
 
+struct DesugaredTypeAlias {
+    visibility: Visibility,
+    name: UstrSpan,
+    generic_params: Vec<UstrSpan>,
+    ty_var_count: u32,
+    ty: Type,
+}
+
 enum DesugaredNamedType {
-    Alias(UstrSpan, Vec<UstrSpan>, u32, Type),
-    Def(Ustr, HirTypeDef),
+    Alias(DesugaredTypeAlias),
+    Def((Ustr, Visibility), HirTypeDef),
 }
 
 impl PModule {
@@ -775,7 +802,9 @@ impl PModule {
         let mut env = ModuleEnv::new(output, others);
 
         for trait_def in traits {
-            output.add_trait(trait_def.desugar(&env, &mut modules_used)?);
+            let visibility = trait_def.visibility;
+            output
+                .add_trait_with_visibility(trait_def.desugar(&env, &mut modules_used)?, visibility);
             env = ModuleEnv::new(output, others);
         }
 
@@ -1058,6 +1087,7 @@ impl PModuleFunction {
         let where_clause =
             desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
         let function = ModuleFunction {
+            visibility: self.visibility,
             name: self.name,
             generic_params: self.generic_params,
             args,

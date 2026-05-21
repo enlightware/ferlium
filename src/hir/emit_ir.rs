@@ -42,9 +42,9 @@ use crate::{
     hir::{self, NodeArena},
     internal_compilation_error,
     module::{
-        ConcreteTraitImplKey, LocalAssignmentMode, LocalDecl, LocalDeclId, LocalFunctionId,
-        LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ModuleId, TraitImpl,
-        build_dictionary_value, id::Id,
+        ConcreteTraitImplKey, GENERATED_LAMBDA_PREFIX, LocalAssignmentMode, LocalDecl, LocalDeclId,
+        LocalFunctionId, LocalImplId, Module, ModuleEnv, ModuleFunction, ModuleFunctionSpans,
+        ModuleId, TraitImpl, build_dictionary_value, id::Id,
     },
     std::{
         STD_MODULE_ID, new_module_using_std,
@@ -288,6 +288,8 @@ pub fn emit_module(
                 method_ids.push(output.add_function_anonymous(module_fn));
             }
             // Build the trait impl and fill it with placeholders.
+            let public =
+                output.is_trait_impl_exportable(&trait_ref, &input_tys, &output_tys, &[], others);
             let associated_const_values = {
                 let solver = trait_solver_from_module!(output, others);
                 emitted_associated_const_values(&trait_ref, &input_tys, 0, imp.span, &solver)?
@@ -300,7 +302,7 @@ pub fn emit_module(
                 method_ids.clone(),
                 dictionary_value,
                 dictionary_ty,
-                true,
+                public,
                 Some(imp.span),
             )
             .with_associated_const_values(associated_const_values);
@@ -447,10 +449,18 @@ pub fn emit_module(
                 imp.span,
                 &trait_solver_from_module!(output, others),
             )?;
+            let public = output.is_trait_impl_exportable(
+                &trait_ref,
+                &emit_output.input_tys,
+                &emit_output.output_tys,
+                &emit_output.constraints,
+                others,
+            );
             output.add_emitted_impl(
                 trait_ref,
                 emit_output,
                 associated_const_values,
+                public,
                 Some(imp.span),
             )
         };
@@ -685,6 +695,7 @@ where
     let mut function_annotation_ty_substs = Vec::new();
     let mut function_explicit_root_tys = Vec::new();
     for ast::ModuleFunction {
+        visibility,
         name,
         generic_params,
         args,
@@ -837,9 +848,9 @@ where
         } else if trait_ctx.is_some() {
             output.add_function_anonymous(descr)
         } else if returns_place {
-            output.add_unsafe_function(name.0, descr)
+            output.add_private_unsafe_function(name.0, descr)
         } else {
-            output.add_function(name.0, descr)
+            output.add_function_with_visibility(name.0, descr, *visibility)
         };
         local_fns.push(id);
         function_annotation_ty_substs.push(annotation_ty_subst);
@@ -916,7 +927,7 @@ where
             let lambda_id = output.add_function_anonymous(function);
             output.name_function(
                 lambda_id,
-                format!("$lambda${}", lambda_id.as_index()).into(),
+                format!("{GENERATED_LAMBDA_PREFIX}{}", lambda_id.as_index()).into(),
             );
             associated_lambdas.entry(*id).or_default().push(lambda_id);
         });
@@ -1534,7 +1545,10 @@ fn emit_expr_unsafe_inner(
         .drain(..)
         .map(|function| {
             let id = module.add_function_anonymous(function);
-            module.name_function(id, format!("$lambda${}", id.as_index()).into());
+            module.name_function(
+                id,
+                format!("{GENERATED_LAMBDA_PREFIX}{}", id.as_index()).into(),
+            );
             id
         })
         .collect::<Vec<_>>();

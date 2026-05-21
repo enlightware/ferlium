@@ -755,7 +755,7 @@ fn explicit_concrete_value_impl_suppresses_auto_blanket_impl() {
 fn value_impl_for_foreign_named_adt_is_rejected() {
     let mut session = TestSession::new();
     session
-        .try_compile_module("a", "struct Foreign(int)")
+        .try_compile_module("a", "pub struct Foreign(int)")
         .unwrap();
     let err = session
         .try_compile_module(

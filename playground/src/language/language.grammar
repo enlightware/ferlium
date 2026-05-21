@@ -51,7 +51,7 @@ modelItem {
 }
 
 TraitDef {
-    kw<'trait'> Identifier traitTypeParams whereClause? '{' TraitMethod* '}'
+    visibility kw<'trait'> Identifier traitTypeParams whereClause? '{' TraitMethod* '}'
 }
 
 traitTypeParams {
@@ -63,7 +63,7 @@ traitOutputParams {
 }
 
 Function {
-    Attribute* kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
+    Attribute* visibility kw<'fn'> Identifier GenericParams? '(' identifierWithOptTypeArgs ')' fnRet? whereClause? Block
 }
 
 TraitMethod {
@@ -87,7 +87,11 @@ TypeDef {
 }
 
 TypeAliasDef {
-    kw<'type'> TypeName { Identifier } GenericParams? '=' AliasType ';'
+    visibility kw<'type'> TypeName { Identifier } GenericParams? '=' AliasType ';'
+}
+
+visibility {
+    kw<'pub'>?
 }
 
 UseDecl {
@@ -99,7 +103,7 @@ UseTree {
 }
 
 StructDef {
-    Attribute* kw<'struct'> TypeName { Identifier } GenericParams? whereClause? structBody
+    Attribute* visibility kw<'struct'> TypeName { Identifier } GenericParams? whereClause? structBody
 }
 
 structBody {
@@ -113,7 +117,7 @@ GenericParams {
 }
 
 EnumDef {
-    Attribute* kw<'enum'> TypeName { Identifier } GenericParams? whereClause? '{' (enumVariant ',')* enumVariant? '}'
+    Attribute* visibility kw<'enum'> TypeName { Identifier } GenericParams? whereClause? '{' (enumVariant ',')* enumVariant? '}'
 }
 
 enumVariant {

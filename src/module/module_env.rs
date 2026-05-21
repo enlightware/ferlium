@@ -371,6 +371,23 @@ impl<'m> ModuleEnv<'m> {
         self.get_module_member(path, &|name, module| module.get_function(ustr(name)))
     }
 
+    /// Resolve a function path to the source module and local function name, applying visibility rules.
+    pub fn function_name_with_module(
+        &self,
+        path: &ast::Path,
+    ) -> Result<Option<(Option<ModuleId>, Ustr)>, InternalCompilationError> {
+        self.find_member_by_path(&path.segments, &|name, module, require_accessible| {
+            if require_accessible
+                && !module.is_symbol_accessible_from(ustr(name), self.current.module_id())
+            {
+                return None;
+            }
+
+            let name = ustr(name);
+            module.get_local_function_id(name).is_some().then_some(name)
+        })
+    }
+
     /// Get the trait reference associated to a trait name.
     pub fn get_trait_ref(
         &'m self,
@@ -402,24 +419,43 @@ impl<'m> ModuleEnv<'m> {
         path: &'m ast::Path,
     ) -> Result<Option<(Option<ModuleId>, TraitMethodDescription<'m>)>, InternalCompilationError>
     {
-        self.get_module_member(&path.segments, &|name, module| {
-            module.trait_iter().find_map(|trait_ref| {
-                trait_ref
-                    .methods
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, function)| {
-                        if function.0 == name {
-                            Some((
-                                trait_ref.clone(),
-                                TraitMethodIndex::from_index(index),
-                                &function.1,
-                            ))
-                        } else {
-                            None
-                        }
-                    })
-            })
+        self.find_member_by_path(&path.segments, &|name, module, require_accessible| {
+            self.trait_method_in_module(name, module, require_accessible)
+        })
+    }
+
+    fn trait_method_in_module(
+        &'m self,
+        name: &'m str,
+        module: &'m Module,
+        require_accessible_trait: bool,
+    ) -> Option<TraitMethodDescription<'m>> {
+        module.trait_iter().find_map(|trait_ref| {
+            if require_accessible_trait
+                && !module.is_trait_accessible_from(
+                    trait_ref,
+                    self.current.module_id(),
+                    self.modules,
+                )
+            {
+                return None;
+            }
+
+            trait_ref
+                .methods
+                .iter()
+                .enumerate()
+                .find_map(|(index, function)| {
+                    if function.0 == name {
+                        Some((
+                            trait_ref.clone(),
+                            TraitMethodIndex::from_index(index),
+                            &function.1,
+                        ))
+                    } else {
+                        None
+                    }
+                })
         })
     }
 
@@ -429,9 +465,24 @@ impl<'m> ModuleEnv<'m> {
         segments: &'a [UstrSpan],
         getter: &impl Fn(/*name*/ &'a str, /*current*/ &'a Module) -> Option<T>,
     ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
+        self.find_member_by_path(segments, &|name, module, require_accessible| {
+            if require_accessible
+                && !module.is_symbol_accessible_from(ustr(name), self.current.module_id())
+            {
+                return None;
+            }
+            getter(name, module)
+        })
+    }
+
+    fn find_member_by_path<'a, T>(
+        &'a self,
+        segments: &'a [UstrSpan],
+        getter: &impl Fn(&'a str, &'a Module, bool) -> Option<T>,
+    ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
         // If the name is not qualified, look in the current module.
         if let [(name, _)] = segments {
-            return self.current.get_member(name, self.modules, getter);
+            return self.find_unqualified_member(name, getter);
         }
         // The name is qualified, split between path and symbol name.
         if let Some(path) = segments.split_last() {
@@ -441,17 +492,16 @@ impl<'m> ModuleEnv<'m> {
                 && single_segment.0 == "std"
                 && self.current.module_id() == STD_MODULE_ID
             {
-                return self.current.get_member(sym_name, self.modules, getter);
+                return self.find_unqualified_member(sym_name, getter);
             }
             // Look into the foreign module, if it exists.
             let path = Path::from_ast_segments(module);
             Ok(
                 if let Some((foreign_id, foreign_entry)) = self.modules.get_by_name(&path)
                     && let Some(module) = foreign_entry.module()
+                    && let Some(t) = getter(sym_name, module, true)
                 {
-                    getter(sym_name, module)
-                        .map(|t| Some((Some(foreign_id), t)))
-                        .unwrap_or(None)
+                    Some((Some(foreign_id), t))
                 } else {
                     None
                 },
@@ -459,5 +509,13 @@ impl<'m> ModuleEnv<'m> {
         } else {
             Ok(None)
         }
+    }
+
+    fn find_unqualified_member<'a, T>(
+        &'a self,
+        name: &'a str,
+        getter: &impl Fn(&'a str, &'a Module, bool) -> Option<T>,
+    ) -> Result<Option<(Option<ModuleId>, T)>, InternalCompilationError> {
+        self.current.find_member(name, self.modules, getter)
     }
 }

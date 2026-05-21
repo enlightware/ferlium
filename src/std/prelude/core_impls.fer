@@ -1,7 +1,7 @@
 // Extra math
 
 /// Clamps a value between a minimum and maximum bound, inclusively.
-fn clamp(value, min_bound, max_bound) {
+pub fn clamp(value, min_bound, max_bound) {
 	if min_bound > max_bound {
 		panic("min_bound must be less than or equal to max_bound")
 	} else {
@@ -12,13 +12,13 @@ fn clamp(value, min_bound, max_bound) {
 // Ranges
 
 /// A range bounded inclusively at start and exclusively at end: [start..end)
-struct Range {
+pub struct Range {
 	start: int,
 	end: int,
 }
 
 /// An iterator over a range.
-struct RangeIterator {
+pub struct RangeIterator {
 	range: Range,
 	next: int,
 }
@@ -57,13 +57,13 @@ impl SizedSeq {
 }
 
 /// A range bounded inclusively at start and at end: [start..end]
-struct RangeInclusive {
+pub struct RangeInclusive {
 	start: int,
 	end: int,
 }
 
 /// An iterator over an inclusive range.
-struct RangeInclusiveIterator {
+pub struct RangeInclusiveIterator {
 	range: RangeInclusive,
 	next: int,
 }
@@ -112,12 +112,12 @@ impl Concat {
 // Sequence and reduction functions
 
 /// Returns true if the collection contains no elements.
-fn is_empty(seq) {
+pub fn is_empty(seq) {
 	len(seq) == 0
 }
 
 /// Reduces the sequence seq to a single value by repeatedly applying f, left to right.
-fn fold(seq, init, f) {
+pub fn fold(seq, init, f) {
 	let mut it = iter(seq);
 	let mut acc = init;
 	loop {
@@ -132,7 +132,7 @@ fn fold(seq, init, f) {
 }
 
 /// Reduces the sequence seq to a single value by repeatedly applying f, left to right, as long as f returns Continue.
-fn try_fold(seq, init, f) {
+pub fn try_fold(seq, init, f) {
 	let mut it = iter(seq);
 	let mut acc = init;
 	loop {
@@ -156,32 +156,32 @@ fn try_fold(seq, init, f) {
 }
 
 /// Tests if every element of the sequence matches a predicate.
-fn all(seq, f) {
+pub fn all(seq, f) {
 	try_fold(seq, (), |_acc, element| if f(element) { Continue(()) } else { Break }) == Continue(())
 }
 
 /// Tests if any element of the sequence matches a predicate.
-fn any(seq, f) {
+pub fn any(seq, f) {
 	try_fold(seq, (), |_acc, element| if f(element) { Break } else { Continue(()) }) == Break
 }
 
 /// Counts the number of elements in the sequence.
-fn count(seq) {
+pub fn count(seq) {
 	fold(seq, 0, |sum, _element| sum + 1)
 }
 
 /// Sums the elements in the sequence.
-fn sum(seq) {
+pub fn sum(seq) {
 	fold(seq, 0, |acc, element| acc + element)
 }
 
 /// Averages the elements in the sequence.
-fn average(seq) {
+pub fn average(seq) {
 	sum(seq) / count(seq)
 }
 
 /// Returns the minimum element in the sequence.
-fn minimum(seq) {
+pub fn minimum(seq) {
 	let mut it = iter(seq);
 	match next(it) {
 		Some(first) => {
@@ -192,7 +192,7 @@ fn minimum(seq) {
 }
 
 /// Returns the maximum element in the sequence.
-fn maximum(seq) {
+pub fn maximum(seq) {
 	let mut it = iter(seq);
 	match next(it) {
 		Some(first) => {
@@ -203,7 +203,7 @@ fn maximum(seq) {
 }
 
 /// Finds the first element in the sequence that matches a predicate, returning None if not found.
-fn find(seq, predicate) -> Option<_> {
+pub fn find(seq, predicate) -> Option<_> {
 	let mut it = iter(seq);
 	loop {
 		match next(it) {
@@ -219,7 +219,7 @@ fn find(seq, predicate) -> Option<_> {
 }
 
 /// Finds the position of the first element in the sequence that matches a predicate, returning None if not found.
-fn position(seq, predicate) -> Option<int> {
+pub fn position(seq, predicate) -> Option<int> {
 	let mut it = iter(seq);
 	let mut index = 0;
 	loop {
@@ -245,12 +245,12 @@ impl<I, T> Seq for <Self = I |-> Item = T, Iter = I> {
 	}
 }
 
-fn collect(value) {
+pub fn collect(value) {
 	from_iter(iter(value))
 }
 
 /// An iterator that maps a function over another iterator.
-struct MapIterator<I, T, O>
+pub struct MapIterator<I, T, O>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
@@ -276,7 +276,7 @@ where
 }
 
 /// An iterator that filters another iterator with a predicate.
-struct FilterIterator<I, T>
+pub struct FilterIterator<I, T>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
@@ -308,7 +308,7 @@ where
 }
 
 /// An iterator that uses a function to both filter and map another iterator.
-struct FilterMapIterator<I, T, O>
+pub struct FilterMapIterator<I, T, O>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
@@ -341,7 +341,7 @@ where
 }
 
 /// An iterator that zips two iterators together, yielding pairs of their items.
-struct ZipIterator<I, J, A, B>
+pub struct ZipIterator<I, J, A, B>
 	where I: Iterator<Item = A>,
 		  J: Iterator<Item = B>
 {
@@ -362,12 +362,12 @@ impl Iterator for ZipIterator<I, J, A, B> {
 }
 
 /// Zips two sequences together, yielding pairs of their items. Stops at the shorter sequence.
-fn zip(seq1, seq2) {
+pub fn zip(seq1, seq2) {
 	ZipIterator { left: iter(seq1), right: iter(seq2) }
 }
 
 /// An iterator that yields (index, item) pairs.
-struct EnumerateIterator<I, T>
+pub struct EnumerateIterator<I, T>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
@@ -388,12 +388,12 @@ impl Iterator for EnumerateIterator<I, T> {
 }
 
 /// Enumerates a sequence, yielding (index, item) pairs starting from 0.
-fn enumerate(seq) {
+pub fn enumerate(seq) {
 	EnumerateIterator { iterator: iter(seq), index: 0 }
 }
 
 /// An iterator that yields at most n items from another iterator.
-struct TakeIterator<I, T>
+pub struct TakeIterator<I, T>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
@@ -417,12 +417,12 @@ impl Iterator for TakeIterator<I, T> {
 }
 
 /// Returns an iterator that yields at most n items from the sequence.
-fn take(seq, n) {
+pub fn take(seq, n) {
 	TakeIterator { iterator: iter(seq), remaining: n }
 }
 
 /// An iterator that skips the first n items of another iterator.
-struct SkipIterator<I, T>
+pub struct SkipIterator<I, T>
 	where I: Iterator<Item = T>
 {
 	iterator: I,
@@ -445,12 +445,12 @@ impl Iterator for SkipIterator<I, T> {
 }
 
 /// Returns an iterator that skips the first n items of the sequence.
-fn skip(seq, n) {
+pub fn skip(seq, n) {
 	SkipIterator { iterator: iter(seq), to_skip: n }
 }
 
 /// An iterator that chains two iterators of the same item type together.
-struct ChainIterator<I, J, T>
+pub struct ChainIterator<I, J, T>
 	where I: Iterator<Item = T>,
 		  J: Iterator<Item = T>
 {
@@ -477,7 +477,7 @@ impl Iterator for ChainIterator<I, J, T> {
 
 /// Chains two sequences together, yielding all items from the first then all from the second.
 /// Both sequences must have the same item type.
-fn chain(seq1, seq2) {
+pub fn chain(seq1, seq2) {
 	ChainIterator { first: iter(seq1), second: iter(seq2), first_done: false }
 }
 
@@ -502,7 +502,7 @@ impl SizedSeq {
 // Serde for basic types
 
 /// Downcasts a variant to None, panicking if the variant is not None.
-fn variant_to_none(v: Variant) -> () {
+pub fn variant_to_none(v: Variant) -> () {
 	match (v) {
 		None => (),
 		Array(a) => {
@@ -516,14 +516,14 @@ fn variant_to_none(v: Variant) -> () {
 	}
 }
 /// Downcasts a variant to a bool, panicking if the variant is not a bool.
-fn variant_to_bool(v: Variant) {
+pub fn variant_to_bool(v: Variant) {
 	match (v) {
 		Bool(b) => b,
 		_ => panic(f"Expected Bool variant")
 	}
 }
 /// Downcasts a variant to an int, panicking if the variant is not an int or a float.
-fn variant_to_int(v: Variant) {
+pub fn variant_to_int(v: Variant) {
 	match (v) {
 		Int(i) => i,
 		Float(f) => round(f),
@@ -531,7 +531,7 @@ fn variant_to_int(v: Variant) {
 	}
 }
 /// Downcasts a variant to a float, panicking if the variant is not a float or int.
-fn variant_to_float(v: Variant) {
+pub fn variant_to_float(v: Variant) {
 	match (v) {
 		Float(f) => f,
 		Int(i) => from_int(i),
@@ -539,7 +539,7 @@ fn variant_to_float(v: Variant) {
 	}
 }
 /// Downcasts a variant to a string, panicking if the variant is not a string.
-fn variant_to_string(v: Variant) {
+pub fn variant_to_string(v: Variant) {
 	match (v) {
 		String(s) => s,
 		_ => panic("Expected String variant")

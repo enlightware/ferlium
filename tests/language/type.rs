@@ -708,7 +708,7 @@ fn trait_impl_orphan_rule() {
     }
 
     session
-        .try_compile_module("a", "struct ForeignCounter(int)")
+        .try_compile_module("a", "pub struct ForeignCounter(int)")
         .unwrap();
     let err = session
         .try_compile_module(

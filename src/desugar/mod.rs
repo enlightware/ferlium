@@ -21,7 +21,7 @@ use crate::{
         DModule, DModuleFunction, DModuleFunctionArg, DTraitImpl, ExprId, ExprKind,
         FieldAccessData, ForLoopData, IndexData, LetData, LetPatternKind, LetRecordPatternField,
         MatchData, ModuleFunction, ModuleFunctionArg, PExprArena, PLetPattern as LetPattern,
-        PModule, PModuleFunction, PModuleFunctionArg, PTraitImpl, PTypeDef, PTypeSpan, Parsed,
+        PModule, PModuleFunction, PModuleFunctionArg, PTraitImpl, PTypeAlias, PTypeDef, Parsed,
         Path, Pattern, PatternConstraintKind, PatternKind, PatternVar, ProjectData,
         StructLiteralData, TypeAscriptionData, UnnamedArg, UstrSpan,
     },

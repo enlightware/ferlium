@@ -205,30 +205,35 @@ fn iter_visible_impls<'a>(
         });
     let imported = others.enumerates().flat_map(|(module_id, entry, _)| {
         entry.module().into_iter().flat_map(move |module| {
-            let concrete = module.impls.concrete().iter().map(move |(key, &id)| {
-                (
-                    TraitKey::Concrete(key.clone()),
-                    module.impls.get_impl_by_local_id(id),
-                    Some(module_id),
-                )
-            });
-            let blankets =
-                module
-                    .impls
-                    .blanket()
-                    .iter()
-                    .flat_map(move |(trait_ref, blanket_impls)| {
-                        blanket_impls.iter().map(move |(sub_key, &id)| {
-                            (
-                                TraitKey::Blanket(BlanketTraitImplKey::new(
-                                    trait_ref.clone(),
-                                    sub_key.clone(),
-                                )),
-                                module.impls.get_impl_by_local_id(id),
-                                Some(module_id),
-                            )
-                        })
-                    });
+            let concrete = module
+                .impls
+                .concrete()
+                .iter()
+                .map(move |(key, &id)| {
+                    (
+                        TraitKey::Concrete(key.clone()),
+                        module.impls.get_impl_by_local_id(id),
+                        Some(module_id),
+                    )
+                })
+                .filter(|(_, imp, _)| imp.public);
+            let blankets = module
+                .impls
+                .blanket()
+                .iter()
+                .flat_map(move |(trait_ref, blanket_impls)| {
+                    blanket_impls.iter().map(move |(sub_key, &id)| {
+                        (
+                            TraitKey::Blanket(BlanketTraitImplKey::new(
+                                trait_ref.clone(),
+                                sub_key.clone(),
+                            )),
+                            module.impls.get_impl_by_local_id(id),
+                            Some(module_id),
+                        )
+                    })
+                })
+                .filter(|(_, imp, _)| imp.public);
             concrete.chain(blankets)
         })
     });
