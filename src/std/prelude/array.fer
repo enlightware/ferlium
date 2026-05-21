@@ -87,6 +87,19 @@ where
 	}
 }
 
+/// Return the first element of an array, or None if the array is empty.
+fn array_peek_front<A>(array: [A]) -> None | Some(A)
+where
+	A: Value
+{
+	let l = array_len(array);
+	if l <= 0 {
+		None
+	} else {
+		Some(array[0])
+	}
+}
+
 /// Append a value to the end of an array.
 fn array_append<A>(array: &mut [A], value: A)
 where

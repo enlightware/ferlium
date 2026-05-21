@@ -591,6 +591,24 @@ fn array_prepend() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_peek() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("let a: [int] = []; (array_peek_front(a), array_peek_back(a))"),
+        tuple!(none(), none())
+    );
+    assert_val_eq!(
+        session.run("let a = [1]; (array_peek_front(a), array_peek_back(a), a)"),
+        tuple!(some(int(1)), some(int(1)), int_a![1])
+    );
+    assert_val_eq!(
+        session.run("let a = [1, 2, 3]; (array_peek_front(a), array_peek_back(a), a)"),
+        tuple!(some(int(1)), some(int(3)), int_a![1, 2, 3])
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_pop_back() {
     let mut session = TestSession::new();
     assert_val_eq!(
