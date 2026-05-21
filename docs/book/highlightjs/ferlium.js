@@ -8,7 +8,7 @@
 			name: "Ferlium",
 			aliases: ["ferlium"],
 			keywords: {
-				keyword: "fn impl struct enum use let mut return if else match for in as and or not",
+				keyword: "pub fn impl struct enum use let mut return if else match for in as and or not",
 				literal: "true false",
 				type: "int string bool float",
 				built_in: "_",

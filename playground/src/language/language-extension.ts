@@ -14,7 +14,7 @@ import { styleTags, tags as t } from "@lezer/highlight";
 
 // list if tags: https://lezer.codemirror.net/docs/ref/#highlight.tags
 const highlight = styleTags({
-	"fn let mut impl struct enum": t.definitionKeyword,
+	"pub fn let mut impl struct enum": t.definitionKeyword,
 	"TypeAliasDef/type": t.definitionKeyword,
 	"if else match for return": t.controlKeyword,
 	"in as": t.operatorKeyword,
