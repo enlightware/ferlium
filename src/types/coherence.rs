@@ -16,16 +16,17 @@ use crate::{
         BlanketTraitImplKey, BlanketTraitImplSubKey, ConcreteTraitImplKey, Module, ModuleId,
         TraitImpl, TraitKey,
     },
-    std::value::VALUE_TRAIT,
+    std::value::{NO_DERIVE_VALUE_ATTRIBUTE, VALUE_TRAIT},
     types::r#trait::{TraitImplPolicy, TraitRef},
     types::trait_solver::TraitSolverProbe,
-    types::r#type::{Type, TypeVar},
+    types::r#type::{Type, TypeKind, TypeVar},
     types::type_inference::unify::{UnifiedTypeInference, UnifiedTypeInferenceSnapshot},
     types::type_like::TypeLike,
     types::type_like::instantiate_types,
     types::type_mapper::{BitmapInstantiationMapper, SimpleInstantiationMapper},
     types::type_scheme::PubTypeConstraint,
 };
+use ustr::ustr;
 
 struct CoherenceTypeUnifier {
     inner: UnifiedTypeInference,
@@ -435,7 +436,11 @@ fn trait_constraint_may_be_satisfiable(
     input_tys: &[Type],
     output_tys: &[Type],
 ) -> Result<bool, InternalCompilationError> {
-    if !trait_ref.derivers.is_empty() && !input_tys.iter().all(Type::is_constant) {
+    let derivers_enabled = !value_deriver_disabled_for_input(current, trait_ref, input_tys);
+    if derivers_enabled
+        && !trait_ref.derivers.is_empty()
+        && !input_tys.iter().all(Type::is_constant)
+    {
         return constraints_may_be_satisfiable(
             current,
             others,
@@ -491,11 +496,31 @@ fn trait_constraint_may_be_satisfiable(
     }
 
     stack.remove(&query);
-    if trait_ref.derivers.is_empty() {
+    if !derivers_enabled || trait_ref.derivers.is_empty() {
         Ok(false)
     } else {
         constraints_may_be_satisfiable(current, others, ty_inf, pending, next_ty_var_index, stack)
     }
+}
+
+fn value_deriver_disabled_for_input(
+    current: &Module,
+    trait_ref: &TraitRef,
+    input_tys: &[Type],
+) -> bool {
+    if trait_ref != &*VALUE_TRAIT || input_tys.len() != 1 {
+        return false;
+    }
+    let ty_data = input_tys[0].data();
+    let TypeKind::Named(named) = &*ty_data else {
+        return false;
+    };
+    current.try_type_def(named.def).is_some_and(|type_def| {
+        type_def
+            .attributes
+            .iter()
+            .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

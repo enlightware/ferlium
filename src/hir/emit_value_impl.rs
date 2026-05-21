@@ -20,8 +20,9 @@ use crate::{
     internal_compilation_error,
     module::{LocalFunctionId, Module, ModuleEnv, ModuleFunction, TypeDefId, id::Id},
     std::value::{
-        VALUE_TRAIT, derive_generic_value_code_entries, function_value_method_function,
-        function_value_method_name, is_function_surface_only_value_type,
+        NO_DERIVE_VALUE_ATTRIBUTE, VALUE_TRAIT, derive_generic_value_code_entries,
+        function_value_method_function, function_value_method_name,
+        is_function_surface_only_value_type,
     },
     types::{
         coherence::check_trait_impl,
@@ -226,6 +227,13 @@ pub(super) fn emit_auto_value_impls(
         }
 
         let type_def = output.type_def(type_def_id);
+        if type_def
+            .attributes
+            .iter()
+            .any(|attribute| attribute.path.0 == ustr::ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+        {
+            continue;
+        }
         let type_def_span = type_def.span;
         let type_def_param_count = type_def.param_count();
         let input_ty = Type::named(

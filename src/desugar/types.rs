@@ -3,6 +3,7 @@ use crate::compiler::error::{
     AttributeTarget, InvalidAttributeKind, InvalidRecursiveTypeKind, UnsafeFeature,
 };
 use crate::std::array::Array as FerliumArray;
+use crate::std::value::NO_DERIVE_VALUE_ATTRIBUTE;
 use crate::types::r#type::{
     BareNativeTypeB, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind, bare_native_type, store_types,
 };
@@ -469,6 +470,48 @@ fn desugar_default_variant(
     Ok(default_variant)
 }
 
+fn validate_type_def_attributes(
+    type_def: &ast::PTypeDef,
+    is_std_module: bool,
+) -> Result<(), InternalCompilationError> {
+    let mut has_no_derive_value = false;
+    for attribute in &type_def.attributes {
+        if attribute.path.0 != ustr(NO_DERIVE_VALUE_ATTRIBUTE) {
+            continue;
+        }
+        if !is_std_module {
+            return Err(
+                InternalCompilationError::new_unsafe_feature_use_not_allowed(
+                    UnsafeFeature::TypeAttribute(attribute.path.0),
+                    attribute.span,
+                ),
+            );
+        }
+        if !attribute.items.is_empty() {
+            return Err(internal_compilation_error!(InvalidAttribute {
+                attribute_name: attribute.path.0,
+                target: AttributeTarget::TypeDef {
+                    name: type_def.name.0,
+                },
+                kind: InvalidAttributeKind::HasArguments,
+                span: attribute.span,
+            }));
+        }
+        if has_no_derive_value {
+            return Err(internal_compilation_error!(InvalidAttribute {
+                attribute_name: attribute.path.0,
+                target: AttributeTarget::TypeDef {
+                    name: type_def.name.0,
+                },
+                kind: InvalidAttributeKind::Duplicate,
+                span: attribute.span,
+            }));
+        }
+        has_no_derive_value = true;
+    }
+    Ok(())
+}
+
 impl ast::PFnArgType {
     pub fn desugar(
         &self,
@@ -704,6 +747,7 @@ impl PTypeDef {
         env: &ModuleEnv<'_>,
         modules_used: &mut FxHashSet<ModuleId>,
     ) -> Result<HirTypeDef, InternalCompilationError> {
+        validate_type_def_attributes(self, env.current.module_id() == STD_MODULE_ID)?;
         let generic_ty_params = extend_generic_ty_params(
             &GenericTyParams::default(),
             &self.generic_params,

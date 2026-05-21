@@ -9,6 +9,8 @@
 
 use std::{mem, sync::LazyLock};
 
+use ustr::ustr;
+
 use crate::{
     FxHashSet, Location,
     ast::{Path, UnnamedArg},
@@ -54,6 +56,7 @@ pub(crate) const VALUE_SIZE_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex(0);
 pub(crate) const VALUE_ALIGN_ASSOC_CONST_INDEX: TraitAssociatedConstIndex =
     TraitAssociatedConstIndex(1);
+pub(crate) const NO_DERIVE_VALUE_ATTRIBUTE: &str = "no_derive_value";
 
 pub(crate) fn native_layout_associated_consts<T>() -> [isize; 2] {
     let mut values = [0; 2];
@@ -1723,6 +1726,16 @@ fn derive_structural_value_impl(
     solver: &mut TraitSolver,
 ) -> Result<Option<TraitImplId>, InternalCompilationError> {
     let ty_data = input_types[0].data();
+    if let TypeKind::Named(named) = &*ty_data {
+        let type_def = solver.type_def(named.def);
+        if type_def
+            .attributes
+            .iter()
+            .any(|attribute| attribute.path.0 == ustr(NO_DERIVE_VALUE_ATTRIBUTE))
+        {
+            return Ok(None);
+        }
+    }
     let can_derive = matches!(
         &*ty_data,
         TypeKind::Tuple(_)
