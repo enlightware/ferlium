@@ -2292,7 +2292,7 @@ fn properties() {
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![]);
     session.run("@props::my_scope.my_array = [1, 2]");
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![1, 2]);
-    session.run("@props::my_scope.my_array = array_concat(@props::my_scope.my_array, [3, 4])");
+    session.run("@props::my_scope.my_array = concat(@props::my_scope.my_array, [3, 4])");
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![1, 2, 3, 4]);
     session.run("@props::my_scope.my_array[0] = 5");
     assert_val_eq!(get_array_property_value(), int_a![5, 2, 3, 4]);

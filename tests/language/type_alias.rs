@@ -506,7 +506,7 @@ fn generic_type_aliases() {
 
         type Mapper<I, T, O> = MapIterator<I, T, O>;
 
-        let mut m: Mapper<array_iterator<int>, int, int> = MapIterator {
+        let mut m: Mapper<ArrayIterator<int>, int, int> = MapIterator {
             iterator: iter([1, 2, 3]),
             mapper: |x| x * 2,
         };
@@ -571,8 +571,10 @@ fn generic_type_aliases_in_explicit_typing() {
 
     // A function that explicitly names a generic type alias in its signature.
     let result = session.run(indoc! { r#"
-        fn my_next(iter: &mut array_iterator<int>) -> None | Some(int) {
-            array_iterator_next(iter)
+        type MyArrayIterator1<A> = ArrayIterator<A>;
+
+        fn my_next(iter: &mut MyArrayIterator1<int>) -> None | Some(int) {
+            next(iter)
         }
         let mut it = iter([10, 20, 30]);
         my_next(it)
@@ -581,7 +583,9 @@ fn generic_type_aliases_in_explicit_typing() {
 
     // Using a generic type alias in return type position.
     let result = session.run(indoc! { r#"
-        fn make_iter(arr: [int]) -> array_iterator<int> {
+        type MyArrayIterator2<A> = ArrayIterator<A>;
+
+        fn make_iter(arr: [int]) -> MyArrayIterator2<int> {
             iter(arr)
         }
         let mut it = make_iter([5, 6, 7]);
@@ -591,17 +595,21 @@ fn generic_type_aliases_in_explicit_typing() {
 
     // Using a generic type alias in a type annotation.
     let result = session.run(indoc! { r#"
-        let mut it = (iter([42]): array_iterator<int>);
+        type MyArrayIterator3<A> = ArrayIterator<A>;
+
+        let mut it = (iter([42]): MyArrayIterator3<int>);
         next(it)
     "# });
     assert_val_eq!(result, some(int(42)));
 
     // Using a generic type alias in a trait impl method signature.
     let result = session.run(indoc! { r#"
+        type MyArrayIterator4<A> = ArrayIterator<A>;
+
         struct Wrapper<A> { arr: [A] }
         impl<A> Iterator for <Self = Wrapper<A> |-> Item = A> {
             fn next(w: &mut Wrapper<A>) -> None | Some(A) {
-                let mut it = (iter(w.arr): array_iterator<A>);
+                let mut it = (iter(w.arr): MyArrayIterator4<A>);
                 next(it)
             }
         }

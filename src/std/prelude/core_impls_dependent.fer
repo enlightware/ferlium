@@ -52,7 +52,7 @@ where
 	A: Value
 {
 	fn map(value: [A], mapper: ((A) -> B !)) -> [B] {
-		from_iter(MapIterator { iterator: array_iter(value), mapper })
+		from_iter(MapIterator { iterator: ArrayIterator { array: value, index: 0 }, mapper })
 	}
 }
 
@@ -61,7 +61,7 @@ where
 	A: Value
 {
 	fn filter(value: [A], predicate: ((A) -> bool !)) -> [A] {
-		from_iter(FilterIterator { iterator: array_iter(value), filter: predicate })
+		from_iter(FilterIterator { iterator: ArrayIterator { array: value, index: 0 }, filter: predicate })
 	}
 }
 
@@ -70,7 +70,7 @@ where
 	A: Value
 {
 	fn filter_map(value: [A], mapper: ((A) -> (None | Some(B)) !)) -> [B] {
-		from_iter(FilterMapIterator { iterator: array_iter(value), filter_map: mapper })
+		from_iter(FilterMapIterator { iterator: ArrayIterator { array: value, index: 0 }, filter_map: mapper })
 	}
 }
 

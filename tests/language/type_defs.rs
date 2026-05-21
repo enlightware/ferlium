@@ -1419,7 +1419,7 @@ fn map_iterator_named_type_from_user_definition() {
         &mut session,
         &build_map_iterator_src,
         "build_map_iterator",
-        "() -> MapIterator<array_iterator<string>, string, int>",
+        "() -> MapIterator<ArrayIterator<string>, string, int>",
     );
 
     let run_map_iterator_src = join_src(&[
@@ -1456,7 +1456,7 @@ fn generic_trait_impl_with_explicit_binders_for_user_defined_map_iterator() {
         &mut session,
         &build_map_iterator_src,
         "build_map_iterator",
-        "() -> MapIterator<array_iterator<string>, string, int>",
+        "() -> MapIterator<ArrayIterator<string>, string, int>",
     );
 
     let run_map_iterator_src = join_src(&[
@@ -1493,7 +1493,7 @@ fn generic_trait_impl_with_explicit_outputs_for_user_defined_map_iterator() {
         &mut session,
         &build_map_iterator_src,
         "build_map_iterator",
-        "() -> MapIterator<array_iterator<string>, string, int>",
+        "() -> MapIterator<ArrayIterator<string>, string, int>",
     );
 
     let run_map_iterator_src = join_src(&[
@@ -1530,7 +1530,7 @@ fn generic_trait_impl_with_where_clause_for_user_defined_map_iterator() {
         &mut session,
         &build_map_iterator_src,
         "build_map_iterator",
-        "() -> MapIterator<array_iterator<string>, string, int>",
+        "() -> MapIterator<ArrayIterator<string>, string, int>",
     );
 
     let run_map_iterator_src = join_src(&[
@@ -1638,7 +1638,7 @@ fn generic_trait_impl_for_user_defined_zip_iterator() {
         &mut session,
         &build_zip_iterator_src,
         "build_zip_iterator",
-        "() -> ZipIterator<array_iterator<int>, array_iterator<string>, int, string>",
+        "() -> ZipIterator<ArrayIterator<int>, ArrayIterator<string>, int, string>",
     );
 
     let run_zip_iterator_src = join_src(&[
@@ -2030,7 +2030,7 @@ fn map_iterator_named_type_from_rust_definition() {
         indoc! { r#"
             fn build_map_iterator() {
                 testing::MapIterator {
-                    iterator: array_iter(["a", "bc"]),
+                    iterator: iter(["a", "bc"]),
                     mapper: |x| len(x),
                 }
             }
@@ -2050,13 +2050,13 @@ fn map_iterator_named_type_from_rust_definition() {
             .ty()
             .format_with(&session.std_module_env())
             .to_string(),
-        "() -> MapIterator<array_iterator<string>, string, int>"
+        "() -> MapIterator<ArrayIterator<string>, string, int>"
     );
 
     assert_val_eq!(
         session.run(indoc! { r#"
             let it = testing::MapIterator {
-                iterator: array_iter(["a", "bc"]),
+                iterator: iter(["a", "bc"]),
                 mapper: |x| len(x),
             };
             it.mapper("abc")

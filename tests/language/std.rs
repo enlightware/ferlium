@@ -452,7 +452,7 @@ fn array_append_and_concat_use_value_clone() {
             let value = testing::make_clone_tracked();
             let array = [value];
             testing::reset_clone_tracked_clones();
-            let combined = array_concat(array, array);
+            let combined = concat(array, array);
             array_len(combined) * 10 + testing::clone_tracked_clone_count()
             "#
         ),
@@ -690,26 +690,6 @@ fn array_slice() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn array_concat() {
-    let mut session = TestSession::new();
-    assert_val_eq!(session.run("array_concat([], [])"), int_a![]);
-    assert_val_eq!(session.run("array_concat([1], [])"), int_a![1]);
-    assert_val_eq!(session.run("array_concat([], [1])"), int_a![1]);
-    assert_val_eq!(session.run("array_concat([1], [2])"), int_a![1, 2]);
-    assert_val_eq!(session.run("array_concat([1, 2], [3])"), int_a![1, 2, 3]);
-    assert_val_eq!(session.run("array_concat([1], [2, 3])"), int_a![1, 2, 3]);
-    assert_val_eq!(
-        session.run("array_concat([1, 2], [3, 4])"),
-        int_a![1, 2, 3, 4]
-    );
-    assert_val_eq!(
-        session.run("array_concat([1, 2], [3, 4, 5])"),
-        int_a![1, 2, 3, 4, 5]
-    );
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn any_on_arrays() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("any(([]: [int]), |x| x == 1)"), bool(false));
@@ -760,27 +740,6 @@ fn all_on_arrays() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn array_iterators() {
     let mut session = TestSession::new();
-    assert_val_eq!(
-        session.run("let a = [1, 2, 3]; let mut it = array_iter(a); (next(it), next(it))"),
-        tuple!(variant_t1("Some", int(1)), variant_t1("Some", int(2)))
-    );
-    assert_val_eq!(
-        session.run("let a = [1.0, 2.0, 3.0]; let mut it = array_iter(a); (next(it), next(it))"),
-        tuple!(
-            variant_t1("Some", float(1.0)),
-            variant_t1("Some", float(2.0))
-        )
-    );
-    assert_val_eq!(
-        session.run(
-            r#"let a = ["hello", "world"]; let mut it = array_iter(a); (next(it), next(it), next(it))"#
-        ),
-        tuple!(
-            variant_t1("Some", string("hello")),
-            variant_t1("Some", string("world")),
-            variant_0("None")
-        )
-    );
     assert_val_eq!(
         session.run("let a = [1, 2, 3]; let mut it = iter(a); (next(it), next(it))"),
         tuple!(variant_t1("Some", int(1)), variant_t1("Some", int(2)))
@@ -2002,11 +1961,18 @@ fn concat() {
     assert_val_eq!(session.run(r#"concat("a", "")"#), string("a"));
     assert_val_eq!(session.run(r#"concat("", "b")"#), string("b"));
     // arrays
-    assert_val_eq!(session.run("concat([1, 2], [3, 4])"), int_a![1, 2, 3, 4]);
     assert_val_eq!(session.run("concat([], [])"), int_a![]);
     assert_val_eq!(session.run("(concat([], []): [int])"), int_a![]);
-    assert_val_eq!(session.run("concat([1, 2], [])"), int_a![1, 2]);
-    assert_val_eq!(session.run("concat([], [3, 4])"), int_a![3, 4]);
+    assert_val_eq!(session.run("concat([1], [])"), int_a![1]);
+    assert_val_eq!(session.run("concat([], [1])"), int_a![1]);
+    assert_val_eq!(session.run("concat([1], [2])"), int_a![1, 2]);
+    assert_val_eq!(session.run("concat([1, 2], [3])"), int_a![1, 2, 3]);
+    assert_val_eq!(session.run("concat([1], [2, 3])"), int_a![1, 2, 3]);
+    assert_val_eq!(session.run("concat([1, 2], [3, 4])"), int_a![1, 2, 3, 4]);
+    assert_val_eq!(
+        session.run("concat([1, 2], [3, 4, 5])"),
+        int_a![1, 2, 3, 4, 5]
+    );
 }
 
 #[test]

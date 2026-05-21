@@ -113,34 +113,40 @@ where
 	array.len += 1;
 }
 
-fn array_concat<A>(left: [A], right: [A]) -> [A]
+fn array_pop_back<A>(array: &mut [A]) -> None | Some(A)
 where
 	A: Value
 {
-	let left_len = array_len(left);
-	let right_len = array_len(right);
-	let mut result = array_with_capacity(left_len + right_len);
-	let mut i = 0;
-	loop {
-		if i < left_len {
-			buffer_clone_into(left.data, array_physical_index_unchecked(left, i), result.data, result.len);
-			result.len += 1;
-			i += 1;
+	let len = array_len(array);
+	if len <= 0 {
+		None
+	} else {
+		let index = array_physical_index_unchecked(array, len - 1);
+		array.len -= 1;
+		Some(buffer_take(array.data, index))
+	}
+}
+
+fn array_pop_front<A>(array: &mut [A]) -> None | Some(A)
+where
+	A: Value
+{
+	let len = array_len(array);
+	if len <= 0 {
+		None
+	} else {
+		let index = array.start;
+		array.len -= 1;
+		if array.len <= 0 {
+			array.start = 0;
 		} else {
-			soft_break;
+			array.start += 1;
+			if array.start >= array.capacity {
+				array.start = 0;
+			};
 		};
-	};
-	let mut i = 0;
-	loop {
-		if i < right_len {
-			buffer_clone_into(right.data, array_physical_index_unchecked(right, i), result.data, result.len);
-			result.len += 1;
-			i += 1;
-		} else {
-			soft_break;
-		};
-	};
-	result
+		Some(buffer_take(array.data, index))
+	}
 }
 
 fn array_slice_bound(len: int, index: int) -> int {
@@ -179,7 +185,30 @@ where
 
 impl Concat {
 	fn concat(left, right) {
-		array_concat(left, right)
+		let left_len = array_len(left);
+		let right_len = array_len(right);
+		let mut result = array_with_capacity(left_len + right_len);
+		let mut i = 0;
+		loop {
+			if i < left_len {
+				buffer_clone_into(left.data, array_physical_index_unchecked(left, i), result.data, result.len);
+				result.len += 1;
+				i += 1;
+			} else {
+				soft_break;
+			};
+		};
+		let mut i = 0;
+		loop {
+			if i < right_len {
+				buffer_clone_into(right.data, array_physical_index_unchecked(right, i), result.data, result.len);
+				result.len += 1;
+				i += 1;
+			} else {
+				soft_break;
+			};
+		};
+		result
 	}
 }
 
@@ -192,43 +221,27 @@ where
 	index: int,
 }
 
-type array_iterator<A> = ArrayIterator<A>;
-
-fn array_iterator_next<A>(it: &mut array_iterator<A>) -> None | Some(A)
+impl<A> Iterator for <Self = ArrayIterator<A> |-> Item = A>
 where
 	A: Value
 {
-	if it.index < array_len(it.array) {
-		let index = it.index;
-		it.index += 1;
-		Some(effects_unsafe { it.array[index] })
-	} else {
-		None
+	fn next(a: &mut ArrayIterator<A>) -> None | Some(A) {
+		if a.index < array_len(a.array) {
+			let index = a.index;
+			a.index += 1;
+			Some(effects_unsafe { a.array[index] })
+		} else {
+			None
+		}
 	}
 }
 
-fn array_iter<A>(a: [A]) -> array_iterator<A>
+impl<A> Seq for <Self = [A] |-> Item = A, Iter = ArrayIterator<A>>
 where
 	A: Value
 {
-	ArrayIterator { array: a, index: 0 }
-}
-
-impl<A> Iterator for <Self = array_iterator<A> |-> Item = A>
-where
-	A: Value
-{
-	fn next(a: &mut array_iterator<A>) -> None | Some(A) {
-		array_iterator_next(a)
-	}
-}
-
-impl<A> Seq for <Self = [A] |-> Item = A, Iter = array_iterator<A>>
-where
-	A: Value
-{
-	fn iter(a: [A]) -> array_iterator<A> {
-		array_iter(a)
+	fn iter(a: [A]) -> ArrayIterator<A> {
+		ArrayIterator { array: a, index: 0 }
 	}
 }
 
@@ -268,41 +281,5 @@ impl<A> Empty for [A] where A: Value {
 impl<A> Default for [A] where A: Value {
 	fn default() -> [A] {
 		array_with_capacity(0)
-	}
-}
-
-fn array_pop_back<A>(array: &mut [A]) -> None | Some(A)
-where
-	A: Value
-{
-	let len = array_len(array);
-	if len <= 0 {
-		None
-	} else {
-		let index = array_physical_index_unchecked(array, len - 1);
-		array.len -= 1;
-		Some(buffer_take(array.data, index))
-	}
-}
-
-fn array_pop_front<A>(array: &mut [A]) -> None | Some(A)
-where
-	A: Value
-{
-	let len = array_len(array);
-	if len <= 0 {
-		None
-	} else {
-		let index = array.start;
-		array.len -= 1;
-		if array.len <= 0 {
-			array.start = 0;
-		} else {
-			array.start += 1;
-			if array.start >= array.capacity {
-				array.start = 0;
-			};
-		};
-		Some(buffer_take(array.data, index))
 	}
 }
