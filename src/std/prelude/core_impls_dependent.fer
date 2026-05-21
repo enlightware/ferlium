@@ -17,7 +17,7 @@ fn variant_to_object(v: Variant) {
 }
 
 /// Gets an entry from a Variant Object by name, returning None if not found.
-fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Some(Variant) | None {
+fn get_variant_object_entry(entries: [(string, Variant)], name: string) -> Option<Variant> {
 	for entry in entries {
 		if entry.0 == name {
 			return Some(entry.1);
@@ -69,7 +69,7 @@ impl<A, B> FilterMap for <Self = [A], Mapped = B |-> Item = A, Output = [B]>
 where
 	A: Value
 {
-	fn filter_map(value: [A], mapper: ((A) -> (None | Some(B)) !)) -> [B] {
+	fn filter_map(value: [A], mapper: ((A) -> Option<B> !)) -> [B] {
 		from_iter(FilterMapIterator { iterator: ArrayIterator { array: value, index: 0 }, filter_map: mapper })
 	}
 }
@@ -135,7 +135,7 @@ impl Iterator for ArraySplitElementIterator<A>
 where
 	A: Value
 {
-	fn next(it: &mut ArraySplitElementIterator<A>) -> None | Some([A]) {
+	fn next(it: &mut ArraySplitElementIterator<A>) -> Option<[A]> {
 		if it.finished {
 			return None;
 		};
@@ -171,7 +171,7 @@ impl Iterator for ArraySplitIterator<A>
 where
 	A: Value
 {
-	fn next(it: &mut ArraySplitIterator<A>) -> None | Some([A]) {
+	fn next(it: &mut ArraySplitIterator<A>) -> Option<[A]> {
 		if it.finished {
 			return None;
 		};

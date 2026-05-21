@@ -75,7 +75,7 @@ impl<A> Value for [A] where A: Value {
 }
 
 /// Return the last element of an array, or None if the array is empty.
-fn array_peek_back<A>(array: [A]) -> None | Some(A)
+fn array_peek_back<A>(array: [A]) -> Option<A>
 where
 	A: Value
 {
@@ -88,7 +88,7 @@ where
 }
 
 /// Return the first element of an array, or None if the array is empty.
-fn array_peek_front<A>(array: [A]) -> None | Some(A)
+fn array_peek_front<A>(array: [A]) -> Option<A>
 where
 	A: Value
 {
@@ -129,7 +129,7 @@ where
 }
 
 /// Remove and return the last element of an array, or None if it is empty.
-fn array_pop_back<A>(array: &mut [A]) -> None | Some(A)
+fn array_pop_back<A>(array: &mut [A]) -> Option<A>
 where
 	A: Value
 {
@@ -144,7 +144,7 @@ where
 }
 
 /// Remove and return the first element of an array, or None if it is empty.
-fn array_pop_front<A>(array: &mut [A]) -> None | Some(A)
+fn array_pop_front<A>(array: &mut [A]) -> Option<A>
 where
 	A: Value
 {
@@ -242,7 +242,7 @@ impl<A> Iterator for <Self = ArrayIterator<A> |-> Item = A>
 where
 	A: Value
 {
-	fn next(a: &mut ArrayIterator<A>) -> None | Some(A) {
+	fn next(a: &mut ArrayIterator<A>) -> Option<A> {
 		if a.index < array_len(a.array) {
 			let index = a.index;
 			a.index += 1;
