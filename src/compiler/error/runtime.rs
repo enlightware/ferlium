@@ -24,7 +24,6 @@ pub enum RuntimeErrorKind {
     DivisionByZero,
     RemainderByZero,
     InvalidArgument(Ustr),
-    ArrayAccessOutOfBounds { index: isize, len: usize },
     CallDepthLimitExceeded { limit: usize },
     StackLimitExceeded { limit: usize },
     // TODO: add execution duration limit exhausted
@@ -41,12 +40,6 @@ impl Display for RuntimeErrorKind {
             DivisionByZero => write!(f, "Division by zero"),
             RemainderByZero => write!(f, "Remainder by zero"),
             InvalidArgument(reason) => write!(f, "Invalid argument: {reason}"),
-            ArrayAccessOutOfBounds { index, len } => {
-                write!(
-                    f,
-                    "Array access out of bounds: index {index} for length {len}"
-                )
-            }
             CallDepthLimitExceeded { limit } => {
                 write!(f, "Call depth limit exceeded: limit is {limit}")
             }

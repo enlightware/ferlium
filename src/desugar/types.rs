@@ -2,10 +2,9 @@ use super::*;
 use crate::compiler::error::{
     AttributeTarget, InvalidAttributeKind, InvalidRecursiveTypeKind, UnsafeFeature,
 };
-use crate::std::array::Array as FerliumArray;
-use crate::std::value::NO_DERIVE_VALUE_ATTRIBUTE;
+use crate::std::{array::array_type, value::NO_DERIVE_VALUE_ATTRIBUTE};
 use crate::types::r#type::{
-    BareNativeTypeB, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind, bare_native_type, store_types,
+    BareNativeTypeB, TypeAliasEntry, TypeDef as HirTypeDef, TypeKind, store_types,
 };
 use crate::types::type_substitution::instantiate_type;
 
@@ -289,13 +288,7 @@ impl<'a, 'm> RecursiveTypeBuilder<'a, 'm> {
             }
             Array(array) => {
                 let element = self.desugar_type(&array.0, array.1, false, None)?;
-                self.store_kind(
-                    TypeKind::Native(b(NativeType {
-                        bare_ty: bare_native_type::<FerliumArray>(),
-                        arguments: vec![element],
-                    })),
-                    slot,
-                )
+                desugar_array_syntax_type(element, self.env.current.module_id(), self.modules_used)
             }
             Function(fn_type) => {
                 let fn_type = self.desugar_fn_type(fn_type)?;
@@ -725,13 +718,17 @@ impl ast::PType {
                         .collect::<Result<Vec<_>, _>>()?,
                 )
             }
-            Array(array) => array_type(array.0.desugar_with_ty_params(
-                array.1,
-                false,
-                env,
-                generic_ty_params,
+            Array(array) => desugar_array_syntax_type(
+                array.0.desugar_with_ty_params(
+                    array.1,
+                    false,
+                    env,
+                    generic_ty_params,
+                    modules_used,
+                )?,
+                env.current.module_id(),
                 modules_used,
-            )?),
+            ),
             Function(fn_type) => Type::function_type(fn_type.desugar_with_ty_params(
                 env,
                 generic_ty_params,
@@ -1162,6 +1159,17 @@ fn resolve_type_path(
     }
 
     Ok(None)
+}
+
+fn desugar_array_syntax_type(
+    element: Type,
+    current_module_id: ModuleId,
+    modules_used: &mut FxHashSet<ModuleId>,
+) -> Type {
+    if current_module_id != STD_MODULE_ID {
+        modules_used.insert(STD_MODULE_ID);
+    }
+    array_type(element)
 }
 
 fn desugar_type_arguments(

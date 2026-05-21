@@ -235,3 +235,28 @@ fn recursive_generic_alias_ide_annotations_do_not_leak_borrowed_argument_temps()
         "borrowed argument temporaries should not move hints before the call:\n{annotated}"
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_ide_annotations_do_not_expose_generated_place_call() {
+    let src = indoc! { r#"
+        fn first() {
+            let xs = [10, 20];
+            xs[{ let i = 0; i }]
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let annotated = annotated_ide_source(&mut compiler, src);
+
+    assert!(
+        annotated.contains("let i: int = 0;"),
+        "array index annotations should still walk source operands, got:\n{annotated}"
+    );
+    assert!(
+        !annotated.contains("array_index")
+            && !annotated.contains("place")
+            && !annotated.contains("array: ")
+            && !annotated.contains("index: "),
+        "array index annotations should not expose generated place-result call details, got:\n{annotated}"
+    );
+}

@@ -9,7 +9,6 @@
 
 use core::panic;
 use std::{
-    collections::VecDeque,
     io::{Cursor, Read},
     str::FromStr,
 };
@@ -21,7 +20,7 @@ use crate::{
     hir::value::Value,
     module::Module,
     std::{
-        array::Array,
+        array::array_value_from_vec,
         math::{float_value, int_value},
         string::{string_type, string_value},
         variant::variant_type,
@@ -70,21 +69,21 @@ fn parse_json_stream<R: Read>(
         }
         String(s) => variant("String", string_value(&s)),
         StartArray => {
-            let mut items = VecDeque::new();
+            let mut items = Vec::new();
             loop {
                 let item = parse_json_stream(reader)?;
                 match item {
-                    ParseResult::Value(v) => items.push_back(v),
+                    ParseResult::Value(v) => items.push(v),
                     ParseResult::Key(_) => panic!("Unexpected object key in array"),
                     ParseResult::EndArray => break,
                     ParseResult::EndObject => panic!("Unexpected end of object in array"),
                 }
             }
-            variant("Array", Value::native(Array::from_deque(items)))
+            variant("Array", array_value_from_vec(items))
         }
         EndArray => return Ok(ParseResult::EndArray),
         StartObject => {
-            let mut fields = VecDeque::new();
+            let mut fields = Vec::new();
             loop {
                 let key_or_end = parse_json_stream(reader)?;
                 let key = match key_or_end {
@@ -97,9 +96,9 @@ fn parse_json_stream<R: Read>(
                     .into_value()
                     .expect("Expected value in object");
                 let tuple = Value::tuple([string_value(key.as_ref()), value]);
-                fields.push_back(tuple);
+                fields.push(tuple);
             }
-            variant("Object", Value::native(Array::from_deque(fields)))
+            variant("Object", array_value_from_vec(fields))
         }
         EndObject => return Ok(ParseResult::EndObject),
         ObjectKey(s) => return Ok(ParseResult::Key(Str::from_str(&s).unwrap())),

@@ -46,19 +46,11 @@ impl Path {
                 path.parts.push(PathPart::FieldAccess(*field));
                 path
             }
-            Index(index) => {
-                let mut path = Self::from_node(arena, index.array);
-                if let NodeKind::Immediate(immediate) = &arena[index.index].kind {
-                    let index = *immediate.value.as_primitive_ty::<isize>().unwrap();
-                    if index >= 0 {
-                        path.parts.push(PathPart::IndexStatic(index as usize));
-                    } else {
-                        path.parts.push(PathPart::IndexDynamic);
-                    }
-                } else {
-                    path.parts.push(PathPart::IndexDynamic);
-                }
-                path
+            StaticApply(app) if app.returns_place => {
+                Self::from_place_result_arguments(arena, &app.arguments)
+            }
+            Apply(app) if app.returns_place => {
+                Self::from_place_result_arguments(arena, &app.arguments)
             }
             EnvLoad(node) => Path {
                 variable: node.id.as_index(),
@@ -66,6 +58,30 @@ impl Path {
             },
             _ => panic!("Cannot resolve a non-place node"),
         }
+    }
+
+    fn from_place_result_arguments(arena: &NodeArena, arguments: &[NodeId]) -> Self {
+        let base_index = arguments
+            .iter()
+            .position(|argument| !matches!(arena[*argument].kind, NodeKind::GetDictionary(_)))
+            .expect("place_result application should have a base argument");
+        let mut path = Self::from_node(arena, arguments[base_index]);
+        if let Some(&index) = arguments.get(base_index + 1) {
+            path.parts.push(Self::index_part(arena, index));
+        } else {
+            path.parts.push(PathPart::IndexDynamic);
+        }
+        path
+    }
+
+    fn index_part(arena: &NodeArena, id: NodeId) -> PathPart {
+        if let NodeKind::Immediate(immediate) = &arena[id].kind {
+            let index = *immediate.value.as_primitive_ty::<isize>().unwrap();
+            if index >= 0 {
+                return PathPart::IndexStatic(index as usize);
+            }
+        }
+        PathPart::IndexDynamic
     }
 }
 
@@ -245,10 +261,6 @@ impl Node {
                 for &node_id in nodes.iter() {
                     check_borrows(arena, node_id)?;
                 }
-            }
-            Index(index) => {
-                check_borrows(arena, index.array)?;
-                check_borrows(arena, index.index)?;
             }
             Case(case) => {
                 check_borrows(arena, case.value)?;

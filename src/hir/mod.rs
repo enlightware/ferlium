@@ -121,6 +121,7 @@ pub struct BuildClosure {
 pub struct Application {
     pub function: NodeId,
     pub arguments: Vec<NodeId>,
+    pub returns_place: bool,
 }
 
 /// Clone the closure environment of `source` into already allocated `target` storage.
@@ -160,6 +161,7 @@ pub struct StaticApplication {
     pub argument_names: Vec<Ustr>,
     pub ty: FnType,
     pub inst_data: FnInstData,
+    pub returns_place: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -208,12 +210,6 @@ pub struct Assignment {
     /// Dispatch used to drop the old destination value before overwriting it.
     /// `None` is used for uninitialized stores and known trivial-copy values.
     pub drop: Option<LocalDrop>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ArrayIndex {
-    pub array: NodeId,
-    pub index: NodeId,
 }
 
 #[derive(Debug, Clone)]
@@ -306,7 +302,6 @@ pub enum NodeKind {
     /// Extract the tag of a variant as an isize, by casting the pointer to the string
     ExtractTag(NodeId),
     Array(B<SVec2<NodeId>>),
-    Index(ArrayIndex),
     Case(B<Case>),
     Loop(NodeId),
     SoftBreak,
@@ -359,7 +354,6 @@ impl NodeKind {
             Project(n, _) | ProjectAt(n, _) => smallvec![*n],
             FieldAccess(fa, _) => smallvec![*fa],
             Variant(_, n) => smallvec![*n],
-            Index(index) => smallvec![index.array, index.index],
             Case(case) => {
                 let mut v: SVec4<NodeId> = SVec4::with_capacity(2 + case.alternatives.len());
                 v.push(case.value);
@@ -679,11 +673,6 @@ impl Node {
                 }
                 writeln!(f, "{indent_str}]")?;
             }
-            Index(index) => {
-                writeln!(f, "{indent_str}index")?;
-                format_ind(arena, index.array, f, locals, env, spacing, indent + 1)?;
-                format_ind(arena, index.index, f, locals, env, spacing, indent + 1)?;
-            }
             Case(case) => {
                 writeln!(f, "{indent_str}match")?;
                 format_ind(arena, case.value, f, locals, env, spacing, indent + 1)?;
@@ -866,14 +855,6 @@ impl Node {
                     }
                 }
             }
-            Index(index) => {
-                if let Some(ty) = type_at(arena, index.array, pos) {
-                    return Some(ty);
-                }
-                if let Some(ty) = type_at(arena, index.index, pos) {
-                    return Some(ty);
-                }
-            }
             Case(case) => {
                 if let Some(ty) = type_at(arena, case.value, pos) {
                     return Some(ty);
@@ -990,10 +971,6 @@ impl Node {
             Array(nodes) => nodes
                 .iter()
                 .for_each(|&node| unbound_ty_vars(arena, node, result, ignore)),
-            Index(index) => {
-                unbound_ty_vars(arena, index.array, result, ignore);
-                unbound_ty_vars(arena, index.index, result, ignore);
-            }
             Case(case) => {
                 unbound_ty_vars(arena, case.value, result, ignore);
                 case.alternatives.iter().for_each(|(_, node)| {

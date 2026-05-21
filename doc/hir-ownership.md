@@ -10,14 +10,15 @@ This document is about source-level ownership semantics and the HIR operations t
 # Values, Places, and Locals
 
 A HIR expression either produces an owned value or denotes a place in existing storage.
-Place-like nodes include `EnvLoad`, projections (`Project`, `ProjectAt`, field projections before elaboration), and array `Index`.
+Place-like nodes include `EnvLoad`, projections (`Project`, `ProjectAt`, field projections before elaboration), and `Apply` / `StaticApply` nodes whose function definition has `returns_place`.
 SSA must not treat every `EnvLoad` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
-When a projection or index needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
+When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
 The consumer then uses a normal place rooted at that temporary, and ordinary `EnvDrop` cleanup releases the temporary after the consumer.
 
-Std-only functions marked with `#[place_result]` are metadata for future place-producing lowering.
-Their source type still returns an ordinary value type; until the dedicated lowering exists, SSA should treat calls normally and rely only on existing place-like HIR nodes.
+Std-only functions marked with `#[place_result]` are place-like nodes.
+The attribute also marks the function unsafe, so user source cannot call or bind it directly.
+HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like other place references when a place is required, or first materialize them with `TrivialCopy` / `ValueClone` when an owned value is required.
 
 `LocalDecl` is the ownership metadata for a local:
 
@@ -40,7 +41,7 @@ When the source is a place, HIR must materialize ownership explicitly:
 - Owned local moved out of its lexical scope: emit `EnvMove { id }` and skip the matching lexical drop.
 
 Generic types are not treated as `TrivialCopy` for this purpose, even if the function has a `T: TrivialCopy` constraint.
-They use the generic `Value` dictionary path unless and until a later storage model supports layout-driven generic copies.
+They use the generic `Value` dictionary path.
 
 Current lowering applies these rules in the main ownership-sensitive contexts:
 
@@ -50,7 +51,7 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 - Closure captures are materialized as owned values before `BuildClosure`.
 - Function returns move an owned local with `EnvMove` when returning that local out of the current scope.
 - Non-place arguments passed by shared-reference ABI are stored in owned temporaries; the call receives places to those temporaries and the temporaries are dropped after the call.
-- Projections and indexes of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `TrivialCopy` or `ValueClone`.
+- Projections and place-result calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `TrivialCopy` or `ValueClone`.
 
 # Drops and Cleanup
 
@@ -122,7 +123,7 @@ SSA should lower the elaborated form.
 
 For concrete associated constants, elaboration emits an immediate.
 For generic associated constants, elaboration projects from the hidden dictionary parameter.
-`Value::SIZE` and `Value::ALIGN` are therefore available either as constants or as dictionary projections and are the intended source of future typed or linear storage sizes.
+`Value::SIZE` and `Value::ALIGN` are therefore available either as constants or as dictionary projections and are the source of typed storage sizes.
 
 # Non-Contracts of the Boxed Interpreter
 

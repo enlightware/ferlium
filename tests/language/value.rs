@@ -559,7 +559,9 @@ fn lexical_drop_runs_on_runtime_error() {
     );
     assert_eq!(
         session.fail_run(&source),
-        RuntimeErrorKind::ArrayAccessOutOfBounds { index: 1, len: 1 }
+        RuntimeErrorKind::Aborted(Some(
+            "Array access out of bounds: index 1 for length 1".to_string()
+        ))
     );
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(5));
 }
@@ -586,7 +588,9 @@ fn generic_value_drop_runs_on_runtime_error() {
     );
     assert_eq!(
         session.fail_run(&source),
-        RuntimeErrorKind::ArrayAccessOutOfBounds { index: 1, len: 1 }
+        RuntimeErrorKind::Aborted(Some(
+            "Array access out of bounds: index 1 for length 1".to_string()
+        ))
     );
     assert_val_eq!(session.run("testing::tracked_drop_log()"), int(66));
 }

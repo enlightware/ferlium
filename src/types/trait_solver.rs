@@ -60,7 +60,7 @@ impl<'a> CurrentTypeDefs<'a> {
 
     fn get(self, id: TypeDefId) -> Option<&'a TypeDef> {
         if id.module == self.module_id {
-            Some(self.slots[id.index.as_index()].def())
+            self.slots.get(id.index.as_index()).map(TypeDefSlot::def)
         } else {
             None
         }

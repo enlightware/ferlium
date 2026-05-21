@@ -10,12 +10,11 @@ use crate::{
     Location,
     containers::{IntoSVec2, b},
     hir::value::{LiteralNativeValue, LiteralValue},
-    hir::{self, NodeArena, NodeId},
+    hir::{self, NodeId},
     module::{
-        FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex,
-        TraitImplId, id::Id,
+        FunctionId, LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex, TraitImplId, id::Id,
     },
-    std::{math::int_type, string::String as FerliumString},
+    std::string::String as FerliumString,
     types::effects::EffType,
     types::mutability::{MutType, MutVal},
     types::r#type::{FnType, Type},
@@ -58,6 +57,7 @@ pub fn static_apply(
         arguments,
         ty,
         inst_data: hir::FnInstData::none(),
+        returns_place: false,
     }))
 }
 
@@ -127,38 +127,6 @@ pub fn move_local(id: LocalDeclId) -> NodeKind {
 
 pub fn project(tuple: NodeId, index: ProjectionIndex) -> NodeKind {
     K::Project(tuple, index)
-}
-
-/// Build an array indexing place node for generated HIR.
-pub fn index_immediate(arena: &mut NodeArena, array: NodeId, index: isize) -> NodeKind {
-    let array_span = arena[array].span;
-    let index_node = arena.alloc(hir::Node::new(
-        immediate(LiteralValue::new_native(index)),
-        int_type(),
-        EffType::empty(),
-        array_span,
-    ));
-    K::Index(hir::ArrayIndex {
-        array,
-        index: index_node,
-    })
-}
-
-/// Build an owned array indexing node for generated HIR.
-pub fn index_immediate_clone(
-    arena: &mut NodeArena,
-    array: NodeId,
-    index: isize,
-    clone: LocalClone,
-    element_ty: Type,
-) -> NodeKind {
-    let span = arena[array].span;
-    let index = index_immediate(arena, array, index);
-    let index_place = arena.alloc(hir::Node::new(index, element_ty, EffType::empty(), span));
-    K::ValueClone(hir::ValueClone {
-        source: index_place,
-        clone: Some(clone),
-    })
 }
 
 pub fn extract_tag(variant: NodeId) -> NodeKind {

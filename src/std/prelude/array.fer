@@ -1,7 +1,84 @@
 // Arrays
 
+impl<A> Value for [A] where A: Value {
+	fn eq(left: [A], right: [A]) -> bool {
+		let l = array_len(left);
+		if l != array_len(right) {
+			return false;
+		};
+		let mut i = 0;
+		loop {
+			if i >= l {
+				return true;
+			};
+			if not eq(effects_unsafe { left[i] }, effects_unsafe { right[i] }) {
+				return false;
+			};
+			i += 1;
+		}
+	}
+
+	fn to_string(value: [A]) -> string {
+		let mut rendered = "[";
+		let mut i = 0;
+		loop {
+			if i >= array_len(value) {
+				string_push_str(rendered, "]");
+				return rendered;
+			};
+			if i > 0 {
+				string_push_str(rendered, ", ");
+			};
+			string_push_str(rendered, to_string(effects_unsafe { value[i] }));
+			i += 1;
+		}
+	}
+
+	fn hash(value: [A], state: &mut hasher) {
+		let l = array_len(value);
+		hasher_write_int(state, l);
+		let mut i = 0;
+		loop {
+			if i >= l {
+				return ();
+			};
+			hash(effects_unsafe { value[i] }, state);
+			i += 1;
+		}
+	}
+
+	fn clone(source: [A], target: &mut [A]) {
+		let len = array_len(source);
+		target = array_with_capacity(len);
+		let mut i = 0;
+		loop {
+			if i >= len {
+				return ();
+			};
+			buffer_clone_into(source.data, array_physical_index_unchecked(source, i), target.data, target.len);
+			target.len += 1;
+			i += 1;
+		}
+	}
+
+	fn drop(target: &mut [A]) {
+		loop {
+			let len = array_len(target);
+			if len <= 0 {
+				return ();
+			};
+			let index = len - 1;
+			buffer_drop_at(target.data, array_physical_index_unchecked(target, index));
+			target.len -= 1;
+		}
+	}
+}
+
 /// Return the last element of an array, or None if the array is empty.
-fn array_peek_back(array) -> None | Some(_) {
+fn array_peek_back<A>(array: [A]) -> None | Some(A)
+where
+	A: Value
+{
 	let l = array_len(array);
 	if l <= 0 {
 		None
@@ -14,14 +91,26 @@ fn array_append<A>(array: &mut [A], value: A)
 where
 	A: Value
 {
-	value_clone_to_mut_ptr(value, array_push_uninit_back(array))
+	array_ensure_capacity(array, array.len + 1);
+	let index = array_wrap_index(array.capacity, array.start + array.len);
+	buffer_clone_value_into(value, array.data, index);
+	array.len += 1;
 }
 
 fn array_prepend<A>(array: &mut [A], value: A)
 where
 	A: Value
 {
-	value_clone_to_mut_ptr(value, array_push_uninit_front(array))
+	array_ensure_capacity(array, array.len + 1);
+	if array.capacity > 0 {
+		array.start = if array.start <= 0 {
+			array.capacity - 1
+		} else {
+			array.start - 1
+		};
+	};
+	buffer_clone_value_into(value, array.data, array.start);
+	array.len += 1;
 }
 
 fn array_concat<A>(left: [A], right: [A]) -> [A]
@@ -31,21 +120,31 @@ where
 	let left_len = array_len(left);
 	let right_len = array_len(right);
 	let mut result = array_with_capacity(left_len + right_len);
-	for i in 0..left_len {
-		ptr_clone(array_element_ptr(left, i), array_push_uninit_back(result));
+	let mut i = 0;
+	loop {
+		if i < left_len {
+			buffer_clone_into(left.data, array_physical_index_unchecked(left, i), result.data, result.len);
+			result.len += 1;
+			i += 1;
+		} else {
+			soft_break;
+		};
 	};
-	for i in 0..right_len {
-		ptr_clone(array_element_ptr(right, i), array_push_uninit_back(result));
+	let mut i = 0;
+	loop {
+		if i < right_len {
+			buffer_clone_into(right.data, array_physical_index_unchecked(right, i), result.data, result.len);
+			result.len += 1;
+			i += 1;
+		} else {
+			soft_break;
+		};
 	};
 	result
 }
 
 fn array_slice_bound(len: int, index: int) -> int {
-	let resolved = if index < 0 {
-		len + index
-	} else {
-		index
-	};
+	let resolved = array_signed_index_to_offset(index, len);
 	if resolved < 0 {
 		len
 	} else if resolved > len {
@@ -64,8 +163,15 @@ where
 	let end = array_slice_bound(len, end);
 	let mut result = array_with_capacity(end - start);
 	if end > start {
-		for i in start..end {
-			ptr_clone(array_element_ptr(array, i), array_push_uninit_back(result));
+		let mut i = start;
+		loop {
+			if i < end {
+				buffer_clone_into(array.data, array_physical_index_unchecked(array, i), result.data, result.len);
+				result.len += 1;
+				i += 1;
+			} else {
+				soft_break;
+			};
 		};
 	};
 	result
@@ -75,27 +181,6 @@ impl Concat {
 	fn concat(left, right) {
 		array_concat(left, right)
 	}
-}
-
-impl<F, T> Cast for <From = [F], To = [T]>
-where
-	Cast<From = F, To = T>
-{
-	fn cast(array: [F]) -> [T] {
-		map(array, (|element| cast(element): (F) -> T))
-	}
-}
-
-// Compatibility, mark as deprecated when supported
-
-/// Deprecated, use `all` instead.
-fn array_all(array: [_], f) {
-	all(array, f)
-}
-
-/// Deprecated, use `any` instead.
-fn array_any(array: [_], f) {
-	any(array, f)
 }
 
 // Iterator and Seq for array
@@ -174,57 +259,50 @@ impl SizedSeq {
 	}
 }
 
-impl<A> Value for [A] where A: Value {
-	fn eq(left: [A], right: [A]) -> bool {
-		let l = array_len(left);
-		if l != array_len(right) {
-			return false;
-		};
-		for i in 0..l {
-			if not eq(effects_unsafe { left[i] }, effects_unsafe { right[i] }) {
-				return false;
-			}
-		};
-		true
+impl<A> Empty for [A] where A: Value {
+	fn empty() -> [A] {
+		array_with_capacity(0)
 	}
+}
 
-	fn to_string(value: [A]) -> string {
-		let mut rendered = "[";
-		for i in 0..array_len(value) {
-			if i > 0 {
-				string_push_str(rendered, ", ");
+impl<A> Default for [A] where A: Value {
+	fn default() -> [A] {
+		array_with_capacity(0)
+	}
+}
+
+fn array_pop_back<A>(array: &mut [A]) -> None | Some(A)
+where
+	A: Value
+{
+	let len = array_len(array);
+	if len <= 0 {
+		None
+	} else {
+		let index = array_physical_index_unchecked(array, len - 1);
+		array.len -= 1;
+		Some(buffer_take(array.data, index))
+	}
+}
+
+fn array_pop_front<A>(array: &mut [A]) -> None | Some(A)
+where
+	A: Value
+{
+	let len = array_len(array);
+	if len <= 0 {
+		None
+	} else {
+		let index = array.start;
+		array.len -= 1;
+		if array.len <= 0 {
+			array.start = 0;
+		} else {
+			array.start += 1;
+			if array.start >= array.capacity {
+				array.start = 0;
 			};
-			string_push_str(rendered, to_string(effects_unsafe { value[i] }));
 		};
-		string_push_str(rendered, "]");
-		rendered
-	}
-
-	fn hash(value: [A], state: &mut hasher) {
-		let l = array_len(value);
-		hasher_write_int(state, l);
-		for i in 0..l {
-			hash(effects_unsafe { value[i] }, state);
-		}
-	}
-
-	fn clone(source: [A], target: &mut [A]) {
-		let len = array_len(source);
-		target = array_with_capacity(len);
-		for i in 0..len {
-			ptr_clone(array_element_ptr(source, i), array_push_uninit_back(target));
-		};
-	}
-
-	fn drop(target: &mut [A]) {
-		loop {
-			let len = array_len(target);
-			if len <= 0 {
-				return ();
-			};
-			let index = len - 1;
-			ptr_drop(array_element_mut_ptr(target, index));
-			array_pop_back_uninit(target);
-		}
+		Some(buffer_take(array.data, index))
 	}
 }

@@ -27,9 +27,10 @@ use ferlium::{
     types::effects::{PrimitiveEffect, effect, no_effects},
 };
 
-use ferlium::std::array::{Array, array_type};
+use ferlium::std::array::array_type;
+use ferlium::std::buffer::Buffer;
 use ferlium::std::logic::bool_type;
-use ferlium::std::math::{float_type, int_type};
+use ferlium::std::math::{Int, float_type, int_type};
 use ferlium::std::string::string_type;
 use ferlium::types::r#type::{Type, tuple_type};
 
@@ -37,6 +38,15 @@ use ferlium::types::r#type::{Type, tuple_type};
 use wasm_bindgen_test::*;
 
 fn assert_std_value_layout<T>(module: &Module, ty: Type) {
+    assert_value_layout(
+        module,
+        ty,
+        std::mem::size_of::<T>() as isize,
+        std::mem::align_of::<T>() as isize,
+    );
+}
+
+fn assert_value_layout(module: &Module, ty: Type, size: isize, align: isize) {
     let size_index = VALUE_TRAIT.associated_const_index(ustr("SIZE")).unwrap();
     let align_index = VALUE_TRAIT.associated_const_index(ustr("ALIGN")).unwrap();
     let key = ConcreteTraitImplKey::new(VALUE_TRAIT.clone(), vec![ty]);
@@ -44,8 +54,6 @@ fn assert_std_value_layout<T>(module: &Module, ty: Type) {
         .get_concrete_impl_by_key(&key)
         .expect("expected std Value impl");
     let imp = module.get_impl_data(impl_id).unwrap();
-    let size = std::mem::size_of::<T>() as isize;
-    let align = std::mem::align_of::<T>() as isize;
 
     assert_eq!(imp.associated_const_value(size_index), Some(size));
     assert_eq!(imp.associated_const_value(align_index), Some(align));
@@ -62,6 +70,44 @@ fn assert_std_value_layout<T>(module: &Module, ty: Type) {
     );
 }
 
+#[derive(Clone, Copy)]
+struct ExpectedLayout {
+    size: usize,
+    align: usize,
+}
+
+impl ExpectedLayout {
+    fn native<T>() -> Self {
+        Self {
+            size: std::mem::size_of::<T>(),
+            align: std::mem::align_of::<T>(),
+        }
+    }
+
+    fn product(fields: impl IntoIterator<Item = Self>) -> Self {
+        let mut size = 0;
+        let mut align = 1;
+        for field in fields {
+            size = align_to(size, field.align);
+            size += field.size;
+            align = align.max(field.align);
+        }
+        Self {
+            size: align_to(size, align),
+            align,
+        }
+    }
+}
+
+fn align_to(offset: usize, align: usize) -> usize {
+    let rem = offset % align;
+    if rem == 0 {
+        offset
+    } else {
+        offset + (align - rem)
+    }
+}
+
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn std_value_impls_store_layout_associated_consts() {
@@ -70,7 +116,7 @@ fn std_value_impls_store_layout_associated_consts() {
 
     assert_std_value_layout::<()>(&module, Type::unit());
     assert_std_value_layout::<bool>(&module, bool_type());
-    assert_std_value_layout::<isize>(&module, int_type());
+    assert_std_value_layout::<Int>(&module, int_type());
     assert_std_value_layout::<ferlium::std::math::Float>(&module, float_type());
     assert_std_value_layout::<ferlium::std::string::String>(&module, string_type());
 }
@@ -82,7 +128,18 @@ fn blanket_value_impls_materialize_layout_associated_consts() {
     let output = session.compile("[1] == [1]");
     let module = session.session().expect_fresh_module(output.module_id);
 
-    assert_std_value_layout::<Array>(module, array_type(int_type()));
+    let array_layout = ExpectedLayout::product([
+        ExpectedLayout::native::<Int>(),
+        ExpectedLayout::native::<Buffer>(),
+        ExpectedLayout::native::<Int>(),
+        ExpectedLayout::native::<Int>(),
+    ]);
+    assert_value_layout(
+        module,
+        array_type(int_type()),
+        array_layout.size as isize,
+        array_layout.align as isize,
+    );
 }
 
 #[test]
@@ -101,59 +158,6 @@ fn value_clone_and_drop_cannot_be_called_explicitly() {
                 assert_eq!(method_name, ustr(expected_method));
             }
             other => panic!("expected CompilerOnlyTraitMethodUse error, got {other:?}"),
-        }
-    }
-}
-
-#[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn std_only_pointer_primitives_cannot_be_used_in_user_code() {
-    let mut session = TestSession::new();
-
-    for (source, expected_feature) in [
-        (
-            "let f = ptr_clone; f",
-            UnsafeFeature::Function(ustr("ptr_clone")),
-        ),
-        ("ptr_drop(())", UnsafeFeature::Function(ustr("ptr_drop"))),
-        (
-            "value_clone_to_mut_ptr(())",
-            UnsafeFeature::Function(ustr("value_clone_to_mut_ptr")),
-        ),
-        (
-            "array_element_ptr([1], 0)",
-            UnsafeFeature::Function(ustr("array_element_ptr")),
-        ),
-        (
-            "array_element_mut_ptr([1], 0)",
-            UnsafeFeature::Function(ustr("array_element_mut_ptr")),
-        ),
-        (
-            "array_push_uninit_back([])",
-            UnsafeFeature::Function(ustr("array_push_uninit_back")),
-        ),
-        (
-            "array_push_uninit_front([])",
-            UnsafeFeature::Function(ustr("array_push_uninit_front")),
-        ),
-        (
-            "array_pop_back_uninit([])",
-            UnsafeFeature::Function(ustr("array_pop_back_uninit")),
-        ),
-        (
-            "type UserPtr = Ptr<int>;",
-            UnsafeFeature::TypeAlias(ustr("Ptr")),
-        ),
-        (
-            "type UserMutPtr = MutPtr<int>;",
-            UnsafeFeature::TypeAlias(ustr("MutPtr")),
-        ),
-    ] {
-        match session.fail_compilation(source).into_inner() {
-            CompilationErrorImpl::UnsafeFeatureUseNotAllowed { feature, .. } => {
-                assert_eq!(feature, expected_feature);
-            }
-            other => panic!("expected UnsafeFeatureUseNotAllowed for `{source}`, got {other:?}"),
         }
     }
 }
@@ -305,6 +309,20 @@ fn array_index_shared_ref_call_does_not_clone() {
         ),
         int(70)
     );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn array_index_function_is_std_internal() {
+    let mut session = TestSession::new();
+    for source in ["array_index([1], 0)", "let f = array_index; f([1], 0)"] {
+        match session.fail_compilation(source).into_inner() {
+            CompilationErrorImpl::UnsafeFeatureUseNotAllowed { feature, .. } => {
+                assert_eq!(feature, UnsafeFeature::Function(ustr("array_index")));
+            }
+            other => panic!("expected unsafe feature error, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -692,26 +710,23 @@ fn array_concat() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn array_any() {
+fn any_on_arrays() {
     let mut session = TestSession::new();
-    assert_val_eq!(
-        session.run("array_any(([]: [int]), |x| x == 1)"),
-        bool(false)
-    );
-    assert_val_eq!(session.run("array_any([1], |x| x == 1)"), bool(true));
-    assert_val_eq!(session.run("array_any([1, 2, 3], |x| x == 1)"), bool(true));
-    assert_val_eq!(session.run("array_any([1, 2, 3], |x| x >= 2)"), bool(true));
-    assert_val_eq!(session.run("array_any([1, 2, 3], |x| x >= 4)"), bool(false));
+    assert_val_eq!(session.run("any(([]: [int]), |x| x == 1)"), bool(false));
+    assert_val_eq!(session.run("any([1], |x| x == 1)"), bool(true));
+    assert_val_eq!(session.run("any([1, 2, 3], |x| x == 1)"), bool(true));
+    assert_val_eq!(session.run("any([1, 2, 3], |x| x >= 2)"), bool(true));
+    assert_val_eq!(session.run("any([1, 2, 3], |x| x >= 4)"), bool(false));
     use PrimitiveEffect::*;
     test_mod_for_effects(
         &mut session,
-        "fn f() { let a = [(1: int)]; array_any(a, |v| { v >= 1 }) }",
+        "fn f() { let a = [(1: int)]; any(a, |v| { v >= 1 }) }",
         "f",
         no_effects(),
     );
     test_mod_for_effects(
         &mut session,
-        "fn f() { let a = [(1: int)]; array_any(a, |v| { effects::read(); v >= 1 }) }",
+        "fn f() { let a = [(1: int)]; any(a, |v| { effects::read(); v >= 1 }) }",
         "f",
         effect(Read),
     );
@@ -719,26 +734,23 @@ fn array_any() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-fn array_all() {
+fn all_on_arrays() {
     let mut session = TestSession::new();
-    assert_val_eq!(
-        session.run("array_all(([]: [int]), |x| x == 1)"),
-        bool(true)
-    );
-    assert_val_eq!(session.run("array_all([1], |x| x == 1)"), bool(true));
-    assert_val_eq!(session.run("array_all([1, 2, 3], |x| x == 1)"), bool(false));
-    assert_val_eq!(session.run("array_all([1, 2, 3], |x| x >= 1)"), bool(true));
-    assert_val_eq!(session.run("array_all([1, 2, 3], |x| x >= 2)"), bool(false));
+    assert_val_eq!(session.run("all(([]: [int]), |x| x == 1)"), bool(true));
+    assert_val_eq!(session.run("all([1], |x| x == 1)"), bool(true));
+    assert_val_eq!(session.run("all([1, 2, 3], |x| x == 1)"), bool(false));
+    assert_val_eq!(session.run("all([1, 2, 3], |x| x >= 1)"), bool(true));
+    assert_val_eq!(session.run("all([1, 2, 3], |x| x >= 2)"), bool(false));
     use PrimitiveEffect::*;
     test_mod_for_effects(
         &mut session,
-        "fn f() { let a = [(1: int)]; array_all(a, |v| { v >= 1 }) }",
+        "fn f() { let a = [(1: int)]; all(a, |v| { v >= 1 }) }",
         "f",
         no_effects(),
     );
     test_mod_for_effects(
         &mut session,
-        "fn f() { let a = [(1: int)]; array_all(a, |v| { effects::read(); v >= 1 }) }",
+        "fn f() { let a = [(1: int)]; all(a, |v| { effects::read(); v >= 1 }) }",
         "f",
         effect(Read),
     );
@@ -1497,11 +1509,8 @@ fn default_value_for_type() {
     assert_some_value_eq(def_val(int_type()), int(0));
     assert_some_value_eq(def_val(float_type()), float(0.0));
     assert_some_value_eq(def_val(string_type()), string(""));
-    assert_some_value_eq(def_val(array_type(int_type())), Value::native(Array::new()));
-    assert_some_value_eq(
-        def_val(array_type(float_type())),
-        Value::native(Array::new()),
-    );
+    assert_some_value_eq(def_val(array_type(int_type())), int_a![]);
+    assert_some_value_eq(def_val(array_type(float_type())), float_a![]);
     assert_some_value_eq(
         def_val(tuple_type([int_type(), bool_type()])),
         tuple!(int(0), bool(false)),

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::{
     Location, cached_ty,
     compiler::error::InternalCompilationError,
-    containers::SVec2,
+    containers::{SVec2, b},
     hir::function::FunctionDefinition,
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
@@ -42,6 +42,43 @@ pub const DESERIALIZE_TRAIT_NAME: &str = "Deserialize";
 
 pub const SERIALIZE_FN_NAME: &str = "serialize";
 pub const DESERIALIZE_FN_NAME: &str = "deserialize";
+
+fn alloc_synth_node(arena: &mut NodeArena, kind: hir::NodeKind, ty: Type) -> NodeId {
+    arena.alloc(hir::Node::new(
+        kind,
+        ty,
+        EffType::empty(),
+        Location::new_synthesized(),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_serialize_projection(
+    arena: &mut NodeArena,
+    solver: &mut TraitSolver,
+    trait_ref: &TraitRef,
+    span: Location,
+    self_id: LocalDeclId,
+    self_ty: Type,
+    index: usize,
+    member_ty: Type,
+) -> Result<NodeId, InternalCompilationError> {
+    use hir::hir_syn::*;
+
+    let load_node = alloc_synth_node(arena, load(self_id), self_ty);
+    let project_node = alloc_synth_node(
+        arena,
+        project(load_node, ProjectionIndex::from_index(index)),
+        member_ty,
+    );
+    let function =
+        solver.solve_impl_method(trait_ref, &[member_ty], TraitMethodIndex(0), span, arena)?;
+    Ok(alloc_synth_node(
+        arena,
+        static_apply_pure(function, [(project_node, member_ty)], variant_type(), span),
+        variant_type(),
+    ))
+}
 
 fn object_payload_type() -> Type {
     cached_ty!(|| {
@@ -111,27 +148,6 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
         let locals = vec![local("self", ty)];
         let l_self_id = LocalDeclId::from_index(0);
 
-        // helper to build the serialization of a member of a tuple
-        let mut build_serialize_i = |arena: &mut NodeArena, index, ty| {
-            // load function parameter (that is a tuple in memory)
-            let load_node = n(arena, load(l_self_id), ty);
-            // project the i-th element
-            let project_node = n(
-                arena,
-                project(load_node, ProjectionIndex::from_index(index)),
-                ty,
-            );
-            // serialize the i-th element
-            let function =
-                solver.solve_impl_method(trait_ref, &[ty], TraitMethodIndex(0), span, arena)?;
-            let apply = n(
-                arena,
-                static_apply_pure(function, [(project_node, ty)], variant_type(), span),
-                variant_type(),
-            );
-            Ok(apply)
-        };
-
         // derive tuple, record, variant serialization
         let root = if let TypeKind::Tuple(tys) = ty_data {
             /*
@@ -160,7 +176,9 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 .enumerate()
                 .map(|(index, ty_i)| {
                     // serialize the i-th element
-                    build_serialize_i(arena, index, ty_i)
+                    build_serialize_projection(
+                        arena, solver, trait_ref, span, l_self_id, ty, index, ty_i,
+                    )
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
             Some(build_serialize_to_seq(arena, nodes, "Array"))
@@ -202,7 +220,9 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                 .enumerate()
                 .map(|(index, (name, ty_i))| {
                     let tag = n(arena, native_str(&name), string_type());
-                    let payload = build_serialize_i(arena, index, ty_i)?;
+                    let payload = build_serialize_projection(
+                        arena, solver, trait_ref, span, l_self_id, ty, index, ty_i,
+                    )?;
                     let entry = n(arena, tuple([tag, payload]), variant_object_entry_type());
                     Ok(entry)
                 })
@@ -246,7 +266,9 @@ impl Deriver for AlgebraicTypeSerializeDeriver {
                     let array_ty = array_type(variant_object_entry_type());
                     let array_node = if payload_ty != Type::unit() {
                         // variant with payload
-                        let payload_node = build_serialize_i(arena, 0, payload_ty)?;
+                        let payload_node = build_serialize_projection(
+                            arena, solver, trait_ref, span, l_self_id, ty, 0, payload_ty,
+                        )?;
                         let data_str = n(arena, native_str("data"), string_type());
                         let payload_entry = n(
                             arena,
@@ -386,6 +408,10 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                 span,
                 arena,
             )?);
+            let variant_value_dictionary =
+                solver.solve_impl(&VALUE_TRAIT, &[variant_ty], span, arena)?;
+            let variant_value_dictionary_ty =
+                VALUE_TRAIT.get_dictionary_type_for_tys(&[variant_ty], &[]);
             // store it at 1
             let (store_array, l_array_id) = store_new(
                 get_array,
@@ -404,14 +430,51 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     // get the array payload of the array variant
                     let get_array = n(arena, load(l_array_id), array_ty);
                     // get the i-th element
-                    let index_kind = index_immediate_clone(
+                    let index_node = n(
                         arena,
-                        get_array,
-                        i as isize,
-                        variant_clone.clone(),
+                        immediate(LiteralValue::new_native(i as isize)),
+                        int_type(),
+                    );
+                    let dictionary_node = n(
+                        arena,
+                        get_dictionary(variant_value_dictionary),
+                        variant_value_dictionary_ty,
+                    );
+                    let array_index = solver.get_function(
+                        span,
+                        &module::Path::single_str("std"),
+                        ustr("array_index"),
+                    )?;
+                    let index_place = n(
+                        arena,
+                        hir::NodeKind::StaticApply(b(hir::StaticApplication {
+                            function: array_index,
+                            function_path: None,
+                            function_span: span,
+                            arguments: vec![dictionary_node, get_array, index_node],
+                            argument_names: vec![
+                                ustr("_d0_impl_Value"),
+                                ustr("array"),
+                                ustr("index"),
+                            ],
+                            ty: FnType::new_by_val(
+                                [variant_value_dictionary_ty, array_ty, int_type()],
+                                variant_ty,
+                                EffType::empty(),
+                            ),
+                            inst_data: hir::FnInstData::none(),
+                            returns_place: true,
+                        })),
                         variant_ty,
                     );
-                    let index_node = n(arena, index_kind, variant_ty);
+                    let index_node = n(
+                        arena,
+                        hir::NodeKind::ValueClone(hir::ValueClone {
+                            source: index_place,
+                            clone: Some(variant_clone.clone()),
+                        }),
+                        variant_ty,
+                    );
                     // deserialize the i-th element
                     build_deserialize(arena, solver, index_node, ty_i)
                 })

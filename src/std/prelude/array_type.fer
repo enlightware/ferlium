@@ -1,0 +1,94 @@
+/// Array storage type
+#[no_derive_value]
+struct array<A> {
+	data: Buffer<A>,
+	capacity: int,
+	len: int,
+	start: int,
+}
+
+fn array_len<A>(array: [A]) -> int {
+	array.len
+}
+
+fn array_wrap_index(capacity: int, index: int) -> int {
+	if index >= capacity {
+		index - capacity
+	} else {
+		index
+	}
+}
+
+fn array_signed_index_to_offset(index: int, len: int) -> int {
+	if index < 0 {
+		len + index
+	} else {
+		index
+	}
+}
+
+fn array_resolve_index(index: int, len: int) -> int {
+	let resolved = array_signed_index_to_offset(index, len);
+	if resolved < 0 or resolved >= len {
+		panic(f"Array access out of bounds: index {index} for length {len}");
+	};
+	resolved
+}
+
+fn array_physical_index<A>(array: [A], index: int) -> int {
+	let resolved = array_resolve_index(index, array.len);
+	array_wrap_index(array.capacity, array.start + resolved)
+}
+
+fn array_physical_index_unchecked<A>(array: [A], index: int) -> int {
+	let resolved = array_signed_index_to_offset(index, array.len);
+	array_wrap_index(array.capacity, array.start + resolved)
+}
+
+#[place_result]
+fn array_index<A>(array: [A], index: int) -> A
+{
+	let len = array_len(array);
+	let resolved = array_resolve_index(index, len);
+	return effects_unsafe { buffer_slot(array.data, array_wrap_index(array.capacity, array.start + resolved)) };
+}
+
+fn array_with_capacity<A>(capacity: int) -> [A] {
+	let capacity = if capacity < 0 { 0 } else { capacity };
+	array {
+		data: buffer_with_capacity(capacity),
+		capacity: capacity,
+		len: 0,
+		start: 0,
+	}
+}
+
+fn array_ensure_capacity<A>(array: &mut [A], len: int)
+{
+	if array.capacity >= len {
+		return ();
+	};
+	let new_capacity = if array.capacity <= 0 {
+		1
+	} else {
+		array.capacity * 2
+	};
+	let new_capacity = if new_capacity < len {
+		len
+	} else {
+		new_capacity
+	};
+	let mut new_data = buffer_with_capacity(new_capacity);
+	let mut i = 0;
+	loop {
+		if i < array.len {
+			buffer_move_into(array.data, array_physical_index_unchecked(array, i), new_data, i);
+			i += 1;
+		} else {
+			soft_break;
+		};
+	};
+	buffer_move(new_data, array.data);
+	array.capacity = new_capacity;
+	array.start = 0;
+}

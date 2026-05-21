@@ -22,7 +22,7 @@ use ferlium::{
     format::FormatWith,
     hir::value::Value,
     std::{
-        array::{Array, array_type_generic},
+        array::array_type_generic,
         math::{float_type, int_type},
     },
     types::mutability::MutType,
@@ -1740,45 +1740,51 @@ fn arithmetic_execution_errors() {
 fn array_execution_errors() {
     let mut session = TestSession::new();
     use RuntimeErrorKind::*;
-    assert_eq!(
-        session.fail_run("[1][1]"),
-        ArrayAccessOutOfBounds { index: 1, len: 1 }
-    );
+    let index_one_len_one = Aborted(Some(
+        "Array access out of bounds: index 1 for length 1".to_string(),
+    ));
+    let index_three_len_two = Aborted(Some(
+        "Array access out of bounds: index 3 for length 2".to_string(),
+    ));
+    let index_minus_three_len_two = Aborted(Some(
+        "Array access out of bounds: index -3 for length 2".to_string(),
+    ));
+    assert_eq!(session.fail_run("[1][1]"), index_one_len_one);
     assert_eq!(
         session.fail_run("let a = [1, 2]; a[3]"),
-        ArrayAccessOutOfBounds { index: 3, len: 2 }
+        index_three_len_two
     );
     assert_eq!(
         session.fail_run("let a = [1, 2]; a[3]; 0"),
-        ArrayAccessOutOfBounds { index: 3, len: 2 }
+        index_three_len_two
     );
     assert_eq!(
         session.fail_run("let a = [1, 2]; a[-3]"),
-        ArrayAccessOutOfBounds { index: -3, len: 2 }
+        index_minus_three_len_two
     );
     assert_eq!(
         session.fail_run("let mut a = [1, 2]; a[3] = 0"),
-        ArrayAccessOutOfBounds { index: 3, len: 2 }
+        index_three_len_two
     );
     assert_eq!(
         session.fail_run("let mut a = [1, 2]; a[-3] = 0"),
-        ArrayAccessOutOfBounds { index: -3, len: 2 }
+        index_minus_three_len_two
     );
     assert_eq!(
         session.fail_run("let i = || 3; let a = [1, 2]; a[i()]"),
-        ArrayAccessOutOfBounds { index: 3, len: 2 }
+        index_three_len_two
     );
     assert_eq!(
         session.fail_run("let i = || -3; let a = [1, 2]; a[i()]"),
-        ArrayAccessOutOfBounds { index: -3, len: 2 }
+        index_minus_three_len_two
     );
     assert_eq!(
         session.fail_run("let i = || 3; let mut a = [1, 2]; a[i()] = 0"),
-        ArrayAccessOutOfBounds { index: 3, len: 2 }
+        index_three_len_two
     );
     assert_eq!(
         session.fail_run("let i = || -3; let mut a = [1, 2]; a[i()] = 0"),
-        ArrayAccessOutOfBounds { index: -3, len: 2 }
+        index_minus_three_len_two
     );
 }
 
@@ -2282,22 +2288,16 @@ fn properties() {
         .expect_mutability_must_be(MutabilityMustBeWhat::Mutable);
 
     // array value
-    set_array_property_value(Array::new());
+    set_array_property_value(int_a![]);
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![]);
     session.run("@props::my_scope.my_array = [1, 2]");
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![1, 2]);
     session.run("@props::my_scope.my_array = array_concat(@props::my_scope.my_array, [3, 4])");
     assert_val_eq!(session.run("@props::my_scope.my_array"), int_a![1, 2, 3, 4]);
     session.run("@props::my_scope.my_array[0] = 5");
-    assert_val_eq!(
-        Value::native(get_array_property_value()),
-        int_a![5, 2, 3, 4]
-    );
+    assert_val_eq!(get_array_property_value(), int_a![5, 2, 3, 4]);
     session.run("@props::my_scope.my_array[3] += 1");
-    assert_val_eq!(
-        Value::native(get_array_property_value()),
-        int_a![5, 2, 3, 5]
-    );
+    assert_val_eq!(get_array_property_value(), int_a![5, 2, 3, 5]);
 }
 
 #[test]

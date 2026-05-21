@@ -748,6 +748,7 @@ impl Node {
                         argument_names,
                         ty,
                         inst_data: hir::FnInstData::none(),
+                        returns_place: false,
                     }));
                 } else if resolved {
                     // Fully resolved, look up the trait implementation and replace the function directly.
@@ -772,6 +773,7 @@ impl Node {
                         argument_names,
                         ty,
                         inst_data: hir::FnInstData::none(),
+                        returns_place: false,
                     }));
                 } else if is_function_surface_only_value_trait_application(
                     &app.trait_ref,
@@ -805,6 +807,7 @@ impl Node {
                     kind = Apply(b(hir::Application {
                         function: project_fn_id,
                         arguments,
+                        returns_place: false,
                     }));
                 } else {
                     // Not fully resolved, use the dictionary to look up the trait method.
@@ -839,6 +842,7 @@ impl Node {
                     kind = Apply(b(hir::Application {
                         function: project_fn_id,
                         arguments,
+                        returns_place: false,
                     }));
                 }
             }
@@ -1135,10 +1139,6 @@ impl Node {
                 for &node_id in nodes.iter() {
                     elaborate_dictionaries(arena, node_id, ctx, local_count)?;
                 }
-            }
-            Index(index) => {
-                elaborate_dictionaries(arena, index.array, ctx, local_count)?;
-                elaborate_dictionaries(arena, index.index, ctx, local_count)?;
             }
             Case(case) => {
                 elaborate_dictionaries(arena, case.value, ctx, local_count)?;

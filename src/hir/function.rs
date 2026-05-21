@@ -409,7 +409,15 @@ impl Callable for ScriptFunction {
 
         ctx.call_depth -= 1;
         if ret.is_ok() {
-            assert_eq!(ctx.environment.len(), ctx.frame_base + arg_count);
+            let expected_len = ctx.frame_base + arg_count;
+            if ctx.environment.len() > expected_len
+                && ctx.environment[expected_len..]
+                    .iter()
+                    .all(|entry| matches!(entry, ValOrMut::Val(Value::Uninit)))
+            {
+                ctx.truncate_environment_storage(expected_len);
+            }
+            assert_eq!(ctx.environment.len(), expected_len);
         }
         ctx.truncate_environment_storage(ctx.frame_base);
         ctx.frame_base = old_frame_base;

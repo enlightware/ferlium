@@ -766,17 +766,6 @@ impl Module {
         self.add_collected_functions(fn_collector);
     }
 
-    /// Add a native blanket trait implementation with no associated const values.
-    pub(crate) fn add_native_blanket_impl(
-        &mut self,
-        trait_ref: TraitRef,
-        sub_key: BlanketTraitImplSubKey,
-        output_tys: impl Into<Vec<Type>>,
-        functions: impl Into<Vec<Function>>,
-    ) {
-        self.add_blanket_impl_no_locals(trait_ref, sub_key, output_tys, [], functions);
-    }
-
     /// Add a blanket trait implementation to this module, with raw functions and no local variables.
     /// The definition will be retrieved by instantiating the trait method definitions with the given types.
     /// The caller is responsible to ensure that the input and output types match the trait reference

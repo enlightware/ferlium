@@ -14,14 +14,15 @@ use ferlium::{
     hir::emit_ir::{CompiledExpr, emit_expr_unsafe},
     hir::function::{
         BinaryNativeFnNNV, BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Function,
-        FunctionDefinition, NullaryNativeFnN, UnaryNativeFnMN, UnaryNativeFnNN, UnaryNativeFnNV,
-        UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
+        FunctionDefinition, NullaryNativeFnN, NullaryNativeFnV, UnaryNativeFnMN, UnaryNativeFnNN,
+        UnaryNativeFnNV, UnaryNativeFnRN, UnaryNativeFnVN, UnaryNativeFnVV,
     },
     hir::value::{NativeDisplay, Value},
     module::{BlanketTraitImplSubKey, Module, ModuleEnv, ModuleId, Path},
     parse_module_and_expr,
     std::{
-        array::{Array, array_type},
+        array::{array_type, array_value_from_vec},
+        buffer::Buffer,
         logic::bool_type,
         math::int_type,
         new_module_using_std,
@@ -94,20 +95,22 @@ fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result
     }
 
     if let (Some(actual), Some(expected)) = (
-        actual.as_primitive_ty::<Array>(),
-        expected.as_primitive_ty::<Array>(),
+        actual.as_primitive_ty::<Buffer>(),
+        expected.as_primitive_ty::<Buffer>(),
     ) {
-        if actual.len() != expected.len() {
+        if actual.capacity() != expected.capacity() {
             return Err(format!(
-                "{path}: expected array length {}, got {}",
-                expected.len(),
-                actual.len()
+                "{path}: expected buffer capacity {}, got {}",
+                expected.capacity(),
+                actual.capacity()
             ));
         }
-        for index in 0..actual.len() {
-            let actual = actual.get(index).unwrap();
-            let expected = expected.get(index).unwrap();
-            compare_values(actual, expected, &format!("{path}[{index}]"))?;
+        for index in 0..actual.capacity() {
+            compare_values(
+                actual.get(index).unwrap(),
+                expected.get(index).unwrap(),
+                &format!("{path}[{index}]"),
+            )?;
         }
         return Ok(());
     }
@@ -119,8 +122,90 @@ fn compare_native_values(actual: &Value, expected: &Value, path: &str) -> Result
     ))
 }
 
+fn ferlium_array_parts(value: &Value) -> Option<(&Buffer, usize, usize)> {
+    let Value::Tuple(fields) = value else {
+        return None;
+    };
+    if fields.len() != 4 {
+        return None;
+    }
+    let buffer = fields[1].as_primitive_ty::<Buffer>()?;
+    let len = usize::try_from(*fields[2].as_primitive_ty::<isize>()?).ok()?;
+    let start = usize::try_from(*fields[3].as_primitive_ty::<isize>()?).ok()?;
+    Some((buffer, len, start))
+}
+
+fn compare_ferlium_arrays(
+    actual: &Value,
+    expected: &Value,
+    path: &str,
+) -> Option<Result<(), String>> {
+    let (actual_buffer, actual_len, actual_start) = ferlium_array_parts(actual)?;
+    let (expected_buffer, expected_len, expected_start) = ferlium_array_parts(expected)?;
+    Some((|| {
+        if actual_len != expected_len {
+            return Err(format!(
+                "{path}: expected array length {expected_len}, got {actual_len}"
+            ));
+        }
+        for index in 0..actual_len {
+            let actual_capacity = actual_buffer.capacity();
+            let expected_capacity = expected_buffer.capacity();
+            let actual_physical = if actual_capacity == 0 {
+                0
+            } else {
+                (actual_start + index) % actual_capacity
+            };
+            let expected_physical = if expected_capacity == 0 {
+                0
+            } else {
+                (expected_start + index) % expected_capacity
+            };
+            compare_values(
+                actual_buffer.get(actual_physical).unwrap(),
+                expected_buffer.get(expected_physical).unwrap(),
+                &format!("{path}[{index}]"),
+            )?;
+        }
+        Ok(())
+    })())
+}
+
+fn compare_tuple_values(actual: &Value, expected: &Value, path: &str) -> Result<(), String> {
+    let (Value::Tuple(actual), Value::Tuple(expected)) = (actual, expected) else {
+        panic!("compare_tuple_values called for non-tuple values");
+    };
+    if actual.len() != expected.len() {
+        return Err(format!(
+            "{path}: expected tuple length {}, got {}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+        compare_values(actual, expected, &format!("{path}.{index}"))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Result<(), String> {
     match (actual, expected) {
+        (Value::Tuple(_), Value::Tuple(_)) => {
+            if let Some(result) = compare_ferlium_arrays(actual, expected, path) {
+                return result;
+            }
+            compare_tuple_values(actual, expected, path)
+        }
+        (Value::Tuple(_), Value::Native(_)) => Err(format!(
+            "{path}: expected {}, got {}",
+            expected.to_string_repr(),
+            actual.to_string_repr()
+        )),
+        (Value::Native(_), Value::Tuple(_)) => Err(format!(
+            "{path}: expected {}, got {}",
+            expected.to_string_repr(),
+            actual.to_string_repr()
+        )),
         (Value::Native(_), Value::Native(_)) => compare_native_values(actual, expected, path),
         (Value::Variant(actual), Value::Variant(expected)) => {
             if actual.tag != expected.tag {
@@ -134,19 +219,6 @@ pub(crate) fn compare_values(actual: &Value, expected: &Value, path: &str) -> Re
                 &expected.value,
                 &format!("{path}.{}", actual.tag),
             )
-        }
-        (Value::Tuple(actual), Value::Tuple(expected)) => {
-            if actual.len() != expected.len() {
-                return Err(format!(
-                    "{path}: expected tuple length {}, got {}",
-                    expected.len(),
-                    actual.len()
-                ));
-            }
-            for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
-                compare_values(actual, expected, &format!("{path}.{index}"))?;
-            }
-            Ok(())
         }
         (Value::Function(actual), Value::Function(expected)) => {
             if actual.function_id != expected.function_id {
@@ -634,30 +706,46 @@ pub fn get_property_value() -> isize {
 }
 
 thread_local! {
-    static INT_ARRAY_PROPERTY_VALUE: RefCell<Array> = RefCell::new(Array::new());
+    static INT_ARRAY_PROPERTY_VALUE: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn set_array_property_value(value: Array) {
-    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = value);
+pub fn set_array_property_value(value: Value) {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = int_vec_from_array_value(&value));
 }
 
-fn set_array_property_value_ref(value: &Array) {
-    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = clone_int_array(value));
+pub fn get_array_property_value() -> Value {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| int_vec_to_array_value(&cell.borrow()))
 }
 
-pub fn get_array_property_value() -> Array {
-    INT_ARRAY_PROPERTY_VALUE.with(|cell| clone_int_array(&cell.borrow()))
+fn get_array_property_value_value() -> Value {
+    get_array_property_value()
 }
 
-fn clone_int_array(value: &Array) -> Array {
-    let mut result = Array::with_capacity(value.len());
-    for index in 0..value.len() {
-        let item = *value
-            .get(index)
+fn set_array_property_value_value_ref(value: &Value) {
+    INT_ARRAY_PROPERTY_VALUE.with(|cell| *cell.borrow_mut() = int_vec_from_array_value(value));
+}
+
+fn int_vec_to_array_value(value: &[isize]) -> Value {
+    let values = value.iter().copied().map(Value::native).collect::<Vec<_>>();
+    array_value_from_vec(values)
+}
+
+fn int_vec_from_array_value(value: &Value) -> Vec<isize> {
+    let (buffer, len, start) =
+        ferlium_array_parts(value).expect("test property my_array only stores arrays");
+    let mut result = Vec::with_capacity(len);
+    for index in 0..len {
+        let physical = if buffer.capacity() == 0 {
+            0
+        } else {
+            (start + index) % buffer.capacity()
+        };
+        let item = *buffer
+            .get(physical)
             .unwrap()
             .as_primitive_ty::<isize>()
             .expect("test property my_array only stores ints");
-        result.push_back(Value::native(item));
+        result.push(item);
     }
     result
 }
@@ -684,8 +772,8 @@ fn test_property_module(module_id: ModuleId) -> Module {
     );
     module.add_function(
         "@get my_scope.my_array".into(),
-        NullaryNativeFnN::description_with_ty(
-            get_array_property_value,
+        NullaryNativeFnV::description_with_ty(
+            get_array_property_value_value,
             [],
             "Gets the value of my_scope.my_array.",
             array_type(int_type()),
@@ -694,8 +782,8 @@ fn test_property_module(module_id: ModuleId) -> Module {
     );
     module.add_function(
         "@set my_scope.my_array".into(),
-        UnaryNativeFnRN::description_with_in_ty(
-            set_array_property_value_ref,
+        UnaryNativeFnVN::description_with_in_ty(
+            set_array_property_value_value_ref,
             ["value"],
             "Sets the value of my_scope.my_array.",
             array_type(int_type()),
@@ -950,12 +1038,15 @@ pub fn variant_tn(tag: &str, values: impl IntoSVec2<Value>) -> Value {
 #[macro_export]
 macro_rules! bool_a {
     [] => {
-        Value::native(Array::new())
+        ferlium::std::array::array_value_from_vec(vec![])
     };
     [$($elem:expr),+ $(,)?] => {
-        Value::native(ferlium::std::array::Array::from_vec(vec![
+        {
+            let values = vec![
             $(Value::native::<bool>($elem)),+
-        ]))
+            ];
+            ferlium::std::array::array_value_from_vec(values)
+        }
     };
 }
 
@@ -963,12 +1054,15 @@ macro_rules! bool_a {
 #[macro_export]
 macro_rules! int_a {
     [] => {
-        Value::native(ferlium::std::array::Array::new())
+        ferlium::std::array::array_value_from_vec(vec![])
     };
     [$($elem:expr),+ $(,)?] => {
-        Value::native(ferlium::std::array::Array::from_vec(vec![
+        {
+            let values = vec![
             $(Value::native::<ferlium::std::math::Int>($elem)),+
-        ]))
+            ];
+            ferlium::std::array::array_value_from_vec(values)
+        }
     };
 }
 
@@ -976,12 +1070,15 @@ macro_rules! int_a {
 #[macro_export]
 macro_rules! float_a {
     [] => {
-        Value::native(ferlium::std::array::Array::new())
+        ferlium::std::array::array_value_from_vec(vec![])
     };
     [$($elem:expr),+ $(,)?] => {
-        Value::native(ferlium::std::array::Array::from_vec(vec![
+        {
+            let values = vec![
             $(Value::native::<ferlium::std::math::Float>(ferlium::std::math::Float::new($elem).unwrap())),+
-        ]))
+            ];
+            ferlium::std::array::array_value_from_vec(values)
+        }
     };
 }
 
@@ -1015,11 +1112,14 @@ macro_rules! tuple {
 #[macro_export]
 macro_rules! array {
     [] => {
-        Value::native(ferlium::std::array::Array::new())
+        ferlium::std::array::array_value_from_vec(vec![])
     };
     [$($elem:expr),+ $(,)?] => {
-        Value::native(ferlium::std::array::Array::from_vec(vec![
+        {
+            let values = vec![
             $($elem),+
-        ]))
+            ];
+            ferlium::std::array::array_value_from_vec(values)
+        }
     };
 }

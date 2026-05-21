@@ -316,14 +316,16 @@ fn node_variable_type_annotations<Env>(
         }
         StaticApply(app) => {
             let arity = app.argument_names.len();
-            let is_synthesized = app.function_span.is_empty();
-            if !is_synthesized && let Some(path) = &app.function_path {
-                for (&arg, arg_name) in app.arguments.iter().zip(app.argument_names.iter()) {
-                    if !should_hide_arg_name_hint(arena, path, arity, arg_name, arg, locals) {
-                        result.push((arena[arg].span.start_usize(), format!("{arg_name}: ")));
-                    }
-                    variable_type_annotations(arena, arg, result, locals, env);
+            let show_arg_name_hints = !app.function_span.is_empty();
+            for (index, &arg) in app.arguments.iter().enumerate() {
+                if show_arg_name_hints
+                    && let (Some(path), Some(arg_name)) =
+                        (&app.function_path, app.argument_names.get(index))
+                    && !should_hide_arg_name_hint(arena, path, arity, arg_name, arg, locals)
+                {
+                    result.push((arena[arg].span.start_usize(), format!("{arg_name}: ")));
                 }
+                variable_type_annotations(arena, arg, result, locals, env);
             }
         }
         TraitMethodApply(_) => {
@@ -388,10 +390,6 @@ fn node_variable_type_annotations<Env>(
         Array(nodes) => nodes
             .iter()
             .for_each(|&node| variable_type_annotations(arena, node, result, locals, env)),
-        Index(index) => {
-            variable_type_annotations(arena, index.array, result, locals, env);
-            variable_type_annotations(arena, index.index, result, locals, env);
-        }
         Case(case) => {
             variable_type_annotations(arena, case.value, result, locals, env);
             for &(_, alt_id) in &case.alternatives {
@@ -428,8 +426,20 @@ fn should_hide_arg_name_hint(
 
     static PATHS_TO_HIDE: LazyLock<FxHashSet<&'static str>> = LazyLock::new(|| {
         [
-            "std::eq", "std::ne", "std::le", "std::lt", "std::ge", "std::gt", "std::not",
-            "std::neg", "std::add", "std::sub", "std::mul", "std::div", "std::rem",
+            "std::eq",
+            "std::ne",
+            "std::le",
+            "std::lt",
+            "std::ge",
+            "std::gt",
+            "std::not",
+            "std::neg",
+            "std::add",
+            "std::sub",
+            "std::mul",
+            "std::div",
+            "std::rem",
+            "std::array_index",
         ]
         .into_iter()
         .collect()

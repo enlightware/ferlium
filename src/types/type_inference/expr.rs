@@ -30,10 +30,8 @@ use crate::{
     parser::location::Location,
     std::{
         STD_MODULE_ID,
-        array::array_type,
         core::{REPR_TRAIT, TRIVIAL_COPY_TRAIT},
         math::int_type,
-        ptr::is_pointer_type,
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT},
     },
     types::{
@@ -760,6 +758,7 @@ impl TypeInference {
                         let call = K::Apply(b(hir::Application {
                             function,
                             arguments: args_nodes,
+                            returns_place: false,
                         }));
                         let call =
                             hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
@@ -1112,7 +1111,7 @@ impl TypeInference {
                     let node = K::Array(b(SVec2::from_vec(Vec::new())));
                     (
                         node,
-                        array_type(element_ty),
+                        env.array_type(element_ty),
                         MutType::constant(),
                         no_effects(),
                     )
@@ -1132,7 +1131,7 @@ impl TypeInference {
                         }
                         // Build the array node and return it
                         let element_nodes = SVec2::from_vec(nodes);
-                        let ty = array_type(element_ty);
+                        let ty = env.array_type(element_ty);
                         let node = K::Array(b(element_nodes));
                         (node, ty, MutType::constant(), effects)
                     }
@@ -1144,7 +1143,7 @@ impl TypeInference {
             Index(data) => {
                 // New type for the array
                 let element_ty = self.fresh_type_var_ty();
-                let array_ty = array_type(element_ty);
+                let array_ty = env.array_type(element_ty);
                 // Infer type of the array expression and make sure it is an array
                 let (array_node_id, array_expr_mut) = self.infer_expr(env, data.array)?;
                 let array_effects = env.ir_arena[array_node_id].effects.clone();
@@ -1176,15 +1175,33 @@ impl TypeInference {
                         let effects = self.make_dependent_effect([&array_effects, &index_effects]);
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
+                        let (path, (definition, function, _module_id, _arg_passing)) =
+                            env.get_std_function(ustr("array_index"), expr_span)?;
+                        let (inst_fn_ty, inst_data, _subst) = definition
+                            .ty_scheme
+                            .instantiate_with_fresh_vars(self, expr_span, None);
+                        self.add_same_type_constraint(
+                            inst_fn_ty.ret,
+                            expr_span,
+                            element_ty,
+                            expr_span,
+                        );
                         let combined_effects = self.make_dependent_effect([
                             &effect(PrimitiveEffect::Fallible),
                             &array_effects,
                             &index_effects,
+                            &inst_fn_ty.effects,
                         ]);
-                        let node = K::Index(hir::ArrayIndex {
-                            array: array_node_id,
-                            index: index_node_id,
-                        });
+                        let node = K::StaticApply(b(hir::StaticApplication {
+                            function,
+                            function_path: Some(path),
+                            function_span: expr_span,
+                            arguments: vec![array_node_id, index_node_id],
+                            argument_names: vec![ustr("array"), ustr("index")],
+                            ty: inst_fn_ty,
+                            inst_data,
+                            returns_place: definition.returns_place,
+                        }));
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
                 }
@@ -1640,13 +1657,44 @@ impl TypeInference {
                     NodeKind::ProjectAt(base, index)
                 })
             }
-            NodeKind::Index(index) => {
-                self.prepare_projection_place(env, place, index.array, span, |base| {
-                    NodeKind::Index(hir::ArrayIndex {
-                        array: base,
-                        index: index.index,
-                    })
-                })
+            NodeKind::StaticApply(mut app) if app.returns_place => {
+                if let Some(base_index) =
+                    place_result_base_argument_index(env.ir_arena, &app.arguments)
+                {
+                    let mut prepared = self.prepare_place_base_for_projection(
+                        env,
+                        app.arguments[base_index],
+                        span,
+                    );
+                    app.arguments[base_index] = prepared.place;
+                    prepared.place =
+                        self.rebuild_place_node(env, place, NodeKind::StaticApply(app));
+                    prepared
+                } else {
+                    PreparedPlace {
+                        prefix: Vec::new(),
+                        place,
+                    }
+                }
+            }
+            NodeKind::Apply(mut app) if app.returns_place => {
+                if let Some(base_index) =
+                    place_result_base_argument_index(env.ir_arena, &app.arguments)
+                {
+                    let mut prepared = self.prepare_place_base_for_projection(
+                        env,
+                        app.arguments[base_index],
+                        span,
+                    );
+                    app.arguments[base_index] = prepared.place;
+                    prepared.place = self.rebuild_place_node(env, place, NodeKind::Apply(app));
+                    prepared
+                } else {
+                    PreparedPlace {
+                        prefix: Vec::new(),
+                        place,
+                    }
+                }
             }
             _ => PreparedPlace {
                 prefix: Vec::new(),
@@ -1700,12 +1748,6 @@ impl TypeInference {
     }
 
     fn type_needs_semantic_drop(&mut self, env: &mut TypingEnv, ty: Type, span: Location) -> bool {
-        // Std-only pointer values are interpreter metadata. They own Rust
-        // storage in the boxed interpreter, but they do not have Ferlium
-        // `Value::drop` semantics.
-        if is_pointer_type(ty) {
-            return false;
-        }
         !self.type_has_concrete_trivial_copy_impl(env, ty, span)
     }
 
@@ -1780,11 +1822,6 @@ impl TypeInference {
             NodeKind::Project(base, _)
             | NodeKind::FieldAccess(base, _)
             | NodeKind::ProjectAt(base, _) => self.place_evaluation_prefix_nodes(arena, *base),
-            NodeKind::Index(index) => {
-                let mut nodes = self.place_evaluation_prefix_nodes(arena, index.array);
-                nodes.extend(self.value_evaluation_prefix_nodes(arena, index.index));
-                nodes
-            }
             _ => vec![node_id],
         }
     }
@@ -1814,7 +1851,7 @@ impl TypeInference {
             return value;
         }
 
-        if place_evaluation_depends_on_array_index(env.ir_arena, value) {
+        if place_evaluation_depends_on_place_result(env.ir_arena, value) {
             return value;
         }
 
@@ -1956,6 +1993,7 @@ impl TypeInference {
             } else if let Some((definition, function, _module_id, arg_passing)) =
                 env.get_function(path)?
             {
+                let returns_place = definition.returns_place;
                 if definition.ty_scheme.ty.args.len() != args.len() {
                     return Err(internal_compilation_error!(WrongNumberOfArguments {
                         expected: definition.ty_scheme.ty.args.len(),
@@ -2003,6 +2041,7 @@ impl TypeInference {
                         argument_names,
                         ty: inst_fn_ty,
                         inst_data,
+                        returns_place,
                     }));
                     let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
                     let node =
@@ -2745,7 +2784,8 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
         EnvLoad(_) => true,
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
         Project(_, _) | FieldAccess(_, _) | ProjectAt(_, _) => true,
-        Index(_) => true,
+        Apply(app) => app.returns_place,
+        StaticApply(app) => app.returns_place,
         _ => false,
     }
 }
@@ -2759,21 +2799,43 @@ fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeId) -> bool 
         Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
             !node_is_place_reference(arena, *base) || place_resolution_may_create_temp(arena, *base)
         }
-        Index(index) => {
-            !node_is_place_reference(arena, index.array)
-                || place_resolution_may_create_temp(arena, index.array)
+        Apply(app) if app.returns_place => {
+            !node_is_place_reference(arena, app.function)
+                || place_resolution_may_create_temp(arena, app.function)
+                || place_result_base_argument_index(arena, &app.arguments).is_some_and(
+                    |base_index| !node_is_place_reference(arena, app.arguments[base_index]),
+                )
+                || app
+                    .arguments
+                    .iter()
+                    .any(|arg| place_resolution_may_create_temp(arena, *arg))
+        }
+        StaticApply(app) if app.returns_place => {
+            place_result_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
+                !node_is_place_reference(arena, app.arguments[base_index])
+            }) || app
+                .arguments
+                .iter()
+                .any(|arg| place_resolution_may_create_temp(arena, *arg))
         }
         _ => false,
     }
 }
 
-fn place_evaluation_depends_on_array_index(arena: &NodeArena, node_id: NodeId) -> bool {
+fn place_result_base_argument_index(arena: &NodeArena, arguments: &[NodeId]) -> Option<usize> {
+    arguments
+        .iter()
+        .position(|argument| !matches!(arena[*argument].kind, NodeKind::GetDictionary(_)))
+}
+
+fn place_evaluation_depends_on_place_result(arena: &NodeArena, node_id: NodeId) -> bool {
     use NodeKind::*;
 
     match &arena[node_id].kind {
-        Index(_) => true,
+        Apply(app) => app.returns_place,
+        StaticApply(app) => app.returns_place,
         Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
-            place_evaluation_depends_on_array_index(arena, *base)
+            place_evaluation_depends_on_place_result(arena, *base)
         }
         _ => false,
     }

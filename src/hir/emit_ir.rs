@@ -811,7 +811,7 @@ where
         };
         let ty_scheme = TypeScheme::new_just_type(fn_type);
         let returns_place =
-            validate_function_attributes(&attributes, name.0, output.module_id() == STD_MODULE_ID)?;
+            validate_function_attributes(attributes, name.0, output.module_id() == STD_MODULE_ID)?;
         let definition = FunctionDefinition::new_with_generic_params_and_attributes(
             ty_scheme,
             generic_params.clone(),
@@ -836,6 +836,8 @@ where
             placeholder_id
         } else if trait_ctx.is_some() {
             output.add_function_anonymous(descr)
+        } else if returns_place {
+            output.add_unsafe_function(name.0, descr)
         } else {
             output.add_function(name.0, descr)
         };

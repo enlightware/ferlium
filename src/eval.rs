@@ -10,9 +10,10 @@ use std::{collections::VecDeque, mem};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
-use ustr::Ustr;
+use ustr::{Ustr, ustr};
 
 use crate::module::id::Id;
+use crate::std::array::array_value_from_vec;
 use crate::std::value::{VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT};
 use crate::{
     CompilerSession, Location, SourceId, SourceTable,
@@ -25,7 +26,7 @@ use crate::{
         LocalDrop, LocalFunctionId, LocalValueMethodDispatch, ModuleFunction, ModuleId,
         ProjectionIndex, TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
-    std::array,
+    std::buffer,
     types::{
         r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex},
         r#type::{FnArgType, Type, TypeKind, bare_native_type},
@@ -198,6 +199,8 @@ pub struct EvalCtx<'a> {
     pub break_loop: bool,
     /// id of the current module for import slot resolution
     pub module_id: ModuleId,
+    /// whether the current function returns a place result
+    returns_place: bool,
     /// session holding sources and other modules for error reporting and import resolution
     compiler_session: &'a CompilerSession,
 }
@@ -215,6 +218,7 @@ impl<'a> EvalCtx<'a> {
             stack_limit: Self::DEFAULT_STACK_LIMIT,
             break_loop: false,
             module_id,
+            returns_place: false,
             compiler_session,
         }
     }
@@ -265,6 +269,7 @@ impl<'a> EvalCtx<'a> {
             stack_limit: Self::DEFAULT_STACK_LIMIT,
             break_loop: false,
             module_id: module,
+            returns_place: false,
             compiler_session,
         }
     }
@@ -520,7 +525,12 @@ impl<'a> EvalCtx<'a> {
         let module = self.compiler_session.expect_fresh_module(self.module_id);
         let function_data = module.get_function_by_id(local_id).unwrap();
         let locals = &function_data.locals;
+        let previous_returns_place = mem::replace(
+            &mut self.returns_place,
+            function_data.definition.returns_place,
+        );
         let result = function_data.code.call(arguments, self, locals);
+        self.returns_place = previous_returns_place;
 
         // Restore the previous module.
         mem::swap(&mut self.module_id, &mut module_id);
@@ -538,6 +548,26 @@ pub struct Place {
     pub target: usize,
     // path within the compound value located at `target`
     pub path: Vec<isize>,
+}
+
+/// Internal runtime marker returned by functions marked `#[place_result]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceResult(Place);
+
+impl PlaceResult {
+    pub(crate) fn new(place: Place) -> Self {
+        Self(place)
+    }
+
+    fn into_place(self) -> Place {
+        self.0
+    }
+}
+
+impl crate::hir::value::NativeDisplay for PlaceResult {
+    fn fmt_repr(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<place>")
+    }
 }
 
 impl Place {
@@ -567,6 +597,14 @@ impl Place {
         (path, index)
     }
 
+    fn resolved(&self, ctx: &EvalCtx) -> Self {
+        let (path, target) = self.resolved_path_and_index(ctx);
+        Self {
+            target,
+            path: path.into_iter().collect(),
+        }
+    }
+
     /// Get a mutable reference to the target value
     pub fn target_mut<'c>(&self, ctx: &'c mut EvalCtx) -> Result<&'c mut Value, RuntimeErrorKind> {
         let (path, index) = self.resolved_path_and_index(ctx);
@@ -577,17 +615,15 @@ impl Place {
                 Tuple(tuple) => tuple.get_mut(index as usize).unwrap(),
                 Variant(variant) if index == 0 => &mut variant.value,
                 Native(primitive) => {
-                    // iif the primitive is our standard Array, we can access its elements
-                    let array = primitive
+                    let buffer = primitive
                         .as_mut()
                         .as_mut_any()
-                        .downcast_mut::<array::Array>()
+                        .downcast_mut::<buffer::Buffer>()
                         .unwrap();
-                    let len = array.len();
-                    match array.get_mut_signed(index) {
+                    match buffer.get_mut_signed(index) {
                         Some(target) => target,
                         None => {
-                            return Err(RuntimeErrorKind::ArrayAccessOutOfBounds { index, len });
+                            return Err(RuntimeErrorKind::InvalidArgument(ustr("buffer index")));
                         }
                     }
                 }
@@ -626,15 +662,13 @@ impl Place {
                 Tuple(tuple) => tuple.get(index as usize).unwrap(),
                 Variant(variant) if index == 0 => &variant.value,
                 Native(primitive) => {
-                    // iif the primitive is our standard Array, we can access its elements
-                    let array = NativeValue::as_any(primitive.as_ref())
-                        .downcast_ref::<array::Array>()
+                    let buffer = NativeValue::as_any(primitive.as_ref())
+                        .downcast_ref::<buffer::Buffer>()
                         .unwrap();
-                    let len = array.len();
-                    match array.get_signed(index) {
+                    match buffer.get_signed(index) {
                         Some(target) => target,
                         None => {
-                            return Err(RuntimeErrorKind::ArrayAccessOutOfBounds { index, len });
+                            return Err(RuntimeErrorKind::InvalidArgument(ustr("buffer index")));
                         }
                     }
                 }
@@ -962,7 +996,6 @@ pub fn eval_node_with_ctx(
         Variant(tag, payload) => eval_variant(arena, *tag, *payload, ctx, locals),
         ExtractTag(node) => eval_extract_tag(arena, *node, ctx, locals),
         Array(nodes) => eval_array(arena, nodes, ctx, locals),
-        Index(index) => eval_index(arena, id, index, ctx, locals),
         Case(case) => eval_case(arena, case, ctx, locals),
         Loop(body) => eval_loop(arena, *body, ctx, locals),
         SoftBreak => {
@@ -1485,6 +1518,7 @@ fn eval_value_clone(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    let temp_start = ctx.environment.len();
     let source = match eval_or_return!(try_resolve_node_place(arena, node.source, ctx, locals)) {
         Some(place) => {
             place
@@ -1503,7 +1537,13 @@ fn eval_value_clone(
         .clone
         .as_ref()
         .expect("ValueClone dispatch should have been resolved before evaluation");
-    call_value_clone_dispatch_for_temp(ctx, clone, source, span).map(ControlFlow::Continue)
+    match call_value_clone_dispatch_for_temp(ctx, clone, source, span) {
+        Ok(value) => cont(value),
+        Err(err) => {
+            ctx.truncate_environment_storage(temp_start);
+            Err(err)
+        }
+    }
 }
 
 #[inline(never)]
@@ -1514,13 +1554,11 @@ fn eval_trivial_copy(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    let temp_start = ctx.environment.len();
     let place = eval_or_return!(resolve_node_place(arena, node.source, ctx, locals));
-    cont(copy_trivial_value_from_place(
-        &place,
-        arena[node.source].ty,
-        ctx,
-        span,
-    )?)
+    let result = copy_trivial_value_from_place(&place, arena[node.source].ty, ctx, span);
+    ctx.truncate_environment_storage(temp_start);
+    cont(result?)
 }
 
 #[inline(never)]
@@ -1553,6 +1591,7 @@ fn eval_apply(
     let function_value = unsafe { &*function_value };
     let arg_passing = ctx.function_value_argument_passing(function_value);
     let args_ty = ctx.function_value_visible_argument_types(function_value);
+    let temp_start = ctx.environment.len();
     let arguments = eval_or_return!(eval_args(
         arena,
         &app.arguments,
@@ -1561,7 +1600,9 @@ fn eval_apply(
         ctx,
         locals
     ));
-    ctx.call_function_value(function_value, arguments, span)
+    let result = ctx.call_function_value(function_value, arguments, span);
+    ctx.truncate_environment_storage(temp_start);
+    result
 }
 
 #[inline(never)]
@@ -1573,6 +1614,7 @@ fn eval_static_apply(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let arg_passing = ctx.function_id_argument_passing(app.function);
+    let temp_start = ctx.environment.len();
     let arguments = eval_or_return!(eval_args(
         arena,
         &app.arguments,
@@ -1581,7 +1623,142 @@ fn eval_static_apply(
         ctx,
         locals
     ));
-    ctx.call_function_id(app.function, arguments, span)
+    let result = ctx.call_function_id(app.function, arguments, span);
+    ctx.truncate_environment_storage(temp_start);
+    result
+}
+
+fn eval_place_result_static_apply(
+    arena: &NodeArena,
+    app: &hir::StaticApplication,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let arg_passing = ctx.function_id_argument_passing(app.function);
+    let temp_start = ctx.environment.len();
+    let arguments = eval_or_return!(eval_place_result_args(
+        arena,
+        &app.arguments,
+        &app.ty.args,
+        arg_passing,
+        ctx,
+        locals,
+    ));
+    match ctx.call_function_id(app.function, arguments, span) {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            ctx.truncate_environment_storage(temp_start);
+            Err(err)
+        }
+    }
+}
+
+enum PendingPlaceResultArg {
+    Ready(ValOrMut),
+    SharedTemp(Value),
+}
+
+impl PendingPlaceResultArg {
+    fn discard_storage(self) {
+        match self {
+            Self::Ready(arg) => arg.discard_storage(),
+            Self::SharedTemp(value) => value.discard_storage(),
+        }
+    }
+}
+
+fn eval_place_result_args(
+    arena: &NodeArena,
+    args: &[NodeId],
+    args_ty: &[FnArgType],
+    arg_passing: Option<&[ArgPassing]>,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> Result<ControlFlow<Vec<ValOrMut>>, RuntimeError> {
+    let mut results = Vec::with_capacity(args.len());
+    assert_eq!(args.len(), args_ty.len());
+    for (arg, ty) in args.iter().zip(args_ty) {
+        let passing = arg_passing
+            .and_then(|passing| passing.get(results.len()).copied())
+            .unwrap_or_else(|| default_argument_passing(ty));
+        let result = match passing {
+            ArgPassing::MutableRef => resolve_node_place(arena, *arg, ctx, locals).map(|result| {
+                result.map_continue(|place| PendingPlaceResultArg::Ready(ValOrMut::Mut(place)))
+            }),
+            ArgPassing::SharedRef => match try_resolve_node_place(arena, *arg, ctx, locals) {
+                Ok(ControlFlow::Continue(Some(place))) => Ok(ControlFlow::Continue(
+                    PendingPlaceResultArg::Ready(ValOrMut::Mut(place)),
+                )),
+                Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, *arg) => {
+                    eval_dictionary_metadata_node(arena, *arg, ctx, locals).map(|result| {
+                        result.map_continue(|dictionary| {
+                            PendingPlaceResultArg::Ready(ValOrMut::Dictionary(dictionary))
+                        })
+                    })
+                }
+                Ok(ControlFlow::Continue(None)) => {
+                    let value = eval_node_with_ctx(arena, *arg, ctx, locals)?;
+                    Ok(value.map_continue(PendingPlaceResultArg::SharedTemp))
+                }
+                Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
+                Err(err) => Err(err),
+            },
+            ArgPassing::OwnedValue if is_dictionary_metadata_node(arena, *arg) => {
+                eval_dictionary_metadata_node(arena, *arg, ctx, locals).map(|result| {
+                    result.map_continue(|dictionary| {
+                        PendingPlaceResultArg::Ready(ValOrMut::Dictionary(dictionary))
+                    })
+                })
+            }
+            ArgPassing::OwnedValue => eval_owned_arg(arena, *arg, ty.ty, ctx, locals)
+                .map(|result| result.map_continue(PendingPlaceResultArg::Ready)),
+        };
+        match result {
+            Ok(ControlFlow::Continue(arg)) => results.push(arg),
+            Ok(ControlFlow::Return(value)) => {
+                for result in results {
+                    result.discard_storage();
+                }
+                return Ok(ControlFlow::Return(value));
+            }
+            Err(err) => {
+                for result in results {
+                    result.discard_storage();
+                }
+                return Err(err);
+            }
+        }
+    }
+    let mut arguments = Vec::with_capacity(results.len());
+    for result in results {
+        match result {
+            PendingPlaceResultArg::Ready(arg) => arguments.push(arg),
+            PendingPlaceResultArg::SharedTemp(value) => {
+                let target = ctx.environment.len();
+                ctx.environment.push(ValOrMut::Val(value));
+                arguments.push(ValOrMut::Mut(Place {
+                    target,
+                    path: Vec::new(),
+                }));
+            }
+        }
+    }
+    Ok(ControlFlow::Continue(arguments))
+}
+
+fn value_into_place_result(value: Value) -> Place {
+    value
+        .into_primitive_ty::<PlaceResult>()
+        .expect("place_result function should return internal PlaceResult")
+        .into_place()
+}
+
+fn control_flow_into_place_result(result: ControlFlow<Value>) -> ControlFlow<Place> {
+    match result {
+        ControlFlow::Continue(value) => ControlFlow::Continue(value_into_place_result(value)),
+        ControlFlow::Return(value) => ControlFlow::Return(value),
+    }
 }
 
 #[inline(never)]
@@ -1815,6 +1992,14 @@ fn eval_return(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    if ctx.returns_place {
+        let place = match resolve_node_place(arena, node, ctx, locals)? {
+            ControlFlow::Continue(place) => place,
+            ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
+        };
+        let place = place.resolved(ctx);
+        return ret(Value::native(PlaceResult::new(place)));
+    }
     ret(eval_node_with_ctx(arena, node, ctx, locals)?.into_value())
 }
 
@@ -2006,15 +2191,16 @@ fn should_evaluate_projection_data_as_value(
     result_ty: Type,
 ) -> bool {
     !is_direct_interpreter_argument(result_ty)
-        && place_resolution_depends_on_array_index(arena, data)
+        && place_resolution_depends_on_place_result(arena, data)
 }
 
-fn place_resolution_depends_on_array_index(arena: &NodeArena, node_id: NodeId) -> bool {
+fn place_resolution_depends_on_place_result(arena: &NodeArena, node_id: NodeId) -> bool {
     match &arena[node_id].kind {
-        NodeKind::Index(_) => true,
+        NodeKind::Apply(app) => app.returns_place,
+        NodeKind::StaticApply(app) => app.returns_place,
         NodeKind::Project(base, _)
         | NodeKind::FieldAccess(base, _)
-        | NodeKind::ProjectAt(base, _) => place_resolution_depends_on_array_index(arena, *base),
+        | NodeKind::ProjectAt(base, _) => place_resolution_depends_on_place_result(arena, *base),
         _ => false,
     }
 }
@@ -2059,32 +2245,9 @@ fn eval_array(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let values = eval_or_return!(eval_nodes(arena, nodes, ctx, locals));
-    cont(Value::native(array::Array::from_vec(values)))
+    cont(array_value_from_vec(values))
 }
 
-#[inline(never)]
-fn eval_index(
-    arena: &NodeArena,
-    id: NodeId,
-    _index: &hir::ArrayIndex,
-    ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
-) -> EvalControlFlowResult {
-    let place = eval_or_return!(resolve_node_place(arena, id, ctx, locals));
-    let result = if let Some(value) =
-        try_copy_trivial_value_from_place(&place, arena[id].ty, ctx, arena[id].span)?
-    {
-        Ok(value)
-    } else {
-        place
-            .target_ref(ctx)
-            .map_err(|err| RuntimeError::new(err, Some(arena[id].span)))?;
-        Ok(Value::unit())
-    };
-    result.map(ControlFlow::Continue)
-}
-
-#[inline(never)]
 fn eval_case(
     arena: &NodeArena,
     case: &hir::Case,
@@ -2179,6 +2342,7 @@ fn eval_args(
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Vec<ValOrMut>>, RuntimeError> {
     // Automatically cast mutable references to values if the function expects values.
+    let temp_start = ctx.environment.len();
     let mut results = Vec::with_capacity(args.len());
     assert_eq!(args.len(), args_ty.len());
     for (index, (arg, ty)) in args.iter().zip(args_ty).enumerate() {
@@ -2213,12 +2377,14 @@ fn eval_args(
                 for result in results {
                     result.discard_storage();
                 }
+                ctx.truncate_environment_storage(temp_start);
                 return Ok(ControlFlow::Return(value));
             }
             Err(err) => {
                 for result in results {
                     result.discard_storage();
                 }
+                ctx.truncate_environment_storage(temp_start);
                 return Err(err);
             }
         }
@@ -2233,12 +2399,14 @@ fn eval_owned_arg(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<ValOrMut>, RuntimeError> {
+    let temp_start = ctx.environment.len();
     match try_resolve_node_place(arena, arg, ctx, locals) {
         // If the expression is a place, materialize the by-value argument using
         // the expected callee type. For dictionary-projected concrete methods,
         // the place node can still carry the caller's generic surface type.
         Ok(ControlFlow::Continue(Some(place))) => {
             let value = copy_trivial_value_from_place(&place, ty, ctx, arena[arg].span);
+            ctx.truncate_environment_storage(temp_start);
             Ok(ControlFlow::Continue(ValOrMut::Val(value?)))
         }
         Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, arg, ctx, locals)
@@ -2336,16 +2504,28 @@ fn try_resolve_node_place(
             place.path.push(index);
             place
         }
-        Index(index) => {
-            let Some(mut place) =
-                eval_or_return!(try_resolve_node_place(arena, index.array, ctx, locals))
-            else {
+        Apply(app) if app.returns_place => {
+            let result = eval_apply(arena, app, node.span, ctx, locals)?;
+            return Ok(control_flow_into_place_result(result).map_continue(Some));
+        }
+        StaticApply(app) if app.returns_place => {
+            let result = eval_place_result_static_apply(arena, app, node.span, ctx, locals)?;
+            return Ok(control_flow_into_place_result(result).map_continue(Some));
+        }
+        ValueClone(node) => return try_resolve_node_place(arena, node.source, ctx, locals),
+        Block(nodes) => {
+            let Some(place_index) = nodes.iter().rposition(|node| {
+                !matches!(
+                    arena[*node].kind,
+                    NodeKind::EnvDrop(_) | NodeKind::EnvStore(_)
+                )
+            }) else {
                 return Ok(ControlFlow::Continue(None));
             };
-            let index_value = eval_or_return!(eval_node_with_ctx(arena, index.index, ctx, locals));
-            let index = index_value.into_primitive_ty::<isize>().unwrap();
-            place.path.push(index);
-            place
+            for &node in &nodes[..place_index] {
+                eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
+            }
+            return try_resolve_node_place(arena, nodes[place_index], ctx, locals);
         }
         EnvLoad(node) => Place {
             // By using frame_base here, we allow to access parent frames

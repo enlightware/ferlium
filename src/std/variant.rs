@@ -8,15 +8,14 @@
 //
 use crate::{
     cached_ty,
-    containers::b,
     module::Module,
     std::{
-        array::Array,
+        array::array_type_def,
         logic::bool_type,
         math::{float_type, int_type},
         string::string_type,
     },
-    types::r#type::{NativeType, Type, TypeKind, bare_native_type, store_types},
+    types::r#type::{NamedType, Type, TypeKind, store_types},
 };
 use ustr::ustr;
 
@@ -27,17 +26,17 @@ pub fn variant_type() -> Type {
         let int_tuple1 = Type::tuple([int_type()]);
         let float_tuple1 = Type::tuple([float_type()]);
         let string_tuple1 = Type::tuple([string_type()]);
-        let bare_array_ty = bare_native_type::<Array>();
-        let seq_array = TypeKind::Native(b(NativeType {
-            bare_ty: bare_array_ty.clone(),
-            arguments: vec![Type::new_local(5)],
-        }));
+        let array_def = array_type_def();
+        let seq_array = TypeKind::Named(NamedType {
+            def: array_def,
+            params: vec![Type::new_local(5)],
+        });
         let seq_tuple1 = TypeKind::Tuple(vec![Type::new_local(0)]);
         let object_entry_tuple = TypeKind::Tuple(vec![string_type(), Type::new_local(5)]);
-        let object_array = TypeKind::Native(b(NativeType {
-            bare_ty: bare_array_ty,
-            arguments: vec![Type::new_local(2)],
-        }));
+        let object_array = TypeKind::Named(NamedType {
+            def: array_def,
+            params: vec![Type::new_local(2)],
+        });
         let object_tuple1 = TypeKind::Tuple(vec![Type::new_local(3)]);
         let variant = TypeKind::Variant(vec![
             (ustr("None"), Type::unit()),

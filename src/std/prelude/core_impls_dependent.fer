@@ -38,6 +38,15 @@ fn expect_variant_object_entry(entries: [(string, Variant)], name: string) -> Va
 
 // Array adaptors
 
+impl<F, T> Cast for <From = [F], To = [T]>
+where
+	Cast<From = F, To = T>
+{
+	fn cast(array: [F]) -> [T] {
+		map(array, (|element| cast(element): (F) -> T))
+	}
+}
+
 impl<A, B> Map for <Self = [A], Mapped = B |-> Item = A, Output = [B]>
 where
 	A: Value

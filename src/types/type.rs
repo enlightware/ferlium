@@ -1616,16 +1616,7 @@ where
     use TypeKind::*;
     match kind {
         Variable(var) => env.fmt_type_var(*var, f),
-        Native(native) => {
-            use crate::std::array::Array;
-            if native.bare_ty == bare_native_type::<Array>() {
-                write!(f, "[")?;
-                native.arguments[0].fmt_with(f, env)?;
-                write!(f, "]")
-            } else {
-                native.fmt_with(f, env)
-            }
-        }
+        Native(native) => native.fmt_with(f, env),
         Variant(types) => {
             for (i, (name, ty)) in types.iter().enumerate() {
                 if i > 0 {
@@ -2512,8 +2503,9 @@ pub struct TypeNames {
 mod tests {
     use crate::{
         CompilerSession,
+        hir::value::NativeDisplay,
         std::{
-            array::Array,
+            array::array_type,
             logic::bool_type,
             math::{Int, float_type, int_type},
             string::string_type,
@@ -2521,6 +2513,22 @@ mod tests {
     };
 
     use super::*;
+
+    #[derive(Debug)]
+    struct SyntheticContainer;
+
+    impl NativeDisplay for SyntheticContainer {
+        fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "<synthetic-container>")
+        }
+    }
+
+    fn container_kind(element_ty: Type) -> TypeKind {
+        TypeKind::Native(b(NativeType::new(
+            bare_native_type::<SyntheticContainer>(),
+            vec![element_ty],
+        )))
+    }
 
     /// Wrap a `TypeKind` in an `InternedType` with an empty summary, for tests
     /// that only exercise the structural-isomorphism logic which never reads
@@ -2535,29 +2543,38 @@ mod tests {
     #[test]
     fn parse_and_format() {
         let mut session = CompilerSession::new();
-        let mut check = |src: &str| {
+        let mut check_format = |src: &str, expected: &str| {
             let ty = session
                 .resolve_defined_type_with_std("<test>", src)
                 .unwrap();
             let env = session.module_env();
             let formatted = format!("{}", ty.format_with(&env));
-            assert_eq!(src, formatted);
+            assert_eq!(expected, formatted);
         };
-        check("()");
-        check("bool");
-        check("int");
-        check("float");
-        check("string");
-        check("[int]");
-        check("[float]");
-        check("(bool,)");
-        check("(bool, bool)");
-        check("(bool, (string, int))");
-        check("{ a: int, b: float }");
-        check("{ a: int, b: { c: bool, d: string } }");
-        check("Option<int>");
-        check("Color (string) | RGB (int, int, int)");
-        check("[[(string, { age: int, name: string, nick: Option<string> })]]");
+        check_format("()", "()");
+        check_format("bool", "bool");
+        check_format("int", "int");
+        check_format("float", "float");
+        check_format("string", "string");
+        check_format("[int]", "array<int>");
+        check_format("[float]", "array<float>");
+        check_format("(bool,)", "(bool,)");
+        check_format("(bool, bool)", "(bool, bool)");
+        check_format("(bool, (string, int))", "(bool, (string, int))");
+        check_format("{ a: int, b: float }", "{ a: int, b: float }");
+        check_format(
+            "{ a: int, b: { c: bool, d: string } }",
+            "{ a: int, b: { c: bool, d: string } }",
+        );
+        check_format("Option<int>", "Option<int>");
+        check_format(
+            "Color (string) | RGB (int, int, int)",
+            "Color (string) | RGB (int, int, int)",
+        );
+        check_format(
+            "[[(string, { age: int, name: string, nick: Option<string> })]]",
+            "array<array<(string, { age: int, name: string, nick: Option<string> })>>",
+        );
     }
 
     #[test]
@@ -2626,10 +2643,7 @@ mod tests {
 
         // Original: Variant = Array([Variant]) | Int(int) | String(string)
         let variant_original = TypeKind::Variant(vec![
-            (
-                ustr("Array"),
-                Type::tuple([Type::native::<Array>(vec![Type::new_local(0)])]),
-            ),
+            (ustr("Array"), Type::tuple([array_type(Type::new_local(0))])),
             (ustr("Int"), Type::tuple([int])),
             (ustr("String"), Type::tuple([string])),
         ]);
@@ -2638,10 +2652,7 @@ mod tests {
         // Peeled once: the Array payload now contains the full variant definition
         // Array([Array([Variant]) | Int(int) | String(string)]) | Int(int) | String(string)
         let variant_peeled = TypeKind::Variant(vec![
-            (
-                ustr("Array"),
-                Type::tuple([Type::native::<Array>(vec![stored_original])]),
-            ),
+            (ustr("Array"), Type::tuple([array_type(stored_original)])),
             (ustr("Int"), Type::tuple([int])),
             (ustr("String"), Type::tuple([string])),
         ]);
@@ -2694,10 +2705,7 @@ mod tests {
 
         // Variant = Int(int) | String(string) | Array([Variant])
         let variant = TypeKind::Variant(vec![
-            (
-                ustr("Array"),
-                Type::tuple([Type::native::<Array>(vec![Type::new_local(0)])]),
-            ),
+            (ustr("Array"), Type::tuple([array_type(Type::new_local(0))])),
             (ustr("Int"), Type::tuple([int])),
             (ustr("String"), Type::tuple([string])),
         ]);
@@ -2891,20 +2899,14 @@ mod tests {
 
         // Manually build: Array([Variant]) | Bool(bool) | Float(float) | Int(int) | None | Object(...) | String(string)
         let unfolded = TypeKind::Variant(vec![
-            (
-                ustr("Array"),
-                Type::tuple([Type::native::<Array>(vec![canonical_variant])]),
-            ),
+            (ustr("Array"), Type::tuple([array_type(canonical_variant)])),
             (ustr("Bool"), Type::tuple([bool])),
             (ustr("Float"), Type::tuple([float])),
             (ustr("Int"), Type::tuple([int])),
             (ustr("None"), Type::unit()),
             (
                 ustr("Object"),
-                Type::tuple([Type::native::<Array>(vec![Type::tuple([
-                    string,
-                    canonical_variant,
-                ])])]),
+                Type::tuple([array_type(Type::tuple([string, canonical_variant]))]),
             ),
             (ustr("String"), Type::tuple([string])),
         ]);
@@ -2937,10 +2939,7 @@ mod tests {
         // Original recursive Variant type:
         // V = Array([V]) | Int(int) | String(string)
         let v_def = TypeKind::Variant(vec![
-            (
-                ustr("Array"),
-                Type::tuple([Type::native::<Array>(vec![Type::new_local(0)])]),
-            ),
+            (ustr("Array"), Type::tuple([array_type(Type::new_local(0))])),
             (ustr("Int"), Type::tuple([int])),
             (ustr("String"), Type::tuple([string])),
         ]);
@@ -2949,7 +2948,7 @@ mod tests {
         // Now create the "unfolded" version where Array's payload explicitly contains V:
         // V_unfolded = Array([Array([V]) | Int(int) | String(string)]) | Int(int) | String(string)
         let v_unfolded_def = TypeKind::Variant(vec![
-            (ustr("Array"), Type::tuple([Type::native::<Array>(vec![v])])),
+            (ustr("Array"), Type::tuple([array_type(v)])),
             (ustr("Int"), Type::tuple([int])),
             (ustr("String"), Type::tuple([string])),
         ]);
@@ -2981,18 +2980,12 @@ mod tests {
         let int = int_type();
 
         let local_world = vec![
-            TypeKind::Native(b(NativeType::new(
-                bare_native_type::<Array>(),
-                vec![Type::new_local(0)],
-            ))),
+            container_kind(Type::new_local(0)),
             TypeKind::Tuple(vec![int, Type::new_local(0)]),
         ];
 
         let mut existing_world = IndexSet::new();
-        existing_world.insert(test_interned(TypeKind::Native(b(NativeType::new(
-            bare_native_type::<Array>(),
-            vec![Type::new_global(1, 0)],
-        )))));
+        existing_world.insert(test_interned(container_kind(Type::new_global(1, 0))));
         existing_world.insert(test_interned(TypeKind::Tuple(vec![
             int,
             Type::new_global(1, 0),
@@ -3019,10 +3012,7 @@ mod tests {
         // Local: [Array([local[1]]), Variant{V(local[0]), Tuple(local[0], )}]
         let local_world = vec![
             // local[0] = Array([local[1]])
-            TypeKind::Native(b(NativeType::new(
-                bare_native_type::<Array>(),
-                vec![Type::new_local(1)],
-            ))),
+            container_kind(Type::new_local(1)),
             // local[1] = Variant with field referencing local[0]
             TypeKind::Variant(vec![(ustr("V"), Type::new_local(2))]),
             TypeKind::Tuple(vec![Type::new_local(0)]), // local[2] = Tuple([local[0]])
@@ -3035,19 +3025,13 @@ mod tests {
             ustr("V"),
             Type::new_global(1, 2),
         )])));
-        existing_world.insert(test_interned(TypeKind::Native(b(NativeType::new(
-            bare_native_type::<Array>(),
-            vec![Type::new_global(1, 0)],
-        )))));
+        existing_world.insert(test_interned(container_kind(Type::new_global(1, 0))));
         existing_world.insert(test_interned(TypeKind::Tuple(vec![Type::new_global(1, 1)])));
 
         let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
 
         assert!(mapping.is_some(), "Should find isomorphism");
         let mapping = mapping.unwrap();
-
-        eprintln!("=== Variant case mapping ===");
-        eprintln!("Mapping: {:?}", mapping);
 
         assert_eq!(mapping.len(), 3);
 
@@ -3077,26 +3061,14 @@ mod tests {
         // Both types are self-referential in structurally similar ways
         // Local: [Array([local[0]]), Array([local[1]])]
         let local_world = vec![
-            TypeKind::Native(b(NativeType::new(
-                bare_native_type::<Array>(),
-                vec![Type::new_local(0)],
-            ))),
-            TypeKind::Native(b(NativeType::new(
-                bare_native_type::<Array>(),
-                vec![Type::new_local(1)],
-            ))),
+            container_kind(Type::new_local(0)),
+            container_kind(Type::new_local(1)),
         ];
 
         // Existing: [Array([global[1,0]]), Array([global[1,1]])]
         let mut existing_world = IndexSet::new();
-        existing_world.insert(test_interned(TypeKind::Native(b(NativeType::new(
-            bare_native_type::<Array>(),
-            vec![Type::new_global(1, 0)],
-        )))));
-        existing_world.insert(test_interned(TypeKind::Native(b(NativeType::new(
-            bare_native_type::<Array>(),
-            vec![Type::new_global(1, 1)],
-        )))));
+        existing_world.insert(test_interned(container_kind(Type::new_global(1, 0))));
+        existing_world.insert(test_interned(container_kind(Type::new_global(1, 1))));
 
         let mapping = find_world_isomorphism(&local_world, &existing_world, 1);
 
@@ -3107,9 +3079,6 @@ mod tests {
 
         assert!(mapping.is_some(), "Should find an isomorphism");
         let mapping = mapping.unwrap();
-
-        eprintln!("=== Ambiguous case mapping ===");
-        eprintln!("Mapping: {:?}", mapping);
 
         // The algorithm should pick one consistently, but which one?
         // The identity mapping [0->0, 1->1] is semantically correct

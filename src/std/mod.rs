@@ -12,7 +12,9 @@ use crate::{
     parser::location::SourceTable,
 };
 
-pub mod array;
+pub mod array_type;
+pub use array_type as array;
+pub mod buffer;
 pub mod cast;
 pub mod core;
 pub mod core_traits_names;
@@ -29,7 +31,6 @@ pub mod option;
 pub mod ordering;
 mod prelude;
 mod product_value_deriver;
-pub mod ptr;
 pub mod serde;
 pub mod string;
 pub mod value;
@@ -51,14 +52,14 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     // mem::add_to_module(&mut module);
     logic::add_to_module(&mut module);
     math::add_to_module(&mut module);
-    ptr::add_to_module(&mut module);
-    array::add_to_module(&mut module);
+    buffer::add_to_module(&mut module);
     io::add_to_module(&mut module);
     string::add_to_module(&mut module);
+    module = prelude::add_ferlium_core(module, source_table, STD_MODULE_ID);
     variant::add_to_module(&mut module);
     serde::add_to_module(&mut module);
     json::add_to_module(&mut module);
-    prelude::add_impls(module, source_table, STD_MODULE_ID)
+    prelude::add_ferlium_prelude(module, source_table, STD_MODULE_ID)
 }
 
 pub fn new_module_using_std(module_id: ModuleId) -> Module {

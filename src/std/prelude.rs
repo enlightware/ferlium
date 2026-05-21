@@ -20,28 +20,62 @@ macro_rules! prelude {
     };
 }
 
-pub fn declare_traits(to: Module, source_table: &mut SourceTable, module_id: ModuleId) -> Module {
-    let code = prelude!("core_traits.fer");
+fn add_chunks(
+    mut to: Module,
+    source_table: &mut SourceTable,
+    module_id: ModuleId,
+    chunks: impl IntoIterator<Item = (&'static str, &'static str)>,
+    failure_context: &str,
+) -> Module {
     let other_modules = Modules::default();
-    add_code_to_module(code.0, code.1, to, module_id, &other_modules, source_table).unwrap_or_else(
-        |e| {
-            panic!(
-                "Failed to declare traits to module: {}",
-                FormatWithData::new(&e, source_table)
-            )
-        },
+    for (name, code) in chunks {
+        to = add_code_to_module(name, code, to, module_id, &other_modules, source_table)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to {failure_context}: {}",
+                    FormatWithData::new(&e, source_table)
+                )
+            });
+    }
+    to
+}
+
+pub fn declare_traits(to: Module, source_table: &mut SourceTable, module_id: ModuleId) -> Module {
+    add_chunks(
+        to,
+        source_table,
+        module_id,
+        [prelude!("core_traits.fer")],
+        "declare traits to module",
     )
 }
 
-pub fn add_impls(mut to: Module, source_table: &mut SourceTable, module_id: ModuleId) -> Module {
+pub fn add_ferlium_core(to: Module, source_table: &mut SourceTable, module_id: ModuleId) -> Module {
+    add_chunks(
+        to,
+        source_table,
+        module_id,
+        [
+            // Comparison operators are needed by the array primitives below.
+            prelude!("comparison.fer"),
+            // Defines the array type and primitives used by array indexing.
+            prelude!("array_type.fer"),
+        ],
+        "add Ferlium core to module",
+    )
+}
+
+pub fn add_ferlium_prelude(
+    to: Module,
+    source_table: &mut SourceTable,
+    module_id: ModuleId,
+) -> Module {
     // The prelude code is split into multiple parts
     // to allow dependencies between trait implementations.
     let codes = [
-        // First compiles basic comparison functions.
-        prelude!("comparison.fer"),
         // Then most of the core traits and generic iterator adaptors.
         prelude!("core_impls.fer"),
-        // Array implementations depend on the generic iterator adaptors and are used by later chunks.
+        // Defines the Ferlium Array implementation.
         prelude!("array.fer"),
         // Array serde depends on the array Value blanket impl being visible.
         prelude!("array_serde.fer"),
@@ -52,15 +86,5 @@ pub fn add_impls(mut to: Module, source_table: &mut SourceTable, module_id: Modu
         // Json depends on expect_variant_object_entry being available.
         prelude!("json.fer"),
     ];
-    let other_modules = Modules::default();
-    for (name, code) in codes {
-        to = add_code_to_module(name, code, to, module_id, &other_modules, source_table)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "Failed to add prelude to module: {}",
-                    FormatWithData::new(&e, source_table)
-                )
-            });
-    }
-    to
+    add_chunks(to, source_table, module_id, codes, "add prelude to module")
 }

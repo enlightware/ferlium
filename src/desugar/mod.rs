@@ -36,7 +36,7 @@ use crate::{
     module::TypeDefId,
     module::{Module, ModuleEnv, ModuleId, TypeDefLookupResult},
     parser::helpers::syn_static_apply,
-    std::{array::array_type, math::int_type},
+    std::{STD_MODULE_ID, math::int_type},
     types::effects::EffType,
     types::effects::EffectsInstSubst,
     types::mutability::{MutType, MutVal},

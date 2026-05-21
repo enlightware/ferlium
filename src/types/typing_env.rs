@@ -19,7 +19,7 @@ use crate::{
         LocalDecl, LocalDeclId, LocalFunctionId, Module, ModuleEnv, ModuleFunction, ModuleId,
         TypeDefLookupResult, id::Id,
     },
-    std::STD_MODULE_ID,
+    std::{STD_MODULE_ID, array::array_type as std_array_type},
     types::r#trait::{TraitMethodIndex, TraitRef},
     types::r#type::{Type, TypeInstSubst, TypeVar},
 };
@@ -36,6 +36,7 @@ pub type GetFunctionData<'a> = (
     Option<ModuleId>,
     Option<&'static [ArgPassing]>,
 );
+pub type GetFunctionWithPathData<'a> = (ast::Path, GetFunctionData<'a>);
 
 #[derive(Debug, new)]
 pub struct LoopFrame {
@@ -78,6 +79,13 @@ pub struct TypingEnv<'m> {
 impl<'m> TypingEnv<'m> {
     pub fn current_module_id(&self) -> ModuleId {
         self.module_env.current.module_id()
+    }
+
+    pub fn array_type(&mut self, element_ty: Type) -> Type {
+        if self.current_module_id() != STD_MODULE_ID {
+            self.new_type_deps.insert(STD_MODULE_ID);
+        }
+        std_array_type(element_ty)
     }
 
     pub fn get_all_locals_and_drop(self) -> Vec<LocalDecl> {
@@ -223,6 +231,48 @@ impl<'m> TypingEnv<'m> {
                 function.code.argument_passing(),
             ))
         })
+    }
+
+    pub fn get_std_function(
+        &mut self,
+        function_name: Ustr,
+        span: Location,
+    ) -> Result<GetFunctionWithPathData<'_>, InternalCompilationError> {
+        let path = ast::Path::new(vec![(ustr("std"), span), (function_name, span)]);
+        let function = if let Some(id) = self
+            .module_env
+            .current
+            .get_local_function_id(function_name)
+            .filter(|_| self.current_module_id() == STD_MODULE_ID)
+        {
+            let function = self.module_env.current.get_function_by_id(id).unwrap();
+            (
+                &function.definition,
+                FunctionId::Local(id),
+                None,
+                function.code.argument_passing(),
+            )
+        } else {
+            let id = self.import_function(STD_MODULE_ID, function_name);
+            let source_module = self
+                .module_env
+                .modules
+                .get(STD_MODULE_ID)
+                .unwrap()
+                .module
+                .as_ref()
+                .unwrap();
+            let function = source_module
+                .get_function(function_name)
+                .unwrap_or_else(|| panic!("std function {function_name} should be available"));
+            (
+                &function.definition,
+                FunctionId::Import(id),
+                Some(STD_MODULE_ID),
+                function.code.argument_passing(),
+            )
+        };
+        Ok((path, function))
     }
 
     pub fn get_type_def(
