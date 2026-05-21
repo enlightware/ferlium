@@ -46,7 +46,7 @@ They use the generic `Value` dictionary path.
 Current lowering applies these rules in the main ownership-sensitive contexts:
 
 - `let mut` initialized from a place owns a snapshot, using `TrivialCopy` or `Value::clone`.
-- A `let` initialized from a mutable or not-known-immutable place also owns a snapshot.
+- A `let` initialized from a mutable place owns a snapshot; during HIR construction, unresolved place mutability is treated conservatively the same way.
 - A `let` initialized from a known immutable place may be non-owning.
 - Closure captures are materialized as owned values before `BuildClosure`.
 - Function returns move an owned local with `EnvMove` when returning that local out of the current scope.
@@ -127,6 +127,6 @@ For generic associated constants, elaboration projects from the hidden dictionar
 
 # Non-Contracts of the Boxed Interpreter
 
-The current boxed interpreter still has helper paths such as boxed native `TrivialCopy` copying and temporary `ValOrMut::Ref` entries.
+The current boxed interpreter still has helper paths such as boxed native `TrivialCopy` copying and interpreter-only `ValOrMut::Ref` call arguments for borrowing existing boxed storage.
 These are interpreter implementation details, not language or SSA contracts.
 SSA should lower `TrivialCopy` as a storage copy and lower clone/drop through the explicit dispatch described above.
