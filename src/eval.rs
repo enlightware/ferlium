@@ -513,6 +513,23 @@ impl<'a> EvalCtx<'a> {
     ) -> EvalControlFlowResult {
         let (local_id, module_id) = self.get_function_local_id(function_id);
 
+        self.call_resolved_function_with_extra(
+            local_id,
+            module_id,
+            extra_arguments,
+            arguments,
+            location,
+        )
+    }
+
+    fn call_resolved_function_with_extra(
+        &mut self,
+        local_id: LocalFunctionId,
+        module_id: ModuleId,
+        extra_arguments: Vec<FunctionHiddenArgValue>,
+        arguments: Vec<ValOrMut>,
+        location: Location,
+    ) -> EvalControlFlowResult {
         self.call_function(local_id, module_id, extra_arguments, arguments)
             .map_err(|err| {
                 err.with_frame(
@@ -543,23 +560,29 @@ impl<'a> EvalCtx<'a> {
             &mut self.returns_place,
             function_data.definition.returns_place,
         );
-        let old_extra_frame_base = self.extra_frame_base;
-        let extra_start = self.extra_parameters.len();
-        self.extra_frame_base = extra_start;
-        self.extra_parameters
-            .extend(extra_arguments.iter().copied());
-        let arguments = if function_data.code.as_script().is_none() {
-            extra_arguments
-                .into_iter()
-                .map(evidence_arg_to_val_or_mut)
-                .chain(arguments)
-                .collect()
-        } else {
+        let is_script = function_data.code.as_script().is_some();
+        let old_extra_frame_base = is_script.then_some(self.extra_frame_base);
+        let extra_start = is_script.then_some(self.extra_parameters.len());
+        if let Some(extra_start) = extra_start {
+            self.extra_frame_base = extra_start;
+            self.extra_parameters
+                .extend(extra_arguments.iter().copied());
+        }
+        let arguments = if is_script || extra_arguments.is_empty() {
             arguments
+        } else {
+            let mut prepared = Vec::with_capacity(extra_arguments.len() + arguments.len());
+            prepared.extend(extra_arguments.into_iter().map(evidence_arg_to_val_or_mut));
+            prepared.extend(arguments);
+            prepared
         };
         let result = function_data.code.call(arguments, self, locals);
-        self.extra_parameters.truncate(extra_start);
-        self.extra_frame_base = old_extra_frame_base;
+        if let Some(extra_start) = extra_start {
+            self.extra_parameters.truncate(extra_start);
+        }
+        if let Some(old_extra_frame_base) = old_extra_frame_base {
+            self.extra_frame_base = old_extra_frame_base;
+        }
         self.returns_place = previous_returns_place;
 
         // Restore the previous module.
@@ -1141,23 +1164,28 @@ fn try_dictionary_metadata_node(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<Option<TraitDictionaryId>>, RuntimeError> {
+    match &arena[node].kind {
+        NodeKind::GetDictionary(get_dict) => {
+            return Ok(ControlFlow::Continue(Some(
+                ctx.get_dictionary_id(get_dict.dictionary),
+            )));
+        }
+        NodeKind::ExtraParameter(id) => {
+            return match extra_parameter_value(ctx, *id) {
+                FunctionHiddenArgValue::TraitDictionary(dictionary) => {
+                    Ok(ControlFlow::Continue(Some(dictionary)))
+                }
+                FunctionHiddenArgValue::FieldIndex(_) => Ok(ControlFlow::Continue(None)),
+            };
+        }
+        _ => {}
+    }
     if let Some(place) = eval_or_return!(try_resolve_node_place(arena, node, ctx, locals)) {
         if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
             return Ok(ControlFlow::Continue(Some(dictionary)));
         }
     }
-    match &arena[node].kind {
-        NodeKind::GetDictionary(get_dict) => Ok(ControlFlow::Continue(Some(
-            ctx.get_dictionary_id(get_dict.dictionary),
-        ))),
-        NodeKind::ExtraParameter(id) => match extra_parameter_value(ctx, *id) {
-            FunctionHiddenArgValue::TraitDictionary(dictionary) => {
-                Ok(ControlFlow::Continue(Some(dictionary)))
-            }
-            FunctionHiddenArgValue::FieldIndex(_) => Ok(ControlFlow::Continue(None)),
-        },
-        _ => Ok(ControlFlow::Continue(None)),
-    }
+    Ok(ControlFlow::Continue(None))
 }
 
 pub(crate) fn try_dictionary_from_place(place: &Place, ctx: &EvalCtx) -> Option<TraitDictionaryId> {
@@ -1684,8 +1712,9 @@ fn eval_static_apply(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    let (local_id, module_id) = ctx.get_function_local_id(app.function);
     let arg_passing = visible_arg_passing(
-        ctx.function_id_argument_passing(app.function),
+        ctx.function_argument_passing(local_id, module_id),
         app.extra_arguments.len(),
         app.arguments.len(),
     );
@@ -1704,7 +1733,13 @@ fn eval_static_apply(
         ctx,
         locals
     ));
-    let result = ctx.call_function_id_with_extra(app.function, extra_arguments, arguments, span);
+    let result = ctx.call_resolved_function_with_extra(
+        local_id,
+        module_id,
+        extra_arguments,
+        arguments,
+        span,
+    );
     ctx.truncate_environment_storage(temp_start);
     result
 }
@@ -1716,8 +1751,9 @@ fn eval_place_result_static_apply(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    let (local_id, module_id) = ctx.get_function_local_id(app.function);
     let arg_passing = visible_arg_passing(
-        ctx.function_id_argument_passing(app.function),
+        ctx.function_argument_passing(local_id, module_id),
         app.extra_arguments.len(),
         app.arguments.len(),
     );
@@ -1736,7 +1772,13 @@ fn eval_place_result_static_apply(
         ctx,
         locals,
     ));
-    match ctx.call_function_id_with_extra(app.function, extra_arguments, arguments, span) {
+    match ctx.call_resolved_function_with_extra(
+        local_id,
+        module_id,
+        extra_arguments,
+        arguments,
+        span,
+    ) {
         Ok(result) => Ok(result),
         Err(err) => {
             ctx.truncate_environment_storage(temp_start);
