@@ -1,4 +1,7 @@
+/// An optional value.
 pub type Option<T> = Some(T) | None;
+
+/// The result of a comparison between two values.
 pub type Ordering = Less | Equal | Greater;
 
 /// A type that has a total ordering.

@@ -227,9 +227,21 @@ fn equal_hash_value(lhs: &HashValue, rhs: &HashValue) -> bool {
 
 pub fn add_to_module(to: &mut Module) {
     // Types
-    to.add_type_alias_str("hash", hash_type());
-    to.add_type_alias_str("hasher", hasher_type());
-    to.add_type_alias_str("unordered_hasher", unordered_hasher_type());
+    to.add_type_alias_str_with_doc(
+        "hash",
+        hash_type(),
+        "A hash value produced by the Hash trait.",
+    );
+    to.add_type_alias_str_with_doc(
+        "hasher",
+        hasher_type(),
+        "A stateful hasher used to combine values into a hash.",
+    );
+    to.add_type_alias_str_with_doc(
+        "unordered_hasher",
+        unordered_hasher_type(),
+        "A hasher for order-independent hashing.",
+    );
 
     to.add_concrete_impl_no_locals(
         VALUE_TRAIT.clone(),

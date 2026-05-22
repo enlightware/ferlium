@@ -1,4 +1,4 @@
-/// Array storage type
+/// A dynamic array supporting double ended queue operations.
 #[no_derive_value]
 pub struct array<A> {
 	data: Buffer<A>,

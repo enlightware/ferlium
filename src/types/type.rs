@@ -845,6 +845,16 @@ impl TypeAliasEntry {
     pub fn param_count(&self) -> usize {
         self.generic_params.len()
     }
+
+    pub fn doc_with_fallback<'a>(&'a self, env: &'a ModuleEnv<'_>) -> Option<&'a str> {
+        self.doc.as_deref().or_else(|| {
+            let type_def = match &*self.ty.data() {
+                TypeKind::Named(named) => named.def,
+                _ => return None,
+            };
+            env.try_type_def(type_def)?.doc.as_deref()
+        })
+    }
 }
 
 /// Aliased types

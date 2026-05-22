@@ -471,45 +471,20 @@ impl Module {
 
     // Type aliases
 
-    /// Add a non-generic type alias to this module (by &str), returning its ID.
-    pub(crate) fn add_type_alias_str(&mut self, name: &str, ty: Type) -> LocalTypeAliasId {
-        self.add_type_alias(ustr(name), vec![], 0, ty)
-    }
-
-    /// Add a type alias to this module, returning its ID.
-    pub(crate) fn add_type_alias(
+    /// Add a documented non-generic type alias to this module (by &str), returning its ID.
+    pub(crate) fn add_type_alias_str_with_doc(
         &mut self,
-        name: Ustr,
-        param_names: Vec<Ustr>,
-        ty_var_count: u32,
+        name: &str,
         ty: Type,
-    ) -> LocalTypeAliasId {
-        self.add_type_alias_with_param_spans(
-            name,
-            param_names
-                .into_iter()
-                .map(|param_name| (param_name, Location::new_synthesized()))
-                .collect(),
-            ty_var_count,
-            ty,
-        )
-    }
-
-    /// Add a type alias with source generic parameter spans to this module, returning its ID.
-    pub(crate) fn add_type_alias_with_param_spans(
-        &mut self,
-        name: Ustr,
-        generic_params: Vec<UstrSpan>,
-        ty_var_count: u32,
-        ty: Type,
+        doc: impl Into<String>,
     ) -> LocalTypeAliasId {
         self.add_type_alias_with_param_spans_and_visibility(
-            name,
-            generic_params,
-            ty_var_count,
+            ustr(name),
+            vec![],
+            0,
             ty,
             Visibility::Public,
-            None,
+            Some(doc.into()),
         )
     }
 
@@ -1510,7 +1485,7 @@ impl Module {
         if !type_aliases.is_empty() {
             writeln!(f, "Type aliases ({}):\n", type_aliases.len())?;
             for alias in type_aliases {
-                if let Some(doc) = &alias.doc {
+                if let Some(doc) = alias.doc_with_fallback(&env) {
                     for line in doc.split('\n') {
                         writeln!(f, "/// {line}")?;
                     }

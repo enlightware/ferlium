@@ -60,11 +60,19 @@ fn unit_hash(_: (), _: &mut Hasher) {}
 
 pub fn add_to_module(to: &mut Module) {
     // Add aliases for basic types
-    to.add_type_alias_str("()", Type::unit());
-    to.add_type_alias_str("bool", bool_type());
-    to.add_type_alias_str("int", int_type());
-    to.add_type_alias_str("float", float_type());
-    to.add_type_alias_str("string", string_type());
+    to.add_type_alias_str_with_doc(
+        "()",
+        Type::unit(),
+        "The unit type. It has exactly one value: ().",
+    );
+    to.add_type_alias_str_with_doc("bool", bool_type(), "A Boolean value: true or false.");
+    to.add_type_alias_str_with_doc("int", int_type(), "A signed machine-sized integer.");
+    to.add_type_alias_str_with_doc(
+        "float",
+        float_type(),
+        "A 64-bit floating-point number, excluding NaN.",
+    );
+    to.add_type_alias_str_with_doc("string", string_type(), "An owned UTF-8 string.");
 
     // Add the `Repr` trait
     to.add_trait(REPR_TRAIT.clone());

@@ -169,6 +169,36 @@ fn compiled_type_aliases_include_doc_comments() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_alias_docs_fall_back_to_named_type_docs() {
+    let mut session = TestSession::new();
+
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            /// Target type docs.
+            struct Target {
+                value: int,
+            }
+
+            type Alias = Target;
+
+            /// Alias-specific docs.
+            type ExplicitAlias = Target;
+        "# },
+    );
+
+    assert!(
+        rendered.contains("/// Target type docs.\nAlias: Target"),
+        "expected alias docs to fall back to named type docs, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("/// Alias-specific docs.\nExplicitAlias: Target"),
+        "expected explicit alias docs to be preferred, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_type_aliases() {
     let mut session = TestSession::new();
 
