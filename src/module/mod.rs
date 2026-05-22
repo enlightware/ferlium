@@ -509,6 +509,7 @@ impl Module {
             ty_var_count,
             ty,
             Visibility::Public,
+            None,
         )
     }
 
@@ -519,10 +520,11 @@ impl Module {
         ty_var_count: u32,
         ty: Type,
         visibility: Visibility,
+        doc: Option<String>,
     ) -> LocalTypeAliasId {
         let id = LocalTypeAliasId::from_index(self.type_aliases.type_len());
         self.type_aliases
-            .set(name, generic_params, ty_var_count, ty);
+            .set(name, generic_params, ty_var_count, ty, doc);
         self.def_table
             .insert(name, Def::new(DefKind::TypeAlias(id), visibility));
         id
@@ -1508,6 +1510,11 @@ impl Module {
         if !type_aliases.is_empty() {
             writeln!(f, "Type aliases ({}):\n", type_aliases.len())?;
             for alias in type_aliases {
+                if let Some(doc) = &alias.doc {
+                    for line in doc.split('\n') {
+                        writeln!(f, "/// {line}")?;
+                    }
+                }
                 write_identifier(f, alias.name.as_str())?;
                 let mut ty_var_names = FxHashMap::default();
                 if !alias.generic_params.is_empty() {

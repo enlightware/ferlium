@@ -838,6 +838,7 @@ pub struct TypeAliasEntry {
     pub generic_params: Vec<UstrSpan>,
     pub ty_var_count: u32,
     pub ty: Type,
+    pub doc: Option<String>,
 }
 
 impl TypeAliasEntry {
@@ -857,7 +858,14 @@ pub(crate) struct TypeAliases {
     name_to_bare_native: FxHashMap<Ustr, BareNativeTypeB>,
 }
 impl TypeAliases {
-    pub fn set(&mut self, alias: Ustr, generic_params: Vec<UstrSpan>, ty_var_count: u32, ty: Type) {
+    pub fn set(
+        &mut self,
+        alias: Ustr,
+        generic_params: Vec<UstrSpan>,
+        ty_var_count: u32,
+        ty: Type,
+        doc: Option<String>,
+    ) {
         // Only register non-generic aliases in the reverse name lookup
         if generic_params.is_empty() {
             self.type_to_name.insert(ty, alias);
@@ -868,6 +876,7 @@ impl TypeAliases {
             generic_params,
             ty_var_count,
             ty,
+            doc,
         });
     }
 

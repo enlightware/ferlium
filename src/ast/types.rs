@@ -35,6 +35,7 @@ pub struct TypeAlias {
     pub name: UstrSpan,
     pub generic_params: Vec<UstrSpan>,
     pub ty: TypeSpan<Parsed>,
+    pub doc: Option<String>,
 }
 
 pub type PTypeAlias = TypeAlias;

@@ -144,6 +144,7 @@ impl NamedTypeData {
                     generic_params: alias.generic_params.clone(),
                     ty_var_count,
                     ty,
+                    doc: alias.doc.clone(),
                 })
             }
             NamedTypeData::Def(def) => DesugaredNamedType::Def(
@@ -521,6 +522,7 @@ impl NamedTypeGraph {
                         alias.ty_var_count,
                         alias.ty,
                         alias.visibility,
+                        alias.doc,
                     );
                 }
                 DesugaredNamedType::Def(name, type_def) => {
@@ -659,19 +661,25 @@ fn desugar_recursive_aliases_in_scc(
         builder.set_generic_ty_params(generic_ty_params);
         let ty = builder.desugar_root(alias_ref.index, &alias.ty.0, alias.ty.1)?;
         root_tys.push(ty);
-        root_entries.push((alias.visibility, alias.name, alias.generic_params.clone()));
+        root_entries.push((
+            alias.visibility,
+            alias.name,
+            alias.generic_params.clone(),
+            alias.doc.clone(),
+        ));
     }
     let root_tys = builder.finish(&root_tys);
     Ok(root_entries
         .into_iter()
         .zip(root_tys)
         .map(
-            |((visibility, name, generic_params), ty)| DesugaredTypeAlias {
+            |((visibility, name, generic_params, doc), ty)| DesugaredTypeAlias {
                 visibility,
                 name,
                 ty_var_count: generic_params.len() as u32,
                 generic_params,
                 ty,
+                doc,
             },
         )
         .collect())
@@ -746,6 +754,7 @@ fn desugar_recursive_named_type_scc(
                 alias.ty_var_count,
                 alias.ty,
                 alias.visibility,
+                alias.doc,
             );
         }
     }
@@ -766,6 +775,7 @@ struct DesugaredTypeAlias {
     generic_params: Vec<UstrSpan>,
     ty_var_count: u32,
     ty: Type,
+    doc: Option<String>,
 }
 
 enum DesugaredNamedType {

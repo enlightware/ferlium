@@ -129,6 +129,46 @@ fn type_aliases() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn type_alias_doc_comments() {
+    let mut session = TestSession::new();
+
+    let module = session.compile_and_get_module(indoc! { r#"
+        /// User-visible account identifier.
+        /// Stored as a string.
+        pub type AccountId = string;
+
+        fn dummy() -> int { 0 }
+    "# });
+    let alias = module
+        .get_type_alias(ustr("AccountId"))
+        .expect("expected AccountId alias to be registered");
+    assert_eq!(
+        alias.doc,
+        Some("User-visible account identifier.\nStored as a string.".into())
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compiled_type_aliases_include_doc_comments() {
+    let mut session = TestSession::new();
+
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            /// User-visible account identifier.
+            type AccountId = string;
+        "# },
+    );
+
+    assert!(
+        rendered.contains("/// User-visible account identifier.\nAccountId: "),
+        "expected type alias doc comments in module formatting, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn recursive_type_aliases() {
     let mut session = TestSession::new();
 

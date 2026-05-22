@@ -386,8 +386,8 @@ TypeDefinition: TypeDef = {
 }
 
 TypeAliasDefinition: TypeAlias = {
-    <visibility:Visibility> <l:@L> "type" <name:Sp<UIdentifier>> <generics:GenericParams?> "=" <ty:Sp<DefinedType>> <r:@R> ";" => {
-        TypeAlias::new(visibility, name, generics.unwrap_or_default(), ty)
+    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "type" <name:Sp<UIdentifier>> <generics:GenericParams?> "=" <ty:Sp<DefinedType>> <r:@R> ";" => {
+        TypeAlias::new(visibility, name, generics.unwrap_or_default(), ty, parse_doc_comments(doc))
     }
 }
 
