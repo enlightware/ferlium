@@ -56,6 +56,21 @@ fn literals() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn raw_identifiers() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run("fn r#fn(r#pub) { r#pub + 1 } r#fn(41)"),
+        int(42)
+    );
+    assert_val_eq!(session.run("({r#type: 1}: {r#type: int}).r#type"), int(1));
+    assert_val_eq!(
+        session.run("let { r#type } = {r#type: 42}; r#type"),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn binary_literals() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("0b0"), int(0));

@@ -13,6 +13,62 @@ use derive_new::new;
 
 use crate::{FxHashMap, types::never::Never};
 
+pub(crate) fn is_keyword(identifier: &str) -> bool {
+    matches!(
+        identifier,
+        "_" | "and"
+            | "as"
+            | "effects_unsafe"
+            | "else"
+            | "enum"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mut"
+            | "not"
+            | "or"
+            | "pub"
+            | "return"
+            | "soft_break"
+            | "struct"
+            | "trait"
+            | "true"
+            | "type"
+            | "use"
+            | "where"
+    )
+}
+
+pub(crate) fn escape_identifier(identifier: &str) -> String {
+    if is_keyword(identifier) {
+        format!("r#{identifier}")
+    } else {
+        identifier.to_string()
+    }
+}
+
+pub(crate) fn write_identifier(f: &mut fmt::Formatter<'_>, identifier: &str) -> fmt::Result {
+    if is_keyword(identifier) {
+        write!(f, "r#{identifier}")
+    } else {
+        f.write_str(identifier)
+    }
+}
+
+pub(crate) fn write_identifier_list<'a>(
+    iter: impl IntoIterator<Item = &'a str>,
+    separator: &str,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    write_with_separator(iter.into_iter().map(escape_identifier), separator, f)
+}
+
 /// A wrapper to fmt::Display types that depend on third-party data
 #[derive(new)]
 pub struct FormatWithData<'a, T: ?Sized + 'a, D: ?Sized + 'a> {

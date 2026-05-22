@@ -17,7 +17,7 @@ use crate::{
     FxHashMap, FxHashSet, Location,
     compiler::error::InternalCompilationError,
     format::write_with_separator_and_format_fn,
-    format::{FormatWith, write_with_separator},
+    format::{FormatWith, write_identifier, write_with_separator},
     hir::value::LiteralValue,
     module::{ModuleEnv, TypeDefId, Visibility},
     types::mutability::MutVal,
@@ -35,9 +35,10 @@ pub struct LetBindingPattern {
 impl Display for LetBindingPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.mut_val == MutVal::mutable() {
-            write!(f, "mut {}", self.name.0)
+            write!(f, "mut ")?;
+            write_identifier(f, self.name.0.as_str())
         } else {
-            write!(f, "{}", self.name.0)
+            write_identifier(f, self.name.0.as_str())
         }
     }
 }
@@ -75,9 +76,10 @@ impl Display for LetRecordPatternField {
             && name.0 == self.name.0
             && *mut_val == MutVal::constant()
         {
-            write!(f, "{}", self.name.0)
+            write_identifier(f, self.name.0.as_str())
         } else {
-            write!(f, "{}: {}", self.name.0, self.pattern)
+            write_identifier(f, self.name.0.as_str())?;
+            write!(f, ": {}", self.pattern)
         }
     }
 }
@@ -129,9 +131,10 @@ impl Display for LetPatternKind {
         match self {
             LetPatternKind::Binding { name, mut_val } => {
                 if *mut_val == MutVal::mutable() {
-                    write!(f, "mut {}", name.0)
+                    write!(f, "mut ")?;
+                    write_identifier(f, name.0.as_str())
                 } else {
-                    write!(f, "{}", name.0)
+                    write_identifier(f, name.0.as_str())
                 }
             }
             LetPatternKind::Ignore => write!(f, "_"),
@@ -228,7 +231,7 @@ impl Display for PatternVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         use PatternVar::*;
         match self {
-            Named((name, _)) => write!(f, "{name}"),
+            Named((name, _)) => write_identifier(f, name.as_str()),
             Wildcard(_) => write!(f, ".."),
         }
     }
@@ -423,7 +426,8 @@ pub struct TypeConstraintInput<P: Phase> {
 impl<P: Phase> FormatWith<ModuleEnv<'_>> for TypeConstraintInput<P> {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
         if let Some((name, _)) = self.name {
-            write!(f, "{name} = {}", self.ty.0.format_with(env))
+            write_identifier(f, name.as_str())?;
+            write!(f, " = {}", self.ty.0.format_with(env))
         } else {
             self.ty.0.fmt_with(f, env)
         }
@@ -450,7 +454,8 @@ pub struct TypeConstraintOutput<P: Phase> {
 
 impl<P: Phase> FormatWith<ModuleEnv<'_>> for TypeConstraintOutput<P> {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
-        write!(f, "{} = {}", self.name.0, self.ty.0.format_with(env))
+        write_identifier(f, self.name.0.as_str())?;
+        write!(f, " = {}", self.ty.0.format_with(env))
     }
 }
 

@@ -13,7 +13,7 @@ use ustr::Ustr;
 
 use crate::{
     FxHashSet,
-    format::FormatWith,
+    format::{FormatWith, escape_identifier},
     module::{Module, ModuleEnv},
     types::r#type::{NamedType, Type, TypeAliasEntry, TypeInstSubst, TypeKind, TypeVar},
 };
@@ -120,7 +120,7 @@ pub(crate) fn render_generic_alias_name_with(
                 subst.get(&var).map_or_else(
                     || {
                         if is_alias_definition_self_reference {
-                            alias.generic_params[i as usize].0.to_string()
+                            escape_identifier(alias.generic_params[i as usize].0.as_str())
                         } else {
                             "_".to_string()
                         }
@@ -130,9 +130,13 @@ pub(crate) fn render_generic_alias_name_with(
             })
             .collect::<Vec<_>>();
         let rendered = if args.is_empty() {
-            alias.name.to_string()
+            escape_identifier(alias.name.as_str())
         } else {
-            format!("{}<{}>", alias.name, args.join(", "))
+            format!(
+                "{}<{}>",
+                escape_identifier(alias.name.as_str()),
+                args.join(", ")
+            )
         };
         Some(GenericAliasName {
             name: alias.name,

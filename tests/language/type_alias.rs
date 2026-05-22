@@ -559,7 +559,24 @@ fn generic_type_aliases() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn keyword_type_is_acceptable() {
     let mut session = TestSession::new();
-    assert_val_eq!(session.run("({type: 1}: {type: int}).type"), int(1));
+    assert_val_eq!(session.run("({r#type: 1}: {r#type: int}).r#type"), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn formatted_output_escapes_keyword_identifiers() {
+    let mut session = TestSession::new();
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            type r#type<r#pub> = { r#fn: r#pub };
+        "# },
+    );
+
+    assert!(
+        rendered.contains("r#type<r#pub>: { r#fn: r#pub }"),
+        "{rendered}"
+    );
 }
 
 #[test]

@@ -9,7 +9,6 @@
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
-use itertools::Itertools;
 use std::fmt::{self, Display};
 
 use ustr::Ustr;
@@ -18,7 +17,7 @@ use crate::{
     FxHashMap, FxHashSet, Location,
     compiler::error::InternalCompilationError,
     containers::{B, b},
-    format::{FormatWith, write_with_separator},
+    format::{FormatWith, write_identifier, write_identifier_list, write_with_separator},
     module::{ModuleEnv, Visibility},
     types::effects::PrimitiveEffect,
     types::mutability::FormatInFnArg,
@@ -42,10 +41,10 @@ pub type PTypeAlias = TypeAlias;
 
 impl FormatWith<ModuleEnv<'_>> for TypeAlias {
     fn fmt_with(&self, f: &mut fmt::Formatter, env: &ModuleEnv) -> std::fmt::Result {
-        write!(f, "{}", self.name.0)?;
+        write_identifier(f, self.name.0.as_str())?;
         if !self.generic_params.is_empty() {
             write!(f, "<")?;
-            write_with_separator(self.generic_params.iter().map(|(s, _)| s), ", ", f)?;
+            write_identifier_list(self.generic_params.iter().map(|(s, _)| s.as_str()), ", ", f)?;
             write!(f, ">")?;
         }
         write!(f, ": ")?;
@@ -250,7 +249,7 @@ impl FormatWith<ModuleEnv<'_>> for PType {
             Unit => write!(f, "()"),
             Resolved(ty) => ty.fmt_with(f, env),
             Infer => write!(f, "_"),
-            Path(path) => write!(f, "{}", path.segments.iter().map(|(s, _)| s).join("::")),
+            Path(path) => write!(f, "{path}"),
             AppliedPath { path, args } => {
                 write!(f, "{path}<")?;
                 for (i, (ty, _)) in args.iter().enumerate() {
@@ -267,9 +266,10 @@ impl FormatWith<ModuleEnv<'_>> for PType {
                         write!(f, " | ")?;
                     }
                     if *ty == Unit {
-                        write!(f, "{name}")?;
+                        write_identifier(f, name.as_str())?;
                     } else {
-                        write!(f, "{name} ")?;
+                        write_identifier(f, name.as_str())?;
+                        write!(f, " ")?;
                         ty.fmt_with(f, env)?;
                     }
                 }
@@ -294,7 +294,8 @@ impl FormatWith<ModuleEnv<'_>> for PType {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{name}: ")?;
+                    write_identifier(f, name.as_str())?;
+                    write!(f, ": ")?;
                     ty.fmt_with(f, env)?;
                 }
                 write!(f, " }}")

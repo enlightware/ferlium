@@ -21,7 +21,7 @@ use crate::ast::Attribute;
 use crate::ast::UstrSpan;
 use crate::containers::FromIndex;
 use crate::define_id_type;
-use crate::format::FormatWith;
+use crate::format::{FormatWith, write_identifier};
 use crate::graph::find_strongly_connected_components;
 use crate::graph::topological_sort_sccs;
 use crate::hir::value::LiteralValue;
@@ -331,7 +331,7 @@ impl TypeFormatEnv for TypeDisplayEnv<'_, '_> {
 
     fn fmt_type_var(&self, var: TypeVar, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.ty_var_names.get(&var) {
-            Some(name) => write!(f, "{name}"),
+            Some(name) => write_identifier(f, name.as_str()),
             None => write!(f, "{var}"),
         }
     }
@@ -1058,14 +1058,15 @@ impl TypeDef {
         } else {
             write!(f, "enum")?;
         }
-        write!(f, " {}", self.name)?;
+        write!(f, " ")?;
+        write_identifier(f, self.name.as_str())?;
         if !self.generic_params.is_empty() {
             write!(f, "<")?;
             for (i, (name, _)) in self.generic_params.iter().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                write!(f, "{name}")?;
+                write_identifier(f, name.as_str())?;
             }
             write!(f, ">")?;
         }
@@ -1095,9 +1096,10 @@ impl TypeDef {
                         write!(f, ", ")?;
                     }
                     if *ty == Type::unit() {
-                        write!(f, "{name}")?;
+                        write_identifier(f, name.as_str())?;
                     } else {
-                        write!(f, "{name} ")?;
+                        write_identifier(f, name.as_str())?;
+                        write!(f, " ")?;
                         ty.fmt_with(f, &type_env)?;
                     }
                 }
@@ -1619,9 +1621,10 @@ where
                     write!(f, " | ")?;
                 }
                 if *ty == Type::unit() {
-                    write!(f, "{name}")?;
+                    write_identifier(f, name.as_str())?;
                 } else {
-                    write!(f, "{name} ")?;
+                    write_identifier(f, name.as_str())?;
+                    write!(f, " ")?;
                     let ty_data = ty.data();
                     if let Tuple(tuple_ty) = &*ty_data {
                         if tuple_ty.len() == 1 {
@@ -1658,7 +1661,8 @@ where
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                write!(f, "{name}: ")?;
+                write_identifier(f, name.as_str())?;
+                write!(f, ": ")?;
                 ty.fmt_with(f, env)?;
             }
             write!(f, " }}")

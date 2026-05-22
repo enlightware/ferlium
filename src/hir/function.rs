@@ -28,7 +28,7 @@ use crate::{
         ControlFlow, EvalControlFlowResult, EvalCtx, RuntimeError, ValOrMut, ValOrMutArgs, cont,
         drop_frame_owned_locals_on_error, eval_node_with_ctx,
     },
-    format::FormatWith,
+    format::{FormatWith, write_identifier},
     hir::value::{NativeDisplay, Value},
     hir::{self, NodeId},
     module::{LocalDecl, ModuleEnv, ModuleFunction},
@@ -178,7 +178,8 @@ impl FunctionDefinition {
                 writeln!(f, "{prefix}/// {line}")?;
             }
         }
-        write!(f, "{prefix}fn {name}")?;
+        write!(f, "{prefix}fn ")?;
+        write_identifier(f, name.as_str())?;
         let ty_var_names = self
             .ty_scheme
             .display_ty_var_names_with_source_params(&self.generic_params);

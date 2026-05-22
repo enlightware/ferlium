@@ -8,7 +8,6 @@
 //
 
 use derive_new::new;
-use itertools::Itertools;
 use std::fmt;
 
 use ustr::Ustr;
@@ -17,7 +16,7 @@ use crate::{
     Location,
     compiler::error::LocatedError,
     format::write_with_separator_and_format_fn,
-    format::{FormatWith, write_with_separator},
+    format::{FormatWith, write_identifier, write_identifier_list, write_with_separator},
     module::{ModuleEnv, Visibility},
     types::mutability::FormatInFnArg,
     types::type_like::TypeLike,
@@ -84,7 +83,8 @@ pub struct TraitMethodArg {
 
 impl FormatWith<ModuleEnv<'_>> for TraitMethodArg {
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, env: &ModuleEnv<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.name.0, self.ty.format_with(env))
+        write_identifier(f, self.name.0.as_str())?;
+        write!(f, ": {}", self.ty.format_with(env))
     }
 }
 
@@ -336,7 +336,9 @@ fn fmt_trait_method(
             writeln!(f, "{doc_prefix}/// {line}")?;
         }
     }
-    write!(f, "{doc_prefix}fn {}(", method.name.0)?;
+    write!(f, "{doc_prefix}fn ")?;
+    write_identifier(f, method.name.0.as_str())?;
+    write!(f, "(")?;
     write_with_separator_and_format_fn(&method.args, ", ", |arg, f| arg.fmt_with(f, env), f)?;
     write!(f, ")")?;
     if let Some((ret_ty, _)) = &method.ret_ty {
@@ -376,13 +378,16 @@ fn fmt_module_function<P: Phase>(
             writeln!(f, "{doc_prefix}/// {line}")?;
         }
     }
-    write!(f, "    fn {}", name.0)?;
+    write!(f, "    fn ")?;
+    write_identifier(f, name.0.as_str())?;
     if !generic_params.is_empty() {
-        write!(
+        write!(f, "<")?;
+        write_identifier_list(
+            generic_params.iter().map(|(name, _)| name.as_str()),
+            ", ",
             f,
-            "<{}>",
-            generic_params.iter().map(|(name, _)| name).join(", ")
         )?;
+        write!(f, ">")?;
     }
     write!(f, "(")?;
     for (i, arg) in args.iter().enumerate() {
@@ -390,13 +395,14 @@ fn fmt_module_function<P: Phase>(
             write!(f, ", ")?;
         }
         if let Some((mut_ty, ty, _)) = &arg.ty {
-            write!(f, "{}: ", arg.name.0)?;
+            write_identifier(f, arg.name.0.as_str())?;
+            write!(f, ": ")?;
             if let Some(mut_ty) = mut_ty {
                 mut_ty.format_in_fn_arg(f)?;
             }
             write!(f, "{}", ty.format_with(env))?;
         } else {
-            write!(f, "{}", arg.name.0)?;
+            write_identifier(f, arg.name.0.as_str())?;
         }
     }
     write!(f, ")")?;
@@ -434,11 +440,27 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
                         writeln!(f, "  /// {line}")?;
                     }
                 }
-                write!(f, "  trait {}<", trait_def.name.0)?;
-                write_with_separator(trait_def.iter_input_type_names(), ", ", f)?;
+                write!(f, "  trait ")?;
+                write_identifier(f, trait_def.name.0.as_str())?;
+                write!(f, "<")?;
+                write_identifier_list(
+                    trait_def
+                        .input_type_names
+                        .iter()
+                        .map(|(name, _)| name.as_str()),
+                    ", ",
+                    f,
+                )?;
                 if !trait_def.output_type_names.is_empty() {
                     write!(f, " |-> ")?;
-                    write_with_separator(trait_def.iter_output_type_names(), ", ", f)?;
+                    write_identifier_list(
+                        trait_def
+                            .output_type_names
+                            .iter()
+                            .map(|(name, _)| name.as_str()),
+                        ", ",
+                        f,
+                    )?;
                 }
                 write!(f, ">")?;
                 if !trait_def.where_clause.is_empty() {
@@ -470,13 +492,16 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
             {
                 write!(f, "  impl")?;
                 if !generic_params.is_empty() {
-                    write!(
+                    write!(f, "<")?;
+                    write_identifier_list(
+                        generic_params.iter().map(|(name, _)| name.as_str()),
+                        ", ",
                         f,
-                        "<{}>",
-                        generic_params.iter().map(|(name, _)| name).join(", ")
                     )?;
+                    write!(f, ">")?;
                 }
-                write!(f, " {}", trait_name.0)?;
+                write!(f, " ")?;
+                write_identifier(f, trait_name.0.as_str())?;
                 if let Some(for_trait) = for_trait {
                     write!(f, " for {}", for_trait.format_with(env))?;
                 } else {

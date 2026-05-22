@@ -1,4 +1,11 @@
 {
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "linkedProjects": ["./Cargo.toml"],
+      },
+    },
+  },
   "languages": {
     "Vue.js": {
       "tab_size": 4,

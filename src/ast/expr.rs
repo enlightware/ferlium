@@ -17,7 +17,7 @@ use crate::{
     Location,
     compiler::error::LocatedError,
     containers::{B, b},
-    format::FormatWith,
+    format::{FormatWith, write_identifier},
     hir::value::LiteralValue,
     module::ModuleEnv,
     parser::helpers::EMPTY_USTR,
@@ -515,7 +515,9 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
             StructLiteral(data) => {
                 writeln!(f, "{indent_str}{} {{", data.path)?;
                 for ((name, _), value) in data.fields.iter() {
-                    writeln!(f, "{indent_str}  {name}:")?;
+                    write!(f, "{indent_str}  ")?;
+                    write_identifier(f, name.as_str())?;
+                    writeln!(f, ":")?;
                     arena[*value].format_ind(f, env, arena, indent + 2)?;
                     writeln!(f, "{indent_str}  ,")?;
                 }
@@ -524,7 +526,9 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
             Record(fields) => {
                 writeln!(f, "{indent_str}{{")?;
                 for ((name, _), value) in fields.iter() {
-                    writeln!(f, "{indent_str}  {name}:")?;
+                    write!(f, "{indent_str}  ")?;
+                    write_identifier(f, name.as_str())?;
+                    writeln!(f, ":")?;
                     arena[*value].format_ind(f, env, arena, indent + 2)?;
                     writeln!(f, "{indent_str}  ,")?;
                 }
@@ -532,7 +536,9 @@ impl<P: Phase> FormatWithIndent<P> for Expr<P> {
             }
             FieldAccess(data) => {
                 arena[data.expr].format_ind(f, env, arena, indent)?;
-                writeln!(f, "{indent_str}  .{}", data.name.0)
+                write!(f, "{indent_str}  .")?;
+                write_identifier(f, data.name.0.as_str())?;
+                writeln!(f)
             }
             Array(args) => {
                 if args.is_empty() {

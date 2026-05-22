@@ -42,7 +42,7 @@ use crate::{
     ast::UstrSpan,
     compiler::error::{ImportKind, ImportSite, InternalCompilationError},
     define_id_type,
-    format::FormatWith,
+    format::{FormatWith, write_identifier},
     hir::{self, NodeArena, emit_ir::EmitTraitOutput, function::Function},
     internal_compilation_error,
     module::id::{Id, NamedIndexed},
@@ -1508,7 +1508,7 @@ impl Module {
         if !type_aliases.is_empty() {
             writeln!(f, "Type aliases ({}):\n", type_aliases.len())?;
             for alias in type_aliases {
-                write!(f, "{}", alias.name)?;
+                write_identifier(f, alias.name.as_str())?;
                 let mut ty_var_names = FxHashMap::default();
                 if !alias.generic_params.is_empty() {
                     write!(f, "<")?;
@@ -1516,7 +1516,7 @@ impl Module {
                         if index > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{name}")?;
+                        write_identifier(f, name.as_str())?;
                         ty_var_names.insert(TypeVar::new(index as u32), *name);
                     }
                     write!(f, ">")?;

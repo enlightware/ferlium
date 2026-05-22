@@ -2,7 +2,7 @@ pub struct Account {
 	name: string,
 	birthdate: int,
 	amount: int,
-	transactions: [{ type: Debit | Credit, amount: int }]
+	transactions: [{ r#type: Debit | Credit, amount: int }]
 }
 
 impl Ord {
@@ -43,10 +43,10 @@ pub fn test_data() {
 			birthdate: 1978,
 			amount: 20,
 			transactions: [
-				{ type: Credit, amount: 10 },
-				{ type: Debit, amount: 2 },
-				{ type: Credit, amount: 5 },
-				{ type: Credit, amount: 7 },
+				{ r#type: Credit, amount: 10 },
+				{ r#type: Debit, amount: 2 },
+				{ r#type: Credit, amount: 5 },
+				{ r#type: Credit, amount: 7 },
 			]
 		},
 		Account {
@@ -54,11 +54,11 @@ pub fn test_data() {
 			birthdate: 1984,
 			amount: 1,
 			transactions: [
-				{ type: Credit, amount: 15 },
-				{ type: Debit, amount: 2 },
-				{ type: Debit, amount: 3 },
-				{ type: Debit, amount: 4 },
-				{ type: Debit, amount: 5 },
+				{ r#type: Credit, amount: 15 },
+				{ r#type: Debit, amount: 2 },
+				{ r#type: Debit, amount: 3 },
+				{ r#type: Debit, amount: 4 },
+				{ r#type: Debit, amount: 5 },
 			]
 		},
 		Account {
@@ -66,8 +66,8 @@ pub fn test_data() {
 			birthdate: 1982,
 			amount: 2,
 			transactions: [
-				{ type: Credit, amount: 4 },
-				{ type: Debit, amount: 2 },
+				{ r#type: Credit, amount: 4 },
+				{ r#type: Debit, amount: 2 },
 			]
 		},
 	]
@@ -85,7 +85,7 @@ pub fn assert_consistency() {
 	for account in test_data() {
 		let mut balance = 0;
 		for transaction in account.transactions {
-			match transaction.type {
+			match transaction.r#type {
 				Credit => balance = balance + transaction.amount,
 				Debit => balance = balance - transaction.amount,
 			}

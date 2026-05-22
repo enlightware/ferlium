@@ -849,12 +849,6 @@ ArrayExpr: ExprKind = {
 
 PathBraceItem: PathBraceItem = {
     <field:RecordExplicitField> => PathBraceItem::Field(field),
-    <name:Sp<"type">> => {
-        // abbreviated field of name "type"
-        let name = (ustr("type"), name.1);
-        let expr = arena.alloc(Expr::new(ExprKind::identifier(Path::single_tuple(name)), name.1));
-        PathBraceItem::Field((name, expr))
-    },
     <key:Expr> "=>" <value:Expr> => PathBraceItem::MapEntry(MapLiteralEntry::new(key, value)),
     <expr:Expr> => PathBraceItem::Expr(expr),
 }
@@ -1072,8 +1066,8 @@ StrOrMore: PatternVar = {
 }
 
 PatternBindingIdentifier: Ustr = {
-    <l:@L> <id:Identifier> <r:@R> =>? if id != "_" {
-        Ok(ustr(id))
+    <l:@L> <id:UIdentifier> <r:@R> =>? if id != ustr("_") {
+        Ok(id)
     } else {
         error("`_` cannot be used as a binding name inside a destructuring pattern".into(), span(l, r, source_id))
     }
@@ -1121,17 +1115,17 @@ LogicalOrOp: () = {
     <l:@L> "||" <r:@R> =>? error("for readability, use the \"or\" keyword instead of the C-style || operator".into(), span(l, r, source_id)),
 }
 
-// Like UIdentifier, but also accepts some contextual keywords valid as field names.
 FieldIdentifier: Ustr = {
     UIdentifier => <>,
-    "type" => ustr("type"),
 }
 
 UIdentifier: Ustr = {
     Identifier => ustr(<>),
+    RawIdentifier => ustr(&<>[2..]),
 }
 
 Identifier: &'input str = r"[\p{L}_][\p{L}\p{N}_]*" => <>;
+RawIdentifier: &'input str = r"r#[\p{L}_][\p{L}\p{N}_]*" => <>;
 
 UnitLiteral: (LiteralValue, IrType) = {
     "(" ")" => literal_value(())

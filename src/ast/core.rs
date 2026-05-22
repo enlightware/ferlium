@@ -16,7 +16,7 @@ use ustr::Ustr;
 use crate::{
     Location,
     containers::B,
-    format::{FormatWith, write_with_separator},
+    format::{FormatWith, write_identifier_list},
     module::ModuleEnv,
     types::mutability::{FormatInFnArg, MutType as IrMutType},
     types::never::Never,
@@ -77,7 +77,7 @@ impl Path {
 
 impl Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_with_separator(self.segments.iter().map(|(s, _)| s), "::", f)
+        write_identifier_list(self.segments.iter().map(|(s, _)| s.as_str()), "::", f)
     }
 }
 
