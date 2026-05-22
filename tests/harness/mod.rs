@@ -31,7 +31,9 @@ use ferlium::{
     },
     types::effects::{PrimitiveEffect, effect, effects, no_effects},
     types::r#trait::TraitRef,
-    types::r#type::{FnType, Type, TypeDef, TypeVar, variant_type},
+    types::r#type::{
+        FnType, Type, TypeDef, TypeDefProductDocs, TypeDefShapeDocs, TypeVar, variant_type,
+    },
     types::type_scheme::{PubTypeConstraint, TypeScheme},
 };
 use std::{cell::RefCell, sync::atomic::AtomicIsize};
@@ -348,6 +350,7 @@ fn option_type_def() -> TypeDef {
             ]),
             constraints: vec![],
         },
+        shape_docs: TypeDefShapeDocs::Enum(vec![]),
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,
@@ -380,6 +383,7 @@ fn map_iterator_type_def(iterator_trait: TraitRef) -> TypeDef {
                 Location::new_synthesized(),
             )],
         },
+        shape_docs: TypeDefShapeDocs::Struct(TypeDefProductDocs::Record(vec![])),
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,
@@ -405,6 +409,7 @@ fn witnessed_type_def(test_assoc_trait: TraitRef) -> TypeDef {
                 Location::new_synthesized(),
             )],
         },
+        shape_docs: TypeDefShapeDocs::Struct(TypeDefProductDocs::Tuple(vec![])),
         span: Location::new_synthesized(),
         attributes: vec![],
         default_variant: None,

@@ -37,9 +37,20 @@ For this reason, functions in Ferlium always return a value.
 ## Comments
 
 Ferlium supports C-style single-line and block comments:
+
 ```ferlium
 // Single-line comment
 /* Block comment */
+```
+
+Documentation comments start with `///`.
+They document the item or field that follows them:
+
+```ferlium
+/// Returns the square of a number.
+fn square(x: int) {
+    x * x
+}
 ```
 
 ## Values and basic literals

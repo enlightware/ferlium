@@ -21,7 +21,7 @@ use crate::{
     hir::value::LiteralValue,
     module::{ModuleEnv, TypeDefId, Visibility},
     types::mutability::MutVal,
-    types::r#type::Type as IrType,
+    types::r#type::{Type as IrType, TypeDefShapeDocs},
 };
 
 use super::{Desugared, Parsed, Path, Phase, TypeSpan, UstrSpan};
@@ -550,6 +550,7 @@ pub struct TypeDef<P: Phase> {
     pub where_clause: Vec<TypeConstraint<P>>,
     pub attributes: Vec<Attribute>,
     pub variant_attributes: Vec<Vec<Attribute>>,
+    pub shape_docs: TypeDefShapeDocs,
     pub span: Location,
     pub doc_comments: Vec<String>,
 }

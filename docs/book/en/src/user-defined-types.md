@@ -153,7 +153,11 @@ It supports empty, tuple, and record forms:
 ```ferlium
 struct Empty {}
 struct Point(int, int)
-struct Person { name: string, age: int }
+struct Person {
+    /// Display name.
+    name: string,
+    age: int,
+}
 ```
 
 Using a struct gives nominal identity to the type, so even if two structs have the same underlying fields, they are not the same type:
@@ -178,8 +182,16 @@ Each alternative can have its own payload:
 ```ferlium
 enum Message {
     Quit,
-    Write(string),
-    Move { x: int, y: int }
+    /// Text to display.
+    Write(
+        /// Message contents.
+        string,
+    ),
+    Move {
+        /// Horizontal position.
+        x: int,
+        y: int,
+    }
 }
 ```
 

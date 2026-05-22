@@ -943,12 +943,117 @@ pub struct TypeDef {
     pub generic_params: Vec<UstrSpan>,
     /// The inner type data, possibly with generic arguments
     pub shape: TypeScheme<Type>,
+    /// Documentation for the declared struct fields or enum variants.
+    pub shape_docs: TypeDefShapeDocs,
     /// The location of the type declaration in the source code
     pub span: Location,
     /// The attributes of the type
     pub attributes: Vec<Attribute>,
     /// The default enum variant for `Default`, if any.
     pub default_variant: Option<Ustr>,
+}
+
+/// Documentation attached to the declared product shape of a struct or enum variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeDefProductDocs {
+    Unit,
+    Tuple(Vec<Option<String>>),
+    Record(Vec<(Ustr, Option<String>)>),
+}
+
+impl TypeDefProductDocs {
+    pub fn has_docs(&self) -> bool {
+        match self {
+            Self::Unit => false,
+            Self::Tuple(fields) => fields.iter().any(Option::is_some),
+            Self::Record(fields) => fields.iter().any(|(_, doc)| doc.is_some()),
+        }
+    }
+}
+
+/// Documentation attached to a declared enum variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDefVariantDocs {
+    pub name: Ustr,
+    pub doc: Option<String>,
+    pub payload: TypeDefProductDocs,
+}
+
+impl TypeDefVariantDocs {
+    pub fn has_docs(&self) -> bool {
+        self.doc.is_some() || self.payload.has_docs()
+    }
+}
+
+/// Documentation attached to the declared shape of a named type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeDefShapeDocs {
+    Struct(TypeDefProductDocs),
+    Enum(Vec<TypeDefVariantDocs>),
+}
+
+impl TypeDefShapeDocs {
+    pub fn has_docs(&self) -> bool {
+        match self {
+            Self::Struct(product) => product.has_docs(),
+            Self::Enum(variants) => variants.iter().any(TypeDefVariantDocs::has_docs),
+        }
+    }
+}
+
+fn write_doc_lines(f: &mut fmt::Formatter, indent: &str, doc: &str) -> fmt::Result {
+    for line in doc.split('\n') {
+        writeln!(f, "{indent}/// {line}")?;
+    }
+    Ok(())
+}
+
+fn write_product_docs(
+    f: &mut fmt::Formatter,
+    product: &TypeDefProductDocs,
+    ty: Type,
+    env: &TypeDisplayEnv<'_, '_>,
+    indent: &str,
+) -> fmt::Result {
+    match product {
+        TypeDefProductDocs::Unit => write!(f, ";"),
+        TypeDefProductDocs::Tuple(field_docs) => {
+            let tuple_fields = ty.data();
+            let tuple_fields = tuple_fields.as_tuple().map_or(&[][..], Vec::as_slice);
+            writeln!(f, "(")?;
+            let field_indent = format!("{indent}    ");
+            for (index, field_ty) in tuple_fields.iter().enumerate() {
+                if let Some(Some(doc)) = field_docs.get(index) {
+                    write_doc_lines(f, &field_indent, doc)?;
+                }
+                write!(f, "{field_indent}")?;
+                field_ty.fmt_with(f, env)?;
+                writeln!(f, ",")?;
+            }
+            write!(f, "{indent})")
+        }
+        TypeDefProductDocs::Record(field_docs) => {
+            let record_fields = ty.data();
+            let record_fields = record_fields.as_record().map_or(&[][..], Vec::as_slice);
+            writeln!(f, "{{")?;
+            let field_indent = format!("{indent}    ");
+            for (name, field_ty) in record_fields {
+                if let Some(doc) = field_docs
+                    .iter()
+                    .find_map(|(doc_name, doc)| (*doc_name == *name).then_some(doc))
+                    .and_then(Option::as_ref)
+                {
+                    write_doc_lines(f, &field_indent, doc)?;
+                }
+                write!(f, "{field_indent}")?;
+                write_identifier(f, name.as_str())?;
+                write!(f, ": ")?;
+                field_ty.fmt_with(f, env)?;
+                writeln!(f, ",")?;
+            }
+            write!(f, "{indent}}}")
+        }
+    }
 }
 
 impl TypeDef {
@@ -1097,6 +1202,44 @@ impl TypeDef {
             write!(f, " ")?;
             self.shape
                 .format_constraints_rust_style_with_type_env(f, &type_env)?;
+        }
+        if self.shape_docs.has_docs() {
+            write!(f, " ")?;
+            match &self.shape_docs {
+                TypeDefShapeDocs::Struct(product) => {
+                    write_product_docs(f, product, self.shape.ty, &type_env, "")?;
+                }
+                TypeDefShapeDocs::Enum(variant_docs) => {
+                    writeln!(f, "{{")?;
+                    if let Some(variants) = self.shape.ty.data().as_variant() {
+                        for (name, ty) in variants {
+                            let docs = variant_docs.iter().find(|docs| docs.name == *name);
+                            if let Some(Some(doc)) = docs.map(|docs| docs.doc.as_ref()) {
+                                write_doc_lines(f, "    ", doc)?;
+                            }
+                            write!(f, "    ")?;
+                            write_identifier(f, name.as_str())?;
+                            if let Some(docs) = docs
+                                && docs.payload.has_docs()
+                            {
+                                if matches!(docs.payload, TypeDefProductDocs::Record(_)) {
+                                    write!(f, " ")?;
+                                }
+                                write_product_docs(f, &docs.payload, *ty, &type_env, "    ")?;
+                                writeln!(f, ",")?;
+                            } else if *ty == Type::unit() {
+                                writeln!(f, ",")?;
+                            } else {
+                                write!(f, " ")?;
+                                ty.fmt_with(f, &type_env)?;
+                                writeln!(f, ",")?;
+                            }
+                        }
+                    }
+                    write!(f, "}}")?;
+                }
+            }
+            return Ok(());
         }
         write!(f, " ")?;
         if self.is_enum() {

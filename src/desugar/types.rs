@@ -780,6 +780,7 @@ impl PTypeDef {
                 ty: shape,
                 constraints,
             },
+            shape_docs: self.shape_docs.clone(),
             span: self.span,
             attributes: self.attributes.clone(),
             default_variant,

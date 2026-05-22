@@ -19,7 +19,7 @@ use ferlium::module::id::Id;
 use ferlium::std::logic::bool_type;
 use ferlium::std::math::{float_type, int_type};
 use ferlium::std::string::string_type;
-use ferlium::types::r#type::{Type, TypeVar};
+use ferlium::types::r#type::{Type, TypeDefProductDocs, TypeDefShapeDocs, TypeVar};
 use ferlium::{CompilerSession, SourceId, ast, parse_module_and_expr};
 use test_log::test;
 
@@ -745,6 +745,70 @@ fn parse_doc_commented_type_definitions() {
     assert_eq!(
         module.type_defs[1].doc_comments,
         vec!["Stores one value.".to_string()]
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parse_type_definition_field_doc_comments() {
+    let module = parse_module_ast(indoc! { r#"
+        struct User {
+            /// Stable user id.
+            id: int,
+            /// Display name.
+            name: string,
+        }
+
+        struct Pair(
+            /// Left value.
+            int,
+            /// Right value.
+            string,
+        )
+
+        enum Result<T, E> {
+            /// Success.
+            Ok(
+                /// Success value.
+                T,
+            ),
+            /// Failure.
+            Err {
+                /// Error value.
+                error: E,
+            },
+        }
+    "# });
+
+    assert_eq!(module.type_defs.len(), 3);
+    assert_eq!(
+        module.type_defs[0].shape_docs,
+        TypeDefShapeDocs::Struct(TypeDefProductDocs::Record(vec![
+            (ustr("id"), Some("Stable user id.".to_string())),
+            (ustr("name"), Some("Display name.".to_string())),
+        ]))
+    );
+    assert_eq!(
+        module.type_defs[1].shape_docs,
+        TypeDefShapeDocs::Struct(TypeDefProductDocs::Tuple(vec![
+            Some("Left value.".to_string()),
+            Some("Right value.".to_string()),
+        ]))
+    );
+    let TypeDefShapeDocs::Enum(variants) = &module.type_defs[2].shape_docs else {
+        panic!("expected enum docs");
+    };
+    assert_eq!(variants[0].name, ustr("Ok"));
+    assert_eq!(variants[0].doc.as_deref(), Some("Success."));
+    assert_eq!(
+        variants[0].payload,
+        TypeDefProductDocs::Tuple(vec![Some("Success value.".to_string())])
+    );
+    assert_eq!(variants[1].name, ustr("Err"));
+    assert_eq!(variants[1].doc.as_deref(), Some("Failure."));
+    assert_eq!(
+        variants[1].payload,
+        TypeDefProductDocs::Record(vec![(ustr("error"), Some("Error value.".to_string()))])
     );
 }
 
@@ -1740,6 +1804,67 @@ fn compiled_type_defs_include_doc_comments() {
     assert!(
         rendered.contains("/// Stores one value.\nstruct Box<T>"),
         "expected struct doc comments in module formatting, got:\n{rendered}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn compiled_type_defs_include_field_doc_comments() {
+    let mut session = TestSession::new();
+
+    let rendered = format_compiled_module(
+        &mut session,
+        indoc! { r#"
+            struct User {
+                /// Stable user id.
+                id: int,
+                /// Display name.
+                name: string,
+            }
+
+            struct Pair(
+                /// Left value.
+                int,
+                /// Right value.
+                string,
+            )
+
+            enum Result<T, E> {
+                /// Success.
+                Ok(
+                    /// Success value.
+                    T,
+                ),
+                /// Failure.
+                Err {
+                    /// Error value.
+                    error: E,
+                },
+            }
+        "# },
+    );
+
+    assert!(
+        rendered.contains(
+            "struct User {\n    /// Stable user id.\n    id: int,\n    /// Display name.\n    name: string,\n}"
+        ),
+        "expected record struct field docs in module formatting, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "struct Pair (\n    /// Left value.\n    int,\n    /// Right value.\n    string,\n)"
+        ),
+        "expected tuple struct field docs in module formatting, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("/// Success.\n    Ok(\n        /// Success value.\n        T,\n    ),"),
+        "expected tuple variant docs in module formatting, got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "/// Failure.\n    Err {\n        /// Error value.\n        error: E,\n    },"
+        ),
+        "expected record variant docs in module formatting, got:\n{rendered}"
     );
 }
 

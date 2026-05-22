@@ -8,6 +8,7 @@
 //
 use crate::Location;
 use crate::SourceId;
+use crate::ast::Attribute;
 use crate::ast::Expr;
 use crate::ast::ExprArena;
 use crate::ast::ExprId;
@@ -20,6 +21,7 @@ use crate::ast::PExprId;
 use crate::ast::PExprKind;
 use crate::ast::PLetPattern;
 use crate::ast::PType;
+use crate::ast::PTypeSpan;
 use crate::ast::Path;
 use crate::ast::Pattern;
 use crate::ast::PatternKind;
@@ -34,7 +36,7 @@ use crate::hir::value::NativeDisplay;
 use crate::parser::escapes::apply_string_escapes;
 use crate::std::math::int_type;
 use crate::std::string::String as MyString;
-use crate::types::r#type::Type;
+use crate::types::r#type::{Type, TypeDefProductDocs, TypeDefShapeDocs, TypeDefVariantDocs};
 use core::str::FromStr;
 use lalrpop_util::ParseError;
 use lalrpop_util::lexer::Token;
@@ -446,6 +448,97 @@ pub(crate) fn parse_doc_comments(comments: Vec<&str>) -> Option<String> {
                 .join("\n"),
         )
     }
+}
+
+pub(crate) type DocTypeSpan = (PTypeSpan, Option<String>);
+pub(crate) type DocRecordField = (UstrSpan, PTypeSpan, Option<String>);
+pub(crate) type TypeDefProduct = (PType, TypeDefProductDocs);
+pub(crate) type ParsedEnumVariant = (UstrSpan, PTypeSpan, Vec<Attribute>, TypeDefVariantDocs);
+
+pub(crate) fn type_def_unit_product() -> TypeDefProduct {
+    (PType::Unit, TypeDefProductDocs::Unit)
+}
+
+pub(crate) fn type_def_record_product(fields: Vec<DocRecordField>) -> TypeDefProduct {
+    let docs = TypeDefProductDocs::Record(
+        fields
+            .iter()
+            .map(|(name, _, doc)| (name.0, doc.clone()))
+            .collect(),
+    );
+    let ty = PType::Record(fields.into_iter().map(|(name, ty, _)| (name, ty)).collect());
+    (ty, docs)
+}
+
+pub(crate) fn type_def_tuple_product(fields: Vec<DocTypeSpan>) -> TypeDefProduct {
+    let docs = TypeDefProductDocs::Tuple(fields.iter().map(|(_, doc)| doc.clone()).collect());
+    let ty = PType::Tuple(fields.into_iter().map(|(ty, _)| ty).collect());
+    (ty, docs)
+}
+
+pub(crate) fn enum_unit_variant(
+    doc: Vec<&str>,
+    attributes: Vec<Attribute>,
+    name: UstrSpan,
+) -> ParsedEnumVariant {
+    let docs = TypeDefVariantDocs {
+        name: name.0,
+        doc: parse_doc_comments(doc),
+        payload: TypeDefProductDocs::Unit,
+    };
+    (name, (PType::Unit, name.1), attributes, docs)
+}
+
+pub(crate) fn enum_tuple_variant(
+    doc: Vec<&str>,
+    attributes: Vec<Attribute>,
+    name: UstrSpan,
+    fields: Vec<DocTypeSpan>,
+    span: Location,
+) -> ParsedEnumVariant {
+    let (ty, payload) = type_def_tuple_product(fields);
+    let docs = TypeDefVariantDocs {
+        name: name.0,
+        doc: parse_doc_comments(doc),
+        payload,
+    };
+    (name, (ty, span), attributes, docs)
+}
+
+pub(crate) fn enum_record_variant(
+    doc: Vec<&str>,
+    attributes: Vec<Attribute>,
+    name: UstrSpan,
+    fields: Vec<DocRecordField>,
+    span: Location,
+) -> ParsedEnumVariant {
+    let (ty, payload) = type_def_record_product(fields);
+    let docs = TypeDefVariantDocs {
+        name: name.0,
+        doc: parse_doc_comments(doc),
+        payload,
+    };
+    (name, (ty, span), attributes, docs)
+}
+
+pub(crate) fn enum_type_from_variants(
+    variants: Vec<ParsedEnumVariant>,
+) -> (PType, Vec<Vec<Attribute>>, TypeDefShapeDocs) {
+    let mut variant_attributes = Vec::with_capacity(variants.len());
+    let mut variant_docs = Vec::with_capacity(variants.len());
+    let variants = variants
+        .into_iter()
+        .map(|(name, ty, attrs, docs)| {
+            variant_attributes.push(attrs);
+            variant_docs.push(docs);
+            (name, ty)
+        })
+        .collect();
+    (
+        PType::Variant(variants),
+        variant_attributes,
+        TypeDefShapeDocs::Enum(variant_docs),
+    )
 }
 
 /// Resolve token names using a static map
