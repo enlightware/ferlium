@@ -77,6 +77,13 @@ let cfg = { host: "localhost", port: 8080 };
 cfg.port
 ```
 
+If a field name collides with a keyword, use a raw identifier:
+
+```ferlium
+let event = { r#type: "click", r#pub: true };
+event.r#type
+```
+
 ### Inference with product types
 
 Inference works naturally with tuples and records: the compiler infers field and element types from their construction and usage.

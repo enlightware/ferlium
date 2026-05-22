@@ -16,6 +16,19 @@ y
 Bindings are immutable by default.
 That means you can read `x`, but you cannot modify the value of `x` later.
 
+## Raw identifiers
+
+Some words are reserved by the language, such as `type`, `pub`, and `fn`.
+When you need to use one of these words as a user-defined name, write it as a raw identifier with `r#`.
+
+```ferlium
+let r#type = "message";
+r#type
+```
+
+The `r#` prefix is only source syntax.
+The logical name is still `type`, so raw identifiers are mainly useful for interoperating with external data or APIs whose field names collide with Ferlium keywords.
+
 ## `let mut` bindings
 
 Use `let mut` when you want a variable that can be modified after it is defined:
