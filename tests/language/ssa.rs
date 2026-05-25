@@ -29,9 +29,10 @@ fn call_functions() {
     r#"u!("a0")
 fn a0:
   0:
-    %r0 = call imported function std::<impl Num for int>::from_int (slot #0)(i32 1)
-    %r1 = call imported function std::<impl Num for int>::add (slot #1)(%p0, %r0)
-    %r2 = ret %r1
+    %r0 = call std::Num<0-5>::from_int(i32 1)
+    %r1 = call std::Num<0-5>::add(%p0, %r0)
+    %r2 = call std::Value<0-5>::drop(%r0)
+    %r3 = ret %r1
 "#
   );
 
@@ -40,9 +41,10 @@ fn a0:
     r#"u!("a0")
 fn a0:
   0:
-    %r0 = call imported function std::<impl Num for int>::from_int (slot #0)(i32 2)
-    %r1 = call imported function std::<impl Num for int>::mul (slot #1)(%r0, %p0)
-    %r2 = ret %r1
+    %r0 = call std::Num<0-5>::from_int(i32 2)
+    %r1 = call std::Num<0-5>::mul(%r0, %p0)
+    %r2 = call std::Value<0-5>::drop(%r0)
+    %r3 = ret %r1
 "#
   );
 }
@@ -65,7 +67,7 @@ fn a0:
     %r4 = store %p0 to %r0
     %r5 = br 4
   3:
-    %r6 = call imported function std::<impl Num for int>::from_int (slot #0)(i32 2)
+    %r6 = call std::Num<0-5>::from_int(i32 2)
     %r7 = store %r6 to %r0
     %r8 = br 4
   4:
@@ -91,18 +93,20 @@ fn a0:
     %r6 = comp_eq %p0 i32 1
     %r7 = condbr %r6, %b4, &b5
   4:
-    %r8 = call imported function std::<impl Num for int>::from_int (slot #0)(i32 1)
-    %r9 = call imported function std::<impl Num for int>::sub (slot #1)(%p0, %r8)
-    %r10 = store %r9 to %r0
-    %r11 = br 6
+    %r8 = call std::Num<0-5>::from_int(i32 1)
+    %r9 = call std::Num<0-5>::sub(%p0, %r8)
+    %r10 = call std::Value<0-5>::drop(%r8)
+    %r11 = store %r9 to %r0
+    %r12 = br 6
   5:
-    %r12 = call imported function std::<impl Num for int>::from_int (slot #0)(i32 1)
-    %r13 = call imported function std::<impl Num for int>::neg (slot #2)(%r12)
-    %r14 = store %r13 to %r0
-    %r15 = br 6
+    %r13 = call std::Num<0-5>::from_int(i32 1)
+    %r14 = call std::Num<0-5>::neg(%r13)
+    %r15 = call std::Value<0-5>::drop(%r13)
+    %r16 = store %r14 to %r0
+    %r17 = br 6
   6:
-    %r16 = load %r0
-    %r17 = ret %r16
+    %r18 = load %r0
+    %r19 = ret %r18
 "#
   );
 }
@@ -118,8 +122,9 @@ fn a0:
   0:
     %r0 = project 6 from %p1
     %r1 = call %r0(i32 2)
-    %r2 = call imported function std::lt (slot #0)(%p0, %p2, %r1)
-    %r3 = ret %r2
+    %r2 = call std::lt(%p0, %r1)
+    %r3 = call %p2(%r1)
+    %r4 = ret %r2
 "#
   )
 }
@@ -133,7 +138,7 @@ fn user_function_call() {
     r#"u!("a0")
 fn a0:
   0:
-    %r0 = call local function a0 (#0)(%p0)
+    %r0 = call <test>::a0(%p0)
     %r1 = ret %r0
 "#
   )
@@ -148,27 +153,30 @@ fn factorial() {
     r#"u!("factorial")
 fn factorial:
   0:
-    %r0 = call imported function std::<impl Num for int>::from_int (slot #1)(i32 1)
-    %r1 = call imported function std::gt (slot #0)((local function Ord<0-5>::cmp (#62)), %p0, %r0)
-    %r2 = alloca Type { world: Some(0), index: 5 }
-    %r3 = br 1
+    %r0 = call std::Num<0-5>::from_int(i32 1)
+    %r1 = call std::gt(%p0, %r0)
+    %r2 = call std::Value<0-5>::drop(%r0)
+    %r3 = alloca Type { world: Some(0), index: 5 }
+    %r4 = br 1
   1:
-    %r4 = comp_eq %r1 i1 1
-    %r5 = condbr %r4, %b2, &b3
+    %r5 = comp_eq %r1 i1 1
+    %r6 = condbr %r5, %b2, &b3
   2:
-    %r6 = call imported function std::<impl Num for int>::from_int (slot #1)(i32 1)
-    %r7 = call imported function std::<impl Num for int>::sub (slot #2)(%p0, %r6)
-    %r8 = call local function factorial (#0)(%r7)
-    %r9 = call imported function std::<impl Num for int>::mul (slot #3)(%p0, %r8)
-    %r10 = store %r9 to %r2
-    %r11 = br 4
-  3:
-    %r12 = call imported function std::<impl Num for int>::from_int (slot #1)(i32 1)
-    %r13 = store %r12 to %r2
+    %r7 = call std::Num<0-5>::from_int(i32 1)
+    %r8 = call std::Num<0-5>::sub(%p0, %r7)
+    %r9 = call std::Value<0-5>::drop(%r7)
+    %r10 = call <test>::factorial(%r8)
+    %r11 = call std::Num<0-5>::mul(%p0, %r10)
+    %r12 = call std::Value<0-5>::drop(%r10)
+    %r13 = store %r11 to %r3
     %r14 = br 4
+  3:
+    %r15 = call std::Num<0-5>::from_int(i32 1)
+    %r16 = store %r15 to %r3
+    %r17 = br 4
   4:
-    %r15 = load %r2
-    %r16 = ret %r15
+    %r18 = load %r3
+    %r19 = ret %r18
 "#
   );
 }

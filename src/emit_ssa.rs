@@ -1,24 +1,46 @@
 use std::mem;
 
+use ustr::Ustr;
+
 use crate::{
-  Location, Modules, containers,
-  format::FormatWith,
-  hir::{self, Case, NodeArena, value::Value},
-  module::{FunctionId, LocalFunctionId, Module, ModuleEnv, TraitImpl, TraitImplId},
-  ssa::{self, BlockIdentity, Program},
+  CompilerSession, Location, Modules, containers, format::FormatWith, hir::{self, Case, GetDictionary, NodeArena, value::{LiteralValue, Value}}, module::{self, FunctionId, ImportFunctionSlotId, LocalDropMode, LocalFunctionId, LocalValueMethodDispatch::{Required, Static}, Module, ModuleEnv, ModuleFunction, ModuleId, TraitDictionary, TraitImpl, TraitImplId, id::Id}, ssa::{self, BlockIdentity, Program, value::FunctionReference}
 };
 
 /// Emit the low-level (aka SSA) ferlium IR of `module`.
 /// Returns a string for debugging purpose.
-pub fn emit_ssa(module: &Module, others: &Modules) -> String {
+pub fn emit_ssa(module: &Module, others: &Modules, session: &CompilerSession) -> String {
   let mut a: Vec<String> = [].to_vec();
   for n in module.own_symbols() {
     a.push(format!("{:?}", n));
     if let Some(f) = module.get_local_function_id(n) {
-      a.push(Emitter::emit_ssa_fn(f, module, others));
+      a.push(Emitter::emit_ssa_fn(f, module, others, session));
     }
   }
   a.join("\n")
+}
+
+/// Returns the string representation of `f`
+fn get_function_representation(f: LocalFunctionId, module: &Module, others: &Modules) -> Ustr {
+  let e =  ModuleEnv::new(module, others);
+  let mname = others.get_name(module.module_id()).unwrap();
+  let fname = e.current.get_function_name_by_id(f).unwrap();
+  format!("{}::{}", mname, fname).into()
+}
+
+/// Returns the `ModuleId` and `LocalFunctionId` corresponding to a `ImportFunctionSlotId`
+fn get_function_and_module(f: ImportFunctionSlotId, module: &Module, session: &CompilerSession) -> (LocalFunctionId, ModuleId){
+  let sl = module.get_import_fn_slot(f).unwrap();
+  let mi = sl.module;
+  let m = session.expect_fresh_module(mi);
+  let fi = match &sl.target {
+    module::ImportFunctionTarget::NamedFunction(name) => {
+      m.get_local_function_id(*name).unwrap()
+    },
+    module::ImportFunctionTarget::TraitImplMethod { key, index } => {
+      m.get_impl_data_by_trait_key(key).unwrap().methods[index.as_index()]
+    }
+  };
+  (fi, mi)
 }
 
 /// The SSA blocks involved in the lowering of a case in a match expression.
@@ -45,21 +67,23 @@ struct Emitter<'a> {
   /// The other modules.
   others: &'a Modules,
 
-  /// The program into which IR is being emitted.
-  program: &'a mut Program,
-
   /// The context in which the emitter inserts new IR.
   context: InsertionContext,
 
+  function: &'a ModuleFunction,
+
   /// The HIR node arena.
   hir_arena: &'a NodeArena,
+
+  /// The current compiler session
+  session: &'a CompilerSession
 
 }
 
 impl<'a> Emitter<'a> {
 
   /// Generates the IR of `source`, which has the given `identity`.
-  fn emit_ssa_fn(identity: LocalFunctionId, module: &'a Module, others: &'a Modules) -> String {
+  fn emit_ssa_fn(identity: LocalFunctionId, module: &'a Module, others: &'a Modules, session: &CompilerSession) -> String {
     // TODO: This is the program into which IR is being inserted. Eventually that should become
     // an argument of the function, as this data structure should persist.
     let mut program = Program::new();
@@ -75,10 +99,13 @@ impl<'a> Emitter<'a> {
 
         let t = f.definition.ty_scheme.extra_parameters();
 
-        // Each parameter introduces a new binding in the environment.
-        let environment = (0..(t.requirements.len() + f.definition.arg_names.len()))
-          .map(|i| ssa::Value::Parameter(i))
-          .collect::<Vec<ssa::Value>>();
+        let mut environment = vec![ssa::Value::Unit; f.locals.len() + t.requirements.len()];
+        for i in 0..t.requirements.len() {
+            environment[i] = ssa::Value::Parameter(i);        // extra params: LocalDeclId(0..n)
+        }
+        for (i, _) in f.definition.arg_names.iter().enumerate() {
+            environment[t.requirements.len() + i] = ssa::Value::Parameter(t.requirements.len() + i); // args
+        }
 
         // Create the function's entry.
         let entry = lowered.add_block().id();
@@ -89,14 +116,15 @@ impl<'a> Emitter<'a> {
         let mut emitter = Emitter {
           module,
           others,
-          program: &mut program,
           context: InsertionContext {
             function: lowered,
             point: InsertionPoint::End(entry),
             span: code.span,
             environment,
           },
+          function: f,
           hir_arena: &module.ir_arena,
+          session: session
         };
 
         // The body of the function evaluates to the return value.
@@ -114,10 +142,9 @@ impl<'a> Emitter<'a> {
   }
 
   /// Returns a reference to the function identified by `f`.
-  fn demand_function(&mut self, f: FunctionId, current_module: &'a Module) -> ssa::Value {
-    let e = ModuleEnv::new(current_module, self.others);
-    let s = format!("{}", f.format_with(&e));
-    ssa::Value::Function(s.into())
+  fn demand_function(&mut self, f: LocalFunctionId, module_identity: ModuleId) -> ssa::Value {
+    let module = self.session.expect_fresh_module(module_identity);
+    ssa::Value::Function(FunctionReference {identity: f, representation: get_function_representation(f, module, self.others), module: module_identity})
   }
 
   /// Generates the IR for `node`, which occurs as a statement.
@@ -145,45 +172,30 @@ impl<'a> Emitter<'a> {
   }
 
   /// Returns a copy of the dictionnary value holded by `t`.
-  fn dictionnary_value(&mut self, t: &hir::GetDictionary) -> hir::value::Value {
+  fn dictionnary_value(&mut self, t: &hir::GetDictionary) -> (TraitDictionary, ModuleId) {
     match t.dictionary {
       TraitImplId::Local(id) => {
-        self.dictionnary_value_from_trait(self.module.get_impl_data(id))
+        (self.dictionnary_value_from_trait(self.module.get_impl_data(id)), self.module.module_id())
       },
       TraitImplId::Import(id) => {
         let slot = self.module.get_import_impl_slot(id).unwrap();
         let other_module = self.others.get(slot.module).unwrap().module().unwrap();
-        self.dictionnary_value_from_trait(other_module.get_impl_data_by_trait_key(&slot.key))
+        (self.dictionnary_value_from_trait(other_module.get_impl_data_by_trait_key(&slot.key)), other_module.module_id())
       }
     }
   }
 
   /// Returns a copy of the dictionnary value of `t`.
-  fn dictionnary_value_from_trait(&mut self, t: Option<&TraitImpl>) -> hir::value::Value {
+  fn dictionnary_value_from_trait(&self, t: Option<&TraitImpl>) -> TraitDictionary {
     t.unwrap().dictionary_value.clone()
   }
 
   /// Converts a HIR `Tuple` into a SSA `Dictionnary`.
-  fn to_ssa_dictionnary(&mut self, v: Value) -> ssa::Value {
+  fn to_ssa_dictionnary(&mut self, n: &GetDictionary) -> ssa::Value {
+    let v = self.dictionnary_value(n);
     let mut r: Vec<ssa::Value> = vec![];
-    let hir::value::Value::Tuple(t) = v else {
-      panic!("the value must be a tuple to be converted into a dictionnary");
-    };
-    for tv in t.iter() {
-      let hir::value::Value::Function(f) = tv else {
-        panic!("");
-      };
-      let i = f.as_ref().function;
-      let n = if f.as_ref().module == self.module.module_id() {
-        let f = FunctionId::Local(i);
-        self.demand_function(f, self.module)
-      } else {
-        let oe = self.others.get(f.as_ref().module).unwrap();
-        let om = oe.module().unwrap();
-        let f = FunctionId::Local(i);
-        self.demand_function(f, om)
-      };
-      r.push(n);
+    for m in v.0.methods() {
+      r.push(self.demand_function(m.clone(), v.1))
     };
     ssa::Value::Dictionary(r)
   }
@@ -193,11 +205,14 @@ impl<'a> Emitter<'a> {
     use hir::NodeKind as K;
     match &node.kind {
       K::Block(n) => {
-        let (last, prefix) = n.split_last().unwrap();
-        for s in prefix.iter() {
-          self.lower_as_statement(&self.hir_arena[*s]);
+        let mut return_value = ssa::Value::Unit;
+        for s in n.iter() {
+          let r = self.lower_as_rvalue(&self.hir_arena[*s]);
+          if !matches!(self.hir_arena[*s].kind, K::EnvDrop(_)) && !matches!(self.hir_arena[*s].kind, K::EnvStore(_)){
+            return_value = r;
+          }
         }
-        self.lower_as_rvalue(&self.hir_arena[*last])
+        return_value
       }
 
       K::Case(n) => {
@@ -228,7 +243,7 @@ impl<'a> Emitter<'a> {
           self.context.point = InsertionPoint::End(blocks.heads[i]);
 
           // Lower the pattern
-          let x0 = self.lower_as_primitive(&c.clone().into_value()).unwrap();
+          let x0 = self.lower_as_primitive(c).unwrap();
           // Compare the condition with the scrutinee and, depending on the result, branch to
           // either the body of the current alternative or the next head.
           let v = self
@@ -272,17 +287,59 @@ impl<'a> Emitter<'a> {
 
       K::EnvLoad(n) => {
         // The following assumes we can simply copy any value referred to by a load.
-        self.context.environment[n.index as usize].clone()
+        self.context.environment[n.id.as_index()].clone()
       }
 
       K::EnvStore(n) => {
         let rhs = self.lower_as_rvalue(&self.hir_arena[n.value]);
-        self.context.environment.push(rhs);
+        self.context.environment[n.id.as_index()] = rhs;
         ssa::Value::Unit
       }
 
+      K::EnvDrop(n) => {
+        // Call the destructor
+        let local = &self.function.locals[n.id.as_index()];
+        if local.drop_mode != LocalDropMode::Value {
+          return ssa::Value::Unit
+        }
+        let drop_fn = match local.drop.as_ref().unwrap() {
+          module::function::LocalValueMethodDispatch::Static(fn_id) => {
+            let (local_id, module_id) = match fn_id {
+              FunctionId::Local(l) => (l.clone(), self.module.module_id()),
+              FunctionId::Import(i) => {
+                get_function_and_module(i.clone(), self.module, self.session)
+              }
+            };
+            self.demand_function(local_id, module_id)
+          },
+          module::function::LocalValueMethodDispatch::Dictionary(param_id) => {
+            self.context.environment[param_id.as_index()].clone()
+          },
+          Required => panic!("Not yet supported")
+        };
+        let value = self.context.environment[n.id.as_index()].clone();
+        self.insert(ssa::Instruction::call(self.context.span, drop_fn, vec![value], node.ty));
+        ssa::Value::Unit
+      },
+
+      K::EnvMove(n) => {
+          let value = self.context.environment[n.id.as_index()].clone();
+
+          // Clearing the slot
+          self.context.environment[n.id.as_index()] = ssa::Value::Unit;
+          value
+      },
+
       K::StaticApply(n) => {
-        let f = self.demand_function(n.function, self.module);
+        let (fi, mi) = match n.function {
+          FunctionId::Local(i) => {
+            (i, self.module.module_id())
+          },
+           FunctionId::Import(i) => {
+             get_function_and_module(i, self.module, self.session)
+          }
+        };
+        let f = self.demand_function(fi, mi);
         let mut a: Vec<ssa::Value> = vec![];
         for x in &n.arguments {
           a.push(self.lower_as_rvalue(&self.hir_arena[*x]));
@@ -296,7 +353,7 @@ impl<'a> Emitter<'a> {
 
       K::GetDictionary(n) => {
         let v = self.dictionnary_value(n);
-        self.to_ssa_dictionnary(v)
+        self.to_ssa_dictionnary(n)
       }
 
       K::Apply(n) => {
@@ -317,7 +374,7 @@ impl<'a> Emitter<'a> {
         let v = self.lower_as_rvalue(m);
 
         self
-          .insert(ssa::Instruction::project(node.span, v, *i, node.ty))
+          .insert(ssa::Instruction::project(node.span, v, i.as_index(), node.ty))
           .unwrap()
       }
 
@@ -342,7 +399,7 @@ impl<'a> Emitter<'a> {
 
                 assert_eq!(n.alternatives.len(), 1 as usize);
 
-                let c0 = self.lower_as_primitive(&n.alternatives[0].0.clone().into_value()).unwrap();
+                let c0 = self.lower_as_primitive(&n.alternatives[0].0).unwrap();
 
                 // Jump to the loop's body if the condition holds or to its tail otherwise.
                 let v = self
@@ -380,6 +437,14 @@ impl<'a> Emitter<'a> {
         todo!("Lowering for Variant is unimplemented");
       }
 
+      K::TrivialCopy(n) => {
+          self.lower_as_rvalue(&self.hir_arena[n.source])
+      }
+
+      K::ExtraParameter(id) => {
+          self.context.environment[id.as_index()].clone()
+      }
+
       _ => {
         println!(
           "lowering is unimplemented for node of kind '{:?}'",
@@ -391,7 +456,7 @@ impl<'a> Emitter<'a> {
   }
 
   /// Returns the lowered representation of the given native value.
-  fn lower_as_primitive(&mut self, native: &hir::value::Value) -> Option<ssa::Value> {
+  fn lower_as_primitive(&mut self, native: &LiteralValue) -> Option<ssa::Value> {
     use ssa::value::Integer as Int;
 
     if native.as_primitive_ty::<()>() != None {

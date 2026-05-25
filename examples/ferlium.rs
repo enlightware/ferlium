@@ -551,7 +551,7 @@ fn process_input(
         let module = session.expect_fresh_module(module_id);
         println!(
             "Module HIR:\n{}",
-            module.format_with(&ShowModuleWithOptions::new(session.modules(), false, false))
+            module.format_with(&ShowModuleWithOptions::new(session.modules(), true, true))
         );
         if let Some(expr) = expr.as_ref() {
             let module_env = ModuleEnv::new(module, session.modules());
