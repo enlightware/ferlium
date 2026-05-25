@@ -126,6 +126,13 @@ fn clamp() {
 fn math_conversions() {
     let mut session = TestSession::new();
     assert_val_eq!(session.run("round(1.0)"), int(1));
+    assert_val_eq!(session.run("round(1.4)"), int(1));
+    assert_val_eq!(session.run("round(1.5)"), int(2));
+    assert_val_eq!(session.run("round(-1.5)"), int(-2));
+    assert_val_eq!(session.run("floor(1.9)"), int(1));
+    assert_val_eq!(session.run("floor(-1.1)"), int(-2));
+    assert_val_eq!(session.run("ceil(1.1)"), int(2));
+    assert_val_eq!(session.run("ceil(-1.9)"), int(-1));
     assert_val_eq!(session.run("(from_int(1): float)"), float(1.0));
     assert_val_eq!(
         session.run("fn round_trip(x) { round(from_int(x)) } round_trip(1)"),

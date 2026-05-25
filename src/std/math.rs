@@ -265,6 +265,14 @@ fn round_float(value: &Float) -> Int {
     value.round() as Int
 }
 
+fn floor_float(value: &Float) -> Int {
+    value.floor() as Int
+}
+
+fn ceil_float(value: &Float) -> Int {
+    value.ceil() as Int
+}
+
 fn float_to_string(value: &Float) -> String {
     String::new(&value.to_string())
 }
@@ -463,7 +471,25 @@ pub fn add_to_module(to: &mut Module) {
         UnaryNativeFnRN::description_with_default_ty(
             round_float,
             ["value"],
-            "Rounds a number to the nearest integer.",
+            "Rounds a number to the nearest integer, saturating if necessary.",
+            no_effects(),
+        ),
+    );
+    to.add_function(
+        ustr("floor"),
+        UnaryNativeFnRN::description_with_default_ty(
+            floor_float,
+            ["value"],
+            "Rounds a number down to the nearest integer, saturating if necessary.",
+            no_effects(),
+        ),
+    );
+    to.add_function(
+        ustr("ceil"),
+        UnaryNativeFnRN::description_with_default_ty(
+            ceil_float,
+            ["value"],
+            "Rounds a number up to the nearest integer, saturating if necessary.",
             no_effects(),
         ),
     );
