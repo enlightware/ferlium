@@ -7,6 +7,9 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use test_log::test;
+use ustr::ustr;
+
+use ferlium::compiler::error::RuntimeErrorKind;
 
 use crate::harness::{TestSession, bool, float, int};
 
@@ -155,5 +158,100 @@ fn float_arithmetic_saturates_to_finite_bounds() {
     assert_val_eq!(
         session.run(r#"match parse_float("-1e308") { Some(x) => x / 0.5, None => 0.0 }"#),
         float(-f64::MAX)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn real() {
+    let mut session = TestSession::new();
+    assert_val_eq!(session.run("sin(0.0)"), float(0.0));
+    assert_val_eq!(session.run("cos(0.0)"), float(1.0));
+    assert_val_eq!(session.run("tan(0.0)"), float(0.0));
+    assert_val_eq!(session.run("asin(0.0)"), float(0.0));
+    assert_val_eq!(session.run("acos(1.0)"), float(0.0));
+    assert_val_eq!(session.run("atan(0.0)"), float(0.0));
+    assert_val_eq!(session.run("atan2(0.0, 0.0)"), float(0.0));
+
+    assert_val_eq!(session.run("sinh(0.0)"), float(0.0));
+    assert_val_eq!(session.run("cosh(0.0)"), float(1.0));
+    assert_val_eq!(session.run("tanh(0.0)"), float(0.0));
+    assert_val_eq!(session.run("asinh(0.0)"), float(0.0));
+    assert_val_eq!(session.run("acosh(1.0)"), float(0.0));
+    assert_val_eq!(session.run("atanh(0.0)"), float(0.0));
+
+    assert_val_eq!(session.run("exp(0.0)"), float(1.0));
+    assert_val_eq!(session.run("log(1.0)"), float(0.0));
+    assert_val_eq!(session.run("pow(2.0, 3.0)"), float(8.0));
+    assert_val_eq!(session.run("sqrt(4.0)"), float(2.0));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn real_domain_errors() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.fail_run("asin(2.0)"),
+        RuntimeErrorKind::InvalidArgument(ustr(
+            "Taking the arcsine of 2 is undefined because it is outside [-1, 1]"
+        ))
+    );
+    assert_eq!(
+        session.fail_run("acos(2.0)"),
+        RuntimeErrorKind::InvalidArgument(ustr(
+            "Taking the arccosine of 2 is undefined because it is outside [-1, 1]"
+        ))
+    );
+    assert_eq!(
+        session.fail_run("acosh(0.0)"),
+        RuntimeErrorKind::InvalidArgument(ustr(
+            "Taking the inverse hyperbolic cosine of 0 is undefined because it is less than 1"
+        ))
+    );
+    assert_eq!(
+        session.fail_run("atanh(1.0)"),
+        RuntimeErrorKind::InvalidArgument(ustr(
+            "Taking the inverse hyperbolic tangent of 1 is undefined because it is outside (-1, 1)"
+        ))
+    );
+    assert_eq!(
+        session.fail_run("log(0.0)"),
+        RuntimeErrorKind::InvalidArgument(ustr(
+            "Taking the logarithm of 0 is undefined because it is not positive"
+        ))
+    );
+    assert_eq!(
+        session.fail_run("pow(-1.0, 0.5)"),
+        RuntimeErrorKind::InvalidArgument(ustr(
+            "Raising -1 to the power 0.5 is undefined as a real number"
+        ))
+    );
+    assert_eq!(
+        session.fail_run("sqrt(-1.0)"),
+        RuntimeErrorKind::InvalidArgument(ustr(
+            "Taking the square root of -1 is undefined because it is negative"
+        ))
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn real_overflow_saturates_to_finite_bounds() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(r#"match parse_float("1000.0") { Some(x) => exp(x), None => 0.0 }"#),
+        float(f64::MAX)
+    );
+    assert_val_eq!(
+        session.run(r#"match parse_float("1000.0") { Some(x) => sinh(x), None => 0.0 }"#),
+        float(f64::MAX)
+    );
+    assert_val_eq!(
+        session.run(r#"match parse_float("1000.0") { Some(x) => cosh(x), None => 0.0 }"#),
+        float(f64::MAX)
+    );
+    assert_val_eq!(
+        session.run(r#"match parse_float("1e308") { Some(x) => pow(x, 2.0), None => 0.0 }"#),
+        float(f64::MAX)
     );
 }

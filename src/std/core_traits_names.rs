@@ -10,6 +10,7 @@
 pub const ORD_TRAIT_NAME: &str = "Ord";
 pub const NUM_TRAIT_NAME: &str = "Num";
 pub const DIV_TRAIT_NAME: &str = "Div";
+pub const REAL_TRAIT_NAME: &str = "Real";
 pub const BITS_TRAIT_NAME: &str = "Bits";
 pub const ITERATOR_TRAIT_NAME: &str = "Iterator";
 pub const SPLIT_TRAIT_NAME: &str = "Split";

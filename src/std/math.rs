@@ -25,14 +25,16 @@ use crate::{
     hir::function::{
         BinaryNativeFnNMN, BinaryNativeFnNNFN, BinaryNativeFnNNN, BinaryNativeFnNNV,
         BinaryNativeFnRMN, BinaryNativeFnRRFN, BinaryNativeFnRRN, BinaryNativeFnRRV, Function,
-        NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnRN,
+        NullaryNativeFnN, UnaryNativeFnNN, UnaryNativeFnRFN, UnaryNativeFnRN,
     },
     hir::value::{NativeDisplay, Value},
     module::Module,
     std::{
         cast::CAST_TRAIT,
         core::TRIVIAL_COPY_TRAIT,
-        core_traits_names::{BITS_TRAIT_NAME, DIV_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME},
+        core_traits_names::{
+            BITS_TRAIT_NAME, DIV_TRAIT_NAME, NUM_TRAIT_NAME, ORD_TRAIT_NAME, REAL_TRAIT_NAME,
+        },
         default::DEFAULT_TRAIT,
         hash::Hasher,
         ordering::compare,
@@ -163,6 +165,14 @@ impl NativeDisplay for Float {
     fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.into_inner())
     }
+}
+
+fn invalid_real_argument(message: StdString) -> RuntimeErrorKind {
+    RuntimeErrorKind::InvalidArgument(ustr(message.as_str()))
+}
+
+fn saturated_real_result(value: f64) -> Float {
+    Float::new_saturating(value)
 }
 
 fn isize_to_float(value: isize) -> Float {
@@ -324,6 +334,113 @@ fn div_float(lhs: &Float, rhs: &Float) -> Result<Float, RuntimeErrorKind> {
     } else {
         Ok(Float::new_saturating(lhs.into_inner() / rhs.into_inner()))
     }
+}
+
+fn sin_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().sin())
+}
+
+fn cos_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().cos())
+}
+
+fn tan_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().tan())
+}
+
+fn asin_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+    let value = value.into_inner();
+    Float::new(value.asin()).map_err(|_| {
+        invalid_real_argument(format!(
+            "Taking the arcsine of {value} is undefined because it is outside [-1, 1]"
+        ))
+    })
+}
+
+fn acos_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+    let value = value.into_inner();
+    Float::new(value.acos()).map_err(|_| {
+        invalid_real_argument(format!(
+            "Taking the arccosine of {value} is undefined because it is outside [-1, 1]"
+        ))
+    })
+}
+
+fn atan_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().atan())
+}
+
+fn atan2_float(y: &Float, x: &Float) -> Float {
+    saturated_real_result(y.into_inner().atan2(x.into_inner()))
+}
+
+fn sinh_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().sinh())
+}
+
+fn cosh_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().cosh())
+}
+
+fn tanh_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().tanh())
+}
+
+fn asinh_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().asinh())
+}
+
+fn acosh_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+    let value = value.into_inner();
+    Float::new(value.acosh()).map_err(|_| {
+        invalid_real_argument(format!(
+            "Taking the inverse hyperbolic cosine of {value} is undefined because it is less than 1"
+        ))
+    })
+}
+
+fn atanh_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+    let value = value.into_inner();
+    Float::new(value.atanh()).map_err(|_| {
+        invalid_real_argument(format!(
+            "Taking the inverse hyperbolic tangent of {value} is undefined because it is outside (-1, 1)"
+        ))
+    })
+}
+
+fn exp_float(value: &Float) -> Float {
+    saturated_real_result(value.into_inner().exp())
+}
+
+fn log_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+    let value = value.into_inner();
+    Float::new(value.ln()).map_err(|_| {
+        invalid_real_argument(format!(
+            "Taking the logarithm of {value} is undefined because it is not positive"
+        ))
+    })
+}
+
+fn pow_float(base: &Float, exponent: &Float) -> Result<Float, RuntimeErrorKind> {
+    let base = base.into_inner();
+    let exponent = exponent.into_inner();
+    let result = base.powf(exponent);
+    if result.is_nan() {
+        Err(invalid_real_argument(format!(
+            "Raising {base} to the power {exponent} is undefined as a real number"
+        )))
+    } else {
+        Ok(saturated_real_result(result))
+    }
+}
+
+fn sqrt_float(value: &Float) -> Result<Float, RuntimeErrorKind> {
+    let value = value.into_inner();
+    Float::new(value.sqrt()).map_err(|_| {
+        invalid_real_argument(format!(
+            "Taking the square root of {value} is undefined because it is negative"
+        ))
+    })
 }
 
 fn neg_float(value: &Float) -> Float {
@@ -536,6 +653,31 @@ pub fn add_to_module(to: &mut Module) {
         [float_type()],
         [],
         [b(BinaryNativeFnRRFN::new(div_float)) as Function],
+    );
+    let real_trait = to.get_trait_str(REAL_TRAIT_NAME).unwrap().clone();
+    to.add_native_concrete_impl(
+        real_trait,
+        [float_type()],
+        [],
+        [
+            b(UnaryNativeFnRN::new(sin_float)) as Function,
+            b(UnaryNativeFnRN::new(cos_float)) as Function,
+            b(UnaryNativeFnRN::new(tan_float)) as Function,
+            b(UnaryNativeFnRFN::new(asin_float)) as Function,
+            b(UnaryNativeFnRFN::new(acos_float)) as Function,
+            b(UnaryNativeFnRN::new(atan_float)) as Function,
+            b(BinaryNativeFnRRN::new(atan2_float)) as Function,
+            b(UnaryNativeFnRN::new(sinh_float)) as Function,
+            b(UnaryNativeFnRN::new(cosh_float)) as Function,
+            b(UnaryNativeFnRN::new(tanh_float)) as Function,
+            b(UnaryNativeFnRN::new(asinh_float)) as Function,
+            b(UnaryNativeFnRFN::new(acosh_float)) as Function,
+            b(UnaryNativeFnRFN::new(atanh_float)) as Function,
+            b(UnaryNativeFnRN::new(exp_float)) as Function,
+            b(UnaryNativeFnRFN::new(log_float)) as Function,
+            b(BinaryNativeFnRRFN::new(pow_float)) as Function,
+            b(UnaryNativeFnRFN::new(sqrt_float)) as Function,
+        ],
     );
     to.add_native_concrete_impl(
         DEFAULT_TRAIT.clone(),

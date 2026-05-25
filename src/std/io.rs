@@ -25,18 +25,18 @@ pub fn set_log_ctx(new_ctx: &str) {
     *ctx = new_ctx.to_string();
 }
 
-fn log(value: &Value) {
+fn debug_log(value: &Value) {
     let ctx = (*LOG_CTX).read().unwrap();
     log::info!("{}{}", *ctx, value.to_string_repr());
 }
 
 pub fn add_to_module(to: &mut Module) {
     to.add_function(
-        ustr("log"),
+        ustr("debug_log"),
         UnaryNativeFnVN::description_with_in_ty(
-            log,
+            debug_log,
             ["message"],
-            "Logs a message to the standard logging output.",
+            "Logs a debug message to the standard logging output.",
             Type::variable_id(0),
             effect(PrimitiveEffect::Write),
         ),

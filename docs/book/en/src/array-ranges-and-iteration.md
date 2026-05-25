@@ -139,7 +139,7 @@ The loop variable can destructure tuples and records:
 
 ```ferlium
 for (i, name) in [(0, "zero"), (1, "one"), (2, "two")] {
-    log(f"{i} = {name}");
+    debug_log(f"{i} = {name}");
 };
 ```
 

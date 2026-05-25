@@ -1925,19 +1925,19 @@ fn never_type() {
     );
     assert_val_eq!(session.run("if false { abort() } else { 2 }"), int(2));
     assert_val_eq!(
-        session.run("log(if true { 2 } else { abort() })"),
+        session.run("debug_log(if true { 2 } else { abort() })"),
         Value::unit()
     );
     assert_eq!(
-        session.fail_run("log(if false { 2 } else { abort() })"),
+        session.fail_run("debug_log(if false { 2 } else { abort() })"),
         Aborted(None)
     );
     assert_eq!(
-        session.fail_run("log(if true { abort() } else { 2 })"),
+        session.fail_run("debug_log(if true { abort() } else { 2 })"),
         Aborted(None)
     );
     assert_val_eq!(
-        session.run("log(if false { abort() } else { 2 })"),
+        session.run("debug_log(if false { abort() } else { 2 })"),
         Value::unit()
     );
 }

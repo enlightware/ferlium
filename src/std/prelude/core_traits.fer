@@ -40,6 +40,60 @@ pub trait Div<Self> {
     fn div(left: Self, right: Self) -> Self ! fallible;
 }
 
+/// A real-valued numeric type supporting elementary mathematical functions.
+pub trait Real<Self> {
+    /// Returns the sine of `value`, in radians.
+    fn sin(value: Self) -> Self;
+
+    /// Returns the cosine of `value`, in radians.
+    fn cos(value: Self) -> Self;
+
+    /// Returns the tangent of `value`, in radians.
+    fn tan(value: Self) -> Self;
+
+    /// Returns the arcsine of `value`, in radians.
+    fn asin(value: Self) -> Self ! fallible;
+
+    /// Returns the arccosine of `value`, in radians.
+    fn acos(value: Self) -> Self ! fallible;
+
+    /// Returns the arctangent of `value`, in radians.
+    fn atan(value: Self) -> Self;
+
+    /// Returns the four-quadrant arctangent of `y` and `x`, in radians.
+    fn atan2(y: Self, x: Self) -> Self;
+
+    /// Returns the hyperbolic sine of `value`.
+    fn sinh(value: Self) -> Self;
+
+    /// Returns the hyperbolic cosine of `value`.
+    fn cosh(value: Self) -> Self;
+
+    /// Returns the hyperbolic tangent of `value`.
+    fn tanh(value: Self) -> Self;
+
+    /// Returns the inverse hyperbolic sine of `value`.
+    fn asinh(value: Self) -> Self;
+
+    /// Returns the inverse hyperbolic cosine of `value`.
+    fn acosh(value: Self) -> Self ! fallible;
+
+    /// Returns the inverse hyperbolic tangent of `value`.
+    fn atanh(value: Self) -> Self ! fallible;
+
+    /// Returns e raised to `value`.
+    fn exp(value: Self) -> Self;
+
+    /// Returns the natural logarithm of `value`.
+    fn log(value: Self) -> Self ! fallible;
+
+    /// Returns `base` raised to `exponent`.
+    fn pow(base: Self, exponent: Self) -> Self ! fallible;
+
+    /// Returns the square root of `value`.
+    fn sqrt(value: Self) -> Self ! fallible;
+}
+
 /// A type that has bitwise operations.
 pub trait Bits<Self> {
     /// Returns the bitwise AND of `left` and `right`.
