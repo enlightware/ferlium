@@ -466,9 +466,9 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     );
                     let index_node = n(
                         arena,
-                        hir::NodeKind::ValueClone(hir::ValueClone {
+                        hir::NodeKind::CloneValue(hir::CloneValue {
                             source: index_place,
-                            clone: Some(variant_clone.clone()),
+                            mode: hir::CloneValueMode::ValueClone(variant_clone),
                         }),
                         variant_ty,
                     );

@@ -137,19 +137,22 @@ pub struct FunctionDrop {
     pub target: NodeId,
 }
 
-/// Clone from place storage source into an owned result using `Value::clone`.
-#[derive(Debug, Clone)]
-pub struct ValueClone {
-    pub source: NodeId,
-    /// Dispatch used to clone the source into an owned result.
-    /// `None` is only valid before dictionary passing.
-    pub clone: Option<LocalClone>,
+/// How a value should be cloned.
+#[derive(Debug, Clone, Copy)]
+pub enum CloneValueMode {
+    /// Copy mode must be selected after type inference has finished.
+    Unknown,
+    /// Copy a concrete `TrivialCopy` value from place storage into an owned result.
+    TrivialCopy,
+    /// Clone from source storage into an owned result using `Value::clone`.
+    ValueClone(LocalClone),
 }
 
-/// Copy a concrete `TrivialCopy` value from place storage into an owned result.
+/// Materialize a value as an owned result, using the cheapest valid copy mode.
 #[derive(Debug, Clone)]
-pub struct TrivialCopy {
+pub struct CloneValue {
     pub source: NodeId,
+    pub mode: CloneValueMode,
 }
 
 #[derive(Debug, Clone)]
@@ -271,8 +274,7 @@ pub enum NodeKind {
     Apply(B<Application>),
     FunctionClone(B<FunctionClone>),
     FunctionDrop(B<FunctionDrop>),
-    ValueClone(ValueClone),
-    TrivialCopy(TrivialCopy),
+    CloneValue(CloneValue),
     StaticApply(B<StaticApplication>),
     /// Note: this should only exist transiently in the HIR and never be executed
     TraitMethodApply(B<TraitMethodApplication>),
@@ -344,8 +346,7 @@ impl NodeKind {
             }
             FunctionClone(node) => smallvec![node.source, node.target],
             FunctionDrop(node) => smallvec![node.target],
-            ValueClone(node) => smallvec![node.source],
-            TrivialCopy(node) => smallvec![node.source],
+            CloneValue(node) => smallvec![node.source],
             StaticApply(app) => app
                 .extra_arguments
                 .iter()
@@ -488,12 +489,18 @@ impl Node {
                 writeln!(f, "{indent_str}function drop")?;
                 format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
             }
-            ValueClone(node) => {
-                writeln!(f, "{indent_str}value clone")?;
-                format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
-            }
-            TrivialCopy(node) => {
-                writeln!(f, "{indent_str}trivial copy")?;
+            CloneValue(node) => {
+                match node.mode {
+                    CloneValueMode::Unknown => {
+                        writeln!(f, "{indent_str}clone value with unknown mode")?;
+                    }
+                    CloneValueMode::TrivialCopy => {
+                        writeln!(f, "{indent_str}clone value with trivial copy")?;
+                    }
+                    CloneValueMode::ValueClone(_) => {
+                        writeln!(f, "{indent_str}clone value with Value::clone")?;
+                    }
+                }
                 format_ind(arena, node.source, f, locals, env, spacing, indent + 1)?;
             }
             StaticApply(app) => {
@@ -760,12 +767,7 @@ impl Node {
                     return Some(ty);
                 }
             }
-            ValueClone(node) => {
-                if let Some(ty) = type_at(arena, node.source, pos) {
-                    return Some(ty);
-                }
-            }
-            TrivialCopy(node) => {
+            CloneValue(node) => {
                 if let Some(ty) = type_at(arena, node.source, pos) {
                     return Some(ty);
                 }
@@ -925,8 +927,7 @@ impl Node {
                 unbound_ty_vars(arena, node.target, result, ignore);
             }
             FunctionDrop(node) => unbound_ty_vars(arena, node.target, result, ignore),
-            ValueClone(node) => unbound_ty_vars(arena, node.source, result, ignore),
-            TrivialCopy(node) => unbound_ty_vars(arena, node.source, result, ignore),
+            CloneValue(node) => unbound_ty_vars(arena, node.source, result, ignore),
             StaticApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
                 for &arg in &app.arguments {

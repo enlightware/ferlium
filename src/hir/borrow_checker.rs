@@ -191,10 +191,7 @@ impl Node {
             FunctionDrop(node) => {
                 check_borrows(arena, node.target)?;
             }
-            ValueClone(node) => {
-                check_borrows(arena, node.source)?;
-            }
-            TrivialCopy(node) => {
+            CloneValue(node) => {
                 check_borrows(arena, node.source)?;
             }
             StaticApply(app) => {

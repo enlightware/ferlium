@@ -308,10 +308,7 @@ fn node_variable_type_annotations<Env>(
         FunctionDrop(node) => {
             variable_type_annotations(arena, node.target, result, locals, env);
         }
-        ValueClone(node) => {
-            variable_type_annotations(arena, node.source, result, locals, env);
-        }
-        TrivialCopy(node) => {
+        CloneValue(node) => {
             variable_type_annotations(arena, node.source, result, locals, env);
         }
         StaticApply(app) => {

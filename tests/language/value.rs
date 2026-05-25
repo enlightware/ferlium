@@ -11,7 +11,7 @@ use test_log::test;
 use crate::harness::{TestSession, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
-    hir::{NodeKind, value::Value},
+    hir::{self, NodeKind, value::Value},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -451,11 +451,24 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
     let mut compile_session = TestSession::new();
     let module = compile_session.compile_and_get_module(source);
     assert!(
-        module
-            .ir_arena
-            .iter()
-            .any(|(_, node)| matches!(node.kind, NodeKind::TrivialCopy(_))),
-        "expected mutable int place materialization to lower through TrivialCopy"
+        module.ir_arena.iter().any(|(_, node)| matches!(
+            node.kind,
+            NodeKind::CloneValue(hir::CloneValue {
+                mode: hir::CloneValueMode::TrivialCopy,
+                ..
+            })
+        )),
+        "expected mutable int place materialization to lower through trivial-copy CloneValue"
+    );
+    assert!(
+        !module.ir_arena.iter().any(|(_, node)| matches!(
+            node.kind,
+            NodeKind::CloneValue(hir::CloneValue {
+                mode: hir::CloneValueMode::Unknown,
+                ..
+            })
+        )),
+        "CloneValueMode::Unknown should not remain after dictionary elaboration"
     );
 
     let mut run_session = TestSession::new();

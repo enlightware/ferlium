@@ -62,9 +62,9 @@ impl Deriver for SelfCastDeriver {
             arena,
         )?;
         let code_id = arena.alloc(hir::Node::new(
-            hir::NodeKind::ValueClone(hir::ValueClone {
+            hir::NodeKind::CloneValue(hir::CloneValue {
                 source: source_id,
-                clone: Some(LocalClone::Static(clone)),
+                mode: hir::CloneValueMode::ValueClone(LocalClone::Static(clone)),
             }),
             from_ty,
             EffType::empty(),

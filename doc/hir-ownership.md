@@ -18,7 +18,7 @@ The consumer then uses a normal place rooted at that temporary, and ordinary `En
 
 Std-only functions marked with `#[place_result]` are place-like nodes.
 The attribute also marks the function unsafe, so user source cannot call or bind it directly.
-HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like other place references when a place is required, or first materialize them with `TrivialCopy` / `ValueClone` when an owned value is required.
+HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like other place references when a place is required, or first materialize them with `CloneValue` when an owned value is required.
 
 `LocalDecl` is the ownership metadata for a local:
 
@@ -36,8 +36,9 @@ HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like ot
 When a context needs an owned value and the source is already an owned value, HIR can use that value directly.
 When the source is a place, HIR must materialize ownership explicitly:
 
-- Concrete `TrivialCopy` type: emit `TrivialCopy { source }`.
-- Non-`TrivialCopy` value type: emit `ValueClone { source, clone }`.
+- Type not yet resolved after HIR construction: emit `CloneValue { source, mode: Unknown }`.
+- Concrete `TrivialCopy` type after dictionary elaboration: resolve to `CloneValue { source, mode: TrivialCopy }`.
+- Non-`TrivialCopy` value type after dictionary elaboration: resolve to `CloneValue { source, mode: ValueClone(clone) }`.
 - Owned local moved out of its lexical scope: emit `EnvMove { id }` and skip the matching lexical drop.
 
 Generic types are not treated as `TrivialCopy` for this purpose, even if the function has a `T: TrivialCopy` constraint.
@@ -45,13 +46,13 @@ They use the generic `Value` dictionary path.
 
 Current lowering applies these rules in the main ownership-sensitive contexts:
 
-- `let mut` initialized from a place owns a snapshot, using `TrivialCopy` or `Value::clone`.
+- `let mut` initialized from a place owns a snapshot, using `CloneValue` with either trivial-copy mode or `Value::clone` mode.
 - A `let` initialized from a mutable place owns a snapshot; during HIR construction, unresolved place mutability is treated conservatively the same way.
 - A `let` initialized from a known immutable place may be non-owning.
 - Closure captures are materialized as owned values before `BuildClosure`.
 - Function returns move an owned local with `EnvMove` when returning that local out of the current scope.
 - Non-place arguments passed by shared-reference ABI are stored in owned temporaries; the call receives places to those temporaries and the temporaries are dropped after the call.
-- Projections and place-result calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `TrivialCopy` or `ValueClone`.
+- Projections and place-result calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `CloneValue`.
 
 # Drops and Cleanup
 
@@ -78,6 +79,9 @@ Resolved clone/drop dispatch is represented by `LocalValueMethodDispatch`:
 - `Dictionary(ExtraParameterId)` loads the `Value` method from a hidden dictionary parameter.
 - `Required` is a pre-elaboration placeholder and is not valid input to SSA lowering.
 
+`CloneValueMode::Unknown` is also a pre-elaboration placeholder.
+Dictionary elaboration resolves it using the final substituted source type.
+
 The `Value` method signatures are:
 
 - `clone(source: T, target: &mut T)`
@@ -95,7 +99,7 @@ SSA lowering may choose a physical ABI layout that packs evidence and values tog
 Dispatch sites are:
 
 - `EnvStore` with `LocalDecl::clone`: clone into the local's uninitialized target storage.
-- `ValueClone`: clone a place into a fresh owned temporary result.
+- `CloneValue` with `ValueClone` mode: clone a place into a fresh owned temporary result.
 - `EnvDrop` with `LocalDecl::drop`: drop an owned local.
 - `Assignment::drop`: drop the overwritten destination value.
 
@@ -130,4 +134,4 @@ For generic associated constants, elaboration projects from the hidden dictionar
 
 The current boxed interpreter still has helper paths such as boxed native `TrivialCopy` copying and interpreter-only `ValOrMut::Ref` call arguments for borrowing existing boxed storage.
 These are interpreter implementation details, not language or SSA contracts.
-SSA should lower `TrivialCopy` as a storage copy and lower clone/drop through the explicit dispatch described above.
+SSA should lower `CloneValue` with `TrivialCopy` mode as a storage copy and lower clone/drop through the explicit dispatch described above.

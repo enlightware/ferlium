@@ -1612,10 +1612,6 @@ impl TypeInference {
         span: Location,
     ) -> NodeId {
         let ty = env.ir_arena[value].ty;
-        if self.type_has_concrete_trivial_copy_impl(env, ty, span) {
-            return self.trivial_copy_value(env, value, span);
-        }
-
         if !ty.is_function() {
             self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                 VALUE_TRAIT.clone(),
@@ -1626,9 +1622,9 @@ impl TypeInference {
         }
         let effects = env.ir_arena[value].effects.clone();
         env.ir_arena.alloc(hir::Node::new(
-            NodeKind::ValueClone(hir::ValueClone {
+            NodeKind::CloneValue(hir::CloneValue {
                 source: value,
-                clone: Some(LocalClone::Required),
+                mode: hir::CloneValueMode::Unknown,
             }),
             ty,
             effects,
@@ -1773,17 +1769,6 @@ impl TypeInference {
         children.iter().any(|node| {
             self.node_value_needs_semantic_drop(env, *node, env.ir_arena[*node].ty, span)
         })
-    }
-
-    fn trivial_copy_value(&mut self, env: &mut TypingEnv, value: NodeId, span: Location) -> NodeId {
-        let ty = env.ir_arena[value].ty;
-        let effects = env.ir_arena[value].effects.clone();
-        env.ir_arena.alloc(hir::Node::new(
-            NodeKind::TrivialCopy(hir::TrivialCopy { source: value }),
-            ty,
-            effects,
-            span,
-        ))
     }
 
     fn materialize_owned_values(

@@ -1010,8 +1010,7 @@ pub fn eval_node_with_ctx(
         Apply(app) => eval_apply(arena, app, node.span, ctx, locals),
         FunctionClone(node) => eval_function_clone(arena, node, arena[id].span, ctx, locals),
         FunctionDrop(node) => eval_function_drop(arena, node, arena[id].span, ctx, locals),
-        ValueClone(node) => eval_value_clone(arena, node, arena[id].span, ctx, locals),
-        TrivialCopy(node) => eval_trivial_copy(arena, node, arena[id].span, ctx, locals),
+        CloneValue(node) => eval_clone_value(arena, node, arena[id].span, ctx, locals),
         StaticApply(app) => eval_static_apply(arena, app, node.span, ctx, locals),
         TraitMethodApply(_) => {
             panic!(
@@ -1618,13 +1617,21 @@ fn eval_function_drop(
 }
 
 #[inline(never)]
-fn eval_value_clone(
+fn eval_clone_value(
     arena: &NodeArena,
-    node: &hir::ValueClone,
+    node: &hir::CloneValue,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
+    if matches!(node.mode, hir::CloneValueMode::TrivialCopy) {
+        let temp_start = ctx.environment.len();
+        let place = eval_or_return!(resolve_node_place(arena, node.source, ctx, locals));
+        let result = copy_trivial_value_from_place(&place, arena[node.source].ty, ctx, span);
+        ctx.truncate_environment_storage(temp_start);
+        return cont(result?);
+    }
+
     let temp_start = ctx.environment.len();
     let source = match eval_or_return!(try_resolve_node_place(arena, node.source, ctx, locals)) {
         Some(place) => {
@@ -1640,10 +1647,9 @@ fn eval_value_clone(
             locals
         ))),
     };
-    let clone = node
-        .clone
-        .as_ref()
-        .expect("ValueClone dispatch should have been resolved before evaluation");
+    let hir::CloneValueMode::ValueClone(clone) = &node.mode else {
+        unreachable!("CloneValue mode should have been resolved before Value::clone dispatch");
+    };
     match call_value_clone_dispatch_for_temp(ctx, clone, source, span) {
         Ok(value) => cont(value),
         Err(err) => {
@@ -1651,21 +1657,6 @@ fn eval_value_clone(
             Err(err)
         }
     }
-}
-
-#[inline(never)]
-fn eval_trivial_copy(
-    arena: &NodeArena,
-    node: &hir::TrivialCopy,
-    span: Location,
-    ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
-) -> EvalControlFlowResult {
-    let temp_start = ctx.environment.len();
-    let place = eval_or_return!(resolve_node_place(arena, node.source, ctx, locals));
-    let result = copy_trivial_value_from_place(&place, arena[node.source].ty, ctx, span);
-    ctx.truncate_environment_storage(temp_start);
-    cont(result?)
 }
 
 #[inline(never)]
@@ -2073,7 +2064,7 @@ fn copy_trivial_native_value_typed<T: TrivialCopy + NativeValue>(value: &Value) 
 /// Temporary boxed-interpreter copy for native values known to implement `TrivialCopy`.
 ///
 /// This is not the language contract for `TrivialCopy`: future typed/linear
-/// storage should lower HIR `TrivialCopy` to a layout-driven memcpy instead.
+/// storage should lower `CloneValueMode::TrivialCopy` to a layout-driven memcpy instead.
 fn copy_trivial_native_value(value: &Value, ty: Type) -> Option<Value> {
     let ty_data = ty.data();
     if let TypeKind::Native(native) = &*ty_data
@@ -2100,7 +2091,7 @@ fn copy_trivial_value_from_place(
 ) -> Result<Value, RuntimeError> {
     // Temporary companion to `copy_trivial_native_value` for the boxed-value
     // interpreter. This should collapse into the backend implementation of HIR
-    // `TrivialCopy` once values are stored in copyable slots.
+    // `CloneValueMode::TrivialCopy` once values are stored in copyable slots.
     try_copy_trivial_value_from_place(place, ty, ctx, span)?.ok_or_else(|| {
         panic!(
             "attempted to materialize non-TrivialCopy local value without Value::clone: type {:?}, place {:?}",
@@ -2657,7 +2648,9 @@ fn try_resolve_node_place(
             let result = eval_place_result_static_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_place_result(result).map_continue(Some));
         }
-        ValueClone(node) => return try_resolve_node_place(arena, node.source, ctx, locals),
+        CloneValue(node) if matches!(node.mode, hir::CloneValueMode::ValueClone(_)) => {
+            return try_resolve_node_place(arena, node.source, ctx, locals);
+        }
         Block(nodes) => {
             let Some(place_index) = nodes.iter().rposition(|node| {
                 !matches!(

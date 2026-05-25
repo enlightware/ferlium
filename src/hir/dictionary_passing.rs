@@ -35,8 +35,9 @@ use crate::{
     containers::b,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::value::LiteralValue,
-    hir::{self, Node, NodeArena, NodeId, NodeKind},
+    hir::{self, CloneValueMode, Node, NodeArena, NodeId, NodeKind},
     std::{
+        core::TRIVIAL_COPY_TRAIT,
         math::int_type,
         value::{
             VALUE_CLONE_METHOD_INDEX, VALUE_DROP_METHOD_INDEX, VALUE_TRAIT,
@@ -576,6 +577,19 @@ fn resolve_local_value_dispatch(
     ))
 }
 
+fn type_has_concrete_trivial_copy_impl(
+    arena: &mut NodeArena,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    ty: Type,
+    span: Location,
+) -> bool {
+    ty.is_constant()
+        && ctx
+            .trait_solver
+            .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, arena)
+            .is_ok()
+}
+
 impl Node {
     pub fn elaborate_dictionaries<'d, 'sr, 'sm>(
         arena: &mut NodeArena,
@@ -652,24 +666,28 @@ impl Node {
             FunctionDrop(node) => {
                 elaborate_dictionaries(arena, node.target, ctx, local_count)?;
             }
-            ValueClone(node) => {
+            CloneValue(node) => {
                 elaborate_dictionaries(arena, node.source, ctx, local_count)?;
-                if !matches!(
-                    node.clone,
-                    Some(LocalClone::Static(_)) | Some(LocalClone::Dictionary(_))
-                ) {
-                    node.clone = Some(resolve_local_value_dispatch(
+                if matches!(node.mode, CloneValueMode::Unknown) {
+                    node.mode =
+                        if type_has_concrete_trivial_copy_impl(arena, ctx, node_ty, node_span) {
+                            CloneValueMode::TrivialCopy
+                        } else {
+                            CloneValueMode::ValueClone(LocalClone::Required)
+                        };
+                }
+                if let CloneValueMode::ValueClone(clone) = &mut node.mode
+                    && matches!(clone, LocalClone::Required)
+                {
+                    *clone = resolve_local_value_dispatch(
                         arena,
                         ctx,
                         node_ty,
                         VALUE_CLONE_METHOD_INDEX,
                         node_span,
                         "Value dictionary for owned value materialization not found, type inference should have failed",
-                    )?);
+                    )?;
                 }
-            }
-            TrivialCopy(node) => {
-                elaborate_dictionaries(arena, node.source, ctx, local_count)?;
             }
             StaticApply(app) => {
                 for &arg_id in &app.extra_arguments {

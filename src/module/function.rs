@@ -214,7 +214,7 @@ define_id_type!(
 );
 
 /// How generated HIR dispatches a local `Value` method such as clone or drop.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum LocalValueMethodDispatch {
     /// Dispatch has not yet been resolved to either a concrete function or extra parameter.
     Required,
