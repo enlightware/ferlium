@@ -150,7 +150,7 @@ This is useful for iterating over a collection with the index of the elements:
 
 ```ferlium
 for (i, name) in ["zero", "one", "two"] |> enumerate() {
-    debug_log(f"{i} = {name}")
+    let entry = f"{i} = {name}";
 }
 ```
 

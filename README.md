@@ -65,7 +65,7 @@ The same `CompilerSession` API is what powers the [Playground](https://enlightwa
 ## Getting started
 
 * **Online playground:** <https://enlightware.github.io/ferlium/playground/>
-* **REPL:** `cargo run --example ferlium`
+* **REPL:** `cargo run --example ferlium` (use `print(string)` in REPL to print to console)
 * **Book:** <https://enlightware.github.io/ferlium/book/>
 * **Chat:** [ferlium.zulipchat.com](https://ferlium.zulipchat.com)
 

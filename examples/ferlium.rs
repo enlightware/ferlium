@@ -19,12 +19,15 @@ use ferlium::compiler::error::{
     CompilationError, CompilationErrorImpl, LocatedError, MutabilityMustBeWhat,
 };
 use ferlium::format::FormatWith;
+use ferlium::hir::function::UnaryNativeFnRN;
 use ferlium::ide::{AnnotationData, Compiler as IdeCompiler};
 use ferlium::module::id::Id;
 use ferlium::module::{
-    LocalFunctionId, ModuleEnv, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
+    LocalFunctionId, Module, ModuleEnv, ModuleId, Path, ShowModuleWithOptions, UseData, Uses,
 };
 use ferlium::std::new_module_using_std;
+use ferlium::std::string::String as FerliumString;
+use ferlium::types::effects::{PrimitiveEffect, effect};
 use ferlium::{
     CompilerSession, Location, ModuleAndExpr, SourceId, SourceTable, SubOrSameType,
     parse_module_and_expr,
@@ -461,6 +464,24 @@ fn print_help() {
     println!("\nNote: expression locals do not persist across REPL inputs.");
 }
 
+fn console_print(message: &FerliumString) {
+    println!("{}", message.as_ref());
+}
+
+fn console_module(module_id: ModuleId) -> Module {
+    let mut module = new_module_using_std(module_id);
+    module.add_function(
+        ustr("print"),
+        UnaryNativeFnRN::description_with_default_ty(
+            console_print,
+            ["message"],
+            "Prints `message` to the REPL console.",
+            effect(PrimitiveEffect::Write),
+        ),
+    );
+    module
+}
+
 /// Process a single input: parse, compile module, and evaluate expression if present.
 /// Returns Ok(module) if successful and Err(exit_code) if there was a failure.
 fn process_input(
@@ -503,6 +524,12 @@ fn process_input(
 
     // Initialize module with use directives
     let mut uses = Uses::new_with_std();
+    if is_repl {
+        uses.wildcards.push(UseData::new(
+            Path::single_str("console"),
+            Location::new_synthesized(),
+        ));
+    }
     for (sym, path) in reverse_uses {
         uses.explicits
             .insert(sym, UseData::new(path, Location::new_synthesized()));
@@ -764,6 +791,10 @@ fn run_interactive_repl() {
 
     // ferlium emission and evaluation contexts
     let mut session = CompilerSession::new();
+    session.register_module(
+        Path::single_str("console"),
+        console_module(session.modules().next_id()),
+    );
     // Last module that compiled successfully, start with the std module.
     let mut last_module = ModuleId::from_index(0);
     let mut counter: usize = 0;

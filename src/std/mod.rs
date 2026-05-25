@@ -22,7 +22,6 @@ pub mod default;
 pub mod empty;
 pub mod flow;
 pub mod hash;
-pub mod io;
 mod json;
 pub mod logic;
 pub mod math;
@@ -53,7 +52,6 @@ pub fn std_module(source_table: &mut SourceTable) -> Module {
     logic::add_to_module(&mut module);
     math::add_to_module(&mut module);
     buffer::add_to_module(&mut module);
-    io::add_to_module(&mut module);
     string::add_to_module(&mut module);
     module = prelude::add_ferlium_core(module, source_table, STD_MODULE_ID);
     variant::add_to_module(&mut module);
