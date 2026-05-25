@@ -477,6 +477,45 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn inferred_projection_materialization_resolves_to_trivial_copy_after_unification() {
+    let source = r#"
+        fn first(pair: &mut (int, int)) -> int {
+            pair.0
+        }
+
+        let mut pair = (1, 2);
+        first(pair)
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    assert!(
+        module.ir_arena.iter().any(|(_, node)| matches!(
+            node.kind,
+            NodeKind::CloneValue(hir::CloneValue {
+                mode: hir::CloneValueMode::TrivialCopy,
+                ..
+            })
+        )),
+        "expected projected int place materialization to resolve to trivial-copy CloneValue"
+    );
+    assert!(
+        !module.ir_arena.iter().any(|(_, node)| matches!(
+            node.kind,
+            NodeKind::CloneValue(hir::CloneValue {
+                mode: hir::CloneValueMode::Unknown,
+                ..
+            })
+        )),
+        "CloneValueMode::Unknown should not remain after dictionary elaboration"
+    );
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), int(1));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn unused_owned_temporary_is_dropped() {
     let mut session = TestSession::new();
     let source = format!(
