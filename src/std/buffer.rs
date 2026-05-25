@@ -142,16 +142,16 @@ fn dictionary_from_arg(
     match arg {
         ValOrMut::Dictionary(dictionary) => Ok(dictionary),
         ValOrMut::Mut(place) => try_dictionary_from_place(&place, ctx).ok_or_else(|| {
-            RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(ustr("dictionary")))
+            RuntimeError::new_native(RuntimeErrorKind::InvalidArgument("dictionary".into()))
         }),
         ValOrMut::Val(value) => {
             value.discard_storage();
             Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-                ustr("dictionary"),
+                "dictionary".into(),
             )))
         }
         ValOrMut::Ref(_) => Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-            ustr("dictionary"),
+            "dictionary".into(),
         ))),
     }
 }
@@ -162,11 +162,11 @@ fn place_from_arg(arg: ValOrMut) -> Result<Place, RuntimeError> {
         ValOrMut::Val(value) => {
             value.discard_storage();
             Err(RuntimeError::new_native(RuntimeErrorKind::InvalidArgument(
-                ustr("buffer"),
+                "buffer".into(),
             )))
         }
         ValOrMut::Dictionary(_) | ValOrMut::Ref(_) => Err(RuntimeError::new_native(
-            RuntimeErrorKind::InvalidArgument(ustr("buffer")),
+            RuntimeErrorKind::InvalidArgument("buffer".into()),
         )),
     }
 }

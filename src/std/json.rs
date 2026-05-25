@@ -34,9 +34,9 @@ use ustr::ustr;
 fn next_event<R: Read>(
     reader: &'_ mut ReaderJsonParser<R>,
 ) -> Result<json_event_parser::JsonEvent<'_>, RuntimeErrorKind> {
-    reader.parse_next().map_err(|e| {
-        RuntimeErrorKind::InvalidArgument(ustr(&format!("Failed to parse JSON: {}", e)))
-    })
+    reader
+        .parse_next()
+        .map_err(|e| RuntimeErrorKind::InvalidArgument(format!("Failed to parse JSON: {}", e)))
 }
 
 #[derive(Debug, EnumAsInner)]
@@ -64,10 +64,10 @@ fn parse_json_stream<R: Read>(
             {
                 variant("Float", float_value(f))
             } else {
-                return Err(RuntimeErrorKind::InvalidArgument(ustr(&format!(
+                return Err(RuntimeErrorKind::InvalidArgument(format!(
                     "Invalid number in JSON: {}",
                     n
-                ))));
+                )));
             }
         }
         String(s) => variant("String", string_value(&s)),

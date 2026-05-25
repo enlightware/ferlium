@@ -6,10 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use test_log::test;
-use ustr::ustr;
-
 use ferlium::compiler::error::RuntimeErrorKind;
+use test_log::test;
 
 use crate::harness::{TestSession, bool, float, int};
 
@@ -192,45 +190,47 @@ fn real_domain_errors() {
     let mut session = TestSession::new();
     assert_eq!(
         session.fail_run("asin(2.0)"),
-        RuntimeErrorKind::InvalidArgument(ustr(
-            "Taking the arcsine of 2 is undefined because it is outside [-1, 1]"
-        ))
+        RuntimeErrorKind::InvalidArgument(
+            "Taking the arcsine of 2 is undefined because it is outside [-1, 1]".into()
+        )
     );
     assert_eq!(
         session.fail_run("acos(2.0)"),
-        RuntimeErrorKind::InvalidArgument(ustr(
-            "Taking the arccosine of 2 is undefined because it is outside [-1, 1]"
-        ))
+        RuntimeErrorKind::InvalidArgument(
+            "Taking the arccosine of 2 is undefined because it is outside [-1, 1]".into()
+        )
     );
     assert_eq!(
         session.fail_run("acosh(0.0)"),
-        RuntimeErrorKind::InvalidArgument(ustr(
+        RuntimeErrorKind::InvalidArgument(
             "Taking the inverse hyperbolic cosine of 0 is undefined because it is less than 1"
-        ))
+                .into()
+        )
     );
     assert_eq!(
         session.fail_run("atanh(1.0)"),
-        RuntimeErrorKind::InvalidArgument(ustr(
+        RuntimeErrorKind::InvalidArgument(
             "Taking the inverse hyperbolic tangent of 1 is undefined because it is outside (-1, 1)"
-        ))
+                .into()
+        )
     );
     assert_eq!(
         session.fail_run("log(0.0)"),
-        RuntimeErrorKind::InvalidArgument(ustr(
-            "Taking the logarithm of 0 is undefined because it is not positive"
-        ))
+        RuntimeErrorKind::InvalidArgument(
+            "Taking the logarithm of 0 is undefined because it is not positive".into()
+        )
     );
     assert_eq!(
         session.fail_run("pow(-1.0, 0.5)"),
-        RuntimeErrorKind::InvalidArgument(ustr(
-            "Raising -1 to the power 0.5 is undefined as a real number"
-        ))
+        RuntimeErrorKind::InvalidArgument(
+            "Raising -1 to the power 0.5 is undefined as a real number".into()
+        )
     );
     assert_eq!(
         session.fail_run("sqrt(-1.0)"),
-        RuntimeErrorKind::InvalidArgument(ustr(
-            "Taking the square root of -1 is undefined because it is negative"
-        ))
+        RuntimeErrorKind::InvalidArgument(
+            "Taking the square root of -1 is undefined because it is negative".into()
+        )
     );
 }
 

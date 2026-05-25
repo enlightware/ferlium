@@ -10,7 +10,6 @@ use core::panic;
 use std::fmt::{self, Display};
 
 use enum_as_inner::EnumAsInner;
-use ustr::Ustr;
 
 use crate::parser::location::{Location, SourceTable};
 
@@ -23,7 +22,7 @@ pub enum RuntimeErrorKind {
     Aborted(Option<String>),
     DivisionByZero,
     RemainderByZero,
-    InvalidArgument(Ustr),
+    InvalidArgument(String),
     CallDepthLimitExceeded { limit: usize },
     StackLimitExceeded { limit: usize },
     // TODO: add execution duration limit exhausted

@@ -10,7 +10,7 @@ use std::{collections::VecDeque, mem};
 
 use derive_new::new;
 use enum_as_inner::EnumAsInner;
-use ustr::{Ustr, ustr};
+use ustr::Ustr;
 
 use crate::module::id::Id;
 use crate::std::array::array_value_from_vec;
@@ -676,7 +676,7 @@ impl Place {
                     match buffer.get_mut_signed(index) {
                         Some(target) => target,
                         None => {
-                            return Err(RuntimeErrorKind::InvalidArgument(ustr("buffer index")));
+                            return Err(RuntimeErrorKind::InvalidArgument("buffer index".into()));
                         }
                     }
                 }
@@ -721,7 +721,7 @@ impl Place {
                     match buffer.get_signed(index) {
                         Some(target) => target,
                         None => {
-                            return Err(RuntimeErrorKind::InvalidArgument(ustr("buffer index")));
+                            return Err(RuntimeErrorKind::InvalidArgument("buffer index".into()));
                         }
                     }
                 }

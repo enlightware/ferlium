@@ -1402,7 +1402,7 @@ fn string_split() {
     );
     assert_eq!(
         session.fail_run(r#"split("abc", "")"#),
-        RuntimeErrorKind::InvalidArgument(ustr("separator must not be empty"))
+        RuntimeErrorKind::InvalidArgument("separator must not be empty".into())
     );
 }
 
@@ -1436,7 +1436,7 @@ fn array_split() {
     );
     assert_eq!(
         session.fail_run("split([1, 2], [])"),
-        RuntimeErrorKind::InvalidArgument(ustr("separator must not be empty"))
+        RuntimeErrorKind::InvalidArgument("separator must not be empty".into())
     );
 }
 
@@ -2625,6 +2625,6 @@ fn json_rejects_non_finite_float() {
     let mut session = TestSession::new();
     assert_eq!(
         session.fail_run(r#"json_decode("1e999")"#),
-        RuntimeErrorKind::InvalidArgument(ustr("Invalid number in JSON: 1e999"))
+        RuntimeErrorKind::InvalidArgument("Invalid number in JSON: 1e999".into())
     );
 }

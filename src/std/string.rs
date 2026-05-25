@@ -237,9 +237,9 @@ impl String {
 
     fn split_iterator(&self, separator: &Self) -> Result<StringSplitIterator, RuntimeErrorKind> {
         if separator.is_empty() {
-            return Err(RuntimeErrorKind::InvalidArgument(ustr(
-                "separator must not be empty",
-            )));
+            return Err(RuntimeErrorKind::InvalidArgument(
+                "separator must not be empty".into(),
+            ));
         }
         let separator_grapheme_len = separator.grapheme_count();
 

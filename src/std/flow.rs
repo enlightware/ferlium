@@ -29,7 +29,7 @@ fn panic(msg: &Str) -> Result<(), RuntimeErrorKind> {
 }
 
 fn invalid_argument(msg: &Str) -> Result<(), RuntimeErrorKind> {
-    Err(RuntimeErrorKind::InvalidArgument(ustr(msg.as_ref())))
+    Err(RuntimeErrorKind::InvalidArgument(msg.as_ref().to_string()))
 }
 
 pub fn add_to_module(to: &mut Module) {

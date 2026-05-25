@@ -168,7 +168,7 @@ impl NativeDisplay for Float {
 }
 
 fn invalid_real_argument(message: StdString) -> RuntimeErrorKind {
-    RuntimeErrorKind::InvalidArgument(ustr(message.as_str()))
+    RuntimeErrorKind::InvalidArgument(message)
 }
 
 fn saturated_real_result(value: f64) -> Float {
