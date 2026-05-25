@@ -7,11 +7,13 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
 use test_log::test;
+use ustr::ustr;
 
 use crate::harness::{TestSession, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
     hir::{self, NodeKind, value::Value},
+    module::{LocalClone, ResolvedLocalClone},
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -454,7 +456,7 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
         module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                mode: hir::CloneValueMode::TrivialCopy,
+                clone: LocalClone::Resolved(ResolvedLocalClone::TrivialCopy),
                 ..
             })
         )),
@@ -464,11 +466,47 @@ fn mutable_concrete_trivial_copy_place_lowers_to_snapshot_copy() {
         !module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                mode: hir::CloneValueMode::Unknown,
+                clone: LocalClone::Unknown,
                 ..
             })
         )),
-        "CloneValueMode::Unknown should not remain after dictionary elaboration"
+        "LocalClone::Unknown should not remain after dictionary elaboration"
+    );
+
+    let mut run_session = TestSession::new();
+    assert_val_eq!(run_session.run(source), int(12));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn inferred_mutable_let_clone_resolves_to_trivial_copy_after_unification() {
+    let source = r#"
+        fn snapshot(slot) -> int {
+            let copy = slot;
+            copy
+        }
+
+        let mut source = 1;
+        let copy = snapshot(source);
+        source = 2;
+        copy * 10 + source
+    "#;
+
+    let mut compile_session = TestSession::new();
+    let module = compile_session.compile_and_get_module(source);
+    let snapshot = module
+        .iter_named_functions()
+        .find_map(|(name, function)| (name == ustr("snapshot")).then_some(function))
+        .expect("snapshot function should be compiled");
+    assert!(
+        snapshot.locals.iter().any(|local| {
+            local.name.0 == ustr("copy")
+                && matches!(
+                    local.clone,
+                    Some(LocalClone::Resolved(ResolvedLocalClone::TrivialCopy))
+                )
+        }),
+        "expected inferred mutable let clone to resolve to trivial copy"
     );
 
     let mut run_session = TestSession::new();
@@ -493,7 +531,7 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
         module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                mode: hir::CloneValueMode::TrivialCopy,
+                clone: LocalClone::Resolved(ResolvedLocalClone::TrivialCopy),
                 ..
             })
         )),
@@ -503,11 +541,11 @@ fn inferred_projection_materialization_resolves_to_trivial_copy_after_unificatio
         !module.ir_arena.iter().any(|(_, node)| matches!(
             node.kind,
             NodeKind::CloneValue(hir::CloneValue {
-                mode: hir::CloneValueMode::Unknown,
+                clone: LocalClone::Unknown,
                 ..
             })
         )),
-        "CloneValueMode::Unknown should not remain after dictionary elaboration"
+        "LocalClone::Unknown should not remain after dictionary elaboration"
     );
 
     let mut run_session = TestSession::new();

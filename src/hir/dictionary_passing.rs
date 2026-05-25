@@ -17,8 +17,8 @@ use crate::{
     format::FormatWith,
     module::{
         ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
-        LocalFunctionId, LocalValueMethodDispatch, ModuleEnv, ProjectionIndex, TraitImpl,
-        TraitImplId, TraitImpls, build_dictionary_value, id::Id,
+        LocalFunctionId, ModuleEnv, ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop,
+        TraitImpl, TraitImplId, TraitImpls, build_dictionary_value, id::Id,
     },
     types::r#trait::{TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef},
     types::trait_solver::TraitSolver,
@@ -35,7 +35,7 @@ use crate::{
     containers::b,
     hir::emit_value_impl::{function_value_method, generic_value_methods_for_type},
     hir::value::LiteralValue,
-    hir::{self, CloneValueMode, Node, NodeArena, NodeId, NodeKind},
+    hir::{self, Node, NodeArena, NodeId, NodeKind},
     std::{
         core::TRIVIAL_COPY_TRAIT,
         math::int_type,
@@ -518,63 +518,105 @@ pub fn elaborate_local_value_dispatches<'d, 'sr, 'sm>(
     ctx: &mut DictElaborationCtx<'d, 'sr, 'sm>,
 ) -> Result<(), InternalCompilationError> {
     for local in locals {
-        if matches!(local.clone, Some(LocalClone::Required)) {
-            local.clone = Some(resolve_local_value_dispatch(
-                arena,
-                ctx,
-                local.ty,
-                VALUE_CLONE_METHOD_INDEX,
-                local.scope,
-                "Value dictionary for mutable let binding not found, type inference should have failed",
-            )?);
+        if matches!(local.clone, Some(LocalClone::Unknown)) {
+            local.clone = Some(resolve_local_clone(arena, ctx, local.ty, local.scope)?);
         }
 
-        if matches!(local.drop, Some(LocalDrop::Required)) {
-            local.drop = Some(resolve_local_value_dispatch(
-                arena,
-                ctx,
-                local.ty,
-                VALUE_DROP_METHOD_INDEX,
-                local.scope,
-                "Value dictionary for local drop not found, type inference should have failed",
-            )?);
+        if matches!(local.drop, Some(LocalDrop::Unknown)) {
+            local.drop = Some(resolve_local_drop(arena, ctx, local.ty, local.scope)?);
         }
     }
     Ok(())
 }
 
-/// Resolve a required local clone/drop into either a static `Value` method or a runtime dictionary slot.
-fn resolve_local_value_dispatch(
+#[derive(Debug, Clone, Copy)]
+enum ResolvedValueMethodDispatch {
+    Static(FunctionId),
+    Dictionary(ExtraParameterId),
+}
+
+/// Resolve a required `Value` method into either a static function or a runtime dictionary slot.
+fn resolve_value_method_dispatch(
     arena: &mut NodeArena,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
     ty: Type,
     method_index: TraitMethodIndex,
     span: Location,
     missing_dictionary_msg: &str,
-) -> Result<LocalValueMethodDispatch, InternalCompilationError> {
+) -> Result<ResolvedValueMethodDispatch, InternalCompilationError> {
     if ty.is_function() {
-        return Ok(LocalValueMethodDispatch::Static(FunctionId::Local(
+        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::Local(
             function_value_method(ctx.trait_solver, method_index, span, arena)?,
         )));
     }
     if is_function_surface_only_value_type(ty) {
         let methods =
             generic_value_methods_for_type(ctx.trait_solver, &VALUE_TRAIT, &[ty], span, arena)?;
-        return Ok(LocalValueMethodDispatch::Static(FunctionId::Local(
+        return Ok(ResolvedValueMethodDispatch::Static(FunctionId::Local(
             methods[usize::from(method_index)],
         )));
     }
     if ty.is_constant() {
-        return Ok(LocalValueMethodDispatch::Static(
+        return Ok(ResolvedValueMethodDispatch::Static(
             ctx.trait_solver
                 .solve_impl_method(&VALUE_TRAIT, &[ty], method_index, span, arena)?,
         ));
     }
-    let dict_index =
-        find_trait_impl_dict_index(ctx.dicts, &VALUE_TRAIT, &[ty]).expect(missing_dictionary_msg);
-    Ok(LocalValueMethodDispatch::Dictionary(
+    let dict_index = find_trait_impl_dict_index(ctx.dicts, &VALUE_TRAIT, &[ty])
+        .unwrap_or_else(|| panic!("{missing_dictionary_msg}: {ty:?}"));
+    Ok(ResolvedValueMethodDispatch::Dictionary(
         ExtraParameterId::from_index(dict_index),
     ))
+}
+
+fn resolve_local_clone(
+    arena: &mut NodeArena,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    ty: Type,
+    span: Location,
+) -> Result<LocalClone, InternalCompilationError> {
+    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
+        return Ok(LocalClone::Resolved(ResolvedLocalClone::TrivialCopy));
+    }
+    let dispatch = resolve_value_method_dispatch(
+        arena,
+        ctx,
+        ty,
+        VALUE_CLONE_METHOD_INDEX,
+        span,
+        "Value dictionary for clone not found, type inference should have failed",
+    )?;
+    Ok(LocalClone::Resolved(match dispatch {
+        ResolvedValueMethodDispatch::Static(function) => ResolvedLocalClone::Static(function),
+        ResolvedValueMethodDispatch::Dictionary(dictionary) => {
+            ResolvedLocalClone::Dictionary(dictionary)
+        }
+    }))
+}
+
+fn resolve_local_drop(
+    arena: &mut NodeArena,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    ty: Type,
+    span: Location,
+) -> Result<LocalDrop, InternalCompilationError> {
+    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
+        return Ok(LocalDrop::Resolved(ResolvedLocalDrop::Skip));
+    }
+    let dispatch = resolve_value_method_dispatch(
+        arena,
+        ctx,
+        ty,
+        VALUE_DROP_METHOD_INDEX,
+        span,
+        "Value dictionary for drop not found, type inference should have failed",
+    )?;
+    Ok(LocalDrop::Resolved(match dispatch {
+        ResolvedValueMethodDispatch::Static(function) => ResolvedLocalDrop::Static(function),
+        ResolvedValueMethodDispatch::Dictionary(dictionary) => {
+            ResolvedLocalDrop::Dictionary(dictionary)
+        }
+    }))
 }
 
 fn type_has_concrete_trivial_copy_impl(
@@ -668,25 +710,8 @@ impl Node {
             }
             CloneValue(node) => {
                 elaborate_dictionaries(arena, node.source, ctx, local_count)?;
-                if matches!(node.mode, CloneValueMode::Unknown) {
-                    node.mode =
-                        if type_has_concrete_trivial_copy_impl(arena, ctx, node_ty, node_span) {
-                            CloneValueMode::TrivialCopy
-                        } else {
-                            CloneValueMode::ValueClone(LocalClone::Required)
-                        };
-                }
-                if let CloneValueMode::ValueClone(clone) = &mut node.mode
-                    && matches!(clone, LocalClone::Required)
-                {
-                    *clone = resolve_local_value_dispatch(
-                        arena,
-                        ctx,
-                        node_ty,
-                        VALUE_CLONE_METHOD_INDEX,
-                        node_span,
-                        "Value dictionary for owned value materialization not found, type inference should have failed",
-                    )?;
+                if matches!(node.clone, LocalClone::Unknown) {
+                    node.clone = resolve_local_clone(arena, ctx, node_ty, node_span)?;
                 }
             }
             StaticApply(app) => {
@@ -1053,16 +1078,11 @@ impl Node {
             Assign(assignment) => {
                 elaborate_dictionaries(arena, assignment.place, ctx, local_count)?;
                 elaborate_dictionaries(arena, assignment.value, ctx, local_count)?;
-                if matches!(assignment.drop, Some(LocalDrop::Required)) {
-                    let place_ty = arena[assignment.place].ty;
-                    assignment.drop = Some(resolve_local_value_dispatch(
-                        arena,
-                        ctx,
-                        place_ty,
-                        VALUE_DROP_METHOD_INDEX,
-                        node_span,
-                        "Value dictionary for assignment overwrite drop not found, type inference should have failed",
-                    )?);
+                let place_ty = arena[assignment.place].ty;
+                if let Some(drop) = &mut assignment.drop
+                    && matches!(drop, LocalDrop::Unknown)
+                {
+                    *drop = resolve_local_drop(arena, ctx, place_ty, node_span)?;
                 }
             }
             Tuple(nodes) => {

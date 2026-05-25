@@ -23,8 +23,8 @@ use crate::{
     hir::{self, EnvStore, Immediate, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
     module::{
-        FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        LocalDropMode, ModuleEnv, ModuleFunction, ModuleFunctionSpans, ProjectionIndex,
+        FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId, LocalDrop, ModuleEnv,
+        ModuleFunction, ModuleFunctionSpans, ProjectionIndex, ResolvedLocalDrop,
         TypeDefLookupResult, id::Id,
     },
     parser::location::Location,
@@ -568,11 +568,13 @@ impl TypeInference {
                     expr_span,
                 );
                 local.owns_storage = owns_storage;
-                if owns_storage && self.type_needs_semantic_drop(env, node_ty, expr_span) {
-                    local.drop_mode = LocalDropMode::Value;
+                if owns_storage {
+                    local.drop = Some(
+                        self.unresolved_or_skipped_drop_for_value(env, node_id, node_ty, expr_span),
+                    );
                 }
                 if needs_clone && !initializer_place_needs_temp {
-                    local.clone = Some(LocalClone::Required);
+                    local.clone = Some(LocalClone::Unknown);
                 }
                 let value_id = if node_ty != Type::never()
                     && initializer_is_borrow
@@ -863,12 +865,12 @@ impl TypeInference {
                         let value_id = self.materialize_owned_value(env, value_id, expr_span);
                         let initializes_storage =
                             assignment_initializes_storage(env.ir_arena, place_id, env);
-                        let drop = if initializes_storage
-                            || !self.type_needs_semantic_drop(env, place_ty, expr_span)
-                        {
+                        let drop = if initializes_storage {
                             None
                         } else {
-                            if !place_ty.is_function() {
+                            if self.type_needs_semantic_drop(env, place_ty, expr_span)
+                                && !place_ty.is_function()
+                            {
                                 self.add_pub_constraint(PubTypeConstraint::new_have_trait(
                                     VALUE_TRAIT.clone(),
                                     vec![place_ty],
@@ -876,7 +878,7 @@ impl TypeInference {
                                     expr_span,
                                 ));
                             }
-                            Some(LocalDrop::Required)
+                            Some(LocalDrop::Unknown)
                         };
                         let combined_effects =
                             self.make_dependent_effect([&value_effects, &place_effects]);
@@ -1338,9 +1340,7 @@ impl TypeInference {
             span,
         );
         local.owns_storage = true;
-        if self.node_value_needs_semantic_drop(env, value, ty, span) {
-            local.drop_mode = LocalDropMode::Value;
-        }
+        local.drop = Some(self.unresolved_or_skipped_drop_for_value(env, value, ty, span));
         let id = env.push_local(local);
 
         let value_effects = env.ir_arena[value].effects.clone();
@@ -1490,24 +1490,9 @@ impl TypeInference {
             .filter(|(_, local_id)| Some(*local_id) != skip_drop)
             .filter(|(_, local_id)| {
                 let local = &env.all_locals[local_id.as_index()];
-                local.owns_storage && local.drop_mode == LocalDropMode::Value
+                local.owns_storage && local.drop.is_some()
             })
             .collect::<Vec<_>>();
-
-        for (_, id) in &locals_to_drop {
-            let local = &mut env.all_locals[id.as_index()];
-            if local.drop.is_none() {
-                if !local.ty.is_function() {
-                    self.add_pub_constraint(PubTypeConstraint::new_have_trait(
-                        VALUE_TRAIT.clone(),
-                        vec![local.ty],
-                        vec![],
-                        span,
-                    ));
-                }
-                local.drop = Some(LocalDrop::Required);
-            }
-        }
 
         locals_to_drop
             .into_iter()
@@ -1624,7 +1609,7 @@ impl TypeInference {
         env.ir_arena.alloc(hir::Node::new(
             NodeKind::CloneValue(hir::CloneValue {
                 source: value,
-                mode: hir::CloneValueMode::Unknown,
+                clone: LocalClone::Unknown,
             }),
             ty,
             effects,
@@ -1746,6 +1731,49 @@ impl TypeInference {
 
     fn type_needs_semantic_drop(&mut self, env: &mut TypingEnv, ty: Type, span: Location) -> bool {
         !self.type_has_concrete_trivial_copy_impl(env, ty, span)
+    }
+
+    fn unresolved_or_skipped_drop_for_value(
+        &mut self,
+        env: &mut TypingEnv,
+        value: NodeId,
+        ty: Type,
+        span: Location,
+    ) -> LocalDrop {
+        if self.node_value_needs_semantic_drop(env, value, ty, span) {
+            self.add_value_constraint_for_unknown_drop(ty, span);
+            LocalDrop::Unknown
+        } else {
+            LocalDrop::Resolved(ResolvedLocalDrop::Skip)
+        }
+    }
+
+    pub(crate) fn set_local_owned_storage_from_value(
+        &mut self,
+        env: &mut TypingEnv,
+        local_id: LocalDeclId,
+        value: NodeId,
+        ty: Type,
+        span: Location,
+    ) {
+        let owns_storage = !node_is_place_reference(env.ir_arena, value);
+        let drop =
+            owns_storage.then(|| self.unresolved_or_skipped_drop_for_value(env, value, ty, span));
+
+        let local = &mut env.all_locals[local_id.as_index()];
+        local.owns_storage = owns_storage;
+        local.drop = drop;
+    }
+
+    fn add_value_constraint_for_unknown_drop(&mut self, ty: Type, span: Location) {
+        if !ty.is_function() {
+            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                VALUE_TRAIT.clone(),
+                vec![ty],
+                vec![],
+                span,
+            ));
+        }
     }
 
     fn node_value_needs_semantic_drop(

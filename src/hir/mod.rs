@@ -21,7 +21,7 @@ use crate::{
     format::FormatWith,
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
-        ProjectionIndex, TraitImplId, id::Id,
+        ProjectionIndex, ResolvedLocalClone, TraitImplId, id::Id,
     },
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
     types::type_like::{CastableToType, TypeLike, instantiate_types_in_place},
@@ -137,22 +137,11 @@ pub struct FunctionDrop {
     pub target: NodeId,
 }
 
-/// How a value should be cloned.
-#[derive(Debug, Clone, Copy)]
-pub enum CloneValueMode {
-    /// Copy mode must be selected after type inference has finished.
-    Unknown,
-    /// Copy a concrete `TrivialCopy` value from place storage into an owned result.
-    TrivialCopy,
-    /// Clone from source storage into an owned result using `Value::clone`.
-    ValueClone(LocalClone),
-}
-
 /// Materialize a value as an owned result, using the cheapest valid copy mode.
 #[derive(Debug, Clone)]
 pub struct CloneValue {
     pub source: NodeId,
-    pub mode: CloneValueMode,
+    pub clone: LocalClone,
 }
 
 #[derive(Debug, Clone)]
@@ -212,7 +201,7 @@ pub struct Assignment {
     pub place: NodeId,
     pub value: NodeId,
     /// Dispatch used to drop the old destination value before overwriting it.
-    /// `None` is used for uninitialized stores and known trivial-copy values.
+    /// `None` is used only when the destination storage is uninitialized.
     pub drop: Option<LocalDrop>,
 }
 
@@ -490,14 +479,16 @@ impl Node {
                 format_ind(arena, node.target, f, locals, env, spacing, indent + 1)?;
             }
             CloneValue(node) => {
-                match node.mode {
-                    CloneValueMode::Unknown => {
+                match node.clone {
+                    LocalClone::Unknown => {
                         writeln!(f, "{indent_str}clone value with unknown mode")?;
                     }
-                    CloneValueMode::TrivialCopy => {
+                    LocalClone::Resolved(ResolvedLocalClone::TrivialCopy) => {
                         writeln!(f, "{indent_str}clone value with trivial copy")?;
                     }
-                    CloneValueMode::ValueClone(_) => {
+                    LocalClone::Resolved(
+                        ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_),
+                    ) => {
                         writeln!(f, "{indent_str}clone value with Value::clone")?;
                     }
                 }

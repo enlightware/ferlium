@@ -18,7 +18,10 @@ use crate::{
     hir::function::FunctionDefinition,
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
-    module::{self, LocalClone, LocalDeclId, Module, ProjectionIndex, TraitImplId, id::Id},
+    module::{
+        self, LocalClone, LocalDeclId, Module, ProjectionIndex, ResolvedLocalClone, TraitImplId,
+        id::Id,
+    },
     std::{
         STD_MODULE_ID,
         array::array_type,
@@ -401,13 +404,14 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             let get_array = build_variant_to_array(arena, solver, load_variant)?;
             let variant_ty = variant_type();
             let array_ty = array_type(variant_ty);
-            let variant_clone = LocalClone::Static(solver.solve_impl_method(
-                &VALUE_TRAIT,
-                &[variant_ty],
-                VALUE_CLONE_METHOD_INDEX,
-                span,
-                arena,
-            )?);
+            let variant_clone =
+                LocalClone::Resolved(ResolvedLocalClone::Static(solver.solve_impl_method(
+                    &VALUE_TRAIT,
+                    &[variant_ty],
+                    VALUE_CLONE_METHOD_INDEX,
+                    span,
+                    arena,
+                )?));
             let variant_value_dictionary =
                 solver.solve_impl(&VALUE_TRAIT, &[variant_ty], span, arena)?;
             let variant_value_dictionary_ty =
@@ -468,7 +472,7 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         arena,
                         hir::NodeKind::CloneValue(hir::CloneValue {
                             source: index_place,
-                            mode: hir::CloneValueMode::ValueClone(variant_clone),
+                            clone: variant_clone,
                         }),
                         variant_ty,
                     );

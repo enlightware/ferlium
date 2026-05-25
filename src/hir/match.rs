@@ -32,7 +32,7 @@ use crate::{
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
     types::r#type::Type,
-    types::type_inference::expr::{TypeInference, node_is_place_reference},
+    types::type_inference::expr::TypeInference,
     types::type_scheme::PubTypeConstraint,
     types::typing_env::TypingEnv,
 };
@@ -255,8 +255,13 @@ impl TypeInference {
                 pattern_ty,
                 env.all_locals,
             );
-            env.all_locals[l_match_condition.as_index()].owns_storage =
-                !node_is_place_reference(env.ir_arena, condition_node_id);
+            self.set_local_owned_storage_from_value(
+                env,
+                l_match_condition,
+                condition_node_id,
+                pattern_ty,
+                match_span,
+            );
             let store_variant_node_id = env.ir_arena.alloc(N::new(
                 store_variant,
                 Type::unit(),
@@ -368,8 +373,13 @@ impl TypeInference {
                                     no_effects(),
                                     sp(*expr),
                                 ));
-                                env.all_locals[l_bindings[i].as_index()].owns_storage =
-                                    !node_is_place_reference(env.ir_arena, project_inner_id);
+                                self.set_local_owned_storage_from_value(
+                                    env,
+                                    l_bindings[i],
+                                    project_inner_id,
+                                    inner_ty,
+                                    sp(*expr),
+                                );
                                 let store_projected_inner_id = env.ir_arena.alloc(N::new(
                                     K::EnvStore(EnvStore {
                                         value: project_inner_id,

@@ -14,7 +14,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     hir,
     hir::function::FunctionDefinition,
-    module::{LocalClone, LocalDeclId, Module, TraitImplId, id::Id},
+    module::{LocalClone, LocalDeclId, Module, ResolvedLocalClone, TraitImplId, id::Id},
     std::{
         STD_MODULE_ID,
         value::{VALUE_CLONE_METHOD_INDEX, VALUE_TRAIT},
@@ -64,7 +64,7 @@ impl Deriver for SelfCastDeriver {
         let code_id = arena.alloc(hir::Node::new(
             hir::NodeKind::CloneValue(hir::CloneValue {
                 source: source_id,
-                mode: hir::CloneValueMode::ValueClone(LocalClone::Static(clone)),
+                clone: LocalClone::Resolved(ResolvedLocalClone::Static(clone)),
             }),
             from_ty,
             EffType::empty(),

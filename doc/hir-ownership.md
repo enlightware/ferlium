@@ -2,7 +2,7 @@
 
 This document records the ownership invariants that SSA lowering should rely on.
 It describes HIR after type inference, borrow checking, and dictionary elaboration.
-At that point all `LocalClone::Required` and `LocalDrop::Required` placeholders must have been resolved.
+At that point all `LocalClone::Unknown` and `LocalDrop::Unknown` placeholders must have been resolved.
 
 See `doc/abi.md` for the physical calling convention.
 This document is about source-level ownership semantics and the HIR operations that preserve them.
@@ -26,9 +26,8 @@ HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like ot
 |-------|--------------------|
 | `slot` | Frame slot offset within the local value frame. Extra dictionary/evidence parameters use a separate index space. |
 | `owns_storage` | This local owns storage that may be moved from and whose storage must be reclaimed. Non-owning locals are aliases. |
-| `clone` | If present, `EnvStore` initializes the local by calling `Value::clone(source, &mut target)`. |
-| `drop_mode` | `Value` means lexical release must run semantic `Value::drop`; `StorageOnly` only reclaims storage. |
-| `drop` | Resolved dispatch for the local's semantic drop. It is meaningful only when a semantic drop is emitted or run during cleanup. |
+| `clone` | If present, `EnvStore` initializes the local by either a trivial copy or `Value::clone(source, &mut target)`. |
+| `drop` | If present, lexical release ends this local's owned lifetime; the resolved mode either skips semantic drop or calls `Value::drop`. |
 | `assignment_mode` | `InitializeStorage` means assignment writes uninitialized storage and must not drop the previous destination. |
 
 # Owned Materialization
@@ -36,9 +35,9 @@ HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like ot
 When a context needs an owned value and the source is already an owned value, HIR can use that value directly.
 When the source is a place, HIR must materialize ownership explicitly:
 
-- Type not yet resolved after HIR construction: emit `CloneValue { source, mode: Unknown }`.
-- Concrete `TrivialCopy` type after dictionary elaboration: resolve to `CloneValue { source, mode: TrivialCopy }`.
-- Non-`TrivialCopy` value type after dictionary elaboration: resolve to `CloneValue { source, mode: ValueClone(clone) }`.
+- Type not yet resolved after HIR construction: emit `CloneValue { source, clone: LocalClone::Unknown }`.
+- Concrete `TrivialCopy` type after dictionary elaboration: resolve to `LocalClone::Resolved(TrivialCopy)`.
+- Non-`TrivialCopy` value type after dictionary elaboration: resolve to a static or dictionary `Value::clone` dispatch.
 - Owned local moved out of its lexical scope: emit `EnvMove { id }` and skip the matching lexical drop.
 
 Generic types are not treated as `TrivialCopy` for this purpose, even if the function has a `T: TrivialCopy` constraint.
@@ -57,11 +56,11 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 # Drops and Cleanup
 
 Lexical drops are explicit `EnvDrop { id }` nodes generated in reverse local order.
-Only locals with `owns_storage && drop_mode == Value` receive semantic drop nodes.
-`EnvDrop` calls the resolved `LocalDrop` dispatch and then discards the local storage.
+Locals with owned storage whose lifetime ends receive `EnvDrop` nodes.
+`EnvDrop` applies the resolved `LocalDrop`: `Skip` reclaims only storage, while static and dictionary modes call `Value::drop` before discarding storage.
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
-If present, the old destination value is dropped before the new value replaces it.
+If present, the old destination lifetime ends before the new value replaces it; the resolved mode may be `Skip`.
 Assignments to uninitialized storage use `assignment_mode == InitializeStorage` and must not drop the destination first.
 
 SSA must preserve the same cleanup behavior on all exits:
@@ -73,14 +72,20 @@ SSA must preserve the same cleanup behavior on all exits:
 
 # Clone and Drop Dispatch
 
-Resolved clone/drop dispatch is represented by `LocalValueMethodDispatch`:
+Clone and drop dispatch are specialized by site.
+Before dictionary elaboration, `Unknown` means the final type is needed to choose the implementation.
 
-- `Static(FunctionId)` calls a concrete generated or user-provided `Value` method.
-- `Dictionary(ExtraParameterId)` loads the `Value` method from a hidden dictionary parameter.
-- `Required` is a pre-elaboration placeholder and is not valid input to SSA lowering.
+`LocalClone` resolves to one of:
 
-`CloneValueMode::Unknown` is also a pre-elaboration placeholder.
-Dictionary elaboration resolves it using the final substituted source type.
+- `TrivialCopy`, which copies the value representation without `Value::clone`.
+- `Static(FunctionId)`, which calls a concrete generated or user-provided `Value::clone`.
+- `Dictionary(ExtraParameterId)`, which loads `Value::clone` from a hidden dictionary parameter.
+
+`LocalDrop` resolves to one of:
+
+- `Skip`, which reclaims storage without semantic `Value::drop`.
+- `Static(FunctionId)`, which calls a concrete generated or user-provided `Value::drop`.
+- `Dictionary(ExtraParameterId)`, which loads `Value::drop` from a hidden dictionary parameter.
 
 The `Value` method signatures are:
 
@@ -99,7 +104,7 @@ SSA lowering may choose a physical ABI layout that packs evidence and values tog
 Dispatch sites are:
 
 - `EnvStore` with `LocalDecl::clone`: clone into the local's uninitialized target storage.
-- `CloneValue` with `ValueClone` mode: clone a place into a fresh owned temporary result.
+- `CloneValue`: clone or copy a place into a fresh owned temporary result.
 - `EnvDrop` with `LocalDecl::drop`: drop an owned local.
 - `Assignment::drop`: drop the overwritten destination value.
 

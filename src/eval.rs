@@ -23,8 +23,8 @@ use crate::{
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDebugVisibility, LocalDecl, LocalDeclId,
-        LocalDrop, LocalFunctionId, LocalValueMethodDispatch, ModuleFunction, ModuleId,
-        ProjectionIndex, TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
+        LocalDrop, LocalFunctionId, ModuleFunction, ModuleId, ProjectionIndex, ResolvedLocalClone,
+        ResolvedLocalDrop, TraitDictionary, TraitDictionaryEntry, TraitDictionaryId, TraitImplId,
     },
     std::buffer,
     types::{
@@ -1278,22 +1278,17 @@ fn discard_call_result(result: EvalControlFlowResult) -> Result<(), RuntimeError
 }
 
 /// Invoke a resolved `Value` method (clone or drop) for a local-dispatch site.
-fn call_local_value_method(
+fn call_resolved_value_method(
     ctx: &mut EvalCtx,
-    dispatch: &LocalValueMethodDispatch,
+    dispatch: ResolvedValueMethod,
     method_index: TraitMethodIndex,
     arguments: Vec<ValOrMut>,
     span: Location,
 ) -> EvalControlFlowResult {
     match dispatch {
-        LocalValueMethodDispatch::Required => {
-            panic!("LocalValueMethodDispatch::Required should have been resolved before evaluation")
-        }
-        LocalValueMethodDispatch::Static(function) => {
-            ctx.call_function_id(*function, arguments, span)
-        }
-        LocalValueMethodDispatch::Dictionary(dict_index) => {
-            let dictionary = dictionary_from_extra_parameter(ctx, *dict_index, span);
+        ResolvedValueMethod::Static(function) => ctx.call_function_id(function, arguments, span),
+        ResolvedValueMethod::Dictionary(dict_index) => {
+            let dictionary = dictionary_from_extra_parameter(ctx, dict_index, span);
             call_dictionary_method(
                 ctx,
                 dictionary,
@@ -1305,15 +1300,43 @@ fn call_local_value_method(
     }
 }
 
+#[derive(Clone, Copy)]
+enum ResolvedValueMethod {
+    Static(FunctionId),
+    Dictionary(ExtraParameterId),
+}
+
+fn clone_value_method_dispatch(clone: &ResolvedLocalClone) -> Option<ResolvedValueMethod> {
+    match clone {
+        ResolvedLocalClone::TrivialCopy => None,
+        ResolvedLocalClone::Static(function) => Some(ResolvedValueMethod::Static(*function)),
+        ResolvedLocalClone::Dictionary(dictionary) => {
+            Some(ResolvedValueMethod::Dictionary(*dictionary))
+        }
+    }
+}
+
 fn call_local_drop_dispatch(
     ctx: &mut EvalCtx,
     drop: &LocalDrop,
     target: Place,
     span: Location,
 ) -> Result<(), RuntimeError> {
-    discard_call_result(call_local_value_method(
+    let dispatch = match drop {
+        LocalDrop::Unknown => {
+            panic!("LocalDrop::Unknown should have been resolved before evaluation")
+        }
+        LocalDrop::Resolved(ResolvedLocalDrop::Skip) => return Ok(()),
+        LocalDrop::Resolved(ResolvedLocalDrop::Static(function)) => {
+            ResolvedValueMethod::Static(*function)
+        }
+        LocalDrop::Resolved(ResolvedLocalDrop::Dictionary(dictionary)) => {
+            ResolvedValueMethod::Dictionary(*dictionary)
+        }
+    };
+    discard_call_result(call_resolved_value_method(
         ctx,
-        drop,
+        dispatch,
         VALUE_DROP_METHOD_INDEX,
         vec![ValOrMut::Mut(target)],
         span,
@@ -1428,12 +1451,14 @@ pub(crate) fn call_value_clone_to_target(
 
 fn call_value_clone_dispatch_for_temp(
     ctx: &mut EvalCtx,
-    clone: &LocalClone,
+    clone: &ResolvedLocalClone,
     source: ValOrMut,
     span: Location,
 ) -> Result<Value, RuntimeError> {
+    let dispatch = clone_value_method_dispatch(clone)
+        .expect("trivial copy should be handled without Value::clone dispatch");
     call_value_clone_with(ctx, source, span, |ctx, arguments| {
-        call_local_value_method(ctx, clone, VALUE_CLONE_METHOD_INDEX, arguments, span)
+        call_resolved_value_method(ctx, dispatch, VALUE_CLONE_METHOD_INDEX, arguments, span)
     })
 }
 
@@ -1624,7 +1649,11 @@ fn eval_clone_value(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
-    if matches!(node.mode, hir::CloneValueMode::TrivialCopy) {
+    let LocalClone::Resolved(clone) = node.clone else {
+        panic!("LocalClone::Unknown should have been resolved before evaluation");
+    };
+
+    if matches!(clone, ResolvedLocalClone::TrivialCopy) {
         let temp_start = ctx.environment.len();
         let place = eval_or_return!(resolve_node_place(arena, node.source, ctx, locals));
         let result = copy_trivial_value_from_place(&place, arena[node.source].ty, ctx, span);
@@ -1647,10 +1676,7 @@ fn eval_clone_value(
             locals
         ))),
     };
-    let hir::CloneValueMode::ValueClone(clone) = &node.mode else {
-        unreachable!("CloneValue mode should have been resolved before Value::clone dispatch");
-    };
-    match call_value_clone_dispatch_for_temp(ctx, clone, source, span) {
+    match call_value_clone_dispatch_for_temp(ctx, &clone, source, span) {
         Ok(value) => cont(value),
         Err(err) => {
             ctx.truncate_environment_storage(temp_start);
@@ -1941,6 +1967,23 @@ fn eval_env_store(
             target: target_index,
             path: Vec::new(),
         };
+        let LocalClone::Resolved(clone) = clone else {
+            panic!("LocalClone::Unknown should have been resolved before evaluation");
+        };
+        if matches!(clone, ResolvedLocalClone::TrivialCopy) {
+            let value =
+                match eval_or_return!(try_resolve_node_place(arena, node.value, ctx, locals)) {
+                    Some(place) => copy_trivial_value_from_place(
+                        &place,
+                        locals[node.id.as_index()].ty,
+                        ctx,
+                        span,
+                    )?,
+                    None => eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals)),
+                };
+            ctx.environment[target_index] = ValOrMut::Val(value);
+            return cont(Value::unit());
+        }
         let source = match eval_or_return!(try_resolve_node_place(arena, node.value, ctx, locals)) {
             Some(place) => {
                 place
@@ -1953,7 +1996,9 @@ fn eval_env_store(
             ))),
         };
         let arguments = vec![source, ValOrMut::Mut(target)];
-        let result = call_local_value_method(ctx, clone, VALUE_CLONE_METHOD_INDEX, arguments, span);
+        let dispatch = clone_value_method_dispatch(clone).expect("trivial copy handled above");
+        let result =
+            call_resolved_value_method(ctx, dispatch, VALUE_CLONE_METHOD_INDEX, arguments, span);
         discard_call_result(result)?;
         if matches!(&ctx.environment[target_index], ValOrMut::Val(Value::Uninit)) {
             panic!("Value::clone returned without initializing local storage");
@@ -2064,7 +2109,7 @@ fn copy_trivial_native_value_typed<T: TrivialCopy + NativeValue>(value: &Value) 
 /// Temporary boxed-interpreter copy for native values known to implement `TrivialCopy`.
 ///
 /// This is not the language contract for `TrivialCopy`: future typed/linear
-/// storage should lower `CloneValueMode::TrivialCopy` to a layout-driven memcpy instead.
+/// storage should lower `ResolvedLocalClone::TrivialCopy` to a layout-driven memcpy instead.
 fn copy_trivial_native_value(value: &Value, ty: Type) -> Option<Value> {
     let ty_data = ty.data();
     if let TypeKind::Native(native) = &*ty_data
@@ -2091,7 +2136,7 @@ fn copy_trivial_value_from_place(
 ) -> Result<Value, RuntimeError> {
     // Temporary companion to `copy_trivial_native_value` for the boxed-value
     // interpreter. This should collapse into the backend implementation of HIR
-    // `CloneValueMode::TrivialCopy` once values are stored in copyable slots.
+    // `ResolvedLocalClone::TrivialCopy` once values are stored in copyable slots.
     try_copy_trivial_value_from_place(place, ty, ctx, span)?.ok_or_else(|| {
         panic!(
             "attempted to materialize non-TrivialCopy local value without Value::clone: type {:?}, place {:?}",
@@ -2648,7 +2693,14 @@ fn try_resolve_node_place(
             let result = eval_place_result_static_apply(arena, app, node.span, ctx, locals)?;
             return Ok(control_flow_into_place_result(result).map_continue(Some));
         }
-        CloneValue(node) if matches!(node.mode, hir::CloneValueMode::ValueClone(_)) => {
+        CloneValue(node)
+            if matches!(
+                node.clone,
+                LocalClone::Resolved(
+                    ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
+                )
+            ) =>
+        {
             return try_resolve_node_place(arena, node.source, ctx, locals);
         }
         Block(nodes) => {

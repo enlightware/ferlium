@@ -161,9 +161,6 @@ pub struct LocalDecl {
     /// Drop dispatch used when releasing owned local storage at lexical scope exit.
     #[new(default)]
     pub drop: Option<LocalDrop>,
-    /// Whether releasing this local must run Ferlium `Value::drop` before reclaiming storage.
-    #[new(default)]
-    pub drop_mode: LocalDropMode,
 }
 impl LocalDecl {
     pub fn as_fn_arg_type(&self) -> FnArgType {
@@ -196,13 +193,6 @@ pub enum LocalAssignmentMode {
     InitializeStorage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LocalDropMode {
-    #[default]
-    StorageOnly,
-    Value,
-}
-
 define_id_type!(
     /// Hidden extra parameter ID within a lowered function frame.
     ExtraParameterId
@@ -213,22 +203,45 @@ define_id_type!(
     ProjectionIndex
 );
 
-/// How generated HIR dispatches a local `Value` method such as clone or drop.
+/// How generated HIR clones into owned storage.
 #[derive(Debug, Clone, Copy)]
-pub enum LocalValueMethodDispatch {
-    /// Dispatch has not yet been resolved to either a concrete function or extra parameter.
-    Required,
+pub enum LocalClone {
+    /// Clone mode must be selected after type inference has finished.
+    Unknown,
+    /// Clone mode has been resolved.
+    Resolved(ResolvedLocalClone),
+}
+
+/// Resolved implementation for a local clone/copy operation.
+#[derive(Debug, Clone, Copy)]
+pub enum ResolvedLocalClone {
+    /// Copy a concrete `TrivialCopy` value.
+    TrivialCopy,
     /// Call this concrete `Value` implementation.
     Static(FunctionId),
     /// Load the `Value` method from this hidden trait dictionary extra parameter.
     Dictionary(ExtraParameterId),
 }
 
-/// How generated HIR clones into an owned mutable local.
-pub type LocalClone = LocalValueMethodDispatch;
+/// How generated HIR drops owned storage.
+#[derive(Debug, Clone, Copy)]
+pub enum LocalDrop {
+    /// Drop mode must be selected after type inference has finished.
+    Unknown,
+    /// Drop mode has been resolved.
+    Resolved(ResolvedLocalDrop),
+}
 
-/// How generated HIR drops an owned local at lexical scope exit.
-pub type LocalDrop = LocalValueMethodDispatch;
+/// Resolved implementation for a local drop operation.
+#[derive(Debug, Clone, Copy)]
+pub enum ResolvedLocalDrop {
+    /// No semantic `Value::drop` is needed.
+    Skip,
+    /// Call this concrete `Value` implementation.
+    Static(FunctionId),
+    /// Load the `Value` method from this hidden trait dictionary extra parameter.
+    Dictionary(ExtraParameterId),
+}
 
 define_id_type!(
     /// Local variable ID within a function
