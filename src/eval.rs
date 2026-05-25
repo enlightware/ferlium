@@ -623,6 +623,12 @@ impl crate::hir::value::NativeDisplay for PlaceResult {
     }
 }
 
+fn invalid_buffer_index(index: isize, len: usize) -> RuntimeErrorKind {
+    RuntimeErrorKind::InvalidArgument(format!(
+        "Buffer index {index} is out of bounds for buffer of length {len}"
+    ))
+}
+
 impl Place {
     /// Return a path and an index of a variable in the environment that is for sure a Value
     fn resolved_path_and_index(&self, ctx: &EvalCtx) -> (VecDeque<isize>, usize) {
@@ -673,10 +679,11 @@ impl Place {
                         .as_mut_any()
                         .downcast_mut::<buffer::Buffer>()
                         .unwrap();
+                    let len = buffer.capacity();
                     match buffer.get_mut_signed(index) {
                         Some(target) => target,
                         None => {
-                            return Err(RuntimeErrorKind::InvalidArgument("buffer index".into()));
+                            return Err(invalid_buffer_index(index, len));
                         }
                     }
                 }
@@ -718,10 +725,11 @@ impl Place {
                     let buffer = NativeValue::as_any(primitive.as_ref())
                         .downcast_ref::<buffer::Buffer>()
                         .unwrap();
+                    let len = buffer.capacity();
                     match buffer.get_signed(index) {
                         Some(target) => target,
                         None => {
-                            return Err(RuntimeErrorKind::InvalidArgument("buffer index".into()));
+                            return Err(invalid_buffer_index(index, len));
                         }
                     }
                 }
