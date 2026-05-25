@@ -3,7 +3,7 @@ use std::fmt;
 use itertools::Itertools;
 use ustr::Ustr;
 
-use crate::ssa;
+use crate::{module::{LocalFunctionId, ModuleId}, ssa};
 
 /// A value in the SSA form of Ferlium.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -16,7 +16,7 @@ pub enum Value {
   Dictionary(Vec<ssa::Value>),
 
   /// A reference to a lowered function.
-  Function(Ustr),
+  Function(FunctionReference),
 
   /// A constant integer.
   Integer(Box<Integer>),
@@ -39,13 +39,26 @@ impl fmt::Display for Value {
       Value::Dictionary(i) => {
         write!(f, "({})", i.iter().map(|v| format!("{}", v)).join(", "))
       },
-      Value::Function(i) => i.fmt(f),
+      Value::Function(i) => write!(f, "{}", i.representation),
       Value::Integer(i) => i.fmt(f),
       Value::Parameter(i) => write!(f, "%p{}", i),
       Value::Register(i) => write!(f, "%r{}", i.raw()),
       Value::Unit => write!(f, "()")
     }
   }
+}
+
+/// A function reference, represented as its reference, and its representation
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FunctionReference {
+  /// The string representation of `self`.
+  pub representation: Ustr,
+
+  /// The module id in which the function is defined.
+  pub module: ModuleId,
+
+  /// The LocalFunctionId in the module in which the function is declared.
+  pub identity: LocalFunctionId,
 }
 
 /// A constant integer, represented as a two's complement value.

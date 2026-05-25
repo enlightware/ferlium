@@ -1005,7 +1005,7 @@ impl CompilerSession {
         let p = module::Path::single_str(source_name);
         let i = self.compile(src, source_name, p).unwrap().module_id;
         let module = self.expect_fresh_module(i);
-        emit_ssa::emit_ssa(module, self.modules())
+        emit_ssa::emit_ssa(module, self.modules(), self)
     }
 
     /// Returns the entry for module_id, or panic if not found.

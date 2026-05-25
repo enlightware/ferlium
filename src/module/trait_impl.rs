@@ -178,6 +178,10 @@ impl TraitDictionary {
             )
         }
     }
+
+    pub fn methods(&self) -> &Vec<LocalFunctionId> {
+      &self.methods
+    }
 }
 
 pub fn build_dictionary_value(
