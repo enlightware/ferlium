@@ -233,7 +233,7 @@ pub enum LocalDrop {
 }
 
 /// Resolved implementation for a local drop operation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedLocalDrop {
     /// No semantic `Value::drop` is needed.
     Skip,

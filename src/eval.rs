@@ -19,7 +19,9 @@ use crate::{
     CompilerSession, Location, SourceId, SourceTable,
     compiler::error::RuntimeErrorKind,
     format::{FormatWith, write_with_separator},
-    hir::function::{ArgPassing, TrivialCopy},
+    hir::function::{
+        ArgPassing, ResolvedArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, TrivialCopy,
+    },
     hir::value::{FunctionHiddenArgValue, FunctionValue, NativeValue, Value},
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDebugVisibility, LocalDecl, LocalDeclId,
@@ -328,33 +330,6 @@ impl<'a> EvalCtx<'a> {
     ) -> &ModuleFunction {
         let module = self.compiler_session.expect_fresh_module(module_id);
         module.get_function_by_id(local_id).unwrap()
-    }
-
-    fn function_argument_passing(
-        &self,
-        local_id: LocalFunctionId,
-        module_id: ModuleId,
-    ) -> Option<&'static [ArgPassing]> {
-        self.get_module_function(local_id, module_id)
-            .code
-            .argument_passing()
-    }
-
-    pub fn function_id_argument_passing(
-        &self,
-        function_id: FunctionId,
-    ) -> Option<&'static [ArgPassing]> {
-        let (local_id, module_id) = self.get_function_local_id(function_id);
-        self.function_argument_passing(local_id, module_id)
-    }
-
-    pub fn function_value_argument_passing(
-        &self,
-        function_value: &FunctionValue,
-    ) -> Option<&'static [ArgPassing]> {
-        let passing =
-            self.function_argument_passing(function_value.function_id, function_value.module_id)?;
-        Some(&passing[function_value.closure_env_len..])
     }
 
     fn function_value_visible_argument_types(
@@ -1343,6 +1318,15 @@ fn call_local_drop_dispatch(
     ))
 }
 
+fn call_resolved_local_drop_dispatch(
+    ctx: &mut EvalCtx,
+    drop: ResolvedLocalDrop,
+    target: Place,
+    span: Location,
+) -> Result<(), RuntimeError> {
+    call_local_drop_dispatch(ctx, &LocalDrop::Resolved(drop), target, span)
+}
+
 pub(crate) fn drop_frame_owned_locals_on_error(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -1713,19 +1697,20 @@ fn eval_apply(
     // this stack frame, or environment storage that the borrow checker prevents
     // from being mutably aliased by the call arguments.
     let function_value = unsafe { &*function_value };
-    let arg_passing = ctx.function_value_argument_passing(function_value);
     let args_ty = ctx.function_value_visible_argument_types(function_value);
     let temp_start = ctx.environment.len();
-    let arguments = eval_or_return!(eval_args(
+    let mut arguments = eval_or_return!(eval_args(
         arena,
         &app.arguments,
         &args_ty,
-        arg_passing,
+        &app.argument_passing,
         ctx,
         locals
     ));
-    let result = ctx.call_function_value(function_value, arguments, span);
+    let result = ctx.call_function_value(function_value, arguments.take_arguments(), span);
+    let cleanup = arguments.drop_temps(ctx, span);
     ctx.truncate_environment_storage(temp_start);
+    cleanup?;
     result
 }
 
@@ -1738,11 +1723,6 @@ fn eval_static_apply(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let (local_id, module_id) = ctx.get_function_local_id(app.function);
-    let arg_passing = visible_arg_passing(
-        ctx.function_argument_passing(local_id, module_id),
-        app.extra_arguments.len(),
-        app.arguments.len(),
-    );
     let temp_start = ctx.environment.len();
     let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
         arena,
@@ -1750,11 +1730,11 @@ fn eval_static_apply(
         ctx,
         locals,
     ));
-    let arguments = eval_or_return!(eval_args(
+    let mut arguments = eval_or_return!(eval_args(
         arena,
         &app.arguments,
         &app.ty.args,
-        arg_passing,
+        &app.argument_passing,
         ctx,
         locals
     ));
@@ -1762,10 +1742,12 @@ fn eval_static_apply(
         local_id,
         module_id,
         extra_arguments,
-        arguments,
+        arguments.take_arguments(),
         span,
     );
+    let cleanup = arguments.drop_temps(ctx, span);
     ctx.truncate_environment_storage(temp_start);
+    cleanup?;
     result
 }
 
@@ -1777,11 +1759,6 @@ fn eval_place_result_static_apply(
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
     let (local_id, module_id) = ctx.get_function_local_id(app.function);
-    let arg_passing = visible_arg_passing(
-        ctx.function_argument_passing(local_id, module_id),
-        app.extra_arguments.len(),
-        app.arguments.len(),
-    );
     let temp_start = ctx.environment.len();
     let extra_arguments = eval_or_return!(eval_function_hidden_arg_nodes(
         arena,
@@ -1789,57 +1766,64 @@ fn eval_place_result_static_apply(
         ctx,
         locals,
     ));
-    let arguments = eval_or_return!(eval_place_result_args(
+    let mut arguments = eval_or_return!(eval_place_result_args(
         arena,
         &app.arguments,
         &app.ty.args,
-        arg_passing,
+        &app.argument_passing,
         ctx,
         locals,
     ));
-    match ctx.call_resolved_function_with_extra(
+    let result = ctx.call_resolved_function_with_extra(
         local_id,
         module_id,
         extra_arguments,
-        arguments,
+        arguments.take_arguments(),
         span,
-    ) {
-        Ok(result) => Ok(result),
-        Err(err) => {
-            ctx.truncate_environment_storage(temp_start);
-            Err(err)
-        }
-    }
-}
-
-fn visible_arg_passing(
-    passing: Option<&'static [ArgPassing]>,
-    extra_arg_count: usize,
-    visible_arg_count: usize,
-) -> Option<&'static [ArgPassing]> {
-    let passing = passing?;
-    if extra_arg_count == 0 {
-        Some(passing)
-    } else {
-        assert!(
-            passing.len() >= extra_arg_count
-                && passing.len() <= extra_arg_count + visible_arg_count
-        );
-        Some(&passing[extra_arg_count..])
-    }
+    );
+    let cleanup = arguments.drop_temps(ctx, span);
+    ctx.truncate_environment_storage(temp_start);
+    cleanup?;
+    result
 }
 
 enum PendingPlaceResultArg {
     Ready(ValOrMut),
-    SharedTemp(Value),
+    SharedTemp(Value, SharedRefTempCleanup),
 }
 
 impl PendingPlaceResultArg {
     fn discard_storage(self) {
         match self {
             Self::Ready(arg) => arg.discard_storage(),
-            Self::SharedTemp(value) => value.discard_storage(),
+            Self::SharedTemp(value, _) => value.discard_storage(),
         }
+    }
+}
+
+struct PreparedCallArgs {
+    arguments: Vec<ValOrMut>,
+    temp_drops: Vec<(Place, ResolvedLocalDrop)>,
+}
+
+impl PreparedCallArgs {
+    fn new(arguments: Vec<ValOrMut>, temp_drops: Vec<(Place, ResolvedLocalDrop)>) -> Self {
+        Self {
+            arguments,
+            temp_drops,
+        }
+    }
+
+    fn drop_temps(&mut self, ctx: &mut EvalCtx, span: Location) -> Result<(), RuntimeError> {
+        for (place, drop) in self.temp_drops.iter().rev() {
+            call_resolved_local_drop_dispatch(ctx, *drop, place.clone(), span)?;
+        }
+        self.temp_drops.clear();
+        Ok(())
+    }
+
+    fn take_arguments(&mut self) -> Vec<ValOrMut> {
+        std::mem::take(&mut self.arguments)
     }
 }
 
@@ -1847,47 +1831,58 @@ fn eval_place_result_args(
     arena: &NodeArena,
     args: &[NodeId],
     args_ty: &[FnArgType],
-    arg_passing: Option<&[ArgPassing]>,
+    arg_passing: &[ArgPassing],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
-) -> Result<ControlFlow<Vec<ValOrMut>>, RuntimeError> {
+) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError> {
     let mut results = Vec::with_capacity(args.len());
     assert_eq!(args.len(), args_ty.len());
-    for (arg, ty) in args.iter().zip(args_ty) {
-        let passing = arg_passing
-            .and_then(|passing| passing.get(results.len()).copied())
-            .unwrap_or_else(|| default_argument_passing(ty));
+    assert_eq!(args.len(), arg_passing.len());
+    for ((arg, ty), passing) in args.iter().zip(args_ty).zip(arg_passing) {
+        let passing = passing
+            .resolved()
+            .expect("ArgPassing::Unknown should have been resolved before evaluation");
         let result = match passing {
-            ArgPassing::MutableRef => resolve_node_place(arena, *arg, ctx, locals).map(|result| {
-                result.map_continue(|place| PendingPlaceResultArg::Ready(ValOrMut::Mut(place)))
-            }),
-            ArgPassing::SharedRef => match try_resolve_node_place(arena, *arg, ctx, locals) {
-                Ok(ControlFlow::Continue(Some(place))) => Ok(ControlFlow::Continue(
-                    PendingPlaceResultArg::Ready(ValOrMut::Mut(place)),
-                )),
-                Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, *arg) => {
-                    eval_dictionary_metadata_node(arena, *arg, ctx, locals).map(|result| {
-                        result.map_continue(|dictionary| {
-                            PendingPlaceResultArg::Ready(ValOrMut::Dictionary(dictionary))
+            ResolvedArgPassing::MutableRef => {
+                resolve_node_place(arena, *arg, ctx, locals).map(|result| {
+                    result.map_continue(|place| PendingPlaceResultArg::Ready(ValOrMut::Mut(place)))
+                })
+            }
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { temp_cleanup }) => {
+                match try_resolve_node_place(arena, *arg, ctx, locals) {
+                    Ok(ControlFlow::Continue(Some(place))) => Ok(ControlFlow::Continue(
+                        PendingPlaceResultArg::Ready(ValOrMut::Mut(place)),
+                    )),
+                    Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, *arg) => {
+                        eval_dictionary_metadata_node(arena, *arg, ctx, locals).map(|result| {
+                            result.map_continue(|dictionary| {
+                                PendingPlaceResultArg::Ready(ValOrMut::Dictionary(dictionary))
+                            })
                         })
-                    })
+                    }
+                    Ok(ControlFlow::Continue(None)) => {
+                        let value = eval_node_with_ctx(arena, *arg, ctx, locals)?;
+                        Ok(value.map_continue(|value| {
+                            PendingPlaceResultArg::SharedTemp(value, temp_cleanup)
+                        }))
+                    }
+                    Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
+                    Err(err) => Err(err),
                 }
-                Ok(ControlFlow::Continue(None)) => {
-                    let value = eval_node_with_ctx(arena, *arg, ctx, locals)?;
-                    Ok(value.map_continue(PendingPlaceResultArg::SharedTemp))
-                }
-                Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
-                Err(err) => Err(err),
-            },
-            ArgPassing::OwnedValue if is_dictionary_metadata_node(arena, *arg) => {
+            }
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned)
+                if is_dictionary_metadata_node(arena, *arg) =>
+            {
                 eval_dictionary_metadata_node(arena, *arg, ctx, locals).map(|result| {
                     result.map_continue(|dictionary| {
                         PendingPlaceResultArg::Ready(ValOrMut::Dictionary(dictionary))
                     })
                 })
             }
-            ArgPassing::OwnedValue => eval_owned_arg(arena, *arg, ty.ty, ctx, locals)
-                .map(|result| result.map_continue(PendingPlaceResultArg::Ready)),
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned) => {
+                eval_owned_arg(arena, *arg, ty.ty, ctx, locals)
+                    .map(|result| result.map_continue(PendingPlaceResultArg::Ready))
+            }
         };
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
@@ -1906,20 +1901,27 @@ fn eval_place_result_args(
         }
     }
     let mut arguments = Vec::with_capacity(results.len());
+    let mut temp_drops = Vec::new();
     for result in results {
         match result {
             PendingPlaceResultArg::Ready(arg) => arguments.push(arg),
-            PendingPlaceResultArg::SharedTemp(value) => {
+            PendingPlaceResultArg::SharedTemp(value, temp_cleanup) => {
                 let target = ctx.environment.len();
                 ctx.environment.push(ValOrMut::Val(value));
-                arguments.push(ValOrMut::Mut(Place {
+                let place = Place {
                     target,
                     path: Vec::new(),
-                }));
+                };
+                if let SharedRefTempCleanup::Drop(temp_drop) = temp_cleanup {
+                    temp_drops.push((place.clone(), temp_drop));
+                }
+                arguments.push(ValOrMut::Mut(place));
             }
         }
     }
-    Ok(ControlFlow::Continue(arguments))
+    Ok(ControlFlow::Continue(PreparedCallArgs::new(
+        arguments, temp_drops,
+    )))
 }
 
 fn value_into_place_result(value: Value) -> Place {
@@ -2519,39 +2521,60 @@ fn eval_args(
     arena: &NodeArena,
     args: &[NodeId],
     args_ty: &[FnArgType],
-    arg_passing: Option<&[ArgPassing]>,
+    arg_passing: &[ArgPassing],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
-) -> Result<ControlFlow<Vec<ValOrMut>>, RuntimeError> {
+) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError> {
     // Automatically cast mutable references to values if the function expects values.
     let temp_start = ctx.environment.len();
     let mut results = Vec::with_capacity(args.len());
+    let mut temp_drops = Vec::new();
     assert_eq!(args.len(), args_ty.len());
-    for (index, (arg, ty)) in args.iter().zip(args_ty).enumerate() {
-        let passing = arg_passing
-            .and_then(|passing| passing.get(index).copied())
-            .unwrap_or_else(|| default_argument_passing(ty));
+    assert_eq!(args.len(), arg_passing.len());
+    for ((arg, ty), passing) in args.iter().zip(args_ty).zip(arg_passing) {
+        let passing = passing
+            .resolved()
+            .expect("ArgPassing::Unknown should have been resolved before evaluation");
         let result = match passing {
-            ArgPassing::MutableRef => resolve_node_place(arena, *arg, ctx, locals)
+            ResolvedArgPassing::MutableRef => resolve_node_place(arena, *arg, ctx, locals)
                 .map(|result| result.map_continue(ValOrMut::Mut)),
-            ArgPassing::SharedRef => match try_resolve_node_place(arena, *arg, ctx, locals) {
-                Ok(ControlFlow::Continue(Some(place))) => {
-                    Ok(ControlFlow::Continue(ValOrMut::Mut(place)))
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { temp_cleanup }) => {
+                match try_resolve_node_place(arena, *arg, ctx, locals) {
+                    Ok(ControlFlow::Continue(Some(place))) => {
+                        Ok(ControlFlow::Continue(ValOrMut::Mut(place)))
+                    }
+                    Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, *arg) => {
+                        eval_dictionary_metadata_node(arena, *arg, ctx, locals)
+                            .map(|result| result.map_continue(ValOrMut::Dictionary))
+                    }
+                    Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, *arg, ctx, locals)
+                        .map(|result| {
+                            result.map_continue(|value| {
+                                let target = ctx.environment.len();
+                                ctx.environment.push(ValOrMut::Val(value));
+                                let place = Place {
+                                    target,
+                                    path: Vec::new(),
+                                };
+                                if let SharedRefTempCleanup::Drop(temp_drop) = temp_cleanup {
+                                    temp_drops.push((place.clone(), temp_drop));
+                                }
+                                ValOrMut::Mut(place)
+                            })
+                        }),
+                    Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
+                    Err(err) => Err(err),
                 }
-                Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, *arg) => {
-                    eval_dictionary_metadata_node(arena, *arg, ctx, locals)
-                        .map(|result| result.map_continue(ValOrMut::Dictionary))
-                }
-                Ok(ControlFlow::Continue(None)) => eval_node_with_ctx(arena, *arg, ctx, locals)
-                    .map(|result| result.map_continue(ValOrMut::Val)),
-                Ok(ControlFlow::Return(value)) => Ok(ControlFlow::Return(value)),
-                Err(err) => Err(err),
-            },
-            ArgPassing::OwnedValue if is_dictionary_metadata_node(arena, *arg) => {
+            }
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned)
+                if is_dictionary_metadata_node(arena, *arg) =>
+            {
                 eval_dictionary_metadata_node(arena, *arg, ctx, locals)
                     .map(|result| result.map_continue(ValOrMut::Dictionary))
             }
-            ArgPassing::OwnedValue => eval_owned_arg(arena, *arg, ty.ty, ctx, locals),
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned) => {
+                eval_owned_arg(arena, *arg, ty.ty, ctx, locals)
+            }
         };
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
@@ -2571,7 +2594,9 @@ fn eval_args(
             }
         }
     }
-    Ok(ControlFlow::Continue(results))
+    Ok(ControlFlow::Continue(PreparedCallArgs::new(
+        results, temp_drops,
+    )))
 }
 
 fn eval_owned_arg(
@@ -2623,21 +2648,6 @@ fn is_dictionary_entry_projection(
     };
     let result = try_dictionary_from_place(&place, ctx).is_some();
     Ok(ControlFlow::Continue(result))
-}
-
-fn default_argument_passing(arg: &FnArgType) -> ArgPassing {
-    if arg
-        .mut_ty
-        .as_resolved()
-        .expect("Unresolved mutability variable found during execution")
-        .is_mutable()
-    {
-        ArgPassing::MutableRef
-    } else if is_direct_interpreter_argument(arg.ty) {
-        ArgPassing::OwnedValue
-    } else {
-        ArgPassing::SharedRef
-    }
 }
 
 fn is_direct_interpreter_argument(ty: Type) -> bool {
@@ -2712,6 +2722,9 @@ fn try_resolve_node_place(
             }) else {
                 return Ok(ControlFlow::Continue(None));
             };
+            if !node_may_resolve_to_place(arena, nodes[place_index]) {
+                return Ok(ControlFlow::Continue(None));
+            }
             for &node in &nodes[..place_index] {
                 eval_or_return!(eval_node_with_ctx(arena, node, ctx, locals));
             }
@@ -2727,6 +2740,37 @@ fn try_resolve_node_place(
     })))
 }
 
+fn node_may_resolve_to_place(arena: &NodeArena, id: NodeId) -> bool {
+    match &arena[id].kind {
+        NodeKind::EnvLoad(_) => true,
+        NodeKind::Project(base, _)
+        | NodeKind::FieldAccess(base, _)
+        | NodeKind::ProjectAt(base, _) => node_may_resolve_to_place(arena, *base),
+        NodeKind::Apply(app) => app.returns_place,
+        NodeKind::StaticApply(app) => app.returns_place,
+        NodeKind::CloneValue(node)
+            if matches!(
+                node.clone,
+                LocalClone::Resolved(
+                    ResolvedLocalClone::Static(_) | ResolvedLocalClone::Dictionary(_)
+                )
+            ) =>
+        {
+            node_may_resolve_to_place(arena, node.source)
+        }
+        NodeKind::Block(nodes) => nodes
+            .iter()
+            .rposition(|node| {
+                !matches!(
+                    arena[*node].kind,
+                    NodeKind::EnvDrop(_) | NodeKind::EnvStore(_)
+                )
+            })
+            .is_some_and(|place_index| node_may_resolve_to_place(arena, nodes[place_index])),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2739,7 +2783,7 @@ mod tests {
         eval::{ControlFlow, EvalCtx, eval_args, eval_nodes},
         hir::{
             Immediate, Node, NodeArena, NodeKind,
-            function::ArgPassing,
+            function::{ArgPassing, ResolvedValueArgPassing, ValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
         module::{ModuleId, id::Id},
@@ -2838,13 +2882,16 @@ mod tests {
             FnArgType::new_by_val(Type::primitive::<EvalDropTracked>()),
             FnArgType::new_by_val(Type::unit()),
         ];
-        let arg_passing = [ArgPassing::OwnedValue, ArgPassing::OwnedValue];
+        let arg_passing = [
+            ArgPassing::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned)),
+            ArgPassing::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned)),
+        ];
 
         let result = eval_args(
             &arena,
             &[tracked, return_unit],
             &arg_tys,
-            Some(&arg_passing),
+            &arg_passing,
             &mut ctx,
             &[],
         )

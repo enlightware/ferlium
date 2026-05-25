@@ -3,6 +3,7 @@
 This document records the ownership invariants that SSA lowering should rely on.
 It describes HIR after type inference, borrow checking, and dictionary elaboration.
 At that point all `LocalClone::Unknown` and `LocalDrop::Unknown` placeholders must have been resolved.
+All call-site `ArgPassing` metadata must also have been resolved.
 
 See `doc/abi.md` for the physical calling convention.
 This document is about source-level ownership semantics and the HIR operations that preserve them.
@@ -50,7 +51,7 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 - A `let` initialized from a known immutable place may be non-owning.
 - Closure captures are materialized as owned values before `BuildClosure`.
 - Function returns move an owned local with `EnvMove` when returning that local out of the current scope.
-- Non-place arguments passed by shared-reference ABI are stored in owned temporaries; the call receives places to those temporaries and the temporaries are dropped after the call.
+- Function calls use the explicit argument passing rules described below.
 - Projections and place-result calls of non-place bases use explicit owned temporaries when consumed as places; if an owned result is needed, that place is then wrapped in `CloneValue`.
 
 # Drops and Cleanup
@@ -107,6 +108,27 @@ Dispatch sites are:
 - `CloneValue`: clone or copy a place into a fresh owned temporary result.
 - `EnvDrop` with `LocalDecl::drop`: drop an owned local.
 - `Assignment::drop`: drop the overwritten destination value.
+
+# Call Argument Passing
+
+HIR call nodes store source-level argument passing decisions:
+
+- `MutableRef`: resolve the argument as a mutable place.
+- `Value(Owned)`: evaluate or copy the argument as an owned value.
+- `Value(SharedRef)`: pass a shared reference to existing storage when possible, or materialize an owned temporary and pass a place to it.
+
+If a shared-reference argument is materialized into an owned temporary at the call edge, `SharedRefTempCleanup` records whether that temporary needs a resolved `Value::drop` cleanup after the call.
+
+During type inference, value argument passing may be unknown because the final type is still a type variable.
+Dictionary elaboration resolves these unknowns using the final type:
+
+- concrete `TrivialCopy` values are passed as owned values;
+- other value types are passed by shared reference;
+- native functions can force already-resolved passing modes from their Rust-side argument extractors.
+
+The interpreter and SSA lowering must consume this call-site metadata.
+They must not recompute source-level argument passing from the final function type.
+The physical direct-vs-indirect ABI decision remains a backend concern, as described in `doc/abi.md`.
 
 # Function Values
 

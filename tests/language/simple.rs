@@ -1497,6 +1497,27 @@ fn variants() {
         session.run(&format!("{match_open} fn f() {{ s(None) }} f()")),
         string("no")
     );
+    assert_val_eq!(
+        session.run(
+            r#"
+            fn sink<T>(x: None | Some((T,))) -> string { "ok" }
+            fn f() { sink(None) }
+            f()
+            "#,
+        ),
+        string("ok")
+    );
+    assert_val_eq!(
+        session.run(
+            r#"
+            enum Option<T> { None, Some(T) }
+            fn sink<T>(x: Option<(T,)>) -> string { "ok" }
+            fn f() { sink(Option::None) }
+            f()
+            "#,
+        ),
+        string("ok")
+    );
 
     // area example
     let match_exhaustive = r#"fn a(x) { match x { Square(r) => r * r, Rect(w, h) => w * h } }"#;

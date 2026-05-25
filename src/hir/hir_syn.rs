@@ -9,6 +9,7 @@
 use crate::{
     Location,
     containers::{IntoSVec2, b},
+    hir::function::{ArgPassing, resolved_arg_passing_for_no_temp_args},
     hir::value::{LiteralNativeValue, LiteralValue},
     hir::{self, NodeId},
     module::{
@@ -47,6 +48,18 @@ pub fn static_apply(
     span: Location,
 ) -> NodeKind {
     let arguments = arguments.into();
+    let argument_passing = resolved_arg_passing_for_no_temp_args(&ty.args);
+    static_apply_with_argument_passing(function, ty, arguments, argument_passing, span)
+}
+
+pub fn static_apply_with_argument_passing(
+    function: FunctionId,
+    ty: FnType,
+    arguments: impl Into<Vec<NodeId>>,
+    argument_passing: Vec<ArgPassing>,
+    span: Location,
+) -> NodeKind {
+    let arguments = arguments.into();
     K::StaticApply(b(hir::StaticApplication {
         function,
         function_path: None,
@@ -55,6 +68,7 @@ pub fn static_apply(
         argument_names: (0..arguments.len())
             .map(|i| ustr(&format!("arg{i}")))
             .collect(),
+        argument_passing,
         arguments,
         ty,
         inst_data: hir::FnInstData::none(),

@@ -13,7 +13,7 @@ use crate::{
     ast::{self, DExprArena},
     compiler::error::{InternalCompilationError, UnsafeFeature},
     hir::NodeArena,
-    hir::function::{ArgPassing, FunctionDefinition},
+    hir::function::{FunctionDefinition, ResolvedArgPassing},
     module::{
         FunctionId, ImportFunctionSlot, ImportFunctionSlotId, ImportFunctionTarget, LocalDecl,
         LocalDeclId, LocalFunctionId, ModuleEnv, ModuleFunction, ModuleId, TypeDefLookupResult,
@@ -34,7 +34,7 @@ pub type GetFunctionData<'a> = (
     &'a FunctionDefinition,
     FunctionId,
     Option<ModuleId>,
-    Option<&'static [ArgPassing]>,
+    Option<&'static [ResolvedArgPassing]>,
 );
 pub type GetFunctionWithPathData<'a> = (ast::Path, GetFunctionData<'a>);
 

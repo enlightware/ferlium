@@ -403,10 +403,11 @@ impl UnifiedTypeInference {
         Ok(())
     }
 
-    /// Default naked orphan trait inputs to unit when they can be satisfied that way.
-    /// This is a narrow fallback for cases like `s(None)`, where a unit variant constructor
-    /// leaves only a trait constraint like `A: Value` after variant information is otherwise gone.
-    pub fn default_naked_trait_inputs_to_unit(
+    /// Default orphan trait inputs from unit variant constructors to unit when they can be
+    /// satisfied that way. This is a narrow fallback for cases like `s(None)`, where a unit
+    /// variant constructor leaves only trait constraints involving its absent payload type,
+    /// such as `A: Value`, `Option<A>: Value`, or `Option<(A,)>: Value`.
+    pub fn default_unit_variant_trait_inputs_to_unit(
         &mut self,
         constraints: &[PubTypeConstraint],
         trait_solver: &mut TraitSolver<'_>,
@@ -420,9 +421,7 @@ impl UnifiedTypeInference {
                 continue;
             };
             for input_ty in input_tys {
-                if let Some(ty_var) = input_ty.data().as_variable().copied() {
-                    candidate_ty_vars.insert(ty_var);
-                }
+                candidate_ty_vars.extend(input_ty.inner_ty_vars());
             }
         }
 
@@ -455,22 +454,13 @@ impl UnifiedTypeInference {
                     break;
                 };
 
-                let occurs_naked_in_inputs = input_tys.iter().any(|input_ty| {
-                    input_ty
-                        .data()
-                        .as_variable()
-                        .is_some_and(|current| *current == ty_var)
-                });
-                let occurs_nested_elsewhere = input_tys.iter().any(|input_ty| {
-                    input_ty.contains_any_type_var(ty_var)
-                        && input_ty
-                            .data()
-                            .as_variable()
-                            .is_none_or(|current| *current != ty_var)
-                }) || output_tys
+                let occurs_in_inputs = input_tys
+                    .iter()
+                    .any(|input_ty| input_ty.contains_any_type_var(ty_var));
+                let occurs_in_outputs = output_tys
                     .iter()
                     .any(|output_ty| output_ty.contains_any_type_var(ty_var));
-                if !occurs_naked_in_inputs || occurs_nested_elsewhere {
+                if !occurs_in_inputs || occurs_in_outputs {
                     all_satisfied = false;
                     break;
                 }
@@ -637,7 +627,7 @@ impl UnifiedTypeInference {
             let unit_default_constraints =
                 scope.unit_default_constraints(self, &remaining_constraints, &boundary_constraints);
             if !unit_default_constraints.is_empty() {
-                self.default_naked_trait_inputs_to_unit(
+                self.default_unit_variant_trait_inputs_to_unit(
                     &unit_default_constraints,
                     trait_solver,
                     arena,

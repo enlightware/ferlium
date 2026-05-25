@@ -15,9 +15,13 @@ use crate::{
     Location, cached_ty,
     compiler::error::InternalCompilationError,
     containers::{SVec2, b},
-    hir::function::FunctionDefinition,
+    hir::hir_syn::native_str,
     hir::value::{LiteralValue, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
+    hir::{
+        dictionary_passing::{resolved_arg_passing_for_generated_call, static_apply_generated},
+        function::FunctionDefinition,
+    },
     module::{
         self, LocalClone, LocalDeclId, Module, ProjectionIndex, ResolvedLocalClone, TraitImplId,
         id::Id,
@@ -76,11 +80,15 @@ fn build_serialize_projection(
     );
     let function =
         solver.solve_impl_method(trait_ref, &[member_ty], TraitMethodIndex(0), span, arena)?;
-    Ok(alloc_synth_node(
+    let apply = static_apply_generated(
         arena,
-        static_apply_pure(function, [(project_node, member_ty)], variant_type(), span),
+        solver,
+        function,
+        [(project_node, member_ty)],
         variant_type(),
-    ))
+        span,
+    )?;
+    Ok(alloc_synth_node(arena, apply, variant_type()))
 }
 
 fn object_payload_type() -> Type {
@@ -350,16 +358,15 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
             |arena: &mut NodeArena, solver: &mut TraitSolver, variant: NodeId, ty: Type| {
                 let function =
                     solver.solve_impl_method(trait_ref, &[ty], TraitMethodIndex(0), span, arena)?;
-                Ok(n(
+                let apply = static_apply_generated(
                     arena,
-                    static_apply_pure(
-                        function,
-                        [(variant, variant_type())],
-                        ty,
-                        Location::new_synthesized(),
-                    ),
+                    solver,
+                    function,
+                    [(variant, variant_type())],
                     ty,
-                ))
+                    Location::new_synthesized(),
+                )?;
+                Ok(n(arena, apply, ty))
             };
 
         // derive tuple, record, variant deserialization
@@ -449,6 +456,12 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         &module::Path::single_str("std"),
                         ustr("array_index"),
                     )?;
+                    let arguments = vec![get_array, index_node];
+                    let ty =
+                        FnType::new_by_val([array_ty, int_type()], variant_ty, EffType::empty());
+                    let argument_passing = resolved_arg_passing_for_generated_call(
+                        arena, solver, &arguments, &ty.args, span,
+                    )?;
                     let index_place = n(
                         arena,
                         hir::NodeKind::StaticApply(b(hir::StaticApplication {
@@ -456,13 +469,10 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             function_path: None,
                             function_span: span,
                             extra_arguments: vec![dictionary_node],
-                            arguments: vec![get_array, index_node],
+                            arguments,
+                            argument_passing,
                             argument_names: vec![ustr("array"), ustr("index")],
-                            ty: FnType::new_by_val(
-                                [array_ty, int_type()],
-                                variant_ty,
-                                EffType::empty(),
-                            ),
+                            ty,
                             inst_data: hir::FnInstData::none(),
                             returns_place: true,
                         })),
@@ -527,16 +537,15 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                         span,
                         arena,
                     )?;
-                    Ok(n(
+                    let apply = static_apply_generated(
                         arena,
-                        static_apply_pure(
-                            function,
-                            [(get_entry, variant_type())],
-                            ty,
-                            Location::new_synthesized(),
-                        ),
+                        solver,
+                        function,
+                        [(get_entry, variant_type())],
                         ty,
-                    ))
+                        Location::new_synthesized(),
+                    )?;
+                    Ok(n(arena, apply, ty))
                 })
                 .collect::<Result<SVec2<_>, _>>()?;
             // build the record node
@@ -686,7 +695,6 @@ fn build_panic(
     solver: &mut TraitSolver,
     message: &str,
 ) -> Result<NodeId, InternalCompilationError> {
-    use hir::hir_syn::*;
     let span = Location::new_synthesized();
 
     // helpers to synthesize HIR
@@ -696,16 +704,15 @@ fn build_panic(
 
     let build_string = n(arena, native_str(message), string_type());
     let function = solver.get_function(span, &module::Path::single_str("std"), ustr("panic"))?;
-    Ok(n(
+    let apply = static_apply_generated(
         arena,
-        static_apply_pure(
-            function,
-            [(build_string, string_type())],
-            Type::never(),
-            span,
-        ),
+        solver,
+        function,
+        [(build_string, string_type())],
         Type::never(),
-    ))
+        span,
+    )?;
+    Ok(n(arena, apply, Type::never()))
 }
 
 fn build_variant_to_array(
@@ -745,7 +752,6 @@ fn build_variant_to_x(
     ret_ty: Type,
     variant_node: NodeId,
 ) -> Result<NodeId, InternalCompilationError> {
-    use hir::hir_syn::*;
     let span = Location::new_synthesized();
 
     // helpers to synthesize HIR
@@ -758,11 +764,15 @@ fn build_variant_to_x(
         &module::Path::single_str("std"),
         ustr(&format!("variant_to_{what}")),
     )?;
-    Ok(n(
+    let apply = static_apply_generated(
         arena,
-        static_apply_pure(function, [(variant_node, variant_type())], ret_ty, span),
+        solver,
+        function,
+        [(variant_node, variant_type())],
         ret_ty,
-    ))
+        span,
+    )?;
+    Ok(n(arena, apply, ret_ty))
 }
 
 // Build a node that gets an entry from a variant object payload [(string, Variant)].
@@ -790,14 +800,13 @@ fn build_expect_variant_object_entry(
         &module::Path::single_str("std"),
         ustr("expect_variant_object_entry"),
     )?;
-    Ok(n(
+    let apply = static_apply_generated(
         arena,
-        static_apply_pure(
-            function,
-            [(fields, payload_ty), (name_node, string_type())],
-            variant_type(),
-            span,
-        ),
+        solver,
+        function,
+        [(fields, payload_ty), (name_node, string_type())],
         variant_type(),
-    ))
+        span,
+    )?;
+    Ok(n(arena, apply, variant_type()))
 }

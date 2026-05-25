@@ -18,7 +18,9 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::b,
-    hir::function::{Function, ScriptFunction, VoidFunction},
+    hir::function::{
+        Function, ScriptFunction, VoidFunction, resolved_arg_passing_for_no_temp_args,
+    },
     hir::hir_syn::{get_dictionary, load},
     hir::{self, FnInstData, Node, NodeArena, NodeKind, StaticApplication},
     internal_compilation_error,
@@ -1755,6 +1757,9 @@ impl<'a> TraitSolver<'a> {
                                 function_span: fn_span,
                                 extra_arguments: constraint_dict_nodes,
                                 argument_names: def.arg_names.clone(),
+                                argument_passing: resolved_arg_passing_for_no_temp_args(
+                                    &def.ty_scheme.ty.args,
+                                ),
                                 arguments,
                                 ty: def.ty_scheme.ty.clone(),
                                 inst_data: FnInstData::none(),
@@ -1955,6 +1960,9 @@ impl<'a> TraitSolver<'a> {
                             function_span: fn_span,
                             extra_arguments: constraint_dict_nodes,
                             argument_names: def.arg_names.clone(),
+                            argument_passing: resolved_arg_passing_for_no_temp_args(
+                                &def.ty_scheme.ty.args,
+                            ),
                             arguments,
                             ty: def.ty_scheme.ty.clone(),
                             inst_data: FnInstData::none(),

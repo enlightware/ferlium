@@ -15,6 +15,10 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     format::FormatWith,
+    hir::function::{
+        ArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, ValueArgPassing,
+        resolve_arg_passing_for_call,
+    },
     module::{
         ConcreteTraitImplKey, ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDrop,
         LocalFunctionId, ModuleEnv, ProjectionIndex, ResolvedLocalClone, ResolvedLocalDrop,
@@ -45,9 +49,9 @@ use crate::{
             is_value_trait_for_function_type, value_layout_associated_const_values,
         },
     },
-    types::effects::no_effects,
+    types::effects::{EffType, no_effects},
     types::mutability::MutType,
-    types::r#type::{FnArgType, Type, TypeKind},
+    types::r#type::{FnArgType, FnType, Type, TypeKind},
 };
 
 /// A dictionary requirement, that will be passed as extra parameter to a function.
@@ -619,6 +623,163 @@ fn resolve_local_drop(
     }))
 }
 
+fn resolve_arg_passing(
+    arena: &mut NodeArena,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    passing: &mut ArgPassing,
+    arg: NodeId,
+    ty: Type,
+    span: Location,
+) -> Result<(), InternalCompilationError> {
+    match passing {
+        ArgPassing::MutableRef | ArgPassing::Value(ValueArgPassing::Resolved(_)) => {}
+        ArgPassing::Value(ValueArgPassing::Unknown | ValueArgPassing::SharedRefUnknownDrop) => {
+            let needs_temp = crate::hir::function::call_argument_may_need_temp(arena, arg);
+            *passing = ArgPassing::Value(ValueArgPassing::Resolved(resolve_value_arg_passing(
+                arena, ctx, ty, needs_temp, span,
+            )?));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_value_arg_passing(
+    arena: &mut NodeArena,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    ty: Type,
+    needs_temp: bool,
+    span: Location,
+) -> Result<ResolvedValueArgPassing, InternalCompilationError> {
+    if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
+        Ok(ResolvedValueArgPassing::Owned)
+    } else if !needs_temp {
+        Ok(ResolvedValueArgPassing::SharedRef {
+            temp_cleanup: SharedRefTempCleanup::None,
+        })
+    } else {
+        Ok(ResolvedValueArgPassing::SharedRef {
+            temp_cleanup: SharedRefTempCleanup::Drop(resolve_temp_drop(arena, ctx, ty, span)?),
+        })
+    }
+}
+
+fn resolve_temp_drop(
+    arena: &mut NodeArena,
+    ctx: &mut DictElaborationCtx<'_, '_, '_>,
+    ty: Type,
+    span: Location,
+) -> Result<ResolvedLocalDrop, InternalCompilationError> {
+    match resolve_local_drop(arena, ctx, ty, span)? {
+        LocalDrop::Resolved(drop) => Ok(drop),
+        LocalDrop::Unknown => unreachable!("resolve_local_drop always resolves"),
+    }
+}
+
+pub(crate) fn resolved_arg_passing_for_generated_call(
+    arena: &mut NodeArena,
+    trait_solver: &mut TraitSolver<'_>,
+    args: &[NodeId],
+    arg_tys: &[FnArgType],
+    span: Location,
+) -> Result<Vec<ArgPassing>, InternalCompilationError> {
+    resolve_arg_passing_for_call(
+        arena,
+        trait_solver,
+        args,
+        arg_tys,
+        span,
+        resolve_generated_value_arg_passing,
+    )
+}
+
+/// Build a generated static call whose visible argument passing is resolved from
+/// the final argument types and the actual argument HIR nodes.
+pub(crate) fn static_apply_generated(
+    arena: &mut NodeArena,
+    trait_solver: &mut TraitSolver<'_>,
+    function: FunctionId,
+    arguments: impl IntoIterator<Item = (NodeId, Type)>,
+    ret_ty: Type,
+    span: Location,
+) -> Result<NodeKind, InternalCompilationError> {
+    let (arguments, args_tys): (Vec<_>, Vec<_>) = arguments.into_iter().unzip();
+    let fn_ty = FnType::new_by_val(args_tys, ret_ty, EffType::empty());
+    let argument_passing = resolved_arg_passing_for_generated_call(
+        arena,
+        trait_solver,
+        &arguments,
+        &fn_ty.args,
+        span,
+    )?;
+    Ok(hir::hir_syn::static_apply_with_argument_passing(
+        function,
+        fn_ty,
+        arguments,
+        argument_passing,
+        span,
+    ))
+}
+
+fn resolve_generated_value_arg_passing(
+    arena: &mut NodeArena,
+    trait_solver: &mut TraitSolver<'_>,
+    ty: Type,
+    needs_temp: bool,
+    span: Location,
+) -> Result<ResolvedValueArgPassing, InternalCompilationError> {
+    if generated_type_has_trivial_copy_impl(arena, trait_solver, ty, span) {
+        Ok(ResolvedValueArgPassing::Owned)
+    } else if !needs_temp {
+        Ok(ResolvedValueArgPassing::SharedRef {
+            temp_cleanup: SharedRefTempCleanup::None,
+        })
+    } else {
+        Ok(ResolvedValueArgPassing::SharedRef {
+            temp_cleanup: SharedRefTempCleanup::Drop(resolve_generated_temp_drop(
+                arena,
+                trait_solver,
+                ty,
+                span,
+            )?),
+        })
+    }
+}
+
+fn resolve_generated_temp_drop(
+    arena: &mut NodeArena,
+    trait_solver: &mut TraitSolver<'_>,
+    ty: Type,
+    span: Location,
+) -> Result<ResolvedLocalDrop, InternalCompilationError> {
+    if generated_type_has_trivial_copy_impl(arena, trait_solver, ty, span) {
+        return Ok(ResolvedLocalDrop::Skip);
+    }
+    if is_function_surface_only_value_type(ty) {
+        return Ok(ResolvedLocalDrop::Static(FunctionId::Local(
+            function_value_method(trait_solver, VALUE_DROP_METHOD_INDEX, span, arena)?,
+        )));
+    }
+    Ok(ResolvedLocalDrop::Static(trait_solver.solve_impl_method(
+        &VALUE_TRAIT,
+        &[ty],
+        VALUE_DROP_METHOD_INDEX,
+        span,
+        arena,
+    )?))
+}
+
+fn generated_type_has_trivial_copy_impl(
+    arena: &mut NodeArena,
+    trait_solver: &mut TraitSolver<'_>,
+    ty: Type,
+    span: Location,
+) -> bool {
+    ty.is_constant()
+        && trait_solver
+            .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, arena)
+            .is_ok()
+}
+
 fn type_has_concrete_trivial_copy_impl(
     arena: &mut NodeArena,
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
@@ -700,6 +861,9 @@ impl Node {
                 for &arg_id in &app.arguments {
                     elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
                 }
+                for (passing, &arg_id) in app.argument_passing.iter_mut().zip(&app.arguments) {
+                    resolve_arg_passing(arena, ctx, passing, arg_id, arena[arg_id].ty, node_span)?;
+                }
             }
             FunctionClone(node) => {
                 elaborate_dictionaries(arena, node.source, ctx, local_count)?;
@@ -720,6 +884,14 @@ impl Node {
                 }
                 for &arg_id in &app.arguments {
                     elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
+                }
+                for ((passing, arg_ty), &arg_id) in app
+                    .argument_passing
+                    .iter_mut()
+                    .zip(&app.ty.args)
+                    .zip(&app.arguments)
+                {
+                    resolve_arg_passing(arena, ctx, passing, arg_id, arg_ty.ty, node_span)?;
                 }
                 if !app.inst_data.dicts_req.is_empty() {
                     // Build the dictionary requirements for the function as evidence arguments.
@@ -750,6 +922,14 @@ impl Node {
                 for &arg_id in &app.arguments {
                     elaborate_dictionaries(arena, arg_id, ctx, local_count)?;
                 }
+                for ((passing, arg_ty), &arg_id) in app
+                    .argument_passing
+                    .iter_mut()
+                    .zip(&app.ty.args)
+                    .zip(&app.arguments)
+                {
+                    resolve_arg_passing(arena, ctx, passing, arg_id, arg_ty.ty, node_span)?;
+                }
                 assert!(
                     app.inst_data.dicts_req.is_empty(),
                     "Instantiation data for trait method is not supported yet."
@@ -768,12 +948,14 @@ impl Node {
                     let function_span = app.method_span;
                     let ty = app.ty.clone();
                     let arguments = mem::take(&mut app.arguments);
+                    let argument_passing = mem::take(&mut app.argument_passing);
                     kind = StaticApply(b(hir::StaticApplication {
                         function,
                         function_path,
                         function_span,
                         extra_arguments: Vec::new(),
                         arguments,
+                        argument_passing,
                         argument_names,
                         ty,
                         inst_data: hir::FnInstData::none(),
@@ -794,12 +976,14 @@ impl Node {
                     let function_span = app.method_span;
                     let ty = app.ty.clone();
                     let arguments = mem::take(&mut app.arguments);
+                    let argument_passing = mem::take(&mut app.argument_passing);
                     kind = StaticApply(b(hir::StaticApplication {
                         function,
                         function_path,
                         function_span,
                         extra_arguments: Vec::new(),
                         arguments,
+                        argument_passing,
                         argument_names,
                         ty,
                         inst_data: hir::FnInstData::none(),
@@ -833,9 +1017,11 @@ impl Node {
                         function_span,
                     );
                     let arguments = mem::take(&mut app.arguments);
+                    let argument_passing = mem::take(&mut app.argument_passing);
                     kind = Apply(b(hir::Application {
                         function: project_fn_id,
                         arguments,
+                        argument_passing,
                         returns_place: false,
                     }));
                 } else {
@@ -867,9 +1053,11 @@ impl Node {
                     );
                     // Finally use the function pointer to call the function.
                     let arguments = mem::take(&mut app.arguments);
+                    let argument_passing = mem::take(&mut app.argument_passing);
                     kind = Apply(b(hir::Application {
                         function: project_fn_id,
                         arguments,
+                        argument_passing,
                         returns_place: false,
                     }));
                 }

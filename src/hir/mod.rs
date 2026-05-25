@@ -19,6 +19,7 @@ use crate::{
     Location,
     ast::{self, UnnamedArg},
     format::FormatWith,
+    hir::function::ArgPassing,
     module::{
         ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
         ProjectionIndex, ResolvedLocalClone, TraitImplId, id::Id,
@@ -47,6 +48,60 @@ pub type NodeId = Idx<Node>;
 
 /// An arena of HIR nodes
 pub type NodeArena = Arena<Node>;
+
+pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> bool {
+    use NodeKind::*;
+
+    match &arena[node_id].kind {
+        EnvLoad(_) => true,
+        GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
+        Project(_, _) | FieldAccess(_, _) | ProjectAt(_, _) => true,
+        Apply(app) => app.returns_place,
+        StaticApply(app) => app.returns_place,
+        _ => false,
+    }
+}
+
+pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeId) -> bool {
+    use NodeKind::*;
+
+    match &arena[node_id].kind {
+        EnvLoad(_) => false,
+        GetTraitMethod(_) => false,
+        Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
+            !node_is_place_reference(arena, *base) || place_resolution_may_create_temp(arena, *base)
+        }
+        Apply(app) if app.returns_place => {
+            !node_is_place_reference(arena, app.function)
+                || place_resolution_may_create_temp(arena, app.function)
+                || place_result_base_argument_index(arena, &app.arguments).is_some_and(
+                    |base_index| !node_is_place_reference(arena, app.arguments[base_index]),
+                )
+                || app
+                    .arguments
+                    .iter()
+                    .any(|arg| place_resolution_may_create_temp(arena, *arg))
+        }
+        StaticApply(app) if app.returns_place => {
+            place_result_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
+                !node_is_place_reference(arena, app.arguments[base_index])
+            }) || app
+                .arguments
+                .iter()
+                .any(|arg| place_resolution_may_create_temp(arena, *arg))
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn place_result_base_argument_index(
+    arena: &NodeArena,
+    arguments: &[NodeId],
+) -> Option<usize> {
+    arguments
+        .iter()
+        .position(|argument| !matches!(arena[*argument].kind, NodeKind::GetDictionary(_)))
+}
 
 /// Function instantiation data that are needed to fill dictionaries
 #[derive(Debug, Clone, new)]
@@ -121,6 +176,7 @@ pub struct BuildClosure {
 pub struct Application {
     pub function: NodeId,
     pub arguments: Vec<NodeId>,
+    pub argument_passing: Vec<ArgPassing>,
     pub returns_place: bool,
 }
 
@@ -151,6 +207,7 @@ pub struct StaticApplication {
     pub function_span: Location,
     pub extra_arguments: Vec<NodeId>,
     pub arguments: Vec<NodeId>,
+    pub argument_passing: Vec<ArgPassing>,
     pub argument_names: Vec<Ustr>,
     pub ty: FnType,
     pub inst_data: FnInstData,
@@ -164,6 +221,7 @@ pub struct TraitMethodApplication {
     pub method_path: ast::Path,
     pub method_span: Location,
     pub arguments: Vec<NodeId>,
+    pub argument_passing: Vec<ArgPassing>,
     pub arguments_unnamed: UnnamedArg,
     pub ty: FnType,
     pub input_tys: Vec<Type>,

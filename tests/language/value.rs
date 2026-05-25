@@ -12,7 +12,11 @@ use ustr::ustr;
 use crate::harness::{TestSession, int, string};
 use ferlium::{
     compiler::error::{CompilationErrorImpl, RuntimeErrorKind},
-    hir::{self, NodeKind, value::Value},
+    hir::{
+        self, NodeKind,
+        function::{ArgPassing, ResolvedValueArgPassing, SharedRefTempCleanup, ValueArgPassing},
+        value::Value,
+    },
     module::{LocalClone, ResolvedLocalClone},
 };
 
@@ -177,6 +181,41 @@ fn generic_value_dictionary_for_function_type_is_compiler_provided() {
             "#
         ),
         string("<function>")
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn generated_value_to_string_calls_resolve_temp_cleanup_for_string_pieces() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(
+        r#"
+        struct Pair(int, int)
+        to_string(Pair(1, 2))
+        "#,
+    );
+
+    assert!(
+        module.ir_arena.iter().any(|(_, node)| {
+            let NodeKind::StaticApply(app) = &node.kind else {
+                return false;
+            };
+            matches!(
+                (
+                    app.arguments.get(1),
+                    app.argument_passing.get(1),
+                ),
+                (
+                    Some(argument),
+                    Some(ArgPassing::Value(ValueArgPassing::Resolved(
+                        ResolvedValueArgPassing::SharedRef {
+                            temp_cleanup: SharedRefTempCleanup::Drop(_),
+                        },
+                    ))),
+                ) if matches!(module.ir_arena[*argument].kind, NodeKind::Immediate(_))
+            )
+        }),
+        "generated calls passing string literal pieces by shared reference should resolve temp cleanup"
     );
 }
 

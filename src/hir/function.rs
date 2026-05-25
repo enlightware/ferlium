@@ -30,10 +30,12 @@ use crate::{
     },
     format::{FormatWith, write_identifier},
     hir::value::{NativeDisplay, Value},
-    hir::{self, NodeId},
-    module::{LocalDecl, ModuleEnv, ModuleFunction},
+    hir::{self, NodeArena, NodeId},
+    module::{LocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop},
     types::effects::EffType,
-    types::r#type::{FnType, Type, fmt_fn_type_with_arg_names},
+    types::r#type::{
+        FnArgType, FnType, Type, TypeKind, bare_native_type, fmt_fn_type_with_arg_names,
+    },
     types::type_like::TypeLike,
     types::type_mapper::TypeMapper,
     types::type_scheme::{PubTypeConstraint, TypeScheme},
@@ -251,7 +253,7 @@ pub trait Callable: DynClone {
     fn as_script(&self) -> Option<&ScriptFunction> {
         None
     }
-    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
+    fn argument_passing(&self) -> Option<&'static [ResolvedArgPassing]> {
         None
     }
     fn as_script_mut(&mut self) -> Option<&mut ScriptFunction> {
@@ -309,15 +311,164 @@ impl Drop for CallArgsStorageGuard {
 
 pub type Function = Box<dyn Callable>;
 
-/// How a callable expects an argument to be prepared at runtime.
+/// How a call argument should be prepared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgPassing {
-    /// Evaluate the source expression to an owned value.
-    OwnedValue,
-    /// Keep a place as a shared borrow when possible, falling back to a temporary owned value.
-    SharedRef,
     /// Resolve the source expression as a mutable place.
     MutableRef,
+    /// Pass a non-mutable value argument.
+    Value(ValueArgPassing),
+}
+
+impl ArgPassing {
+    pub fn resolved(self) -> Option<ResolvedArgPassing> {
+        match self {
+            Self::MutableRef => Some(ResolvedArgPassing::MutableRef),
+            Self::Value(ValueArgPassing::Unknown | ValueArgPassing::SharedRefUnknownDrop) => None,
+            Self::Value(ValueArgPassing::Resolved(passing)) => {
+                Some(ResolvedArgPassing::Value(passing))
+            }
+        }
+    }
+
+    pub fn from_resolved(passing: ResolvedArgPassing) -> Self {
+        match passing {
+            ResolvedArgPassing::MutableRef => Self::MutableRef,
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned) => {
+                Self::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned))
+            }
+            ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef { .. }) => {
+                Self::Value(ValueArgPassing::SharedRefUnknownDrop)
+            }
+        }
+    }
+}
+
+/// How a call argument by value should be prepared, possibly unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueArgPassing {
+    /// Decide between owned value and shared reference after type inference.
+    Unknown,
+    /// Shared reference is required, but temporary drop dispatch is not resolved yet.
+    SharedRefUnknownDrop,
+    Resolved(ResolvedValueArgPassing),
+}
+
+/// How a call argument should be prepared, once resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedArgPassing {
+    /// Resolve the source expression as a mutable place.
+    MutableRef,
+    /// Pass a non-mutable value argument.
+    Value(ResolvedValueArgPassing),
+}
+
+/// How a call argument by value should be prepared, once resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedValueArgPassing {
+    /// Evaluate the source expression to an owned value.
+    Owned,
+    /// Keep a place as a shared borrow when possible, falling back to a temporary owned value.
+    SharedRef { temp_cleanup: SharedRefTempCleanup },
+}
+
+/// Cleanup required if a shared-ref argument is materialized into an owned temporary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedRefTempCleanup {
+    /// This call edge is known not to materialize an owned temporary.
+    None,
+    /// Drop a materialized owned temporary with this resolved drop operation.
+    Drop(ResolvedLocalDrop),
+}
+
+fn unresolved_arg_passing_for_arg(arg: &FnArgType) -> ArgPassing {
+    if arg
+        .mut_ty
+        .as_resolved()
+        .is_some_and(|mut_ty| mut_ty.is_mutable())
+    {
+        ArgPassing::MutableRef
+    } else {
+        ArgPassing::Value(ValueArgPassing::Unknown)
+    }
+}
+
+pub fn unresolved_arg_passing_for_args(args: &[FnArgType]) -> Vec<ArgPassing> {
+    args.iter().map(unresolved_arg_passing_for_arg).collect()
+}
+
+pub fn resolved_arg_passing_for_no_temp_arg(arg: &FnArgType) -> ArgPassing {
+    match unresolved_arg_passing_for_arg(arg) {
+        ArgPassing::MutableRef => ArgPassing::MutableRef,
+        ArgPassing::Value(ValueArgPassing::Unknown) => ArgPassing::Value(
+            ValueArgPassing::Resolved(if is_builtin_trivial_copy_type(arg.ty) {
+                ResolvedValueArgPassing::Owned
+            } else {
+                ResolvedValueArgPassing::SharedRef {
+                    temp_cleanup: SharedRefTempCleanup::None,
+                }
+            }),
+        ),
+        ArgPassing::Value(ValueArgPassing::Resolved(_)) => {
+            unreachable!("unresolved helper never emits resolved passing")
+        }
+        ArgPassing::Value(ValueArgPassing::SharedRefUnknownDrop) => {
+            unreachable!("unresolved helper never emits shared-ref-only passing")
+        }
+    }
+}
+
+/// Resolve call argument passing when the caller knows the call edge cannot
+/// materialize a temporary that needs semantic cleanup.
+pub fn resolved_arg_passing_for_no_temp_args(args: &[FnArgType]) -> Vec<ArgPassing> {
+    args.iter()
+        .map(resolved_arg_passing_for_no_temp_arg)
+        .collect()
+}
+
+pub(crate) type ValueArgPassingResolver<C, E> =
+    fn(&mut NodeArena, &mut C, Type, bool, Location) -> Result<ResolvedValueArgPassing, E>;
+
+pub(crate) fn resolve_arg_passing_for_call<E, C>(
+    arena: &mut NodeArena,
+    ctx: &mut C,
+    args: &[NodeId],
+    arg_tys: &[FnArgType],
+    span: Location,
+    resolve_value_arg_passing: ValueArgPassingResolver<C, E>,
+) -> Result<Vec<ArgPassing>, E> {
+    assert_eq!(args.len(), arg_tys.len());
+    args.iter()
+        .zip(arg_tys)
+        .map(|(&arg, arg_ty)| {
+            if arg_ty
+                .mut_ty
+                .as_resolved()
+                .is_some_and(|mut_ty| mut_ty.is_mutable())
+            {
+                return Ok(ArgPassing::MutableRef);
+            }
+            let needs_temp = call_argument_may_need_temp(arena, arg);
+            resolve_value_arg_passing(arena, ctx, arg_ty.ty, needs_temp, span)
+                .map(|passing| ArgPassing::Value(ValueArgPassing::Resolved(passing)))
+        })
+        .collect()
+}
+
+pub(crate) fn call_argument_may_need_temp(arena: &NodeArena, node_id: NodeId) -> bool {
+    !hir::node_is_place_reference(arena, node_id)
+        || hir::place_resolution_may_create_temp(arena, node_id)
+}
+
+fn is_builtin_trivial_copy_type(ty: Type) -> bool {
+    let ty_data = ty.data();
+    let TypeKind::Native(native) = &*ty_data else {
+        return false;
+    };
+    native.arguments.is_empty()
+        && (native.bare_ty == bare_native_type::<()>()
+            || native.bare_ty == bare_native_type::<bool>()
+            || native.bare_ty == bare_native_type::<isize>())
 }
 
 /// An empty dummy function returning (), used as placeholder
@@ -471,14 +622,14 @@ impl Eq for Box<ScriptFunction> {}
 #[derive(Debug, Clone, Copy)]
 pub struct ContextNativeFn {
     name: &'static str,
-    argument_passing: &'static [ArgPassing],
+    argument_passing: &'static [ResolvedArgPassing],
     function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
 }
 
 impl ContextNativeFn {
     pub(crate) fn new(
         name: &'static str,
-        argument_passing: &'static [ArgPassing],
+        argument_passing: &'static [ResolvedArgPassing],
         function: for<'a> fn(ValOrMutArgs, &mut CallCtx<'a>) -> EvalControlFlowResult,
     ) -> Self {
         Self {
@@ -499,7 +650,7 @@ impl Callable for ContextNativeFn {
         (self.function)(ValOrMutArgs::new(args), ctx)
     }
 
-    fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
+    fn argument_passing(&self) -> Option<&'static [ResolvedArgPassing]> {
         Some(self.argument_passing)
     }
 
@@ -589,7 +740,7 @@ pub fn extract_native_ref<'m, T: 'static>(
 /// This is necessary due to the lack of specialization in stable Rust.
 pub trait ArgExtractor {
     type Output<'a>;
-    const PASSING: ArgPassing;
+    const PASSING: ResolvedArgPassing;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -599,7 +750,10 @@ pub trait ArgExtractor {
 
 impl ArgExtractor for Value {
     type Output<'a> = &'a Value;
-    const PASSING: ArgPassing = ArgPassing::SharedRef;
+    const PASSING: ResolvedArgPassing =
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
+            temp_cleanup: SharedRefTempCleanup::None,
+        });
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -613,7 +767,7 @@ impl ArgExtractor for Value {
 
 impl ArgExtractor for &'_ mut Value {
     type Output<'a> = &'a mut Value;
-    const PASSING: ArgPassing = ArgPassing::MutableRef;
+    const PASSING: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -627,7 +781,7 @@ impl ArgExtractor for &'_ mut Value {
 
 impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
     type Output<'a> = T;
-    const PASSING: ArgPassing = ArgPassing::OwnedValue;
+    const PASSING: ResolvedArgPassing = ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned);
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -641,7 +795,10 @@ impl<T: TrivialCopy> ArgExtractor for NatVal<T> {
 
 impl<T: 'static> ArgExtractor for NatRef<T> {
     type Output<'a> = &'a T;
-    const PASSING: ArgPassing = ArgPassing::SharedRef;
+    const PASSING: ResolvedArgPassing =
+        ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
+            temp_cleanup: SharedRefTempCleanup::None,
+        });
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -655,7 +812,7 @@ impl<T: 'static> ArgExtractor for NatRef<T> {
 
 impl<T: 'static> ArgExtractor for NatMut<T> {
     type Output<'a> = &'a mut T;
-    const PASSING: ArgPassing = ArgPassing::MutableRef;
+    const PASSING: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
     fn extract<'m>(
         arg: &'m ValOrMut,
         ctx: &'m mut CallCtx,
@@ -790,7 +947,7 @@ macro_rules! n_ary_native_fn {
             #[allow(clippy::too_many_arguments)]
             pub fn description_with_ty(f: for<'a> fn($($arg::Output<'a>),*) -> O::Input, arg_names: [&'static str; count!($($arg)*)], doc: &'static str, $([<$arg:lower _ty>]: Type,)* o_ty: Type, effects: EffType) -> ModuleFunction {
                 let ty_scheme = TypeScheme::new_infer_quantifiers(FnType::new_mut_resolved(
-                    [$(([<$arg:lower _ty>], $arg::PASSING == ArgPassing::MutableRef)), *],
+                    [$(([<$arg:lower _ty>], $arg::PASSING == ResolvedArgPassing::MutableRef)), *],
                     o_ty,
                     effects,
                 ));
@@ -835,7 +992,7 @@ macro_rules! n_ary_native_fn {
             }
             }
 
-            fn argument_passing(&self) -> Option<&'static [ArgPassing]> {
+            fn argument_passing(&self) -> Option<&'static [ResolvedArgPassing]> {
                 Some(&[$($arg::PASSING),*])
             }
 

@@ -16,12 +16,15 @@ use crate::{
     ast::{Path, UnnamedArg},
     compiler::error::InternalCompilationError,
     containers::b,
-    hir::emit_value_impl::function_value_method,
     hir::function::{
         BinaryNativeFnRWN, Function, FunctionDefinition, ScriptFunction, UnaryNativeFnMN,
     },
     hir::value::{FunctionValue, LiteralValue, NativeValue, Value, ustr_to_isize},
     hir::{self, NodeArena, NodeId},
+    hir::{
+        dictionary_passing::{resolved_arg_passing_for_generated_call, static_apply_generated},
+        emit_value_impl::function_value_method,
+    },
     internal_compilation_error,
     module::{
         self, ConcreteTraitImplKey, FunctionId, LocalDecl, LocalDeclId, Module, ModuleFunction,
@@ -403,13 +406,33 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                 span,
                 arena,
             )?);
+            let argument_passing = resolved_arg_passing_for_generated_call(
+                arena,
+                self.solver,
+                &arguments,
+                &fn_ty.args,
+                span,
+            )?;
             return Ok((
-                hir::hir_syn::static_apply(function, fn_ty, arguments, span),
+                hir::hir_syn::static_apply_with_argument_passing(
+                    function,
+                    fn_ty,
+                    arguments,
+                    argument_passing,
+                    span,
+                ),
                 ret_ty,
             ));
         }
 
         if self.emit_generic_trait_calls && !input_ty.is_constant() {
+            let argument_passing = resolved_arg_passing_for_generated_call(
+                arena,
+                self.solver,
+                &arguments,
+                &fn_ty.args,
+                span,
+            )?;
             return Ok((
                 hir::NodeKind::TraitMethodApply(crate::containers::b(
                     hir::TraitMethodApplication {
@@ -418,6 +441,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                         method_path: Path::single(trait_ref.method(method_index).0, span),
                         method_span: span,
                         arguments,
+                        argument_passing,
                         arguments_unnamed: UnnamedArg::All,
                         ty: fn_ty,
                         input_tys: vec![input_ty],
@@ -431,8 +455,21 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
         let function =
             self.solver
                 .solve_impl_method(trait_ref, &[input_ty], method_index, span, arena)?;
+        let argument_passing = resolved_arg_passing_for_generated_call(
+            arena,
+            self.solver,
+            &arguments,
+            &fn_ty.args,
+            span,
+        )?;
         Ok((
-            hir::hir_syn::static_apply(function, fn_ty, arguments, span),
+            hir::hir_syn::static_apply_with_argument_passing(
+                function,
+                fn_ty,
+                arguments,
+                argument_passing,
+                span,
+            ),
             ret_ty,
         ))
     }
@@ -604,19 +641,15 @@ pub(crate) fn function_value_method_function(
             ];
             let state = alloc_synth_node(arena, load(state_id), hasher_ty);
             let marker = alloc_synth_node(arena, native_str("<function>"), string_type());
-            let write_ty = FnType::new(
-                vec![
-                    FnArgType::new(hasher_ty, MutType::mutable()),
-                    FnArgType::new_by_val(string_type()),
-                ],
-                unit_ty,
-                EffType::empty(),
-            );
-            let write = alloc_synth_node(
+            let write_kind = static_apply_generated(
                 arena,
-                static_apply(hasher_write_string, write_ty, [state, marker], span),
+                solver,
+                hasher_write_string,
+                [(state, hasher_ty), (marker, string_type())],
                 unit_ty,
-            );
+                span,
+            )?;
+            let write = alloc_synth_node(arena, write_kind, unit_ty);
             let unit = alloc_synth_node(arena, native(()), unit_ty);
             let root = alloc_synth_node(arena, block([write, unit]), unit_ty);
             (definition, root, locals)
@@ -684,14 +717,6 @@ fn derive_value_to_string_body(
     )?;
 
     let string_lit = |arena: &mut NodeArena, text: &str| n(arena, native_str(text), string_type());
-    let string_push_str_ty = FnType::new(
-        vec![
-            FnArgType::new(string_type(), MutType::mutable()),
-            FnArgType::new_by_val(string_type()),
-        ],
-        Type::unit(),
-        EffType::empty(),
-    );
     macro_rules! build_to_string {
         ($arena:expr, $value:expr, $value_ty:expr) => {
             value_method_call_node(
@@ -706,9 +731,11 @@ fn derive_value_to_string_body(
         };
     }
     let build_string_block = |arena: &mut NodeArena,
+                              solver: &mut TraitSolver<'_>,
                               locals: &mut Vec<crate::module::LocalDecl>,
                               initial: &str,
-                              mut pieces: Vec<NodeId>| {
+                              mut pieces: Vec<NodeId>|
+     -> Result<NodeId, InternalCompilationError> {
         let initial_value = string_lit(arena, initial);
         let next_local = locals.len();
         let (store_rendered, l_rendered_id) = store_new(
@@ -723,20 +750,19 @@ fn derive_value_to_string_body(
         statements.push(n(arena, store_rendered, Type::unit()));
         for piece in pieces.drain(..) {
             let target = n(arena, load(l_rendered_id), string_type());
-            statements.push(n(
+            let push = static_apply_generated(
                 arena,
-                static_apply(
-                    string_push_str,
-                    string_push_str_ty.clone(),
-                    [target, piece],
-                    span,
-                ),
+                solver,
+                string_push_str,
+                [(target, string_type()), (piece, string_type())],
                 Type::unit(),
-            ));
+                span,
+            )?;
+            statements.push(n(arena, push, Type::unit()));
         }
         let rendered = n(arena, move_local(l_rendered_id), string_type());
         statements.push(rendered);
-        n(arena, block(statements), string_type())
+        Ok(n(arena, block(statements), string_type()))
     };
 
     let locals = vec![local("self", ty)];
@@ -764,7 +790,10 @@ fn derive_value_to_string_body(
                 pieces.push(member_str);
             }
             pieces.push(string_lit(arena, ")"));
-            Some((build_string_block(arena, &mut locals, "(", pieces), locals))
+            Some((
+                build_string_block(arena, ctx.solver, &mut locals, "(", pieces)?,
+                locals,
+            ))
         }
         Record(fields) => {
             let fields = fields.clone();
@@ -787,7 +816,10 @@ fn derive_value_to_string_body(
                 pieces.push(member_str);
             }
             pieces.push(string_lit(arena, " }"));
-            Some((build_string_block(arena, &mut locals, "{ ", pieces), locals))
+            Some((
+                build_string_block(arena, ctx.solver, &mut locals, "{ ", pieces)?,
+                locals,
+            ))
         }
         Variant(variants) => {
             let variants = variants.clone();
@@ -811,18 +843,20 @@ fn derive_value_to_string_body(
                     if payload_ty.data().is_tuple() {
                         build_string_block(
                             arena,
+                            ctx.solver,
                             &mut locals,
                             &format!("{} ", tag),
                             vec![payload_str],
-                        )
+                        )?
                     } else {
                         let close = string_lit(arena, ")");
                         build_string_block(
                             arena,
+                            ctx.solver,
                             &mut locals,
                             &format!("{}(", tag),
                             vec![payload_str, close],
-                        )
+                        )?
                     }
                 };
                 alternatives.push((tag_val, rendered));
@@ -859,7 +893,13 @@ fn derive_value_to_string_body(
                         pieces.push(build_to_string!(arena, member, member_ty)?);
                     }
                     pieces.push(string_lit(arena, ")"));
-                    build_string_block(arena, &mut locals, &format!("{} (", type_name), pieces)
+                    build_string_block(
+                        arena,
+                        ctx.solver,
+                        &mut locals,
+                        &format!("{} (", type_name),
+                        pieces,
+                    )?
                 }
                 Record(fields) => {
                     let fields = fields.clone();
@@ -879,7 +919,13 @@ fn derive_value_to_string_body(
                         pieces.push(build_to_string!(arena, member, member_ty)?);
                     }
                     pieces.push(string_lit(arena, " }"));
-                    build_string_block(arena, &mut locals, &format!("{} {{ ", type_name), pieces)
+                    build_string_block(
+                        arena,
+                        ctx.solver,
+                        &mut locals,
+                        &format!("{} {{ ", type_name),
+                        pieces,
+                    )?
                 }
                 Variant(variants) => {
                     let variants = variants.clone();
@@ -901,18 +947,20 @@ fn derive_value_to_string_body(
                             if payload_ty.data().is_tuple() {
                                 build_string_block(
                                     arena,
+                                    ctx.solver,
                                     &mut locals,
                                     &format!("{}::{} ", type_name, tag),
                                     vec![payload_str],
-                                )
+                                )?
                             } else {
                                 let close = string_lit(arena, ")");
                                 build_string_block(
                                     arena,
+                                    ctx.solver,
                                     &mut locals,
                                     &format!("{}::{}(", type_name, tag),
                                     vec![payload_str, close],
-                                )
+                                )?
                             }
                         };
                         alternatives.push((tag_val, rendered));
@@ -930,10 +978,11 @@ fn derive_value_to_string_body(
                     let payload_str = build_to_string!(arena, load_self, shape_ty)?;
                     build_string_block(
                         arena,
+                        ctx.solver,
                         &mut locals,
                         &format!("{} ", type_name),
                         vec![payload_str],
-                    )
+                    )?
                 }
             };
             Some((root, locals))
@@ -1168,28 +1217,21 @@ fn derive_value_hash_body(
     let l_self_id = LocalDeclId::from_index(0);
     let l_state_id = LocalDeclId::from_index(1);
 
-    let hasher_write_string_ty = FnType::new(
-        vec![
-            FnArgType::new(hasher_ty, MutType::mutable()),
-            FnArgType::new_by_val(string_type()),
-        ],
-        unit_ty,
-        EffType::empty(),
-    );
-
-    let build_write_string = |arena: &mut NodeArena, value: &str| {
+    let build_write_string = |arena: &mut NodeArena,
+                              solver: &mut TraitSolver<'_>,
+                              value: &str|
+     -> Result<NodeId, InternalCompilationError> {
         let state = n(arena, load(l_state_id), hasher_ty);
         let value = n(arena, native_str(value), string_type());
-        n(
+        let write = static_apply_generated(
             arena,
-            static_apply(
-                hasher_write_string,
-                hasher_write_string_ty.clone(),
-                [state, value],
-                span,
-            ),
+            solver,
+            hasher_write_string,
+            [(state, hasher_ty), (value, string_type())],
             unit_ty,
-        )
+            span,
+        )?;
+        Ok(n(arena, write, unit_ty))
     };
     macro_rules! build_hash_value {
         ($arena:expr, $value:expr, $value_ty:expr) => {{
@@ -1231,7 +1273,7 @@ fn derive_value_hash_body(
 
             for (tag, payload_ty) in $variants.into_iter() {
                 let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
-                let mut statements = vec![build_write_string($arena, tag.as_str())];
+                let mut statements = vec![build_write_string($arena, ctx.solver, tag.as_str())?];
                 if payload_ty != Type::unit() {
                     let self_value = n($arena, load(l_self_id), ty);
                     let payload = n(
@@ -1308,7 +1350,7 @@ fn derive_value_hash_body(
         Function(_) => {
             drop(ty_data);
             let statements = vec![
-                build_write_string(arena, "<function>"),
+                build_write_string(arena, ctx.solver, "<function>")?,
                 n(arena, native(()), unit_ty),
             ];
             Some((n(arena, block(statements), unit_ty), locals))

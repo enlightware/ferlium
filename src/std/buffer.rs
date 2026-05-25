@@ -19,8 +19,9 @@ use crate::{
     },
     hir::{
         function::{
-            ArgPassing, BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Callable,
-            ContextNativeFn, Function, FunctionDefinition, UnaryNativeFnMN, UnaryNativeFnRN,
+            BinaryNativeFnRMN, BinaryNativeFnRRN, BinaryNativeFnRWN, Callable, ContextNativeFn,
+            Function, FunctionDefinition, ResolvedArgPassing, ResolvedValueArgPassing,
+            SharedRefTempCleanup, UnaryNativeFnMN, UnaryNativeFnRN,
         },
         value::{NativeDisplay, Value},
     },
@@ -31,6 +32,13 @@ use crate::{
         type_scheme::{PubTypeConstraint, TypeScheme},
     },
 };
+
+const OWNED: ResolvedArgPassing = ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned);
+const SHARED_REF: ResolvedArgPassing =
+    ResolvedArgPassing::Value(ResolvedValueArgPassing::SharedRef {
+        temp_cleanup: SharedRefTempCleanup::None,
+    });
+const MUTABLE_REF: ResolvedArgPassing = ResolvedArgPassing::MutableRef;
 
 use super::value::{VALUE_TRAIT, native_layout_associated_consts};
 
@@ -207,7 +215,7 @@ fn buffer_slot_descr() -> ModuleFunction {
         ),
         Box::new(ContextNativeFn::new(
             "buffer_slot",
-            &[ArgPassing::MutableRef, ArgPassing::OwnedValue],
+            &[MUTABLE_REF, OWNED],
             buffer_slot,
         )),
         None,
@@ -228,7 +236,7 @@ fn buffer_with_capacity_descr() -> ModuleFunction {
         "Creates fixed-size uninitialized storage.",
         ContextNativeFn::new(
             "buffer_with_capacity",
-            &[ArgPassing::OwnedValue],
+            &[OWNED],
             |mut args: ValOrMutArgs, _ctx: &mut EvalCtx| {
                 let capacity = args
                     .next()
@@ -271,12 +279,7 @@ fn buffer_clone_value_into_descr() -> ModuleFunction {
         "Clones a value into a buffer slot.",
         ContextNativeFn::new(
             "buffer_clone_value_into",
-            &[
-                ArgPassing::SharedRef,
-                ArgPassing::SharedRef,
-                ArgPassing::MutableRef,
-                ArgPassing::OwnedValue,
-            ],
+            &[SHARED_REF, SHARED_REF, MUTABLE_REF, OWNED],
             buffer_clone_value_into,
         ),
     )
@@ -325,13 +328,7 @@ fn buffer_clone_into_descr() -> ModuleFunction {
         "Clones a buffer slot into another buffer slot.",
         ContextNativeFn::new(
             "buffer_clone_into",
-            &[
-                ArgPassing::SharedRef,
-                ArgPassing::SharedRef,
-                ArgPassing::OwnedValue,
-                ArgPassing::MutableRef,
-                ArgPassing::OwnedValue,
-            ],
+            &[SHARED_REF, SHARED_REF, OWNED, MUTABLE_REF, OWNED],
             buffer_clone_into,
         ),
     )
@@ -380,12 +377,7 @@ fn buffer_move_into_descr() -> ModuleFunction {
         "Moves a buffer slot into another buffer slot.",
         ContextNativeFn::new(
             "buffer_move_into",
-            &[
-                ArgPassing::MutableRef,
-                ArgPassing::OwnedValue,
-                ArgPassing::MutableRef,
-                ArgPassing::OwnedValue,
-            ],
+            &[MUTABLE_REF, OWNED, MUTABLE_REF, OWNED],
             buffer_move_into,
         ),
     )
@@ -415,11 +407,7 @@ fn buffer_move_descr() -> ModuleFunction {
         [],
         ["source", "target"],
         "Moves a whole buffer into another buffer.",
-        ContextNativeFn::new(
-            "buffer_move",
-            &[ArgPassing::MutableRef, ArgPassing::MutableRef],
-            buffer_move,
-        ),
+        ContextNativeFn::new("buffer_move", &[MUTABLE_REF, MUTABLE_REF], buffer_move),
     )
 }
 
@@ -449,11 +437,7 @@ fn buffer_take_descr() -> ModuleFunction {
         [],
         ["source", "index"],
         "Moves a value out of a buffer slot.",
-        ContextNativeFn::new(
-            "buffer_take",
-            &[ArgPassing::MutableRef, ArgPassing::OwnedValue],
-            buffer_take,
-        ),
+        ContextNativeFn::new("buffer_take", &[MUTABLE_REF, OWNED], buffer_take),
     )
 }
 
@@ -487,11 +471,7 @@ fn buffer_drop_at_descr() -> ModuleFunction {
         "Drops a value stored in a buffer slot.",
         ContextNativeFn::new(
             "buffer_drop_at",
-            &[
-                ArgPassing::SharedRef,
-                ArgPassing::MutableRef,
-                ArgPassing::OwnedValue,
-            ],
+            &[SHARED_REF, MUTABLE_REF, OWNED],
             buffer_drop_at,
         ),
     )

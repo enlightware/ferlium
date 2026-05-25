@@ -18,9 +18,15 @@ use crate::{
     },
     containers::{SVec2, b, continuous_hashmap_to_vec},
     format::FormatWith,
-    hir::function::{ArgPassing, Function, FunctionDefinition, ScriptFunction},
+    hir::function::{
+        ArgPassing, Function, FunctionDefinition, ResolvedArgPassing, ScriptFunction,
+        unresolved_arg_passing_for_args,
+    },
     hir::value::LiteralValue,
-    hir::{self, EnvStore, Immediate, NodeArena, NodeId, NodeKind},
+    hir::{
+        self, EnvStore, Immediate, NodeArena, NodeId, NodeKind, node_is_place_reference,
+        place_resolution_may_create_temp, place_result_base_argument_index,
+    },
     internal_compilation_error,
     module::{
         FunctionId, LocalAssignmentMode, LocalClone, LocalDecl, LocalDeclId, LocalDrop, ModuleEnv,
@@ -749,17 +755,19 @@ impl TypeInference {
                             temp_stores.push(store);
                             load
                         };
-                        temp_stores.extend(self.borrowed_argument_temp_stores(
+                        let (argument_passing, argument_temp_stores) = self.prepare_call_arguments(
                             env,
                             &mut args_nodes,
                             &args_tys,
-                            None,
                             expr_span,
-                        ));
+                            None,
+                        );
+                        temp_stores.extend(argument_temp_stores);
                         // Store and return the result
                         let call = K::Apply(b(hir::Application {
                             function,
                             arguments: args_nodes,
+                            argument_passing,
                             returns_place: false,
                         }));
                         let call =
@@ -1177,8 +1185,9 @@ impl TypeInference {
                         let effects = self.make_dependent_effect([&array_effects, &index_effects]);
                         Self::diverging_prefix_result(nodes, effects)
                     } else {
-                        let (path, (definition, function, _module_id, _arg_passing)) =
+                        let (path, (definition, function, _module_id, arg_passing)) =
                             env.get_std_function(ustr("array_index"), expr_span)?;
+                        let returns_place = definition.returns_place;
                         let (inst_fn_ty, inst_data, _subst) = definition
                             .ty_scheme
                             .instantiate_with_fresh_vars(self, expr_span, None);
@@ -1194,16 +1203,31 @@ impl TypeInference {
                             &index_effects,
                             &inst_fn_ty.effects,
                         ]);
+                        let arguments = vec![array_node_id, index_node_id];
+                        let visible_arg_passing =
+                            visible_native_arg_passing(arg_passing, &inst_data, arguments.len());
+                        let argument_passing =
+                            self.argument_passing_for_args(&inst_fn_ty.args, visible_arg_passing);
+                        for ((arg, arg_ty), passing) in arguments
+                            .iter()
+                            .zip(&inst_fn_ty.args)
+                            .zip(&argument_passing)
+                        {
+                            self.add_call_argument_temp_value_constraint(
+                                env, *arg, arg_ty.ty, *passing, expr_span,
+                            );
+                        }
                         let node = K::StaticApply(b(hir::StaticApplication {
                             function,
                             function_path: Some(path),
                             function_span: expr_span,
                             extra_arguments: Vec::new(),
-                            arguments: vec![array_node_id, index_node_id],
+                            arguments,
+                            argument_passing,
                             argument_names: vec![ustr("array"), ustr("index")],
                             ty: inst_fn_ty,
                             inst_data,
-                            returns_place: definition.returns_place,
+                            returns_place,
                         }));
                         (node, element_ty, array_expr_mut, combined_effects)
                     }
@@ -1359,33 +1383,81 @@ impl TypeInference {
         (store, load)
     }
 
-    fn borrowed_argument_temp_stores(
+    fn prepare_call_arguments(
         &mut self,
         env: &mut TypingEnv,
         args: &mut [NodeId],
         arg_tys: &[FnArgType],
-        arg_passing: Option<&[ArgPassing]>,
         span: Location,
-    ) -> Vec<NodeId> {
+        native_arg_passing: Option<&[ResolvedArgPassing]>,
+    ) -> (Vec<ArgPassing>, Vec<NodeId>) {
+        let arg_passing = self.argument_passing_for_args(arg_tys, native_arg_passing);
         let mut stores = Vec::new();
-        for (index, (arg, arg_ty)) in args.iter_mut().zip(arg_tys).enumerate() {
-            let passing = arg_passing.and_then(|passing| passing.get(index)).copied();
-            let by_shared_ref = self.argument_is_passed_by_shared_ref(env, arg_ty, passing, span);
-            let by_mut_ref = self.argument_is_passed_by_mut_ref(arg_ty, passing);
-            if !by_shared_ref && !by_mut_ref {
-                continue;
-            }
-            if node_is_place_reference(env.ir_arena, *arg) {
-                let prepared = self.prepare_place_for_consumer(env, *arg, span);
-                stores.extend(prepared.prefix);
-                *arg = prepared.place;
-            } else if by_shared_ref {
-                let (store, load) = self.store_owned_temp(env, *arg, arg_ty.ty, span, ustr("$arg"));
-                stores.push(store);
-                *arg = load;
+        for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
+            match passing {
+                ArgPassing::MutableRef => {
+                    if node_is_place_reference(env.ir_arena, *arg) {
+                        let prepared = self.prepare_place_for_consumer(env, *arg, span);
+                        stores.extend(prepared.prefix);
+                        *arg = prepared.place;
+                    }
+                }
+                ArgPassing::Value(_) => {
+                    if node_is_place_reference(env.ir_arena, *arg)
+                        && place_resolution_may_create_temp(env.ir_arena, *arg)
+                    {
+                        let prepared = self.prepare_place_for_consumer(env, *arg, span);
+                        stores.extend(prepared.prefix);
+                        *arg = prepared.place;
+                    }
+                    self.add_call_argument_temp_value_constraint(
+                        env, *arg, arg_ty.ty, *passing, span,
+                    );
+                }
             }
         }
-        stores
+        (arg_passing, stores)
+    }
+
+    fn argument_passing_for_args(
+        &self,
+        arg_tys: &[FnArgType],
+        native_arg_passing: Option<&[ResolvedArgPassing]>,
+    ) -> Vec<ArgPassing> {
+        if let Some(native_arg_passing) = native_arg_passing {
+            assert_eq!(arg_tys.len(), native_arg_passing.len());
+            return native_arg_passing
+                .iter()
+                .copied()
+                .map(ArgPassing::from_resolved)
+                .collect();
+        }
+
+        unresolved_arg_passing_for_args(arg_tys)
+    }
+
+    fn add_call_argument_temp_value_constraint(
+        &mut self,
+        env: &mut TypingEnv,
+        arg: NodeId,
+        ty: Type,
+        passing: ArgPassing,
+        span: Location,
+    ) {
+        // A non-place shared-ref argument may need owned temporary storage whose cleanup uses Value::drop.
+        if matches!(passing, ArgPassing::Value(_))
+            && (!node_is_place_reference(env.ir_arena, arg)
+                || place_resolution_may_create_temp(env.ir_arena, arg))
+            && !self.type_has_concrete_trivial_copy_impl(env, ty, span)
+            && !ty.is_function()
+        {
+            self.add_pub_constraint(PubTypeConstraint::new_have_trait(
+                VALUE_TRAIT.clone(),
+                vec![ty],
+                vec![],
+                span,
+            ));
+        }
     }
 
     fn wrap_call_with_temp_drops(
@@ -1981,12 +2053,12 @@ impl TypeInference {
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
                     let temp_start_index = env.cur_locals.len();
-                    let temp_stores = self.borrowed_argument_temp_stores(
+                    let (argument_passing, temp_stores) = self.prepare_call_arguments(
                         env,
                         &mut args_node_ids,
                         &inst_fn_ty.args,
-                        None,
                         expr_span,
+                        None,
                     );
                     let call = K::TraitMethodApply(b(hir::TraitMethodApplication {
                         trait_ref,
@@ -1994,6 +2066,7 @@ impl TypeInference {
                         method_path: path.clone(),
                         method_span: path_span,
                         arguments: args_node_ids,
+                        argument_passing,
                         arguments_unnamed,
                         ty: inst_fn_ty,
                         input_tys,
@@ -2034,25 +2107,15 @@ impl TypeInference {
                     let ret_ty = inst_fn_ty.ret;
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
-                    let visible_arg_passing = arg_passing.map(|passing| {
-                        let hidden_dict_arg_count = inst_data.dicts_req.len();
-                        if hidden_dict_arg_count == 0 {
-                            passing
-                        } else {
-                            assert!(
-                                passing.len() >= hidden_dict_arg_count
-                                    && passing.len() <= hidden_dict_arg_count + args_node_ids.len()
-                            );
-                            &passing[hidden_dict_arg_count..]
-                        }
-                    });
+                    let visible_arg_passing =
+                        visible_native_arg_passing(arg_passing, &inst_data, args_node_ids.len());
                     let temp_start_index = env.cur_locals.len();
-                    let temp_stores = self.borrowed_argument_temp_stores(
+                    let (argument_passing, temp_stores) = self.prepare_call_arguments(
                         env,
                         &mut args_node_ids,
                         &inst_fn_ty.args,
-                        visible_arg_passing,
                         expr_span,
+                        visible_arg_passing,
                     );
                     let call = K::StaticApply(b(hir::StaticApplication {
                         function,
@@ -2060,6 +2123,7 @@ impl TypeInference {
                         function_span: path_span,
                         extra_arguments: Vec::new(),
                         arguments: args_node_ids,
+                        argument_passing,
                         argument_names,
                         ty: inst_fn_ty,
                         inst_data,
@@ -2799,57 +2863,6 @@ fn initializer_needs_mut_binding_clone(arena: &NodeArena, node_id: NodeId) -> bo
     node_is_place_reference(arena, node_id)
 }
 
-pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> bool {
-    use NodeKind::*;
-
-    match &arena[node_id].kind {
-        EnvLoad(_) => true,
-        GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
-        Project(_, _) | FieldAccess(_, _) | ProjectAt(_, _) => true,
-        Apply(app) => app.returns_place,
-        StaticApply(app) => app.returns_place,
-        _ => false,
-    }
-}
-
-fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeId) -> bool {
-    use NodeKind::*;
-
-    match &arena[node_id].kind {
-        EnvLoad(_) => false,
-        GetTraitMethod(_) => false,
-        Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
-            !node_is_place_reference(arena, *base) || place_resolution_may_create_temp(arena, *base)
-        }
-        Apply(app) if app.returns_place => {
-            !node_is_place_reference(arena, app.function)
-                || place_resolution_may_create_temp(arena, app.function)
-                || place_result_base_argument_index(arena, &app.arguments).is_some_and(
-                    |base_index| !node_is_place_reference(arena, app.arguments[base_index]),
-                )
-                || app
-                    .arguments
-                    .iter()
-                    .any(|arg| place_resolution_may_create_temp(arena, *arg))
-        }
-        StaticApply(app) if app.returns_place => {
-            place_result_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
-                !node_is_place_reference(arena, app.arguments[base_index])
-            }) || app
-                .arguments
-                .iter()
-                .any(|arg| place_resolution_may_create_temp(arena, *arg))
-        }
-        _ => false,
-    }
-}
-
-fn place_result_base_argument_index(arena: &NodeArena, arguments: &[NodeId]) -> Option<usize> {
-    arguments
-        .iter()
-        .position(|argument| !matches!(arena[*argument].kind, NodeKind::GetDictionary(_)))
-}
-
 fn place_evaluation_depends_on_place_result(arena: &NodeArena, node_id: NodeId) -> bool {
     use NodeKind::*;
 
@@ -2906,35 +2919,23 @@ impl TypeInference {
         self.trivial_copy_cache.insert(ty, result);
         result
     }
+}
 
-    fn argument_is_passed_by_shared_ref(
-        &mut self,
-        env: &mut TypingEnv<'_>,
-        arg: &FnArgType,
-        passing: Option<ArgPassing>,
-        span: Location,
-    ) -> bool {
-        match passing {
-            Some(ArgPassing::SharedRef) => true,
-            Some(ArgPassing::OwnedValue | ArgPassing::MutableRef) => false,
-            None => {
-                !arg.mut_ty
-                    .as_resolved()
-                    .is_some_and(|mut_ty| mut_ty.is_mutable())
-                    && !self.type_has_concrete_trivial_copy_impl(env, arg.ty, span)
-            }
-        }
-    }
-
-    fn argument_is_passed_by_mut_ref(&self, arg: &FnArgType, passing: Option<ArgPassing>) -> bool {
-        match passing {
-            Some(ArgPassing::MutableRef) => true,
-            Some(ArgPassing::OwnedValue | ArgPassing::SharedRef) => false,
-            None => arg
-                .mut_ty
-                .as_resolved()
-                .is_some_and(|mut_ty| mut_ty.is_mutable()),
-        }
+fn visible_native_arg_passing(
+    passing: Option<&'static [ResolvedArgPassing]>,
+    inst_data: &hir::FnInstData,
+    visible_arg_count: usize,
+) -> Option<&'static [ResolvedArgPassing]> {
+    let passing = passing?;
+    let hidden_dict_arg_count = inst_data.dicts_req.len();
+    if hidden_dict_arg_count == 0 {
+        Some(passing)
+    } else {
+        assert!(
+            passing.len() >= hidden_dict_arg_count
+                && passing.len() <= hidden_dict_arg_count + visible_arg_count
+        );
+        Some(&passing[hidden_dict_arg_count..])
     }
 }
 
