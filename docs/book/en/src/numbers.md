@@ -5,7 +5,7 @@ Ferlium has two numeric types: `int` for whole numbers and `float` for floating-
 ## The two numeric types
 
 `int` is a signed integer using the machine word width (typically 64 bits).
-`float` is an [IEEE 754](https://en.wikipedia.org/wiki/IEEE_754) double-precision number that excludes `NaN`, so equality and ordering on `float` always behave consistently.
+`float` is a finite [IEEE 754](https://en.wikipedia.org/wiki/IEEE_754) double-precision number. It excludes `NaN` and infinities, so equality and ordering on `float` always behave consistently.
 
 ```ferlium
 let i: int = 42;
@@ -74,7 +74,7 @@ let j = 5.7 as int;
 (f, j)
 ```
 
-Float-to-int truncates toward zero, and both directions saturate at the target type's bounds rather than wrapping or producing `NaN`.
+Float-to-int truncates toward zero, and both directions saturate at the target type's bounds rather than wrapping or producing `NaN` or infinity.
 
 ## Division and integer arithmetic
 

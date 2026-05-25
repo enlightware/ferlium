@@ -139,3 +139,21 @@ fn math_conversions() {
         int(1)
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn float_arithmetic_saturates_to_finite_bounds() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(r#"match parse_float("1e308") { Some(x) => x * x, None => 0.0 }"#),
+        float(f64::MAX)
+    );
+    assert_val_eq!(
+        session.run(r#"match parse_float("-1e308") { Some(x) => x * x, None => 0.0 }"#),
+        float(f64::MAX)
+    );
+    assert_val_eq!(
+        session.run(r#"match parse_float("-1e308") { Some(x) => x / 0.5, None => 0.0 }"#),
+        float(-f64::MAX)
+    );
+}

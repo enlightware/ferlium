@@ -2618,3 +2618,13 @@ fn json_serialization_roundtrip() {
         )
     );
 }
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn json_rejects_non_finite_float() {
+    let mut session = TestSession::new();
+    assert_eq!(
+        session.fail_run(r#"json_decode("1e999")"#),
+        RuntimeErrorKind::InvalidArgument(ustr("Invalid number in JSON: 1e999"))
+    );
+}

@@ -70,7 +70,7 @@ pub fn add_to_module(to: &mut Module) {
     to.add_type_alias_str_with_doc(
         "float",
         float_type(),
-        "A 64-bit floating-point number, excluding NaN.",
+        "A finite 64-bit floating-point number.",
     );
     to.add_type_alias_str_with_doc("string", string_type(), "An owned UTF-8 string.");
 

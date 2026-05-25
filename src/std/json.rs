@@ -64,7 +64,10 @@ fn parse_json_stream<R: Read>(
             {
                 variant("Float", float_value(f))
             } else {
-                panic!("Invalid number in JSON: {}", n);
+                return Err(RuntimeErrorKind::InvalidArgument(ustr(&format!(
+                    "Invalid number in JSON: {}",
+                    n
+                ))));
             }
         }
         String(s) => variant("String", string_value(&s)),

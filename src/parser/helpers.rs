@@ -34,14 +34,13 @@ use crate::containers::b;
 use crate::hir::value::LiteralValue;
 use crate::hir::value::NativeDisplay;
 use crate::parser::escapes::apply_string_escapes;
-use crate::std::math::int_type;
+use crate::std::math::{Float, int_type};
 use crate::std::string::String as MyString;
 use crate::types::r#type::{Type, TypeDefProductDocs, TypeDefShapeDocs, TypeDefVariantDocs};
 use core::str::FromStr;
 use lalrpop_util::ParseError;
 use lalrpop_util::lexer::Token;
 use num_traits::bounds::Bounded;
-use ordered_float::NotNan;
 use std::any::Any;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
@@ -200,7 +199,7 @@ pub(crate) fn proj_or_float<L, T>(
     if let Some(value) = int_val {
         let index = rhs.0;
         let float_value = format!("{value}.{index}");
-        return parse_num_literal::<NotNan<f64>, L, T>(&float_value, rhs.1);
+        return parse_num_literal::<Float, L, T>(&float_value, rhs.1);
     }
     Ok(ExprKind::project(lhs, rhs))
 }

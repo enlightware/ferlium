@@ -6,10 +6,16 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use std::{convert::identity, fmt};
+use std::{
+    convert::identity,
+    fmt,
+    hash::{Hash, Hasher as StdHasher},
+    str::FromStr,
+    string::String as StdString,
+};
 
 use num_traits::{Bounded, NumCast, PrimInt, Signed, Zero};
-use ordered_float::{FloatCore, NotNan};
+use ordered_float::NotNan;
 use ustr::ustr;
 
 use crate::{
@@ -57,63 +63,134 @@ impl NativeDisplay for isize {
 }
 
 pub fn float_type() -> Type {
-    cached_primitive_ty!(NotNan<f64>)
+    cached_primitive_ty!(Float)
 }
 
 pub fn float_value(value: f64) -> Value {
-    Value::native(NotNan::new(value).unwrap())
+    Value::native(Float::new(value).unwrap())
 }
 
-pub type Float = NotNan<f64>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Float(NotNan<f64>);
 
-impl NativeDisplay for NotNan<f64> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FloatIsNotFinite;
+
+impl Float {
+    pub fn new(value: f64) -> Result<Self, FloatIsNotFinite> {
+        if value.is_finite() {
+            Ok(Self(
+                NotNan::new(value).expect("finite f64 values are never NaN"),
+            ))
+        } else {
+            Err(FloatIsNotFinite)
+        }
+    }
+
+    pub fn new_saturating(value: f64) -> Self {
+        if value.is_finite() {
+            Self::new(value).expect("finite f64 values should construct a Float")
+        } else if value.is_nan() {
+            panic!("finite float operation produced NaN")
+        } else if value.is_sign_negative() {
+            Self::new(-f64::MAX).expect("f64::MAX should construct a Float")
+        } else {
+            Self::new(f64::MAX).expect("f64::MAX should construct a Float")
+        }
+    }
+
+    pub fn into_inner(self) -> f64 {
+        self.0.into_inner()
+    }
+
+    pub fn is_sign_negative(self) -> bool {
+        self.into_inner().is_sign_negative()
+    }
+
+    pub fn abs(self) -> Self {
+        Self(self.0.abs())
+    }
+
+    pub fn signum(self) -> Self {
+        Self(self.0.signum())
+    }
+
+    pub fn round(self) -> f64 {
+        self.into_inner().round()
+    }
+
+    pub fn floor(self) -> f64 {
+        self.into_inner().floor()
+    }
+
+    pub fn ceil(self) -> f64 {
+        self.into_inner().ceil()
+    }
+}
+
+impl Hash for Float {
+    fn hash<H: StdHasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl fmt::Display for Float {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.into_inner())
+    }
+}
+
+impl FromStr for Float {
+    type Err = StdString;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let value = s.parse::<f64>().map_err(|err| err.to_string())?;
+        Self::new(value).map_err(|_| "value must be finite".to_string())
+    }
+}
+
+impl Bounded for Float {
+    fn min_value() -> Self {
+        Self::new(-f64::MAX).expect("f64::MAX should construct a Float")
+    }
+
+    fn max_value() -> Self {
+        Self::new(f64::MAX).expect("f64::MAX should construct a Float")
+    }
+}
+
+impl NativeDisplay for Float {
     fn fmt_repr(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.into_inner())
     }
 }
 
-fn isize_to_not_nan(value: isize) -> NotNan<f64> {
-    // Safe because an `isize` is always a valid `f64`
-    NotNan::new(value as f64).expect("Conversion from isize to NotNan<f64> should not fail")
+fn isize_to_float(value: isize) -> Float {
+    // Safe because an `isize` always converts to a finite `f64`.
+    Float::new(value as f64).expect("Conversion from isize to Float should not fail")
 }
 
-/// Integer → float with finite saturation, wrapped in NotNan.
-pub fn saturating_cast_int_to_notnan<I, F>(x: I) -> NotNan<F>
+/// Integer → float with finite saturation.
+pub fn saturating_cast_int_to_float<I>(x: I) -> Float
 where
     I: NumCast + PrimInt + Zero,
-    F: NumCast + FloatCore + Bounded,
 {
     // First, try the straightforward numeric cast.
-    let mut v: F = NumCast::from(x).unwrap_or_else(|| {
+    let v = NumCast::from(x).unwrap_or_else(|| {
         // If the integer can't be represented at all (e.g., very wide int),
         // pick an extreme based on the sign of x.
-        if x < I::zero() {
-            <F as Bounded>::min_value()
-        } else {
-            <F as Bounded>::max_value()
-        }
+        if x < I::zero() { -f64::MAX } else { f64::MAX }
     });
 
-    // Avoid infinities that some int→float casts can produce.
-    if v.is_infinite() {
-        v = if x < I::zero() {
-            <F as Bounded>::min_value()
-        } else {
-            <F as Bounded>::max_value()
-        };
-    }
-
-    // y is finite and not NaN by construction.
-    NotNan::new(v).unwrap()
+    Float::new_saturating(v)
 }
 
 /// Float → integer with saturation.
-fn saturating_trunc<F, I>(x: NotNan<F>) -> I
+fn saturating_trunc<I>(x: Float) -> I
 where
-    F: NumCast + FloatCore,
     I: NumCast + Bounded,
 {
-    if let Some(v) = NumCast::from(x.trunc()) {
+    if let Some(v) = NumCast::from(x.into_inner().trunc()) {
         v
     } else if x.is_sign_negative() {
         I::min_value()
@@ -123,7 +200,7 @@ where
 }
 
 fn saturating_trunc_ref(value: &Float) -> Int {
-    saturating_trunc::<f64, Int>(*value)
+    saturating_trunc::<Int>(*value)
 }
 
 fn clamp_to_u32(value: Int) -> u32 {
@@ -230,35 +307,35 @@ fn compare_float(lhs: &Float, rhs: &Float) -> Value {
 }
 
 fn add_float(lhs: &Float, rhs: &Float) -> Float {
-    *lhs + *rhs
+    Float::new_saturating(lhs.into_inner() + rhs.into_inner())
 }
 
 fn sub_float(lhs: &Float, rhs: &Float) -> Float {
-    *lhs - *rhs
+    Float::new_saturating(lhs.into_inner() - rhs.into_inner())
 }
 
 fn mul_float(lhs: &Float, rhs: &Float) -> Float {
-    *lhs * *rhs
+    Float::new_saturating(lhs.into_inner() * rhs.into_inner())
 }
 
 fn div_float(lhs: &Float, rhs: &Float) -> Result<Float, RuntimeErrorKind> {
-    if *rhs == 0.0 {
+    if rhs.into_inner() == 0.0 {
         Err(RuntimeErrorKind::DivisionByZero)
     } else {
-        Ok(*lhs / *rhs)
+        Ok(Float::new_saturating(lhs.into_inner() / rhs.into_inner()))
     }
 }
 
 fn neg_float(value: &Float) -> Float {
-    -*value
+    Float::new(-value.into_inner()).expect("negating a finite float should stay finite")
 }
 
 fn abs_float(value: &Float) -> Float {
-    Float::abs(value)
+    value.abs()
 }
 
 fn signum_float(value: &Float) -> Float {
-    Float::signum(value)
+    value.signum()
 }
 
 fn round_float(value: &Float) -> Int {
@@ -444,7 +521,7 @@ pub fn add_to_module(to: &mut Module) {
             b(UnaryNativeFnRN::new(neg_float)) as Function,
             b(UnaryNativeFnRN::new(abs_float)) as Function,
             b(UnaryNativeFnRN::new(signum_float)) as Function,
-            b(UnaryFn::new(isize_to_not_nan)) as Function,
+            b(UnaryFn::new(isize_to_float)) as Function,
         ],
     );
     to.add_native_concrete_impl(
@@ -499,9 +576,7 @@ pub fn add_to_module(to: &mut Module) {
         CAST_TRAIT.clone(),
         [int_type(), float_type()],
         [],
-        [b(UnaryNativeFnNN::new(
-            saturating_cast_int_to_notnan::<Int, f64>,
-        )) as Function],
+        [b(UnaryNativeFnNN::new(saturating_cast_int_to_float::<Int>)) as Function],
     );
     to.add_native_concrete_impl(
         CAST_TRAIT.clone(),
