@@ -25,6 +25,7 @@ mod simple;
 mod std;
 mod subscript;
 mod r#trait;
+mod ssa;
 mod r#type;
 mod type_alias;
 mod type_defs;
