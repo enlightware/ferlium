@@ -466,50 +466,81 @@ pub struct CallDictionaryMethod {
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind {
-    Immediate(LiteralValue),
     /// Compiler-only uninitialized storage used while generated `Value::clone` code fills a target.
     Uninit,
+    /// Return a literal value.
+    Immediate(LiteralValue),
+    /// Build a runtime closure value from a function and captured values.
     BuildClosure(B<BuildClosure>),
+    /// Call a first-class function value.
     Apply(B<Application>),
+    /// Clone the closure environment of `source` into already allocated `target` storage.
     FunctionClone(FunctionClone),
+    /// Drop the owned closure environment stored in `target`.
     FunctionDrop(FunctionDrop),
+    /// Materialize a value as an owned result, using the cheapest valid copy mode.
     CloneValue(CloneValue),
+    /// Call a statically known function.
     StaticApply(B<StaticApplication>),
-    /// Note: this should only exist transiently in the HIR and never be executed
+    /// Call a trait method before dictionary passing resolves it.
     TraitMethodApply(B<TraitMethodApplication>),
+    /// Load a statically known function as a first-class value.
     GetFunction(B<GetFunction>),
-    /// Note: this should only exist transiently in the IR and never be executed
+    /// Load a trait method as a first-class value before dictionary passing.
     GetTraitMethod(B<GetTraitMethod>),
-    /// Note: this should only exist transiently in the IR and never be executed
+    /// Load a trait associated const before dictionary passing resolves it.
     GetTraitAssociatedConst(B<GetTraitAssociatedConst>),
-    /// Note: this should only exist transiently in the IR and never be executed
+    /// Load a trait dictionary before dictionary passing resolves it.
     GetTraitDictionary(B<GetTraitDictionary>),
+    /// Get a trait dictionary selected by static trait resolution.
     GetDictionary(GetDictionary),
+    /// Load a trait dictionary from a function hidden argument.
     LoadDictionary(LoadDictionary),
+    /// Load a structural field index from a function hidden argument.
     LoadFieldIndex(LoadFieldIndex),
+    /// Look up a method function value from a trait dictionary.
     GetDictionaryMethod(GetDictionaryMethod),
+    /// Look up an associated const value from a trait dictionary.
     GetDictionaryAssociatedConst(GetDictionaryAssociatedConst),
+    /// Call a method entry through a trait dictionary.
     CallDictionaryMethod(B<CallDictionaryMethod>),
+    /// Store a value into local storage.
     StoreLocal(StoreLocal),
+    /// Drop the owned value stored in a local.
     DropLocal(DropLocal),
+    /// Take a local value as an owned result.
     TakeLocalValue(TakeLocalValue),
+    /// Load a local as a place or borrowed value.
     LoadLocal(LoadLocal),
+    /// Return from the current function.
     Return(NodeId),
+    /// Evaluate a sequence of nodes.
     Block(NodeIds),
+    /// Assign a new value into an existing place.
     Assign(Assignment),
+    /// Build a tuple value.
     Tuple(NodeIds),
+    /// Project a tuple-like value at a statically known index.
     Project(Project),
+    /// Build a record value.
     Record(NodeIds),
-    // Note: this should only exist transiently in the HIR and never be executed
+    /// Access a record-like value at a statically known field.
     FieldAccess(FieldAccess),
+    /// Project a tuple-like value using a hidden field-index parameter.
     ProjectAt(ProjectAt),
+    /// Build a variant value with a tag and payload.
     Variant(Variant),
-    /// Extract the tag of a variant as an isize, by casting the pointer to the string
+    /// Extract the tag of a variant as an isize, by casting the pointer to the string.
     ExtractTag(NodeId),
+    /// Build an array value.
     Array(NodeIds),
+    /// Branch on a literal value with a default alternative.
     Case(B<Case>),
+    /// Loop forever until a return or soft break is reached.
     Loop(NodeId),
+    /// Break out of the nearest loop without returning from the function.
     SoftBreak,
+    /// Placeholder used while temporarily moving a node kind out of the arena.
     Unimplemented,
 }
 
