@@ -2569,7 +2569,7 @@ fn eval_args(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError> {
-    // Automatically cast mutable references to values if the function expects values.
+    // Consume the already-resolved source-level argument passing metadata.
     let temp_start = ctx.environment.len();
     let mut results = Vec::with_capacity(args.len());
     let mut temp_drops = Vec::new();
