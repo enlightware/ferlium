@@ -200,18 +200,16 @@ fn generated_value_to_string_calls_resolve_temp_cleanup_for_string_pieces() {
                 return false;
             };
             matches!(
-                (
-                    app.arguments.get(1),
-                    app.argument_passing.get(1),
-                ),
-                (
-                    Some(argument),
-                    Some(ArgPassing::Value(ValueArgPassing::Resolved(
+                app.arguments.get(1),
+                Some(argument)
+                    if matches!(
+                        argument.passing,
+                        ArgPassing::Value(ValueArgPassing::Resolved(
                         ResolvedValueArgPassing::SharedRef {
                             temp_cleanup: SharedRefTempCleanup::Drop(_),
                         },
-                    ))),
-                ) if matches!(module.ir_arena[*argument].kind, NodeKind::Immediate(_))
+                    ))
+                    ) && matches!(module.ir_arena[argument.value].kind, NodeKind::Immediate(_))
             )
         }),
         "generated calls passing string literal pieces by shared reference should resolve temp cleanup"

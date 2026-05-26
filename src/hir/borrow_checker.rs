@@ -11,7 +11,7 @@ use ustr::Ustr;
 use crate::{
     Location,
     compiler::error::InternalCompilationError,
-    hir::{Node, NodeArena, NodeId, NodeKind},
+    hir::{CallArgument, Node, NodeArena, NodeId, NodeKind},
     internal_compilation_error,
     module::id::Id,
     types::r#type::FnArgType,
@@ -60,14 +60,14 @@ impl Path {
         }
     }
 
-    fn from_place_result_arguments(arena: &NodeArena, arguments: &[NodeId]) -> Self {
+    fn from_place_result_arguments(arena: &NodeArena, arguments: &[CallArgument]) -> Self {
         let base_index = arguments
             .iter()
-            .position(|argument| !is_evidence_node(&arena[*argument].kind))
+            .position(|argument| !is_evidence_node(&arena[argument.value].kind))
             .expect("place_result application should have a base argument");
-        let mut path = Self::from_node(arena, arguments[base_index]);
-        if let Some(&index) = arguments.get(base_index + 1) {
-            path.parts.push(Self::index_part(arena, index));
+        let mut path = Self::from_node(arena, arguments[base_index].value);
+        if let Some(index) = arguments.get(base_index + 1) {
+            path.parts.push(Self::index_part(arena, index.value));
         } else {
             path.parts.push(PathPart::IndexDynamic);
         }
@@ -125,7 +125,7 @@ fn do_paths_overlap(a: &Path, b: &Path) -> bool {
 /// Implements borrow checking logic by comparing the paths of mutable arguments.
 fn check_arguments(
     arg_types: &[FnArgType],
-    arguments: &[NodeId],
+    arguments: &[CallArgument],
     arena: &NodeArena,
     fn_span: Location,
 ) -> Result<(), InternalCompilationError> {
@@ -135,7 +135,7 @@ fn check_arguments(
         .enumerate()
         .filter_map(|(i, ty)| {
             if ty.mut_ty.is_mutable() {
-                Some((i, Path::from_node(arena, arguments[i])))
+                Some((i, Path::from_node(arena, arguments[i].value)))
             } else {
                 None
             }
@@ -146,8 +146,8 @@ fn check_arguments(
         for arg_j in in_out_args.iter().skip(i + 1) {
             if do_paths_overlap(&arg_i.1, &arg_j.1) {
                 return Err(internal_compilation_error!(MutablePathsOverlap {
-                    a_span: arena[arguments[arg_i.0]].span,
-                    b_span: arena[arguments[arg_j.0]].span,
+                    a_span: arena[arguments[arg_i.0].value].span,
+                    b_span: arena[arguments[arg_j.0].value].span,
                     fn_span,
                 }));
             }
@@ -179,8 +179,8 @@ impl Node {
             }
             Apply(app) => {
                 check_borrows(arena, app.function)?;
-                for &arg in &app.arguments {
-                    check_borrows(arena, arg)?;
+                for arg in &app.arguments {
+                    check_borrows(arena, arg.value)?;
                 }
                 let fn_type = arena[app.function].ty.data();
                 let fn_type = fn_type.as_function().unwrap();
@@ -202,14 +202,14 @@ impl Node {
                 check_borrows(arena, node.source)?;
             }
             StaticApply(app) => {
-                for &arg in &app.arguments {
-                    check_borrows(arena, arg)?;
+                for arg in &app.arguments {
+                    check_borrows(arena, arg.value)?;
                 }
                 check_arguments(&app.ty.args, &app.arguments, arena, app.function_span)?;
             }
             TraitMethodApply(app) => {
-                for &arg in &app.arguments {
-                    check_borrows(arena, arg)?;
+                for arg in &app.arguments {
+                    check_borrows(arena, arg.value)?;
                 }
                 check_arguments(&app.ty.args, &app.arguments, arena, app.method_span)?;
             }
@@ -223,8 +223,8 @@ impl Node {
             GetDictionaryAssociatedConst(node) => check_borrows(arena, node.dictionary)?,
             CallDictionaryMethod(node) => {
                 check_borrows(arena, node.dictionary)?;
-                for &arg in &node.arguments {
-                    check_borrows(arena, arg)?;
+                for arg in &node.arguments {
+                    check_borrows(arena, arg.value)?;
                 }
                 check_arguments(
                     &node.ty.args,

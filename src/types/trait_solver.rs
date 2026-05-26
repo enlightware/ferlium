@@ -23,7 +23,7 @@ use crate::{
         ValueArgPassing, VoidFunction,
     },
     hir::hir_syn::{get_dictionary, load_local},
-    hir::{self, FnInstData, Node, NodeArena, NodeKind, StaticApplication},
+    hir::{self, CallArgument, FnInstData, Node, NodeArena, NodeKind, StaticApplication},
     internal_compilation_error,
     module::{
         self, BlanketImpls, BlanketTraitImplKey, BlanketTraitImpls, ConcreteTraitImplKey, Def,
@@ -1780,7 +1780,7 @@ impl<'a> TraitSolver<'a> {
 
                             // Build the value arguments for the call. Constraint dictionaries are
                             // evidence arguments and stay separate from source-level values.
-                            let arguments: Vec<_> = def
+                            let argument_values: Vec<_> = def
                                 .ty_scheme
                                 .ty
                                 .args
@@ -1796,6 +1796,15 @@ impl<'a> TraitSolver<'a> {
                                     ))
                                 })
                                 .collect();
+                            let argument_passing = self.resolved_arg_passing_for_no_temp_args(
+                                arena,
+                                &def.ty_scheme.ty.args,
+                                fn_span,
+                            );
+                            let arguments = CallArgument::from_values_and_passing(
+                                argument_values,
+                                argument_passing,
+                            );
 
                             // Build the application node.
                             let apply = NodeKind::StaticApply(b(StaticApplication {
@@ -1804,11 +1813,6 @@ impl<'a> TraitSolver<'a> {
                                 function_span: fn_span,
                                 extra_arguments: constraint_dict_nodes,
                                 argument_names: def.arg_names.clone(),
-                                argument_passing: self.resolved_arg_passing_for_no_temp_args(
-                                    arena,
-                                    &def.ty_scheme.ty.args,
-                                    fn_span,
-                                ),
                                 arguments,
                                 ty: def.ty_scheme.ty.clone(),
                                 inst_data: FnInstData::none(),
@@ -1985,7 +1989,7 @@ impl<'a> TraitSolver<'a> {
 
                         // Build the value arguments for the call. Constraint dictionaries are
                         // evidence arguments and stay separate from source-level values.
-                        let arguments: Vec<_> = def
+                        let argument_values: Vec<_> = def
                             .ty_scheme
                             .ty
                             .args
@@ -2001,6 +2005,15 @@ impl<'a> TraitSolver<'a> {
                                 ))
                             })
                             .collect();
+                        let argument_passing = self.resolved_arg_passing_for_no_temp_args(
+                            arena,
+                            &def.ty_scheme.ty.args,
+                            fn_span,
+                        );
+                        let arguments = CallArgument::from_values_and_passing(
+                            argument_values,
+                            argument_passing,
+                        );
 
                         // Build the application node.
                         let apply = NodeKind::StaticApply(b(StaticApplication {
@@ -2009,11 +2022,6 @@ impl<'a> TraitSolver<'a> {
                             function_span: fn_span,
                             extra_arguments: constraint_dict_nodes,
                             argument_names: def.arg_names.clone(),
-                            argument_passing: self.resolved_arg_passing_for_no_temp_args(
-                                arena,
-                                &def.ty_scheme.ty.args,
-                                fn_span,
-                            ),
                             arguments,
                             ty: def.ty_scheme.ty.clone(),
                             inst_data: FnInstData::none(),

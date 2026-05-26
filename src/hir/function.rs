@@ -349,6 +349,7 @@ pub enum ValueArgPassing {
     Unknown,
     /// Shared reference is required, but temporary drop dispatch is not resolved yet.
     SharedRefUnknownDrop,
+    /// We know how to pass the argument.
     Resolved(ResolvedValueArgPassing),
 }
 

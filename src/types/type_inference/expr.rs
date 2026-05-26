@@ -24,8 +24,9 @@ use crate::{
     },
     hir::value::LiteralValue,
     hir::{
-        self, Immediate, NodeArena, NodeId, NodeKind, StoreLocal, node_is_place_reference,
-        place_resolution_may_create_temp, place_result_base_argument_index,
+        self, CallArgument, Immediate, NodeArena, NodeId, NodeKind, StoreLocal,
+        node_is_place_reference, place_resolution_may_create_temp,
+        place_result_base_argument_index,
     },
     internal_compilation_error,
     module::{
@@ -100,6 +101,11 @@ pub struct TypeInference {
 struct PreparedPlace {
     prefix: Vec<NodeId>,
     place: NodeId,
+}
+
+struct PreparedCallArguments {
+    arguments: Vec<CallArgument>,
+    temp_stores: Vec<NodeId>,
 }
 
 impl TypeInference {
@@ -768,19 +774,18 @@ impl TypeInference {
                             temp_stores.push(store);
                             load
                         };
-                        let (argument_passing, argument_temp_stores) = self.prepare_call_arguments(
+                        let prepared_arguments = self.prepare_call_arguments(
                             env,
                             &mut args_nodes,
                             &args_tys,
                             expr_span,
                             None,
                         );
-                        temp_stores.extend(argument_temp_stores);
+                        temp_stores.extend(prepared_arguments.temp_stores);
                         // Store and return the result
                         let call = K::Apply(b(hir::Application {
                             function,
-                            arguments: args_nodes,
-                            argument_passing,
+                            arguments: prepared_arguments.arguments,
                             returns_place: false,
                         }));
                         let call =
@@ -1216,12 +1221,15 @@ impl TypeInference {
                             &index_effects,
                             &inst_fn_ty.effects,
                         ]);
-                        let arguments = vec![array_node_id, index_node_id];
-                        let visible_arg_passing =
-                            visible_native_arg_passing(arg_passing, &inst_data, arguments.len());
+                        let argument_values = vec![array_node_id, index_node_id];
+                        let visible_arg_passing = visible_native_arg_passing(
+                            arg_passing,
+                            &inst_data,
+                            argument_values.len(),
+                        );
                         let argument_passing =
                             self.argument_passing_for_args(&inst_fn_ty.args, visible_arg_passing);
-                        for ((arg, arg_ty), passing) in arguments
+                        for ((arg, arg_ty), passing) in argument_values
                             .iter()
                             .zip(&inst_fn_ty.args)
                             .zip(&argument_passing)
@@ -1230,13 +1238,16 @@ impl TypeInference {
                                 env, *arg, arg_ty.ty, *passing, expr_span,
                             );
                         }
+                        let arguments = CallArgument::from_values_and_passing(
+                            argument_values,
+                            argument_passing,
+                        );
                         let node = K::StaticApply(b(hir::StaticApplication {
                             function,
                             function_path: Some(path),
                             function_span: expr_span,
                             extra_arguments: Vec::new(),
                             arguments,
-                            argument_passing,
                             argument_names: vec![ustr("array"), ustr("index")],
                             ty: inst_fn_ty,
                             inst_data,
@@ -1402,7 +1413,7 @@ impl TypeInference {
         arg_tys: &[FnArgType],
         span: Location,
         native_arg_passing: Option<&[ResolvedArgPassing]>,
-    ) -> (Vec<ArgPassing>, Vec<NodeId>) {
+    ) -> PreparedCallArguments {
         let arg_passing = self.argument_passing_for_args(arg_tys, native_arg_passing);
         let mut stores = Vec::new();
         for ((arg, arg_ty), passing) in args.iter_mut().zip(arg_tys).zip(&arg_passing) {
@@ -1428,7 +1439,11 @@ impl TypeInference {
                 }
             }
         }
-        (arg_passing, stores)
+        let arguments = CallArgument::from_value_slice_and_passing(args, arg_passing);
+        PreparedCallArguments {
+            arguments,
+            temp_stores: stores,
+        }
     }
 
     fn argument_passing_for_args(
@@ -1738,10 +1753,10 @@ impl TypeInference {
                 {
                     let mut prepared = self.prepare_place_base_for_projection(
                         env,
-                        app.arguments[base_index],
+                        app.arguments[base_index].value,
                         span,
                     );
-                    app.arguments[base_index] = prepared.place;
+                    app.arguments[base_index].value = prepared.place;
                     prepared.place =
                         self.rebuild_place_node(env, place, NodeKind::StaticApply(app));
                     prepared
@@ -1758,10 +1773,10 @@ impl TypeInference {
                 {
                     let mut prepared = self.prepare_place_base_for_projection(
                         env,
-                        app.arguments[base_index],
+                        app.arguments[base_index].value,
                         span,
                     );
-                    app.arguments[base_index] = prepared.place;
+                    app.arguments[base_index].value = prepared.place;
                     prepared.place = self.rebuild_place_node(env, place, NodeKind::Apply(app));
                     prepared
                 } else {
@@ -2077,7 +2092,7 @@ impl TypeInference {
                     let combined_effects =
                         self.make_dependent_effect([&args_effects, &inst_fn_ty.effects]);
                     let temp_start_index = env.cur_locals.len();
-                    let (argument_passing, temp_stores) = self.prepare_call_arguments(
+                    let prepared_arguments = self.prepare_call_arguments(
                         env,
                         &mut args_node_ids,
                         &inst_fn_ty.args,
@@ -2089,16 +2104,19 @@ impl TypeInference {
                         method_index,
                         method_path: path.clone(),
                         method_span: path_span,
-                        arguments: args_node_ids,
-                        argument_passing,
+                        arguments: prepared_arguments.arguments,
                         arguments_unnamed,
                         ty: inst_fn_ty,
                         input_tys,
                         inst_data,
                     }));
                     let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
-                    let node =
-                        self.wrap_call_with_temp_drops(env, temp_start_index, temp_stores, call);
+                    let node = self.wrap_call_with_temp_drops(
+                        env,
+                        temp_start_index,
+                        prepared_arguments.temp_stores,
+                        call,
+                    );
                     (node, ret_ty, MutType::constant(), combined_effects)
                 }
             } else if let Some((definition, function, _module_id, arg_passing)) =
@@ -2134,7 +2152,7 @@ impl TypeInference {
                     let visible_arg_passing =
                         visible_native_arg_passing(arg_passing, &inst_data, args_node_ids.len());
                     let temp_start_index = env.cur_locals.len();
-                    let (argument_passing, temp_stores) = self.prepare_call_arguments(
+                    let prepared_arguments = self.prepare_call_arguments(
                         env,
                         &mut args_node_ids,
                         &inst_fn_ty.args,
@@ -2146,16 +2164,19 @@ impl TypeInference {
                         function_path: Some(path.clone()),
                         function_span: path_span,
                         extra_arguments: Vec::new(),
-                        arguments: args_node_ids,
-                        argument_passing,
+                        arguments: prepared_arguments.arguments,
                         argument_names,
                         ty: inst_fn_ty,
                         inst_data,
                         returns_place,
                     }));
                     let call = hir::Node::new(call, ret_ty, combined_effects.clone(), expr_span);
-                    let node =
-                        self.wrap_call_with_temp_drops(env, temp_start_index, temp_stores, call);
+                    let node = self.wrap_call_with_temp_drops(
+                        env,
+                        temp_start_index,
+                        prepared_arguments.temp_stores,
+                        call,
+                    );
                     (node, ret_ty, MutType::constant(), combined_effects)
                 }
             } else if let Some(type_def) = env.get_type_def(path)? {

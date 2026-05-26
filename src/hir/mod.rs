@@ -77,20 +77,20 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
             !node_is_place_reference(arena, app.function)
                 || place_resolution_may_create_temp(arena, app.function)
                 || place_result_base_argument_index(arena, &app.arguments).is_some_and(
-                    |base_index| !node_is_place_reference(arena, app.arguments[base_index]),
+                    |base_index| !node_is_place_reference(arena, app.arguments[base_index].value),
                 )
                 || app
                     .arguments
                     .iter()
-                    .any(|arg| place_resolution_may_create_temp(arena, *arg))
+                    .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
         StaticApply(app) if app.returns_place => {
             place_result_base_argument_index(arena, &app.arguments).is_some_and(|base_index| {
-                !node_is_place_reference(arena, app.arguments[base_index])
+                !node_is_place_reference(arena, app.arguments[base_index].value)
             }) || app
                 .arguments
                 .iter()
-                .any(|arg| place_resolution_may_create_temp(arena, *arg))
+                .any(|arg| place_resolution_may_create_temp(arena, arg.value))
         }
         _ => false,
     }
@@ -130,11 +130,11 @@ pub(crate) fn resolve_deferred_local_storage_shape(
 
 pub(crate) fn place_result_base_argument_index(
     arena: &NodeArena,
-    arguments: &[NodeId],
+    arguments: &[CallArgument],
 ) -> Option<usize> {
     arguments
         .iter()
-        .position(|argument| !is_evidence_node(&arena[*argument].kind))
+        .position(|argument| !is_evidence_node(&arena[argument.value].kind))
 }
 
 fn is_evidence_node(kind: &NodeKind) -> bool {
@@ -211,11 +211,44 @@ pub struct BuildClosure {
     pub captures_value_dictionary: Option<NodeId>,
 }
 
+/// A visible call argument together with its resolved or deferred passing mode.
+#[derive(Debug, Clone, Copy)]
+pub struct CallArgument {
+    pub value: NodeId,
+    pub passing: ArgPassing,
+}
+
+impl CallArgument {
+    pub(crate) fn from_values_and_passing(
+        values: Vec<NodeId>,
+        passing: Vec<ArgPassing>,
+    ) -> Vec<Self> {
+        assert_eq!(values.len(), passing.len());
+        values
+            .into_iter()
+            .zip(passing)
+            .map(|(value, passing)| Self { value, passing })
+            .collect()
+    }
+
+    pub(crate) fn from_value_slice_and_passing(
+        values: &[NodeId],
+        passing: Vec<ArgPassing>,
+    ) -> Vec<Self> {
+        assert_eq!(values.len(), passing.len());
+        values
+            .iter()
+            .copied()
+            .zip(passing)
+            .map(|(value, passing)| Self { value, passing })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Application {
     pub function: NodeId,
-    pub arguments: Vec<NodeId>,
-    pub argument_passing: Vec<ArgPassing>,
+    pub arguments: Vec<CallArgument>,
     pub returns_place: bool,
 }
 
@@ -245,8 +278,8 @@ pub struct StaticApplication {
     pub function_path: Option<ast::Path>,
     pub function_span: Location,
     pub extra_arguments: Vec<NodeId>,
-    pub arguments: Vec<NodeId>,
-    pub argument_passing: Vec<ArgPassing>,
+    pub arguments: Vec<CallArgument>,
+    /// Optional source/debug names for visible arguments; same length as `arguments`.
     pub argument_names: Vec<Ustr>,
     pub ty: FnType,
     pub inst_data: FnInstData,
@@ -259,8 +292,7 @@ pub struct TraitMethodApplication {
     pub method_index: TraitMethodIndex,
     pub method_path: ast::Path,
     pub method_span: Location,
-    pub arguments: Vec<NodeId>,
-    pub argument_passing: Vec<ArgPassing>,
+    pub arguments: Vec<CallArgument>,
     pub arguments_unnamed: UnnamedArg,
     pub ty: FnType,
     pub input_tys: Vec<Type>,
@@ -383,8 +415,7 @@ pub struct GetDictionaryAssociatedConst {
 pub struct CallDictionaryMethod {
     pub dictionary: NodeId,
     pub entry_index: TraitDictionaryEntryIndex,
-    pub arguments: Vec<NodeId>,
-    pub argument_passing: Vec<ArgPassing>,
+    pub arguments: Vec<CallArgument>,
     pub ty: FnType,
 }
 
@@ -470,7 +501,7 @@ impl NodeKind {
             }
             Apply(app) => {
                 let mut v: SVec4<NodeId> = smallvec![app.function];
-                v.extend_from_slice(&app.arguments);
+                v.extend(app.arguments.iter().map(|arg| arg.value));
                 v
             }
             FunctionClone(node) => smallvec![node.source, node.target],
@@ -479,17 +510,17 @@ impl NodeKind {
             StaticApply(app) => app
                 .extra_arguments
                 .iter()
-                .chain(app.arguments.iter())
                 .copied()
+                .chain(app.arguments.iter().map(|arg| arg.value))
                 .collect(),
             GetDictionaryMethod(node) => smallvec![node.dictionary],
             GetDictionaryAssociatedConst(node) => smallvec![node.dictionary],
             CallDictionaryMethod(node) => {
                 let mut v: SVec4<NodeId> = smallvec![node.dictionary];
-                v.extend_from_slice(&node.arguments);
+                v.extend(node.arguments.iter().map(|arg| arg.value));
                 v
             }
-            TraitMethodApply(app) => app.arguments.iter().copied().collect(),
+            TraitMethodApply(app) => app.arguments.iter().map(|arg| arg.value).collect(),
             StoreLocal(store) => smallvec![store.value],
             Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
             Block(nodes) | Tuple(nodes) | Record(nodes) | Array(nodes) => {
@@ -609,8 +640,8 @@ impl Node {
                     writeln!(f, "{indent_str}and apply to ()")?;
                 } else {
                     writeln!(f, "{indent_str}and apply to (")?;
-                    for &arg in &app.arguments {
-                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
+                    for arg in &app.arguments {
+                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -656,11 +687,11 @@ impl Node {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for (name, &arg) in app.argument_names.iter().zip(app.arguments.iter()) {
+                    for (name, arg) in app.argument_names.iter().zip(app.arguments.iter()) {
                         if !name.is_empty() {
                             writeln!(f, "{indent_str}  {name}:")?;
                         }
-                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
+                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -678,9 +709,9 @@ impl Node {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for (name, &arg) in method_def.arg_names.iter().zip(app.arguments.iter()) {
+                    for (name, arg) in method_def.arg_names.iter().zip(app.arguments.iter()) {
                         writeln!(f, "{indent_str}  {name}:")?;
-                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
+                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -773,8 +804,8 @@ impl Node {
                     writeln!(f, "{indent_str}to ()")?;
                 } else {
                     writeln!(f, "{indent_str}to (")?;
-                    for &arg in &call.arguments {
-                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
+                    for arg in &call.arguments {
+                        format_ind(arena, arg.value, f, locals, env, spacing, indent + 1)?;
                     }
                     writeln!(f, "{indent_str})")?;
                 }
@@ -961,8 +992,8 @@ impl Node {
                 if let Some(ty) = type_at(arena, app.function, pos) {
                     return Some(ty);
                 }
-                for &arg in &app.arguments {
-                    if let Some(ty) = type_at(arena, arg, pos) {
+                for arg in &app.arguments {
+                    if let Some(ty) = type_at(arena, arg.value, pos) {
                         return Some(ty);
                     }
                 }
@@ -986,15 +1017,15 @@ impl Node {
                 }
             }
             StaticApply(app) => {
-                for &arg in &app.arguments {
-                    if let Some(ty) = type_at(arena, arg, pos) {
+                for arg in &app.arguments {
+                    if let Some(ty) = type_at(arena, arg.value, pos) {
                         return Some(ty);
                     }
                 }
             }
             TraitMethodApply(app) => {
-                for &arg in &app.arguments {
-                    if let Some(ty) = type_at(arena, arg, pos) {
+                for arg in &app.arguments {
+                    if let Some(ty) = type_at(arena, arg.value, pos) {
                         return Some(ty);
                     }
                 }
@@ -1029,8 +1060,8 @@ impl Node {
                 if let Some(ty) = type_at(arena, node.dictionary, pos) {
                     return Some(ty);
                 }
-                for &arg in &node.arguments {
-                    if let Some(ty) = type_at(arena, arg, pos) {
+                for arg in &node.arguments {
+                    if let Some(ty) = type_at(arena, arg.value, pos) {
                         return Some(ty);
                     }
                 }
@@ -1151,8 +1182,8 @@ impl Node {
             }
             Apply(app) => {
                 unbound_ty_vars(arena, app.function, result, ignore);
-                for &arg in &app.arguments {
-                    unbound_ty_vars(arena, arg, result, ignore);
+                for arg in &app.arguments {
+                    unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
             FunctionClone(node) => {
@@ -1163,14 +1194,14 @@ impl Node {
             CloneValue(node) => unbound_ty_vars(arena, node.source, result, ignore),
             StaticApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
-                for &arg in &app.arguments {
-                    unbound_ty_vars(arena, arg, result, ignore);
+                for arg in &app.arguments {
+                    unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
             TraitMethodApply(app) => {
                 self.unbound_ty_vars_in_ty(&app.ty, result, ignore);
-                for &arg in &app.arguments {
-                    unbound_ty_vars(arena, arg, result, ignore);
+                for arg in &app.arguments {
+                    unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
             GetFunction(_) => {
@@ -1206,8 +1237,8 @@ impl Node {
             CallDictionaryMethod(node) => {
                 self.unbound_ty_vars_in_ty(&node.ty, result, ignore);
                 unbound_ty_vars(arena, node.dictionary, result, ignore);
-                for &arg in &node.arguments {
-                    unbound_ty_vars(arena, arg, result, ignore);
+                for arg in &node.arguments {
+                    unbound_ty_vars(arena, arg.value, result, ignore);
                 }
             }
             StoreLocal(node) => unbound_ty_vars(arena, node.value, result, ignore),

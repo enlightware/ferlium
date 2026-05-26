@@ -20,7 +20,7 @@ use crate::{
         BinaryNativeFnRWN, Function, FunctionDefinition, ScriptFunction, UnaryNativeFnMN,
     },
     hir::value::{FunctionValue, LiteralValue, NativeValue, Value, ustr_to_isize},
-    hir::{self, NodeArena, NodeId},
+    hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
         dictionary_passing::{resolved_arg_passing_for_generated_call, static_apply_generated},
         emit_value_impl::function_value_method,
@@ -433,6 +433,7 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                 &fn_ty.args,
                 span,
             )?;
+            let arguments = CallArgument::from_values_and_passing(arguments, argument_passing);
             return Ok((
                 hir::NodeKind::TraitMethodApply(crate::containers::b(
                     hir::TraitMethodApplication {
@@ -441,7 +442,6 @@ impl<'s, 'm> ValueBodyCtx<'s, 'm> {
                         method_path: Path::single(trait_ref.method(method_index).0, span),
                         method_span: span,
                         arguments,
-                        argument_passing,
                         arguments_unnamed: UnnamedArg::All,
                         ty: fn_ty,
                         input_tys: vec![input_ty],

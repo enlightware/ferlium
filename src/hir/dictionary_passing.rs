@@ -864,11 +864,18 @@ impl Node {
             }
             Apply(app) => {
                 elaborate_dictionaries(arena, app.function, ctx, locals, local_count)?;
-                for &arg_id in &app.arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
+                for arg in &app.arguments {
+                    elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
                 }
-                for (passing, &arg_id) in app.argument_passing.iter_mut().zip(&app.arguments) {
-                    resolve_arg_passing(arena, ctx, passing, arg_id, arena[arg_id].ty, node_span)?;
+                for arg in &mut app.arguments {
+                    resolve_arg_passing(
+                        arena,
+                        ctx,
+                        &mut arg.passing,
+                        arg.value,
+                        arena[arg.value].ty,
+                        node_span,
+                    )?;
                 }
             }
             FunctionClone(node) => {
@@ -889,16 +896,18 @@ impl Node {
                 for &arg_id in &app.extra_arguments {
                     elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
                 }
-                for &arg_id in &app.arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
+                for arg in &app.arguments {
+                    elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
                 }
-                for ((passing, arg_ty), &arg_id) in app
-                    .argument_passing
-                    .iter_mut()
-                    .zip(&app.ty.args)
-                    .zip(&app.arguments)
-                {
-                    resolve_arg_passing(arena, ctx, passing, arg_id, arg_ty.ty, node_span)?;
+                for (arg, arg_ty) in app.arguments.iter_mut().zip(&app.ty.args) {
+                    resolve_arg_passing(
+                        arena,
+                        ctx,
+                        &mut arg.passing,
+                        arg.value,
+                        arg_ty.ty,
+                        node_span,
+                    )?;
                 }
                 if !app.inst_data.dicts_req.is_empty() {
                     // Build the dictionary requirements for the function as evidence arguments.
@@ -926,16 +935,18 @@ impl Node {
                 }
             }
             TraitMethodApply(app) => {
-                for &arg_id in &app.arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
+                for arg in &app.arguments {
+                    elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
                 }
-                for ((passing, arg_ty), &arg_id) in app
-                    .argument_passing
-                    .iter_mut()
-                    .zip(&app.ty.args)
-                    .zip(&app.arguments)
-                {
-                    resolve_arg_passing(arena, ctx, passing, arg_id, arg_ty.ty, node_span)?;
+                for (arg, arg_ty) in app.arguments.iter_mut().zip(&app.ty.args) {
+                    resolve_arg_passing(
+                        arena,
+                        ctx,
+                        &mut arg.passing,
+                        arg.value,
+                        arg_ty.ty,
+                        node_span,
+                    )?;
                 }
                 assert!(
                     app.inst_data.dicts_req.is_empty(),
@@ -955,14 +966,12 @@ impl Node {
                     let function_span = app.method_span;
                     let ty = app.ty.clone();
                     let arguments = mem::take(&mut app.arguments);
-                    let argument_passing = mem::take(&mut app.argument_passing);
                     kind = StaticApply(b(hir::StaticApplication {
                         function,
                         function_path,
                         function_span,
                         extra_arguments: Vec::new(),
                         arguments,
-                        argument_passing,
                         argument_names,
                         ty,
                         inst_data: hir::FnInstData::none(),
@@ -983,14 +992,12 @@ impl Node {
                     let function_span = app.method_span;
                     let ty = app.ty.clone();
                     let arguments = mem::take(&mut app.arguments);
-                    let argument_passing = mem::take(&mut app.argument_passing);
                     kind = StaticApply(b(hir::StaticApplication {
                         function,
                         function_path,
                         function_span,
                         extra_arguments: Vec::new(),
                         arguments,
-                        argument_passing,
                         argument_names,
                         ty,
                         inst_data: hir::FnInstData::none(),
@@ -1021,13 +1028,11 @@ impl Node {
                         app.method_index,
                     );
                     let arguments = mem::take(&mut app.arguments);
-                    let argument_passing = mem::take(&mut app.argument_passing);
                     let ty = app.ty.clone();
                     kind = CallDictionaryMethod(b(hir::CallDictionaryMethod {
                         dictionary: dict_id,
                         entry_index,
                         arguments,
-                        argument_passing,
                         ty,
                     }));
                 } else {
@@ -1057,13 +1062,11 @@ impl Node {
                         app.method_index,
                     );
                     let arguments = mem::take(&mut app.arguments);
-                    let argument_passing = mem::take(&mut app.argument_passing);
                     let ty = app.ty.clone();
                     kind = CallDictionaryMethod(b(hir::CallDictionaryMethod {
                         dictionary: load_dict_id,
                         entry_index,
                         arguments,
-                        argument_passing,
                         ty,
                     }));
                 }
@@ -1278,16 +1281,18 @@ impl Node {
             }
             CallDictionaryMethod(call) => {
                 elaborate_dictionaries(arena, call.dictionary, ctx, locals, local_count)?;
-                for &arg_id in &call.arguments {
-                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
+                for arg in &call.arguments {
+                    elaborate_dictionaries(arena, arg.value, ctx, locals, local_count)?;
                 }
-                for ((passing, arg_ty), &arg_id) in call
-                    .argument_passing
-                    .iter_mut()
-                    .zip(&call.ty.args)
-                    .zip(&call.arguments)
-                {
-                    resolve_arg_passing(arena, ctx, passing, arg_id, arg_ty.ty, node_span)?;
+                for (arg, arg_ty) in call.arguments.iter_mut().zip(&call.ty.args) {
+                    resolve_arg_passing(
+                        arena,
+                        ctx,
+                        &mut arg.passing,
+                        arg.value,
+                        arg_ty.ty,
+                        node_span,
+                    )?;
                 }
             }
             Return(node_id) => {

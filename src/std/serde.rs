@@ -17,7 +17,7 @@ use crate::{
     containers::{SVec2, b},
     hir::hir_syn::native_str,
     hir::value::{LiteralValue, ustr_to_isize},
-    hir::{self, NodeArena, NodeId},
+    hir::{self, CallArgument, NodeArena, NodeId},
     hir::{
         dictionary_passing::{resolved_arg_passing_for_generated_call, static_apply_generated},
         function::FunctionDefinition,
@@ -462,6 +462,8 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                     let argument_passing = resolved_arg_passing_for_generated_call(
                         arena, solver, &arguments, &ty.args, span,
                     )?;
+                    let arguments =
+                        CallArgument::from_values_and_passing(arguments, argument_passing);
                     let index_place = n(
                         arena,
                         hir::NodeKind::StaticApply(b(hir::StaticApplication {
@@ -470,7 +472,6 @@ impl Deriver for AlgebraicTypeDeserializeDeriver {
                             function_span: span,
                             extra_arguments: vec![dictionary_node],
                             arguments,
-                            argument_passing,
                             argument_names: vec![ustr("array"), ustr("index")],
                             ty,
                             inst_data: hir::FnInstData::none(),

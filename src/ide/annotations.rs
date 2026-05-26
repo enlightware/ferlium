@@ -297,8 +297,8 @@ fn node_variable_type_annotations<Env>(
         }
         Apply(app) => {
             variable_type_annotations(arena, app.function, result, locals, env);
-            for &arg in &app.arguments {
-                variable_type_annotations(arena, arg, result, locals, env);
+            for arg in &app.arguments {
+                variable_type_annotations(arena, arg.value, result, locals, env);
             }
         }
         FunctionClone(node) => {
@@ -314,15 +314,15 @@ fn node_variable_type_annotations<Env>(
         StaticApply(app) => {
             let arity = app.argument_names.len();
             let show_arg_name_hints = !app.function_span.is_empty();
-            for (index, &arg) in app.arguments.iter().enumerate() {
+            for (index, arg) in app.arguments.iter().enumerate() {
                 if show_arg_name_hints
                     && let (Some(path), Some(arg_name)) =
                         (&app.function_path, app.argument_names.get(index))
-                    && !should_hide_arg_name_hint(arena, path, arity, arg_name, arg, locals)
+                    && !should_hide_arg_name_hint(arena, path, arity, arg_name, arg.value, locals)
                 {
-                    result.push((arena[arg].span.start_usize(), format!("{arg_name}: ")));
+                    result.push((arena[arg.value].span.start_usize(), format!("{arg_name}: ")));
                 }
-                variable_type_annotations(arena, arg, result, locals, env);
+                variable_type_annotations(arena, arg.value, result, locals, env);
             }
         }
         TraitMethodApply(_) => {
@@ -348,8 +348,8 @@ fn node_variable_type_annotations<Env>(
         }
         CallDictionaryMethod(node) => {
             variable_type_annotations(arena, node.dictionary, result, locals, env);
-            for &arg in &node.arguments {
-                variable_type_annotations(arena, arg, result, locals, env);
+            for arg in &node.arguments {
+                variable_type_annotations(arena, arg.value, result, locals, env);
             }
         }
         StoreLocal(node) => {

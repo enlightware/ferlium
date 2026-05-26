@@ -37,7 +37,7 @@ use crate::{
 };
 use crate::{
     Modules,
-    hir::{self, NodeArena, NodeId, NodeKind},
+    hir::{self, CallArgument, NodeArena, NodeId, NodeKind},
 };
 
 use crate::module::ImportFunctionTarget;
@@ -1277,7 +1277,6 @@ fn eval_call_dictionary_method(
         arena,
         &node.arguments,
         &node.ty.args,
-        &node.argument_passing,
         ctx,
         locals,
     ));
@@ -1750,14 +1749,7 @@ fn eval_apply(
     let function_value = unsafe { &*function_value };
     let args_ty = ctx.function_value_visible_argument_types(function_value);
     let temp_start = ctx.environment.len();
-    let mut arguments = eval_or_return!(eval_args(
-        arena,
-        &app.arguments,
-        &args_ty,
-        &app.argument_passing,
-        ctx,
-        locals
-    ));
+    let mut arguments = eval_or_return!(eval_args(arena, &app.arguments, &args_ty, ctx, locals));
     let result = ctx.call_function_value(function_value, arguments.take_arguments(), span);
     let cleanup = arguments.drop_temps(ctx, span);
     ctx.truncate_environment_storage(temp_start);
@@ -1781,14 +1773,8 @@ fn eval_static_apply(
         ctx,
         locals,
     ));
-    let mut arguments = eval_or_return!(eval_args(
-        arena,
-        &app.arguments,
-        &app.ty.args,
-        &app.argument_passing,
-        ctx,
-        locals
-    ));
+    let mut arguments =
+        eval_or_return!(eval_args(arena, &app.arguments, &app.ty.args, ctx, locals));
     let result = ctx.call_resolved_function_with_extra(
         local_id,
         module_id,
@@ -1821,7 +1807,6 @@ fn eval_place_result_static_apply(
         arena,
         &app.arguments,
         &app.ty.args,
-        &app.argument_passing,
         ctx,
         locals,
     ));
@@ -1906,17 +1891,15 @@ impl PreparedCallArgs {
 
 fn eval_place_result_args(
     arena: &NodeArena,
-    args: &[NodeId],
+    args: &[CallArgument],
     args_ty: &[FnArgType],
-    arg_passing: &[ArgPassing],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError> {
     let mut results = Vec::with_capacity(args.len());
     assert_eq!(args.len(), args_ty.len());
-    assert_eq!(args.len(), arg_passing.len());
-    for ((arg, ty), passing) in args.iter().zip(args_ty).zip(arg_passing) {
-        let result = eval_call_arg(arena, *arg, ty.ty, *passing, ctx, locals);
+    for (arg, ty) in args.iter().zip(args_ty) {
+        let result = eval_call_arg(arena, arg.value, ty.ty, arg.passing, ctx, locals);
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
             Ok(ControlFlow::Return(value)) => {
@@ -2575,9 +2558,8 @@ fn eval_call_arg(
 
 fn eval_args(
     arena: &NodeArena,
-    args: &[NodeId],
+    args: &[CallArgument],
     args_ty: &[FnArgType],
-    arg_passing: &[ArgPassing],
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<PreparedCallArgs>, RuntimeError> {
@@ -2586,9 +2568,8 @@ fn eval_args(
     let mut results = Vec::with_capacity(args.len());
     let mut temp_drops = Vec::new();
     assert_eq!(args.len(), args_ty.len());
-    assert_eq!(args.len(), arg_passing.len());
-    for ((arg, ty), passing) in args.iter().zip(args_ty).zip(arg_passing) {
-        let result = eval_call_arg(arena, *arg, ty.ty, *passing, ctx, locals)
+    for (arg, ty) in args.iter().zip(args_ty) {
+        let result = eval_call_arg(arena, arg.value, ty.ty, arg.passing, ctx, locals)
             .map(|result| result.map_continue(|arg| arg.materialize(ctx, &mut temp_drops)));
         match result {
             Ok(ControlFlow::Continue(arg)) => results.push(arg),
@@ -2766,7 +2747,7 @@ mod tests {
         CompilerSession, Location,
         eval::{ControlFlow, EvalCtx, eval_args, eval_nodes},
         hir::{
-            Immediate, Node, NodeArena, NodeKind,
+            CallArgument, Immediate, Node, NodeArena, NodeKind,
             function::{ArgPassing, ResolvedValueArgPassing, ValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
@@ -2866,20 +2847,22 @@ mod tests {
             FnArgType::new_by_val(Type::primitive::<EvalDropTracked>()),
             FnArgType::new_by_val(Type::unit()),
         ];
-        let arg_passing = [
-            ArgPassing::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned)),
-            ArgPassing::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned)),
+        let arguments = [
+            CallArgument {
+                value: tracked,
+                passing: ArgPassing::Value(ValueArgPassing::Resolved(
+                    ResolvedValueArgPassing::Owned,
+                )),
+            },
+            CallArgument {
+                value: return_unit,
+                passing: ArgPassing::Value(ValueArgPassing::Resolved(
+                    ResolvedValueArgPassing::Owned,
+                )),
+            },
         ];
 
-        let result = eval_args(
-            &arena,
-            &[tracked, return_unit],
-            &arg_tys,
-            &arg_passing,
-            &mut ctx,
-            &[],
-        )
-        .unwrap();
+        let result = eval_args(&arena, &arguments, &arg_tys, &mut ctx, &[]).unwrap();
         let ControlFlow::Return(value) = result else {
             panic!("expected eval_args to propagate return");
         };

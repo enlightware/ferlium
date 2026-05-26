@@ -11,7 +11,7 @@ use crate::{
     containers::{IntoSVec2, b},
     hir::function::ArgPassing,
     hir::value::{LiteralNativeValue, LiteralValue},
-    hir::{self, NodeId},
+    hir::{self, CallArgument, NodeId},
     module::{
         FunctionId, LocalDecl, LocalDeclId, LocalDrop, LocalFrameSlot, ProjectionIndex,
         TakeLocalValueMode, TraitImplId, id::Id,
@@ -49,6 +49,7 @@ pub fn static_apply_with_argument_passing(
     span: Location,
 ) -> NodeKind {
     let arguments = arguments.into();
+    let arguments = CallArgument::from_values_and_passing(arguments, argument_passing);
     K::StaticApply(b(hir::StaticApplication {
         function,
         function_path: None,
@@ -57,7 +58,6 @@ pub fn static_apply_with_argument_passing(
         argument_names: (0..arguments.len())
             .map(|i| ustr(&format!("arg{i}")))
             .collect(),
-        argument_passing,
         arguments,
         ty,
         inst_data: hir::FnInstData::none(),
