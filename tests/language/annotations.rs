@@ -9,7 +9,7 @@
 
 use test_log::test;
 
-use ferlium::ide::Compiler as IdeCompiler;
+use ferlium::ide::{AnnotationData, Compiler as IdeCompiler};
 use indoc::indoc;
 
 #[cfg(target_arch = "wasm32")]
@@ -24,7 +24,7 @@ fn compile_source(src: &str) -> IdeCompiler {
     compiler
 }
 
-fn annotated_ide_source(compiler: &mut IdeCompiler, src: &str) -> String {
+fn annotated_source(src: &str, annotations: impl IntoIterator<Item = AnnotationData>) -> String {
     let char_to_byte = |char_pos: usize| {
         src.char_indices()
             .map(|(index, _)| index)
@@ -33,7 +33,7 @@ fn annotated_ide_source(compiler: &mut IdeCompiler, src: &str) -> String {
     };
 
     let mut grouped = Vec::<(usize, String)>::new();
-    for annotation in compiler.get_annotations() {
+    for annotation in annotations {
         if let Some((_, hint)) = grouped.last_mut().filter(|(pos, _)| *pos == annotation.pos) {
             hint.push_str(&annotation.hint);
         } else {
@@ -48,12 +48,133 @@ fn annotated_ide_source(compiler: &mut IdeCompiler, src: &str) -> String {
     annotated
 }
 
+fn annotated_ide_source(compiler: &mut IdeCompiler, src: &str) -> String {
+    annotated_source(src, compiler.get_annotations())
+}
+
+fn light_annotated_ide_source(compiler: &mut IdeCompiler, src: &str) -> String {
+    annotated_source(src, compiler.get_light_annotations())
+}
+
 fn annotation_hints(compiler: &mut IdeCompiler) -> String {
     compiler
         .get_annotations()
         .into_iter()
         .map(|annotation| annotation.hint)
         .collect()
+}
+
+fn light_annotation_hints(compiler: &mut IdeCompiler) -> String {
+    compiler
+        .get_light_annotations()
+        .into_iter()
+        .map(|annotation| annotation.hint)
+        .collect()
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_hide_value_and_parent_constraints() {
+    let src = indoc! { r#"
+        fn needs_real<T>(value: T) -> T
+        where
+            T: Value,
+            T: Num,
+            T: Div,
+            T: Real
+        {
+            value
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let full_annotations = annotation_hints(&mut compiler);
+    let light_annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        full_annotations.contains("T: Div + Num + Real + Value"),
+        "expected full annotations to keep all constraints, got: {full_annotations}"
+    );
+    assert!(
+        light_annotations.contains("T: Real")
+            && !light_annotations.contains("T: Value")
+            && !light_annotations.contains("T: Num")
+            && !light_annotations.contains("T: Div"),
+        "expected light annotations to keep only Real, got: {light_annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_group_simple_unary_trait_constraints() {
+    let src = indoc! { r#"
+        trait Alpha<Self> {}
+        trait Beta<Self> {}
+
+        fn constrained<T>(value: T) -> T
+        where
+            T: Beta,
+            T: Alpha
+        {
+            value
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        annotations.contains("T: Alpha + Beta"),
+        "expected grouped unary trait constraints in light annotations, got: {annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn light_annotations_keep_structural_constraints() {
+    let src = indoc! { r#"
+        fn get_name<T>(value: T) {
+            value.name
+        }
+    "# };
+    let mut compiler = compile_source(src);
+    let annotations = light_annotation_hints(&mut compiler);
+
+    assert!(
+        annotations.contains("name"),
+        "expected structural field constraint in light annotations, got: {annotations}"
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn ide_annotations_skip_synthesized_function_signature_spans() {
+    let src = indoc! { r#"
+        fn f(x, y) {
+            (x.1, x.1.0, y == x.1)
+        }
+
+        fn l2(v) {
+            let sq = |x| x * x;
+            sq(v.x) + sq(v.y)
+        }
+
+        fn id(x) {
+            x
+        }
+
+        (id(1), id(true), id(|x, y| (y, x))(1, 1.3), l2({x:1, y:2}))
+    "# };
+    let mut compiler = compile_source(src);
+    let full = annotated_ide_source(&mut compiler, src);
+    let light = light_annotated_ide_source(&mut compiler, src);
+
+    assert!(
+        full.starts_with("fn f"),
+        "full annotations should not insert synthesized function generics at the start, got:\n{full}"
+    );
+    assert!(
+        light.starts_with("fn f"),
+        "light annotations should not insert synthesized function generics at the start, got:\n{light}"
+    );
 }
 
 #[test]
@@ -213,7 +334,7 @@ fn recursive_generic_alias_ide_annotations_do_not_leak_borrowed_argument_temps()
     let expected = indoc! { r#"
         type Tree<T> = Leaf(T) | Node(Tree<T>, Tree<T>);
 
-        fn sum<T>(tree: Tree<T>) -> T where T: Num, T: Value {
+        fn sum<T>(tree: Tree<T>) -> T where T: Num + Value {
             match tree {
                 Leaf(v: T) => v,
                 Node(l: Tree<T>, r: Tree<T>) => sum(tree: l) + sum(tree: r)

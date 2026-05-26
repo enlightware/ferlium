@@ -1200,8 +1200,7 @@ impl TypeDef {
         let type_env = self.shape.type_display_env(env, &ty_var_names);
         if !self.shape.constraints.is_empty() {
             write!(f, " ")?;
-            self.shape
-                .format_constraints_rust_style_with_type_env(f, &type_env)?;
+            self.shape.format_constraints_with_type_env(f, &type_env)?;
         }
         if self.shape_docs.has_docs() {
             write!(f, " ")?;

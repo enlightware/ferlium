@@ -80,9 +80,7 @@ fn assert_compiled_fn_type(session: &mut TestSession, src: &str, fn_name: &str, 
     assert!(
         function.ty_scheme.ty_quantifiers.is_empty(),
         "expected a concrete function type, got {}",
-        function
-            .ty_scheme
-            .display_rust_style(&session.std_module_env()),
+        function.ty_scheme.display(&session.std_module_env()),
     );
     assert_eq!(
         function
@@ -2016,9 +2014,7 @@ fn generic_named_type_from_rust_definition() {
     assert!(
         make_some.ty_scheme.ty_quantifiers.is_empty(),
         "constructor should infer a concrete named type, got {}",
-        make_some
-            .ty_scheme
-            .display_rust_style(&session.std_module_env()),
+        make_some.ty_scheme.display(&session.std_module_env()),
     );
     assert_eq!(
         make_some
@@ -2086,9 +2082,7 @@ fn constrained_named_type_from_rust_definition() {
     assert!(
         make_string.ty_scheme.ty_quantifiers.is_empty(),
         "constraint-instantiated constructor should not stay polymorphic, got {}",
-        make_string
-            .ty_scheme
-            .display_rust_style(&session.std_module_env()),
+        make_string.ty_scheme.display(&session.std_module_env()),
     );
     assert_eq!(
         make_string
@@ -2110,9 +2104,7 @@ fn constrained_named_type_from_rust_definition() {
     assert!(
         make_bool.ty_scheme.ty_quantifiers.is_empty(),
         "constraint-instantiated constructor should not stay polymorphic, got {}",
-        make_bool
-            .ty_scheme
-            .display_rust_style(&session.std_module_env()),
+        make_bool.ty_scheme.display(&session.std_module_env()),
     );
     assert_eq!(
         make_bool
@@ -2167,7 +2159,7 @@ fn map_iterator_named_type_from_rust_definition() {
         "constructor should infer a concrete named type, got {}",
         build_map_iterator
             .ty_scheme
-            .display_rust_style(&session.std_module_env()),
+            .display(&session.std_module_env()),
     );
     assert_eq!(
         build_map_iterator

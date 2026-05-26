@@ -10,16 +10,28 @@ import { defined } from './types';
 import { onMounted } from 'vue';
 
 const demoTitles = demoCodes.map(([title, _]) => title);
+const annotationModes = ["none", "light", "full"] as const;
+type AnnotationMode = typeof annotationModes[number];
+const annotationOptionTitles = [
+	"Hide type annotations.",
+	"Show simplified type annotations.",
+	"Show full type annotations.",
+];
 const editor = ref<typeof CodeEditor>();
 const console = ref<typeof ConsoleOutput>();
 const runOutput = ref("Press Run or Ctrl/Cmd+Enter to execute the code.");
 const isRunDisabled = ref(false);
+const annotationMode = ref<AnnotationMode>("light");
 
 function updateEditor(data: { value: string, index: number }) {
 	if (editor.value) {
 		editor.value.setText(demoCodes[data.index]?.[1] ?? '');
 	}
 };
+
+function updateAnnotationMode(data: { value: string, index: number }) {
+	annotationMode.value = annotationModes[data.index] ?? "light";
+}
 
 function runCode() {
 	if (editor.value && !isRunDisabled.value) {
@@ -59,7 +71,15 @@ onMounted(() => {
 		<div class="demo-controls">
 			<DropdownSelect
 				:items="demoTitles"
+				placeholder="Select a code sample"
 				@selection-changed="updateEditor"
+			/>
+			<DropdownSelect
+				:items="[...annotationModes]"
+				:item-titles="annotationOptionTitles"
+				:initial-index="1"
+				placeholder="annotation"
+				@selection-changed="updateAnnotationMode"
 			/>
 			<FlatLinkButton
 				href="https://enlightware.github.io/ferlium/book/"
@@ -71,6 +91,7 @@ onMounted(() => {
 	</div>
 	<CodeEditor
 		ref="editor"
+		:annotation-mode="annotationMode"
 		@run-code="runCode()"
 		@set-run-availability="setRunAvailability"
 	/>

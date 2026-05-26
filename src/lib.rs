@@ -76,7 +76,7 @@ macro_rules! call_fn {
                     $name,
                     args_fmt,
                     ret_fmt,
-                    func.definition.ty_scheme.display_rust_style(&module_env),
+                    func.definition.ty_scheme.display(&module_env),
                 ))
             } else {
                 let mut ctx = $crate::eval::EvalCtx::new(__module_id, __session);

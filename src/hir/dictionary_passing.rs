@@ -31,7 +31,7 @@ use crate::{
     types::r#type::TypeVar,
     types::type_like::{TypeLike, instantiate_types_in_place},
     types::type_mapper::TypeMapper,
-    types::type_scheme::format_have_trait,
+    types::type_scheme_display::format_have_trait,
 };
 use derive_new::new;
 use itertools::process_results;

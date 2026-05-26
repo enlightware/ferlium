@@ -32,8 +32,9 @@ use crate::{
     types::r#type::{Type, TypeInstSubst, TypeVar},
     types::type_like::TypeLike,
     types::type_mapper::BitmapInstantiationMapper,
-    types::type_scheme::{
-        PubTypeConstraint, TypeConstraintRenderStyle, format_pub_type_constraint_with_style,
+    types::type_scheme::PubTypeConstraint,
+    types::type_scheme_display::{
+        TypeConstraintRenderStyle, format_pub_type_constraint_with_style,
     },
     types::type_visitor::TyVarsCollector,
 };

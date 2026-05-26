@@ -606,7 +606,7 @@ fn process_input(
                 println!(
                     "{}: {}",
                     value.display_pretty(&expr.ty.ty, &module_env),
-                    expr.ty.display_rust_style(&module_env)
+                    expr.ty.display(&module_env)
                 );
             }
             Err(error) => {

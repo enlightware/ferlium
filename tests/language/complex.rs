@@ -970,7 +970,7 @@ fn unreachable_block_suffix_does_not_constrain_return_type() {
     let num_trait = session.std_trait(NUM_TRAIT_NAME);
     let module_env = session.std_module_env();
     assert_eq!(
-        fn_def.ty_scheme.display_rust_style(&module_env).to_string(),
+        fn_def.ty_scheme.display(&module_env).to_string(),
         "() -> A where A: Num"
     );
     assert_eq!(fn_def.ty_scheme.ty_quantifiers.len(), 1);

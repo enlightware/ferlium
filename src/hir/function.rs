@@ -207,7 +207,7 @@ impl FunctionDefinition {
         if !self.ty_scheme.is_just_type_and_effects() {
             write!(f, " ")?;
             self.ty_scheme
-                .format_constraints_rust_style_with_type_env(f, &type_env)
+                .format_constraints_with_type_env(f, &type_env)
         } else {
             Ok(())
         }

@@ -28,7 +28,8 @@ use crate::{
     types::r#type::{Type, TypeInstSubst, TypeVar, fmt_fn_type_with_arg_names},
     types::type_inference::substitution::InstSubst,
     types::type_like::TypeLike,
-    types::type_scheme::{PubTypeConstraint, format_constraints_consolidated},
+    types::type_scheme::PubTypeConstraint,
+    types::type_scheme_display::format_constraints_consolidated,
 };
 
 define_id_type!(

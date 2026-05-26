@@ -1,9 +1,16 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 
-const props = defineProps<{
-	items: string[]
-}>();
+const props = withDefaults(defineProps<{
+	items: string[],
+	itemTitles?: string[],
+	initialIndex?: number,
+	placeholder?: string,
+}>(), {
+	itemTitles: () => [],
+	initialIndex: -1,
+	placeholder: 'Select',
+});
 
 interface Selection {
 	value: string;
@@ -14,7 +21,8 @@ const emit = defineEmits<{
 	selectionChanged: [value: Selection]
 }>();
 
-const selected = ref('');
+const selected = ref(props.initialIndex >= 0 ? props.items[props.initialIndex] ?? '' : '');
+const selectedTitle = computed(() => props.itemTitles[props.items.indexOf(selected.value)] ?? '');
 
 const handleChange = () => {
 	const index = props.items.indexOf(selected.value);
@@ -25,17 +33,19 @@ const handleChange = () => {
 <template>
 	<select
 		v-model="selected"
+		:title="selectedTitle"
 		@change="handleChange"
 	>
 		<option
 			disabled
 			value=""
 		>
-			Please select one
+			{{ placeholder }}
 		</option>
 		<option
 			v-for="(item, index) in items"
 			:key="index"
+			:title="itemTitles[index] ?? ''"
 			:value="item"
 		>
 			{{ item }}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { Compiler, ErrorData } from "script-api";
 
 import { EditorView, keymap, ViewUpdate, scrollPastEnd } from "@codemirror/view";
@@ -18,6 +18,12 @@ const diagnostics: Diagnostic[] = [];
 
 const compiler = new Compiler();
 
+type AnnotationMode = "none" | "light" | "full";
+
+const props = defineProps<{
+	annotationMode: AnnotationMode,
+}>();
+
 const emit = defineEmits<{
 	runCode: [],
 	setRunAvailability: [status: boolean],
@@ -32,6 +38,7 @@ const myKeymap = keymap.of([
 ]);
 
 let forceLint = false;
+let annotationsAvailable = false;
 
 function linterNeedsRefresh() {
 	if (forceLint) {
@@ -84,16 +91,41 @@ function processUpdate(update: ViewUpdate) {
 	if (update.docChanged) {
 		const errorData = compiler.compile(text);
 		if (errorData !== undefined) {
+			annotationsAvailable = false;
 			fillDiagnostics(errorData);
 			setAnnotations(view, []);
 			emit("setRunAvailability", false);
 		} else {
+			annotationsAvailable = true;
 			diagnostics.length = 0;
-			setAnnotations(view, compiler.get_annotations());
+			refreshAnnotations();
 			emit("setRunAvailability", true);
 		}
 	}
 }
+
+function refreshAnnotations() {
+	if (!view.value) {
+		return;
+	}
+	if (!annotationsAvailable) {
+		setAnnotations(view.value, []);
+		return;
+	}
+	switch (props.annotationMode) {
+		case "none":
+			setAnnotations(view.value, []);
+			break;
+		case "light":
+			setAnnotations(view.value, compiler.get_light_annotations());
+			break;
+		case "full":
+			setAnnotations(view.value, compiler.get_annotations());
+			break;
+	}
+}
+
+watch(() => props.annotationMode, refreshAnnotations);
 
 const setText = (newText: string) => {
 	if (view.value) {

@@ -17,7 +17,10 @@ use crate::{
     hir::hir_syn::local,
     hir::value::{NativeValue, Value},
     run_fn_native,
-    types::r#type::{Type, tuple_type},
+    types::{
+        r#type::{Type, tuple_type},
+        type_scheme_display::TypeSchemeConstraintRenderMode,
+    },
 };
 use regex::Regex;
 #[cfg(target_arch = "wasm32")]
@@ -103,7 +106,7 @@ impl Compiler {
                 signature.push(' ');
                 signature.push_str(
                     &ty_scheme
-                        .display_constraints_rust_style_with_type_env(&type_env)
+                        .display_constraints_with_type_env(&type_env)
                         .to_string(),
                 );
             }
@@ -186,8 +189,7 @@ impl Compiler {
                     };
                     let module = self.session.expect_fresh_module(module_id);
                     let module_env = ModuleEnv::new(module, self.session.modules());
-                    let output =
-                        format!("{}: {}", rendered, expr.ty.display_rust_style(&module_env));
+                    let output = format!("{}: {}", rendered, expr.ty.display(&module_env));
                     ExecutionResult::success(output)
                 }
                 Err(error) => {
@@ -216,6 +218,17 @@ impl Compiler {
     }
 
     pub fn get_annotations(&mut self) -> Vec<AnnotationData> {
+        self.get_annotations_with_constraint_mode(TypeSchemeConstraintRenderMode::Full)
+    }
+
+    pub fn get_light_annotations(&mut self) -> Vec<AnnotationData> {
+        self.get_annotations_with_constraint_mode(TypeSchemeConstraintRenderMode::Light)
+    }
+
+    fn get_annotations_with_constraint_mode(
+        &mut self,
+        constraint_mode: TypeSchemeConstraintRenderMode,
+    ) -> Vec<AnnotationData> {
         let (source_id, source_entry) = match self
             .session
             .source_table()
@@ -229,6 +242,7 @@ impl Compiler {
             source_id,
             source_entry.source(),
             &self.session,
+            constraint_mode,
         );
         let mut annotations = annotations
             .into_iter()

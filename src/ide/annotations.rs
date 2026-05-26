@@ -17,7 +17,7 @@ use crate::{
     format::FormatWith,
     hir::{Node, NodeArena, NodeId, NodeKind},
     module::{LocalDecl, ModuleEnv, id::Id},
-    types::r#type::Type,
+    types::{r#type::Type, type_scheme_display::TypeSchemeConstraintRenderMode},
 };
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -44,6 +44,7 @@ pub(super) fn display_annotations(
     source_id: SourceId,
     src: &str,
     session: &CompilerSession,
+    constraint_mode: TypeSchemeConstraintRenderMode,
 ) -> Vec<(usize, String)> {
     let entry = session.expect_module_entry(module_and_expr.module_id);
     let module = match entry.module() {
@@ -131,7 +132,7 @@ pub(super) fn display_annotations(
                         last_source_param_span.end_usize(),
                         format!(", {inserted_quantifiers}"),
                     ));
-                } else {
+                } else if !spans.name.is_synthesized() {
                     annotations.push((spans.name.end_usize(), format!("<{inserted_quantifiers}>")));
                 }
             }
@@ -209,15 +210,19 @@ pub(super) fn display_annotations(
             ))
         };
         if !function.definition.ty_scheme.is_just_type_and_effects() {
-            annotation = Some(format!(
-                "{}{}{}",
-                annotation.as_ref().map_or("", |v| v),
-                annotation.as_ref().map_or(start_space, |_| " "),
-                function
-                    .definition
-                    .ty_scheme
-                    .display_constraints_rust_style_with_type_env(&type_env)
-            ));
+            let constraints = function
+                .definition
+                .ty_scheme
+                .display_constraints_with_mode(&type_env, constraint_mode)
+                .to_string();
+            if !constraints.is_empty() {
+                annotation = Some(format!(
+                    "{}{}{}",
+                    annotation.as_ref().map_or("", |v| v),
+                    annotation.as_ref().map_or(start_space, |_| " "),
+                    constraints
+                ));
+            }
         }
         if let Some(mut annotation) = annotation {
             let end_space = if past_args_index < byte_src.len() && byte_src[past_args_index] == b' '
@@ -236,7 +241,7 @@ pub(super) fn display_annotations(
         let root_span = module.ir_arena[expr.expr].span;
         annotations.push((
             root_span.end_usize(),
-            format!(": {}", expr.ty.display_rust_style(&env)),
+            format!(": {}", expr.ty.display(&env)),
         ));
     }
     // FIXME: this need better behaviour to be useful.
