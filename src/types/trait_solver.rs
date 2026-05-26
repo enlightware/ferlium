@@ -19,7 +19,8 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::b,
     hir::function::{
-        Function, ScriptFunction, VoidFunction, resolved_arg_passing_for_no_temp_args,
+        ArgPassing, Function, ResolvedValueArgPassing, ScriptFunction, SharedRefTempCleanup,
+        ValueArgPassing, VoidFunction,
     },
     hir::hir_syn::{get_dictionary, load_local},
     hir::{self, FnInstData, Node, NodeArena, NodeKind, StaticApplication},
@@ -32,13 +33,13 @@ use crate::{
         TraitImpl, TraitImplId, TraitImpls, TraitKey, TypeDefId, build_dictionary_value, id::Id,
     },
     std::{
-        core::REPR_TRAIT,
+        core::{REPR_TRAIT, TRIVIAL_COPY_TRAIT},
         new_module_using_std,
         value::{VALUE_TRAIT, value_layout_associated_const_values},
     },
     types::effects::EffType,
     types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
-    types::r#type::{Type, TypeDef, TypeDefSlot},
+    types::r#type::{FnArgType, Type, TypeDef, TypeDefSlot},
     types::type_inference::unify::UnifiedTypeInference,
     types::type_like::{TypeLike, instantiate_types},
     types::type_mapper::BitmapInstantiationMapper,
@@ -540,6 +541,52 @@ impl<'a> TraitSolver<'a> {
                 .unwrap_or_else(|| panic!("Type definition module #{} is unavailable", id.module))
                 .type_def(id)
         })
+    }
+
+    fn type_has_concrete_trivial_copy_impl(
+        &mut self,
+        arena: &mut NodeArena,
+        ty: Type,
+        span: Location,
+    ) -> bool {
+        ty.is_constant()
+            && self
+                .solve_output_types(&TRIVIAL_COPY_TRAIT, &[ty], span, arena)
+                .is_ok()
+    }
+
+    fn resolved_arg_passing_for_no_temp_arg(
+        &mut self,
+        arena: &mut NodeArena,
+        arg: &FnArgType,
+        span: Location,
+    ) -> ArgPassing {
+        if arg
+            .mut_ty
+            .as_resolved()
+            .is_some_and(|mut_ty| mut_ty.is_mutable())
+        {
+            ArgPassing::MutableRef
+        } else if self.type_has_concrete_trivial_copy_impl(arena, arg.ty, span) {
+            ArgPassing::Value(ValueArgPassing::Resolved(ResolvedValueArgPassing::Owned))
+        } else {
+            ArgPassing::Value(ValueArgPassing::Resolved(
+                ResolvedValueArgPassing::SharedRef {
+                    temp_cleanup: SharedRefTempCleanup::None,
+                },
+            ))
+        }
+    }
+
+    fn resolved_arg_passing_for_no_temp_args(
+        &mut self,
+        arena: &mut NodeArena,
+        args: &[FnArgType],
+        span: Location,
+    ) -> Vec<ArgPassing> {
+        args.iter()
+            .map(|arg| self.resolved_arg_passing_for_no_temp_arg(arena, arg, span))
+            .collect()
     }
 
     /// Collect all visible concrete and blanket impl heads for a trait.
@@ -1757,8 +1804,10 @@ impl<'a> TraitSolver<'a> {
                                 function_span: fn_span,
                                 extra_arguments: constraint_dict_nodes,
                                 argument_names: def.arg_names.clone(),
-                                argument_passing: resolved_arg_passing_for_no_temp_args(
+                                argument_passing: self.resolved_arg_passing_for_no_temp_args(
+                                    arena,
                                     &def.ty_scheme.ty.args,
+                                    fn_span,
                                 ),
                                 arguments,
                                 ty: def.ty_scheme.ty.clone(),
@@ -1960,8 +2009,10 @@ impl<'a> TraitSolver<'a> {
                             function_span: fn_span,
                             extra_arguments: constraint_dict_nodes,
                             argument_names: def.arg_names.clone(),
-                            argument_passing: resolved_arg_passing_for_no_temp_args(
+                            argument_passing: self.resolved_arg_passing_for_no_temp_args(
+                                arena,
                                 &def.ty_scheme.ty.args,
+                                fn_span,
                             ),
                             arguments,
                             ty: def.ty_scheme.ty.clone(),

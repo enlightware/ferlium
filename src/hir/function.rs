@@ -33,9 +33,7 @@ use crate::{
     hir::{self, NodeArena, NodeId},
     module::{LocalDecl, ModuleEnv, ModuleFunction, ResolvedLocalDrop},
     types::effects::EffType,
-    types::r#type::{
-        FnArgType, FnType, Type, TypeKind, bare_native_type, fmt_fn_type_with_arg_names,
-    },
+    types::r#type::{FnArgType, FnType, Type, fmt_fn_type_with_arg_names},
     types::type_like::TypeLike,
     types::type_mapper::TypeMapper,
     types::type_scheme::{PubTypeConstraint, TypeScheme},
@@ -397,35 +395,6 @@ pub fn unresolved_arg_passing_for_args(args: &[FnArgType]) -> Vec<ArgPassing> {
     args.iter().map(unresolved_arg_passing_for_arg).collect()
 }
 
-pub fn resolved_arg_passing_for_no_temp_arg(arg: &FnArgType) -> ArgPassing {
-    match unresolved_arg_passing_for_arg(arg) {
-        ArgPassing::MutableRef => ArgPassing::MutableRef,
-        ArgPassing::Value(ValueArgPassing::Unknown) => ArgPassing::Value(
-            ValueArgPassing::Resolved(if is_builtin_trivial_copy_type(arg.ty) {
-                ResolvedValueArgPassing::Owned
-            } else {
-                ResolvedValueArgPassing::SharedRef {
-                    temp_cleanup: SharedRefTempCleanup::None,
-                }
-            }),
-        ),
-        ArgPassing::Value(ValueArgPassing::Resolved(_)) => {
-            unreachable!("unresolved helper never emits resolved passing")
-        }
-        ArgPassing::Value(ValueArgPassing::SharedRefUnknownDrop) => {
-            unreachable!("unresolved helper never emits shared-ref-only passing")
-        }
-    }
-}
-
-/// Resolve call argument passing when the caller knows the call edge cannot
-/// materialize a temporary that needs semantic cleanup.
-pub fn resolved_arg_passing_for_no_temp_args(args: &[FnArgType]) -> Vec<ArgPassing> {
-    args.iter()
-        .map(resolved_arg_passing_for_no_temp_arg)
-        .collect()
-}
-
 pub(crate) type ValueArgPassingResolver<C, E> =
     fn(&mut NodeArena, &mut C, Type, bool, Location) -> Result<ResolvedValueArgPassing, E>;
 
@@ -458,17 +427,6 @@ pub(crate) fn resolve_arg_passing_for_call<E, C>(
 pub(crate) fn call_argument_may_need_temp(arena: &NodeArena, node_id: NodeId) -> bool {
     !hir::node_is_place_reference(arena, node_id)
         || hir::place_resolution_may_create_temp(arena, node_id)
-}
-
-fn is_builtin_trivial_copy_type(ty: Type) -> bool {
-    let ty_data = ty.data();
-    let TypeKind::Native(native) = &*ty_data else {
-        return false;
-    };
-    native.arguments.is_empty()
-        && (native.bare_ty == bare_native_type::<()>()
-            || native.bare_ty == bare_native_type::<bool>()
-            || native.bare_ty == bare_native_type::<isize>())
 }
 
 /// An empty dummy function returning (), used as placeholder

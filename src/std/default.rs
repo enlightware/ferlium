@@ -13,8 +13,10 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::b,
-    hir::function::FunctionDefinition,
-    hir::{self, NodeArena, NodeId},
+    hir::{
+        self, NodeArena, NodeId, dictionary_passing::static_apply_generated,
+        function::FunctionDefinition,
+    },
     module::{Module, TraitImplId},
     std::{STD_MODULE_ID, product_value_deriver::ProductValueDeriver},
     types::effects::EffType,
@@ -87,11 +89,15 @@ impl Deriver for EnumDefaultDeriver {
                 span,
                 arena,
             )?;
-            let payload = n(
+            let payload_kind = static_apply_generated(
                 arena,
-                static_apply_pure(function, std::iter::empty(), payload_ty, span),
+                solver,
+                function,
+                std::iter::empty(),
                 payload_ty,
-            );
+                span,
+            )?;
+            let payload = n(arena, payload_kind, payload_ty);
             n(arena, variant(default_variant, payload), ty)
         };
 

@@ -9,7 +9,7 @@
 use crate::{
     Location,
     containers::{IntoSVec2, b},
-    hir::function::{ArgPassing, resolved_arg_passing_for_no_temp_args},
+    hir::function::ArgPassing,
     hir::value::{LiteralNativeValue, LiteralValue},
     hir::{self, NodeId},
     module::{
@@ -17,7 +17,6 @@ use crate::{
         TakeLocalValueMode, TraitImplId, id::Id,
     },
     std::string::String as FerliumString,
-    types::effects::EffType,
     types::mutability::{MutType, MutVal},
     types::r#type::{FnType, Type},
 };
@@ -42,17 +41,6 @@ pub fn immediate(value: LiteralValue) -> NodeKind {
     K::Immediate(hir::Immediate::new(value))
 }
 
-pub fn static_apply(
-    function: FunctionId,
-    ty: FnType,
-    arguments: impl Into<Vec<NodeId>>,
-    span: Location,
-) -> NodeKind {
-    let arguments = arguments.into();
-    let argument_passing = resolved_arg_passing_for_no_temp_args(&ty.args);
-    static_apply_with_argument_passing(function, ty, arguments, argument_passing, span)
-}
-
 pub fn static_apply_with_argument_passing(
     function: FunctionId,
     ty: FnType,
@@ -75,21 +63,6 @@ pub fn static_apply_with_argument_passing(
         inst_data: hir::FnInstData::none(),
         returns_place: false,
     }))
-}
-
-pub fn static_apply_pure(
-    function: FunctionId,
-    arguments: impl IntoIterator<Item = (NodeId, Type)>,
-    ret_ty: Type,
-    span: Location,
-) -> NodeKind {
-    let (arguments, args_tys): (Vec<_>, Vec<_>) = arguments.into_iter().unzip();
-    static_apply(
-        function,
-        FnType::new_by_val(args_tys, ret_ty, EffType::empty()),
-        arguments,
-        span,
-    )
 }
 
 pub fn local(name: &str, ty: Type) -> LocalDecl {

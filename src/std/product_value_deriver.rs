@@ -11,7 +11,7 @@ use crate::{
     Location,
     compiler::error::InternalCompilationError,
     containers::SVec2,
-    hir::{self, NodeArena, NodeId},
+    hir::{self, NodeArena, NodeId, dictionary_passing::static_apply_generated},
     module::TraitImplId,
     types::effects::EffType,
     types::r#trait::{Deriver, TraitMethodIndex, TraitRef},
@@ -70,11 +70,15 @@ impl Deriver for ProductValueDeriver {
                 span,
                 arena,
             )?;
-            Ok(n(
+            let member_kind = static_apply_generated(
                 arena,
-                static_apply_pure(function, std::iter::empty(), member_ty, span),
+                solver,
+                function,
+                std::iter::empty(),
                 member_ty,
-            ))
+                span,
+            )?;
+            Ok(n(arena, member_kind, member_ty))
         };
 
         let ty_data = ty.data();
