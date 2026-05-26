@@ -48,6 +48,9 @@ use crate::{
 /// An index to a node in the HIR arena
 pub type NodeId = Idx<Node>;
 
+/// A compact ordered list of HIR node IDs.
+pub type NodeIds = B<SVec2<NodeId>>;
+
 /// An arena of HIR nodes
 pub type NodeArena = Arena<Node>;
 
@@ -492,18 +495,18 @@ pub enum NodeKind {
     TakeLocalValue(TakeLocalValue),
     LoadLocal(LoadLocal),
     Return(NodeId),
-    Block(B<SVec2<NodeId>>),
+    Block(NodeIds),
     Assign(Assignment),
-    Tuple(B<SVec2<NodeId>>),
+    Tuple(NodeIds),
     Project(Project),
-    Record(B<SVec2<NodeId>>),
+    Record(NodeIds),
     // Note: this should only exist transiently in the HIR and never be executed
     FieldAccess(FieldAccess),
     ProjectAt(ProjectAt),
     Variant(Variant),
     /// Extract the tag of a variant as an isize, by casting the pointer to the string
     ExtractTag(NodeId),
-    Array(B<SVec2<NodeId>>),
+    Array(NodeIds),
     Case(B<Case>),
     Loop(NodeId),
     SoftBreak,
