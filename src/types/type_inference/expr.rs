@@ -24,9 +24,8 @@ use crate::{
     },
     hir::value::LiteralValue,
     hir::{
-        self, CallArgument, Immediate, NodeArena, NodeId, NodeKind, StoreLocal,
-        node_is_place_reference, place_resolution_may_create_temp,
-        place_result_base_argument_index,
+        self, CallArgument, NodeArena, NodeId, NodeKind, StoreLocal, node_is_place_reference,
+        place_resolution_may_create_temp, place_result_base_argument_index,
     },
     internal_compilation_error,
     module::{
@@ -397,7 +396,7 @@ impl TypeInference {
         let sp = |id: DExprId| env.ast_arena[id].span;
         let (node, ty, mut_ty, effects) = match &expr.kind {
             Literal(value, ty) => (
-                K::Immediate(Immediate::new(value.clone())),
+                K::Immediate(value.clone()),
                 *ty,
                 MutType::constant(),
                 no_effects(),
@@ -503,14 +502,14 @@ impl TypeInference {
                     }
                     let node = if let Some(tag) = tag {
                         let payload = env.ir_arena.alloc(N::new(
-                            K::Immediate(Immediate::new(LiteralValue::new_native(()))),
+                            K::Immediate(LiteralValue::new_native(())),
                             Type::unit(),
                             no_effects(),
                             expr_span,
                         ));
                         K::Variant(tag, payload)
                     } else {
-                        K::Immediate(Immediate::new(LiteralValue::new_native(())))
+                        K::Immediate(LiteralValue::new_native(()))
                     };
                     (node, ty, MutType::constant(), EffType::empty())
                 }
@@ -532,7 +531,7 @@ impl TypeInference {
                         ),
                     ));
                     let payload = env.ir_arena.alloc(N::new(
-                        K::Immediate(Immediate::new(LiteralValue::new_native(()))),
+                        K::Immediate(LiteralValue::new_native(())),
                         Type::unit(),
                         no_effects(),
                         expr_span,
@@ -1983,7 +1982,7 @@ impl TypeInference {
         let prefix = self.value_evaluation_prefix_nodes(env.ir_arena, value);
         match prefix.len() {
             0 => env.ir_arena.alloc(hir::Node::new(
-                NodeKind::Immediate(Immediate::new(LiteralValue::new_native(()))),
+                NodeKind::Immediate(LiteralValue::new_native(())),
                 Type::unit(),
                 no_effects(),
                 span,
@@ -2223,7 +2222,7 @@ impl TypeInference {
                 } else {
                     let node_ids = self.materialize_owned_values(env, node_ids, expr_span);
                     let inner_kind = if node_ids.is_empty() {
-                        K::Immediate(Immediate::new(LiteralValue::new_native(())))
+                        K::Immediate(LiteralValue::new_native(()))
                     } else {
                         K::Tuple(b(SVec2::from_vec(node_ids)))
                     };
@@ -2259,7 +2258,7 @@ impl TypeInference {
                         0 => (
                             Type::unit(),
                             env.ir_arena.alloc(N::new(
-                                K::Immediate(Immediate::new(LiteralValue::new_native(()))),
+                                K::Immediate(LiteralValue::new_native(())),
                                 Type::unit(),
                                 no_effects(),
                                 path_span,
@@ -2457,7 +2456,7 @@ impl TypeInference {
         // Literal of correct type, we are good
         if let Literal(value, ty) = &expr.kind {
             if *ty == expected_ty {
-                let node = K::Immediate(Immediate::new(value.clone()));
+                let node = K::Immediate(value.clone());
                 return Ok(env
                     .ir_arena
                     .alloc(N::new(node, expected_ty, no_effects(), expr_span)));

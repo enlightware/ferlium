@@ -398,9 +398,7 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                             let index = record.iter().position(|field| field.0 == *name).expect(
                                 "Field not found in type, type inference should have failed"
                             );
-                            K::Immediate(hir::Immediate::new(LiteralValue::new_native(
-                                index as isize,
-                            )))
+                            K::Immediate(LiteralValue::new_native(index as isize))
                         }
                         Variable(var) => {
                             // Variable, it must be in the input dictionaries, look for it.
@@ -1493,7 +1491,7 @@ mod tests {
         let NodeKind::Immediate(immediate) = &arena[node].kind else {
             panic!("expected associated const to elaborate to an immediate");
         };
-        assert_eq!(immediate.value.as_primitive_ty::<isize>(), Some(&8));
+        assert_eq!(immediate.as_primitive_ty::<isize>(), Some(&8));
     }
 
     #[test]

@@ -76,7 +76,7 @@ impl Path {
 
     fn index_part(arena: &NodeArena, node_id: NodeId) -> PathPart {
         if let NodeKind::Immediate(immediate) = &arena[node_id].kind {
-            let index = *immediate.value.as_primitive_ty::<isize>().unwrap();
+            let index = *immediate.as_primitive_ty::<isize>().unwrap();
             if index >= 0 {
                 return PathPart::IndexStatic(index as usize);
             }

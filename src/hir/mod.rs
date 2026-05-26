@@ -37,7 +37,7 @@ use la_arena::{Arena, Idx};
 use ustr::Ustr;
 
 use crate::{
-    containers::{B, SVec2, SVec4, b},
+    containers::{B, SVec2, SVec4},
     hir::dictionary_passing::DictionariesReq,
     hir::value::LiteralValue,
     module::ModuleEnv,
@@ -194,16 +194,6 @@ impl UnboundTyCtxs {
 pub(crate) type UnboundTyVars = IndexMap<TypeVar, UnboundTyCtxs>;
 
 #[derive(Debug, Clone)]
-pub struct Immediate {
-    pub value: LiteralValue,
-}
-impl Immediate {
-    pub fn new(value: LiteralValue) -> B<Self> {
-        b(Self { value })
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct BuildClosure {
     pub function: NodeId,
     pub dictionary_captures: Vec<NodeId>,
@@ -253,20 +243,20 @@ pub struct Application {
 }
 
 /// Clone the closure environment of `source` into already allocated `target` storage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct FunctionClone {
     pub source: NodeId,
     pub target: NodeId,
 }
 
 /// Drop the owned closure environment stored in `target`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct FunctionDrop {
     pub target: NodeId,
 }
 
 /// Materialize a value as an owned result, using the cheapest valid copy mode.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct CloneValue {
     pub source: NodeId,
     pub clone: LocalClone,
@@ -304,29 +294,29 @@ impl TraitMethodApplication {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct StoreLocal {
     pub value: NodeId,
     pub id: LocalDeclId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DropLocal {
     pub id: LocalDeclId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct TakeLocalValue {
     pub id: LocalDeclId,
     pub mode: TakeLocalValueMode,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct LoadLocal {
     pub id: LocalDeclId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Assignment {
     pub place: NodeId,
     pub value: NodeId,
@@ -422,13 +412,13 @@ pub struct CallDictionaryMethod {
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind {
-    Immediate(B<Immediate>),
+    Immediate(LiteralValue),
     /// Compiler-only uninitialized storage used while generated `Value::clone` code fills a target.
     Uninit,
     BuildClosure(B<BuildClosure>),
     Apply(B<Application>),
-    FunctionClone(B<FunctionClone>),
-    FunctionDrop(B<FunctionDrop>),
+    FunctionClone(FunctionClone),
+    FunctionDrop(FunctionDrop),
     CloneValue(CloneValue),
     StaticApply(B<StaticApplication>),
     /// Note: this should only exist transiently in the HIR and never be executed
@@ -600,7 +590,7 @@ impl Node {
         match &self.kind {
             Immediate(immediate) => {
                 writeln!(f, "{indent_str}immediate")?;
-                writeln!(f, "{}⎸ {}", indent_str, immediate.value)?
+                writeln!(f, "{indent_str}⎸ {immediate}")?
             }
             Uninit => {
                 writeln!(f, "{indent_str}uninitialized")?;

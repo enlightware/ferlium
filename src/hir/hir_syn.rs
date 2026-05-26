@@ -38,7 +38,7 @@ pub fn native_str(value: &str) -> NodeKind {
 }
 
 pub fn immediate(value: LiteralValue) -> NodeKind {
-    K::Immediate(hir::Immediate::new(value))
+    K::Immediate(value)
 }
 
 pub fn static_apply_with_argument_passing(

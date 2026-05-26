@@ -979,7 +979,7 @@ pub fn eval_node_with_ctx(
     use NodeKind::*;
     let node = &arena[node_id];
     match &node.kind {
-        Immediate(immediate) => cont(immediate.value.clone().into_value()),
+        Immediate(immediate) => cont(immediate.clone().into_value()),
         Uninit => cont(Value::uninit()),
         BuildClosure(build_closure) => eval_build_closure(arena, build_closure, ctx, locals),
         Apply(app) => eval_apply(arena, app, node.span, ctx, locals),
@@ -2747,7 +2747,7 @@ mod tests {
         CompilerSession, Location,
         eval::{ControlFlow, EvalCtx, eval_args, eval_nodes},
         hir::{
-            CallArgument, Immediate, Node, NodeArena, NodeKind,
+            CallArgument, Node, NodeArena, NodeKind,
             function::{ArgPassing, ResolvedValueArgPassing, ValueArgPassing},
             value::{LiteralValue, NativeDisplay},
         },
@@ -2789,13 +2789,13 @@ mod tests {
         let span = Location::new_synthesized();
         let mut arena = NodeArena::default();
         let tracked = arena.alloc(Node::new(
-            NodeKind::Immediate(Immediate::new(LiteralValue::new_native(EvalDropTracked))),
+            NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
             Type::primitive::<EvalDropTracked>(),
             EffType::empty(),
             span,
         ));
         let unit = arena.alloc(Node::new(
-            NodeKind::Immediate(Immediate::new(LiteralValue::new_native(()))),
+            NodeKind::Immediate(LiteralValue::new_native(())),
             Type::unit(),
             EffType::empty(),
             span,
@@ -2824,13 +2824,13 @@ mod tests {
         let span = Location::new_synthesized();
         let mut arena = NodeArena::default();
         let tracked = arena.alloc(Node::new(
-            NodeKind::Immediate(Immediate::new(LiteralValue::new_native(EvalDropTracked))),
+            NodeKind::Immediate(LiteralValue::new_native(EvalDropTracked)),
             Type::primitive::<EvalDropTracked>(),
             EffType::empty(),
             span,
         ));
         let unit = arena.alloc(Node::new(
-            NodeKind::Immediate(Immediate::new(LiteralValue::new_native(()))),
+            NodeKind::Immediate(LiteralValue::new_native(())),
             Type::unit(),
             EffType::empty(),
             span,
