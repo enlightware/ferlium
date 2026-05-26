@@ -1016,10 +1016,10 @@ pub fn eval_node_with_ctx(
             let _ = get_dict;
             panic!("GetDictionary is runtime metadata and should not be evaluated as a Value")
         }
-        EnvStore(node) => eval_env_store(arena, node, arena[id].span, ctx, locals),
-        EnvDrop(node) => eval_env_drop(node, arena[id].span, ctx, locals),
+        StoreLocal(node) => eval_store_local(arena, node, arena[id].span, ctx, locals),
+        DropLocal(node) => eval_drop_local(node, arena[id].span, ctx, locals),
         TakeLocalValue(node) => eval_take_local_value(node, arena[id].span, ctx, locals),
-        EnvLoad(node) => eval_env_load(arena, id, node, ctx, locals),
+        LoadLocal(node) => eval_load_local(arena, id, node, ctx, locals),
         ExtraParameter(_) => {
             panic!("ExtraParameter is hidden evidence and should not be evaluated as a Value")
         }
@@ -1940,9 +1940,9 @@ fn control_flow_into_place_result(result: ControlFlow<Value>) -> ControlFlow<Pla
 }
 
 #[inline(never)]
-fn eval_env_store(
+fn eval_store_local(
     arena: &NodeArena,
-    node: &hir::EnvStore,
+    node: &hir::StoreLocal,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2069,8 +2069,8 @@ fn eval_env_store(
 }
 
 #[inline(never)]
-fn eval_env_drop(
-    node: &hir::EnvDrop,
+fn eval_drop_local(
+    node: &hir::DropLocal,
     span: Location,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
@@ -2205,10 +2205,10 @@ fn try_copy_trivial_value_from_place(
 }
 
 #[inline(never)]
-fn eval_env_load(
+fn eval_load_local(
     arena: &NodeArena,
     id: NodeId,
-    node: &hir::EnvLoad,
+    node: &hir::LoadLocal,
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> EvalControlFlowResult {
@@ -2273,7 +2273,7 @@ fn eval_block(
                 return Ok(ControlFlow::Return(val));
             }
             Ok(ControlFlow::Continue(val)) => {
-                if !matches!(arena[*node].kind, NodeKind::EnvDrop(_)) {
+                if !matches!(arena[*node].kind, NodeKind::DropLocal(_)) {
                     if let Some(old_value) = last_value.replace(val) {
                         old_value.discard_storage();
                     }
@@ -2761,7 +2761,7 @@ fn try_resolve_node_place(
             let Some(place_index) = nodes.iter().rposition(|node| {
                 !matches!(
                     arena[*node].kind,
-                    NodeKind::EnvDrop(_) | NodeKind::EnvStore(_)
+                    NodeKind::DropLocal(_) | NodeKind::StoreLocal(_)
                 )
             }) else {
                 return Ok(ControlFlow::Continue(None));
@@ -2774,7 +2774,7 @@ fn try_resolve_node_place(
             }
             return try_resolve_node_place(arena, nodes[place_index], ctx, locals);
         }
-        EnvLoad(node) => Place {
+        LoadLocal(node) => Place {
             // By using frame_base here, we allow to access parent frames
             // when the Place is used in a child function.
             target: local_environment_index(ctx, locals, node.id),
@@ -2786,7 +2786,7 @@ fn try_resolve_node_place(
 
 fn node_may_resolve_to_place(arena: &NodeArena, id: NodeId) -> bool {
     match &arena[id].kind {
-        NodeKind::EnvLoad(_) => true,
+        NodeKind::LoadLocal(_) => true,
         NodeKind::Project(base, _)
         | NodeKind::FieldAccess(base, _)
         | NodeKind::ProjectAt(base, _) => node_may_resolve_to_place(arena, *base),
@@ -2807,7 +2807,7 @@ fn node_may_resolve_to_place(arena: &NodeArena, id: NodeId) -> bool {
             .rposition(|node| {
                 !matches!(
                     arena[*node].kind,
-                    NodeKind::EnvDrop(_) | NodeKind::EnvStore(_)
+                    NodeKind::DropLocal(_) | NodeKind::StoreLocal(_)
                 )
             })
             .is_some_and(|place_index| node_may_resolve_to_place(arena, nodes[place_index])),

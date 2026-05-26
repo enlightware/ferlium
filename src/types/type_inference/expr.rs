@@ -24,7 +24,7 @@ use crate::{
     },
     hir::value::LiteralValue,
     hir::{
-        self, EnvStore, Immediate, NodeArena, NodeId, NodeKind, node_is_place_reference,
+        self, Immediate, NodeArena, NodeId, NodeKind, StoreLocal, node_is_place_reference,
         place_resolution_may_create_temp, place_result_base_argument_index,
     },
     internal_compilation_error,
@@ -224,7 +224,7 @@ impl TypeInference {
                 // It is a local variable in the current environment, capture it.
                 let local = &env.all_locals[outer_id.as_index()];
                 let capture_id = env.ir_arena.alloc(N::new(
-                    K::EnvLoad(hir::EnvLoad { id: outer_id }),
+                    K::LoadLocal(hir::LoadLocal { id: outer_id }),
                     local.ty,
                     no_effects(),
                     span,
@@ -405,7 +405,7 @@ impl TypeInference {
                     && let Some(id) = env.get_variable_id(name)
                 {
                     let local = &env.all_locals[id.as_index()];
-                    let node = K::EnvLoad(hir::EnvLoad { id });
+                    let node = K::LoadLocal(hir::LoadLocal { id });
                     (node, local.ty, local.mut_ty, no_effects())
                 }
                 // Retrieve the trait method from the environment, if it exists
@@ -605,7 +605,7 @@ impl TypeInference {
                 };
                 let node_effects = env.ir_arena[value_id].effects.clone();
                 let id = env.push_local(local);
-                let node = K::EnvStore(EnvStore {
+                let node = K::StoreLocal(StoreLocal {
                     value: value_id,
                     id,
                 });
@@ -1381,13 +1381,13 @@ impl TypeInference {
 
         let value_effects = env.ir_arena[value].effects.clone();
         let store = env.ir_arena.alloc(hir::Node::new(
-            NodeKind::EnvStore(hir::EnvStore { value, id }),
+            NodeKind::StoreLocal(hir::StoreLocal { value, id }),
             Type::unit(),
             value_effects,
             span,
         ));
         let load = env.ir_arena.alloc(hir::Node::new(
-            NodeKind::EnvLoad(hir::EnvLoad { id }),
+            NodeKind::LoadLocal(hir::LoadLocal { id }),
             ty,
             no_effects(),
             value_span,
@@ -1535,8 +1535,8 @@ impl TypeInference {
         let (store_result, result_load) =
             self.store_owned_temp(env, value, ty, span, ustr("$result"));
         let result_id = match &env.ir_arena[result_load].kind {
-            NodeKind::EnvLoad(load) => load.id,
-            _ => panic!("store_owned_temp should return an EnvLoad"),
+            NodeKind::LoadLocal(load) => load.id,
+            _ => panic!("store_owned_temp should return a LoadLocal"),
         };
         let result_move = env.ir_arena.alloc(hir::Node::new(
             NodeKind::TakeLocalValue(hir::TakeLocalValue {
@@ -1586,7 +1586,7 @@ impl TypeInference {
             .rev()
             .map(|(_, id)| {
                 env.ir_arena.alloc(hir::Node::new(
-                    NodeKind::EnvDrop(hir::EnvDrop { id }),
+                    NodeKind::DropLocal(hir::DropLocal { id }),
                     Type::unit(),
                     no_effects(),
                     span,
@@ -1627,7 +1627,7 @@ impl TypeInference {
         span: Location,
     ) -> (NodeId, Option<LocalDeclId>) {
         let id = match &env.ir_arena[value].kind {
-            NodeKind::EnvLoad(load) => load.id,
+            NodeKind::LoadLocal(load) => load.id,
             _ => return (value, None),
         };
         if id.as_index() < min_local_decl_index {
@@ -1928,7 +1928,7 @@ impl TypeInference {
 
     fn place_evaluation_prefix_nodes(&self, arena: &NodeArena, node_id: NodeId) -> Vec<NodeId> {
         match &arena[node_id].kind {
-            NodeKind::EnvLoad(_) => Vec::new(),
+            NodeKind::LoadLocal(_) => Vec::new(),
             NodeKind::Project(base, _)
             | NodeKind::FieldAccess(base, _)
             | NodeKind::ProjectAt(base, _) => self.place_evaluation_prefix_nodes(arena, *base),
@@ -2904,7 +2904,7 @@ fn assignment_initializes_storage(
     use NodeKind::*;
 
     match &arena[place_id].kind {
-        EnvLoad(load) => {
+        LoadLocal(load) => {
             env.all_locals[load.id.as_index()].assignment_mode
                 == LocalAssignmentMode::InitializeStorage
         }

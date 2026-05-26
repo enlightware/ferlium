@@ -102,7 +102,7 @@ pub fn local(name: &str, ty: Type) -> LocalDecl {
     )
 }
 
-pub fn store_new(
+pub fn store_new_local(
     value: NodeId,
     index: usize,
     name: &str,
@@ -121,20 +121,20 @@ pub fn store_new(
     local.set_owned_storage(LocalDrop::Unknown);
     local.slot = LocalFrameSlot::from_index(index);
     locals.push(local);
-    (K::EnvStore(hir::EnvStore { value, id }), id)
+    (K::StoreLocal(hir::StoreLocal { value, id }), id)
 }
 
 #[allow(dead_code)]
-pub fn store_to(value: NodeId, id: LocalDeclId) -> NodeKind {
-    K::EnvStore(hir::EnvStore { value, id })
+pub fn store_local_to(value: NodeId, id: LocalDeclId) -> NodeKind {
+    K::StoreLocal(hir::StoreLocal { value, id })
 }
 
 pub fn get_dictionary(dictionary: TraitImplId) -> NodeKind {
     K::GetDictionary(hir::GetDictionary { dictionary })
 }
 
-pub fn load(id: LocalDeclId) -> NodeKind {
-    K::EnvLoad(hir::EnvLoad { id })
+pub fn load_local(id: LocalDeclId) -> NodeKind {
+    K::LoadLocal(hir::LoadLocal { id })
 }
 
 pub fn take_local_value(id: LocalDeclId) -> NodeKind {

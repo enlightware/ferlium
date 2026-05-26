@@ -52,7 +52,7 @@ impl Path {
             Apply(app) if app.returns_place => {
                 Self::from_place_result_arguments(arena, &app.arguments)
             }
-            EnvLoad(node) => Path {
+            LoadLocal(node) => Path {
                 variable: node.id.as_index(),
                 parts: Vec::new(),
             },
@@ -211,12 +211,12 @@ impl Node {
             GetTraitAssociatedConst(_) => {}
             GetTraitDictionary(_) => {}
             GetDictionary(_) => {}
-            EnvStore(node) => {
+            StoreLocal(node) => {
                 check_borrows(arena, node.value)?;
             }
-            EnvDrop(_) => {}
+            DropLocal(_) => {}
             TakeLocalValue(_) => {}
-            EnvLoad(_) => {}
+            LoadLocal(_) => {}
             ExtraParameter(_) => {}
             Return(node_id) => {
                 check_borrows(arena, *node_id)?;

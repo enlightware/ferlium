@@ -53,7 +53,7 @@ pub(crate) fn node_is_place_reference(arena: &NodeArena, node_id: NodeId) -> boo
     use NodeKind::*;
 
     match &arena[node_id].kind {
-        EnvLoad(_) => true,
+        LoadLocal(_) => true,
         GetTraitMethod(method) => !method.input_tys.iter().all(Type::is_constant),
         Project(_, _) | FieldAccess(_, _) | ProjectAt(_, _) => true,
         Apply(app) => app.returns_place,
@@ -66,7 +66,7 @@ pub(crate) fn place_resolution_may_create_temp(arena: &NodeArena, node_id: NodeI
     use NodeKind::*;
 
     match &arena[node_id].kind {
-        EnvLoad(_) => false,
+        LoadLocal(_) => false,
         GetTraitMethod(_) => false,
         Project(base, _) | FieldAccess(base, _) | ProjectAt(base, _) => {
             !node_is_place_reference(arena, *base) || place_resolution_may_create_temp(arena, *base)
@@ -266,13 +266,13 @@ impl TraitMethodApplication {
 }
 
 #[derive(Debug, Clone)]
-pub struct EnvStore {
+pub struct StoreLocal {
     pub value: NodeId,
     pub id: LocalDeclId,
 }
 
 #[derive(Debug, Clone)]
-pub struct EnvDrop {
+pub struct DropLocal {
     pub id: LocalDeclId,
 }
 
@@ -283,7 +283,7 @@ pub struct TakeLocalValue {
 }
 
 #[derive(Debug, Clone)]
-pub struct EnvLoad {
+pub struct LoadLocal {
     pub id: LocalDeclId,
 }
 
@@ -366,10 +366,10 @@ pub enum NodeKind {
     /// Note: this should only exist transiently in the IR and never be executed
     GetTraitDictionary(B<GetTraitDictionary>),
     GetDictionary(GetDictionary),
-    EnvStore(EnvStore),
-    EnvDrop(EnvDrop),
+    StoreLocal(StoreLocal),
+    DropLocal(DropLocal),
     TakeLocalValue(TakeLocalValue),
-    EnvLoad(EnvLoad),
+    LoadLocal(LoadLocal),
     ExtraParameter(ExtraParameterId),
     Return(NodeId),
     Block(B<SVec2<NodeId>>),
@@ -404,9 +404,9 @@ impl NodeKind {
             | GetTraitAssociatedConst(_)
             | GetTraitDictionary(_)
             | GetDictionary(_)
-            | EnvDrop(_)
+            | DropLocal(_)
             | TakeLocalValue(_)
-            | EnvLoad(_)
+            | LoadLocal(_)
             | ExtraParameter(_)
             | SoftBreak
             | Unimplemented => smallvec![],
@@ -434,7 +434,7 @@ impl NodeKind {
                 .copied()
                 .collect(),
             TraitMethodApply(app) => app.arguments.iter().copied().collect(),
-            EnvStore(store) => smallvec![store.value],
+            StoreLocal(store) => smallvec![store.value],
             Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
             Block(nodes) | Tuple(nodes) | Record(nodes) | Array(nodes) => {
                 nodes.iter().copied().collect()
@@ -659,7 +659,7 @@ impl Node {
                     get_dict.dictionary.format_with(env)
                 )?;
             }
-            EnvStore(node) => {
+            StoreLocal(node) => {
                 let local = &locals[node.id.as_index()];
                 let name = local.name.0;
                 let clone_suffix = if local.clone.is_some() {
@@ -677,7 +677,7 @@ impl Node {
                 )?;
                 format_ind(arena, node.value, f, locals, env, spacing, indent + 1)?;
             }
-            EnvDrop(node) => {
+            DropLocal(node) => {
                 let local = &locals[node.id.as_index()];
                 let name = local.name.0;
                 writeln!(
@@ -707,7 +707,7 @@ impl Node {
                     local.slot, local.name.0
                 )?;
             }
-            EnvLoad(node) => {
+            LoadLocal(node) => {
                 let local = &locals[node.id.as_index()];
                 writeln!(f, "{indent_str}load {} as \"{}\"", local.slot, local.name.0)?;
             }
@@ -898,14 +898,14 @@ impl Node {
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
             }
-            EnvStore(store) => {
+            StoreLocal(store) => {
                 if let Some(ty) = type_at(arena, store.value, pos) {
                     return Some(ty);
                 }
             }
-            EnvDrop(_) => {}
+            DropLocal(_) => {}
             TakeLocalValue(_) => {}
-            EnvLoad(_) => {}
+            LoadLocal(_) => {}
             ExtraParameter(_) => {}
             Return(node) => {
                 if let Some(ty) = type_at(arena, *node, pos) {
@@ -1060,10 +1060,10 @@ impl Node {
             GetDictionary(_) => {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
-            EnvStore(node) => unbound_ty_vars(arena, node.value, result, ignore),
-            EnvDrop(_) => {}
+            StoreLocal(node) => unbound_ty_vars(arena, node.value, result, ignore),
+            DropLocal(_) => {}
             TakeLocalValue(_) => {}
-            EnvLoad(_) => {}
+            LoadLocal(_) => {}
             ExtraParameter(_) => {}
             Return(node) => unbound_ty_vars(arena, *node, result, ignore),
             Block(nodes) => nodes

@@ -21,7 +21,7 @@ use crate::{
     hir::function::{
         Function, ScriptFunction, VoidFunction, resolved_arg_passing_for_no_temp_args,
     },
-    hir::hir_syn::{get_dictionary, load},
+    hir::hir_syn::{get_dictionary, load_local},
     hir::{self, FnInstData, Node, NodeArena, NodeKind, StaticApplication},
     internal_compilation_error,
     module::{
@@ -1742,7 +1742,7 @@ impl<'a> TraitSolver<'a> {
                                 .map(|(arg_i, arg_ty)| {
                                     let id = LocalDeclId::from_index(arg_i);
                                     arena.alloc(Node::new(
-                                        load(id),
+                                        load_local(id),
                                         arg_ty.ty,
                                         EffType::empty(),
                                         fn_span,
@@ -1945,7 +1945,7 @@ impl<'a> TraitSolver<'a> {
                             .map(|(arg_i, arg_ty)| {
                                 let id = LocalDeclId::from_index(arg_i);
                                 arena.alloc(Node::new(
-                                    load(id),
+                                    load_local(id),
                                     arg_ty.ty,
                                     EffType::empty(),
                                     fn_span,

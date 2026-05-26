@@ -53,7 +53,12 @@ impl Deriver for SelfCastDeriver {
         // the returned value.
         let locals = vec![local("value", from_ty)];
         let id = LocalDeclId::from_index(0);
-        let source_id = arena.alloc(hir::Node::new(load(id), from_ty, EffType::empty(), span));
+        let source_id = arena.alloc(hir::Node::new(
+            load_local(id),
+            from_ty,
+            EffType::empty(),
+            span,
+        ));
         let clone = solver.solve_impl_method(
             &VALUE_TRAIT,
             &[from_ty],

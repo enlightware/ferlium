@@ -339,7 +339,7 @@ fn node_variable_type_annotations<Env>(
             // There is no GetTraitDictionary left in the final IR.
         }
         GetDictionary(_) => {}
-        EnvStore(node) => {
+        StoreLocal(node) => {
             // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.
             // Note: synthesized let nodes have empty name span, so we ignore these.
             let local = &locals[node.id.as_index()];
@@ -362,9 +362,9 @@ fn node_variable_type_annotations<Env>(
             }
             variable_type_annotations(arena, node.value, result, locals, env);
         }
-        EnvDrop(_) => {}
+        DropLocal(_) => {}
         TakeLocalValue(_) => {}
-        EnvLoad(_) => {}
+        LoadLocal(_) => {}
         ExtraParameter(_) => {}
         Return(node) => variable_type_annotations(arena, *node, result, locals, env),
         Block(nodes) => nodes
@@ -480,7 +480,7 @@ fn is_argument_similar_to_arg_name(
 ) -> bool {
     use NodeKind::*;
     let argument = match arena[argument].kind {
-        EnvLoad(ref load) => locals[load.id.as_index()].name.0.as_str(),
+        LoadLocal(ref load) => locals[load.id.as_index()].name.0.as_str(),
         _ => return false,
     };
 

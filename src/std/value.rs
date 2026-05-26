@@ -523,8 +523,8 @@ fn function_value_clone_root(
 ) -> NodeId {
     use hir::hir_syn::*;
 
-    let source = alloc_synth_node(arena, load(source_id), ty);
-    let target = alloc_synth_node(arena, load(target_id), ty);
+    let source = alloc_synth_node(arena, load_local(source_id), ty);
+    let target = alloc_synth_node(arena, load_local(target_id), ty);
     alloc_synth_node(
         arena,
         hir::NodeKind::FunctionClone(b(hir::FunctionClone { source, target })),
@@ -554,7 +554,7 @@ fn function_value_clone_body(ty: Type, arena: &mut NodeArena) -> (NodeId, Vec<Lo
 fn function_value_drop_root(ty: Type, target_id: LocalDeclId, arena: &mut NodeArena) -> NodeId {
     use hir::hir_syn::*;
 
-    let target = alloc_synth_node(arena, load(target_id), ty);
+    let target = alloc_synth_node(arena, load_local(target_id), ty);
     alloc_synth_node(
         arena,
         hir::NodeKind::FunctionDrop(b(hir::FunctionDrop { target })),
@@ -639,7 +639,7 @@ pub(crate) fn function_value_method_function(
                     Location::new_synthesized(),
                 ),
             ];
-            let state = alloc_synth_node(arena, load(state_id), hasher_ty);
+            let state = alloc_synth_node(arena, load_local(state_id), hasher_ty);
             let marker = alloc_synth_node(arena, native_str("<function>"), string_type());
             let write_kind = static_apply_generated(
                 arena,
@@ -738,7 +738,7 @@ fn derive_value_to_string_body(
      -> Result<NodeId, InternalCompilationError> {
         let initial_value = string_lit(arena, initial);
         let next_local = locals.len();
-        let (store_rendered, l_rendered_id) = store_new(
+        let (store_rendered, l_rendered_id) = store_new_local(
             initial_value,
             next_local,
             "rendered",
@@ -749,7 +749,7 @@ fn derive_value_to_string_body(
         let mut statements = Vec::with_capacity(pieces.len() + 2);
         statements.push(n(arena, store_rendered, Type::unit()));
         for piece in pieces.drain(..) {
-            let target = n(arena, load(l_rendered_id), string_type());
+            let target = n(arena, load_local(l_rendered_id), string_type());
             let push = static_apply_generated(
                 arena,
                 solver,
@@ -774,7 +774,7 @@ fn derive_value_to_string_body(
         Tuple(member_tys) => {
             let member_tys = member_tys.clone();
             drop(ty_data);
-            let load_self = n(arena, load(l_self_id), ty);
+            let load_self = n(arena, load_local(l_self_id), ty);
             let mut locals = locals;
             let mut pieces = Vec::with_capacity(member_tys.len() * 2 + 1);
             for (index, member_ty) in member_tys.into_iter().enumerate() {
@@ -798,7 +798,7 @@ fn derive_value_to_string_body(
         Record(fields) => {
             let fields = fields.clone();
             drop(ty_data);
-            let load_self = n(arena, load(l_self_id), ty);
+            let load_self = n(arena, load_local(l_self_id), ty);
             let mut locals = locals;
             let mut pieces = Vec::with_capacity(fields.len() * 4 + 1);
             for (index, (name, member_ty)) in fields.into_iter().enumerate() {
@@ -824,7 +824,7 @@ fn derive_value_to_string_body(
         Variant(variants) => {
             let variants = variants.clone();
             drop(ty_data);
-            let self_value = n(arena, load(l_self_id), ty);
+            let self_value = n(arena, load_local(l_self_id), ty);
             let self_tag = n(arena, extract_tag(self_value), int_type());
             let mut locals = locals;
             let mut alternatives = Vec::with_capacity(variants.len());
@@ -833,7 +833,7 @@ fn derive_value_to_string_body(
                 let rendered = if payload_ty == Type::unit() {
                     string_lit(arena, tag.as_str())
                 } else {
-                    let self_value = n(arena, load(l_self_id), ty);
+                    let self_value = n(arena, load_local(l_self_id), ty);
                     let payload = n(
                         arena,
                         project(self_value, ProjectionIndex::from_index(0)),
@@ -873,7 +873,7 @@ fn derive_value_to_string_body(
             let type_def = ctx.solver.type_def(named.def);
             let type_name = type_def.name;
             let shape_ty = type_def.instantiated_shape(&named.params);
-            let load_self = n(arena, load(l_self_id), ty);
+            let load_self = n(arena, load_local(l_self_id), ty);
             let mut locals = locals;
             let shape_data = shape_ty.data();
             let root = match &*shape_data {
@@ -937,7 +937,7 @@ fn derive_value_to_string_body(
                         let rendered = if payload_ty == Type::unit() {
                             string_lit(arena, &format!("{}::{}", type_name, tag))
                         } else {
-                            let self_value = n(arena, load(l_self_id), ty);
+                            let self_value = n(arena, load_local(l_self_id), ty);
                             let payload = n(
                                 arena,
                                 project(self_value, ProjectionIndex::from_index(0)),
@@ -974,7 +974,7 @@ fn derive_value_to_string_body(
                 }
                 _ => {
                     drop(shape_data);
-                    let load_self = n(arena, load(l_self_id), shape_ty);
+                    let load_self = n(arena, load_local(l_self_id), shape_ty);
                     let payload_str = build_to_string!(arena, load_self, shape_ty)?;
                     build_string_block(
                         arena,
@@ -1024,13 +1024,13 @@ fn derive_value_eq_body(
         ($arena:expr, $member_tys:expr) => {{
             let mut eq_pairs: Vec<NodeId> = Vec::new();
             for (index, member_ty) in $member_tys.into_iter().enumerate() {
-                let load_left_i = n($arena, load(l_left_id), ty);
+                let load_left_i = n($arena, load_local(l_left_id), ty);
                 let left_i = n(
                     $arena,
                     project(load_left_i, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let load_right_i = n($arena, load(l_right_id), ty);
+                let load_right_i = n($arena, load_local(l_right_id), ty);
                 let right_i = n(
                     $arena,
                     project(load_right_i, ProjectionIndex::from_index(index)),
@@ -1064,18 +1064,18 @@ fn derive_value_eq_body(
             let mut alternatives: Vec<(LiteralValue, NodeId)> = Vec::new();
             for (tag, payload_ty) in $variants {
                 let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
-                let load_right_outer = n($arena, load(l_right_id), ty);
+                let load_right_outer = n($arena, load_local(l_right_id), ty);
                 let right_tag = n($arena, extract_tag(load_right_outer), int_type());
                 let inner_body = if payload_ty == Type::unit() {
                     n($arena, native(true), bool_ty)
                 } else {
-                    let load_left_v = n($arena, load(l_left_id), ty);
+                    let load_left_v = n($arena, load_local(l_left_id), ty);
                     let left_payload = n(
                         $arena,
                         project(load_left_v, ProjectionIndex::from_index(0)),
                         payload_ty,
                     );
-                    let load_right_v = n($arena, load(l_right_id), ty);
+                    let load_right_v = n($arena, load_local(l_right_id), ty);
                     let right_payload = n(
                         $arena,
                         project(load_right_v, ProjectionIndex::from_index(0)),
@@ -1099,7 +1099,7 @@ fn derive_value_eq_body(
                 );
                 alternatives.push((tag_val, inner_case));
             }
-            let load_left_outer = n($arena, load(l_left_id), ty);
+            let load_left_outer = n($arena, load_local(l_left_id), ty);
             let left_tag = n($arena, extract_tag(load_left_outer), int_type());
             let false_default = n($arena, native(false), bool_ty);
             n($arena, case(left_tag, alternatives, false_default), bool_ty)
@@ -1154,8 +1154,8 @@ fn derive_value_eq_body(
                 }
                 _ => {
                     drop(shape_data);
-                    let load_left = n(arena, load(l_left_id), shape_ty);
-                    let load_right = n(arena, load(l_right_id), shape_ty);
+                    let load_left = n(arena, load_local(l_left_id), shape_ty);
+                    let load_right = n(arena, load_local(l_right_id), shape_ty);
                     Some(value_method_call_node(
                         ctx,
                         trait_ref,
@@ -1221,7 +1221,7 @@ fn derive_value_hash_body(
                               solver: &mut TraitSolver<'_>,
                               value: &str|
      -> Result<NodeId, InternalCompilationError> {
-        let state = n(arena, load(l_state_id), hasher_ty);
+        let state = n(arena, load_local(l_state_id), hasher_ty);
         let value = n(arena, native_str(value), string_type());
         let write = static_apply_generated(
             arena,
@@ -1235,7 +1235,7 @@ fn derive_value_hash_body(
     };
     macro_rules! build_hash_value {
         ($arena:expr, $value:expr, $value_ty:expr) => {{
-            let state = n($arena, load(l_state_id), hasher_ty);
+            let state = n($arena, load_local(l_state_id), hasher_ty);
             value_method_call_node(
                 ctx,
                 trait_ref,
@@ -1250,7 +1250,7 @@ fn derive_value_hash_body(
 
     macro_rules! build_product_hash {
         ($arena:expr, $member_tys:expr) => {{
-            let load_self = n($arena, load(l_self_id), ty);
+            let load_self = n($arena, load_local(l_self_id), ty);
             let mut statements = Vec::with_capacity($member_tys.len() + 1);
             for (index, member_ty) in $member_tys.into_iter().enumerate() {
                 let member = n(
@@ -1267,7 +1267,7 @@ fn derive_value_hash_body(
 
     macro_rules! build_variant_hash {
         ($arena:expr, $variants:expr) => {{
-            let self_value = n($arena, load(l_self_id), ty);
+            let self_value = n($arena, load_local(l_self_id), ty);
             let self_tag = n($arena, extract_tag(self_value), int_type());
             let mut alternatives = Vec::with_capacity($variants.len());
 
@@ -1275,7 +1275,7 @@ fn derive_value_hash_body(
                 let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
                 let mut statements = vec![build_write_string($arena, ctx.solver, tag.as_str())?];
                 if payload_ty != Type::unit() {
-                    let self_value = n($arena, load(l_self_id), ty);
+                    let self_value = n($arena, load_local(l_self_id), ty);
                     let payload = n(
                         $arena,
                         project(self_value, ProjectionIndex::from_index(0)),
@@ -1342,7 +1342,7 @@ fn derive_value_hash_body(
                 }
                 _ => {
                     drop(shape_data);
-                    let load_self = n(arena, load(l_self_id), shape_ty);
+                    let load_self = n(arena, load_local(l_self_id), shape_ty);
                     Some((build_hash_value!(arena, load_self, shape_ty)?, locals))
                 }
             }
@@ -1391,8 +1391,8 @@ fn derive_value_clone_body(
         ),
     ];
     let build_assign_whole = |arena: &mut NodeArena| {
-        let target = n(arena, load(target_id), ty);
-        let source = n(arena, load(source_id), ty);
+        let target = n(arena, load_local(target_id), ty);
+        let source = n(arena, load_local(source_id), ty);
         n(
             arena,
             hir::NodeKind::Assign(hir::Assignment {
@@ -1407,7 +1407,7 @@ fn derive_value_clone_body(
         ($arena:expr, $member_tys:expr) => {{
             let member_tys = $member_tys;
             let mut statements = Vec::with_capacity(member_tys.len() + 2);
-            let target = n($arena, load(target_id), ty);
+            let target = n($arena, load_local(target_id), ty);
             let uninit_members = member_tys
                 .iter()
                 .map(|&member_ty| n($arena, hir::NodeKind::Uninit, member_ty))
@@ -1423,13 +1423,13 @@ fn derive_value_clone_body(
                 Type::unit(),
             ));
             for (index, &member_ty) in member_tys.iter().enumerate() {
-                let source = n($arena, load(source_id), ty);
+                let source = n($arena, load_local(source_id), ty);
                 let source_member = n(
                     $arena,
                     project(source, ProjectionIndex::from_index(index)),
                     member_ty,
                 );
-                let target = n($arena, load(target_id), ty);
+                let target = n($arena, load_local(target_id), ty);
                 let target_member = n(
                     $arena,
                     project(target, ProjectionIndex::from_index(index)),
@@ -1451,12 +1451,12 @@ fn derive_value_clone_body(
     }
     macro_rules! build_variant_clone {
         ($arena:expr, $variants:expr) => {{
-            let source = n($arena, load(source_id), ty);
+            let source = n($arena, load_local(source_id), ty);
             let source_tag = n($arena, extract_tag(source), int_type());
             let mut alternatives = Vec::with_capacity($variants.len());
             for (tag, payload_ty) in $variants {
                 let tag_val = LiteralValue::new_native(ustr_to_isize(tag));
-                let target = n($arena, load(target_id), ty);
+                let target = n($arena, load_local(target_id), ty);
                 let target_value = if payload_ty == Type::unit() {
                     let payload = n($arena, native(()), Type::unit());
                     n($arena, variant(tag, payload), ty)
@@ -1478,13 +1478,13 @@ fn derive_value_clone_body(
                 } else {
                     let mut statements = Vec::with_capacity(3);
                     statements.push(init_target);
-                    let source = n($arena, load(source_id), ty);
+                    let source = n($arena, load_local(source_id), ty);
                     let source_payload = n(
                         $arena,
                         project(source, ProjectionIndex::from_index(0)),
                         payload_ty,
                     );
-                    let target = n($arena, load(target_id), ty);
+                    let target = n($arena, load_local(target_id), ty);
                     let target_payload = n(
                         $arena,
                         project(target, ProjectionIndex::from_index(0)),
@@ -1604,7 +1604,7 @@ fn derive_value_drop_body(
         ($arena:expr, $member_tys:expr) => {{
             let mut statements = Vec::with_capacity($member_tys.len() + 1);
             for (index, member_ty) in $member_tys.into_iter().enumerate() {
-                let target = n($arena, load(target_id), ty);
+                let target = n($arena, load_local(target_id), ty);
                 let target_member = n(
                     $arena,
                     project(target, ProjectionIndex::from_index(index)),
@@ -1626,7 +1626,7 @@ fn derive_value_drop_body(
     }
     macro_rules! build_variant_drop {
         ($arena:expr, $variants:expr) => {{
-            let target = n($arena, load(target_id), ty);
+            let target = n($arena, load_local(target_id), ty);
             let target_tag = n($arena, extract_tag(target), int_type());
             let mut alternatives = Vec::with_capacity($variants.len());
             for (tag, payload_ty) in $variants {
@@ -1634,7 +1634,7 @@ fn derive_value_drop_body(
                 let branch = if payload_ty == Type::unit() {
                     n($arena, native(()), Type::unit())
                 } else {
-                    let target = n($arena, load(target_id), ty);
+                    let target = n($arena, load_local(target_id), ty);
                     let target_payload = n(
                         $arena,
                         project(target, ProjectionIndex::from_index(0)),

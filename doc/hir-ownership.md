@@ -11,11 +11,11 @@ This document is about source-level ownership semantics and the HIR operations t
 # Values, Places, and Locals
 
 A HIR expression either produces an owned value or denotes a place in existing storage.
-Place-like nodes include `EnvLoad`, projections (`Project`, `ProjectAt`, field projections before elaboration), and `Apply` / `StaticApply` nodes whose function definition has `returns_place`.
-SSA must not treat every `EnvLoad` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
+Place-like nodes include `LoadLocal`, projections (`Project`, `ProjectAt`, field projections before elaboration), and `Apply` / `StaticApply` nodes whose function definition has `returns_place`.
+SSA must not treat every `LoadLocal` as an owned read: ownership transfer, clone, and copy are explicit HIR operations.
 
 When a place-producing projection or call needs a non-place base, HIR generation stores that base in an explicit owned temporary local first.
-The consumer then uses a normal place rooted at that temporary, and ordinary `EnvDrop` cleanup releases the temporary after the consumer.
+The consumer then uses a normal place rooted at that temporary, and ordinary `DropLocal` cleanup releases the temporary after the consumer.
 
 Std-only functions marked with `#[place_result]` are place-like nodes.
 The attribute also marks the function unsafe, so user source cannot call or bind it directly.
@@ -27,7 +27,7 @@ HIR consumers must handle `Apply` and `StaticApply` with `returns_place` like ot
 |-------|--------------------|
 | `slot` | Frame slot offset within the local value frame. Extra dictionary/evidence parameters use a separate index space. |
 | `storage` | Whether this local is a non-owning alias, owns storage with lexical cleanup, or is temporarily deferred until final mutability facts are known. |
-| `clone` | If present, `EnvStore` initializes the local by either a trivial copy or `Value::clone(source, &mut target)`. |
+| `clone` | If present, `StoreLocal` initializes the local by either a trivial copy or `Value::clone(source, &mut target)`. |
 | `assignment_mode` | `InitializeStorage` means assignment writes uninitialized storage and must not drop the previous destination. |
 
 # Owned Materialization
@@ -57,9 +57,9 @@ Current lowering applies these rules in the main ownership-sensitive contexts:
 
 # Drops and Cleanup
 
-Lexical drops are explicit `EnvDrop { id }` nodes generated in reverse local order.
-Locals with owned or deferred storage whose lifetime ends receive `EnvDrop` nodes.
-After local storage resolution, `EnvDrop` is a no-op for non-owning locals.
+Lexical drops are explicit `DropLocal { id }` nodes generated in reverse local order.
+Locals with owned or deferred storage whose lifetime ends receive `DropLocal` nodes.
+After local storage resolution, `DropLocal` is a no-op for non-owning locals.
 For owned locals it applies the resolved `LocalDrop`: `Skip` reclaims only storage, while static and dictionary modes call `Value::drop` before discarding storage.
 
 Assignments to initialized storage carry an optional `Assignment::drop`.
@@ -68,7 +68,7 @@ Assignments to uninitialized storage use `assignment_mode == InitializeStorage` 
 
 SSA must preserve the same cleanup behavior on all exits:
 
-- Normal scope exit runs the generated `EnvDrop`s.
+- Normal scope exit runs the generated `DropLocal`s.
 - A moved local is not dropped again.
 - Runtime-error edges must run semantic drops for initialized owned locals created in the exited scope, in reverse order, before storage is reclaimed.
 - Early return propagates the returned value and must not drop storage that has been moved into that return value.
@@ -106,9 +106,9 @@ SSA lowering may choose a physical ABI layout that packs evidence and values tog
 
 Dispatch sites are:
 
-- `EnvStore` with `LocalDecl::clone`: clone into the local's uninitialized target storage.
+- `StoreLocal` with `LocalDecl::clone`: clone into the local's uninitialized target storage.
 - `CloneValue`: clone or copy a place into a fresh owned temporary result.
-- `EnvDrop` with `LocalDecl::drop`: drop an owned local.
+- `DropLocal` with `LocalDecl::drop`: drop an owned local.
 - `Assignment::drop`: drop the overwritten destination value.
 
 # Call Argument Passing

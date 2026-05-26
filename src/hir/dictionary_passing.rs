@@ -1263,10 +1263,10 @@ impl Node {
             GetDictionary(_) => {
                 // nothing to do
             }
-            EnvStore(store) => {
+            StoreLocal(store) => {
                 elaborate_dictionaries(arena, store.value, ctx, locals, local_count)?;
             }
-            EnvDrop(_) => {}
+            DropLocal(_) => {}
             TakeLocalValue(node) => {
                 if matches!(node.mode, TakeLocalValueMode::Unknown) {
                     node.mode = if locals[node.id.as_index()].owns_storage() {
@@ -1278,7 +1278,7 @@ impl Node {
                     };
                 }
             }
-            EnvLoad(_) => {}
+            LoadLocal(_) => {}
             ExtraParameter(_) => {}
             Return(node_id) => {
                 elaborate_dictionaries(arena, *node_id, ctx, locals, local_count)?;

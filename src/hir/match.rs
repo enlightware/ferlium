@@ -10,7 +10,7 @@ use crate::{
     FxHashMap, Location,
     ast::{DExprId, PatternVar},
     compiler::error::DuplicatedVariantContext,
-    hir::hir_syn::store_new,
+    hir::hir_syn::store_new_local,
     internal_compilation_error,
     module::{
         LocalDecl, LocalDeclId, LocalFrameSlot, ProjectionIndex, TypeDefId, TypeDefLookupResult,
@@ -27,7 +27,7 @@ use crate::{
     compiler::error::InternalCompilationError,
     containers::{SVec2, b},
     hir::value::LiteralValue,
-    hir::{self, EnvLoad, EnvStore, NodeId, NodeKind},
+    hir::{self, LoadLocal, NodeId, NodeKind, StoreLocal},
     std::math::int_type,
     types::effects::{EffType, no_effects},
     types::mutability::MutType,
@@ -247,7 +247,7 @@ impl TypeInference {
                 .process_results(|iter| iter.unzip())?;
 
             // Code to store the variant value in the environment.
-            let (store_variant, l_match_condition) = store_new(
+            let (store_variant, l_match_condition) = store_new_local(
                 condition_node_id,
                 match_condition_slot,
                 "@match_condition",
@@ -270,10 +270,10 @@ impl TypeInference {
             ));
             env.cur_locals.push(l_match_condition);
 
-            // Code to load the variant and extract the tag
+            // Code to load the variant local and extract the tag.
 
             let load_variant_node = N::new(
-                K::EnvLoad(EnvLoad {
+                K::LoadLocal(LoadLocal {
                     id: l_match_condition,
                 }),
                 pattern_ty,
@@ -381,7 +381,7 @@ impl TypeInference {
                                     sp(*expr),
                                 );
                                 let store_projected_inner_id = env.ir_arena.alloc(N::new(
-                                    K::EnvStore(EnvStore {
+                                    K::StoreLocal(StoreLocal {
                                         value: project_inner_id,
                                         id: l_bindings[i],
                                     }),
