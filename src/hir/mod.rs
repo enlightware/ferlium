@@ -205,6 +205,8 @@ impl UnboundTyCtxs {
 /// A map of unbound type variables to the context of their first appearance
 pub(crate) type UnboundTyVars = IndexMap<TypeVar, UnboundTyCtxs>;
 
+// Value construction payloads.
+
 /// Build a runtime closure value from a function and captured values.
 #[derive(Debug, Clone)]
 pub struct BuildClosure {
@@ -213,6 +215,96 @@ pub struct BuildClosure {
     pub captures: Vec<NodeId>,
     pub captures_value_dictionary: Option<NodeId>,
 }
+
+/// Build a variant value with a tag and payload.
+#[derive(Debug, Clone, Copy, new)]
+pub struct Variant {
+    pub tag: Ustr,
+    pub payload: NodeId,
+}
+
+// Value access payloads.
+
+/// Project a tuple-like value at a statically known index.
+#[derive(Debug, Clone, Copy, new)]
+pub struct Project {
+    pub value: NodeId,
+    pub index: ProjectionIndex,
+}
+
+/// Access a record-like value at a statically known field.
+#[derive(Debug, Clone, Copy, new)]
+pub struct FieldAccess {
+    pub value: NodeId,
+    pub field: Ustr,
+}
+
+/// Project a tuple-like value using a hidden field-index parameter.
+#[derive(Debug, Clone, Copy, new)]
+pub struct ProjectAt {
+    pub value: NodeId,
+    pub index: ExtraParameterId,
+}
+
+// Local storage and ownership payloads.
+
+/// Load a local as a place or borrowed value.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadLocal {
+    pub id: LocalDeclId,
+}
+
+/// Store a value into local storage.
+#[derive(Debug, Clone, Copy)]
+pub struct StoreLocal {
+    pub value: NodeId,
+    pub id: LocalDeclId,
+}
+
+/// Take a local value as an owned result.
+#[derive(Debug, Clone, Copy)]
+pub struct TakeLocalValue {
+    pub id: LocalDeclId,
+    pub mode: TakeLocalValueMode,
+}
+
+/// Drop the owned value stored in a local.
+#[derive(Debug, Clone, Copy)]
+pub struct DropLocal {
+    pub id: LocalDeclId,
+}
+
+/// Assign a new value into an existing place.
+#[derive(Debug, Clone, Copy)]
+pub struct Assignment {
+    pub place: NodeId,
+    pub value: NodeId,
+    /// Dispatch used to drop the old destination value before overwriting it.
+    /// `None` is used only when the destination storage is uninitialized.
+    pub drop: Option<LocalDrop>,
+}
+
+/// Materialize a value as an owned result, using the cheapest valid copy mode.
+#[derive(Debug, Clone, Copy)]
+pub struct CloneValue {
+    pub source: NodeId,
+    pub clone: LocalClone,
+}
+
+/// Clone the closure environment of `source` into already allocated `target` storage.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionClone {
+    pub source: NodeId,
+    pub target: NodeId,
+}
+
+/// Drop the owned closure environment stored in `target`.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionDrop {
+    pub target: NodeId,
+}
+
+// Calls and function value payloads.
 
 /// A visible call argument together with its resolved or deferred passing mode.
 #[derive(Debug, Clone, Copy)]
@@ -248,32 +340,21 @@ impl CallArgument {
     }
 }
 
+/// Load a statically known function as a first-class value.
+#[derive(Debug, Clone)]
+pub struct GetFunction {
+    pub function: FunctionId,
+    pub function_path: ast::Path,
+    pub function_span: Location,
+    pub inst_data: FnInstData,
+}
+
 /// Call a first-class function value.
 #[derive(Debug, Clone)]
 pub struct Application {
     pub function: NodeId,
     pub arguments: Vec<CallArgument>,
     pub returns_place: bool,
-}
-
-/// Clone the closure environment of `source` into already allocated `target` storage.
-#[derive(Debug, Clone, Copy)]
-pub struct FunctionClone {
-    pub source: NodeId,
-    pub target: NodeId,
-}
-
-/// Drop the owned closure environment stored in `target`.
-#[derive(Debug, Clone, Copy)]
-pub struct FunctionDrop {
-    pub target: NodeId,
-}
-
-/// Materialize a value as an owned result, using the cheapest valid copy mode.
-#[derive(Debug, Clone, Copy)]
-pub struct CloneValue {
-    pub source: NodeId,
-    pub clone: LocalClone,
 }
 
 /// Call a statically known function.
@@ -310,86 +391,7 @@ impl TraitMethodApplication {
     }
 }
 
-/// Store a value into local storage.
-#[derive(Debug, Clone, Copy)]
-pub struct StoreLocal {
-    pub value: NodeId,
-    pub id: LocalDeclId,
-}
-
-/// Drop the owned value stored in a local.
-#[derive(Debug, Clone, Copy)]
-pub struct DropLocal {
-    pub id: LocalDeclId,
-}
-
-/// Take a local value as an owned result.
-#[derive(Debug, Clone, Copy)]
-pub struct TakeLocalValue {
-    pub id: LocalDeclId,
-    pub mode: TakeLocalValueMode,
-}
-
-/// Load a local as a place or borrowed value.
-#[derive(Debug, Clone, Copy)]
-pub struct LoadLocal {
-    pub id: LocalDeclId,
-}
-
-/// Assign a new value into an existing place.
-#[derive(Debug, Clone, Copy)]
-pub struct Assignment {
-    pub place: NodeId,
-    pub value: NodeId,
-    /// Dispatch used to drop the old destination value before overwriting it.
-    /// `None` is used only when the destination storage is uninitialized.
-    pub drop: Option<LocalDrop>,
-}
-
-/// Project a tuple-like value at a statically known index.
-#[derive(Debug, Clone, Copy, new)]
-pub struct Project {
-    pub value: NodeId,
-    pub index: ProjectionIndex,
-}
-
-/// Access a record-like value at a statically known field.
-#[derive(Debug, Clone, Copy, new)]
-pub struct FieldAccess {
-    pub value: NodeId,
-    pub field: Ustr,
-}
-
-/// Project a tuple-like value using a hidden field-index parameter.
-#[derive(Debug, Clone, Copy, new)]
-pub struct ProjectAt {
-    pub value: NodeId,
-    pub index: ExtraParameterId,
-}
-
-/// Build a variant value with a tag and payload.
-#[derive(Debug, Clone, Copy, new)]
-pub struct Variant {
-    pub tag: Ustr,
-    pub payload: NodeId,
-}
-
-/// Branch on a literal value with a default alternative.
-#[derive(Debug, Clone)]
-pub struct Case {
-    pub value: NodeId,
-    pub alternatives: Vec<(LiteralValue, NodeId)>,
-    pub default: NodeId,
-}
-
-/// Load a statically known function as a first-class value.
-#[derive(Debug, Clone)]
-pub struct GetFunction {
-    pub function: FunctionId,
-    pub function_path: ast::Path,
-    pub function_span: Location,
-    pub inst_data: FnInstData,
-}
+// Trait and evidence operation payloads.
 
 /// Load a trait method as a first-class value before dictionary passing.
 #[derive(Debug, Clone)]
@@ -463,29 +465,78 @@ pub struct CallDictionaryMethod {
     pub ty: FnType,
 }
 
+// Control flow payloads.
+
+/// Branch on a literal value with a default alternative.
+#[derive(Debug, Clone)]
+pub struct Case {
+    pub value: NodeId,
+    pub alternatives: Vec<(LiteralValue, NodeId)>,
+    pub default: NodeId,
+}
+
 /// The kind-specific part of the expression-based execution tree
 #[derive(Debug, Clone, EnumAsInner)]
 pub enum NodeKind {
+    // Internal placeholders.
     /// Compiler-only uninitialized storage used while generated `Value::clone` code fills a target.
     Uninit,
+    /// Placeholder used while temporarily moving a node kind out of the arena.
+    Unimplemented,
+
+    // Value construction.
     /// Return a literal value.
     Immediate(LiteralValue),
+    /// Build a tuple value.
+    Tuple(NodeIds),
+    /// Build a record value.
+    Record(NodeIds),
+    /// Build an array value.
+    Array(NodeIds),
+    /// Build a variant value with a tag and payload.
+    Variant(Variant),
     /// Build a runtime closure value from a function and captured values.
     BuildClosure(B<BuildClosure>),
-    /// Call a first-class function value.
-    Apply(B<Application>),
+
+    // Value access.
+    /// Project a tuple-like value at a statically known index.
+    Project(Project),
+    /// Access a record-like value at a statically known field.
+    FieldAccess(FieldAccess),
+    /// Project a tuple-like value using a hidden field-index parameter.
+    ProjectAt(ProjectAt),
+    /// Extract the tag of a variant as an isize, by casting the pointer to the string.
+    ExtractTag(NodeId),
+
+    // Local storage and ownership.
+    /// Load a local as a place or borrowed value.
+    LoadLocal(LoadLocal),
+    /// Store a value into local storage.
+    StoreLocal(StoreLocal),
+    /// Take a local value as an owned result.
+    TakeLocalValue(TakeLocalValue),
+    /// Drop the owned value stored in a local.
+    DropLocal(DropLocal),
+    /// Assign a new value into an existing place.
+    Assign(Assignment),
+    /// Materialize a value as an owned result, using the cheapest valid copy mode.
+    CloneValue(CloneValue),
     /// Clone the closure environment of `source` into already allocated `target` storage.
     FunctionClone(FunctionClone),
     /// Drop the owned closure environment stored in `target`.
     FunctionDrop(FunctionDrop),
-    /// Materialize a value as an owned result, using the cheapest valid copy mode.
-    CloneValue(CloneValue),
+
+    // Calls and function values.
+    /// Load a statically known function as a first-class value.
+    GetFunction(B<GetFunction>),
+    /// Call a first-class function value.
+    Apply(B<Application>),
     /// Call a statically known function.
     StaticApply(B<StaticApplication>),
     /// Call a trait method before dictionary passing resolves it.
     TraitMethodApply(B<TraitMethodApplication>),
-    /// Load a statically known function as a first-class value.
-    GetFunction(B<GetFunction>),
+
+    // Trait and evidence operations.
     /// Load a trait method as a first-class value before dictionary passing.
     GetTraitMethod(B<GetTraitMethod>),
     /// Load a trait associated const before dictionary passing resolves it.
@@ -504,44 +555,18 @@ pub enum NodeKind {
     GetDictionaryAssociatedConst(GetDictionaryAssociatedConst),
     /// Call a method entry through a trait dictionary.
     CallDictionaryMethod(B<CallDictionaryMethod>),
-    /// Store a value into local storage.
-    StoreLocal(StoreLocal),
-    /// Drop the owned value stored in a local.
-    DropLocal(DropLocal),
-    /// Take a local value as an owned result.
-    TakeLocalValue(TakeLocalValue),
-    /// Load a local as a place or borrowed value.
-    LoadLocal(LoadLocal),
-    /// Return from the current function.
-    Return(NodeId),
+
+    // Control flow.
     /// Evaluate a sequence of nodes.
     Block(NodeIds),
-    /// Assign a new value into an existing place.
-    Assign(Assignment),
-    /// Build a tuple value.
-    Tuple(NodeIds),
-    /// Project a tuple-like value at a statically known index.
-    Project(Project),
-    /// Build a record value.
-    Record(NodeIds),
-    /// Access a record-like value at a statically known field.
-    FieldAccess(FieldAccess),
-    /// Project a tuple-like value using a hidden field-index parameter.
-    ProjectAt(ProjectAt),
-    /// Build a variant value with a tag and payload.
-    Variant(Variant),
-    /// Extract the tag of a variant as an isize, by casting the pointer to the string.
-    ExtractTag(NodeId),
-    /// Build an array value.
-    Array(NodeIds),
+    /// Return from the current function.
+    Return(NodeId),
     /// Branch on a literal value with a default alternative.
     Case(B<Case>),
     /// Loop forever until a return or soft break is reached.
     Loop(NodeId),
     /// Break out of the nearest loop without returning from the function.
     SoftBreak,
-    /// Placeholder used while temporarily moving a node kind out of the arena.
-    Unimplemented,
 }
 
 impl NodeKind {
