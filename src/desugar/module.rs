@@ -877,6 +877,12 @@ impl ast::TraitDefinition {
             &generic_params,
             GenericParamsOwner::Trait { name: self.name.0 },
         )?;
+        let parent_constraints = desugar_type_constraints(
+            &self.parent_constraints,
+            &generic_ty_params,
+            env,
+            modules_used,
+        )?;
         let constraints =
             desugar_type_constraints(&self.where_clause, &generic_ty_params, env, modules_used)?;
         let method_spans = self
@@ -899,6 +905,7 @@ impl ast::TraitDefinition {
             doc: self.doc,
             input_type_names,
             output_type_names,
+            parent_constraints,
             constraints,
             methods,
             associated_consts: vec![],
@@ -990,6 +997,11 @@ impl ast::TraitDefinition {
                 .output_type_names
                 .iter()
                 .map(|(_, span)| *span)
+                .collect(),
+            parent_constraints: self
+                .parent_constraints
+                .iter()
+                .map(|constraint| constraint.span)
                 .collect(),
             constraints: self
                 .where_clause

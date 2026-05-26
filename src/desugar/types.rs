@@ -310,23 +310,44 @@ fn desugar_type_constraint(
     };
     record_module_use(module_id, modules_used);
 
-    let input_tys = if constraint.input_types.len() == 1 && constraint.input_types[0].name.is_none()
-    {
-        if trait_ref.input_type_count() != 1 {
+    let has_named_inputs = constraint
+        .input_types
+        .iter()
+        .any(|input| input.name.is_some());
+    let has_positional_inputs = constraint
+        .input_types
+        .iter()
+        .any(|input| input.name.is_none());
+    let input_tys = if has_positional_inputs && !has_named_inputs {
+        if trait_ref.input_type_count() as usize != constraint.input_types.len() {
             let expected_count = trait_ref.input_type_count() as usize;
+            let kind = if constraint.input_types.len() == 1 {
+                InvalidTraitConstraintKind::ExpectedNamedInputs { expected_count }
+            } else {
+                InvalidTraitConstraintKind::WrongNumberOfInputBindings {
+                    expected_count,
+                    got_count: constraint.input_types.len(),
+                }
+            };
             return Err(internal_compilation_error!(InvalidTraitConstraint {
                 trait_name: constraint.trait_name.to_string(),
-                kind: InvalidTraitConstraintKind::ExpectedNamedInputs { expected_count },
+                kind,
                 span: constraint.span,
             }));
         }
-        vec![constraint.input_types[0].ty.0.desugar_with_ty_params(
-            constraint.input_types[0].ty.1,
-            false,
-            env,
-            generic_ty_params,
-            modules_used,
-        )?]
+        constraint
+            .input_types
+            .iter()
+            .map(|input| {
+                input.ty.0.desugar_with_ty_params(
+                    input.ty.1,
+                    false,
+                    env,
+                    generic_ty_params,
+                    modules_used,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
     } else {
         let named_inputs = constraint
             .input_types

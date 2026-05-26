@@ -104,6 +104,7 @@ pub struct TraitDefinition {
     pub name: UstrSpan,
     pub input_type_names: Vec<UstrSpan>,
     pub output_type_names: Vec<UstrSpan>,
+    pub parent_constraints: Vec<PTypeConstraint>,
     pub where_clause: Vec<PTypeConstraint>,
     pub methods: Vec<TraitMethod>,
     pub span: Location,
@@ -463,6 +464,15 @@ impl<'a> FormatWith<ModuleEnv<'_>> for ModuleDisplay<'a, Parsed> {
                     )?;
                 }
                 write!(f, ">")?;
+                if !trait_def.parent_constraints.is_empty() {
+                    write!(f, ": ")?;
+                    write_with_separator_and_format_fn(
+                        &trait_def.parent_constraints,
+                        ", ",
+                        |constraint, f| constraint.fmt_trait_headed(f, env),
+                        f,
+                    )?;
+                }
                 if !trait_def.where_clause.is_empty() {
                     write!(f, " where ")?;
                     write_with_separator_and_format_fn(

@@ -190,6 +190,241 @@ fn user_defined_traits_store_outputs_constraints_and_effects() {
 
 #[test]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parent_trait_constraints_are_impl_obligations() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Parent<Self> {
+                fn parent_value(value: Self) -> int;
+            }
+
+            trait Child<Self>: Parent<Self> {
+                fn child_value(value: Self) -> int;
+            }
+
+            impl Parent for int {
+                fn parent_value(value: int) -> int {
+                    value
+                }
+            }
+
+            impl Child for int {
+                fn child_value(value: int) -> int {
+                    parent_value(value) + 1
+                }
+            }
+
+            child_value(41)
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parent_trait_constraints_must_hold_for_concrete_impls() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! {r#"
+        trait Parent<Self> {
+            fn parent_value(value: Self) -> int;
+        }
+
+        trait Child<Self>: Parent<Self> {
+            fn child_value(value: Self) -> int;
+        }
+
+        impl Child for int {
+            fn child_value(value: int) -> int {
+                42
+            }
+        }
+    "#});
+
+    match err.into_inner() {
+        CompilationErrorImpl::TraitImplNotFound { trait_ref, .. } => {
+            assert_eq!(trait_ref, "Parent");
+        }
+        other => panic!("expected TraitImplNotFound for Parent, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parent_trait_constraints_gate_blanket_impl_selection() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            struct Box<T>(T)
+
+            trait Parent<Self> {
+                fn parent_value(value: Self) -> int;
+            }
+
+            trait Child<Self>: Parent<Self> {
+                fn child_value(value: Self) -> int;
+            }
+
+            impl<T> Parent for Box<T> {
+                fn parent_value(value: Box<T>) -> int {
+                    41
+                }
+            }
+
+            impl<T> Child for Box<T> {
+                fn child_value(value: Box<T>) -> int {
+                    parent_value(value) + 1
+                }
+            }
+
+            child_value(Box(0))
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parent_trait_constraints_support_multi_input_traits() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Left<A> {
+                fn left(value: A) -> int;
+            }
+
+            trait Right<B> {
+                fn right(value: B) -> int;
+            }
+
+            trait Pair<A, B>: Left<A>, Right<B> {
+                fn pair(left_value: A, right_value: B) -> int;
+            }
+
+            impl Left for int {
+                fn left(value: int) -> int {
+                    value
+                }
+            }
+
+            impl Right for string {
+                fn right(value: string) -> int {
+                    2
+                }
+            }
+
+            impl Pair for <int, string> {
+                fn pair(left_value: int, right_value: string) -> int {
+                    left(left_value) + right(right_value)
+                }
+            }
+
+            pair(40, "ignored")
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn where_clauses_accept_positional_trait_inputs() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            trait Combine<Left, Right> {
+                fn combine(left: Left, right: Right) -> int;
+            }
+
+            impl Combine for <int, string> {
+                fn combine(left: int, right: string) -> int {
+                    left + 2
+                }
+            }
+
+            fn use_combine<Left, Right>(left: Left, right: Right) -> int
+            where
+                Combine<Left, Right>
+            {
+                combine(left, right)
+            }
+
+            use_combine(40, "ignored")
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn where_clauses_accept_positional_trait_inputs_with_named_outputs() {
+    let mut session = TestSession::new();
+    assert_val_eq!(
+        session.run(indoc! {r#"
+            struct IntSource(int)
+
+            trait Produce<Self |-> Item> {
+                fn produce(value: Self) -> Item;
+            }
+
+            impl Produce for <Self = IntSource |-> Item = int> {
+                fn produce(value: IntSource) -> int {
+                    value.0
+                }
+            }
+
+            fn use_produce<Source>(source: Source) -> int
+            where
+                Produce<Source |-> Item = int>
+            {
+                produce(source)
+            }
+
+            use_produce(IntSource(42))
+        "#}),
+        int(42)
+    );
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn parent_trait_constraints_are_not_trait_use_entailment() {
+    let mut session = TestSession::new();
+    let module = session.compile_and_get_module(indoc! {r#"
+        trait Parent<Self> {
+            fn parent_value(value: Self) -> int;
+        }
+
+        trait Child<Self>: Parent<Self> {
+            fn child_value(value: Self) -> int;
+        }
+
+        fn needs_both<T>(value: T) -> int
+        where
+            T: Child
+        {
+            parent_value(value)
+        }
+    "#});
+    let def = &module
+        .get_function(ustr("needs_both"))
+        .expect("expected needs_both function")
+        .definition;
+    let trait_names = def
+        .ty_scheme
+        .constraints
+        .iter()
+        .filter_map(|constraint| {
+            constraint
+                .as_have_trait()
+                .map(|(trait_ref, _, _, _)| trait_ref.name)
+        })
+        .collect::<Vec<_>>();
+
+    assert!(trait_names.contains(&ustr("Child")));
+    assert!(trait_names.contains(&ustr("Parent")));
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 fn concrete_impl_stores_associated_const_values() {
     let method = FunctionDefinition::new_infer_quantifiers(
         FnType::new_by_val([Type::variable_id(0)], Type::variable_id(0), no_effects()),

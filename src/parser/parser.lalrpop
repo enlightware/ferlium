@@ -71,12 +71,13 @@ ModuleTraitImpl: Module = {
 }
 
 TraitDefinition: TraitDefinition = {
-    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <where_clause:WhereClause?> "{" <methods:TraitMethod*> "}" <r:@R> => {
+    <doc:DOC_COMMENT*> <visibility:Visibility> <l:@L> "trait" <name:Sp<UIdentifier>> <header:TraitDefinitionHeader> <parent_constraints:ParentConstraintList?> <where_clause:WhereClause?> "{" <methods:TraitMethod*> "}" <r:@R> => {
         TraitDefinition {
             visibility,
             name,
             input_type_names: header.0,
             output_type_names: header.1,
+            parent_constraints: parent_constraints.unwrap_or_default(),
             where_clause: where_clause.unwrap_or_default(),
             methods,
             span: span(l, r, source_id),
@@ -92,6 +93,10 @@ TraitDefinitionHeader: (Vec<UstrSpan>, Vec<UstrSpan>) = {
 
 TraitDefinitionOutputSection: Vec<UstrSpan> = {
     "|->" <output_type_names:Sep1<Sp<UIdentifier>, ",">> => output_type_names,
+}
+
+ParentConstraintList: Vec<TypeConstraint> = {
+    ":" <first:TypeConstraint> <rest:("," <TypeConstraint>)*> => ext_f(first, rest),
 }
 
 TraitImpl: TraitImpl = {
@@ -544,6 +549,17 @@ TypeConstraint: TypeConstraint = {
         TypeConstraint {
             trait_name,
             input_types,
+            output_types: output_types.unwrap_or_default(),
+            span: span(l, r, source_id),
+        }
+    },
+    <l:@L> <trait_name:Path> "<" <input_tys:TypeArgList<"">> <output_types:TypeConstraintOutputSection?> ">" <r:@R> => {
+        TypeConstraint {
+            trait_name,
+            input_types: input_tys
+                .into_iter()
+                .map(|ty| TypeConstraintInput { name: None, ty })
+                .collect(),
             output_types: output_types.unwrap_or_default(),
             span: span(l, r, source_id),
         }

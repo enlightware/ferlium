@@ -657,6 +657,9 @@ where
                 );
             }
         }
+        for constraint in &trait_ctx.trait_ref.parent_constraints {
+            ty_inf.add_pub_constraint(constraint.instantiate_location_cloned(trait_ctx.span));
+        }
         for constraint in &trait_ctx.trait_ref.constraints {
             ty_inf.add_pub_constraint(constraint.instantiate_location_cloned(trait_ctx.span));
         }

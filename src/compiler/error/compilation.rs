@@ -158,13 +158,31 @@ impl InvalidGenericParamsKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidTraitConstraintKind {
-    UnknownInputBinding { name: Ustr },
-    DuplicateInputBinding { name: Ustr },
-    MissingInputBindings { names: Vec<Ustr> },
-    UnknownOutputBinding { name: Ustr },
-    DuplicateOutputBinding { name: Ustr },
-    MissingOutputBindings { names: Vec<Ustr> },
-    ExpectedNamedInputs { expected_count: usize },
+    UnknownInputBinding {
+        name: Ustr,
+    },
+    DuplicateInputBinding {
+        name: Ustr,
+    },
+    MissingInputBindings {
+        names: Vec<Ustr>,
+    },
+    UnknownOutputBinding {
+        name: Ustr,
+    },
+    DuplicateOutputBinding {
+        name: Ustr,
+    },
+    MissingOutputBindings {
+        names: Vec<Ustr>,
+    },
+    ExpectedNamedInputs {
+        expected_count: usize,
+    },
+    WrongNumberOfInputBindings {
+        expected_count: usize,
+        got_count: usize,
+    },
 }
 
 impl InvalidTraitConstraintKind {
@@ -193,6 +211,12 @@ impl InvalidTraitConstraintKind {
             ),
             ExpectedNamedInputs { expected_count } => format!(
                 "Trait `{trait_name}` expects {expected_count} named input type parameters in this constraint"
+            ),
+            WrongNumberOfInputBindings {
+                expected_count,
+                got_count,
+            } => format!(
+                "Trait `{trait_name}` expects {expected_count} input type parameters in this constraint, got {got_count}"
             ),
         }
     }

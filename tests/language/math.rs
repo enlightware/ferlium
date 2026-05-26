@@ -6,7 +6,8 @@
 //
 // Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 //
-use ferlium::compiler::error::RuntimeErrorKind;
+use ferlium::compiler::error::{CompilationErrorImpl, RuntimeErrorKind};
+use indoc::indoc;
 use test_log::test;
 
 use crate::harness::{TestSession, bool, float, int};
@@ -120,6 +121,28 @@ fn clamp() {
     assert_val_eq!(session.run("clamp(4.0, -1.5, 3.0)"), float(3.0));
     assert_val_eq!(session.run("clamp(0.0, 3.0, 3.0)"), float(3.0));
     assert!(session.fail_run("clamp(0.0, 3.0, 2.0)").is_aborted());
+}
+
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn div_impl_requires_num_parent_constraint() {
+    let mut session = TestSession::new();
+    let err = session.fail_compilation(indoc! {r#"
+        struct Fraction(int, int)
+
+        impl Div for Fraction {
+            fn div(left: Fraction, right: Fraction) -> Fraction {
+                left
+            }
+        }
+    "#});
+
+    match err.into_inner() {
+        CompilationErrorImpl::TraitImplNotFound { trait_ref, .. } => {
+            assert_eq!(trait_ref, "Num");
+        }
+        other => panic!("expected TraitImplNotFound for Num, got {other:?}"),
+    }
 }
 
 #[test]

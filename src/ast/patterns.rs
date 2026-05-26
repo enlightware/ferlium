@@ -502,6 +502,16 @@ impl<P: Phase> FormatWith<ModuleEnv<'_>> for TypeConstraint<P> {
             return Ok(());
         }
 
+        self.fmt_trait_headed(f, env)
+    }
+}
+
+impl<P: Phase> TypeConstraint<P> {
+    pub(crate) fn fmt_trait_headed(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        env: &ModuleEnv<'_>,
+    ) -> fmt::Result {
         write!(f, "{}<", self.trait_name)?;
         write_with_separator_and_format_fn(
             &self.input_types,

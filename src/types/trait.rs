@@ -32,7 +32,9 @@ use crate::{
     types::r#type::{Type, TypeInstSubst, TypeVar},
     types::type_like::TypeLike,
     types::type_mapper::BitmapInstantiationMapper,
-    types::type_scheme::PubTypeConstraint,
+    types::type_scheme::{
+        PubTypeConstraint, TypeConstraintRenderStyle, format_pub_type_constraint_with_style,
+    },
     types::type_visitor::TyVarsCollector,
 };
 
@@ -84,6 +86,7 @@ pub struct TraitSpans {
     pub name: Location,
     pub input_type_names: Vec<Location>,
     pub output_type_names: Vec<Location>,
+    pub parent_constraints: Vec<Location>,
     pub constraints: Vec<Location>,
     pub methods: Vec<TraitMethodSpans>,
     pub span: Location,
@@ -129,6 +132,8 @@ pub struct Trait {
     /// Name of the output types.
     /// By convention, the type variables just after input types correspond to output types.
     pub output_type_names: Vec<Ustr>,
+    /// Trait constraints required to implement this trait.
+    pub parent_constraints: Vec<PubTypeConstraint>,
     /// The constraints on the trait, for example related to the associated types.
     pub constraints: Vec<PubTypeConstraint>,
     /// The methods provided by the trait.
@@ -270,8 +275,20 @@ impl Trait {
 
     /// Validate the trait and return a descriptive error instead of panicking.
     pub fn try_validate(&self) -> Result<(), TraitValidationError> {
-        // Make sure that constraints only refer to the input or the output type variables.
+        // Make sure that parent constraints only refer to the input or the output type variables.
         let trait_type_count = self.type_var_count();
+        for constraint in &self.parent_constraints {
+            for ty_var in constraint.inner_ty_vars() {
+                if ty_var.name() >= trait_type_count {
+                    return Err(TraitValidationError::Invalid {
+                        trait_name: self.name,
+                        kind: InvalidTraitDefinitionKind::InvalidConstraintTypeVar { ty_var },
+                    });
+                }
+            }
+        }
+
+        // Make sure that constraints only refer to the input or the output type variables.
         for constraint in &self.constraints {
             for ty_var in constraint.inner_ty_vars() {
                 if ty_var.name() >= trait_type_count {
@@ -456,10 +473,28 @@ impl FormatWith<ModuleEnv<'_>> for Trait {
                 f,
             )?;
         }
-        if self.constraints.is_empty() {
-            writeln!(f, "> {{")?;
+        if !self.parent_constraints.is_empty() {
+            write!(f, ">: ")?;
+            write_with_separator_and_format_fn(
+                &self.parent_constraints,
+                ", ",
+                |constraint, f| {
+                    format_pub_type_constraint_with_style(
+                        constraint,
+                        f,
+                        env,
+                        TypeConstraintRenderStyle::ParentList,
+                    )
+                },
+                f,
+            )?;
         } else {
-            write!(f, ">\nwhere")?;
+            write!(f, ">")?;
+        }
+        if self.constraints.is_empty() {
+            writeln!(f, " {{")?;
+        } else {
+            write!(f, "\nwhere")?;
             for constraint in &self.constraints {
                 write!(f, "\n    ")?;
                 constraint.fmt_with(f, env)?;
@@ -519,6 +554,7 @@ impl TraitRef {
             doc: Some(doc.to_string()),
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
+            parent_constraints: Vec::new(),
             constraints: Vec::new(),
             methods,
             associated_consts: Vec::new(),
@@ -562,6 +598,7 @@ impl TraitRef {
             doc: Some(doc.to_string()),
             input_type_names: input_type_names.into_iter().map(ustr).collect(),
             output_type_names: output_type_names.into().into_iter().map(ustr).collect(),
+            parent_constraints: Vec::new(),
             constraints: constraints.into(),
             methods,
             associated_consts: Vec::new(),

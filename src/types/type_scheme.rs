@@ -557,10 +557,33 @@ impl FormatWith<TypeDisplayEnv<'_, '_>> for PubTypeConstraint {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum TypeConstraintRenderStyle {
+    WhereClause,
+    ParentList,
+}
+
 fn format_pub_type_constraint<Env>(
     constraint: &PubTypeConstraint,
     f: &mut std::fmt::Formatter,
     env: &Env,
+) -> std::fmt::Result
+where
+    Type: FormatWith<Env>,
+{
+    format_pub_type_constraint_with_style(
+        constraint,
+        f,
+        env,
+        TypeConstraintRenderStyle::WhereClause,
+    )
+}
+
+pub(crate) fn format_pub_type_constraint_with_style<Env>(
+    constraint: &PubTypeConstraint,
+    f: &mut std::fmt::Formatter,
+    env: &Env,
+    style: TypeConstraintRenderStyle,
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
@@ -618,7 +641,7 @@ where
             input_tys,
             output_tys,
             ..
-        } => format_have_trait_with_env(trait_ref, input_tys, output_tys, f, env),
+        } => format_have_trait_with_env(trait_ref, input_tys, output_tys, f, env, style),
     }
 }
 
@@ -973,7 +996,14 @@ pub fn format_have_trait(
     f: &mut std::fmt::Formatter,
     env: &ModuleEnv<'_>,
 ) -> std::fmt::Result {
-    format_have_trait_with_env(trait_ref, input_tys, output_tys, f, env)
+    format_have_trait_with_env(
+        trait_ref,
+        input_tys,
+        output_tys,
+        f,
+        env,
+        TypeConstraintRenderStyle::WhereClause,
+    )
 }
 
 fn format_have_trait_with_env<Env>(
@@ -982,12 +1012,15 @@ fn format_have_trait_with_env<Env>(
     output_tys: &[Type],
     f: &mut std::fmt::Formatter,
     env: &Env,
+    style: TypeConstraintRenderStyle,
 ) -> std::fmt::Result
 where
     Type: FormatWith<Env>,
 {
     let trait_name = trait_ref.name;
-    if input_tys.len() == 1 {
+    let use_unary_where_clause =
+        input_tys.len() == 1 && matches!(style, TypeConstraintRenderStyle::WhereClause);
+    if use_unary_where_clause {
         write!(f, "{}: {}", input_tys[0].format_with(env), trait_name)?;
         if output_tys.is_empty() {
             return Ok(());
@@ -1010,7 +1043,7 @@ where
         )?;
     }
     if !output_tys.is_empty() {
-        if input_tys.len() != 1 {
+        if !use_unary_where_clause {
             write!(f, " ↦ ")?;
         }
         write_with_separator_and_format_fn(
@@ -1212,7 +1245,14 @@ where
                 } else {
                     f.write_str(", ")?;
                 }
-                format_have_trait_with_env(trait_ref, input_tys, output_tys, f, env)?;
+                format_have_trait_with_env(
+                    trait_ref,
+                    input_tys,
+                    output_tys,
+                    f,
+                    env,
+                    TypeConstraintRenderStyle::WhereClause,
+                )?;
             }
         }
     }

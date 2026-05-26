@@ -35,13 +35,13 @@ pub trait Num<Self> {
 }
 
 /// A type that supports division.
-pub trait Div<Self> {
+pub trait Div<Self>: Num<Self> {
     /// Divides `left` by `right`.
     fn div(left: Self, right: Self) -> Self ! fallible;
 }
 
 /// A real-valued numeric type supporting elementary mathematical functions.
-pub trait Real<Self> {
+pub trait Real<Self>: Div<Self> {
     /// Returns the sine of `value`, in radians.
     fn sin(value: Self) -> Self;
 
