@@ -63,7 +63,7 @@ impl Path {
     fn from_place_result_arguments(arena: &NodeArena, arguments: &[NodeId]) -> Self {
         let base_index = arguments
             .iter()
-            .position(|argument| !matches!(arena[*argument].kind, NodeKind::GetDictionary(_)))
+            .position(|argument| !is_evidence_node(&arena[*argument].kind))
             .expect("place_result application should have a base argument");
         let mut path = Self::from_node(arena, arguments[base_index]);
         if let Some(&index) = arguments.get(base_index + 1) {
@@ -83,6 +83,13 @@ impl Path {
         }
         PathPart::IndexDynamic
     }
+}
+
+fn is_evidence_node(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::GetDictionary(_) | NodeKind::LoadDictionary(_) | NodeKind::LoadFieldIndex(_)
+    )
 }
 
 /// Returns whether the two nodes' path to memory are overlapping.
@@ -211,13 +218,27 @@ impl Node {
             GetTraitAssociatedConst(_) => {}
             GetTraitDictionary(_) => {}
             GetDictionary(_) => {}
+            LoadDictionary(_) | LoadFieldIndex(_) => {}
+            GetDictionaryMethod(node) => check_borrows(arena, node.dictionary)?,
+            GetDictionaryAssociatedConst(node) => check_borrows(arena, node.dictionary)?,
+            CallDictionaryMethod(node) => {
+                check_borrows(arena, node.dictionary)?;
+                for &arg in &node.arguments {
+                    check_borrows(arena, arg)?;
+                }
+                check_arguments(
+                    &node.ty.args,
+                    &node.arguments,
+                    arena,
+                    arena[node.dictionary].span,
+                )?;
+            }
             StoreLocal(node) => {
                 check_borrows(arena, node.value)?;
             }
             DropLocal(_) => {}
             TakeLocalValue(_) => {}
             LoadLocal(_) => {}
-            ExtraParameter(_) => {}
             Return(node_id) => {
                 check_borrows(arena, *node_id)?;
             }

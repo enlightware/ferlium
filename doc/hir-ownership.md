@@ -152,12 +152,12 @@ Clone/drop for a function value must call the captured-environment dictionary, n
 
 # Trait Dictionaries and Layout Constants
 
-Dictionary elaboration rewrites transient `GetTraitMethod`, `GetTraitAssociatedConst`, and `GetTraitDictionary` nodes into ordinary dictionary values and projections.
+Dictionary elaboration rewrites transient `GetTraitMethod`, `GetTraitAssociatedConst`, and `GetTraitDictionary` nodes into explicit dictionary/evidence nodes.
 SSA should lower the elaborated form.
 
 For concrete associated constants, elaboration emits an immediate.
-For generic associated constants, elaboration projects from the hidden dictionary parameter.
-`Value::SIZE` and `Value::ALIGN` are therefore available either as constants or as dictionary projections and are the source of typed storage sizes.
+For generic associated constants, elaboration emits `GetDictionaryAssociatedConst` from the hidden dictionary parameter.
+`Value::SIZE` and `Value::ALIGN` are therefore available either as constants or as dictionary associated constants and are the source of typed storage sizes.
 
 # Non-Contracts of the Boxed Interpreter
 

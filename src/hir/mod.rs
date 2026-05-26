@@ -24,7 +24,9 @@ use crate::{
         ExtraParameterId, FunctionId, LocalClone, LocalDecl, LocalDeclId, LocalDrop,
         ProjectionIndex, ResolvedLocalClone, TakeLocalValueMode, TraitImplId, id::Id,
     },
-    types::r#trait::{TraitAssociatedConstIndex, TraitMethodIndex, TraitRef},
+    types::r#trait::{
+        TraitAssociatedConstIndex, TraitDictionaryEntryIndex, TraitMethodIndex, TraitRef,
+    },
     types::type_like::{CastableToType, TypeLike, instantiate_types_in_place},
     types::type_mapper::TypeMapper,
 };
@@ -132,7 +134,14 @@ pub(crate) fn place_result_base_argument_index(
 ) -> Option<usize> {
     arguments
         .iter()
-        .position(|argument| !matches!(arena[*argument].kind, NodeKind::GetDictionary(_)))
+        .position(|argument| !is_evidence_node(&arena[*argument].kind))
+}
+
+fn is_evidence_node(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::GetDictionary(_) | NodeKind::LoadDictionary(_) | NodeKind::LoadFieldIndex(_)
+    )
 }
 
 /// Function instantiation data that are needed to fill dictionaries
@@ -193,8 +202,6 @@ impl Immediate {
         b(Self { value })
     }
 }
-
-// TODO: add TraitMethodImmediate for trait methods
 
 #[derive(Debug, Clone)]
 pub struct BuildClosure {
@@ -339,9 +346,46 @@ pub struct GetTraitDictionary {
     pub output_tys: Vec<Type>,
 }
 
-#[derive(Debug, Clone)]
+/// Get a trait dictionary selected by static trait resolution.
+#[derive(Debug, Clone, Copy)]
 pub struct GetDictionary {
     pub dictionary: TraitImplId,
+}
+
+/// Load a trait dictionary from a function hidden argument.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadDictionary {
+    pub extra_parameter: ExtraParameterId,
+}
+
+/// Load a structural field index from a function hidden argument.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadFieldIndex {
+    pub extra_parameter: ExtraParameterId,
+}
+
+/// Look up a method function value from a trait dictionary.
+#[derive(Debug, Clone, Copy)]
+pub struct GetDictionaryMethod {
+    pub dictionary: NodeId,
+    pub entry_index: TraitDictionaryEntryIndex,
+}
+
+/// Look up an associated const value from a trait dictionary.
+#[derive(Debug, Clone, Copy)]
+pub struct GetDictionaryAssociatedConst {
+    pub dictionary: NodeId,
+    pub entry_index: TraitDictionaryEntryIndex,
+}
+
+/// Call a method entry through a trait dictionary.
+#[derive(Debug, Clone)]
+pub struct CallDictionaryMethod {
+    pub dictionary: NodeId,
+    pub entry_index: TraitDictionaryEntryIndex,
+    pub arguments: Vec<NodeId>,
+    pub argument_passing: Vec<ArgPassing>,
+    pub ty: FnType,
 }
 
 /// The kind-specific part of the expression-based execution tree
@@ -366,11 +410,15 @@ pub enum NodeKind {
     /// Note: this should only exist transiently in the IR and never be executed
     GetTraitDictionary(B<GetTraitDictionary>),
     GetDictionary(GetDictionary),
+    LoadDictionary(LoadDictionary),
+    LoadFieldIndex(LoadFieldIndex),
+    GetDictionaryMethod(GetDictionaryMethod),
+    GetDictionaryAssociatedConst(GetDictionaryAssociatedConst),
+    CallDictionaryMethod(B<CallDictionaryMethod>),
     StoreLocal(StoreLocal),
     DropLocal(DropLocal),
     TakeLocalValue(TakeLocalValue),
     LoadLocal(LoadLocal),
-    ExtraParameter(ExtraParameterId),
     Return(NodeId),
     Block(B<SVec2<NodeId>>),
     Assign(Assignment),
@@ -404,10 +452,11 @@ impl NodeKind {
             | GetTraitAssociatedConst(_)
             | GetTraitDictionary(_)
             | GetDictionary(_)
+            | LoadDictionary(_)
+            | LoadFieldIndex(_)
             | DropLocal(_)
             | TakeLocalValue(_)
             | LoadLocal(_)
-            | ExtraParameter(_)
             | SoftBreak
             | Unimplemented => smallvec![],
             BuildClosure(bc) => {
@@ -433,6 +482,13 @@ impl NodeKind {
                 .chain(app.arguments.iter())
                 .copied()
                 .collect(),
+            GetDictionaryMethod(node) => smallvec![node.dictionary],
+            GetDictionaryAssociatedConst(node) => smallvec![node.dictionary],
+            CallDictionaryMethod(node) => {
+                let mut v: SVec4<NodeId> = smallvec![node.dictionary];
+                v.extend_from_slice(&node.arguments);
+                v
+            }
             TraitMethodApply(app) => app.arguments.iter().copied().collect(),
             StoreLocal(store) => smallvec![store.value],
             Return(node) | ExtractTag(node) | Loop(node) => smallvec![*node],
@@ -659,6 +715,70 @@ impl Node {
                     get_dict.dictionary.format_with(env)
                 )?;
             }
+            LoadDictionary(load) => {
+                writeln!(
+                    f,
+                    "{indent_str}load dictionary extra parameter {}",
+                    load.extra_parameter.as_index()
+                )?;
+            }
+            LoadFieldIndex(load) => {
+                writeln!(
+                    f,
+                    "{indent_str}load field index extra parameter {}",
+                    load.extra_parameter.as_index()
+                )?;
+            }
+            GetDictionaryMethod(get_method) => {
+                writeln!(
+                    f,
+                    "{indent_str}get dictionary method entry {}",
+                    usize::from(get_method.entry_index)
+                )?;
+                format_ind(
+                    arena,
+                    get_method.dictionary,
+                    f,
+                    locals,
+                    env,
+                    spacing,
+                    indent + 1,
+                )?;
+            }
+            GetDictionaryAssociatedConst(get_const) => {
+                writeln!(
+                    f,
+                    "{indent_str}get dictionary associated const entry {}",
+                    usize::from(get_const.entry_index)
+                )?;
+                format_ind(
+                    arena,
+                    get_const.dictionary,
+                    f,
+                    locals,
+                    env,
+                    spacing,
+                    indent + 1,
+                )?;
+            }
+            CallDictionaryMethod(call) => {
+                writeln!(
+                    f,
+                    "{indent_str}call dictionary method entry {}",
+                    usize::from(call.entry_index)
+                )?;
+                writeln!(f, "{indent_str}with dictionary")?;
+                format_ind(arena, call.dictionary, f, locals, env, spacing, indent + 1)?;
+                if call.arguments.is_empty() {
+                    writeln!(f, "{indent_str}to ()")?;
+                } else {
+                    writeln!(f, "{indent_str}to (")?;
+                    for &arg in &call.arguments {
+                        format_ind(arena, arg, f, locals, env, spacing, indent + 1)?;
+                    }
+                    writeln!(f, "{indent_str})")?;
+                }
+            }
             StoreLocal(node) => {
                 let local = &locals[node.id.as_index()];
                 let name = local.name.0;
@@ -709,9 +829,6 @@ impl Node {
             LoadLocal(node) => {
                 let local = &locals[node.id.as_index()];
                 writeln!(f, "{indent_str}load {} as \"{}\"", local.slot, local.name.0)?;
-            }
-            ExtraParameter(id) => {
-                writeln!(f, "{indent_str}extra parameter {}", id.as_index())?;
             }
             Return(node) => {
                 writeln!(f, "{indent_str}return")?;
@@ -897,6 +1014,27 @@ impl Node {
             GetDictionary(_) => {
                 // GetDictionary nodes don't contain child expressions with types
             }
+            LoadDictionary(_) | LoadFieldIndex(_) => {}
+            GetDictionaryMethod(node) => {
+                if let Some(ty) = type_at(arena, node.dictionary, pos) {
+                    return Some(ty);
+                }
+            }
+            GetDictionaryAssociatedConst(node) => {
+                if let Some(ty) = type_at(arena, node.dictionary, pos) {
+                    return Some(ty);
+                }
+            }
+            CallDictionaryMethod(node) => {
+                if let Some(ty) = type_at(arena, node.dictionary, pos) {
+                    return Some(ty);
+                }
+                for &arg in &node.arguments {
+                    if let Some(ty) = type_at(arena, arg, pos) {
+                        return Some(ty);
+                    }
+                }
+            }
             StoreLocal(store) => {
                 if let Some(ty) = type_at(arena, store.value, pos) {
                     return Some(ty);
@@ -905,7 +1043,6 @@ impl Node {
             DropLocal(_) => {}
             TakeLocalValue(_) => {}
             LoadLocal(_) => {}
-            ExtraParameter(_) => {}
             Return(node) => {
                 if let Some(ty) = type_at(arena, *node, pos) {
                     return Some(ty);
@@ -1059,11 +1196,24 @@ impl Node {
             GetDictionary(_) => {
                 // no need to look into the dictionary's type as it is already in this node's type
             }
+            LoadDictionary(_) | LoadFieldIndex(_) => {}
+            GetDictionaryMethod(node) => {
+                unbound_ty_vars(arena, node.dictionary, result, ignore);
+            }
+            GetDictionaryAssociatedConst(node) => {
+                unbound_ty_vars(arena, node.dictionary, result, ignore);
+            }
+            CallDictionaryMethod(node) => {
+                self.unbound_ty_vars_in_ty(&node.ty, result, ignore);
+                unbound_ty_vars(arena, node.dictionary, result, ignore);
+                for &arg in &node.arguments {
+                    unbound_ty_vars(arena, arg, result, ignore);
+                }
+            }
             StoreLocal(node) => unbound_ty_vars(arena, node.value, result, ignore),
             DropLocal(_) => {}
             TakeLocalValue(_) => {}
             LoadLocal(_) => {}
-            ExtraParameter(_) => {}
             Return(node) => unbound_ty_vars(arena, *node, result, ignore),
             Block(nodes) => nodes
                 .iter()
@@ -1157,6 +1307,9 @@ pub(crate) fn instantiate_node_in_place<M: TypeMapper>(
         GetTraitDictionary(get_dict) => {
             instantiate_types_in_place(&mut get_dict.input_tys, mapper);
             instantiate_types_in_place(&mut get_dict.output_tys, mapper);
+        }
+        CallDictionaryMethod(call) => {
+            call.ty = call.ty.map(mapper);
         }
         _ => {}
     }

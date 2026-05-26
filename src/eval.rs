@@ -337,10 +337,9 @@ impl<'a> EvalCtx<'a> {
         &self,
         function_value: &FunctionValue,
     ) -> Vec<FnArgType> {
-        // Dynamic calls must use the actual callee signature. A generic
-        // dictionary projection can have surface type `(A, A) -> R` while its
-        // runtime `FunctionValue` points at a concrete method such as
-        // `Ord<int>::cmp`.
+        // Dynamic calls must use the actual callee signature. A dictionary
+        // method value can have surface type `(A, A) -> R` while its runtime
+        // `FunctionValue` points at a concrete method such as `Ord<int>::cmp`.
         self.get_module_function(function_value.function_id, function_value.module_id)
             .definition
             .ty_scheme
@@ -1000,7 +999,7 @@ pub fn eval_node_with_ctx(
         }
         GetTraitAssociatedConst(_) => {
             panic!(
-                "Trait associated const should not be executed, but transformed to an immediate or dictionary projection"
+                "Trait associated const should not be executed, but transformed to an immediate or dictionary associated const"
             );
         }
         GetTraitDictionary(_) => {
@@ -1012,17 +1011,24 @@ pub fn eval_node_with_ctx(
             let (function, module_id) = ctx.get_function_local_id(get_fn.function);
             cont(Value::function(function, module_id))
         }
-        GetDictionary(get_dict) => {
-            let _ = get_dict;
-            panic!("GetDictionary is runtime metadata and should not be evaluated as a Value")
+        GetDictionary(_) | LoadDictionary(_) => {
+            panic!("dictionary metadata should not be evaluated as a Value")
+        }
+        LoadFieldIndex(node) => cont(Value::native(field_index_from_extra_parameter(
+            ctx,
+            node.extra_parameter,
+        ))),
+        GetDictionaryMethod(node) => eval_get_dictionary_method(arena, node, ctx),
+        GetDictionaryAssociatedConst(node) => {
+            eval_get_dictionary_associated_const(arena, node, ctx)
+        }
+        CallDictionaryMethod(node) => {
+            eval_call_dictionary_method(arena, node, arena[node_id].span, ctx, locals)
         }
         StoreLocal(node) => eval_store_local(arena, node, arena[node_id].span, ctx, locals),
         DropLocal(node) => eval_drop_local(node, arena[node_id].span, ctx, locals),
         TakeLocalValue(node) => eval_take_local_value(node, arena[node_id].span, ctx, locals),
         LoadLocal(node) => eval_load_local(arena, node_id, node, ctx, locals),
-        ExtraParameter(_) => {
-            panic!("ExtraParameter is hidden evidence and should not be evaluated as a Value")
-        }
         Return(node) => eval_return(arena, *node, ctx, locals),
         Block(nodes) => eval_block(arena, nodes, ctx, locals),
         Assign(assignment) => eval_assign(arena, node_id, assignment, ctx, locals),
@@ -1063,7 +1069,7 @@ fn eval_build_closure(
     let captures = eval_or_return!(eval_nodes(arena, &build_closure.captures, ctx, locals));
     let captures_value_dictionary = if let Some(dict) = build_closure.captures_value_dictionary {
         Some(eval_or_return!(eval_dictionary_metadata_node(
-            arena, dict, ctx, locals
+            arena, dict, ctx
         )))
     } else {
         None
@@ -1088,12 +1094,12 @@ fn eval_function_hidden_arg_node(
     ctx: &mut EvalCtx,
     locals: &[LocalDecl],
 ) -> Result<ControlFlow<FunctionHiddenArgValue>, RuntimeError> {
-    if let NodeKind::ExtraParameter(id) = &arena[node].kind {
-        return Ok(ControlFlow::Continue(extra_parameter_value(ctx, *id)));
+    if let NodeKind::LoadFieldIndex(load) = &arena[node].kind {
+        return Ok(ControlFlow::Continue(FunctionHiddenArgValue::FieldIndex(
+            field_index_from_extra_parameter(ctx, load.extra_parameter),
+        )));
     }
-    if let Some(dictionary) =
-        eval_or_return!(try_dictionary_metadata_node(arena, node, ctx, locals))
-    {
+    if let Some(dictionary) = eval_or_return!(try_dictionary_metadata_node(arena, node, ctx)) {
         return Ok(ControlFlow::Continue(
             FunctionHiddenArgValue::TraitDictionary(dictionary),
         ));
@@ -1128,11 +1134,8 @@ fn eval_dictionary_metadata_node(
     arena: &NodeArena,
     node: NodeId,
     ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
 ) -> Result<ControlFlow<TraitDictionaryId>, RuntimeError> {
-    if let Some(dictionary) =
-        eval_or_return!(try_dictionary_metadata_node(arena, node, ctx, locals))
-    {
+    if let Some(dictionary) = eval_or_return!(try_dictionary_metadata_node(arena, node, ctx)) {
         return Ok(ControlFlow::Continue(dictionary));
     }
     panic!(
@@ -1145,7 +1148,6 @@ fn try_dictionary_metadata_node(
     arena: &NodeArena,
     node: NodeId,
     ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
 ) -> Result<ControlFlow<Option<TraitDictionaryId>>, RuntimeError> {
     match &arena[node].kind {
         NodeKind::GetDictionary(get_dict) => {
@@ -1153,20 +1155,17 @@ fn try_dictionary_metadata_node(
                 ctx.get_dictionary_id(get_dict.dictionary),
             )));
         }
-        NodeKind::ExtraParameter(id) => {
-            return match extra_parameter_value(ctx, *id) {
+        NodeKind::LoadDictionary(load) => {
+            return match extra_parameter_value(ctx, load.extra_parameter) {
                 FunctionHiddenArgValue::TraitDictionary(dictionary) => {
                     Ok(ControlFlow::Continue(Some(dictionary)))
                 }
-                FunctionHiddenArgValue::FieldIndex(_) => Ok(ControlFlow::Continue(None)),
+                FunctionHiddenArgValue::FieldIndex(_) => {
+                    panic!("expected dictionary extra parameter")
+                }
             };
         }
         _ => {}
-    }
-    if let Some(place) = eval_or_return!(try_eval_node_as_place(arena, node, ctx, locals)) {
-        if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
-            return Ok(ControlFlow::Continue(Some(dictionary)));
-        }
     }
     Ok(ControlFlow::Continue(None))
 }
@@ -1221,17 +1220,6 @@ fn extra_parameter_value(
     ctx.extra_parameters[ctx.extra_frame_base + extra_parameter.as_index()]
 }
 
-fn dictionary_entry_value(
-    ctx: &EvalCtx,
-    dictionary: TraitDictionaryId,
-    entry_index: TraitDictionaryEntryIndex,
-) -> Value {
-    match ctx.dictionary_value(dictionary).entry(entry_index) {
-        TraitDictionaryEntry::Method(function) => Value::function(function, dictionary.module_id),
-        TraitDictionaryEntry::AssociatedConst(value) => Value::native(value),
-    }
-}
-
 fn call_dictionary_method(
     ctx: &mut EvalCtx,
     dictionary: TraitDictionaryId,
@@ -1246,6 +1234,64 @@ fn call_dictionary_method(
     };
     let function_value = FunctionValue::bare(function, dictionary.module_id);
     ctx.call_function_value(&function_value, arguments, span)
+}
+
+fn eval_get_dictionary_method(
+    arena: &NodeArena,
+    node: &hir::GetDictionaryMethod,
+    ctx: &mut EvalCtx,
+) -> EvalControlFlowResult {
+    let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
+    let TraitDictionaryEntry::Method(function) =
+        ctx.dictionary_value(dictionary).entry(node.entry_index)
+    else {
+        panic!("attempted to get a non-method dictionary entry as a function");
+    };
+    cont(Value::function(function, dictionary.module_id))
+}
+
+fn eval_get_dictionary_associated_const(
+    arena: &NodeArena,
+    node: &hir::GetDictionaryAssociatedConst,
+    ctx: &mut EvalCtx,
+) -> EvalControlFlowResult {
+    let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
+    let TraitDictionaryEntry::AssociatedConst(value) =
+        ctx.dictionary_value(dictionary).entry(node.entry_index)
+    else {
+        panic!("attempted to get a non-associated-const dictionary entry as a value");
+    };
+    cont(Value::native(value))
+}
+
+fn eval_call_dictionary_method(
+    arena: &NodeArena,
+    node: &hir::CallDictionaryMethod,
+    span: Location,
+    ctx: &mut EvalCtx,
+    locals: &[LocalDecl],
+) -> EvalControlFlowResult {
+    let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.dictionary, ctx));
+    let temp_start = ctx.environment.len();
+    let mut arguments = eval_or_return!(eval_args(
+        arena,
+        &node.arguments,
+        &node.ty.args,
+        &node.argument_passing,
+        ctx,
+        locals,
+    ));
+    let result = call_dictionary_method(
+        ctx,
+        dictionary,
+        node.entry_index,
+        arguments.take_arguments(),
+        span,
+    );
+    let cleanup = arguments.drop_temps(ctx, span);
+    ctx.truncate_environment_storage(temp_start);
+    cleanup?;
+    result
 }
 
 fn discard_call_result(result: EvalControlFlowResult) -> Result<(), RuntimeError> {
@@ -1986,36 +2032,26 @@ fn eval_store_local(
                 eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
                 panic!("never-typed local initializer returned normally");
             }
-            None if matches!(arena[node.value].kind, NodeKind::GetDictionary(_)) => {
-                let dictionary = eval_or_return!(eval_dictionary_metadata_node(
-                    arena, node.value, ctx, locals
-                ));
+            None if is_dictionary_metadata_node(arena, node.value) => {
+                let dictionary =
+                    eval_or_return!(eval_dictionary_metadata_node(arena, node.value, ctx));
                 ValOrMut::Dictionary(dictionary)
             }
-            None if matches!(arena[node.value].kind, NodeKind::GetFunction(_)) => {
+            None if is_function_metadata_node(arena, node.value) => {
                 let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
                 ValOrMut::Val(value)
             }
             None => {
-                if eval_or_return!(is_dictionary_entry_projection(
-                    arena, node.value, ctx, locals
-                )) {
-                    let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
-                    ValOrMut::Val(value)
-                } else {
-                    panic!(
-                        "Cannot bind non-owning local '{}' of type {:?} to non-place node: {:?}",
-                        local.name.0, local.ty, arena[node.value].kind
-                    );
-                }
+                panic!(
+                    "Cannot bind non-owning local '{}' of type {:?} to non-place node: {:?}",
+                    local.name.0, local.ty, arena[node.value].kind
+                );
             }
         };
         ctx.set_environment_entry(target_index, entry);
     } else {
-        let entry = if matches!(arena[node.value].kind, NodeKind::GetDictionary(_)) {
-            let dictionary = eval_or_return!(eval_dictionary_metadata_node(
-                arena, node.value, ctx, locals
-            ));
+        let entry = if is_dictionary_metadata_node(arena, node.value) {
+            let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, node.value, ctx));
             ValOrMut::Dictionary(dictionary)
         } else {
             let value = eval_or_return!(eval_node_with_ctx(arena, node.value, ctx, locals));
@@ -2277,13 +2313,6 @@ fn eval_project(
 ) -> EvalControlFlowResult {
     let index = index.as_index();
     if let Some(mut place) = eval_or_return!(try_eval_node_as_place(arena, data, ctx, locals)) {
-        if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
-            return cont(dictionary_entry_value(
-                ctx,
-                dictionary,
-                TraitDictionaryEntryIndex::from_index(index),
-            ));
-        }
         place.path.push(index as isize);
         if place_resolution_depends_on_place_result(arena, data) {
             if let Some(value) = try_copy_trivial_copy_value_from_place(
@@ -2302,14 +2331,6 @@ fn eval_project(
                 arena[node_id].span,
             )?);
         }
-    }
-    if is_dictionary_metadata_node(arena, data) {
-        let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, data, ctx, locals));
-        return cont(dictionary_entry_value(
-            ctx,
-            dictionary,
-            TraitDictionaryEntryIndex::from_index(index),
-        ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, data, ctx, locals));
     cont(
@@ -2330,13 +2351,6 @@ fn eval_project_at(
 ) -> EvalControlFlowResult {
     if let Some(mut place) = eval_or_return!(try_eval_node_as_place(arena, data, ctx, locals)) {
         let index = field_index_from_extra_parameter(ctx, index);
-        if let Some(dictionary) = try_dictionary_from_place(&place, ctx) {
-            return cont(dictionary_entry_value(
-                ctx,
-                dictionary,
-                TraitDictionaryEntryIndex::from_index(index as usize),
-            ));
-        }
         place.path.push(index);
         if place_resolution_depends_on_place_result(arena, data) {
             if let Some(value) = try_copy_trivial_copy_value_from_place(
@@ -2355,15 +2369,6 @@ fn eval_project_at(
                 arena[node_id].span,
             )?);
         }
-    }
-    if is_dictionary_metadata_node(arena, data) {
-        let dictionary = eval_or_return!(eval_dictionary_metadata_node(arena, data, ctx, locals));
-        let index = field_index_from_extra_parameter(ctx, index);
-        return cont(dictionary_entry_value(
-            ctx,
-            dictionary,
-            TraitDictionaryEntryIndex::from_index(index as usize),
-        ));
     }
     let value = eval_or_return!(eval_node_with_ctx(arena, data, ctx, locals));
     let index = field_index_from_extra_parameter(ctx, index);
@@ -2536,7 +2541,7 @@ fn eval_call_arg(
                     EvaluatedCallArg::Ready(ValOrMut::Mut(place)),
                 )),
                 Ok(ControlFlow::Continue(None)) if is_dictionary_metadata_node(arena, arg) => {
-                    eval_dictionary_metadata_node(arena, arg, ctx, locals).map(|result| {
+                    eval_dictionary_metadata_node(arena, arg, ctx).map(|result| {
                         result.map_continue(|dictionary| {
                             EvaluatedCallArg::Ready(ValOrMut::Dictionary(dictionary))
                         })
@@ -2555,7 +2560,7 @@ fn eval_call_arg(
         ResolvedArgPassing::Value(ResolvedValueArgPassing::Owned)
             if is_dictionary_metadata_node(arena, arg) =>
         {
-            eval_dictionary_metadata_node(arena, arg, ctx, locals).map(|result| {
+            eval_dictionary_metadata_node(arena, arg, ctx).map(|result| {
                 result.map_continue(|dictionary| {
                     EvaluatedCallArg::Ready(ValOrMut::Dictionary(dictionary))
                 })
@@ -2635,28 +2640,15 @@ fn eval_owned_arg(
 fn is_dictionary_metadata_node(arena: &NodeArena, node: NodeId) -> bool {
     matches!(
         arena[node].kind,
-        NodeKind::GetDictionary(_) | NodeKind::ExtraParameter(_)
+        NodeKind::GetDictionary(_) | NodeKind::LoadDictionary(_)
     )
 }
 
-fn is_dictionary_entry_projection(
-    arena: &NodeArena,
-    node: NodeId,
-    ctx: &mut EvalCtx,
-    locals: &[LocalDecl],
-) -> Result<ControlFlow<bool>, RuntimeError> {
-    let data = match &arena[node].kind {
-        NodeKind::Project(data, _) | NodeKind::ProjectAt(data, _) => *data,
-        _ => return Ok(ControlFlow::Continue(false)),
-    };
-    if is_dictionary_metadata_node(arena, data) {
-        return Ok(ControlFlow::Continue(true));
-    }
-    let Some(place) = eval_or_return!(try_eval_node_as_place(arena, data, ctx, locals)) else {
-        return Ok(ControlFlow::Continue(false));
-    };
-    let result = try_dictionary_from_place(&place, ctx).is_some();
-    Ok(ControlFlow::Continue(result))
+fn is_function_metadata_node(arena: &NodeArena, node: NodeId) -> bool {
+    matches!(
+        arena[node].kind,
+        NodeKind::GetFunction(_) | NodeKind::GetDictionaryMethod(_)
+    )
 }
 
 /// Evaluate a node as a place when the HIR shape permits it.
@@ -2675,9 +2667,6 @@ fn try_eval_node_as_place(
             else {
                 return Ok(ControlFlow::Continue(None));
             };
-            if try_dictionary_from_place(&place, ctx).is_some() {
-                return Ok(ControlFlow::Continue(None));
-            }
             place.path.push(index.as_index() as isize);
             place
         }
@@ -2688,9 +2677,6 @@ fn try_eval_node_as_place(
                 return Ok(ControlFlow::Continue(None));
             };
             let index = field_index_from_extra_parameter(ctx, *index);
-            if try_dictionary_from_place(&place, ctx).is_some() {
-                return Ok(ControlFlow::Continue(None));
-            }
             place.path.push(index);
             place
         }

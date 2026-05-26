@@ -339,6 +339,19 @@ fn node_variable_type_annotations<Env>(
             // There is no GetTraitDictionary left in the final IR.
         }
         GetDictionary(_) => {}
+        LoadDictionary(_) | LoadFieldIndex(_) => {}
+        GetDictionaryMethod(node) => {
+            variable_type_annotations(arena, node.dictionary, result, locals, env);
+        }
+        GetDictionaryAssociatedConst(node) => {
+            variable_type_annotations(arena, node.dictionary, result, locals, env);
+        }
+        CallDictionaryMethod(node) => {
+            variable_type_annotations(arena, node.dictionary, result, locals, env);
+            for &arg in &node.arguments {
+                variable_type_annotations(arena, arg, result, locals, env);
+            }
+        }
         StoreLocal(node) => {
             // Note: desugared string interpolation code have variable names starting with "@", so we ignore these.
             // Note: synthesized let nodes have empty name span, so we ignore these.
@@ -365,7 +378,6 @@ fn node_variable_type_annotations<Env>(
         DropLocal(_) => {}
         TakeLocalValue(_) => {}
         LoadLocal(_) => {}
-        ExtraParameter(_) => {}
         Return(node) => variable_type_annotations(arena, *node, result, locals, env),
         Block(nodes) => nodes
             .iter()

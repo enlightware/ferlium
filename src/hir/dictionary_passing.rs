@@ -347,7 +347,9 @@ fn trait_dictionary_node_kind(
     } else {
         let index = find_trait_impl_dict_index(ctx.dicts, trait_ref, input_tys)
             .expect("Dictionary for trait impl not found, type inference should have failed");
-        NodeKind::ExtraParameter(ExtraParameterId::from_index(index))
+        NodeKind::LoadDictionary(hir::LoadDictionary {
+            extra_parameter: ExtraParameterId::from_index(index),
+        })
     };
     let ty = trait_ref.get_dictionary_type_for_tys(input_tys, output_tys);
     Ok((node_kind, ty))
@@ -365,28 +367,6 @@ fn dictionary_method_projection_data(
         .as_tuple()
         .expect("Trait impl dict should be a tuple type")[usize::from(entry_index)];
     (entry_index, function_ty)
-}
-
-/// Allocate a projection node that extracts a trait method function from a dictionary value.
-fn alloc_dictionary_method_projection(
-    arena: &mut NodeArena,
-    dictionary_id: NodeId,
-    dictionary_ty: Type,
-    trait_ref: &TraitRef,
-    method_index: TraitMethodIndex,
-    span: Location,
-) -> NodeId {
-    let (entry_index, function_ty) =
-        dictionary_method_projection_data(trait_ref, dictionary_ty, method_index);
-    arena.alloc(Node::new(
-        NodeKind::Project(
-            dictionary_id,
-            ProjectionIndex::from_index(usize::from(entry_index)),
-        ),
-        function_ty,
-        no_effects(),
-        span,
-    ))
 }
 
 pub(crate) fn instantiate_dictionary_requirements<M: TypeMapper>(
@@ -429,7 +409,9 @@ fn extra_args_from_inst_data<'d, 'sr, 'sm>(
                             let index = find_field_dict_index(ctx.dicts, var, name).unwrap_or_else(
                                 || panic!("Dictionary for field \"{name}\" in type variable \"{var}\" not found, type inference should have failed"),
                             );
-                            K::ExtraParameter(ExtraParameterId::from_index(index))
+                            K::LoadFieldIndex(hir::LoadFieldIndex {
+                                extra_parameter: ExtraParameterId::from_index(index),
+                            })
                         }
                         _ => {
                             panic!("FieldIndex dictionary should have a variable or record type");
@@ -475,13 +457,17 @@ fn extra_args_for_module_function(
                 .position(|d| d == dict)
                 .expect("Target dictionary not found in ours");
             let ty = dict.to_dict_type();
+            let extra_parameter = ExtraParameterId::from_index(index);
+            let kind = match dict {
+                DictionaryReq::TraitImpl { .. } => {
+                    NodeKind::LoadDictionary(hir::LoadDictionary { extra_parameter })
+                }
+                DictionaryReq::FieldIndex { .. } => {
+                    NodeKind::LoadFieldIndex(hir::LoadFieldIndex { extra_parameter })
+                }
+            };
             (
-                arena.alloc(Node::new(
-                    NodeKind::ExtraParameter(ExtraParameterId::from_index(index)),
-                    ty,
-                    no_effects(),
-                    span,
-                )),
+                arena.alloc(Node::new(kind, ty, no_effects(), span)),
                 FnArgType::new(ty, MutType::constant()),
             )
         })
@@ -1029,21 +1015,20 @@ impl Node {
                     )?;
                     let dict_id =
                         arena.alloc(Node::new(dict_kind, dict_ty, no_effects(), function_span));
-                    let project_fn_id = alloc_dictionary_method_projection(
-                        arena,
-                        dict_id,
-                        dict_ty,
+                    let (entry_index, _) = dictionary_method_projection_data(
                         &app.trait_ref,
+                        dict_ty,
                         app.method_index,
-                        function_span,
                     );
                     let arguments = mem::take(&mut app.arguments);
                     let argument_passing = mem::take(&mut app.argument_passing);
-                    kind = Apply(b(hir::Application {
-                        function: project_fn_id,
+                    let ty = app.ty.clone();
+                    kind = CallDictionaryMethod(b(hir::CallDictionaryMethod {
+                        dictionary: dict_id,
+                        entry_index,
                         arguments,
                         argument_passing,
-                        returns_place: false,
+                        ty,
                     }));
                 } else {
                     // Not fully resolved, use the dictionary to look up the trait method.
@@ -1059,27 +1044,27 @@ impl Node {
                     let function_span = app.method_span;
                     // Load that dictionary from the correct local variable.
                     let load_dict_id = arena.alloc(Node::new(
-                        NodeKind::ExtraParameter(ExtraParameterId::from_index(dict_index)),
+                        NodeKind::LoadDictionary(hir::LoadDictionary {
+                            extra_parameter: ExtraParameterId::from_index(dict_index),
+                        }),
                         dict_ty,
                         no_effects(),
                         function_span,
                     ));
-                    let project_fn_id = alloc_dictionary_method_projection(
-                        arena,
-                        load_dict_id,
-                        dict_ty,
+                    let (entry_index, _) = dictionary_method_projection_data(
                         &app.trait_ref,
+                        dict_ty,
                         app.method_index,
-                        function_span,
                     );
-                    // Finally use the function pointer to call the function.
                     let arguments = mem::take(&mut app.arguments);
                     let argument_passing = mem::take(&mut app.argument_passing);
-                    kind = Apply(b(hir::Application {
-                        function: project_fn_id,
+                    let ty = app.ty.clone();
+                    kind = CallDictionaryMethod(b(hir::CallDictionaryMethod {
+                        dictionary: load_dict_id,
+                        entry_index,
                         arguments,
                         argument_passing,
-                        returns_place: false,
+                        ty,
                     }));
                 }
             }
@@ -1196,10 +1181,10 @@ impl Node {
                         dict_ty,
                         get_method.method_index,
                     );
-                    kind = Project(
-                        dict_id,
-                        ProjectionIndex::from_index(usize::from(entry_index)),
-                    );
+                    kind = GetDictionaryMethod(hir::GetDictionaryMethod {
+                        dictionary: dict_id,
+                        entry_index,
+                    });
                 }
             }
             GetTraitAssociatedConst(get_const) => {
@@ -1240,19 +1225,19 @@ impl Node {
                     );
                     let dict_ty = ctx.dicts.requirements[dict_index].to_dict_type();
                     let load_dict_id = arena.alloc(Node::new(
-                        NodeKind::ExtraParameter(ExtraParameterId::from_index(dict_index)),
+                        NodeKind::LoadDictionary(hir::LoadDictionary {
+                            extra_parameter: ExtraParameterId::from_index(dict_index),
+                        }),
                         dict_ty,
                         no_effects(),
                         get_const.associated_const_span,
                     ));
-                    kind = Project(
-                        load_dict_id,
-                        ProjectionIndex::from_index(usize::from(
-                            get_const.trait_ref.dictionary_associated_const_index(
-                                get_const.associated_const_index,
-                            ),
-                        )),
-                    );
+                    kind = GetDictionaryAssociatedConst(hir::GetDictionaryAssociatedConst {
+                        dictionary: load_dict_id,
+                        entry_index: get_const
+                            .trait_ref
+                            .dictionary_associated_const_index(get_const.associated_const_index),
+                    });
                 }
             }
             GetTraitDictionary(get_dict) => {
@@ -1266,7 +1251,7 @@ impl Node {
                 )?;
                 kind = node_kind;
             }
-            GetDictionary(_) => {
+            GetDictionary(_) | LoadDictionary(_) | LoadFieldIndex(_) => {
                 // nothing to do
             }
             StoreLocal(store) => {
@@ -1285,7 +1270,26 @@ impl Node {
                 }
             }
             LoadLocal(_) => {}
-            ExtraParameter(_) => {}
+            GetDictionaryMethod(node) => {
+                elaborate_dictionaries(arena, node.dictionary, ctx, locals, local_count)?;
+            }
+            GetDictionaryAssociatedConst(node) => {
+                elaborate_dictionaries(arena, node.dictionary, ctx, locals, local_count)?;
+            }
+            CallDictionaryMethod(call) => {
+                elaborate_dictionaries(arena, call.dictionary, ctx, locals, local_count)?;
+                for &arg_id in &call.arguments {
+                    elaborate_dictionaries(arena, arg_id, ctx, locals, local_count)?;
+                }
+                for ((passing, arg_ty), &arg_id) in call
+                    .argument_passing
+                    .iter_mut()
+                    .zip(&call.ty.args)
+                    .zip(&call.arguments)
+                {
+                    resolve_arg_passing(arena, ctx, passing, arg_id, arg_ty.ty, node_span)?;
+                }
+            }
             Return(node_id) => {
                 elaborate_dictionaries(arena, *node_id, ctx, locals, local_count)?;
             }
@@ -1488,7 +1492,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_associated_const_elaborates_to_dictionary_projection() {
+    fn generic_associated_const_elaborates_to_dictionary_associated_const() {
         let trait_ref = layout_trait();
         let input_ty = Type::variable_id(0);
         let mut arena = NodeArena::default();
@@ -1530,13 +1534,13 @@ mod tests {
 
         elaborate_dictionaries(&mut arena, node, &mut ctx, &[], 3).unwrap();
 
-        let NodeKind::Project(dictionary_node, index) = arena[node].kind else {
-            panic!("expected associated const to elaborate to a dictionary projection");
+        let NodeKind::GetDictionaryAssociatedConst(get_const) = arena[node].kind else {
+            panic!("expected associated const to elaborate to a dictionary associated const");
         };
-        assert_eq!(index.as_index(), 1);
-        let NodeKind::ExtraParameter(id) = &arena[dictionary_node].kind else {
-            panic!("expected dictionary projection source to load an extra parameter");
+        assert_eq!(usize::from(get_const.entry_index), 1);
+        let NodeKind::LoadDictionary(load) = &arena[get_const.dictionary].kind else {
+            panic!("expected dictionary associated const source to load a dictionary");
         };
-        assert_eq!(id.as_index(), 0);
+        assert_eq!(load.extra_parameter.as_index(), 0);
     }
 }
