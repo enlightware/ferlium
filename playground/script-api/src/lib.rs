@@ -16,8 +16,8 @@ use ferlium::{
     ustr, CompilerSession, Location, Path,
 };
 
-pub use ferlium::ide::{AnnotationData, ErrorData, ExecutionErrorData};
 pub use ferlium::ide::ExecutionResult;
+pub use ferlium::ide::{AnnotationData, ErrorData, ExecutionErrorData};
 
 #[wasm_bindgen]
 pub struct PlaygroundCompiler {
