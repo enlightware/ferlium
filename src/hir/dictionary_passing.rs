@@ -533,7 +533,12 @@ pub fn elaborate_local_ownership_and_value_dispatches<'d, 'sr, 'sm>(
         }
 
         if matches!(local.clone, Some(LocalClone::Unknown)) {
-            local.clone = Some(resolve_local_clone(arena, ctx, local.ty, local.scope)?);
+            local.clone = Some(LocalClone::Resolved(resolve_local_clone(
+                arena,
+                ctx,
+                local.ty,
+                local.scope,
+            )?));
         }
 
         let local_ty = local.ty;
@@ -592,9 +597,9 @@ fn resolve_local_clone(
     ctx: &mut DictElaborationCtx<'_, '_, '_>,
     ty: Type,
     span: Location,
-) -> Result<LocalClone, InternalCompilationError> {
+) -> Result<ResolvedLocalClone, InternalCompilationError> {
     if type_has_concrete_trivial_copy_impl(arena, ctx, ty, span) {
-        return Ok(LocalClone::Resolved(ResolvedLocalClone::TrivialCopy));
+        return Ok(ResolvedLocalClone::TrivialCopy);
     }
     let dispatch = resolve_value_method_dispatch(
         arena,
@@ -604,24 +609,12 @@ fn resolve_local_clone(
         span,
         "Value dictionary for clone not found, type inference should have failed",
     )?;
-    Ok(LocalClone::Resolved(match dispatch {
+    Ok(match dispatch {
         ResolvedValueMethodDispatch::Static(function) => ResolvedLocalClone::Static(function),
         ResolvedValueMethodDispatch::Dictionary(dictionary) => {
             ResolvedLocalClone::Dictionary(dictionary)
         }
-    }))
-}
-
-fn resolve_borrowed_take_clone(
-    arena: &mut NodeArena,
-    ctx: &mut DictElaborationCtx<'_, '_, '_>,
-    ty: Type,
-    span: Location,
-) -> Result<ResolvedLocalClone, InternalCompilationError> {
-    let LocalClone::Resolved(clone) = resolve_local_clone(arena, ctx, ty, span)? else {
-        unreachable!("resolve_local_clone always returns a resolved clone mode")
-    };
-    Ok(clone)
+    })
 }
 
 fn resolve_local_drop(
@@ -902,7 +895,8 @@ impl Node {
             CloneValue(node) => {
                 elaborate_dictionaries(arena, node.source, ctx, locals, local_count)?;
                 if matches!(node.clone, LocalClone::Unknown) {
-                    node.clone = resolve_local_clone(arena, ctx, node_ty, node_span)?;
+                    node.clone =
+                        LocalClone::Resolved(resolve_local_clone(arena, ctx, node_ty, node_span)?);
                 }
             }
             StaticApply(app) => {
@@ -1284,7 +1278,7 @@ impl Node {
                     node.mode = if locals[node.id.as_index()].owns_storage() {
                         TakeLocalValueMode::MoveOwned
                     } else {
-                        TakeLocalValueMode::CloneBorrowed(resolve_borrowed_take_clone(
+                        TakeLocalValueMode::CloneBorrowed(resolve_local_clone(
                             arena, ctx, node_ty, node_span,
                         )?)
                     };
